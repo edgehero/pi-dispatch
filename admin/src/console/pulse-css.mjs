@@ -11,7 +11,7 @@
  */
 
 /** The sha256 of `PULSE_CSS` as UTF-8, which is the sha256 of `components/bundle.css` itself. */
-export const PULSE_CSS_SHA256 = "4bbc2e83b01f498b375bc6d7aa313f28aa1ca9832bf0a72b78683ad69539a2de";
+export const PULSE_CSS_SHA256 = "acd9426272c7960005ae17e7fdcbf636b8d7dd758f300b92841997ab9db10134";
 
 /** `components/bundle.css`, every byte. */
 export const PULSE_CSS = `/* pi-dispatch console, Pulse. One stylesheet for every page.
@@ -22,7 +22,9 @@ export const PULSE_CSS = `/* pi-dispatch console, Pulse. One stylesheet for ever
 *, *::before, *::after { box-sizing: border-box; }
 html { color-scheme: light; }
 [data-theme="dark"] { color-scheme: dark; }
-body { margin: 0; background: var(--canvas); color: var(--ink); font-family: var(--font-sans); font-size: 14px; line-height: 20px; font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+body { margin: 0; background: var(--canvas); color: var(--ink); font-family: var(--font-sans); font-size: 14px; line-height: 20px; -webkit-font-smoothing: antialiased; }
+/* Tabular figures on numbers only: on running text they also widen hyphens, so an id like gh-2f6a reads "gh - 2f6a". */
+.kpi b, .big__n, .count, .cap__v, .meterrow__v, .ticket b, .tx__t, .tbl td.num, .tbl .when, .wb-t, .tax, .tnowcap-t, .tp-sub, .tp-sub2, .tp-sub3, time, .tnum { font-variant-numeric: tabular-nums; }
 a { color: inherit; }
 button, input, textarea, select { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -489,4 +491,11 @@ kbd { padding: 1px 7px; border-radius: 6px; background: var(--surface-2); font: 
   .tx__b { grid-column: 1 / -1; }
   .hostrow { grid-template-columns: 10px minmax(0, 1fr) auto; grid-template-areas: "d n b" ". s p" ". x x"; }
 }
+
+/* Seven full-size navigation pills: explicit wrapping prevents count-dependent row jumps. */
+
+@media not all and (max-width:760px){.top{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--space-3)}.top>.brandpill{grid-row:1;grid-column:1}.top__end{grid-row:1;grid-column:2;min-width:0;margin-left:0;justify-content:flex-end}.pillnav{grid-row:2;grid-column:1/-1;flex-wrap:wrap}.pillnav>a{flex:none}.top__end>.who{flex:0 1 auto;min-width:0}.who>span:first-child{min-width:0;max-width:160px}.who b,.who small{max-width:100%;overflow:hidden;text-overflow:ellipsis}}
+@media not all and (max-width:760px){@media(max-width:1059px){.pillnav{row-gap:0}.pillnav>:nth-child(-n+4){order:1}.pillnav::after{content:"";order:2;flex-basis:100%;height:6px}.pillnav>:nth-child(n+5){order:3}}}
+@media(min-width:1600px){.top:not(.top--ro){grid-template-columns:max-content max-content minmax(0,1fr)}.top:not(.top--ro)>.pillnav{grid-row:1;grid-column:2}.top:not(.top--ro)>.top__end{grid-column:3}}
+@media(min-width:1760px){.top--ro{grid-template-columns:max-content max-content minmax(0,1fr)}.top--ro>.pillnav{grid-row:1;grid-column:2}.top--ro>.top__end{grid-column:3}}
 `;

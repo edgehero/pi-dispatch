@@ -10427,6 +10427,19 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 
 ## INT-CONSOLE-STATE-API
 
+**Extension (#750, trigger list):** `POST /api/trigger-check` is a hypothetical read, not an action. A viewer
+session suffices, including on a read-only console. Host, same-Origin/fetch-site, JSON, body-size and
+`x-console-as` person guards apply before its bounded event input is evaluated. It takes no query parameters.
+Its closed input vocabulary and per-field limits come from `admin/src/trigger-check.mjs`, shared with the
+form; the server's body ceiling applies too. The strict, bounded whole-file read must succeed before the
+receiver's own filters judge precedence. Success returns `{ "html": "<escaped result region>" }`; invalid
+event/configuration returns the same result shape with status 400. Missing infrastructure is a fixed 503;
+body/auth/session refusals keep the existing JSON error contract. No response includes event text, private
+trigger text or a constructed queue job. The request creates no ticket, job, reservation or audit row and
+persists no input. The normal request log names the fixed route only. `GET /api/state`, its version and
+payload remain UNCHANGED, checked; no list-specific history or checker text is added to shared state.
+
+
 **Extension (#649):** `/api/run` and parked folds may carry optional validated id-only `approval` audit metadata under `INT-APPROVAL-STATE-CONTRACT`. The existing parked-answer action accepts optional approve/decline decisions, converted to command text before its shared planner; request binding and worker authority remain mandatory.
 
 **The console → scripts and later integrations.** `GET /api/state`: the deployment's live snapshot as JSON, so a
@@ -11886,3 +11899,4 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-29 (#748) | **`INT-CONSOLE-EVENT-STREAM`, `INT-HOST-REGISTRY-CONTRACT`, `INT-DEFER-REASON-KEY` AMENDED**: the page live flag defines stream admission; host telemetry adds orphan venue/time, retained workspace inventory, budget provenance and CPU-reserve facts; host-budget defer records identify memory, CPU or count while legacy budget remains readable. **`INT-CONSOLE-STATE-API`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: telemetry grants no authority and no job payload text is read for running targets. |
 | 2026-10-29 (#749) | `INT-HOST-REGISTRY-CONTRACT` and `INT-CAPACITY-REPORT` AMENDED: optional h/ha actual dollar holds and additive fleet metrics, shared with CLI and console. `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-CONSOLE-AUDIT-LOG`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked: no new API field, live route, audit kind, run fact or plan writer. |
 | 2026-10-30 (#750) | `INT-TRIGGERS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` AMENDED: safe display fields, human numbering and trigger-fire audit kind. `INT-CONFIG-OVERLAY-CONTRACT`, `INT-CONSOLE-STATE-API`, queue payload and runner exit protocol UNCHANGED, checked. Shared state never includes prompt text. |
+| 2026-10-30 (#750, trigger list) | `INT-CONSOLE-STATE-API` AMENDED with the separate viewer hypothetical-check POST contract. The state version/payload, `INT-CONSOLE-EVENT-STREAM`, `INT-CONSOLE-AUDIT-LOG`, `INT-TRIGGERS-FILE-CONTRACT`, queue and run-record contracts UNCHANGED, checked: no event text or job body is returned, and the read writes no audit row. |

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { specificity } from "./helpers/css-specificity.mjs";
+import { TRIGGERS_CSS } from "../src/console/triggers-css.mjs";
 import { CONFIG_CSS } from "../src/console/config-css.mjs";
 import { AUDIT_LAYOUT, OVERVIEW_LAYOUT, PAGE_CSS, SECONDARY_BTN, SHELL_CSS, TOP_BAR, cssBlocks, pageCss, scopeCss, selectorsOf, splitSelectors, stackRules } from "../src/console/page-css.mjs";
 import { PULSE_CSS, PULSE_CSS_SHA256 } from "../src/console/pulse-css.mjs";
@@ -30,17 +31,17 @@ const read = (css) => new Set([...css.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) =
 const declarationsOf = (css) => cssBlocks(css).flatMap(({ prelude, body }) => (prelude.startsWith("@") ? declarationsOf(body) : [body]));
 
 test("bundle.css and tokens.json are pasted verbatim: each module's text hashes to the design file's", () => {
-  assert.equal(PULSE_CSS_SHA256, "4bbc2e83b01f498b375bc6d7aa313f28aa1ca9832bf0a72b78683ad69539a2de", "the pin is the file's, measured when it was pasted");
+  assert.equal(PULSE_CSS_SHA256, "acd9426272c7960005ae17e7fdcbf636b8d7dd758f300b92841997ab9db10134", "the pin is the file's, measured when it was pasted");
   assert.equal(sha256(PULSE_CSS), PULSE_CSS_SHA256, "PULSE_CSS is bundle.css, every byte");
   assert.equal(PULSE_TOKENS_SHA256, "23a272327010840ed86e4138c3d2c904831b7a33a24d7a9dcb67a58cb1c1c868");
   assert.equal(sha256(JSON.stringify(PULSE_TOKENS, null, 1)), PULSE_TOKENS_SHA256, "PULSE_TOKENS is tokens.json, every value");
 });
 
 test("the stylesheet is the tokens, then bundle.css, the shell and pages, and it fetches nothing", () => {
-  assert.equal(CONSOLE_CSS, [tokenCss(), PULSE_CSS, SHELL_CSS, pageCss(), CONFIG_CSS].join("\n"));
+  assert.equal(CONSOLE_CSS, [tokenCss(), PULSE_CSS, SHELL_CSS, pageCss(), CONFIG_CSS, TRIGGERS_CSS].join("\n"));
   assert.ok(CONSOLE_CSS.startsWith(tokenCss()), "the tokens come first, so every later rule reads them");
   assert.ok(CONSOLE_CSS.indexOf(PULSE_CSS) > tokenCss().length - 1, "bundle.css after the tokens");
-  assert.ok(CONSOLE_CSS.endsWith(CONFIG_CSS), "the configuration rules follow the bundle and shell");
+  assert.ok(CONSOLE_CSS.endsWith(TRIGGERS_CSS), "the triggers rules follow the configuration, bundle and shell");
   assert.doesNotMatch(CONSOLE_CSS, /--pd-|\.legacy/);
   // Plain rules: no element a page could be broken out by, nothing loaded, no remote font or image.
   for (const needle of ["<", "@import", "url(", "expression(", "@font-face", "javascript:"]) assert.ok(!CONSOLE_CSS.includes(needle), `no ${needle}`);
@@ -62,13 +63,13 @@ test("every custom property the bundle, the shell and the pages read is a token 
   for (const [label, css] of [["bundle.css", PULSE_CSS], ["SHELL_CSS", SHELL_CSS], ["pageCss()", pageCss()]]) {
     for (const name of read(css)) assert.ok(tokens.has(name) || own.has(name) || (label === "SHELL_CSS" && shellOwn.has(name)), `${label} reads ${name}, which tokenCss() defines`);
   }
-  for (const name of read(CONFIG_CSS)) assert.ok(tokens.has(name) || own.has(name), `CONFIG_CSS reads ${name}, which is defined`);
+  for (const name of read(CONFIG_CSS + TRIGGERS_CSS)) assert.ok(tokens.has(name) || own.has(name), `CONFIG_CSS reads ${name}, which is defined`);
   assert.doesNotMatch(CONSOLE_CSS, /--pd-/);
 
 });
 
 test("the shell and configuration declarations hold no colour literal: every colour is a token", () => {
-  for (const [label, css] of [["SHELL_CSS", SHELL_CSS], ["CONFIG_CSS", CONFIG_CSS]]) {
+  for (const [label, css] of [["SHELL_CSS", SHELL_CSS], ["CONFIG_CSS", CONFIG_CSS], ["TRIGGERS_CSS", TRIGGERS_CSS]]) {
     for (const body of declarationsOf(css)) assert.ok(!/#[0-9a-f]{3,8}\b/i.test(body), `${label}: ${body} names a colour by hex`);
   }
   assert.match(SHELL_CSS, /(?:^|\n)section\[data-panel\]:empty\{display:none\}/, "an empty panel is still not drawn");
@@ -197,13 +198,13 @@ function mediaMatches(prelude, width) {
 
 const PHONE = "@media (max-width: 760px)";
 const DESKTOP = "@media not all and (max-width: 760px)";
-const NAV_BREAK = `${DESKTOP} @media (max-width: 939px)`;
-const ONE_ROW = "@media (min-width: 1440px)";
-const ONE_ROW_RO = "@media (min-width: 1600px)";
+const NAV_BREAK = `${DESKTOP} @media (max-width: 1059px)`;
+const ONE_ROW = "@media (min-width: 1600px)";
+const ONE_ROW_RO = "@media (min-width: 1760px)";
 /** The bands the Search button is left off a desktop bar in: just past each width where the bar's end is tightest. */
 const SEARCH_OFF_RO = `${DESKTOP} @media not all and (min-width: 817px)`;
-const SEARCH_OFF = `${ONE_ROW} @media not all and (min-width: 1496px)`;
-const SEARCH_OFF_ONE_ROW_RO = `${ONE_ROW_RO} @media not all and (min-width: 1656px)`;
+const SEARCH_OFF = `${ONE_ROW} @media not all and (min-width: 1656px)`;
+const SEARCH_OFF_ONE_ROW_RO = `${ONE_ROW_RO} @media not all and (min-width: 1816px)`;
 const SHELL = rulesOf(SHELL_CSS);
 
 /** The write flow's markup, as written (the Undo row's parts). */
@@ -220,7 +221,7 @@ function contrast(a, b) {
 }
 
 test("the top bar's breakpoints follow the viewport and the read-only class alone: phone, two rows, one row", () => {
-  assert.deepEqual(TOP_BAR, { phoneMax: 760, navBreakMax: 939, oneRowMin: 1440, oneRowReadOnlyMin: 1600, searchRoom: 56 });
+  assert.deepEqual(TOP_BAR, { phoneMax: 760, navBreakMax: 1059, oneRowMin: 1600, oneRowReadOnlyMin: 1760, searchRoom: 56 });
   assert.ok(Object.isFrozen(TOP_BAR));
   // The phone is bundle.css's own: its breakpoint, its scrolling row; above it bundle.css's navigation is no scroll box.
   assert.ok(PULSE_CSS.includes(`@media (max-width: ${TOP_BAR.phoneMax}px) {`));
@@ -252,14 +253,14 @@ test("the media queries cover every width, fractional ones too: the desktop's ru
   }
 });
 
-test("above a phone the bar is a grid: the pi-dispatch pill and the end, then the navigation wrapping across the width; one row from 1440 (1600 read-only)", () => {
+test("above a phone the bar is a grid: the pi-dispatch pill and the end, then the navigation wrapping across the width; one row from 1600 (1760 read-only)", () => {
   assert.deepEqual(SHELL.media[DESKTOP], {
     ".top": { display: "grid", "grid-template-columns": "max-content minmax(0,1fr)", gap: "var(--space-3)" },
     ".top>.brandpill": { "grid-row": "1", "grid-column": "1" },
     ".top__end": { "grid-row": "1", "grid-column": "2", "min-width": "0", "margin-left": "0", "justify-content": "flex-end" },
     ".pillnav": { "grid-row": "2", "grid-column": "1/-1", "flex-wrap": "wrap" },
   });
-  // Below 940 the navigation breaks after its fourth pill whatever the Parked count says: a count that appears cannot
+  // Below 1060 the navigation breaks after its fourth pill whatever the Parked count says: a count that appears cannot
   // push a pill onto a new line. The break is a full-width zero-height item between the two orders, 6px tall, the gap.
   assert.deepEqual(SHELL.media[NAV_BREAK], {
     ".pillnav": { "row-gap": "0" },

@@ -142,11 +142,12 @@ export function loadPauseWindows(config, { readFileSync = fsReadFileSync, exists
 const WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
 /** The wall-clock parts of instant `ms` in `tz`: `{ y, mo, d, hh, mi, dow }` (dow 0=Sun..6=Sat). */
-function zonedParts(tz, ms) {
-	const fmt = new Intl.DateTimeFormat("en-US", {
+function zonedParts(tz, ms, formatters = null) {
+	const fmt = formatters?.get(tz) ?? new Intl.DateTimeFormat("en-US", {
 		timeZone: tz, hour12: false,
 		year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", weekday: "short",
 	});
+	if (formatters && !formatters.has(tz)) formatters.set(tz, fmt);
 	const p = {};
 	for (const part of fmt.formatToParts(new Date(ms))) p[part.type] = part.value;
 	let hh = Number(p.hour);
@@ -159,17 +160,17 @@ function zonedParts(tz, ms) {
  * guess back in `tz`, diff to recover the zone offset, subtract. Correct except the ~1h DST-transition seam,
  * which is immaterial for a pause boundary.
  */
-function wallToMs(tz, y, mo, d, hh, mi) {
+function wallToMs(tz, y, mo, d, hh, mi, formatters = null) {
 	const guess = Date.UTC(y, mo - 1, d, hh, mi);
-	const shown = zonedParts(tz, guess);
+	const shown = zonedParts(tz, guess, formatters);
 	const shownAsUtc = Date.UTC(shown.y, shown.mo - 1, shown.d, shown.hh, shown.mi);
 	return guess - (shownAsUtc - guess);
 }
 
 /** The date `delta` days from `parts`' date, computed at local noon to dodge DST edges. Returns zoned parts. */
-function shiftDay(tz, parts, delta) {
-	const noon = wallToMs(tz, parts.y, parts.mo, parts.d, 12, 0);
-	return zonedParts(tz, noon + delta * 86400000);
+function shiftDay(tz, parts, delta, formatters = null) {
+	const noon = wallToMs(tz, parts.y, parts.mo, parts.d, 12, 0, formatters);
+	return zonedParts(tz, noon + delta * 86400000, formatters);
 }
 
 function ymd(parts) {
@@ -186,11 +187,13 @@ function qualifies(w, parts) {
 }
 
 /** The end epoch ms of the window occurrence active at `nowMs`, or null if `now` is not inside `w`. Exported
- * so the admin panel can mark a single window "currently paused · resumes in …" without a synthetic job. */
-export function windowEndAt(w, nowMs) {
-	const p = zonedParts(w.tz, nowMs);
+ * so the admin panel can mark a single window "currently paused · resumes in …" without a synthetic job.
+ * An optional caller-owned formatter cache lets a bounded calendar projection reuse clocks; the worker default
+ * still constructs its clock per call, and both paths evaluate exactly the same wall-time rules. */
+export function windowEndAt(w, nowMs, formatters = null) {
+	const p = zonedParts(w.tz, nowMs, formatters);
 	const nowMin = p.hh * 60 + p.mi;
-	const endAt = (dateParts) => wallToMs(w.tz, dateParts.y, dateParts.mo, dateParts.d, Math.floor(w.toMin / 60), w.toMin % 60);
+	const endAt = (dateParts) => wallToMs(w.tz, dateParts.y, dateParts.mo, dateParts.d, Math.floor(w.toMin / 60), w.toMin % 60, formatters);
 
 	if (w.fromMin < w.toMin) {
 		// Same-day window: [from, to) today, starting today.
@@ -199,8 +202,8 @@ export function windowEndAt(w, nowMs) {
 	}
 	// Overnight window (from > to): started tonight (>= from, today qualifies) -> ends tomorrow at `to`,
 	// or started last night (< to, yesterday qualified) -> ends today at `to`.
-	if (nowMin >= w.fromMin && qualifies(w, p)) return endAt(shiftDay(w.tz, p, 1));
-	if (nowMin < w.toMin && qualifies(w, shiftDay(w.tz, p, -1))) return endAt(p);
+	if (nowMin >= w.fromMin && qualifies(w, p)) return endAt(shiftDay(w.tz, p, 1, formatters));
+	if (nowMin < w.toMin && qualifies(w, shiftDay(w.tz, p, -1, formatters))) return endAt(p);
 	return null;
 }
 

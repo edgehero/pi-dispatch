@@ -78,6 +78,9 @@ export const SHOTS = Object.freeze([
   ["fleet", "fleet", ""],
   ["host", "host", "name=build3"],
   ["venue", "venue", "name=podman"],
+  ["triggers", "triggers", ""],
+  ["triggers-filtered", "triggers", "kind=comment"],
+  ["trigger-check", "trigger-check", ""],
   ["trigger", "trigger", "index=2"],
   ["trigger-add", "trigger-add", ""],
   ["config", "config", ""],
@@ -300,6 +303,7 @@ async function renderInChild() {
     doctorResults: await import("../../../worker/src/doctor-results.mjs"),
   };
   const RM = await import("../../src/read-model.mjs");
+  const { triggerListOf } = await import("../../src/trigger-list.mjs");
   const DW = await import("../../src/dollar-windows.mjs");
   const { assembleInsightsView } = await import("../../src/insights-assembly.mjs");
   const { makeWhatIfReader } = await import("../../src/console/whatif.mjs");
@@ -411,6 +415,15 @@ async function renderInChild() {
     reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW, readLiveHostsFn: (redis, opts) => W.hostRegistry.readLiveHosts(atBeat(redis), opts) });
     const deps = {
       paths: fleetPaths,
+      // Registry fixture workers all publish UTC. Use the actual read snapshot and bounded record payloads,
+      // retaining the same incompleteness contract as serve rather than inventing card totals.
+      triggerList: (snapshot) => triggerListOf({
+        snapshot, now: NOW,
+        records: snapshot.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : snapshot.runs,
+        scheduleZones: { "nightly-tidy": "UTC", "pm-weekly": "UTC" },
+        subscriptions: RM.readSubscriptions({ subscriptionsPath: paths.subs }).subscriptions ?? [],
+        coverage: { complete: false },
+      }),
       // The fixture serves GitHub webhooks. Presence is metadata, never a credential in rendered output.
       triggerEditor: () => RM.readTriggerEditor({ paths: fleetPaths, env: { ...env, WEBHOOK_SECRET: "fixture-webhook-configured" } }),
       // The transport endpoint comes from the test environment, not the fixture deployment. Keep its display

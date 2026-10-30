@@ -24,6 +24,8 @@
  */
 import { triggerOn, triggerRuns, triggerRun, triggerEdit, triggerTrust, triggerKinds, triggerChange, triggerAdd, triggerKindHelp, triggerForgeWords, triggerRefusals, triggerTitle } from "./panels/trigger.mjs";
 import { configNavigation, configFiles, configUnset, configDescription } from "./panels/config.mjs";
+import { triggersNavigation, triggersViewer, triggersCount, triggersNext, triggersSpend, triggersFilters, triggersWeek, triggersSchedules, triggersGithub, triggersGitlab, triggersForgejo, triggersAzure, triggersUnknown, triggersCheck, triggerCheckPage, triggersDescription } from "./panels/triggers.mjs";
+import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
 import { readTriggerEditor, triggerDetailOf, TRANSCRIPT_ID_RE } from "../read-model.mjs";
@@ -132,6 +134,8 @@ export const PAGES = Object.freeze({
   host: Object.freeze({ path: "/fleet/host", auth: "viewer", live: true, title: "Host", nav: null, icon: "fleet" }),
   venue: Object.freeze({ path: "/fleet/venue", auth: "viewer", live: false, title: VENUE_LABEL, nav: null, icon: "fleet" }),
   trigger: Object.freeze({ path: "/config/trigger", auth: "viewer", live: false, title: "Trigger", nav: null, icon: "config" }),
+  triggers: Object.freeze({ path: "/triggers", auth: "viewer", live: false, title: "Triggers", nav: "Triggers", icon: "bolt" }),
+  "trigger-check": Object.freeze({ path: "/triggers/check", auth: "viewer", live: false, title: "Check an event", nav: null, icon: "bolt" }),
   "trigger-add": Object.freeze({ path: "/config/trigger-add", auth: "operator", live: false, title: "Add a trigger", nav: null, icon: "config" }),
   config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration", icon: "config" }),
   watch: Object.freeze({ path: "/watch", auth: "viewer", live: false, title: "Watch", nav: null, icon: "bolt" }),
@@ -141,6 +145,8 @@ export const PAGES = Object.freeze({
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
+  triggers: [["p-tr-tabs", triggersNavigation], ["p-tr-viewer", triggersViewer], ["p-tr-count", triggersCount], ["p-tr-next", triggersNext], ["p-tr-spend", triggersSpend], ["p-tr-filters", triggersFilters], ["p-tr-week", triggersWeek], ["p-tr-schedule", triggersSchedules], ["p-tr-github", triggersGithub], ["p-tr-gitlab", triggersGitlab], ["p-tr-forgejo", triggersForgejo], ["p-tr-azure", triggersAzure], ["p-tr-unknown", triggersUnknown], ["p-tr-check", triggersCheck]],
+  "trigger-check": [["p-tr-check", triggerCheckPage]],
   // Issue #737: the first run's checklist (empty once the deployment runs), then what needs a person first, what waits,
   // what runs and what it costs, the timeline and the caps, then the waitlists and the hosts. Every one of the eleven is
   // on the page in both states (`panels/overview.mjs`'s header), so the stream moves a first run to the overview by
@@ -193,6 +199,7 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  triggers: [{ cls: "stack", items: ["p-tr-tabs", "p-tr-viewer"] }, { cls: "cards-3 triggers-kpis", items: ["p-tr-count", "p-tr-next", "p-tr-spend"] }, { cls: "cols triggers-layout", items: [{ cls: "stack triggers-rules", items: ["p-tr-filters", "p-tr-week", "p-tr-schedule", "p-tr-github", "p-tr-gitlab", "p-tr-forgejo", "p-tr-azure", "p-tr-unknown"] }, { cls: "stack triggers-check-side", items: ["p-tr-check"] }] }],
   ...SPEND_LAYOUTS,
   config: [{ cls: "stack", items: ["cf-navigation"] }, { cls: "cols cols--wide-side config-layout", items: [{ cls: "stack", items: ["cf-settings", "cf-triggers", "cf-pause-windows", "cf-scoped-limits", "cf-projects", "cf-files"] }, { cls: "stack", items: ["cf-unset", "cf-mcp-servers", "cf-packages", "cf-secret-profiles", "cf-secret-bundles"] }] }],
   trigger: [{ cls: "cols config-layout", items: [{ cls: "stack", items: ["p-trigger-on", "p-trigger-runs", "p-trigger-run", "p-trigger-edit"] }, { cls: "stack", items: ["p-trigger-trust", "p-trigger-kinds", "p-trigger-change"] }] }],
@@ -246,6 +253,8 @@ const PAGE_PARAMS = Object.freeze({
   venue: ["name"],
   config: [],
   trigger: ["index"],
+  triggers: ["kind"],
+  "trigger-check": [],
   "trigger-add": [],
   watch: ["rule"],
   "watch-board": ["rule", "finding"],
@@ -312,6 +321,11 @@ export function parsePageQuery(name, searchParams) {
     return v === null || v === "" ? null : v;
   };
   switch (name) {
+    case "triggers": {
+      const kind = one("kind") ?? "all";
+      if (!TRIGGER_LIST_KINDS.includes(kind)) return { refusal: `kind must be one of ${TRIGGER_LIST_KINDS.join(", ")}` };
+      return { query: Object.freeze({ kind }) };
+    }
     case "trigger": {
       const index = one("index");
       if (index === null || !/^(?:0|[1-9]\d{0,5})$/.test(index)) return { refusal: "index must be a triggers-file index" };
@@ -401,6 +415,7 @@ export function pageQueryString(name, query) {
   const p = new URLSearchParams();
   const q = query ?? {};
   if (name === "trigger" && Number.isSafeInteger(q.index)) p.set("index", String(q.index));
+  if (name === "triggers" && q.kind && q.kind !== "all") p.set("kind", q.kind);
   if (name === "watch" || name === "watch-board") {
     for (const k of ["rule", "finding"]) if (q[k]) p.set(k, q[k]);
   } else if (name === "runs") {
@@ -485,6 +500,8 @@ const PAGE_READS = Object.freeze({
   venue: ["snapshot"],
   config: ["snapshot"],
   trigger: ["snapshot", "waiting"],
+  triggers: ["snapshot", "waiting"],
+  "trigger-check": ["parkedCount"],
   "trigger-add": ["snapshot"],
   watch: ["parkedCount"],
   "watch-board": ["parkedCount"],
@@ -613,7 +630,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
   if (name === "watch" || name === "watch-board") data.watch = await loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true });
   const reads = PAGE_READS[name];
-  if (["config", "trigger", "trigger-add"].includes(name) && typeof deps.configLocations === "function") data.configLocations = deps.configLocations();
+  if (["config", "trigger", "trigger-add", "triggers"].includes(name) && typeof deps.configLocations === "function") data.configLocations = deps.configLocations();
   // The by-id lookups' one question for this load (see above): the hub's, or this request's, read before any of them.
   const lookup = who?.live === true ? { live: true } : typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};
   if (name === "run" && typeof deps.env?.PI_CHAIN_MAX_PER_JOB === "string" && /^\d{1,9}$/.test(deps.env.PI_CHAIN_MAX_PER_JOB)) data.chainMaxPerJob = Number(deps.env.PI_CHAIN_MAX_PER_JOB);
@@ -625,6 +642,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
       data.readFailed = true;
     }
+  }
+  if (name === "triggers") {
+    try { data.triggerList = typeof deps.triggerList === "function" ? await deps.triggerList(data.snapshot) : triggerListOf({ snapshot: data.snapshot, now }); }
+    catch { data.triggerList = triggerListOf({ snapshot: null, now }); }
   }
   if (name === "trigger") {
     if (data.snapshot && typeof deps.fleet?.triggerSkew === "function") {
@@ -932,7 +953,8 @@ export async function renderPage(name, ctx) {
   if (name === "run" && extra !== null) sections.set("p-transcript", html`${sections.get("p-transcript")}${extra}`);
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
-  const titleOptions = name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {};
+  const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
+  const titleOptions = triggerListOptions ?? (name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   const body = shellHtml(name, ctx, html`${name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${inner}`, { ...titleOptions, ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = places !== null && !runPlaces(places).shown ? 503 : 200;

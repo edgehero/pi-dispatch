@@ -54,8 +54,8 @@ function boxSpans(html) {
 const count = (text, needle) => text.split(needle).length - 1;
 const navOf = (page) => /<nav class="pillnav"[^>]*>([^]*?)<\/nav>/.exec(page)?.[1] ?? null;
 
-test("the navigation is Overview, Runs, Parked, Fleet, Spend, Configuration, then More with Audit, and names every page that has a label", () => {
-  assert.deepEqual(NAV, ["overview", "runs", "parked", "fleet", "insights", "config"]);
+test("the navigation is Overview, Runs, Parked, Fleet, Spend, Triggers, Configuration, then More with Audit, and names every page that has a label", () => {
+  assert.deepEqual(NAV, ["overview", "runs", "parked", "fleet", "insights", "triggers", "config"]);
   assert.deepEqual(NAV_MORE, ["audit"]);
   assert.ok(Object.isFrozen(NAV) && Object.isFrozen(NAV_MORE));
   const labelled = Object.keys(PAGES).filter((n) => PAGES[n].nav !== null).sort();
@@ -78,7 +78,7 @@ test("every page, both roles: the pills in order, aria-current on the screen sho
       assert.equal(nav.includes('<details class="more">'), role === "operator", `${name}.${role}: More is the operator's`);
       if (role === "viewer") assert.ok(!html.includes('href="/audit"'), `${name}: a viewer is never offered the audit log`);
       const current = [...nav.matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]);
-      const here = name.startsWith("insights") ? "insights" : name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add"].includes(name) ? "config" : name;
+      const here = name.startsWith("insights") ? "insights" : name === "run" ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
       if (PAGES[here].auth === "operator" && role !== "operator") assert.deepEqual(current, [], `${name}.${role}: the refused page has no pill to mark`);
       else assert.deepEqual(current, [PAGES[here].path], `${name}.${role}: the one current pill`);
     }

@@ -290,13 +290,13 @@ test("console pages: hostile values are escaped or refused, and a viewer never s
 test("parsePageQuery: each screen takes only its own parameters, bounded and charset-checked, and refuses without echoing", async () => {
   const { PAGES, QUERY_LIMITS, pageQueryString, parsePageQuery } = await import("../src/console/pages.mjs");
   const q = (name, qs) => parsePageQuery(name, new URLSearchParams(qs));
-  assert.deepEqual(Object.keys(PAGES), ["overview", "runs", "run", "parked", "insights", "insights-budget-split", "insights-capacity", "insights-breakdown", "insights-flows", "fleet", "host", "venue", "trigger", "trigger-add", "config", "watch", "watch-board", "audit"]);
+  assert.deepEqual(Object.keys(PAGES), ["overview", "runs", "run", "parked", "insights", "insights-budget-split", "insights-capacity", "insights-breakdown", "insights-flows", "fleet", "host", "venue", "trigger", "triggers", "trigger-check", "trigger-add", "config", "watch", "watch-board", "audit"]);
   assert.ok(Object.isFrozen(PAGES) && Object.values(PAGES).every(Object.isFrozen));
   assert.equal(PAGES.audit.auth, "operator");
   assert.ok(Object.values(PAGES).filter((p) => p.auth !== "operator").every((p) => p.auth === "viewer"));
   assert.match(q("nope", "").refusal, /no such page/);
   assert.match(q("__proto__", "").refusal, /no such page/);
-  for (const name of ["parked", "fleet", "config"]) {
+  for (const name of ["parked", "fleet", "config", "trigger-check"]) {
     assert.deepEqual(q(name, "").query, {});
     assert.match(q(name, "x=1").refusal, /takes no query parameters/);
   }
@@ -453,7 +453,7 @@ test("loadPageData reads only what a screen shows, the snapshot at most once, an
     assert.ok(calls.snapshot <= 1, `${name}: snapshot at most once`);
     // Issue #737: a screen that reads no snapshot reads the navigation's Parked count, once; one that does takes it from
     // the snapshot, so no screen reads both.
-    const expected = name.startsWith("insights") ? ["insights", "parkedCount"] : { overview: ["snapshot", "waiting"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot", "waiting"], host: ["snapshot", "waiting", "runsPage"], venue: ["snapshot"], trigger: ["snapshot", "waiting"], "trigger-add": ["snapshot"], config: ["snapshot"], watch: ["parkedCount"], "watch-board": ["parkedCount"], audit: ["audit", "parkedCount"] }[name];
+    const expected = name.startsWith("insights") ? ["insights", "parkedCount"] : { overview: ["snapshot", "waiting"], runs: ["runsPage", "subscriptions", "parkedCount"], run: ["runById", "runsPage", "subscriptions", "transcriptMeta", "parkedCount"], parked: ["snapshot"], insights: ["insights", "parkedCount"], fleet: ["snapshot", "waiting"], host: ["snapshot", "waiting", "runsPage"], venue: ["snapshot"], trigger: ["snapshot", "waiting"], triggers: ["snapshot", "waiting"], "trigger-check": ["parkedCount"], "trigger-add": ["snapshot"], config: ["snapshot"], watch: ["parkedCount"], "watch-board": ["parkedCount"], audit: ["audit", "parkedCount"] }[name];
     assert.deepEqual(Object.keys(calls).filter((k) => calls[k] > 0).sort(), [...expected].sort(), `${name} reads ${expected.join(", ")}`);
     assert.ok(calls.parkedCount <= 1, `${name}: the count at most once`);
     assert.equal(data.parkedCount, expected.includes("parkedCount") ? 2 : undefined, `${name}: the count is in the data where it was read`);

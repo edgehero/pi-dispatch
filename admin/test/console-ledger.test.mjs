@@ -1,3 +1,4 @@
+import { TRIGGER_LIST_PANEL_STATES } from "./helpers/trigger-list-goldens.mjs";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -43,6 +44,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  TriggersScreen: 750, TriggersViewer: 750, TriggersPhone: 750,
   ConfigScreen: 750, TriggerDetail: 750, TriggerEditor: 750,
   SpendScreen: 749, SpendBudgetSplit: 749, SpendCapacity: 749, SpendBreakdown: 749, TopologyScreen: 749, SpendPhone: 749,
   FleetScreen: 6, FleetPartPaused: 6, HostDetail: 6, VenueDetail: 6,
@@ -86,6 +88,8 @@ const ISSUE_OWNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  "triggers.operator", "triggers.viewer", "triggers-filtered.operator", "triggers-filtered.viewer", "trigger-check.operator", "trigger-check.viewer",
+  ...TRIGGER_LIST_PANEL_STATES.map(key => `panels/${key}`),
   "config.operator", "config.viewer", "trigger.operator", "trigger.viewer", "trigger-add.operator",
   ...["trigger-editor-no-webhook.operator", "trigger-cron.operator", "trigger-spent.operator", "trigger-file-invalid.operator", "trigger-readonly.viewer", "trigger-editor-refusals.operator"].map(key=>`panels/${key}`),
   ...SPEND_PANEL_STATES.map((key) => `panels/${key}`),
@@ -412,4 +416,18 @@ test("every Spend state is evidenced by its card ledger with visible state-speci
   const cards = ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen", "SpendPhone"];
   const represented = new Set(ELEMENTS.filter(({ card, e }) => cards.includes(card) && e.kind === "state" && e.shows).flatMap(({ e }) => e.golden ?? []));
   assert.deepEqual(SPEND_PANEL_STATES.filter((key) => !represented.has(`panels/${key}`)), []);
+});
+
+// A list claim needs the actual facts/result state in its panel. A named export or a matching heading alone
+// cannot establish receiver parity, bounded schedule projection, truthful history or viewer policy.
+test("Triggers cards cite visible list/check evidence for every behavior and exceptional state", () => {
+  const cards = new Set(["TriggersScreen", "TriggersViewer", "TriggersPhone"]);
+  const entries = ELEMENTS.filter(({ card, e }) => cards.has(card) && ["new", "real"].includes(e.status));
+  for (const { card, e } of entries) {
+    assert.ok(e.golden?.length, `${card}/${e.el}: rendered evidence`);
+    if (e.kind !== "panel") assert.ok(e.shows?.length, `${card}/${e.el}: concrete visible output`);
+    if (e.kind !== "panel" && e.source.includes("/panels/")) assert.ok(e.panel, `${card}/${e.el}: panel-scoped evidence`);
+  }
+  const represented = new Set(entries.flatMap(({ e }) => e.golden ?? []));
+  assert.deepEqual(TRIGGER_LIST_PANEL_STATES.filter(key => !represented.has(`panels/${key}`)), [], "every exceptional state proves a concrete ledger claim");
 });

@@ -33,7 +33,7 @@ def card_marker(group, height, width, subtitle):
     return f'<!-- @dsCard group="{group}" height={height} width={width} subtitle="{E(subtitle)}" -->'
 
 # ---------------- shell ----------------
-NAV = [("home", "Overview"), ("runs", "Runs"), ("parked", "Parked"), ("bolt", "Triggers"), ("fleet", "Fleet"), ("spend", "Spend"),
+NAV = [("home", "Overview"), ("runs", "Runs"), ("parked", "Parked"), ("fleet", "Fleet"), ("spend", "Spend"), ("bolt", "Triggers"),
        ("config", "Configuration")]
 
 def topbar(active="Overview", parked=1, role="operator", live="live"):

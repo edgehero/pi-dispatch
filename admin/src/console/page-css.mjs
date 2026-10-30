@@ -179,38 +179,17 @@ export function scopeCss(prefix, css) {
  *   window's width in CSS pixels can be fractional (browser zoom, a display scaled by 125%), and a width of 760.5 px
  *   matched neither a `max-width: 760px` nor a `min-width: 761px` block, so it drew the bundle's bare row (issue #737's
  *   third review). The ranges inside the desktop (the navigation's break below) are nested in that same query.
- * - `navBreakMax`: from 761 px up to here the navigation, on its own row, always breaks after its fourth pill
- *   (Overview, Runs, Parked, Fleet, then the rest). The operator's navigation measures 773 px in the macOS system font
- *   and 825 px in DejaVu Sans (Linux's, wider, where CI measures) with a one-digit Parked count, 842 px with three
- *   digits: below about 873 px it cannot be one line, and where it just can, a count that appears or gains a digit
- *   (the live stream moves it) would push its last pill onto a second line and the page down by 54 px. A break at a
- *   fixed pill holds both lines short of the width whatever the count says. From 940 px the navigation is one line
- *   with a 3-digit count and 50 px to spare in DejaVu Sans.
- * - `oneRowMin`: from here the bar is one row (pi-dispatch, the navigation, the end), as the Shell card draws it at
- *   1440. Measured at 1440 in DejaVu Sans: the pi-dispatch pill 171 px, the navigation 825, the live pill at its widest
- *   word (Reconnecting) 147, the theme button, the avatar and sign-out, with the gaps and the page's 24 px sides, leave
- *   37 px for the signed-in name and role (the macOS font leaves 112). Name and role are the one part that gives way:
- *   the longer of the two is cut first with an ellipsis (the block's `title` holds both) rather than the bar wrapping,
- *   and only with the widest word do they lose that much. Below this the bar is two rows: the pi-dispatch pill and the end, then the navigation.
- * - `oneRowReadOnlyMin`: the same for a read-only console, whose end also holds the read-only chip (150 px in the macOS
- *   font, 163 in DejaVu Sans). At 1600 DejaVu Sans leaves 27 px for the name with Reconnecting.
- *
- * At 761 px a read-only console's first row is the tightest place: 25 px for the name with Reconnecting in DejaVu Sans.
- *
- * - `searchRoom`: what the Search button (`shell.mjs` `SEARCH_HREF`, PR 4) takes from the bar's end, its 48 px
- *   (`--control-h`) and the end's 8 px gap. The name is the one part that gives way, and at the three places where the
- *   end is tightest (just above a phone for a read-only console, `oneRowMin`, `oneRowReadOnlyMin`) it has less than
- *   that: measured in DejaVu Sans with Reconnecting, the button left the avatar 17 px under Sign out at 761 px read-only,
- *   5 px at 1440 and 15 px at 1600 read-only with a one-digit Parked count (21 and 32 px with three digits, which push
- *   the one-row navigation 17 px further). So from each of those widths the button is drawn only `searchRoom` px
- *   later (`SHELL_CSS`): until then the bar is exactly what it was without it, and from there the name has at least the
- *   room it had at the breakpoint. Off a phone's bar altogether (bundle.css's `hide-phone`), as the Shell card draws it.
- *   REJECTED: keeping the button and letting the name give way instead, down to the avatar alone in a round pill the
- *   buttons' size. That frees 20 px (the name's column, its gap and the pill's padding), and the button needs 56:
- *   measured in DejaVu Sans with Reconnecting, the theme button shown and a three-digit Parked count, the end was still
- *   15 px short at 1440, 11 at 761 read-only and 26 at 1600 read-only, so the avatar ran under Sign out.
+ * - `navBreakMax`: below 1060 px the seven full-size navigation pills always break after Fleet. Adding Triggers
+ *   made the previous 940 px unbroken row depend on the Parked count: three digits pushed More onto a third row.
+ * - `oneRowMin`: 1600 px leaves the seven-pill navigation, fixed end controls and longest live word their full
+ *   size. Below it the navigation owns its second row. The previous 1440 px threshold let the avatar overlap Sign out.
+ * - `oneRowReadOnlyMin`: 1760 px also reserves the read-only chip. Its previous 1600 px threshold had the same overlap.
+ * - `searchRoom`: Search needs its 48 px control and 8 px gap beyond each tight threshold. Only the name may ellipsize;
+ *   a navigation pill is never hidden or narrowed above a phone. The full browser matrix checks counts, all live
+ *   states, both roles, read-only mode, long names and fractional breakpoint neighbors, including More without JS.
+
  */
-export const TOP_BAR = Object.freeze({ phoneMax: 760, navBreakMax: 939, oneRowMin: 1440, oneRowReadOnlyMin: 1600, searchRoom: 56 });
+export const TOP_BAR = Object.freeze({ phoneMax: 760, navBreakMax: 1059, oneRowMin: 1600, oneRowReadOnlyMin: 1760, searchRoom: 56 });
 
 /**
  * What the shell draws that `bundle.css` has no rule for, or draws in a way the console cannot use:

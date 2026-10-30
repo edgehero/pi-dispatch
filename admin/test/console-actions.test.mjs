@@ -2377,14 +2377,17 @@ test("a one-line change in a 3000-line file previews small and shows the change;
 
 // ---- the browser script ----------------------------------------------------------------------------------------------
 
-test("the script writes markup in exactly three places: the confirm slot, the panel swap behind data-panel, and the transcript append into [data-transcript]", () => {
+test("the script writes markup in exactly four places: the confirm slot, the panel swap behind data-panel, the checker result, and the transcript append into [data-transcript]", () => {
   // Issue #737: the preview's bar goes into the page's ONE confirm slot (the answer's `html`, and the skeleton it
   // restores), never into the form or its section; a panel swap stays behind data-panel; the transcript append as before.
   const writes = CONSOLE_SCRIPT.match(/[\w.]+\.(?:innerHTML|outerHTML)\s*=|[\w.]*insertAdjacentHTML|document\.write/g) ?? [];
-  assert.deepEqual([...new Set(writes.map((w) => w.replace(/\s+/g, "")))].sort(), ["el.innerHTML=", "slot.innerHTML=", "tbox.insertAdjacentHTML"]);
+  assert.deepEqual([...new Set(writes.map((w) => w.replace(/\s+/g, "")))].sort(), ["checkResult.innerHTML=", "el.innerHTML=", "slot.innerHTML=", "tbox.insertAdjacentHTML"]);
   // Issue #643: `tbox` is bound once, to the page's [data-transcript] element, and the append writes the entry's
   // server-rendered html (a string, checked) at its end and nowhere else.
   assert.deepEqual(CONSOLE_SCRIPT.match(/\btbox\s*=(?!=)/g), ["tbox ="]);
+  assert.match(CONSOLE_SCRIPT, /var checkResult = document\.querySelector\("\[data-trigger-check-result\]"\);/);
+  assert.deepEqual(CONSOLE_SCRIPT.match(/\bcheckResult\s*=(?!=)/g), ["checkResult ="], "the checker sink is bound once to its server-marked region");
+  assert.match(CONSOLE_SCRIPT, /if \(\(r\.status === 200 \|\| r\.status === 400\) && r\.body && typeof r\.body\.html === "string"\) \{\n\s+checkResult\.innerHTML = r\.body\.html;/);
   assert.match(CONSOLE_SCRIPT, /var tbox = document\.querySelector\("\[data-transcript\]"\);/);
   assert.match(CONSOLE_SCRIPT, /if \(!msg \|\| typeof msg\.html !== "string"\) return;\n[^]*?tbox\.insertAdjacentHTML\("beforeend", msg\.html\);/);
   assert.equal((CONSOLE_SCRIPT.match(/new EventSource\(/g) ?? []).length, 1, "the transcript uses the page's only connection");

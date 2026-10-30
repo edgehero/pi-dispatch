@@ -1545,12 +1545,15 @@ test("the 2 s the script waits is the stream's own retry and what the sentences 
   assert.ok(SIGN_IN_NOTICES.unreachable.body.includes(said), SIGN_IN_NOTICES.unreachable.body);
 });
 
-test("the script writes markup in exactly three places: the slot's answer or skeleton, the panel swap, and the transcript append", () => {
+test("the script writes markup in exactly four places: the slot's answer or skeleton, the panel swap, the checker result, and the transcript append", () => {
   const writes = CONSOLE_SCRIPT.match(/[\w.]+\.(?:innerHTML|outerHTML)\s*=(?!=)|[\w.]*insertAdjacentHTML|document\.write/g) ?? [];
-  assert.deepEqual(writes.map((x) => x.replace(/\s+/g, "")), ["slot.innerHTML=", "el.innerHTML=", "tbox.insertAdjacentHTML"]);
+  assert.deepEqual(writes.map((x) => x.replace(/\s+/g, "")), ["slot.innerHTML=", "el.innerHTML=", "checkResult.innerHTML=", "tbox.insertAdjacentHTML"]);
   assert.match(CONSOLE_SCRIPT, /function fillSlot\(markup\) \{\n\s+slot\.innerHTML = markup;\n\s+try \{ localTimes\(slot\); \} catch \(e\) \{ \/\* the times stay UTC \*\/ \}\n\s+\}/, "the slot's one write, in one function, its times shown as the page's");
   assert.match(CONSOLE_SCRIPT, /var slot = document\.getElementById\(CONFIRM_SLOT_ID\);/);
   assert.deepEqual(CONSOLE_SCRIPT.match(/\bslot\s*=(?!=)/g), ["slot ="], "bound once, to the server's slot");
+  assert.match(CONSOLE_SCRIPT, /var checkResult = document\.querySelector\("\[data-trigger-check-result\]"\);/);
+  assert.deepEqual(CONSOLE_SCRIPT.match(/\bcheckResult\s*=(?!=)/g), ["checkResult ="], "the checker sink is bound once to its server-marked region");
+  assert.match(CONSOLE_SCRIPT, /if \(\(r\.status === 200 \|\| r\.status === 400\) && r\.body && typeof r\.body\.html === "string"\) \{\n\s+checkResult\.innerHTML = r\.body\.html;/);
   assert.match(CONSOLE_SCRIPT, /function swapPanel\(el, markup\) \{\n[^]*?el\.innerHTML = markup;/, "the panel's one write, in one function");
   assert.match(CONSOLE_SCRIPT, /if \(!el \|\| !el\.hasAttribute\("data-panel"\)\) return;\n[^]*?if \(inUse\(el\)\) hold\(el, msg\.html\);\n\s+else swapPanel\(el, msg\.html\);/, "only an element the server marked data-panel, and not while it is in use");
   assert.match(CONSOLE_SCRIPT, /if \(!el \|\| !el\.hasAttribute\("data-panel"\)\) delete pending\[id\];\n\s+else if \(!inUse\(el\)\) swapPanel\(el, pending\[id\]\);/, "a held update lands only in a panel, once it is free");
