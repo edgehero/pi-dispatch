@@ -25,14 +25,14 @@ Start with **Start here**: the concept map shows how the pieces connect, the glo
 |---|---|
 | Start here | How pi-dispatch fits together (concept map), Glossary, The sample deployment, Journeys: a run asks a question, a run fails, set up a new deployment |
 | Overview | Overview, Overview all clear, First run setup (in the browser, after one command) |
-| Runs | Runs, Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
+| Runs | Runs, Sandboxes (#771, operator only), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
 | Fleet | Fleet, Fleet part paused (bulk actions, held, delayed), Host detail (registry row, budget, capacity, doctor), Venue detail (14 properties), Fleet as a viewer |
 | Spend | Spend, Budget split, Capacity, Breakdown, Flows map, as tabs of one page |
 | Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, Add a trigger, Triggers as a viewer |
 | Configuration | Configuration, Secrets, Connections, Project detail |
 | Access and audit | Sign-in, Access states (one-time link, operator, viewer, read-only), Audit, Error |
 | Phone | Overview, Runs, Parked, Spend, Run live, Fleet, Triggers, Parked with a draft, Zero touch |
-| Planned and proposed | Approval request (#649), Fork a run (#648), Models: roles, cooldowns and canary (#716, #717, #693), Watch and a finding (#735, a tab of Triggers), Watch board: why each finding did what it did, every query and decision, Jev in the job and in shadow at the gate, and a board jobs propose and you adopt (#735, #743), Dispatchers: many sandboxes at once, each with its own purpose, what each did today, where they read the same input and how they stay bounded together; Dispatcher: one in full, reading git changes and infra streams and only starting jobs and proposing triggers, as a Jev loop or an LLM flow; Sandboxes: open a run's kept workspace in your own terminal from the console, or a fresh sandbox for a repository with no run, with a browser terminal shown as an off-by-default proposal; Zero touch: how often runs needed a person, per project and repository, why, the questions they keep asking and the fixes that worked; Parked with an answer rule: a draft job per parked question that drafts from what a person already decided, for the person to send; Zero touch and Parked with a draft as a viewer sees them |
+| Planned and proposed | Approval request (#649), Fork a run (#648), Models: roles, cooldowns and canary (#716, #717, #693), Watch and a finding (#735, a tab of Triggers), Watch board: why each finding did what it did, every query and decision, Jev in the job and in shadow at the gate, and a board jobs propose and you adopt (#735, #743), Dispatchers: many sandboxes at once, each with its own purpose, what each did today, where they read the same input and how they stay bounded together; Dispatcher: one in full, reading git changes and infra streams and only starting jobs and proposing triggers, as a Jev loop or an LLM flow; Zero touch: how often runs needed a person, per project and repository, why, the questions they keep asking and the fixes that worked; Parked with an answer rule: a draft job per parked question that drafts from what a person already decided, for the person to send; Zero touch and Parked with a draft as a viewer sees them |
 | Components | Shell, Status, Actions and confirm, Cards and banners, Data table, Facts and levels, Timeline and waitlists, Transcript, Fields, diff and command, Confirm states, Live states |
 
 Each screen is built only from `components/bundle.css`, the page kit's helpers and a small page style. Its README says how a person uses it, which panels it has, what the server provides, what a viewer sees, and which data is sample.
@@ -68,6 +68,7 @@ Every page, panel, state and write of the console at `ce5338f`, plus the 5.0.0 i
 | `/run` on OpenShell: sandbox policy, rule hosts, secret bundle variables, shadowed names, bundle skipped, cost floor and settled basis, per-model usage, resources, chain | Run in a sandbox |
 | `/run` for a viewer: numbers and tool names only, the operator-only sentences | Run as a viewer, Access states |
 | `/parked`: waiting, being answered, unknown, the answer and its reserve | Run parked, Parked on a phone, Approval request, Parked with an answer rule |
+| `/runs/sandboxes` (#771): operator-only kept workspaces and live shells, local terminal handoff, fresh preparation, pin and End with preview/Confirm, Fleet target settings | Sandboxes |
 | `pi-dispatch sandbox`: kept runs and their deadline, `--list`, `--pin`, the `--publish` refusal, one sandbox per run, venues that cannot reopen | Sandboxes |
 | Run records: outcomes, reasons, awaiting input, operator cancels, steers, re-runs | Zero touch |
 | `/insights`: windows, tiles, budget and soft hold, job sizes, what-if | Spend |
@@ -105,14 +106,10 @@ What this design asks the repo for, because the repo cannot do it yet:
 - dispatchers: a trigger whose job reads git changes and infra streams and may only start listed jobs and propose triggers, with wider outbox chaining than today (other folders and repositories, more than 2 requests) and a Jev loop engine that runs like the GitHub poller;
 - Triggers as a page of its own, with Watch as its second tab;
 - delivery health for webhooks, which the receiver does not publish;
-- sandboxes from the console:
-  - a `pi-dispatch-open://` opener on the person's computer that types the sandbox command into their terminal and waits for Enter;
-  - a sandbox with no run (`pi-dispatch sandbox --new <repo> --ref <ref>`), cloned with a read-only token that is dropped before the shell starts;
-  - the list of open sandbox shells, and an SSH target per host;
 - a touch record per run (who touched it and why), with question themes and standing answers, for Zero touch;
 - answer rules: a hand-written rule that starts a draft job when a run parks, which classifies the question and drafts an answer from cited sources for a person to send;
 
-These are issue #753, with the specs as proposed entries (`REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-ZERO-TOUCH-RATE`, `REQ-PARKED-ANSWERER`).
+The original proposals are issue #753. Sandboxes shipped under #771 (`REQ-SANDBOX-FROM-THE-CONSOLE`); the browser-terminal proposal remains #754. The other entries keep their own issue status.
 
 Proposed only, not asked for: a browser terminal through a separate sandbox gateway. It reverses a recorded decision (specs/design.md, #642 and #641), so issue #754 decides it first, recorded as `OQ-050`.
 

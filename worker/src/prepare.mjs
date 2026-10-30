@@ -182,7 +182,7 @@ export function makePrepareWorkspace({
 			// The snapshot only for a confirmed portfolio job, and never for a chained child or a manual run, whatever its data
 			// says (the processor's gate already holds both; this keeps a direct caller to the same rule).
 			const snapshot = portfolio === true && typeof portfolioSnapshot === "function" && event.source === "cron" ? { portfolio: () => portfolioSnapshot(job) } : {};
-			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(job.watch ? { watch: job.watch, watchDecisionModel: job.watchDecisionModel, watchSecrets } : {}), ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null } : {}), ...snapshot }), sandbox), jobDir));
+			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(job.watch ? { watch: job.watch, watchDecisionModel: job.watchDecisionModel, watchSecrets } : {}), ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null, ...(typeof localPlacement.sandboxDir === "string" ? { sandboxDir: localPlacement.sandboxDir } : {}) } : {}), ...snapshot }), sandbox), jobDir));
 		}
 		const prepare = preparers[job.kind];
 		if (prepare) {

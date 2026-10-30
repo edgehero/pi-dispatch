@@ -2,8 +2,11 @@ import { spawn } from "node:child_process";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { basename } from "node:path";
-import { SANDBOX_OPEN_GRACE_MS, launchSandbox, listRunningSandboxes, openSandbox, parsePublish, sandboxContainerName, sandboxLauncher, sandboxVenueOf, sandboxVenueRefusal, sandboxVenues } from "./sandbox.mjs";
+import { fileURLToPath } from "node:url";
+import { SANDBOX_OPEN_GRACE_MS, decideSandboxJobUser, launchSandbox, listRunningSandboxes, openSandbox, parsePublish, resolveSandbox, sandboxContainerName, sandboxLauncher, sandboxVenueOf, sandboxVenueRefusal, sandboxVenues } from "./sandbox.mjs";
 import { listSandboxes, pinSandbox, sandboxDeadline } from "./sandbox-store.mjs";
+import { ensureSandboxMonitor, inspectSandboxSession, makeSandboxMonitor } from "./sandbox-session-watch.mjs";
+import { SANDBOX_SESSION_ID_RE } from "./sandbox-sessions.mjs";
 
 /**
  * `pi-dispatch sandbox` -- re-open a finished run's sandbox as an interactive shell
@@ -43,13 +46,50 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 				list: { type: "boolean", default: false },
 				publish: { type: "string", multiple: true }, // repeatable; always bound to 127.0.0.1
 				pin: { type: "boolean", default: false },
+				attach: { type: "boolean", default: false },
+				new: { type: "string" },
+				ref: { type: "string" },
+				as: { type: "string" },
+				deployment: { type: "string" },
+				"expected-host": { type: "string" },
+				"opened-by": { type: "string" },
 			},
 		}));
 	} catch (error) {
 		return fail(err, error.message);
 	}
 
-	const config = loadConfig(env);
+	if (values.deployment) {
+		const { sandboxDeploymentEnv } = await import("./sandbox-deployment.mjs");
+		const loaded = await (deps.deploymentEnv ?? sandboxDeploymentEnv)({ dir: values.deployment, env, expectedHost: values["expected-host"] });
+		if (loaded.refused) return fail(err, loaded.message);
+		// Readers and runtime helpers use their process's environment. Re-exec in the clean environment so none
+		// can accidentally consult the SSH shell's DOCKER_HOST, egress or rootless store (#771).
+		const next = [];
+		for (let i = 0; i < argv.length; i++) {
+			if (argv[i] === "--deployment" || argv[i] === "--expected-host") { i++; continue; }
+			if (argv[i].startsWith("--deployment=") || argv[i].startsWith("--expected-host=")) continue;
+			next.push(argv[i]);
+		}
+		return (deps.runDeployment ?? runDeploymentSandbox)(next, loaded.env, values.deployment);
+	}
+	if (values["expected-host"]) return fail(err, "--expected-host requires --deployment");
+	let config;
+	try { config = loadConfig(env); } catch (error) { return fail(err, error.message); }
+	if (values.new !== undefined) {
+		if (positionals.length || values.list || values.attach || values.publish?.length || values.ref === undefined || values.as === undefined || !/^(0|[1-9][0-9]*)$/.test(values.as)) return fail(err, "--new takes --ref <branch|pr:N|sha> and --as <trigger index>, with no run id, --list, --attach or --publish");
+		try {
+			const { createSandboxPreparer } = await import("./sandbox-prepare.mjs");
+			const prepare = deps.prepare ?? createSandboxPreparer({ config, env });
+			const result = await prepare({ repo: values.new, ref: values.ref, triggerIndex: Number(values.as), host: config.workerName, pin: values.pin });
+			if (result.refused) return fail(err, result.message);
+			out(`prepared ${result.id}, kept until ${new Date(result.until).toISOString()}; no container started\n`);
+			out(`open it with: pi-dispatch sandbox ${result.id}\n`);
+			return 0;
+		} catch { return fail(err, "sandbox preparation failed; check the repository, forge access and deployment settings, then try again"); }
+	}
+	if (values.ref !== undefined || values.as !== undefined) return fail(err, "--ref and --as require --new");
+	if (positionals.length > 1 || (values.list && (positionals.length || values.attach || values.pin || values.publish?.length))) return fail(err, "choose one sandbox id, or --list");
 	// A docker that cannot be reached costs a column, never the command: `listRunningSandboxes` throws so
 	// the REAPER can tell "none" from "could not ask", and these callers only draw a marker. Asked only
 	// where it is used, and never before the arguments are known good -- a typo should not shell out.
@@ -75,12 +115,31 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 
 	const jobId = positionals[0];
 	if (!jobId) return fail(err, "a job id is required — `pi-dispatch sandbox --list` shows what is still re-openable");
+	if (!SANDBOX_SESSION_ID_RE.test(jobId)) return fail(err, "the sandbox id must contain only letters, digits, dot, underscore, colon and hyphen (at most 200 characters)");
 
 	// Refused BEFORE anything else that could half-succeed. `-t` against a pipe fails inside docker with
 	// "the input device is not a TTY", which names neither the cause nor the fix; a sandbox is an operator
 	// session by definition, so the absence of an operator is a refusal rather than a fallback.
 	if (!isTty) {
 		return fail(err, "`pi-dispatch sandbox` needs a terminal — it opens an interactive shell, so it cannot run from a pipe, a script without a TTY, or CI");
+	}
+	const monitorSession = deps.monitorSession ?? makeSandboxMonitor({ env, config, by: values["opened-by"], now });
+	if (values.attach) {
+		if (values.publish?.length || values.pin) return fail(err, "--attach does not take --publish or --pin; pin the kept workspace separately");
+		const resolved = resolveSandbox({ jobId, sandboxDir: config.sandboxDir, retentionHours: config.sandboxRetentionHours, blessed: config.backends, pin: true, now });
+		if (resolved.refused) return fail(err, resolved.message);
+		const { bin } = sandboxLauncher(resolved.venue);
+		const state = await (deps.inspectSession ?? inspectSandboxSession)({ bin, name: resolved.name });
+		if (state.unknown) return fail(err, "the runtime could not report this sandbox; check its host and try again");
+		if (!state.present || !state.running) return fail(err, "this sandbox is no longer running; open its kept workspace again");
+		if (!/^[a-f0-9]{32}$/.test(state.nonce ?? "")) return fail(err, `this shell predates session tracking; return with \`${bin} attach ${resolved.name}\`, or exit it and open it again to register it`);
+		const user = await (resolveJobUser ?? decideSandboxJobUser)({ manifest: resolved.manifest, venue: resolved.venue, backendFloor: config.backendFloor });
+		if (user?.refused) return fail(err, user.message);
+		try { await (deps.ensureMonitor ?? ensureSandboxMonitor)({ resolved, runtime: bin, state, config, env, admittedRuntime: user?.runtime ?? null, by: values["opened-by"], now }); }
+		catch { return fail(err, "sandbox tracking could not be recovered; check Valkey before attaching"); }
+		out(`attaching to ${resolved.name} (${bin}); exit the shell to end it\n`);
+		const attached = await (deps.attach ?? attachSandbox)({ bin, containerId: state.containerId });
+		return attached.code ?? 1;
 	}
 
 	let publish;
@@ -121,6 +180,7 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		// Issue #429: which venues open here, and what a podman sandbox's observations must show, as the worker reads them.
 		blessed: config.backends,
 		backendFloor: config.backendFloor,
+		monitorSession,
 		now,
 		// Pin BEFORE the shell, not after: the operator asked to keep this one, and a session that ends in a crashed
 		// terminal or a closed laptop lid must not be the reason the pin never landed. And since issue #446 before
@@ -147,6 +207,22 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 	if (result.lost) err(`note: ${result.message}\n`);
 	if (result.detached) out(`detached: ${containerName} is still running with its egress network, which is left in place after it exits -- \`${runtime} attach ${containerName}\` to return\n`);
 	return result.code ?? 0;
+}
+
+function runDeploymentSandbox(argv, env, dir) {
+	return new Promise((resolve) => {
+		const child = spawn(process.execPath, [fileURLToPath(new URL("./cli.mjs", import.meta.url)), "sandbox", ...argv], { env, ...(dir ? { cwd: dir } : {}), stdio: "inherit" });
+		child.once("error", () => resolve(1));
+		child.once("exit", (code) => resolve(code ?? 1));
+	});
+}
+
+export function attachSandbox({ bin, containerId, spawnFn = spawn }) {
+	return new Promise((resolve) => {
+		const child = spawnFn(bin, ["attach", containerId], { stdio: "inherit" });
+		child.once("error", () => resolve({ code: 1 }));
+		child.once("exit", (code) => resolve({ code: code ?? 1 }));
+	});
 }
 
 /**

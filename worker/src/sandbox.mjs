@@ -366,10 +366,12 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstat
 }
 
 /** The store this account's Podman uses right now, from one bounded `podman info`, or null when it cannot say. */
-async function defaultPodmanStore() {
-	const read = await makePodmanInfoReader()();
-	return read?.answered === true ? (read.info?.graphRoot ?? null) : null;
+export async function readPodmanStore({ read = makePodmanInfoReader() } = {}) {
+	const result = await read();
+	return result?.answered === true ? (result.info?.graphRoot ?? null) : null;
 }
+
+const defaultPodmanStore = readPodmanStore;
 
 /**
  * The sweep's runner for one runtime: bounded, both streams, never throws. `execDockerBounded` already settles on its
@@ -840,6 +842,8 @@ export async function openSandbox({
 	detachGate = null,
 	// Issue #452, gate round 4: `(network, reason) => void`, told of a teardown the gate refused, which leaves the network.
 	onNetworkKept = () => {},
+	// The CLI's detached monitor registers the shell and owns eventual network cleanup (#771).
+	monitorSession = null,
 }) {
 	// The posture is REQUIRED, and a boolean. Every other part of this function defaults safely; this one would
 	// default to the open bridge, which is the dropped part this function exists to stop a caller dropping.
@@ -849,6 +853,11 @@ export async function openSandbox({
 	const pinning = typeof pin === "function";
 	const resolved = resolveSandbox({ jobId, sandboxDir, retentionHours, publish, blessed, now, pin: pinning, ...(fs ? { fs } : {}), ...(fileExists ? { fileExists } : {}) });
 	if (resolved.refused) return resolved;
+	if (resolved.manifest.origin === "prepared") {
+		const saved = resolved.manifest.sandboxEgress;
+		if (typeof saved?.armed !== "boolean" || typeof saved.proxy !== "string" || saved.proxy !== egress.proxy || (egress.armed && !saved.armed)) return { refused: "sandbox-egress-changed", message: "The prepared sandbox's egress settings changed. Prepare it again with this deployment's current settings." };
+		egress = { armed: saved.armed, proxy: saved.proxy };
+	}
 	// Admitted by `resolveSandbox`, so never null here.
 	const { bin } = sandboxLauncher(resolved.venue);
 	// Issue #596: the run's size, decided before anything is asked or created. A recorded size that is malformed refuses.
@@ -1008,6 +1017,7 @@ export async function openSandbox({
 		};
 	}
 	let detached = false;
+	let sessionWatch = null;
 	// THE POST-LAUNCH LOOK (issue #446). The refusal and the pin decide from what was on disk before the launch, and
 	// two things can still take the run from under the new shell: the accepted residual (a worker whose window was
 	// lowered below this opener's, whose pass missed the container), and the sweep's own rename and restore. So once
@@ -1086,6 +1096,10 @@ export async function openSandbox({
 		// the network was created, so a leftover network printed the banner and then refused. Inside the `try`, so a hook
 		// that throws still has this session's network removed by the `finally`.
 		await beforeLaunch({ resolved, args, network, runtime: bin });
+		if (monitorSession) {
+			try { sessionWatch = await monitorSession({ resolved, args, network, runtime: bin, admittedRuntime: jobUser?.runtime ?? null }); }
+			catch { return { refused: "sandbox-tracking-unavailable", message: "Sandbox tracking is unavailable. Check Valkey before opening a shell." }; }
+		}
 		const watching = look().catch(() => {});
 		let launched;
 		try {
@@ -1139,7 +1153,8 @@ export async function openSandbox({
 			: {};
 		return { code: code ?? null, error: error ?? null, ...(detached ? { detached: true } : {}), ...during };
 	} finally {
-		if (network && !detached) {
+		sessionWatch?.finish?.();
+		if (network && !detached && !sessionWatch?.ownsNetwork) {
 			// The runtime this session was ADMITTED on (issue #452, gate round 4), never a fresh read at the teardown; a
 			// refused teardown is said with its token.
 			await removeJobNetwork(spawnNetwork, {

@@ -61,7 +61,11 @@ import { makeCollectPlan } from "./outbox-plan.mjs";
 import { makePortfolioSnapshot } from "./portfolio-snapshot.mjs";
 import { containerPackagePaths, readStageManifest } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
-import { listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch } from "./sandbox.mjs";
+import { listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, sandboxSyncRefusal } from "./sandbox.mjs";
+import { createSandboxPreparer } from "./sandbox-prepare.mjs";
+import { checkSandboxWorkspace } from "./sandbox-workspace-guard.mjs";
+import { startSandboxPrepareWorker } from "./sandbox-prepare-requests.mjs";
+import { makeSandboxInventory } from "./sandbox-inventory.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeDoctorSpawner } from "./doctor-spawner.mjs";
 import { fileURLToPath } from "node:url";
@@ -706,6 +710,9 @@ export async function startWorker(
 		readMirroredRecord: readMirroredRecordFn = readMirroredRecord,
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
 		makeSandboxReaper: makeSandboxReaperFn = makeSandboxReaper,
+		createSandboxPreparer: createSandboxPreparerFn = createSandboxPreparer,
+		startSandboxPrepareWorker: startSandboxPrepareWorkerFn = startSandboxPrepareWorker,
+		makeSandboxInventory: makeSandboxInventoryFn = makeSandboxInventory,
 		listSandboxes: listSandboxesFn = listSandboxes,
 		makeSandboxNetworkSweeper: makeSandboxNetworkSweeperFn = makeSandboxNetworkSweeper,
 		// Issue #429: the one call that asks a runtime which sandboxes are open, seamed so a wiring test can drive the real
@@ -2109,7 +2116,7 @@ export async function startWorker(
 	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
 	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
 	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });
-	const retainedNow = makeSandboxTelemetry({ list: () => listSandboxesFn({ sandboxDir: config.sandboxDir, throwOnReadFailure: true }), deadline: sandboxDeadline, retentionHours: config.sandboxRetentionHours, now, log });
+	const retainedNow = makeSandboxTelemetry({ list: () => listSandboxesFn({ sandboxDir: config.sandboxDir, throwOnReadFailure: true }), deadline: sandboxDeadline, retentionHours: config.sandboxRetentionHours, canOpen: (manifest) => !sandboxSyncRefusal({ jobId: manifest.jobId, manifest, blessed: config.backends }), now, log });
 	// Issue #596, phase 2: one integer of the host budget's snapshot for the beat, or "" before the worker exists.
 	const snapshotField = (key) => {
 		const snap = worker?.hostBudget?.snapshot?.();
@@ -2991,6 +2998,7 @@ export async function startWorker(
 			// Off the REGISTRY's surface, like every other per-job backend fact. Rebuilding it at the call site
 			// is how a fact ends up dispatched on one path and hardcoded on another.
 			neverStartedExits: backends.neverStartedExits,
+			checkSandboxWorkspace: (job) => checkSandboxWorkspace(job, { sandboxDir: config.sandboxDir }),
 			prepareWorkspace: makePrepareWorkspaceFn({
 				jobsDir: config.jobsDir,
 				// Issue #643: with PI_LIVE_TRANSCRIPTS=0 no live file is staged either, so a job without a resume transcript
@@ -3007,7 +3015,7 @@ export async function startWorker(
 				defaultBackend: config.defaultBackend,
 				// Issue #504 part B: a local job's folder is resolved at prepare and mounted resolved; one named inside a run
 				// root or a cron folder must still resolve inside it, and none may be the envelope's folder or above it.
-				localPlacement: { jobPaths: envelopeJobPathsNow, envelopeFile: config.envelopeFile ?? null },
+				localPlacement: { jobPaths: envelopeJobPathsNow, envelopeFile: config.envelopeFile ?? null, sandboxDir: config.sandboxDir },
 				// Issue #505: /job/portfolio.json for a confirmed portfolio job.
 				portfolioSnapshot,
 				preparers: makeForgePreparers({ gitlabApiUrl: config.gitlab?.apiUrl ?? null, forgejoApiUrl: config.forgejo?.apiUrl ?? null, azureOrgUrl: config.azure?.orgUrl ?? null }),
@@ -3087,6 +3095,14 @@ export async function startWorker(
 	// the live Worker held the loop forever. The catch below covers the REGION, not a list of calls,
 	// so a step added tomorrow is covered the day it is added.
 	try {
+		// Human preparation uses its own bounded control worker, outside the paid processor and its slot ledgers.
+		const prepareSandbox = createSandboxPreparerFn({ config, env, forgeFor, readTriggers: () => readFileSync(onceTriggersFile, "utf8"), projects: () => projects.current, limits: () => scopedLimits.current, now });
+		const sandboxControl = startSandboxPrepareWorkerFn({ connection: valkeyConn(), host: config.workerName, config, prepare: prepareSandbox, now, log });
+		settleCloseOf(sandboxControl);
+		extraClosers.push(sandboxControl);
+		const sandboxInventory = makeSandboxInventoryFn({ redis, host: config.workerName, read: retainedNow, settings: { image: config.jobImage, defaultBackend: config.defaultBackend, backends: config.backends, egress: config.egress, egressProxy: config.egressProxy, sandboxRetentionHours: config.sandboxRetentionHours, sandboxPinDays: config.sandboxPinDays, jobMemory: env.PI_JOB_MEMORY, jobCpus: env.PI_JOB_CPUS }, now, log });
+		sandboxInventory.start();
+		extraClosers.push(sandboxInventory);
 
 		// REQ-LOCAL-JOB-VISIBILITY: exactly one terminal line per job, carrying the job id and outcome,
 		// where the operator is already looking. This is the local counterpart of the GitHub issue

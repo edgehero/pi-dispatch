@@ -1,3 +1,5 @@
+import { sandboxLinks } from "../sandbox-links.mjs";
+import { sandboxHostEditor } from "../sandbox-host-editor.mjs";
 /** Host pages report published facts; runtime cleanup remains an explicit command on that host. */
 import {
   jobContainerName,
@@ -255,12 +257,7 @@ export const hostSandboxes = card("Sandboxes left on the host", (h, v) => {
         !shell
           ? "This venue has no sandbox shell: pi-dispatch sandbox cannot reopen its runs."
           : typeof id === "string" && !id.startsWith("sha256:")
-            ? command(v, [
-                "pi-dispatch",
-                "sandbox",
-                id,
-                ...(until && until <= v.now ? ["--pin"] : []),
-              ])
+            ? v.role === "operator" && !(until && until <= v.now) ? sandboxLinks({ id, host: h.name, config: v.data?.sandboxHosts, compact: true }) : command(v, ["pi-dispatch", "sandbox", id, ...(until && until <= v.now ? ["--pin"] : [])])
             : "The published id is a digest; identify the run on this host.",
       ];
     }),
@@ -275,9 +272,9 @@ export const hostSandboxes = card("Sandboxes left on the host", (h, v) => {
     h.sandboxRetentionHours === 0
       ? "Workspace retention is off on this host."
       : `Retention window: ${h.sandboxRetentionHours ?? "not published"} hours (24 by default).`
-  } Each workspace holds the run's clone, prompt.md and event.json (issue text). Whether a shell is open needs this host's runtime. </p> ${
+  } Each workspace holds the run's clone, prompt.md and event.json (issue text). Open shells are listed on the operator’s Sandboxes tab from the terminal’s live registration. </p> ${
     v.role === "operator"
-      ? ui.cmd(["pi-dispatch", "sandbox", "--list"], { host: h.name })
+      ? html`${ui.cmd(["pi-dispatch", "sandbox", "--list"], { host: h.name })}<a class="link" href="/runs/sandboxes">Open Sandboxes</a>${sandboxHostEditor(v, h.name)}`
       : null
   }`;
 });

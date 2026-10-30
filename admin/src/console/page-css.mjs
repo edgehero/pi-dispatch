@@ -1,3 +1,4 @@
+import { SANDBOX_CSS } from "./sandbox-css.mjs";
 import { ZERO_TOUCH_CSS } from "./zero-touch-css.mjs";
 /**
  * The console's own rules after the Pulse stylesheet (issue #737): what the shell needs that `components/bundle.css`
@@ -348,6 +349,7 @@ const BTN_SIZES = Object.freeze(["sm", "lg", "round"]);
 export const SECONDARY_BTN = `.btn${BTN_KINDS.filter((k) => !BTN_SIZES.includes(k)).map((k) => `:not(.btn--${k})`).join("")}`;
 
 export const SHELL_CSS = `
+
 section[data-panel]:empty{display:none}
 [hidden]:not([data-theme-toggle]){display:none!important}
 [data-theme-toggle][hidden]{visibility:hidden}
@@ -425,7 +427,7 @@ section[data-panel]>.held{margin:0 0 var(--space-3)}
 @media ${DESKTOP}{@media not all and (min-width: ${TOP_BAR.phoneMax + 1 + TOP_BAR.searchRoom}px){.top--ro .top__search{display:none}}}
 @media (min-width: ${TOP_BAR.oneRowMin}px){@media not all and (min-width: ${TOP_BAR.oneRowMin + TOP_BAR.searchRoom}px){.top:not(.top--ro) .top__search{display:none}}}
 @media (min-width: ${TOP_BAR.oneRowReadOnlyMin}px){@media not all and (min-width: ${TOP_BAR.oneRowReadOnlyMin + TOP_BAR.searchRoom}px){.top--ro .top__search{display:none}}}
-@media ${PHONE}{main{gap:12px}.titlebar__end>.drawn{flex-basis:100%}.titlebar__end>.drawn+.btn--ghost{margin-left:-10px}.pillnav{flex:0 0 auto;margin:-4px calc(var(--space-4) * -1);padding:4px var(--space-4);overflow-y:hidden}.pillnav::-webkit-scrollbar{display:none}details.more{position:static}details.more>summary{width:40px;height:40px}.top__end{flex:0 1 auto;min-width:0;flex-wrap:wrap;justify-content:flex-end;gap:6px}.top__end .live{display:inline-flex;position:relative;justify-content:center;width:16px;height:16px;padding:0;gap:0;background:transparent}.top__end .live>.ic{width:16px;height:16px}.top__end .live--retry>.dot,.top__end .live--off>.dot{display:none}.top__end .live--retry>.live__retry,.top__end .live--off:not(.live--out)>.live__off{display:block}.top__end .live [data-live-word]{${VISUALLY_HIDDEN}}.top__end .live>.dot{animation-name:live-phone}}
+@media ${PHONE}{.sandbox-opener{display:none!important}main{gap:12px}.titlebar__end>.drawn{flex-basis:100%}.titlebar__end>.drawn+.btn--ghost{margin-left:-10px}.pillnav{flex:0 0 auto;margin:-4px calc(var(--space-4) * -1);padding:4px var(--space-4);overflow-y:hidden}.pillnav::-webkit-scrollbar{display:none}details.more{position:static}details.more>summary{width:40px;height:40px}.top__end{flex:0 1 auto;min-width:0;flex-wrap:wrap;justify-content:flex-end;gap:6px}.top__end .live{display:inline-flex;position:relative;justify-content:center;width:16px;height:16px;padding:0;gap:0;background:transparent}.top__end .live>.ic{width:16px;height:16px}.top__end .live--retry>.dot,.top__end .live--off>.dot{display:none}.top__end .live--retry>.live__retry,.top__end .live--off:not(.live--out)>.live__off{display:block}.top__end .live [data-live-word]{${VISUALLY_HIDDEN}}.top__end .live>.dot{animation-name:live-phone}}
 `.trim();
 
 /**
@@ -750,7 +752,7 @@ ${FLEET_CSS}
 `;
 
 /** Each page's own rules, by page name, unscoped as written; `pageCss()` confines them. */
-export const PAGE_CSS = Object.freeze({ "zero-touch": ZERO_TOUCH_CSS, insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
+export const PAGE_CSS = Object.freeze({ sandboxes: SANDBOX_CSS, "zero-touch": ZERO_TOUCH_CSS, insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: RUN_CSS, runs: RUNS_CSS, parked: PARKED_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
 ${FLEET_CSS}`, venue: VENUE_CSS });
 
 /**

@@ -46,6 +46,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  SandboxesScreen: 771,
   ZeroTouchScreen: 777, ZeroTouchViewer: 777, ZeroTouchPhone: 777,
   SecretsScreen: 751, ConnectionsScreen: 751, ProjectDetail: 751,
   TriggersScreen: 750, TriggersViewer: 750, TriggersPhone: 750,
@@ -92,6 +93,7 @@ const ISSUE_OWNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  "sandboxes.operator", "panels/sandboxes-populated.operator",
   ...ZERO_TOUCH_PANEL_STATES.map((key) => `panels/${key}`),
   ...CONFIGURATION_PANEL_STATES.map((key) => `panels/${key}`),
   "secrets.operator", "secrets.viewer", "connections.operator", "connections.viewer", "project.operator", "project.viewer",

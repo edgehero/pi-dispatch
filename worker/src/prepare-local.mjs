@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { materializePiDir } from "./materialize.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
+import { checkSandboxWorkspace } from "./sandbox-workspace-guard.mjs";
 
 const exec = promisify(execFile);
 
@@ -44,7 +45,7 @@ export const LOCAL_FOLDER_HOLDS_ENVELOPE = "local-folder-holds-envelope";
  * default keeps a directly-constructed call (tests, older wiring) honest: a job with no derived
  * context is a manual run.
  */
-export async function prepareLocalWorkspace({ folder: named, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs, jobPaths = null, envelopeFile = null, portfolio = null, watch = null, watchDecisionModel = null, watchSecrets = null }) {
+export async function prepareLocalWorkspace({ folder: named, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs, jobPaths = null, envelopeFile = null, sandboxDir = null, portfolio = null, watch = null, watchDecisionModel = null, watchSecrets = null }) {
 	requirePath(fs, named, `local folder does not exist: ${named}`, "the local folder");
 	// Issue #504 part B: the folder is RESOLVED here, once, and the resolved path is the one everything below reads and the
 	// one the container mounts (`workspace`). The raw string was mounted before, so a link below a job path swapped after
@@ -53,6 +54,11 @@ export async function prepareLocalWorkspace({ folder: named, task, jobDir, git =
 	// the container start, and the two checks below judge the folder that will be mounted. Residual, named: a link above
 	// the resolved folder swapped inside that window is followed by the runtime when it mounts.
 	const folder = resolveFolder(fs, named);
+	// Pickup checked the named folder before any slot. Recheck the resolved mount source here so a symlink
+	// redirected into a human's kept clone after pickup cannot turn it into an agent workspace.
+	const sandbox = checkSandboxWorkspace({ kind: "local", folder: named }, { sandboxDir, fs, resolvedFolder: folder });
+	if (sandbox?.unavailable) throw new InfraRetry("the local workspace sandbox boundary could not be read");
+	if (sandbox) return sandbox;
 	const placement = judgePlacement(fs, named, folder, { jobPaths: typeof jobPaths === "function" ? jobPaths() : jobPaths, envelopeFile });
 	if (placement) return { outcome: "policy", reason: placement };
 	// Issue #524: a folder that is not a repository is its own determinate refusal, RETURNED with its own reason

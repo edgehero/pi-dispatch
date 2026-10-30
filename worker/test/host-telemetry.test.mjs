@@ -79,3 +79,24 @@ test("a malformed nonempty inventory cannot become a claim that no workspace rem
 	assert.equal(parseSandboxes(Array.from({ length: 33 }, () => good)), null, "a list over the publication bound is not silently cut");
 	assert.deepEqual(parseSandboxes("[]"), [], "only a verified empty list claims no retained workspace");
 });
+
+test("per-workspace image and source kind survive telemetry without paths, project guesses or private fields (#771)", () => {
+	const image = `ghcr.io/edgehero/pi-job@sha256:${"a".repeat(64)}`;
+	for (const kind of ["local", "github", "gitlab", "forgejo", "azure"]) {
+		const row = { ...manifest(`run-${kind}`), image, kind, folder: "/private/source", project: "unverified-project" };
+		const read = makeSandboxTelemetry({ list: () => [row], deadline: sandboxDeadline, retentionHours: 24, now: () => instant });
+		const raw = read().sandboxes;
+		assert.deepEqual(parseSandboxes(raw), [{ id: `run-${kind}`, v: "local", until: instant + 24 * 3_600_000, pin: false, image, kind }]);
+		assert.doesNotMatch(raw, /private|folder|project|prompt/);
+	}
+});
+
+test("malformed optional image or kind facts make source and parsed inventories unknown (#771)", () => {
+	const good = { id: "safe", v: "local", until: null, pin: false };
+	for (const patch of [{ image: "--help" }, { image: " job:one" }, { image: "job:one\nsecret" }, { image: null }, { kind: "a/private/folder" }, { kind: "watch" }, { kind: null }]) {
+		assert.equal(parseSandboxes([good, { ...good, ...patch }]), null, JSON.stringify(patch));
+		const read = makeSandboxTelemetry({ list: () => [{ ...manifest("bad"), ...patch }], deadline: sandboxDeadline, retentionHours: 24, now: () => instant });
+		assert.equal(parseSandboxes(read().sandboxes), null, "a corrupt present fact cannot be dropped into a plausible complete inventory");
+		assert.equal(read().sandboxesMore, "");
+	}
+});

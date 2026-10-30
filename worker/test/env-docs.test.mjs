@@ -559,7 +559,8 @@ test("no assignment in .env.example carries an inline comment, live or commented
 	// PI_HOST_* budget settings in its phase 2, FORGEJO_PERMISSION_TOKEN for OQ-043, the eight PI_CONSOLE_* keys of
 	// issue #640, PI_LIVE_TRANSCRIPTS in issue #643, PI_RUN_PROGRESS in issue #644, PI_CHECKPOINTS_DIR in issue #645, and PI_OPENSHELL_ENGINE and PI_OPENSHELL_GATEWAY in issue #683, PI_SECRET_BUNDLES in issue #704, PI_DOCTOR_INTERVAL_HOURS in issue #712; PI_GRAPH_DIR left with the
 	// insights move to the console).
-	assert.equal(scanned, 127, "the scan must actually reach every assignment in the file");
+	// PI_SANDBOX_HOSTS_FILE adds the operator-only Fleet opener mapping (#771).
+	assert.equal(scanned, 128, "the scan must actually reach every assignment in the file");
 	assert.match("  PI_X=1 # c", /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses, indented or not");
 
 	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM

@@ -350,3 +350,44 @@ and `event.json`, including issue text; the registry publishes none of that cont
 An orphan container is separate from a retained workspace. The host page gives its venue's cleanup command to run
 on that host, with listing guidance where a published digest cannot safely identify it. The console starts no
 sandbox and performs no cleanup on another host.
+
+## From the console
+
+Operators can select **Runs → Sandboxes**, or use **Open in Terminal** on a kept run. The console submits no shell command. A checked `pi-dispatch-open://` link opens a helper in your own terminal; it shows the complete command and waits for Enter. Cancel or close the helper to do nothing. The link contains a fixed verb, sandbox ID and host, never a command, path or credential.
+
+Configure the host in Fleet with its SSH target, deployment directory and absolute Node/CLI paths. Export the mapping and explicitly install it on your computer:
+
+```bash
+pi-dispatch opener install --config ./approved-sandbox-hosts.json
+```
+
+The imported mapping is local authority. A web page cannot enroll a different host or replace its SSH target. Re-export and explicitly import after changing a mapping. Installation is per user on macOS, Linux and Windows; Linux needs a supported terminal launcher. Missing integration refuses and names the copy-command route.
+
+The copy command always remains available, and is the route on phones. Selectable command text also works with JavaScript disabled; console writes require JavaScript and still pass through preview, confirmation and audit. Viewers receive no Sandboxes tab, shell list or terminal commands.
+
+An SSH command uses the configured absolute Node/CLI paths, a TTY and explicit `--deployment` loading. The deployment file must be owned by the account or root, have trusted parent directories and be readable exactly as the service loader reads it. Contradictory ambient runtime/capability settings refuse. If Docker or Podman is outside the SSH login's standard tool directories, set an absolute-directory `PATH` in the trusted deployment `.env`, as the worker service requires. The sandbox is re-executed in a clean environment so an SSH shell's `PI_EGRESS=0` cannot override an omitted deployment setting. Ordinary CLI invocations without `--deployment` still read their own environment.
+
+## Prepare without a run
+
+```bash
+pi-dispatch sandbox --new acme/web --ref main --as 0
+pi-dispatch sandbox --new acme/web --ref pr:42 --as 0 --pin
+```
+
+`--as` selects the trigger's zero-based file index. The console supplies a labelled selector. Preparation uses its image, project size and venue, plus that host's effective egress posture. Branches, tags, commit IDs and pull-request heads served by the repository are admitted. No agent reads the prepared tree. Local jobs targeting the kept-workspace root, its descendants or aliases refuse before taking a host slot, and the local preparer checks again before reading Git.
+
+The host clones using hardened git and a host-only credential, requests contents-read access on the GitHub App path, then discards the credential and askpass helper. Other authentication sources retain their documented forge limitations. No container starts, no provider is called and no job or dollar reserve is taken. The console confirms a bounded request to the selected worker through a dedicated control queue, separate from paid job queues.
+
+Preparation requires `PI_JOBS_DIR` and `PI_SANDBOX_DIR` on the same filesystem so the completed tree publishes atomically. A mismatch refuses before minting a credential or cloning. A crashed request is reconciled by its stable ID; abandoned standalone CLI staging follows the existing worker boot orphan sweep.
+
+The result has an `sb-` ID and opens with `pi-dispatch sandbox <id>`. It follows the same retention, pin and sweep rules as a run's kept workspace. Optional `--pin` is persisted before reporting ready; the UI labels use the owning host's configured durations. A prepared workspace records egress posture and proxy; current proxy destination rules still apply when opened. Incompatible host policy changes require preparing again.
+
+## Open shells and End
+
+The CLI starts a private detached monitor. Its short-lived Valkey lease publishes host, sandbox ID, terminal-reported account and opening time, with no terminal input or idle-time claim. It continues after detaching from the shell. The console reads those leases and never asks a container runtime.
+
+**End** is previewed, confirmed and audited. It requests the exact session incarnation and immutable container ID; a late request cannot stop a later shell reusing the same name. The monitor confirms disappearance before acknowledging success. End keeps the workspace and uses the existing guarded network cleanup. A timeout or failed stop is reported as uncertain or refused, never silently successful.
+
+Return with `pi-dispatch sandbox <id> --attach`. A shell opened before tracking was installed names the raw Docker/Podman attach remedy. Missing or expired tracking does not prove a container disappeared. Kept inventories show their publication time and distinguish offline, stale, incomplete and unreadable hosts from hosts reporting no workspace.
+
+The browser terminal remains off and is decided separately in #754. No gateway, browser PTY or WebSocket is installed by this feature.

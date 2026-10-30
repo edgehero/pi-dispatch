@@ -51,7 +51,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -80,8 +80,9 @@ export async function loadModules() {
     import("../connections-view.mjs"),
     import("../project-view.mjs"),
     import("../zero-touch-data.mjs"),
+    import("../sandbox-data.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -458,12 +459,14 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     // `/api/state`, so the overview's load asks for them per call (`pages.mjs` `PAGE_READS`), and a page that draws no
     // waiting job pays no read for one.
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
-    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
+    fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: () => log("console: Zero touch accounting needs repair") });
+    const sandboxes = m.sandboxData?.makeSandboxService({ paths: side.paths, env: { ...side.env, ...(config.sandboxHostsFile ? { PI_SANDBOX_HOSTS_FILE: config.sandboxHostsFile } : {}) }, deploymentDir: config.dir, fleet, fs, now });
     const pricing = pricingOf(m.pricing);
     const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
     const pageDeps = {
       fleet,
+      sandboxes,
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
       secretsView: (snapshot) => m.secretsView.secretsView({ snapshot, env: side.env, fs }),
@@ -555,6 +558,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       actionDeps: {
         watch: fleet.watch,
         zeroTouch,
+        sandboxes,
         rm: m.readModel,
         plans: m.writePlans ?? null,
         paths: side.paths,

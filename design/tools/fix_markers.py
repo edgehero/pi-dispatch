@@ -9,7 +9,7 @@ from paths import COMPONENTS as ROOT
 GROUPS = {
     "Start here": ["ConceptMap", "Glossary", "SampleStory", "JourneyAnswer", "JourneyFailure", "JourneySetup"],
     "Overview": ["OverviewScreen", "OverviewAllClear", "SetupScreen"],
-    "Runs": ["RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer"],
+    "Runs": ["SandboxesScreen", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer"],
     "Fleet": ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail", "FleetViewer"],
     "Spend": ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen"],
     "Triggers": ["TriggersScreen", "TriggerDetail", "TriggerEditor", "TriggersViewer", "WatchScreen", "WatchBoard"],
@@ -18,7 +18,7 @@ GROUPS = {
     "Phone": ["OverviewPhone", "RunsPhone", "ParkedPhone", "SpendPhone", "RunLivePhone", "FleetPhone", "TriggersPhone",
               "ParkedDraftPhone", "ZeroTouchPhone"],
     "Planned and proposed": ["ApprovalRequest", "ModelsScreen", "DispatchersScreen", "DispatcherScreen",
-                             "SandboxesScreen", "ParkedAnswerer", "ParkedDraftViewer"],
+                             "ParkedAnswerer", "ParkedDraftViewer"],
     "Components": ["Shell", "Status", "Actions", "CardsAndBanners", "DataTable", "FactsAndLevels", "TimelineAndWaitlists",
                    "Transcript", "FieldsDiffCommand", "ConfirmStates", "LiveStates"],
 }
@@ -48,7 +48,7 @@ STATUS = {
     "ModelsScreen": (PLANNED, "#773. The worker side shipped with #717 (roles), #716 (failover) and #693 (Radius)."),
     "WatchScreen": (BUILT, "Built by #735: compact retained source, rule and finding view."), "WatchBoard": (BUILT, "Built by #743: retained trace, classifier totals and operator-adopted inert board; live projections remain future work."),
     "DispatchersScreen": (PROPOSED, "#776, specs first; it grew out of #735."), "DispatcherScreen": (PROPOSED, "#776, specs first; it grew out of #735."),
-    "SandboxesScreen": (PROPOSED, "#771, part of #753. The browser terminal part needs a decision first: #754."),
+    "SandboxesScreen": (BUILT, "Built by #771. The browser terminal remains proposed under #754."),
     "ZeroTouchScreen": (BUILT, "Built by #777, fleet-wide touch accounting and cause-linked fixes."), "ZeroTouchViewer": (BUILT, "Built by #777, as a viewer sees it."),
     "ZeroTouchPhone": (BUILT, "Built by #777, on a phone."),
     "ParkedDraftViewer": (PROPOSED, "#772. As a viewer sees it."), "ParkedDraftPhone": (PROPOSED, "#772. On a phone."),

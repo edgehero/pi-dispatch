@@ -683,6 +683,13 @@ was spent.
 
 What to do: run the job again. It resolves the default branch afresh.
 
+### local-folder-is-sandbox
+
+This folder is a kept sandbox workspace for a person, so it cannot become an agent job workspace.
+The refusal happens before a host slot or any paid work, and the local preparer checks again before Git.
+Choose the original repository outside the sandbox retention directory. Symlinks and aliases into that
+retained root are refused too.
+
 ### local-folder-not-a-repo
 
 A folder job's folder has no `.git` at its root. It may have stopped being a repository after the job was queued, or a

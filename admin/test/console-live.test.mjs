@@ -202,7 +202,7 @@ test("SECURITY: a viewer and an operator on the same page and query never share 
 
 test("a runs view is loaded at most every pageMinMs (5 s), not every tick; other pages load every tick; a new filter loads at once", async () => {
   // The run detail is held to 2 s since issue #644 made it live (its load reads a record and searches for children).
-  assert.deepEqual(LIVE_DEFAULTS.pageMinMs, { runs: 5000, run: 2000, parked: 5000 });
+  assert.deepEqual(LIVE_DEFAULTS.pageMinMs, { sandboxes: 5000, runs: 5000, run: 2000, parked: 5000 });
   const now = clock();
   const h = hubOn({ now, pageMinMs: undefined });
   h.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "runs", query: { q: "zz1" } });

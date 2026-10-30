@@ -24,7 +24,6 @@ const OUTSIDE_LEDGERS = Object.freeze({
   ModelsScreen: "Planned by #773; worker model support shipped in #716/#717/#693, outside #751.",
   DispatchersScreen: "Proposed by #776; grew from #735, outside #751.",
   DispatcherScreen: "Proposed by #776; grew from #735, outside #751.",
-  SandboxesScreen: "Proposed by #771 under #753; browser terminal needs #754's decision, outside #751.",
   ParkedAnswerer: "Proposed by #772 under #753; unattended answers need OQ-051's decision, outside #751.",
   ParkedDraftViewer: "The proposed #772 draft's viewer variant, outside #751.",
   ParkedDraftPhone: "The proposed #772 draft's phone variant, outside #751.",
@@ -41,6 +40,7 @@ function assertDispositionOwner(card, disposition, preview) {
 const COMPONENTS = new URL("../../design/system/components/", import.meta.url);
 const LEDGERS = new URL("./fixtures/console-ledger/", import.meta.url);
 const CARDS = Object.freeze({
+  SandboxesScreen: { page: "sandboxes", path: "/runs/sandboxes", auth: "operator" },
   ZeroTouchScreen: { page: "zero-touch", path: "/runs/zero-touch" },
   ZeroTouchViewer: { page: "zero-touch", path: "/runs/zero-touch" },
   SecretsScreen: { page: "secrets", path: "/config/secrets" },
@@ -64,7 +64,7 @@ test("every published design card has a checked ledger or an explicit issue/fami
 });
 
 test("a future-card owner cannot drift to a prerequisite or disappear while the card inventory stays the same", () => {
-  for (const [card, prerequisite] of [["ModelsScreen", "#716"], ["SandboxesScreen", "#753"]]) {
+  for (const [card, prerequisite] of [["ModelsScreen", "#716"], ["ParkedAnswerer", "#753"]]) {
     const preview = readFileSync(new URL(`${card}/preview.html`, COMPONENTS), "utf8");
     assertDispositionOwner(card, OUTSIDE_LEDGERS[card], preview);
     assert.ok(OUTSIDE_LEDGERS[card].includes(prerequisite), "the prerequisite is a real counterexample to a substring check");
@@ -79,8 +79,8 @@ test("a future-card owner cannot drift to a prerequisite or disappear while the 
 test("the three #751 cards map to real viewer routes and every README/preview panel maps to its page", () => {
   for (const [card, spec] of Object.entries(CARDS)) {
     assert.equal(PAGES[spec.page]?.path, spec.path, card);
-    assert.equal(PAGES[spec.page]?.auth, "viewer", card);
-    assert.equal(PAGES[spec.page]?.live, false, `${card}: drawn on demand`);
+    assert.equal(PAGES[spec.page]?.auth, spec.auth ?? "viewer", card);
+    assert.equal(PAGES[spec.page]?.live, spec.page === "sandboxes", `${card}: drawn on demand`);
     const ledger = JSON.parse(readFileSync(new URL(`${card}.json`, LEDGERS), "utf8"));
     const readme = readFileSync(new URL(`${card}/README.md`, COMPONENTS), "utf8");
     const panelLine = readme.match(/\*\*Panels\.\*\* ([^\n]+)/)?.[1];

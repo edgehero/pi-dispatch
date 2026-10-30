@@ -1417,6 +1417,7 @@ ${FIT_JS}
         var refused = false;
         if (b.results && b.results.length) for (var i = 0; i < b.results.length; i++) if (b.results[i] && b.results[i].ok === false) refused = true;
         if (refused && typeof b.html === "string") refill(b.html);
+        else if (typeof b.requestId === "string" && /^sb-[0-9a-f]{32}$/.test(b.requestId) && typeof b.host === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(b.host)) location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));
         else location.reload();
         return;
       }
@@ -1453,15 +1454,16 @@ ${FIT_JS}
   // changed from what the server drew. Nothing else. A form is a write's (form[data-action]) or a page's filter bar
   // (form.filterbar, issue #737: the runs filters are a live panel whose counts change, and a swap would wipe a search
   // half typed or a list chosen and not yet applied, and take the focus out of the field).
-  var HELD_FORMS = "form[data-action], form.filterbar";
+  // Explicit data-live-hold opts native GET pickers into the same rule without giving them filterbar styling.
+  var HELD_FORMS = "form[data-action], form.filterbar, form[data-live-hold]";
   function inUse(panel) {
     if (slot && !slot.hidden && slotOwner === panel) return true;
     if (panel.querySelector("details[open] form[data-action]")) return true;
     var active = document.activeElement;
     if (active && panel.contains(active) && isField(active) && active.closest && active.closest(HELD_FORMS)) return true;
-    var fields = panel.querySelectorAll("form[data-action] input:not([type=hidden]), form[data-action] textarea, form.filterbar input:not([type=hidden])");
+    var fields = panel.querySelectorAll("form[data-action] input:not([type=hidden]), form[data-action] textarea, form.filterbar input:not([type=hidden]), form[data-live-hold] input:not([type=hidden]), form[data-live-hold] textarea");
     for (var i = 0; i < fields.length; i++) if (fields[i].value !== fields[i].defaultValue) return true;
-    var lists = panel.querySelectorAll("form.filterbar select");
+    var lists = panel.querySelectorAll("form.filterbar select, form[data-live-hold] select");
     for (var j = 0; j < lists.length; j++) if (picked(lists[j])) return true;
     return false;
   }

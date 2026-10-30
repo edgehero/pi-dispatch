@@ -200,6 +200,7 @@ const ROWS = [
 	// ── The repository or folder ────────────────────────────────────────────────────────────────────────────────────
 	["unprotected-branch", REFUSAL_COMMENTS["unprotected-branch"], "Protect the repository's default branch, then run the job again."],
 	["sha-gone", "Refused: the commit this job was resolved to is no longer on the forge (the default branch moved past it), so it could not be fetched. Not run.", "Run the job again: it resolves the default branch afresh."],
+	["local-folder-is-sandbox", "Refused: this folder is a kept sandbox workspace for a person, so it cannot become an agent job workspace. Not run.", "Choose the original repository outside the sandbox retention directory."],
 	["local-folder-not-a-repo", "Refused: this job's folder is not a git repository (it has no `.git` at its root). Not run.", "Run `git init` in the folder and commit once, or point the job at a repository."],
 	["local-folder-no-commit", "Refused: this job's folder is a git repository with no commit yet. Not run.", "Commit once in the folder, then run the job again."],
 	["local-folder-unreadable-repo", "Refused: git could not read this job's repository (its HEAD, a ref or an object could not be resolved). Not run.", "Run `git status` in the folder to see what is wrong, and repair the repository."],

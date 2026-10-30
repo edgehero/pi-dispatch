@@ -1,0 +1,46 @@
+name: opener native handoff
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - "worker/src/opener-*.mjs"
+      - "worker/src/sandbox-hosts.mjs"
+      - ".github/scripts/opener-native-smoke.mjs"
+      - ".github/workflows/opener-native.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: the terminal opener holds its handoff (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+      - name: Install Linux desktop test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xterm xdg-utils xvfb dbus-x11 xdotool
+          sudo update-alternatives --set x-terminal-emulator /usr/bin/xterm
+      - name: Native desktop protocol and Enter handoff (Linux)
+        if: runner.os == 'Linux'
+        run: dbus-run-session -- xvfb-run -a node .github/scripts/opener-native-smoke.mjs
+      - name: Native protocol and terminal helper (macOS and Windows)
+        if: runner.os != 'Linux'
+        run: node .github/scripts/opener-native-smoke.mjs

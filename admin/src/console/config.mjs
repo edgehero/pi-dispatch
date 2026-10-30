@@ -19,6 +19,7 @@ import { parseListen } from "./listen.mjs";
 
 /** The keys the console reads from the deployment's `.env`. */
 export const CONSOLE_ENV_KEYS = Object.freeze([
+  "PI_SANDBOX_HOSTS_FILE",
   "PI_CONSOLE_LISTEN",
   "PI_CONSOLE_TOKENS_FILE",
   "PI_CONSOLE_ALLOWED_HOSTS",
@@ -33,7 +34,7 @@ export const CONSOLE_ENV_KEYS = Object.freeze([
 ]);
 
 // Path-valued keys a `.env` may write relative; resolved against the deployment folder, as panelEnv does.
-const PATH_KEYS = new Set(["PI_CONSOLE_TOKENS_FILE", "PI_LOGS_DIR", "PI_PAUSE_WINDOWS_FILE"]);
+const PATH_KEYS = new Set(["PI_SANDBOX_HOSTS_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_LOGS_DIR", "PI_PAUSE_WINDOWS_FILE"]);
 
 export const DEFAULT_LISTEN = "127.0.0.1:4790";
 
@@ -136,5 +137,6 @@ export function consoleConfig({ env, dir, platform = process.platform, tokensFil
     valkeyUrl: env.VALKEY_URL || "redis://127.0.0.1:6379",
     // The panel's default (resolvePaths): the deployment folder's pause-windows.json, which `init` scaffolds.
     pauseWindowsPath: inDir(env.PI_PAUSE_WINDOWS_FILE || "pause-windows.json"),
+    sandboxHostsFile: inDir(env.PI_SANDBOX_HOSTS_FILE || "sandbox-hosts.json"),
   };
 }

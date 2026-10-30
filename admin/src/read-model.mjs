@@ -1,3 +1,5 @@
+import { readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
+import { readSandboxSessions, requestSandboxEnd } from "@edgehero/pi-dispatch/sandbox-sessions";
 /**
  * The admin extension's whole data-access surface: reads the queue, the budget counter, the durable
  * run-history files (INT-RUN-HISTORY-FILE-CONTRACT, admin is the named consumer), the settings overlay
@@ -4075,12 +4077,24 @@ export function createFleetReader(
     // imported by modules held to a small graph (insights-assembly, write-plans). Null: `sandboxCheck` cannot tell, so
     // the run page keeps the command. The console passes the real one.
     sandboxRetentionFn = null,
+    readSandboxInventoriesFn = readSandboxInventories,
+    readSandboxSessionsFn = readSandboxSessions,
+    requestSandboxEndFn = requestSandboxEnd,
+    makeSandboxPrepareQueueFn = null,
+    enqueueSandboxPreparationFn = null,
+    readSandboxPreparationFn = null,
   } = {},
 ) {
   const prune = readOnly !== true;
   const activePerQueue = Number.isSafeInteger(activeLimit) ? Math.min(Math.max(activeLimit, 1), ACTIVE_PER_QUEUE_MAX) : 1;
   const queue = makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }));
   const redis = redisFn(paths.valkeyUrl);
+  const sandboxQueues = new Map();
+  const sandboxQueue = (host) => {
+    if (typeof host !== "string" || !WORKER_NAME_RE.test(host)) throw new Error("a sandbox request needs a worker name");
+    if (!sandboxQueues.has(host)) sandboxQueues.set(host, makeSandboxPrepareQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { host }));
+    return sandboxQueues.get(host);
+  };
   const watchStore = makeWatchStore(redis, { now: nowFn });
   const watch = { ...watchStore,
     async listSources() {
@@ -5048,7 +5062,20 @@ export function createFleetReader(
       // can raise it directly.
       return requestCancel({ redis, jobId });
     },
+    // Only dedicated operator page/action reads ask for these. snapshot()/api/state never carry them.
+    async sandboxInventory() {
+      await fleetQueues();
+      return readSandboxInventoriesFn(redis, { now: nowFn, hosts: lastHosts.map((h) => h.name) });
+    },
+    async sandboxSessions() {
+      await fleetQueues();
+      return readSandboxSessionsFn(redis, { now: nowFn, hosts: lastHosts.map((h) => h.name), timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
+    async sandboxPrepare(request) { if (!enqueueSandboxPreparationFn) return { refused: "sandbox-not-wired", message: "Sandbox requests are not wired in this console." }; return enqueueSandboxPreparationFn(sandboxQueue(request.host), request, { now: nowFn }); },
+    async sandboxPreparationStatus(host, id) { return readSandboxPreparationFn ? readSandboxPreparationFn(sandboxQueue(host), id) : { id, host, state: "unknown" }; },
+    async sandboxEnd(request) { return requestSandboxEndFn({ redis, ...request, now: nowFn }); },
     async dispose() {
+      for (const q of sandboxQueues.values()) { try { await q.close(); } catch { /* best effort teardown */ } }
       for (const q of pool.values()) {
         try {
           await q.close();

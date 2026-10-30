@@ -42,3 +42,15 @@ await build({
 });
 
 console.log("[built admin/dist/console.mjs]");
+
+// A detached sandbox shell outlives the extension process. Its monitor is a real sibling
+// program so the bundled extension's import.meta.url still resolves a shipped file.
+await build({
+	...NODE_BUNDLE_OPTIONS,
+	entryPoints: [join(here, "../worker/src/sandbox-session-monitor.mjs")],
+	outfile: join(here, "dist/sandbox-session-monitor.mjs"),
+	banner: { js: NODE_REQUIRE_PRELUDE },
+	logLevel: "info",
+});
+
+console.log("[built admin/dist/sandbox-session-monitor.mjs]");

@@ -1,6 +1,10 @@
 /** Run cards and the browser-owned transcript slots (#747), scoped to the run page by page-css.mjs. */
 import { QCARD_CSS } from "./parked-css.mjs";
 export const RUN_CSS = `${QCARD_CSS}
+/* Keep fact values readable inside a narrow desktop card as well as on a phone. */
+.facts, .facts--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
+.facts--1 { grid-template-columns: minmax(0, 1fr); }
+.fact { grid-template-columns: minmax(0, min(128px, 40%)) minmax(0, 1fr); }
 .titlebar h1 { overflow-wrap: anywhere; word-break: break-word; font-family: var(--font-mono); font-size: 26px; }
 .titlebar__sub [data-panel] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .titlebar__sub .act { margin-left: auto; }

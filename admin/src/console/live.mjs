@@ -111,7 +111,7 @@ import { transcriptEntryHtml, transcriptEntryJson } from "./transcript.mjs";
  * most once per 15 s, so it is held to 5 s. Between loads the last data is rendered again (cheap), so a new view of the
  * same page and query is drawn at once from it.
  */
-export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ runs: 5000, run: 2000, parked: 5000 }), transcriptPagesPerTick: 4 });
+export const LIVE_DEFAULTS = Object.freeze({ intervalMs: 1000, pingMs: 15_000, maxBufferBytes: 2 * 1024 * 1024, pageMinMs: Object.freeze({ sandboxes: 5000, runs: 5000, run: 2000, parked: 5000 }), transcriptPagesPerTick: 4 });
 
 const digestOf = (text) => createHash("sha256").update(text).digest("hex");
 

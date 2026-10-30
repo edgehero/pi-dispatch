@@ -1,3 +1,4 @@
+import { parseSandboxOpenUrl } from "@edgehero/pi-dispatch/opener-protocol";
 import { zeroTouchFixture } from "./zero-touch-goldens.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -58,6 +59,7 @@ export const SHOTS = Object.freeze([
   // Issue #737: the timeline by host over its widest window, the overview's other grouping, through its query.
   ["overview-host", "overview", "rows=host&zoom=24h"],
   ["runs", "runs", ""],
+  ["sandboxes", "sandboxes", ""],
   ["zero-touch", "zero-touch", "days=30"],
   ["runs-filtered", "runs", "project=web&outcome=completed"],
   // Issue #737: the runs that did not complete, and a search by a job id (the parked run's), its row found by its id.
@@ -633,6 +635,11 @@ export function assertOwnReferences(key, html) {
     const own = /^#([a-z][a-z0-9-]*)$/.exec(ref);
     if (own) assert.ok(ids.has(own[1]), `${key}: ${ref} names an element this page holds`);
     else if (/^\/(?![/\\])/.test(ref)) continue;
+    else if (ref.startsWith("pi-dispatch-open:")) {
+      assert.equal(attr, "href", `${key}: opener schemes belong only to anchor links`);
+      assert.match(tag, /^<a [^>]*href="[^"]+" rel="noreferrer noopener" target="_blank">$/, `${key}: opener anchor uses the protected outbound shape`);
+      assert.doesNotThrow(() => parseSandboxOpenUrl(ref), `${key}: a canonical opener link`);
+    }
     else assert.ok(attr === "href" && OUTBOUND_LINK_RE.test(tag), `${key}: ${attr}="${ref}" is neither this console's nor this page's (${tag.slice(0, 120)})`);
   }
 }
@@ -661,7 +668,9 @@ export function assertStructure(key, html) {
 /** The properties every rendered page holds, whatever it shows. */
 export function assertClean(key, html) {
   assert.ok(!CONTROL_RE.test(html), `${key} carries no control byte`);
-  assert.doesNotMatch(html, HOST_PATH_RE, `${key} names no path of this machine`);
+  const terminalPaths = /<aside data-sandbox-(?:command|target)>[\s\S]*?<\/aside>/g;
+  if (/<aside data-sandbox-(?:command|target)>/.test(html)) assert.ok(/\.operator(?:$| |\.html)/.test(key) && /<body[^>]*data-page="(?:run|host|sandboxes)"/.test(html), `${key}: absolute terminal paths belong only to declared operator command/configuration regions`);
+  assert.doesNotMatch(html.replace(terminalPaths, ""), HOST_PATH_RE, `${key} names no path outside a declared terminal command or mapping`);
   assert.doesNotMatch(html, EMAIL_RE, `${key} holds no email address`);
   assert.doesNotMatch(html, ACTIVE_MARKUP_RE, `${key} carries no inline script, style, handler or javascript: link`);
   const host = hostname().split(".")[0];

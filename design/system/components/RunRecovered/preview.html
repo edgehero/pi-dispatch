@@ -6,6 +6,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Run gh-5d10-r2, recovering</title>
 <style>
+/* Keep fact values readable inside a narrow desktop card as well as on a phone. */
+.facts, .facts--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
+.facts--1 { grid-template-columns: minmax(0, 1fr); }
+.fact { grid-template-columns: minmax(0, min(128px, 40%)) minmax(0, 1fr); }
 .run-id { font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.03em; }
 .titlebar__sub .link { margin-left: 4px; }
 .titlebar__sub .muted { margin-left: 4px; }

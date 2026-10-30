@@ -51,6 +51,16 @@ const VALKEY_URL = process.env.VALKEY_TEST_URL ?? "redis://127.0.0.1:6399";
 const bootLines = [];
 
 /** Parse the raw chunks a slice of `bootLines` holds; a non-JSON chunk survives as `{ raw }`. */
+async function sandboxControlClosers(captured) {
+	const controls = captured.extraClosers.filter((c) => c.name === `pi-sandbox-prepare@${captured.name}`);
+	assert.equal(controls.length, 1, "exactly one separate host control queue joins shutdown");
+	assert.ok(controls[0].closing, "the control worker was actually closed");
+	const inventories = captured.extraClosers.filter((c) => c !== captured.extraClosers[1] && typeof c.publish === "function");
+	assert.equal(inventories.length, 1, "one durable publisher shares the retained telemetry projection");
+	assert.deepEqual(await inventories[0].publish(), { closed: true }, "shutdown stopped publication, not only its timer");
+	return 2;
+}
+
 function parseLines(chunks) {
 	return chunks.flatMap((l) =>
 		String(l)
@@ -2238,7 +2248,7 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
 		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
 		// 7 since issue #499's projects watch, registered by the same rule; 8 since issue #712's doctor runs.
-		assert.equal(captured.extraClosers.length, 9, "runtimeQueue + registry + watch recovery drainer + one closer per armed watch + the retention sweep + the doctor runs");
+		assert.equal(captured.extraClosers.length, 9 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + one closer per armed watch + the retention sweep + the doctor runs");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
@@ -2666,7 +2676,7 @@ test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it coul
 	assert.equal(constructions.length, 0, "the factory is never called at all");
 	// No watch files in this env, so the list is just the runtime queue and the registry. The point is
 	// the DELTA against the twin test below: the sweep contributes exactly one closer, or none at 0.
-	assert.equal(captured.extraClosers.length, 4, "runtimeQueue + registry + watch recovery drainer + the doctor runs (issue #712), and nothing from the sweep");
+	assert.equal(captured.extraClosers.length, 4 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + the doctor runs (issue #712), and nothing from the sweep");
 	assert.equal(logs.filter((l) => l.event === "retention_sweep").length, 0);
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.equal(started.sweepIntervalHours, 0, "the boot line still SAYS the sweep is off, which is the one visible difference");
@@ -2690,7 +2700,7 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// same closure in the same place.
 	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
 	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "session", "recovery_host_lost"], "boot's own order");
-	assert.equal(captured.extraClosers.length, 5, "runtimeQueue + registry + watch recovery drainer + the sweep + the doctor runs (no watch files in this env)");
+	assert.equal(captured.extraClosers.length, 5 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
 
@@ -2717,7 +2727,7 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	const off = [];
 	const second = await runStart({ env: { PI_DOCTOR_INTERVAL_HOURS: "0" }, makeDoctorSpawner: (args) => (off.push(args), { start() {}, close: async () => {} }) });
 	assert.equal(off.length, 0, "at 0 the factory is never called: no timer, no closer, no child");
-	assert.equal(second.captured.extraClosers.length, 4, "runtimeQueue + registry + watch recovery drainer + the sweep");
+	assert.equal(second.captured.extraClosers.length, 4 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + watch recovery drainer + the sweep");
 	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
 });
 
@@ -6114,4 +6124,30 @@ test("Zero touch boot shares tracking and private grouping dependencies, rereads
 	assert.equal(classifier.type, "classifier", "the real pinned catalog, not a text-model-only lookup, reaches grouping preflight");
 	assert.equal(written.at(-1).purpose, "zero-touch-grouping");
 	assert.equal(written.at(-1).touchTrackingVersion, 1);
+});
+
+test("a failing paid-worker constructor starts no sandbox control worker or inventory publisher (#771)", { skip }, async () => {
+	const dir = tempDir("sandbox-before-worker-");
+	const failure = new Error("paid worker constructor refused (test)");
+	const made = [];
+	let captured;
+	try {
+		await assert.rejects(() => runStart({
+			env: { VALKEY_URL, PI_WORKER_NAME: "sandbox-constructor-refusal", PI_SANDBOX_DIR: join(dir, "sandboxes"), PI_SWEEP_INTERVAL_HOURS: "0" },
+			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+			makeHost: () => fakeHost(),
+			durable: {
+				createWorkerFn: (args) => { captured = args; throw failure; },
+				createSandboxPreparer: () => { made.push("preparer"); throw new Error("sandbox preparer ran too early"); },
+				startSandboxPrepareWorker: () => { made.push("control"); throw new Error("sandbox control ran too early"); },
+				makeSandboxInventory: () => { made.push("inventory"); throw new Error("sandbox publisher ran too early"); },
+			},
+		}), (error) => error === failure);
+		assert.ok(captured, "the intended constructor failure was reached");
+		assert.deepEqual(made, [], "sandbox startup is below successful construction of the paid worker");
+	} finally {
+		// This double throws before runStart's ordinary capture. Its earlier runtime handles still need a harness drain.
+		for (const closer of captured?.extraClosers ?? []) await Promise.resolve(closer?.close?.()).catch(() => {});
+		await Promise.resolve(captured?.redis?.quit?.()).catch(() => captured?.redis?.disconnect?.());
+	}
 });

@@ -1,0 +1,262 @@
+{
+  "card": "SandboxesScreen",
+  "pr": 771,
+  "panels": [
+    "p-sb-run",
+    "p-sb-new",
+    "p-sb-open",
+    "p-sb-kept",
+    "p-sb-browser"
+  ],
+  "elements": [
+    {
+      "el": "p-sb-run",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxFromRun",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ]
+    },
+    {
+      "el": "p-sb-new",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxNew",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ]
+    },
+    {
+      "el": "p-sb-open",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxOpen",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ]
+    },
+    {
+      "el": "p-sb-kept",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxKept",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ]
+    },
+    {
+      "el": "p-sb-browser",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxBrowser",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ]
+    },
+    {
+      "el": "Pick a kept workspace under **From a run**, inspect its image, read-only job inputs, host, venue and deadline, then choose **Open in Terminal** or copy the command.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxFromRun",
+      "panel": "p-sb-run",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "What opens"
+    },
+    {
+      "el": "The opener, installed once with `pi-dispatch opener install --config sandbox-hosts.json`, checks its own imported host configuration and opens the terminal with the command typed in. It waits for Enter. The link carries an `open` or `attach` verb, id and host, no command or credential.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxFromRun",
+      "panel": "p-sb-run",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "What opens"
+    },
+    {
+      "el": "On a phone, the opener links are hidden and unfocusable. Copy the command or select its text. With JavaScript off, navigation and Review settings still work; writes explain that Preview and Confirm require JavaScript.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxFromRun",
+      "panel": "p-sb-run",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "What opens"
+    },
+    {
+      "el": "Under **Without a run**, enter a repository, select a trigger and host, and enter HEAD (the default branch), a branch, tag, commit SHA or `pr:42`. Choose that host\u2019s retention or pin window, then Review settings.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxNew",
+      "panel": "p-sb-new",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Without a run"
+    },
+    {
+      "el": "The preview shows the resolved image, size, venue, network and retention. Confirm queues one host preparation request. The worker rechecks the trigger digest and host plan before cloning; changed settings are refused before a credential is minted.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxNew",
+      "panel": "p-sb-new",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Without a run"
+    },
+    {
+      "el": "The worker clones with a repository-scoped credential, drops it, and keeps the result under an `sb-` id. No container starts, no model runs, no dollars are spent and no run slot is taken. Open the prepared workspace from the terminal after it is ready.",
+      "kind": "readme",
+      "status": "new",
+      "source": "worker/src/sandbox-prepare.mjs#createSandboxPreparer",
+      "panel": "p-sb-new",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Without a run"
+    },
+    {
+      "el": "**Open now** shows the host, opening account and opening time. Attach opens the existing shell. End previews and confirms a request to the terminal that opened that exact shell; it cannot end a replacement shell. The workspace remains kept.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxOpen",
+      "panel": "p-sb-open",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Open now"
+    },
+    {
+      "el": "**Kept workspaces** shows each host\u2019s published list, pin and deadline. Pin previews the host\u2019s configured pin window. Stale, missing, unreadable and truncated publications are stated; none means an empty fleet.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxKept",
+      "panel": "p-sb-kept",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Kept workspaces"
+    },
+    {
+      "el": "Fleet\u2019s host page edits a credential-free SSH target and explicit executable/deployment paths. Download and inspect the file, then import it into the opener on the person\u2019s computer. A link cannot enroll a host or change this config.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/sandbox-host-editor.mjs#sandboxHostEditor",
+      "panel": "p-sb-kept",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Kept workspaces"
+    },
+    {
+      "el": "**In this browser** is an off/proposed note linking #754. It opens no terminal, pty or WebSocket.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxBrowser",
+      "panel": "p-sb-browser",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "needs a decision"
+    },
+    {
+      "el": "Host-published kept workspaces with their identity, venue, deadline, pin, manifest generation and shell capability; a separate, credential-free host settings projection supports exact previews.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxKept",
+      "panel": "p-sb-kept",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Kept workspaces"
+    },
+    {
+      "el": "Short-lived shell registrations renewed by the terminal process, with exact-incarnation End requests and acknowledgements. The console never asks Docker for this list.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxOpen",
+      "panel": "p-sb-open",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Open now"
+    },
+    {
+      "el": "Durable bounded preparation/pin requests and results, separate from paid jobs and their run slots.",
+      "kind": "readme",
+      "status": "new",
+      "source": "worker/src/sandbox-prepare-requests.mjs#enqueueSandboxPreparation",
+      "panel": "p-sb-new",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Without a run"
+    },
+    {
+      "el": "Operator-only reads and preview/Confirm/audit writes. The private inventory and opener host configuration never join `/api/state` or viewer page data.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/sandbox-data.mjs#makeSandboxService",
+      "panel": "p-sb-new",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Without a run"
+    },
+    {
+      "el": "The container boundary is the existing sandbox launcher, with read-only `/job`, a non-root user, no capabilities, no new privileges, resource limits and the host\u2019s job network. The original run venue must support reopening; openshell and openshell-bind do not.",
+      "kind": "readme",
+      "status": "real",
+      "source": "worker/src/sandbox.mjs#buildSandboxRunArgs",
+      "panel": "p-sb-new",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Without a run"
+    },
+    {
+      "el": "A kept workspace holds issue text and stays on its host. Sweeping, pinning and idle logout keep their existing lifecycle rules. Retention defaults to 24 hours, pinning to seven days and idle logout to 30 minutes, but the screen reads the selected host\u2019s actual configuration.",
+      "kind": "readme",
+      "status": "real",
+      "source": "worker/src/sandbox-store.mjs#sandboxDeadline",
+      "panel": "p-sb-new",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "Without a run"
+    },
+    {
+      "el": "A hostile page can only ask the locally configured opener to show a command that waits for Enter. No credentials or arbitrary executable string travel in the URI.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxFromRun",
+      "panel": "p-sb-run",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "What opens"
+    },
+    {
+      "el": "The browser-terminal rejection remains while #754 / OQ-050 is open.",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/sandboxes.mjs#sandboxBrowser",
+      "panel": "p-sb-browser",
+      "golden": [
+        "panels/sandboxes-populated.operator"
+      ],
+      "shows": "needs a decision"
+    },
+    {
+      "el": "The pictured hosts, runs, paths, image tag and times are sample data.",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The card fixture is invented; production reads each host\u2019s actual publication and manifest. The browser terminal is a separate #754 proposal and stays an inert note."
+    }
+  ]
+}

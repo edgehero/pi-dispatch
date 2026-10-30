@@ -34,7 +34,8 @@ const link = (id) => html`<a class="link code" href="${`/run?id=${encodeURICompo
 const fail = (m) => m.state === "unavailable" ? html`<p class="zt-note" role="status">${ZERO_TOUCH_WORDS.unavailable}</p>` : null;
 export function zeroTouchTabs(view) {
   const here = view?.page === "zero-touch";
-  return ui.tabs([{ label: "All runs", href: "/runs", icon: "runs", current: !here }, { label: "Zero touch", href: "/runs/zero-touch", icon: "flag", current: here }], { label: "Runs views" });
+  const sandboxes = view?.page === "sandboxes";
+  return ui.tabs([{ label: "All runs", href: "/runs", icon: "runs", current: !here && !sandboxes }, { label: "Zero touch", href: "/runs/zero-touch", icon: "flag", current: here }, ...(view?.role === "operator" ? [{ label: "Sandboxes", href: "/runs/sandboxes", icon: "box", current: sandboxes }] : [])], { label: "Runs views" });
 }
 export function zeroTouchControls(view) {
   const m = model(view);
