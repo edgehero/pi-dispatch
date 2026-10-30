@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { openerDirectory, runOpener } from "../../worker/src/opener-cli.mjs";
 import { sandboxOpenUrl } from "../../worker/src/opener-protocol.mjs";
 import { sandboxCommand } from "../../worker/src/sandbox-hosts.mjs";
-import { windowsPowerShellEnv } from "../../worker/src/opener-terminal.mjs";
+import { terminalLaunch, windowsPowerShellEnv } from "../../worker/src/opener-terminal.mjs";
 
 if (process.env.CI !== "true") throw new Error("native opener registration smoke runs only in an isolated CI account");
 const execFile = promisify(nodeExecFile);
@@ -63,6 +63,11 @@ async function diagnoseWindowsDelivery() {
 		const result = await execFile(process.execPath, [stub, "sandbox", "sb-diagnostic-recorder"], { env, timeout: 5_000, maxBuffer: 64 * 1024 });
 		console.error(`Native diagnostic direct recorder succeeded: ${JSON.stringify(rows())}; stdout=${JSON.stringify(result.stdout)}; stderr=${JSON.stringify(result.stderr)}`);
 	} catch (error) { console.error(`Native diagnostic direct recorder failed: ${error.message}; stdout=${JSON.stringify(error.stdout)}; stderr=${JSON.stringify(error.stderr)}`); }
+	try {
+		const plan = terminalLaunch({ platform: "win32", nodePath: process.execPath, cliPath: stub, url: protocol, directory: join(openerDirectory(env), "prompts"), env });
+		const result = await execFile(plan.bin, plan.args, { env: plan.env, windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024 });
+		console.error(`Native diagnostic exact terminal launcher exited; stdout=${JSON.stringify(result.stdout)}; stderr=${JSON.stringify(result.stderr)}; rows=${JSON.stringify(rows())}`);
+	} catch (error) { console.error(`Native diagnostic exact terminal launcher failed: ${error.message}; stdout=${JSON.stringify(error.stdout)}; stderr=${JSON.stringify(error.stderr)}; rows=${JSON.stringify(rows())}`); }
 	try {
 		const script = `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('pi-dispatch-opener-native-') } | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress`;
 		const result = await execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { env, timeout: 5_000, maxBuffer: 64 * 1024 });

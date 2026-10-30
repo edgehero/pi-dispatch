@@ -173,9 +173,20 @@ test("terminal launch starts an approval helper, never SSH or the sandbox, inclu
 	assert.doesNotMatch(fs.readFileSync(mac.args[0], "utf8"), /ssh| sandbox /);
 	assert.equal(fs.statSync(mac.args[0]).mode & 0o777, 0o700);
 	const windows = terminalLaunch({ ...common, platform: "win32" });
-	assert.match(windows.args.at(-1), /\$start\.UseShellExecute = \$false/);
-	assert.match(windows.args.at(-1), /\$start\.CreateNoWindow = \$false/);
-	assert.match(windows.args.at(-1), /opener.*prompt/);
+	const windowsScript = Buffer.from(windows.args.at(-1), "base64").toString("utf16le");
+	assert.match(windowsScript, /\$start\.UseShellExecute = \$false/);
+	assert.match(windowsScript, /\$start\.CreateNoWindow = \$false/);
+	assert.match(windowsScript, /opener.*prompt/);
+});
+
+test("the local PS5 launcher transports the entire nested argv script as UTF16LE without interpreting path metacharacters", () => {
+	const w = world();
+	const plan = terminalLaunch({ platform: "win32", nodePath: "C:\\Program Files\\node's $bin%\\node.exe", cliPath: "C:\\worker's $name%\\dispatch cli.mjs", url: uri(), directory: w.root, env: w.env });
+	assert.deepEqual(plan.args.slice(0, -1), ["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
+	const decoded = Buffer.from(plan.args.at(-1), "base64").toString("utf16le");
+	assert.ok(decoded.includes(String.raw`$start.FileName = 'C:\Program Files\node''s $bin%\node.exe';`));
+	assert.ok(decoded.includes(String.raw`$start.Arguments = '"C:\worker''s $name%\dispatch cli.mjs" "opener" "prompt" "${uri()}"';`));
+	assert.match(decoded, /\$child\.WaitForExit\(\); exit \$child\.ExitCode$/);
 });
 
 test("a Windows terminal child derives PS5 module paths even when its Node parent came from PowerShell 7", async () => {
