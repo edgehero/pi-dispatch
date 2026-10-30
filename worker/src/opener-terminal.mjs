@@ -18,6 +18,43 @@ export function windowsArgument(value) {
 	return `"${String(value).replace(/(\\*)"/g, "$1$1\\\"").replace(/(\\+)$/, "$1$1")}"`;
 }
 const psString = (value) => `'${String(value).replaceAll("'", "''")}'`;
+// A detached dispatcher's standard handles are NUL. Neither ProcessStartInfo's window preference nor
+// inheriting those handles creates an interactive terminal. The console owns fresh keyboard/screen buffers.
+const WINDOWS_CONSOLE_SOURCE = `using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class PiDispatchConsole {
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	private struct STARTUPINFO {
+		public uint cb;
+		public string lpReserved, lpDesktop, lpTitle;
+		public uint dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+		public ushort wShowWindow, cbReserved2;
+		public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+	}
+	[StructLayout(LayoutKind.Sequential)]
+	private struct PROCESS_INFORMATION {
+		public IntPtr hProcess, hThread;
+		public uint dwProcessId, dwThreadId;
+	}
+	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool CreateProcessW(string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint flags, IntPtr environment, string currentDirectory, ref STARTUPINFO startup, out PROCESS_INFORMATION process);
+	[DllImport("kernel32.dll", SetLastError = true)]
+	[return: MarshalAs(UnmanagedType.Bool)]
+	private static extern bool CloseHandle(IntPtr handle);
+	public static void Start(string application, string commandLine) {
+		STARTUPINFO startup = new STARTUPINFO();
+		startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFO));
+		startup.dwFlags = 0x00000001;
+		startup.wShowWindow = 1;
+		PROCESS_INFORMATION process;
+		if (!CreateProcessW(application, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, 0x00000010, IntPtr.Zero, null, ref startup, out process)) throw new Win32Exception(Marshal.GetLastWin32Error());
+		try { CloseHandle(process.hThread); }
+		finally { CloseHandle(process.hProcess); }
+	}
+}`;
 export function windowsPowerShellEnv(env) {
 	// env-internal PSModulePath: Windows PowerShell must derive its own module directories. A Node child of
 	// PowerShell 7 otherwise inherits incompatible modules ahead of the system's Start-Process implementation.
@@ -39,19 +76,29 @@ export function terminalLaunch({ platform, nodePath, cliPath, url, directory, en
 	}
 	if (platform === "win32") {
 		// env-internal SystemRoot: Windows' own system directory, not a variable forwarded to a container.
-		// Start-Process re-enters ShellExecute, whose registry templates expand percent placeholders. Pass the
-		// fixed command line directly to CreateProcess instead, with a visible console using the OS terminal.
-		const script = `$start = [System.Diagnostics.ProcessStartInfo]::new(); $start.FileName = ${psString(nodePath)}; $start.Arguments = ${psString(args.map(windowsArgument).join(" "))}; $start.UseShellExecute = $false; $start.CreateNoWindow = $false; $start.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal; $child = [System.Diagnostics.Process]::Start($start); $child.WaitForExit(); exit $child.ExitCode`;
+		// ShellExecute expands percent templates; CreateProcessW gets the fixed literal argv directly and
+		// explicitly allocates a new console without inheriting the dispatcher's redirected standard handles.
+		const script = `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition ${psString(WINDOWS_CONSOLE_SOURCE)}; [PiDispatchConsole]::Start(${psString(nodePath)}, ${psString([nodePath, ...args].map(windowsArgument).join(" "))})`;
 		// EncodedCommand preserves this fixed script through PowerShell 5's command-line parser, including the
 		// nested quotes in Arguments. The URI is still validated data in a quoted literal, never script input.
-		return { bin: win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args: ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], env: windowsPowerShellEnv(env) };
+		return { bin: win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args: ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], env: windowsPowerShellEnv(env), waitForExit: true };
 	}
 	throw new Error("this operating system has no supported terminal opener; copy the sandbox command instead");
 }
-export function spawnTerminal(plan, { spawn = nodeSpawn } = {}) {
+export function spawnTerminal(plan, { spawn = nodeSpawn, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
 	return new Promise((resolve, reject) => {
-		const child = spawn(plan.bin, plan.args, { detached: true, stdio: "ignore", windowsHide: true, ...(plan.env ? { env: plan.env } : {}) });
-		child.once("error", reject);
-		child.once("spawn", () => { child.unref(); resolve(); });
+		// Detachment also keeps libuv's process-job lifetime from owning the independently created console.
+		const child = spawn(plan.bin, plan.args, { detached: true, stdio: plan.waitForExit ? ["ignore", "ignore", "pipe"] : "ignore", windowsHide: true, ...(plan.env ? { env: plan.env } : {}) });
+		let timer;
+		let stderr = "";
+		child.stderr?.on("data", (chunk) => { stderr = (stderr + chunk.toString("utf8")).slice(-4096); });
+		const failed = (code) => Object.assign(new Error("Windows could not open an interactive console; check Windows PowerShell and use Copy until it is available"), { code, stderr });
+		child.once("error", (error) => { clearTimer(timer); reject(error); });
+		if (plan.waitForExit) {
+			// This dispatcher exits as soon as CreateProcessW returns. Waiting catches a refused launch without
+			// waiting for the person to press Enter, and the deadline bounds a blocked PowerShell/compiler.
+			timer = setTimer(() => { child.kill(); reject(failed()); }, 30_000);
+			child.once("exit", (code) => { clearTimer(timer); if (code === 0) resolve(); else reject(failed(code)); });
+		} else child.once("spawn", () => { child.unref(); resolve(); });
 	});
 }

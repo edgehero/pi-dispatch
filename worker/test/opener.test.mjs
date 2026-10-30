@@ -174,8 +174,8 @@ test("terminal launch starts an approval helper, never SSH or the sandbox, inclu
 	assert.equal(fs.statSync(mac.args[0]).mode & 0o777, 0o700);
 	const windows = terminalLaunch({ ...common, platform: "win32" });
 	const windowsScript = Buffer.from(windows.args.at(-1), "base64").toString("utf16le");
-	assert.match(windowsScript, /\$start\.UseShellExecute = \$false/);
-	assert.match(windowsScript, /\$start\.CreateNoWindow = \$false/);
+	assert.match(windowsScript, /CreateProcessW\(application, new StringBuilder\(commandLine\), IntPtr.Zero, IntPtr.Zero, false, 0x00000010,/);
+	assert.match(windowsScript, /startup.dwFlags = 0x00000001;/, "only normal-window metadata is supplied, never inherited standard handles");
 	assert.match(windowsScript, /opener.*prompt/);
 });
 
@@ -184,9 +184,9 @@ test("the local PS5 launcher transports the entire nested argv script as UTF16LE
 	const plan = terminalLaunch({ platform: "win32", nodePath: "C:\\Program Files\\node's $bin%\\node.exe", cliPath: "C:\\worker's $name%\\dispatch cli.mjs", url: uri(), directory: w.root, env: w.env });
 	assert.deepEqual(plan.args.slice(0, -1), ["-NoProfile", "-NonInteractive", "-EncodedCommand"]);
 	const decoded = Buffer.from(plan.args.at(-1), "base64").toString("utf16le");
-	assert.ok(decoded.includes(String.raw`$start.FileName = 'C:\Program Files\node''s $bin%\node.exe';`));
-	assert.ok(decoded.includes(String.raw`$start.Arguments = '"C:\worker''s $name%\dispatch cli.mjs" "opener" "prompt" "${uri()}"';`));
-	assert.match(decoded, /\$child\.WaitForExit\(\); exit \$child\.ExitCode$/);
+	assert.ok(decoded.endsWith(String.raw`[PiDispatchConsole]::Start('C:\Program Files\node''s $bin%\node.exe', '"C:\Program Files\node''s $bin%\node.exe" "C:\worker''s $name%\dispatch cli.mjs" "opener" "prompt" "${uri()}"')`));
+	assert.match(decoded, /CloseHandle\(process.hThread\);[\s\S]*finally \{ CloseHandle\(process.hProcess\); \}/);
+	assert.equal(plan.waitForExit, true, "only the finite dispatcher is awaited, never the interactive helper");
 });
 
 test("a Windows terminal child derives PS5 module paths even when its Node parent came from PowerShell 7", async () => {
@@ -194,10 +194,51 @@ test("a Windows terminal child derives PS5 module paths even when its Node paren
 	const env = { ...w.env, PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules", pSmOdUlEpAtH: "another incompatible path", SystemRoot: "C:\\Windows" };
 	const plan = terminalLaunch({ platform: "win32", nodePath: "C:\\node\\node.exe", cliPath: "C:\\dispatch cli.mjs", url: uri(), directory: w.root, env });
 	let options;
-	await spawnTerminal(plan, { spawn: (_bin, _args, passed) => { options = passed; const child = new EventEmitter(); child.unref = () => {}; queueMicrotask(() => child.emit("spawn")); return child; } });
+	await spawnTerminal(plan, { spawn: (_bin, _args, passed) => { options = passed; const child = new EventEmitter(); queueMicrotask(() => child.emit("exit", 0)); return child; } });
 	assert.equal(Object.keys(options.env).some((key) => key.toLowerCase() === "psmodulepath"), false);
 	assert.equal(options.env.SystemRoot, "C:\\Windows");
+	assert.equal(options.detached, true, "the finite dispatcher does not give libuv ownership of its console's lifetime");
 	assert.equal(env.PSModulePath, "C:\\Program Files\\PowerShell\\7\\Modules", "the invoking shell's environment is untouched");
+});
+
+test("the Windows dispatcher must finish successfully; process creation alone cannot hide its failure", async () => {
+	const plan = { bin: "powershell.exe", args: ["fixed-dispatcher"], waitForExit: true };
+	let child, settled = false;
+	const pending = spawnTerminal(plan, { spawn: () => { child = new EventEmitter(); child.stderr = new PassThrough(); return child; } });
+	pending.then(() => settled = true, () => settled = true);
+	child.emit("spawn");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(settled, false, "a spawned PowerShell has not yet confirmed CreateProcessW succeeded");
+	child.stderr.write("x".repeat(10_000));
+	child.emit("exit", 1);
+	await assert.rejects(pending, (error) => /could not open an interactive console/.test(error.message) && error.code === 1 && error.stderr.length === 4096);
+	const failed = new Error("PowerShell executable unavailable");
+	await assert.rejects(spawnTerminal(plan, { spawn: () => { const c = new EventEmitter(); queueMicrotask(() => c.emit("error", failed)); return c; } }), (error) => error === failed);
+});
+
+test("a failed Windows console dispatcher makes the opener refuse instead of announcing an opened terminal", async () => {
+	const w = world(), errors = [];
+	fs.mkdirSync(openerDirectory(w.env), { recursive: true, mode: 0o700 });
+	fs.writeFileSync(join(openerDirectory(w.env), "hosts.json"), JSON.stringify(config()), { mode: 0o600 });
+	const result = await runOpener(["handle", uri()], { env: w.env, deps: { platform: "win32", err: (s) => errors.push(s), showTerminal: (plan) => spawnTerminal(plan, { spawn: () => { const c = new EventEmitter(); queueMicrotask(() => c.emit("exit", 1)); return c; } }) } });
+	assert.equal(result, 1);
+	assert.match(errors.join(""), /could not open an interactive console/);
+});
+
+test("a Windows dispatcher that never completes is killed at its bounded deadline without waiting for Enter", async () => {
+	let deadline, bound, killed = 0;
+	const child = new EventEmitter();
+	child.kill = () => { killed++; };
+	const pending = spawnTerminal({ bin: "powershell.exe", args: ["dispatcher"], waitForExit: true }, {
+		spawn: () => child,
+		setTimer: (fn, ms) => { deadline = fn; bound = ms; return "timer"; },
+		clearTimer: () => {},
+	});
+	assert.equal(bound, 30_000);
+	assert.equal(killed, 0);
+	deadline();
+	await assert.rejects(pending, /could not open an interactive console/);
+	assert.equal(killed, 1, "only the stuck finite dispatcher is stopped");
 });
 
 test("readable POSIX commands round-trip literal arguments through a real shell without evaluating metacharacters", { skip: process.platform === "win32" ? "POSIX shell oracle" : false }, () => {
