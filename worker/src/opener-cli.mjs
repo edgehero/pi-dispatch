@@ -37,7 +37,9 @@ export function openerRegistration({ platform, home, directory, nodePath, cliPat
 	if (platform === "win32") {
 		// HKCU registration requires no elevation. reg.exe takes values as argv, never through cmd.exe.
 		const key = "HKCU\\Software\\Classes\\pi-dispatch-open";
-		const quoted = (value) => `"${String(value).replaceAll('"', '\\"')}"`;
+		// ShellExecute expands percent placeholders in this registry template, even inside quoted paths.
+		// Escape only the fixed paths; the final %1 remains the single URI substitution.
+		const quoted = (value) => `"${String(value).replaceAll("%", "%%").replaceAll('"', '\\"')}"`;
 		return { commands: [["reg.exe", ["add", key, "/ve", "/d", "URL:pi-dispatch sandbox opener", "/f"]], ["reg.exe", ["add", key, "/v", "URL Protocol", "/d", "", "/f"]], ["reg.exe", ["add", `${key}\\shell\\open\\command`, "/ve", "/d", `${quoted(nodePath)} ${quoted(cliPath)} opener handle "%1"`, "/f"]]] };
 	}
 	throw new Error("this operating system has no supported opener installer; copy the sandbox command instead");
