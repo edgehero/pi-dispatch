@@ -136,6 +136,16 @@ try {
 	const waiting = rows().find((r) => r.phase === "prompt-waiting");
 	assert.equal(waiting.tty, true, "the default terminal has real input and output TTYs");
 	assert.equal(waiting.waiting, true, "the real approval promise remains pending for Enter");
+	await until(() => { try { process.kill(returned.pid, 0); return false; } catch (error) { if (error.code === "ESRCH") return true; throw error; } }, "original native URI handler process exit");
+	if (process.platform === "win32") {
+		const stopped = () => { try { return fs.readFileSync(exitEvents, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse).find((r) => r.pid === returned.pid); } catch { return null; } };
+		await until(() => Boolean(stopped()), "original Windows native URI handler observed exit status");
+		assert.equal(stopped().status, 0, "the original Windows handler process actually exited successfully");
+	}
+	process.kill(waiting.pid, 0);
+	assert.equal(rows().some((r) => r.pid === waiting.pid && r.phase === "returned"), false, "the real terminal approval remains pending after its URI handler exits");
+	assert.equal(rows().some((r) => r.error), false);
+
 	const expected = sandboxCommand(JSON.parse(fs.readFileSync(source, "utf8")), { verb: "open", id: nativeId, host: "native" });
 	assert.deepEqual(waiting.command.argv, expected.argv, "the terminal's pending command uses the approved host's exact argv");
 	assert.equal(waiting.command.display, expected.display);

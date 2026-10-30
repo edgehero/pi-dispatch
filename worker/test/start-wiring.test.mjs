@@ -8,6 +8,7 @@ import { makeOpenshellBackend as realOpenshellBackend } from "../src/backend-ope
 import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs";
+import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inventory.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -386,21 +387,34 @@ async function runStart({ env = {}, whileRunning, makeDoctorSpawner, makeAuth, m
 		// work -- BullMQ writes `:meta` back on the way out, so the keys reappear -- and the worker's own client
 		// is disconnected by then. The MATCH is narrowed to this run's declared name, so it can only ever remove
 		// what this file made.
-		if (env.PI_WORKER_NAME) {
+		// Production deliberately keeps the durable inventory after shutdown. This fixture must remove only its
+		// own publication, after its publisher closes, or repeated boots fill the bounded fleet's first 64 hosts.
+		// The resolved name matters here: an undeclared worker still publishes under its default host name.
+		if (env.PI_WORKER_NAME || captured?.name) {
 			const { makeRedisClient } = await import("../src/connection.mjs");
-			const sweeper = makeRedisClient(env.VALKEY_URL ?? VALKEY_URL);
+			// Copy the judged client's pinned URL, connector and context, auth, database and TLS options. The
+			// ambient name may intentionally not resolve: boot already replaced it with the verified endpoint.
+			const sweeper = captured?.redis ? captured.redis.duplicate() : makeRedisClient(env.VALKEY_URL ?? VALKEY_URL);
 			sweeper.on("error", () => {});
 			try {
-				let cursor = "0";
-				const keys = [];
-				do {
-					const [next, batch] = await sweeper.scan(cursor, "MATCH", `bull:pi-jobs@${env.PI_WORKER_NAME}:*`, "COUNT", 200);
-					cursor = next;
-					keys.push(...batch);
-				} while (cursor !== "0");
-				if (keys.length > 0) await sweeper.del(...keys);
-			} catch {
-				// Best effort: a surviving key costs a FUTURE test a confusing fixture, never this one a failure.
+				if (env.PI_WORKER_NAME) {
+					try {
+						let cursor = "0";
+						const keys = [];
+						do {
+							const [next, batch] = await sweeper.scan(cursor, "MATCH", `bull:pi-jobs@${env.PI_WORKER_NAME}:*`, "COUNT", 200);
+							cursor = next;
+							keys.push(...batch);
+						} while (cursor !== "0");
+						if (keys.length > 0) await sweeper.del(...keys);
+					} catch {
+						// Preserve the existing best-effort host-queue cleanup.
+					}
+				}
+				if (captured?.name) {
+					await sweeper.del(sandboxInventoryKey(captured.name));
+					await sweeper.srem(SANDBOX_INVENTORY_HOSTS, captured.name);
+				}
 			} finally {
 				sweeper.disconnect();
 			}
@@ -4465,6 +4479,42 @@ test("a backend registry refusal releases every handle boot opened before it, no
 	assert.equal(registryClosed, true);
 });
 
+test("backend registry refusal settles both queue starts before closing and observes a failed-start disconnect", { skip }, async () => {
+	const refusal = new Error("registry refused before the queues became ready");
+	const failedStart = new Error("Connection is closed.");
+	const queues = [];
+	let bothWaiting;
+	const waiting = new Promise((resolve) => { bothWaiting = resolve; });
+	const events = [];
+	const pending = runStart({
+		env: { VALKEY_URL, PI_WORKER_NAME: "refused-before-queue-ready", PI_SWEEP_INTERVAL_HOURS: "0" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		makeBackendRegistry: () => { throw refusal; },
+		durable: { makeRuntimeQueue: (_connection, options) => {
+			const name = options?.name ?? "pi-jobs";
+			let resolve, reject;
+			const ready = new Promise((yes, no) => { resolve = yes; reject = no; });
+			const queue = { name, resolve, reject,
+				waitUntilReady: () => { events.push([name, "waiting"]); if (events.filter(([, phase]) => phase === "waiting").length === 2) bothWaiting(); return ready; },
+				close: async () => { events.push([name, "close"]); },
+				disconnect: async () => { events.push([name, "disconnect"]); await ready; },
+			};
+			queues.push(queue);
+			return queue;
+		} },
+	});
+	const rejected = assert.rejects(pending, (error) => error === refusal, "cleanup preserves the actual registry refusal");
+	await waiting;
+	assert.equal(queues.length, 2, "the shared and this host's queue each started");
+	assert.deepEqual(events, [["pi-jobs", "waiting"], ["pi-jobs@refused-before-queue-ready", "waiting"]], "neither queue can close while its own start is pending");
+	queues[0].resolve();
+	queues[1].reject(failedStart);
+	await rejected;
+	await new Promise((resolve) => setImmediate(resolve));
+	for (const queue of queues) assert.deepEqual(events.filter(([name]) => name === queue.name).map(([, phase]) => phase), ["waiting", "close", "disconnect"], "failed readiness still closes, and an async disconnect rejection cannot become unhandled");
+});
+
 test("the sandbox reaper holds a directory its OWN runtime reports open, whatever the worker blesses (#429 review)", { skip }, async () => {
 	// THE REPRODUCTION, driven through the real wiring and the real `makeSandboxReaper` on a real retention root: a
 	// worker blessing podman alone, a local run retained earlier and reopened under docker from a shell with no
@@ -4721,6 +4771,12 @@ test("boot judges VALKEY_URL's owner before any Valkey contact, refuses as a con
 	const pinnedUrl = process.env.VALKEY_TEST_URL;
 	const r = await runStart({ env: { VALKEY_URL: "redis://valkey-name-never-resolves.invalid:1" }, judgeValkey: async () => ({ url: pinnedUrl, servername: null, pinned: { address: "127.0.0.1", port: 6399, heldBy: "this account" }, notes: ["another account also listens on [::1]:6399"] }) });
 	assert.equal(r.captured.connection.host, new URL(pinnedUrl).hostname, "BullMQ's worker connection");
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const inventoryProbe = makeRedisClient(pinnedUrl);
+	try {
+		assert.equal(await inventoryProbe.get(sandboxInventoryKey(r.captured.name)), null, "fixture cleanup used the judged server despite the unresolvable ambient URL");
+		assert.equal(await inventoryProbe.sismember(SANDBOX_INVENTORY_HOSTS, r.captured.name), 0);
+	} finally { await inventoryProbe.quit(); }
 	assert.ok(r.logs.some((l) => l.event === "valkey_pinned" && l.address === "127.0.0.1" && l.heldBy === "this account"), JSON.stringify(r.logs.slice(0, 5)));
 	assert.ok(r.logs.some((l) => l.event === "valkey_note" && /\[::1\]:6399/.test(l.note)));
 	// The boot line carries the pinned address beside the URL as written (gate round 2 follow-up).
@@ -6149,5 +6205,45 @@ test("a failing paid-worker constructor starts no sandbox control worker or inve
 		// This double throws before runStart's ordinary capture. Its earlier runtime handles still need a harness drain.
 		for (const closer of captured?.extraClosers ?? []) await Promise.resolve(closer?.close?.()).catch(() => {});
 		await Promise.resolve(captured?.redis?.quit?.()).catch(() => captured?.redis?.disconnect?.());
+	}
+});
+
+test("runStart removes only its own durable inventory after the publisher closes, including a default worker name", { skip }, async (t) => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const redis = makeRedisClient(VALKEY_URL);
+	const nonce = `${process.pid}-${Math.random().toString(16).slice(2)}`;
+	const unrelated = `inventory-unrelated-${nonce}`;
+	const owned = [];
+	const now = () => 1_800_000_000_000;
+	const otherRecord = JSON.stringify({ version: 1, host: unrelated, at: now(), rows: [], more: 0, retentionHours: 24, settings: null });
+	t.after(async () => {
+		await redis.del(...[unrelated, ...owned].map(sandboxInventoryKey));
+		await redis.srem(SANDBOX_INVENTORY_HOSTS, unrelated, ...owned);
+		await redis.quit();
+	});
+	await redis.set(sandboxInventoryKey(unrelated), otherRecord);
+	await redis.sadd(SANDBOX_INVENTORY_HOSTS, unrelated);
+	for (const declared of [false, true]) {
+		let name;
+		await runStart({
+			env: { VALKEY_URL, PI_SWEEP_INTERVAL_HOURS: "0", ...(declared ? { PI_WORKER_NAME: `inventory-owned-${nonce}` } : {}) },
+			now,
+			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+			makeHost: () => fakeHost(),
+			whileRunning: async ({ captured }) => {
+				name = captured.name;
+				owned.push(name);
+				assert.notEqual(name, unrelated);
+				const publisher = captured.extraClosers.find((closer) => closer !== captured.extraClosers[1] && typeof closer.publish === "function");
+				assert.ok(publisher);
+				assert.deepEqual(await publisher.publish(), { published: true });
+				assert.notEqual(await redis.get(sandboxInventoryKey(name)), null, "the real fixture publication exists before teardown");
+				assert.equal(await redis.sismember(SANDBOX_INVENTORY_HOSTS, name), 1);
+			},
+		});
+		assert.equal(await redis.get(sandboxInventoryKey(name)), null, "the closed publisher cannot leave a durable fixture record");
+		assert.equal(await redis.sismember(SANDBOX_INVENTORY_HOSTS, name), 0);
+		assert.equal(await redis.get(sandboxInventoryKey(unrelated)), otherRecord, "another host's durable evidence stays byte-identical");
+		assert.equal(await redis.sismember(SANDBOX_INVENTORY_HOSTS, unrelated), 1);
 	}
 });

@@ -696,6 +696,7 @@ export async function startWorker(
 		makeAuth = makeGitHubAuth,
 		makeHost = makeGitHubHost,
 		createWorkerFn = createWorker,
+		makeRuntimeQueue: makeRuntimeQueueFn = makeQueue,
 		makeCpuReserve: makeCpuReserveFn = makeCpuReserve,
 		makeReaper: makeReaperFn = makeReaper,
 		makeBackendRegistry: makeBackendRegistryFn = makeBackendRegistry,
@@ -1502,7 +1503,9 @@ export async function startWorker(
 	// collector enqueues chained children onto it -- the same pi-jobs queue, so one handle serves both.
 	// Non-failFast: a long-lived handle rides out a Valkey blip. Registered as an extraCloser so shutdown
 	// drains it after the worker.
-	const runtimeQueue = makeQueue(valkeyConn());
+	// Install the settled close before ANY later boot refusal can reach these handles. Waiting until
+	// the worker handoff left the backend registry's refusal racing BullMQ's initial INFO (#664).
+	const runtimeQueue = settleCloseOf(makeRuntimeQueueFn(valkeyConn()));
 
 	// THE HOST QUEUE (issue #57): work only this machine can do, because the folder lives here.
 	//
@@ -1518,7 +1521,7 @@ export async function startWorker(
 	// live triggers-file edit lands on the same queue the boot reconcile used; otherwise the shared
 	// runtime queue, exactly as before. Registered as an extraCloser only when it is a NEW handle --
 	// closing `runtimeQueue` twice would be closing another owner's connection.
-	const cronQueue = hostQueue ? makeQueue(valkeyConn(), { name: hostQueue }) : runtimeQueue;
+	const cronQueue = hostQueue ? settleCloseOf(makeRuntimeQueueFn(valkeyConn(), { name: hostQueue })) : runtimeQueue;
 
 	// Issue #645 (durable runs): the checkpoint collaborators, built once here and handed to the processor and the live
 	// transcript opener. Only with a store (`config.checkpointsDir`, PI_CHECKPOINTS_DIR else <PI_SESSIONS_DIR>/.checkpoints):
@@ -2458,7 +2461,9 @@ export async function startWorker(
 		await settleWithin(Promise.allSettled(opened.map((handle) => Promise.resolve().then(() => handle?.close?.()))), 5_000);
 		for (const handle of opened) {
 			try {
-				handle?.disconnect?.();
+				// BullMQ's disconnect awaits initialization and can reject asynchronously when that start failed.
+				// Observe that cleanup rejection without extending the bound or replacing the boot's refusal.
+				void Promise.resolve(handle?.disconnect?.()).catch(() => {});
 			} catch {
 				// a handle with nothing left to drop
 			}
@@ -2477,11 +2482,6 @@ export async function startWorker(
 	// not when it receives it, and so does the test harness at teardown. A refactor that COPIES it there --
 	// a spread, a freeze, a snapshot inside `createWorker` -- un-registers the watchers in SILENCE and puts
 	// issue #295 back. Append only: two tests pin `[0]` as the runtime queue and `[1]` as the registry.
-	// Issue #664: the two long-lived queues close only after their connection's start has settled, as #661 made the
-	// reconcile queue and the recovery path's host queues do. Each is kept as the same object (the closer list and its
-	// tests name them), with its own `close` routed through `closeQueueSettled`'s wait; closed early, BullMQ's unawaited
-	// INFO rejected unhandled ("Connection is closed"), failing whichever test was running.
-	for (const q of new Set([runtimeQueue, cronQueue])) settleCloseOf(q);
 	const extraClosers = [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])];
 	// A first source can arrive through live configuration after boot. Recovery and quiet-close
 	// draining must already exist then, even when the initial source registry was empty.
