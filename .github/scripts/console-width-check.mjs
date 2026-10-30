@@ -1798,6 +1798,11 @@ export const EMULATION_PROBE = `(() => {
 
 // ---- the run ----------------------------------------------------------------------------------------------------
 
+/** Both console browser checks use the same platform startup policy; their document CSP stays enforced. */
+export function chromeLaunchArgs({ sandbox = true } = {}) {
+	return ["--use-mock-keychain", ...(sandbox ? [] : ["--no-sandbox"])];
+}
+
 /**
  * Serve `docs` (each `{ id, path, html }`), `shellDocs`, the negative `controls` (`controlDoc`'s and
  * `phoneControlDoc`'s: each page, its stylesheet and its script, if any) and the console's static files with the
@@ -1858,7 +1863,7 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 	// loads) never needs. Other platforms ignore the flag. The resolver still maps every NAME to nothing; only the
 	// loopback address this server listens on is excluded, because Chrome applies the rules to an IP literal too
 	// (measured: ERR_NAME_NOT_RESOLVED without the exclusion).
-	const extraArgs = ["--use-mock-keychain", ...(sandbox ? [] : ["--no-sandbox"])];
+	const extraArgs = chromeLaunchArgs({ sandbox });
 	const browser = await openChrome({ chrome, work, children, Refusal, stepMs: STEP_MS, env: { HOME: join(work, "home") }, extraArgs, captureStderr: true, resolverRules: "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" });
 	onOpen?.(browser);
 	const results = [];

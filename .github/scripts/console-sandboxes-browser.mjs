@@ -5,18 +5,19 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { openChrome } from "../../launch/chrome-pipe.mjs";
-import { EDGE_SLACK, findChrome, measureSource, widthVerdict } from "./console-width-check.mjs";
+import { EDGE_SLACK, chromeLaunchArgs, findChrome, measureSource, widthVerdict } from "./console-width-check.mjs";
 import { parseSandboxOpenUrl } from "../../worker/src/opener-protocol.mjs";
 import { startSandboxBrowserFixture, SANDBOX_BROWSER_TOKENS } from "../../admin/test/helpers/sandbox-browser.mjs";
+import { SECURITY_HEADERS } from "../../admin/src/console/headers.mjs";
 
-export async function checkSandboxBrowser({ chrome, shots = null } = {}) {
+export async function checkSandboxBrowser({ chrome, shots = null, sandbox = process.env.GITHUB_ACTIONS !== "true" } = {}) {
   const work = mkdtempSync(join(tmpdir(), "pd-sandbox-browser-")), children = new Set();
   let fixture, extraFixture, browser, tab, stage = "startup";
   try {
     fixture = await startSandboxBrowserFixture(work);
     mkdirSync(join(work, "browser"));
-    browser = await openChrome({ chrome, work: join(work, "browser"), children, env: { HOME: process.env.HOME }, resolverRules: "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", captureStderr: true });
-    tab = await browser.openTarget(); await tab.send("Page.enable"); await tab.send("Runtime.enable");
+    browser = await openChrome({ chrome, work: join(work, "browser"), children, env: { HOME: process.env.HOME }, extraArgs: chromeLaunchArgs({ sandbox }), resolverRules: "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", captureStderr: true });
+    tab = await browser.openTarget(); await tab.send("Page.enable"); await tab.send("Runtime.enable"); await tab.send("Network.enable");
     await tab.send("Page.addScriptToEvaluateOnNewDocument", { source: "window.__sandboxCsp=[]; addEventListener('securitypolicyviolation',e=>window.__sandboxCsp.push(e.violatedDirective+':'+e.blockedURI));" });
     const evaluate = async (expression) => {
       let r;
@@ -37,7 +38,11 @@ export async function checkSandboxBrowser({ chrome, shots = null } = {}) {
     };
     const navigate = async (path) => {
       const loaded = browser.event((m) => m.sessionId === tab.sessionId && m.method === "Page.loadEventFired", "sandbox page load");
+      const response = browser.event((m) => m.sessionId === tab.sessionId && m.method === "Network.responseReceived" && m.params.type === "Document" && m.params.response.url.startsWith(fixture.origin + "/") && new URL(m.params.response.url).pathname === path.split("?")[0], "sandbox document response");
+      loaded.catch(() => {}); response.catch(() => {});
       await tab.send("Page.navigate", { url: fixture.origin + path }); await loaded;
+      const headers = Object.fromEntries(Object.entries((await response).params.response.headers).map(([name, value]) => [name.toLowerCase(), value]));
+      assert.equal(headers["content-security-policy"], SECURITY_HEADERS["content-security-policy"], "the actual document response carries the production CSP");
       await until(`location.origin === ${JSON.stringify(fixture.origin)} && location.pathname === ${JSON.stringify(path.split("?")[0])} && document.readyState === 'complete'`);
       if (stage !== "no JavaScript") await evaluate("document.fonts.ready.then(()=>true)");
     };
@@ -64,6 +69,12 @@ export async function checkSandboxBrowser({ chrome, shots = null } = {}) {
     };
     await login("operator");
     const path = "/runs/sandboxes?id=gh-9575&host=mini1&repo=acme/web&index=0&ref=HEAD";
+    stage = "CSP negative control";
+    await navigate(path);
+    await evaluate("window.__sandboxInlineRan=false;const probe=document.createElement('script');probe.textContent='window.__sandboxInlineRan=true';document.head.appendChild(probe)");
+    await until("window.__sandboxCsp.some(x=>x.startsWith('script-src')&&x.endsWith(':inline'))");
+    assert.equal(await evaluate("window.__sandboxInlineRan"), false, "the real policy blocks an inline script instead of merely carrying an unused header");
+    await navigate(path); // A fresh document clears the intentional violation before positive interactions.
     const measurements = [];
     for (const theme of ["light", "dark"]) for (const width of [320, 375, 390, 760, 761, 800, 1024, 1440, 1600]) {
       stage = `render ${theme} ${width}`;
@@ -128,7 +139,6 @@ export async function checkSandboxBrowser({ chrome, shots = null } = {}) {
     }
     await tab.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
     stage = "live GET drafts";
-    await tab.send("Network.enable");
     const streamReady = browser.event((m) => m.sessionId === tab.sessionId && m.method === "Network.responseReceived" && m.params.response.url.startsWith(fixture.origin + "/api/events?page=sandboxes"), "sandbox live stream connected");
     await navigate(path); await streamReady;
     await evaluate("window.__sbRef=document.querySelector('#sb-ref');window.__sbRepo=document.querySelector('#sb-repo')");
