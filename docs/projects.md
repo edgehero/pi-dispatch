@@ -47,7 +47,7 @@ is refused when no one is there to answer it.
 
 | Tool | What it does |
 |---|---|
-| `dispatch_projects` | Lists each project: id, name, members, and the scoped-limits rows that cap it. |
+| `dispatch_projects` | Lists safe project identity/membership, scoped limits, spend/share, size suggestion and exact call, and why an edit or delete would be refused. Local paths are abbreviated. |
 | `dispatch_project_add` | Adds a project (`id`, `members`, optional `name`). |
 | `dispatch_project_edit` | Changes a project's `name` or replaces its `members`. An empty `name` removes it. |
 | `dispatch_project_delete` | Removes a project. Refused while a `project:<id>` row names it. |
@@ -85,6 +85,20 @@ Only a run is grouped. A webhook trigger fires for whichever repo delivers, so t
 project.
 
 ## See the spend
+
+The console's `/config/project?id=<id>` page brings the project's spend/share, held amount, members, run outcomes,
+measured job size, newest runs, allocation, limits, bundle and trigger activity together. A missing envelope has
+no invented share. The size chart distinguishes measured peaks, confirmed OOMs, configured sizes and suggestions;
+**Preview this size** uses the existing add/edit scoped-limit action with its actual row and a person's confirm.
+Suggestions remain advisory, and are no longer under Capacity.
+
+The member form says when joining starts counting and how leaving widens spend. It is absent while a bundle
+names the project, with the planner's refusal shown before any press. Unreadable or invalid triggers make bundle
+state unknown, never absent; its fixed source-load explanation keeps parser text and secret references private.
+Delete likewise names its actual blockers
+(scoped limits, bundle, envelope floor), otherwise requires a red confirmed action. Existing records retain their
+project id. Viewer and read-only pages retain the facts with no writes. See [the console](console.md#one-project).
+
 
 - **Insights** (the console's `/insights`, [insights](insights.md)): the breakdown has a "by project" list. Each bar is a project id, and the
   names sit under the list.

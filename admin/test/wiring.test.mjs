@@ -349,10 +349,11 @@ const WRITE_TOOLS = ["dispatch_trigger_fire", "dispatch_set", "dispatch_trigger_
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
   const { calls } = await loadRegistered();
   const names = calls.registerTool.map((t) => t.name).sort();
-  assert.equal(calls.registerTool.length, 30, "exactly thirty tools");
+  assert.equal(calls.registerTool.length, 32, "exactly thirty-two tools");
   assert.deepEqual(names, [
     "dispatch_allocations",
     "dispatch_capacity",
+    "dispatch_connections",
     "dispatch_costs",
     "dispatch_envelope_set",
     "dispatch_limit_add",
@@ -372,6 +373,7 @@ test("registers exactly the read/control/enqueue/write tools, and never a raw-lo
     "dispatch_resume",
     "dispatch_run",
     "dispatch_runs",
+    "dispatch_secrets",
     "dispatch_set",
     "dispatch_status",
     "dispatch_trigger_add",

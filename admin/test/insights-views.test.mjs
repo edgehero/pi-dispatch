@@ -25,7 +25,7 @@ function readsFixture() {
 }
 
 for (const [view, expected] of [
-  ["capacity", ["capacity", "hosts", "sizing"]],
+  ["capacity", ["capacity", "hosts"]],
   ["budget-split", ["projects", "allocation", "hosts", "scan"]],
   ["breakdown", ["projects", "costs"]],
 ]) test(`${view} reads only its own slices`, async () => {

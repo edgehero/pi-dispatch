@@ -829,10 +829,10 @@ test("secrets remove --bundle names the bundles it strands, and list shows profi
   await runSecretsCommand(paths, { ui: {} }, (m) => notes.push(m), ["list"], { fs, env: { PI_SECRET_RESOLVER_ROOTS: "/opt" } });
   assert.equal(notes[0], [
     "Resolver profiles (settings overlay):\n  prod: /opt/p.sh",
-    // Issue #712: each profile's use; this fake fs resolves nothing, so the roots are the worker's to judge.
+    // The fake fs resolves neither profile nor bundle executables, so both leave the roots for the worker to judge.
     "Secret profiles in use (names only; the resolver paths are listed above):\n  prod: declared in the settings overlay; its resolver cannot be resolved on this host, so only the worker can judge it against PI_SECRET_RESOLVER_ROOTS (doctor --secrets); used by no trigger; last resolve: no run in view recorded it; served by: the registry is not read here (the console's and the panel's profiles show the live hosts)",
     "Bundle resolvers (settings overlay):\n  op-shop: /opt/b.mjs (json)",
-    "Secret bundles (triggers.json; names only, never a reference or a value):\n  shop: project shop; profile op-shop (declared in the settings overlay, json, inside PI_SECRET_RESOLVER_ROOTS as written; doctor --secrets checks it runs); fork reviews do not; no endpoints; 1 trigger opts out: #1",
+    "Secret bundles (triggers.json; names only, never a reference or a value):\n  shop: project shop; profile op-shop (declared in the settings overlay, json; its resolver cannot be resolved on this host, so only the worker can judge it against PI_SECRET_RESOLVER_ROOTS; doctor --secrets checks it runs); fork reviews do not; no endpoints; 1 trigger opts out: #1",
   ].join("\n\n"));
   assert.ok(!notes[0].includes("env-ref-canary"));
   // Roots the panel can see that do not hold the path: the worker would not run it, and the list says so.

@@ -85,7 +85,7 @@ ${value}</textarea
 }
 export function actForm(
   action,
-  { hidden = [], fields = null, label, structured = null } = {},
+  { hidden = [], fields = null, label, structured = null, danger = false } = {},
 ) {
   return html`<form
     class="act config-form stack"
@@ -105,7 +105,7 @@ export function actForm(
     )}${fields}${ui.btn({
       type: "submit",
       label,
-      kind: action.endsWith("delete") ? ["danger", "sm"] : action === "trigger-fire" ? ["paid", "sm"] : ["primary", "sm"],
+      kind: danger || action.endsWith("delete") ? ["danger", "sm"] : action === "trigger-fire" ? ["paid", "sm"] : ["primary", "sm"],
     })}
     </fieldset>
     <noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>

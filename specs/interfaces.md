@@ -10427,6 +10427,21 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 
 ## INT-CONSOLE-STATE-API
 
+**Extension (#751):** `/config/secrets`, `/config/connections` and `/config/project?id=` are non-live viewer pages.
+The project id follows PROJECT_ID_RE; readable absence is the no-project 404, unreadable projects remain
+unavailable. Connections reads deployment source keys, allowlist, model-endpoint definitions and live slot leases
+only for its page and its safe tool projection. Endpoint observations carry closed `counting` values: `fleet`,
+`per-machine`, `worker-name-absent` or `unknown`. Only `fleet` can carry an observed integer `used`; other modes
+carry null, with declared `slots` retained. An unavailable fleet lease read also has null `used`, distinct from
+an observed zero. These are console/tool projections over existing worker gates, not new lease or host telemetry.
+The page directs 401/404 diagnosis to forge history; receiver logs can help with 503/enqueue failures and do not
+cover early request refusals or every 503. No such values enter `/api/state`; STATE_VERSION, its keys and
+the event-stream protocol are UNCHANGED, checked. Resolver action response keys/tickets stay the same, while
+all displayed diff lines, summary/Undo sentences and refusals shorten resolver/root paths to their last folder.
+The ticket retains real operands server-side. Secret/bundle values and references never enter a response;
+agent reads further omit variable names. Worker env, trigger, project, endpoint, lease, run-record and hook
+file/process contracts are UNCHANGED, checked; the console reads their existing published facts.
+
 **Extension (#750, trigger list):** `POST /api/trigger-check` is a hypothetical read, not an action. A viewer
 session suffices, including on a read-only console. Host, same-Origin/fetch-site, JSON, body-size and
 `x-console-as` person guards apply before its bounded event input is evaluated. It takes no query parameters.
@@ -11900,3 +11915,6 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-29 (#749) | `INT-HOST-REGISTRY-CONTRACT` and `INT-CAPACITY-REPORT` AMENDED: optional h/ha actual dollar holds and additive fleet metrics, shared with CLI and console. `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-CONSOLE-AUDIT-LOG`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked: no new API field, live route, audit kind, run fact or plan writer. |
 | 2026-10-30 (#750) | `INT-TRIGGERS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` AMENDED: safe display fields, human numbering and trigger-fire audit kind. `INT-CONFIG-OVERLAY-CONTRACT`, `INT-CONSOLE-STATE-API`, queue payload and runner exit protocol UNCHANGED, checked. Shared state never includes prompt text. |
 | 2026-10-30 (#750, trigger list) | `INT-CONSOLE-STATE-API` AMENDED with the separate viewer hypothetical-check POST contract. The state version/payload, `INT-CONSOLE-EVENT-STREAM`, `INT-CONSOLE-AUDIT-LOG`, `INT-TRIGGERS-FILE-CONTRACT`, queue and run-record contracts UNCHANGED, checked: no event text or job body is returned, and the read writes no audit row. |
+| 2026-10-30 (#751) | `INT-CONSOLE-STATE-API` AMENDED to name page-scoped Configuration reads and safe resolver response text. Its shared state version/keys, `INT-CONSOLE-EVENT-STREAM`, action ticket/audit guards, run records, trigger/project/endpoint files, secret resolver processes and `INT-ON-FAILURE-HOOK-CONTRACT` UNCHANGED, checked. |
+| 2026-10-30 (#751, review) | Safe Connections tool projections add a selected provider-key name and closed source/fallback facts; manager variable names and values remain excluded. Typed project preflight facts stay internal to page assembly. `INT-CONSOLE-STATE-API`, state/event-stream versions and keys, confirmation tickets, audit, worker files/processes and run records UNCHANGED, checked. |
+| 2026-10-30 (#751, observation coverage) | Page/tool endpoint projections add closed counting coverage with nullable observed use and retained declared capacity. Delivery guidance distinguishes forge history from partial receiver logs. `INT-CONSOLE-STATE-API` shared version/keys, event streams, worker endpoint files/leases, host registry, receiver responses/logging and action confirmation/audit contracts UNCHANGED, checked. |

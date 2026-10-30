@@ -481,11 +481,11 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["setting-unset", { beforeText: json({ maxTurns: 30 }), plan: { key: "maxTurns" } }, twice("Set maxTurns back to 30"), { action: "setting-set", body: { key: "maxTurns", value: "30" } }, "Confirm", "Unset maxTurns"],
     ["setting-unset", { beforeText: json({ maxTurns: "" }), plan: { key: "maxTurns" } }, twice("Set maxTurns back by hand: its old value is not one this form can send."), null, "Confirm", "Unset maxTurns"],
     ["secret-profile-add", { beforeText: json({}), plan: { name: "dev" } }, twice("Remove profile dev"), { action: "secret-profile-remove", body: { name: "dev" } }, "Confirm", "Declared profile dev"],
-    ["secret-profile-add", { beforeText: json({ secretProfiles: { dev: "/opt/old" } }), plan: { name: "dev" } }, ["Put profile dev back by hand: this preview's diff shows the resolver it replaced; the console keeps no copy.", "Put profile dev back by hand: the console kept no copy of the resolver it replaced."], null, "Confirm", "Replaced the resolver of profile dev"],
-    ["secret-profile-remove", { plan: { name: "dev" } }, DEL, null, "Remove profile dev", "Removed profile dev"],
+    ["secret-profile-add", { beforeText: json({ secretProfiles: { dev: "/opt/old" } }), plan: { name: "dev" } }, twice("Declare dev again with the previous resolver; the console keeps no full path to replay it."), null, "Confirm", "Replaced the resolver of profile dev"],
+    ["secret-profile-remove", { plan: { name: "dev" } }, twice("Declare dev again with the same resolver"), null, "Remove profile dev", "Removed profile dev"],
     ["secret-bundle-add", { beforeText: json({}), plan: { name: "op" } }, twice("Remove bundle resolver op"), { action: "secret-bundle-remove", body: { name: "op" } }, "Confirm", "Declared bundle resolver op"],
-    ["secret-bundle-add", { beforeText: json({ secretBundles: { op: { path: "/b", format: "json" } } }), plan: { name: "op" } }, ["Put bundle resolver op back by hand: this preview's diff shows the resolver it replaced; the console keeps no copy.", "Put bundle resolver op back by hand: the console kept no copy of the resolver it replaced."], null, "Confirm", "Replaced bundle resolver op"],
-    ["secret-bundle-remove", { plan: { name: "op" } }, DEL, null, "Remove bundle resolver op", "Removed bundle resolver op"],
+    ["secret-bundle-add", { beforeText: json({ secretBundles: { op: { path: "/b", format: "json" } } }), plan: { name: "op" } }, twice("Declare op again with the previous resolver; the console keeps no full path to replay it."), null, "Confirm", "Replaced bundle resolver op"],
+    ["secret-bundle-remove", { plan: { name: "op" } }, twice("Declare op again with the same resolver"), null, "Remove bundle resolver op", "Removed bundle resolver op"],
     ["pause-window-add", { beforeText: json({ windows: [windows] }) }, twice("Delete pause window row 2"), { action: "pause-window-delete", body: { index: 1 } }, "Confirm", "Added pause window row 2"],
     ["pause-window-edit", { plan: { index: 0, before: windows, entry: { ...windows, to: "03:00" } } }, twice("Edit pause window row 1 back to what it said"), { action: "pause-window-edit", body: { index: 0, ...windows } }, "Confirm", "Edited pause window row 1"],
     ["pause-window-edit", { plan: { index: 0, before: null, entry: windows } }, ["Edit pause window row 1 back by hand: this preview's diff shows what it said.", "Edit pause window row 1 back by hand: the console kept no copy of what it said."], null, "Confirm", "Edited pause window row 1"],
@@ -562,7 +562,7 @@ function goldenForms() {
   for (const f of files) {
     const text = readFileSync(join(root, String(f)), "utf8");
     for (const m of text.matchAll(/<form\b[^>]*\sdata-action="([^"]+)"[^>]*>([^]*?)<\/form>/g)) {
-      forms.push({ structured: /data-structured="(priorities|envelope|trigger)"/.exec(m[0])?.[1] ?? null, file: String(f), action: m[1], names: [...m[2].matchAll(/<(?:input|select|textarea|button)\b[^>]*\sname="([^"]+)"/g)].map((n) => n[1]) });
+      forms.push({ structured: /data-structured="(priorities|envelope|trigger|resolver)"/.exec(m[0])?.[1] ?? null, file: String(f), action: m[1], names: [...m[2].matchAll(/<(?:input|select|textarea|button)\b[^>]*\sname="([^"]+)"/g)].map((n) => n[1]) });
     }
   }
   return forms;
@@ -574,10 +574,11 @@ test("every form a golden draws names a known action and sends only fields that 
   for (const { file, action, names, structured } of forms) {
     const a = ACTIONS.find((x) => x.name === action);
     assert.ok(a, `${file}: form[data-action="${action}"] is an action`);
-    const sent = structured === "trigger" ? ["trigger"] : structured === "priorities" ? ["projects", "validDays"] : structured === "envelope" ? ["envelope"] : names;
+    const sent = structured === "trigger" ? ["trigger"] : structured === "priorities" ? ["projects", "validDays"] : structured === "envelope" ? ["envelope"] : structured === "resolver" ? names.filter((n) => n !== "kind" && (action === "secret-bundle-add" || n !== "format")) : names;
     if (structured) {
-      assert.equal(action, structured === "trigger" ? "trigger-add" : structured === "priorities" ? "priorities-set" : "envelope-set");
-      for (const name of names) assert.ok(structured === "trigger" ? Object.values(WP.TRIGGER_ADD_FIELDS).some(fields=>fields.includes(name)) : structured === "priorities" ? name === "validDays" || /^weight:(?:_other|[a-z0-9-]+)$/.test(name) : ["window", "totalUsd", "enabled", "writers", "maxStepPct", "minIntervalHours", "maxPlanDays"].includes(name) || /^(?:floor|weight):(?:_other|[a-z0-9-]+)$/.test(name), `${file}: structured ${name} is packed by bodyOf`);
+      if (structured === "resolver") assert.ok(["secret-profile-add", "secret-bundle-add"].includes(action), `${file}: the resolver picker uses an existing declaration action`);
+      else assert.equal(action, structured === "trigger" ? "trigger-add" : structured === "priorities" ? "priorities-set" : "envelope-set");
+      for (const name of names) assert.ok(structured === "resolver" ? ["kind", "name", "path", "format"].includes(name) : structured === "trigger" ? Object.values(WP.TRIGGER_ADD_FIELDS).some(fields=>fields.includes(name)) : structured === "priorities" ? name === "validDays" || /^weight:(?:_other|[a-z0-9-]+)$/.test(name) : ["window", "totalUsd", "enabled", "writers", "maxStepPct", "minIntervalHours", "maxPlanDays"].includes(name) || /^(?:floor|weight):(?:_other|[a-z0-9-]+)$/.test(name), `${file}: structured ${name} is packed by bodyOf`);
     }
     for (const n of sent) assert.ok(a.fields.includes(n), `${file}: ${action} sends ${n}, which it does not take`);
   }
@@ -915,13 +916,13 @@ test("a resolver's replace and removal are said in words in the bar, never an ar
   const c = await start({ paths });
   const items = (j) => (/<ul class="confirm__list">([^]*?)<\/ul>/.exec(j.html)?.[1] ?? "").split("</li>").filter(Boolean).map((li) => li.replace(/^<li>/, ""));
   const removed = (await c.act("secret-profile-remove", { name: "prod" })).json();
-  assert.deepEqual(items(removed), ["prod: /opt/r", "Every trigger naming it refuses pre-spend after this, rather than running without its secrets."]);
+  assert.deepEqual(items(removed), ["prod: …/r", "No trigger in the triggers file names this profile, so none of its jobs depend on it.", "The resolver script stays on disk; only the declaration goes.", "Audited as secret-profile-remove."]);
   const bundleGone = (await c.act("secret-bundle-remove", { name: "op-shop" })).json();
-  assert.deepEqual(items(bundleGone), ["op-shop: /opt/b (dotenv)", "No bundle in triggers.json names it, so no project&#39;s jobs depend on it."]);
+  assert.deepEqual(items(bundleGone), ["op-shop: …/b (dotenv)", "No bundle in triggers.json names it, so no project&#39;s jobs depend on it.", "The resolver script stays on disk; only the declaration goes.", "Audited as secret-bundle-remove."]);
   const replaced = (await c.act("secret-profile-add", { name: "prod", path: "/opt/r2" })).json();
-  assert.ok(items(replaced).includes("This replaces the current resolver, prod: /opt/r"), items(replaced).join("\n"));
+  assert.ok(items(replaced).includes("This replaces the current resolver, prod: …/r"), items(replaced).join("\n"));
   const bundleReplaced = (await c.act("secret-bundle-add", { name: "op-shop", path: "/opt/b2", format: "json" })).json();
-  assert.ok(items(bundleReplaced).includes("This replaces the current resolver, op-shop: /opt/b (dotenv)"), items(bundleReplaced).join("\n"));
+  assert.ok(items(bundleReplaced).includes("This replaces the current resolver, op-shop: …/b (dotenv)"), items(bundleReplaced).join("\n"));
   for (const j of [removed, bundleGone, replaced, bundleReplaced]) assert.ok(!items(j).includes(""), "a blank planner line is no item");
 });
 
@@ -1379,7 +1380,7 @@ test("an Undo is the way back as it was: a key that had no value is unset again,
   writeFileSync(fresh.settingsFile, `${JSON.stringify({ secretProfiles: { prod: "/opt/old-resolver" } }, null, 2)}\n`);
   const replaced = (await f.both("secret-profile-add", { name: "prod", path: "/opt/new-resolver" })).confirm.json().change;
   assert.equal(replaced.inverse, null);
-  assert.equal(replaced.undo, "Put profile prod back by hand: the console kept no copy of the resolver it replaced.", "the banner's sentence points at no preview");
+  assert.equal(replaced.undo, "Declare prod again with the previous resolver; the console keeps no full path to replay it.", "the banner's sentence points at no preview");
   assert.equal(replaced.summary, "Replaced the resolver of profile prod");
   assert.ok(!JSON.stringify(replaced).includes("/opt/"), "no resolver path in the change");
   const added = (await f.both("secret-profile-add", { name: "dev", path: "/opt/dev-resolver" })).confirm.json().change;

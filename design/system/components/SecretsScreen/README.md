@@ -8,24 +8,25 @@ Secret profiles and project bundles as names and states, never values: where eac
   - Triggers and Projects that use it;
   - Last resolve, with its run;
   - Served by: the live hosts that advertise it.
-  Rows that refuse jobs are tinted, and each says so in words. Remove opens a red confirm under the table with the settings diff (paths by last folder only) and what it refuses after: "Every trigger naming it is refused before spend after this, rather than running without its secrets."
+  Rows that refuse jobs are tinted, and each says so in words. Triggers link by their one-based row; a refused cron gives its next fire. Remove opens a red confirm under the table with the settings diff (paths by last folder only) and what it refuses after: "Every trigger naming it is refused before spend after this, rather than running without its secrets." If the env also declares the name, removal ends the ambiguity and jobs use its env resolver. The script stays on disk; Undo says to declare the name again with the same resolver.
 - **Secret bundles.** Each bundle's project, resolver and its declared state, fork reviews, OpenShell endpoints, the triggers that opted out, and the variable names the newest run received.
-- **Declare a resolver.** One form for a profile or a bundle resolver. It refuses a relative path in the console's words, and its hint names the resolver roots.
+- **Declare a resolver.** One form for a profile or a bundle resolver, with dotenv or json for a bundle. It refuses a relative path under the field in the console's words, and its hint counts the resolver roots.
+- **What a run gets.** Profiles, project bundles, resolver execution and limits, the five bundle exclusions and the venue-specific custody of the values. Names only.
 
 A viewer sees the tables, with no Remove or forms.
 
-**Panels.** `p-secret-profiles`, `p-secret-bundles`, `p-secret-add`.
+**Panels.** `p-secret-problems`, `p-secret-profiles`, `p-secret-bundles`, `p-secret-add`, `p-secret-help`.
 
 **The server provides.**
 - Per profile: source, roots judgement, triggers and projects using it, the last resolve with its run, and the hosts advertising `s:<name>`.
-- Per bundle: project, resolver and declared state, format, fork reviews, endpoints by name and host, opted-out triggers, and the newest received variable names.
+- Per bundle: project, resolver and declared state, format, fork reviews, endpoints by name and host, opted-out triggers, and the newest received variable names with the run and time. Bundle resolvers include both sources.
 - For writes: the settings diff with resolver paths shortened to their last folder, the effect sentence and the ticket.
 
 **Why it works this way.**
 - **A profile** resolves a trigger's own `run.secrets`: one reference per variable, at most 16.
 - **A bundle** hands every variable its resolver prints to each trigger-made job of the project: at most 64 variables, 256 KiB of output, 64 KiB per value.
 - **A run goes without its bundle** when it is a hand run, a chained run, opted out, a fork's pull request (unless fork reviews is on), or its head could not be verified. Its run page says which.
-- **The resolver runs** as the worker's account, once per reference, and only from inside `PI_SECRET_RESOLVER_ROOTS`.
+- **The resolver runs** as the worker's account, once per reference for profiles and once per job start for bundles. Only overlay resolvers must sit inside `PI_SECRET_RESOLVER_ROOTS`; env resolvers are not bounded by it.
 - **Never shown:** a reference, a value, or a resolver's full path. Viewers see names and states.
 
 **Fixture note.** The fixture declares no secret profile or bundle, so everything here is sample: the profiles default, vault, ops-1p and stripe; the bundles billing, web and legacy; and their variables, hosts and runs. The sentences follow the console's own (`read-model.mjs`, `write-plans.mjs`). The all-caps words there (AMBIGUOUS, OUTSIDE, PRE-SPEND, EXECUTES) are written in sentence case.

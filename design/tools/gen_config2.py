@@ -315,7 +315,7 @@ def secrets():
         ("vault", ("idle", "info", "declared in the settings overlay"), ("ok", "done", "inside PI_SECRET_RESOLVER_ROOTS"), "#7", '<span class="muted">any (a webhook trigger)</span>',
          f'{state_line("ok", "done", "resolved")}<small>15:13 UTC · {runlink("gh-2f6a")}</small>', 'mini1, mini2<small>build3 publishes no capabilities</small>', ""),
         ("ops-1p", ("idle", "info", "declared in the settings overlay"), ("failed", "failed", "outside PI_SECRET_RESOLVER_ROOTS, so the worker refuses every job naming it"), "#6", tag("ops"),
-         f'<span class="muted">no run since it was declared, Tue 6 Oct</span>{state_line("failed", "failed", "the next run, Mon 06:00 UTC, will be refused")}', "mini1", "row--failed"),
+         f'<span class="muted">no run in view</span>{state_line("failed", "failed", "the next run, Mon 06:00 UTC, will be refused")}', "mini1", "row--failed"),
         ("stripe", ("failed", "failed", "ambiguous: also in PI_SECRET_PROFILES, so the worker refuses every secrets job"), ("idle", "info", "not bounded (an env resolver)"), "#5",
          '<span class="muted">any (a webhook trigger)</span>', '<span class="muted">no run in view</span>', '<span class="c2-st tone-attention">' + ic("attention", "ic ic--sm") + '<span>no live host advertises it</span></span>', "row--failed"),
     ]
@@ -326,7 +326,7 @@ def secrets():
                           (f'<span class="c2-cell">{last}</span>', "wide"), (f'<span class="c2-cell">{served}</span>', "wide"), (act, "act c2-actc")]))
     prof_tbl = table([("Profile", ""), ("Source", ""), ("Resolver roots", ""), ("Triggers", ""), ("Projects", ""), ("Last resolve", ""), ("Served by", ""), ("", "act")],
                      rows, caption="Secret profiles", stack=True)
-    remove = f"""<div class="c2-pad2">{diff("~/.pi-dispatch/settings.json", [("ctx", '"secretProfiles": {'), ("del", '  "ops-1p": "…/1p-read",'),
+    remove = f"""<div class="c2-pad2">{diff("settings.json", [("ctx", '"secretProfiles": {'), ("del", '  "ops-1p": "…/1p-read",'),
                                                                      ("ctx", '  "stripe": "…/stripe-read",'), ("ctx", '  "vault": "…/vault-read"'), ("ctx", '},')])}
 <div class="c2-gap2">{confirm("danger", "Remove a secret resolver",
     [f"<b>{code('ops-1p')} → {code('…/1p-read')}</b> leaves the settings overlay.",
@@ -363,10 +363,20 @@ def secrets():
     p_add = card("Declare a resolver", add, id_="p-secret-add", sub="writes the settings overlay")
 
 
-    inner = top + p_prof + p_bund + p_add
+    help_body = f"""<ul class="c2-list">
+<li>{ic('key')}<span><b>Trigger secrets:</b> at most 16 variables, through its named profile or default, once per reference before the container starts.</span></li>
+<li>{ic('key')}<span><b>Project bundle:</b> dotenv or json, at most 64 variables, 256 KiB of output and 64 KiB per value. A trigger's own secrets win on a clash; its run records the received and shadowed names.</span></li>
+<li>{ic('info')}<span>A hand run, a chained run, an opted-out trigger, a fork without fork reviews, or an unverified head goes without the bundle. Its run page says which.</span></li>
+<li>{ic('info')}<span><b>Resolvers:</b> executable absolute paths, run as the worker's account, once per reference for a profile and once per job start for a bundle. Overlay resolvers must sit inside PI_SECRET_RESOLVER_ROOTS; env resolvers are not bounded by it. A name in both sources refuses every secrets or bundled job.</span></li>
+<li>{ic('info')}<span>Local and Podman jobs can read every supplied value. On OpenShell a variable with an endpoint is a placeholder, replaced only in requests to that host. Forge and provider tokens and PI_FORWARD_ENV are separate inputs.</span></li>
+<li>{ic('info')}<span>Never shown here: a reference, a value, or a resolver's or root's full path.</span></li>
+</ul>"""
+    p_help = card("What a run gets", help_body, id_="p-secret-help")
+    inner = '<section id="p-secret-problems" data-panel>' + top + '</section>' + p_prof + p_bund + p_add + p_help
     return shell("Configuration", inner, "Secrets", sub="Names and states only. 2 problems: one profile declared twice, one outside the resolver roots.", back="Configuration")
 
 SE_CSS = COMMON_CSS + """
+.btn { position: relative; }
 .c2-pad2 { padding: var(--space-4) var(--space-5) var(--space-5); border-top: 1px solid var(--line); }
 .c2-res { padding: 0 var(--space-5) var(--space-3); font-size: 13px; color: var(--ink); }
 #p-secret-add .c2-form { max-width: 640px; }
@@ -406,28 +416,29 @@ def connections():
                           (f'<span class="c2-cell"><span>{ver}</span><small>{path}</small></span>', "wide"), (poll, ""), (who, "")])
         else:
             frows.append(("c2-off", [(f'<b>{f}</b>', "c2-first"), (state_line("idle", "minus", "not configured"), "c2-actc"),
-                          (f'<span class="muted">No trigger names {f}, so its webhook path answers 404 ("{f} webhooks are not configured").</span>', "wide c2-span"),
+                          (f'<span class="muted">No receiver variable for {f} is set, so its webhook path answers 404 ("{f} webhooks are not configured").</span>', "wide c2-span"),
                           ("", "hide-phone"), ("", "hide-phone"), ("", "hide-phone")]))
     forges = table([("Forge", ""), ("State", ""), ("Auth", ""), ("Webhook", ""), ("Polling", ""), ("Who may fire", "")], frows, caption="Forges", stack=True)
     forges += f"""<div class="c2-pad2">
-  <p class="c2-st tone-idle">{ic('info', 'ic ic--sm')}<span><b>Delivery health is not published.</b> Check the forge's delivery history or the receiver's log on mini1.</span></p>
+  <p class="c2-st tone-idle">{ic('info', 'ic ic--sm')}<span><b>Delivery health is not published.</b> Check the forge's delivery history for 401/404 refusals; the receiver log can help with 503 or enqueue failures. The receiver's location is not published.</span></p>
 </div>"""
     p_forges = card("Forges", forges, id_="p-forges", flush=True, sub="where jobs come from",
-                    end='<span class="card__sub">Receiver: a host service on mini1, port 8787</span>')
+                    end='<span class="card__sub">Receiver: port 3000; its location is not published</span>')
 
     E_ = [("mini1", "ok", "done", "running", "denies unlisted hosts (doctor, 2h ago)"),
           ("mini2", "ok", "done", "running", "denies unlisted hosts (doctor, 3h ago)"),
           ("build3", "failed", "failed", "missing", "every job here is refused before spend")]
     erows = [[(f'<b>{h}</b>', "c2-first"), (state_line(t, i, s), "c2-actc"), (f'<span class="muted">{n}</span>', "wide")] for h, t, i, s, n in E_]
     allow = ["api.github.com", ".githubusercontent.com", "gitlab.acme.dev", "registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "mcp.example.com", "api.acme.dev"]
-    egress = f"""<div class="c2-pad3">{facts([("Posture", f'on: jobs reach out only through the proxy ({code("PI_EGRESS")} unset)')], 1)}
+    egress = f"""<div class="c2-pad3">{facts([("Posture", f'on: local and podman jobs reach out only through the host proxy ({code("PI_EGRESS")} unset)')], 1)}
   <p class="c2-sub">Allowlist, {code('egress-allowlist.conf')}</p>
   <p class="c2-names">{''.join(code(h) for h in allow)}<span class="muted">and 6 more</span></p></div>
 {table([("Host", ""), ("Proxy", ""), ("Checked", "")], erows, caption="Egress proxy per host", stack=True)}"""
     p_egress = card("Egress", egress, id_="p-egress", flush=True, sub="what jobs may reach")
 
     ep_rows = [[(f'<b class="code">ollama-mini2</b>', "id c2-first"), (code("mini2.lan:11434"), ""), ("keyless", ""), (f'<svg class="c2-slots" viewBox="0 0 40 10" role="img" aria-label="1 of 2 slots in use"><circle class="c2-on" cx="5" cy="5" r="4.5"/><circle class="c2-offs" cx="17" cy="5" r="4"/></svg> 1 of 2', "c2-actc")],
-               [(f'<b class="code">vllm-build3</b>', "id c2-first"), (code("10.0.0.5:8000"), ""), ("keyless", ""), (f'<svg class="c2-slots" viewBox="0 0 40 10" role="img" aria-label="0 of 4 slots in use"><circle class="c2-offs" cx="5" cy="5" r="4"/><circle class="c2-offs" cx="17" cy="5" r="4"/><circle class="c2-offs" cx="29" cy="5" r="4"/></svg> 0 of 4', "c2-actc")]]
+               [(f'<b class="code">vllm-build3</b>', "id c2-first"), (code("10.0.0.5:8000"), ""), ("keyless", ""), (f'<svg class="c2-slots c2-slots--4" viewBox="0 0 52 10" role="img" aria-label="0 of 4 slots in use"><circle class="c2-offs" cx="5" cy="5" r="4"/><circle class="c2-offs" cx="17" cy="5" r="4"/><circle class="c2-offs" cx="29" cy="5" r="4"/><circle class="c2-offs" cx="41" cy="5" r="4"/></svg> 0 of 4', "c2-actc")]]
+    ep_rows.append([(f'<b class="code">local-model</b>', "id c2-first"), (code("host.docker.internal:11434"), "wide"), ("keyless", ""), (f'{state_line("idle", "minus", "not counted")}<div class="muted">2 declared · per-machine endpoint</div>', "wide")])
     endpoints = f"""{table([("Endpoint", ""), ("Host and port", ""), ("Key", ""), ("Slots in use", "act")], ep_rows, caption="Model endpoints", stack=True)}
 <div class="c2-pad2">
   {banner("attention", "attention", "mini2 reads its own copy of the file, and it does not load",
@@ -438,22 +449,22 @@ def connections():
     <li class="rowpill">{ic('key', 'ic ic--sm')}<b>kimi-coding</b><span>from the pi login on each host</span></li>
   </ul>
 </div>"""
-    p_ep = card("Model endpoints", endpoints, id_="p-endpoints", flush=True, sub=f'{code("model-endpoints.json")} · slots shared by the fleet')
+    p_ep = card("Model endpoints", endpoints, id_="p-endpoints", flush=True, sub=f'{code("model-endpoints.json")} · fleet lease counts where available')
 
     mcp = f"""<ul class="rows">
   <li class="rowpill">{ic('plug', 'ic ic--sm')}<b class="code">linear</b><span>http · {code('mcp.example.com')}</span><span class="end"><span class="muted">codemode</span>{chip('on', 'ok', 'done')}</span></li>
   <li class="rowpill">{ic('plug', 'ic ic--sm')}<b class="code">docs</b><span>stdio · {code('npx docs-mcp')}</span><span class="end"><span class="muted">deferred</span>{chip('off', '', 'minus')}</span></li>
-  <li class="rowpill tone-failed">{ic('failed', 'ic ic--sm')}<b class="code">dispatch-notes</b><span class="tinted">refused: names starting with dispatch are reserved</span></li>
-  <li class="rowpill">{ic('git', 'ic ic--sm')}<b class="code">forge</b><span>github-mcp-server 2.0.2; merge and approve tools withheld</span></li>
+  <li class="rowpill tone-failed">{ic('failed', 'ic ic--sm')}<b class="code">dispatch-notes</b><span class="tinted">refused: a name holding dispatch is reserved for the dispatch admin</span></li>
+  <li class="rowpill">{ic('git', 'ic ic--sm')}<b class="code">forge</b><span>GitHub or GitLab, as the job token; merge and approval tools withheld. Its version is in the job image</span></li>
 </ul>
-<p class="c2-gap2 card__sub">References {code('LINEAR_API_KEY')}. Changed with {code('pi-dispatch import-pi')}.</p>"""
+<p class="c2-gap2 card__sub">References {code('LINEAR_API_KEY')}. Rewritten by {code('pi-dispatch import-pi')}; there is no form for it here.</p>"""
     p_mcp = card("MCP servers", mcp, id_="p-mcp", sub="from the overlay's mcp.json")
 
     notify = f"""<ul class="c2-list">
   <li>{ic('comment')}<span><b>Forge comments:</b> on. Trigger 3 also keeps a <b>status comment</b> up to date while it runs.</span></li>
   <li>{ic('bell')}<span><b>Failure hook:</b> {code('PI_ON_FAILURE')} → {code('…/ntfy-page')}, once per paid failure.</span></li>
 </ul>
-<p class="c2-gap2 c2-st c2-quiet tone-ok">{ic('done', 'ic ic--sm')}<span>Last ran 15:10 UTC for {code('gh-f0c2')}, failed ({code('container-never-started')}) on mini1; it answered in 0.4 s.</span></p>"""
+  <p class="c2-gap2 c2-st c2-quiet tone-ok">{ic('done', 'ic ic--sm')}<span>The hook's runs are in the worker's log; hook history is not published.</span></p>"""
     p_notify = card("Notifications", notify, id_="p-notify")
 
     env = facts([
@@ -465,15 +476,16 @@ def connections():
     ], 1)
     p_env = card("Deployment environment", env + '<p class="c2-gap2 card__sub">Read from the deployment\'s .env. Edit the file and restart the service; nothing here writes it.</p>', id_="p-env")
 
-    pkgs = f"""<p class="muted">Staged 1 Oct, 09:12 UTC, by pi setup.</p>
+    pkgs = f"""<p class="muted">Staged 1 Oct, 09:12 UTC.</p>
 <ul class="rows c2-gap2"><li class="rowpill">{ic('queue', 'ic ic--sm')}<b class="code">pi-lint@1.4.2</b></li><li class="rowpill">{ic('queue', 'ic ic--sm')}<b class="code">pi-test-runner@0.9.0</b></li></ul>
 <p class="c2-gap2 card__sub">They load into every job except triggers that set {code('"packages": false')} (1 does). Staged with {code('pi-dispatch import-pi --with-packages')}.</p>"""
     p_pkgs = card("Staged pi packages", pkgs, id_="p-packages", sub="2")
 
-    inner = top + f'<div class="cols"><div class="stack">{p_forges}{p_egress}{p_ep}</div><div class="stack">{p_notify}{p_mcp}{p_env}{p_pkgs}</div></div>'
+    inner = '<section id="p-connection-problems" data-panel>' + top + '</section>' + f'<div class="cols"><div class="stack">{p_forges}{p_egress}{p_ep}</div><div class="stack">{p_notify}{p_mcp}{p_env}{p_pkgs}</div></div>'
     return shell("Configuration", inner, "Connections", sub="Where jobs come from, what they may reach, and who hears about failures. Names and hosts only.", back="Configuration")
 
 CO_CSS = COMMON_CSS + """
+@media (max-width: 1000px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 .c2-pad2 { padding: var(--space-4) var(--space-5) var(--space-5); border-top: 1px solid var(--line); display: grid; gap: var(--space-3); }
 .c2-pad2 .c2-sub { margin: var(--space-2) 0 0; }
 .c2-pad3 { padding: 0 var(--space-5) var(--space-4); }
@@ -486,6 +498,7 @@ CO_CSS = COMMON_CSS + """
 #p-env .fact { grid-template-columns: 150px minmax(0, 1fr); }
 #p-env .fact dt .code { font-size: 12px; }
 .c2-slots { width: 40px; height: 10px; vertical-align: -1px; margin-right: 4px; }
+.c2-slots--4 { width: 52px; }
 .c2-on { fill: var(--running); }
 .c2-offs { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
 .c2-names .muted { font-size: 12px; align-self: center; }
@@ -495,6 +508,8 @@ CO_CSS = COMMON_CSS + """
   .c2-pad2 { padding: var(--space-4); }
   .c2-pad3 { padding: 0 var(--space-4) var(--space-3); }
   #p-forges .card__head .end { margin-left: 0; }
+  #p-forges .tbl--stack tr { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+  #p-packages .code { white-space: normal; overflow-wrap: anywhere; }
   #p-mcp .rowpill, #p-endpoints .rowpill { flex-wrap: wrap; }
   .tbl--stack tr.c2-off { background: var(--surface-2); }
   #p-forges .tbl--stack tr.c2-off td { background: transparent; }
@@ -506,20 +521,19 @@ CO_CSS = COMMON_CSS + """
 # 5. PROJECT DETAIL: billing
 # =====================================================================================
 def size_chart():
-    """Peak memory of 23 runs (dots) against the size given (8 GiB line) and the suggestion (4 GiB, dashed). y: 0..9 GiB."""
+    """The chart's SVG scales its geometry, while phone axis type compensates for that scale."""
     peaks = [1.4, 1.9, 1.2, 2.0, 1.6, 1.8, 2.3, 1.1, 1.5, 1.7, 2.1, 1.3, 1.9, 1.6, 2.2, 1.0, 1.8, 1.5, 2.0, 1.7, 1.4, 1.9, 1.6]
-    H = 9.0
-    y = lambda g: 100 - g / H * 100
-    dots = "".join(f'<circle class="c2-pk" cx="{3 + i * 94 / (len(peaks) - 1):.1f}%" cy="{y(p):.1f}%" r="4"/>' for i, p in enumerate(peaks))
-    return f"""<svg class="c2-chart" role="img" aria-label="Peak memory of the last 23 runs, 1.0 to 2.3 GiB, against a size of 8 GiB; the suggestion is 4 GiB">
-  <line class="c2-grid0" x1="0" x2="100%" y1="{y(0):.1f}%" y2="{y(0):.1f}%"/>
-  <line class="c2-size" x1="0" x2="100%" y1="{y(8):.1f}%" y2="{y(8):.1f}%"/>
-  <line class="c2-sugg" x1="0" x2="100%" y1="{y(4):.1f}%" y2="{y(4):.1f}%"/>
-  <text class="c2-ct" x="0" y="{y(8) - 4:.1f}%">size 8 GiB</text>
-  <text class="c2-ct c2-ct--s" x="0" y="{y(4) - 4:.1f}%">suggested 4 GiB</text>
-  {dots}
+    y = lambda g: 154 - g / 9.0 * 130
+    ticks = "".join(f'<line class="c2-grid0" x1="68" x2="540" y1="{y(g):.1f}" y2="{y(g):.1f}"/><text class="c2-axis" x="60" y="{y(g):.1f}" text-anchor="end" dominant-baseline="middle">{g}</text>' for g in [0, 2, 4, 6, 8])
+    dates = "".join(f'<text class="c2-axis" x="{x}" y="175" text-anchor="{anchor}">{label}</text>' for x, anchor, label in [(68,"start","09-08"),(225.333,"middle","09-18"),(382.667,"middle","09-28"),(540,"end","10-08")])
+    dots = "".join(f'<circle class="c2-pk" cx="{68 + i * 472 / (len(peaks) - 1):.1f}" cy="{y(peak):.1f}" r="4"/>' for i, peak in enumerate(peaks))
+    return f"""<p class="c2-chart-unit">GiB</p><svg class="c2-chart" viewBox="0 0 560 190" role="img" aria-label="Peak memory of the last 23 runs, 1.0 to 2.3 GiB, against a size of 8 GiB; the suggestion is 4 GiB">
+  {ticks}
+  <line class="c2-size" x1="68" x2="540" y1="{y(8):.1f}" y2="{y(8):.1f}"/>
+  <line class="c2-sugg" x1="68" x2="540" y1="{y(4):.1f}" y2="{y(4):.1f}"/>
+  {dots}{dates}
 </svg>
-<div class="keyrow"><span><i class="c2-k c2-k--pk"></i>peak of one run</span><span><i class="c2-k c2-k--size"></i>size given</span><span><i class="c2-k c2-k--sugg"></i>suggestion</span><span>a red dot would be an out-of-memory kill; there are none</span></div>"""
+<div class="keyrow"><span><i class="c2-k c2-k--pk"></i>peak of one run</span><span><i class="c2-k c2-k--size"></i>size given, 8 GiB</span><span><i class="c2-k c2-k--sugg"></i>suggestion, 4 GiB</span><span>a red dot would be an out-of-memory kill; there are none</span></div>"""
 
 def project():
     kpis = f"""<div class="cards-3">
@@ -538,19 +552,8 @@ def project():
          ("gitlab:acme/billing-ui", "git", "repository", "6 runs this week", "13:49 UTC")]
     mrows = "".join(f'<li class="rowpill">{ic(i, "ic ic--sm")}<b class="code">{E(n)}</b><span>{k}</span><span class="end">{r} · last {l}</span></li>' for n, i, k, r, l in M)
     members = f"""<ul class="rows">{mrows}</ul>
-<form class="c2-form c2-gap" aria-label="Edit the members of billing">
-  <div class="field"><label for="pm-members">Members, one repository or folder per line</label>
-    <textarea id="pm-members" class="textarea input--code">github:acme/billing
-github:acme/billing-worker</textarea></div>
-  <div class="c2-act"><button class="btn btn--primary" type="button">Preview the edit</button><span class="field__hint">Name a repository with its forge (github:owner/name) or a folder by its absolute path.</span></div>
-</form>
-<div class="c2-gap">{diff("…/deploy/projects.json", [("ctx", '{ "id": "billing",'), ("ctx", '  "members": ['), ("ctx", '    "github:acme/billing",'),
-                                                    ("del", '    "gitlab:acme/billing-ui"'), ("add", '    "github:acme/billing-worker"'), ("ctx", '  ] }')])}</div>
-<div class="c2-gap2">{confirm("safe", "Edit project billing",
-    ["<b>github:acme/billing-worker joins</b>: its runs record billing from their next pickup, and count against billing's rows.",
-     "<b>gitlab:acme/billing-ui leaves the project</b>: a project:billing row no longer counts it, which widens what it may spend.",
-     "Records already written keep billing. Audited as <b>project-edit</b>."],
-    "Put gitlab:acme/billing-ui back and remove billing-worker", "Confirm: edit billing")}</div>"""
+<p class="c2-gap2 card__sub">Runs of these members record project billing when a worker picks them up; a record keeps the project it was written with.</p>
+<p class="c2-gap2 c2-st tone-attention">{ic('attention', 'ic ic--sm')}<span>Members cannot be edited while the secret bundle names billing. Change the bundle in triggers.json first.</span></p>"""
     p_members = card("Members", members, id_="p-proj-members", sub="2 repositories")
 
     size = f"""{size_chart()}
@@ -593,7 +596,7 @@ github:acme/billing-worker</textarea></div>
 </ul>"""
     p_trg = card("Triggers that ran here", trg, id_="p-proj-triggers", sub="last 24 hours")
 
-    delete = f"""<p class="muted">Delete project billing: refused while scoped limits row 2 ({code('project:billing')}) or the secret bundle {code('billing')} names it. Remove those first.</p>
+    delete = f"""<p class="muted">Delete project billing: refused while scoped limits row 2 ({code('project:billing')}), the secret bundle {code('billing')} or an envelope floor names it. Remove those first.</p>
 <div class="c2-gap2 c2-act"><button class="btn btn--danger" type="button" aria-disabled="true">Delete billing</button></div>"""
     p_del = card("Delete", delete, id_="p-proj-delete")
 
@@ -603,7 +606,14 @@ github:acme/billing-worker</textarea></div>
     return shell("Configuration", inner, title, sub=sub, end=btn("Open in Runs", "", "runs", sm=False), back="Configuration")
 
 PR_CSS = COMMON_CSS + """
-.c2-chart { display: block; width: 100%; height: 150px; overflow: visible; }
+#p-proj-members .rowpill { min-width: 0; flex-wrap: wrap; }
+#p-proj-members .rowpill .end { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 1100px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+@media (min-width: 761px) and (max-width: 900px) { .cards-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .cards-3 > :last-child { grid-column: 1 / -1; } }
+.c2-chart-unit { color: var(--ink-muted); font-size: 11px; line-height: 14px; margin-top: var(--space-2); }
+.c2-chart { display: block; width: 100%; height: auto; min-height: 150px; overflow: visible; margin-top: 0; }
+.c2-axis { fill: var(--ink-muted); font-family: var(--font-sans); font-size: 11px; }
+@media (max-width: 760px) { .c2-axis { font-size: calc(34px - 3vw); } .c2-chart { min-height: 120px; } }
 .c2-grid0 { stroke: var(--line); }
 .c2-size { stroke: var(--ink-muted); stroke-width: 2; }
 .c2-sugg { stroke: var(--attention); stroke-width: 2; stroke-dasharray: 6 5; }
@@ -725,24 +735,25 @@ A viewer never sees this page.
   - Triggers and Projects that use it;
   - Last resolve, with its run;
   - Served by: the live hosts that advertise it.
-  Rows that refuse jobs are tinted, and each says so in words. Remove opens a red confirm under the table with the settings diff (paths by last folder only) and what it refuses after: "Every trigger naming it is refused before spend after this, rather than running without its secrets."
+  Rows that refuse jobs are tinted, and each says so in words. Triggers link by their one-based row; a refused cron gives its next fire. Remove opens a red confirm under the table with the settings diff (paths by last folder only) and what it refuses after: "Every trigger naming it is refused before spend after this, rather than running without its secrets." If the env also declares the name, removal ends the ambiguity and jobs use its env resolver. The script stays on disk; Undo says to declare the name again with the same resolver.
 - **Secret bundles.** Each bundle's project, resolver and its declared state, fork reviews, OpenShell endpoints, the triggers that opted out, and the variable names the newest run received.
-- **Declare a resolver.** One form for a profile or a bundle resolver. It refuses a relative path in the console's words, and its hint names the resolver roots.
+- **Declare a resolver.** One form for a profile or a bundle resolver, with dotenv or json for a bundle. It refuses a relative path under the field in the console's words, and its hint counts the resolver roots.
+- **What a run gets.** Profiles, project bundles, resolver execution and limits, the five bundle exclusions and the venue-specific custody of the values. Names only.
 
 A viewer sees the tables, with no Remove or forms.
 
-**Panels.** `p-secret-profiles`, `p-secret-bundles`, `p-secret-add`.
+**Panels.** `p-secret-problems`, `p-secret-profiles`, `p-secret-bundles`, `p-secret-add`, `p-secret-help`.
 
 **The server provides.**
 - Per profile: source, roots judgement, triggers and projects using it, the last resolve with its run, and the hosts advertising `s:<name>`.
-- Per bundle: project, resolver and declared state, format, fork reviews, endpoints by name and host, opted-out triggers, and the newest received variable names.
+- Per bundle: project, resolver and declared state, format, fork reviews, endpoints by name and host, opted-out triggers, and the newest received variable names with the run and time. Bundle resolvers include both sources.
 - For writes: the settings diff with resolver paths shortened to their last folder, the effect sentence and the ticket.
 
 **Why it works this way.**
 - **A profile** resolves a trigger's own `run.secrets`: one reference per variable, at most 16.
 - **A bundle** hands every variable its resolver prints to each trigger-made job of the project: at most 64 variables, 256 KiB of output, 64 KiB per value.
 - **A run goes without its bundle** when it is a hand run, a chained run, opted out, a fork's pull request (unless fork reviews is on), or its head could not be verified. Its run page says which.
-- **The resolver runs** as the worker's account, once per reference, and only from inside `PI_SECRET_RESOLVER_ROOTS`.
+- **The resolver runs** as the worker's account, once per reference for profiles and once per job start for bundles. Only overlay resolvers must sit inside `PI_SECRET_RESOLVER_ROOTS`; env resolvers are not bounded by it.
 - **Never shown:** a reference, a value, or a resolver's full path. Viewers see names and states.
 
 **Fixture note.** The fixture declares no secret profile or bundle, so everything here is sample: the profiles default, vault, ops-1p and stripe; the bundles billing, web and legacy; and their variables, hosts and runs. The sentences follow the console's own (`read-model.mjs`, `write-plans.mjs`). The all-caps words there (AMBIGUOUS, OUTSIDE, PRE-SPEND, EXECUTES) are written in sentence case.""",
@@ -753,34 +764,35 @@ A viewer sees the tables, with no Remove or forms.
 - **Problems first.** A banner names the host whose egress proxy is missing and the run it refused, with the command that fixes it.
 - **Forges.**
   - For each armed forge: which triggers arm it, the auth source and per-job token, how deliveries are verified and de-duplicated, polling, and who may fire.
-  - Forges no trigger names collapse to one line saying their path answers 404.
+  - An unconfigured forge collapses to one line saying its path answers 404. GitHub is enabled by a trigger or an explicit auth source; each other forge by any of its receiver variables. GitHub's implicit default auth source is shown as such.
   - One line says delivery health is not published and where to look instead.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
-- **Model endpoints.** Each endpoint's host and port, whether it is keyless, and its slots in use. A banner covers the case where a host's own copy of the file does not load, quoting doctor. Provider keys are listed by variable name and where they come from.
-- **Notifications.** Forge comments and the `PI_ON_FAILURE` hook, and when the hook last ran.
+- **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor. Provider keys are listed by variable name and where they come from.
+- **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Its runs are in the worker's log; their history is not published.
 - **MCP servers, Deployment environment, Staged pi packages.** All read-only, each with the command or file that changes it. Caps set only in the .env read "unknown (worker env or default)".
 
 Viewers see the same page; nothing on it writes.
 
-**Panels.** `p-forges`, `p-egress`, `p-endpoints`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
+**Panels.** `p-connection-problems`, `p-forges`, `p-egress`, `p-endpoints`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
 
 **The server provides.**
 - Per forge: the triggers naming it, the auth source, whether verification secrets are set (names only), the webhook mode and path, and the polling settings.
 - Per host: the egress proxy state and the newest egress doctor lines.
-- The model endpoints file and live slot leases, and the provider key sources.
+- The model endpoints file, declared slots and whether fleet leases count that endpoint, and the provider key sources.
 - The overlay MCP servers with their refusals, and the staged packages receipt.
-- The `PI_ON_FAILURE` hook path and its last `on_failure` log line.
+- The `PI_ON_FAILURE` hook by its last folder, its timeout and the fact that its runs are in the worker's log.
 - The .env keys the console reads, and any shell-versus-.env disagreement.
 
 **Why it works this way.**
-- **Delivery health.** The receiver has no health check of its own, so the console cannot say whether deliveries arrive. The forge's delivery history (401, 404 and 503 answers) and the receiver's log can.
-- **Egress.** With egress on, each job gets its own internal network and reaches out only through the proxy: HTTPS (443) and plain HTTP (80) to listed hosts, plus the declared model endpoints. A leading dot covers subdomains.
+- **Delivery health.** The receiver has no health check of its own, so the console cannot say whether deliveries arrive. Use the forge's delivery history for 401/404 refusals. The receiver log can help with 503 or enqueue failures; signature, route and early request refusals do not write a log line, and not every 503 is logged.
+- **Endpoint slots.** Fleet leases count endpoints only when PI_WORKER_NAME is declared and the endpoint is not host.docker.internal or host.containers.internal. These aliases use per-machine capacity; without a host queue, the worker takes no fleet lease. Both cases say not counted and retain the declared capacity, rather than claiming zero. A failed lease read remains unknown.
+- **Egress.** With egress on, each local or podman job gets its own internal network and reaches out only through its host's proxy: HTTPS (443) and plain HTTP (80) to listed hosts, plus the declared model endpoints. OpenShell applies its own sandbox policy from the same sources. A leading dot covers subdomains.
 - **Notifications.** pi-dispatch sends none of its own. Forge comments are always on: one fixed sentence on the issue for a paid failure, and one when a run stops to ask. The failure hook runs once per paid failure with "job, outcome, reason, host" and has 10 s to answer; it never runs for completions, free refusals, recovered retries or a cancel.
 - **MCP servers** are named by reference only; values never reach the page, and there is no form for them here.
 
 **Fixture note.**
 - **From the fixture:** build3's missing proxy, gh-e9a0, the linear MCP server, and the forges named by triggers 1 to 7.
-- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path, and its last run for gh-f0c2.
+- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. Receiver location and hook history are not published, so the card says where to look rather than inventing them.
 - **Known repo gaps:** webhook health is not published, and there is no notification setting beyond the hook.""",
 
 "ProjectDetail": """One project on its own page: what it spent against its share, its members, its job size against what its runs use, and the rows that govern it.
@@ -790,8 +802,8 @@ Viewers see the same page; nothing on it writes.
   - this week's spend against the allocation share;
   - the last 24 hours of runs, with the worst one named;
   - the job size, flagged when the runs use far less.
-- **Members.** Each member repository or folder, with its runs and last run. Editing the list previews the projects file as a diff. The confirm bar says what joining and leaving mean: a member that leaves widens what it may spend.
-- **Job size.** Each run's peak memory as a dot against the size given (solid) and the suggestion (dashed); an out-of-memory kill would be a red dot. Under the chart:
+- **Members.** Each member repository or folder, with its runs and last run. Editing an unbound project previews the projects file as a diff; joining counts from the next pickup, leaving widens what it may spend, and written records keep their project. Billing has a bundle, so its planner's refusal appears before any press and no edit form is drawn.
+- **Job size.** Each run's peak memory as a dot against the size given (solid) and the suggestion (dashed); an out-of-memory kill would be a red dot. Visible GiB units and numeric/date axes keep readable screen-sized type on a phone as the SVG scales. Under the chart:
   - the memory and CPU verdicts in words;
   - the exact `dispatch_limit_edit` call, with Copy;
   - Preview this size, which goes through the normal confirm.
@@ -801,7 +813,7 @@ Viewers see the same page; nothing on it writes.
   - Limits: its scoped rows.
   - Secret bundle: variable names only.
   - The triggers that ran here.
-  - Delete, which says why it is refused while a limits row or a bundle names the project.
+  - Delete, which shows the planner's refusal while a limits row, bundle or envelope floor names the project, otherwise a red confirmed action.
 
 A viewer sees the numbers, chart and facts, with no forms or Delete.
 
@@ -821,7 +833,7 @@ A viewer sees the numbers, chart and facts, with no forms or Delete.
 
 **Fixture note.**
 - **From the fixture:** the billing members, scoped limits row 2 (8 GiB, 4 CPUs) and the runs gh-e9a0, gh-ebd7, gl-9a2c, gh-7cdf and gh-4a7e.
-- **Sample:** the spend and share, the weights and plan, the peaks and suggestion, github:acme/billing-worker, the bundle, and the run counts per member.""",
+- **Sample:** the spend and share, the weights and plan, the peaks and suggestion, the bundle, and the run counts per member. An unbound project provides the member edit and confirmed preview; billing's bundle refuses that edit.""",
 }
 
 if __name__ == "__main__":

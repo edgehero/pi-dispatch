@@ -5,8 +5,8 @@ One project on its own page: what it spent against its share, its members, its j
   - this week's spend against the allocation share;
   - the last 24 hours of runs, with the worst one named;
   - the job size, flagged when the runs use far less.
-- **Members.** Each member repository or folder, with its runs and last run. Editing the list previews the projects file as a diff. The confirm bar says what joining and leaving mean: a member that leaves widens what it may spend.
-- **Job size.** Each run's peak memory as a dot against the size given (solid) and the suggestion (dashed); an out-of-memory kill would be a red dot. Under the chart:
+- **Members.** Each member repository or folder, with its runs and last run. Editing an unbound project previews the projects file as a diff; joining counts from the next pickup, leaving widens what it may spend, and written records keep their project. Billing has a bundle, so its planner's refusal appears before any press and no edit form is drawn.
+- **Job size.** Each run's peak memory as a dot against the size given (solid) and the suggestion (dashed); an out-of-memory kill would be a red dot. Visible GiB units and numeric/date axes keep readable screen-sized type on a phone as the SVG scales. Under the chart:
   - the memory and CPU verdicts in words;
   - the exact `dispatch_limit_edit` call, with Copy;
   - Preview this size, which goes through the normal confirm.
@@ -16,7 +16,7 @@ One project on its own page: what it spent against its share, its members, its j
   - Limits: its scoped rows.
   - Secret bundle: variable names only.
   - The triggers that ran here.
-  - Delete, which says why it is refused while a limits row or a bundle names the project.
+  - Delete, which shows the planner's refusal while a limits row, bundle or envelope floor names the project, otherwise a red confirmed action.
 
 A viewer sees the numbers, chart and facts, with no forms or Delete.
 
@@ -36,4 +36,4 @@ A viewer sees the numbers, chart and facts, with no forms or Delete.
 
 **Fixture note.**
 - **From the fixture:** the billing members, scoped limits row 2 (8 GiB, 4 CPUs) and the runs gh-e9a0, gh-ebd7, gl-9a2c, gh-7cdf and gh-4a7e.
-- **Sample:** the spend and share, the weights and plan, the peaks and suggestion, github:acme/billing-worker, the bundle, and the run counts per member.
+- **Sample:** the spend and share, the weights and plan, the peaks and suggestion, the bundle, and the run counts per member. An unbound project provides the member edit and confirmed preview; billing's bundle refuses that edit.

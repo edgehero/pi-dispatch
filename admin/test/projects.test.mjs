@@ -10,6 +10,7 @@ import { planProjectsWrite, readProjects, writeProjects, writeScopedLimits } fro
 import { checkProjectRows, parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
 import { escapeInterpreted } from "../src/panel.mjs";
 import { escapeControls, parseProjects } from "@edgehero/pi-dispatch/projects";
+import { readProjectView } from "../src/project-view.mjs";
 
 /**
  * Issue #499 part C: the admin's projects surfaces. The reader and the writer (`readProjects`, `planProjectsWrite`,
@@ -36,6 +37,31 @@ function toolCtx({ hasUI = true, answer = true } = {}) {
   return { ctx: { hasUI, ui: hasUI ? ui : {} }, shown };
 }
 const textOf = (res) => JSON.parse(res.content[0].text);
+
+/** The tool's production project assembly, with only the fleet and expensive reads injected: no unit test dials. */
+async function withProjectToolReads(run) {
+  let disposed = 0;
+  let snapshots = 0;
+  const readIds = [];
+  indexMod.setConfigToolReadsForTest({
+    fleet: () => ({
+      snapshot: async (options) => { snapshots++; assert.deepEqual(options, { waiting: true }); return { hostBudgets: [{ name: "test", jobs: "[]", jobsMore: "0" }], waiting: { rows: [] } }; },
+      runsPage: async () => ({ runs: [], next: null, mirror: "off" }),
+      dispose: async () => { disposed++; },
+    }),
+    project: (options) => {
+      readIds.push(options.id);
+      return readProjectView({ ...options, reads: {
+        ...options.reads,
+        scan: () => [{ jobId: "gh-tool-view", project: "shop", kind: "github", target: "acme/web#1", outcome: "completed", endedAt: new Date(options.now - 1_000).toISOString(), tokens: { cost: 0.25, metered: true } }],
+        allocation: () => ({ unset: true }),
+        sizing: () => ({ projects: {} }),
+      } });
+    },
+  });
+  try { return await run({ stats: () => ({ disposed, snapshots, readIds }) }); }
+  finally { indexMod.setConfigToolReadsForTest(); }
+}
 
 /** An in-memory fs that records every call, so a test can see HOW a file was written, not only what it holds. */
 function memFs(initial = {}) {
@@ -253,11 +279,21 @@ test("the project tools refuse while PI_PROJECTS_FILE is unset, saying why", asy
 
 test("dispatch_projects lists each project with its escaped name, members and the rows that cap it", async () => {
   deployment({ projects: [{ id: "shop", name: "Web‮shop", members: ["github:acme/web"] }, { id: "ops", members: ["/srv/ops"] }], limits: [{ scope: "acme/api", day: 1 }, { scope: "project:shop", day: 2 }] });
-  const out = textOf(await toolByName("dispatch_projects").execute("id", {}, undefined, undefined, undefined));
-  assert.deepEqual(out, { projects: [
-    { id: "shop", name: "Web\\u{202E}shop", members: ["github:acme/web"], limitRows: [1] },
-    { id: "ops", name: null, members: ["/srv/ops"], limitRows: [] },
-  ] });
+  await withProjectToolReads(async ({ stats }) => {
+    const out = textOf(await toolByName("dispatch_projects").execute("id", {}, undefined, undefined, undefined));
+    assert.deepEqual(out.projects.map(({ id, name, members, limitRows }) => ({ id, name, members, limitRows })), [
+      { id: "shop", name: "Web\\u{202E}shop", members: ["github:acme/web"], limitRows: [1] },
+      { id: "ops", name: null, members: ["/srv/ops"], limitRows: [] },
+    ]);
+    const [shop, ops] = out.projects;
+    assert.deepEqual(shop.spend, { window: "week", usedMicros: 250_000, settledMicros: 250_000, heldMicros: 0, shareMicros: null, incomplete: false });
+    assert.equal(ops.spend.settledMicros, 0, "a project's spend is selected by the record's project, not its current members");
+    assert.deepEqual(shop.size, { memMiB: 4096, cpuCenti: 200, source: "default", memorySource: "default (a host's worker environment may override it)", cpuSource: "default (a host's worker environment may override it)" });
+    assert.equal(shop.suggestion, null, "no fabricated suggestion without measurements");
+    assert.match(shop.deleteRefusal, /project:shop/, "the actual planner explains the row that stops a delete");
+    assert.equal(ops.deleteRefusal, null);
+    assert.deepEqual(stats(), { disposed: 1, snapshots: 1, readIds: ["shop", "ops"] }, "one shared fleet read, always disposed");
+  });
 });
 
 // ── dispatch_costs ──────────────────────────────────────────────────────────────────────────────────────
@@ -496,7 +532,7 @@ test("members and refusals are escaped in tool results, dispatch_projects and er
   const text = res.content[0].text;
   for (const ch of ["\u202e", "\u009b"]) assert.ok(!text.includes(ch) && !shown[0].message.includes(ch), `U+${ch.codePointAt(0).toString(16)} escaped`);
   assert.ok(text.includes("\\\\u{202E}"), "shown as visible text");
-  const list = (await toolByName("dispatch_projects").execute("id", {}, undefined, undefined, undefined)).content[0].text;
+  const list = await withProjectToolReads(async () => (await toolByName("dispatch_projects").execute("id", {}, undefined, undefined, undefined)).content[0].text);
   assert.ok(!list.includes("\u202e") && !list.includes("\u009b"));
   await assert.rejects(
     () => toolByName("dispatch_project_add").execute("id", { id: "ops", members: [evil] }, undefined, undefined, ctx),

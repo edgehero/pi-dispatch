@@ -40,6 +40,9 @@ import {
 	SIGN_IN,
 	THEME_HIDDEN_READ,
 	VIEWPORT,
+	THEMES,
+	CONFIG_DETAIL_PAGES,
+	CONFIG_DETAIL_WIDTHS,
 	WIDTH_PENDING,
 	barSource,
 	barVerdict,
@@ -93,6 +96,9 @@ import {
 	readsNote,
 	runCheck,
 	runVerdict,
+	projectChartTextProblems,
+	projectKpiTextProblems,
+	stackedLabelProblems,
 	sha256Hex,
 	shellContexts,
 	shellDocs,
@@ -810,6 +816,87 @@ test("forced themes carry exactly the head page() draws for the theme: data-them
 	assert.ok(runs.filter((r) => !r.forced).every((r) => r.expect === r.emulated));
 	assert.equal(new Set(runs.map((r) => r.key)).size, runs.length, "every run has its own key");
 	assert.throws(() => planRuns([{ id: "login" }]), /no golden overview\.operator\.html/);
+});
+
+test("configuration details and every canned exceptional state get full-content widths in both themes, independent of the shell sweep", () => {
+	const docs = [{ id: FORCED_DOC, page: "overview" }];
+	for (const page of CONFIG_DETAIL_PAGES) for (const role of ["operator", "viewer"]) {
+		docs.push({ id: `${page}.${role}`, page });
+		docs.push({ id: `panels.${page}-exception.${role}`, page });
+	}
+	docs.push({ id: "panels.project-not-found.viewer", page: "error" });
+	docs.push({ id: "panels.project-fractional-memory.operator", page: "project" });
+	const runs = planRuns(docs);
+	assert.equal(new Set(runs.map((run) => run.key)).size, runs.length);
+	for (const doc of docs.slice(1)) for (const theme of THEMES) {
+		const got = runs.filter((run) => run.doc === doc && run.expect === theme).map((run) => run.width ?? VIEWPORT.width).sort((a, b) => a - b);
+		assert.deepEqual(got, [...CONFIG_DETAIL_WIDTHS], `${doc.id}: ${theme} complete content`);
+	}
+	for (const width of [320, 375, 390, 759, 760, 761, 800, 899, 900, 901, 999, 1000, 1001, 1024, 1099, 1100, 1101, 1280, 1440]) {
+		assert.ok(CONFIG_DETAIL_WIDTHS.includes(width), `${width}: phone, tablet, desktop and card breakpoint neighbours`);
+	}
+
+	for (const file of ["secrets-css.mjs", "connections-css.mjs", "project-css.mjs"]) {
+		const css = readFileSync(new URL(`../../admin/src/console/${file}`, import.meta.url), "utf8");
+		for (const match of css.matchAll(/@media\s*\(max-width:\s*(\d+)px\)/g)) {
+			const breakpoint = Number(match[1]);
+			for (const width of [breakpoint - 1, breakpoint, breakpoint + 1]) assert.ok(CONFIG_DETAIL_WIDTHS.includes(width), `${file}: production breakpoint ${breakpoint} and both neighbours are measured with full content`);
+		}
+	}
+	assert.equal(runs.filter((run) => run.doc.page === "overview").length, 4, "existing unrelated pages keep their baseline and forced-theme checks");
+});
+
+test("Project chart axes stay legible after SVG scaling, inside the SVG and apart even when the page fits", () => {
+	const chart = { rect: { left: 0, top: 0, right: 320, bottom: 150 }, texts: [{ label: "8", screenPx: 11, rect: { left: 4, top: 20, right: 14, bottom: 34 } }, { label: "10-08", screenPx: 11, rect: { left: 260, top: 130, right: 312, bottom: 144 } }] };
+	assert.deepEqual(projectChartTextProblems([chart]), []);
+	assert.deepEqual(projectChartTextProblems([{ ...chart, texts: [] }]), ["Project size chart: no readable numeric/date axes were measured"], "a removed/hidden axis class cannot make the oracle silently blind");
+	const tiny = { ...chart, texts: [{ ...chart.texts[0], screenPx: 6.1 }] };
+	assert.deepEqual(projectChartTextProblems([tiny]), ['Project size chart: axis "8" is 6.1 px on screen; at least 10 px is required']);
+	assert.match(projectChartTextProblems([{ ...chart, texts: [{ ...chart.texts[0], rect: { left: -2, top: 0, right: 14, bottom: 14 } }] }])[0], /leaves the SVG/);
+	assert.match(projectChartTextProblems([{ ...chart, texts: [...chart.texts, { label: "GiB", screenPx: 11, rect: chart.texts[0].rect }] }])[0], /axes "8" and "GiB" overlap/);
+	const measured = { scrollWidth: 320, clientWidth: 320, elements: [], projectCharts: [tiny] };
+	const verdict = runVerdict({ width: 320, csp: [], canvas: "#000000", want: "#000000", expect: "dark", measured, emulation: PHONE });
+	assert.equal(verdict.width.ok, true, "a page fitting does not establish readable chart text");
+	assert.match(verdict.failures[0], /6\.1 px on screen/);
+});
+
+test("Project's visible money text keeps the primary headline hierarchy, even inside the moneyHtml span", () => {
+	const value = { label: "$13.34", fontPx: 32, ink: "rgb(17, 21, 19)", texts: [{ text: "$13.34", fontPx: 32, color: "rgb(17, 21, 19)" }] };
+	assert.deepEqual(projectKpiTextProblems([value]), []);
+	const small = { ...value, texts: [{ ...value.texts[0], fontPx: 13 }] };
+	assert.match(projectKpiTextProblems([small])[0], /does not keep the primary 32 px type/, "the b's own 32px is not proof of its descendant's visible size");
+	assert.match(projectKpiTextProblems([{ ...value, texts: [{ ...value.texts[0], color: "rgb(106, 113, 110)" }] }])[0], /primary ink/, "a normal-size amount in secondary ink still loses the primary hierarchy");
+	assert.match(projectKpiTextProblems([{ ...value, fontPx: 13, texts: small.texts }])[0], /smaller than 24 px/);
+	assert.match(projectKpiTextProblems([{ ...value, texts: [] }])[0], /no visible primary amount/);
+	assert.match(projectKpiTextProblems([{ ...value, texts: [{ ...value.texts[0], text: "at least" }] }])[0], /no visible primary amount/, "a visible prefix cannot disguise a hidden primary dollar amount");
+	const measured = { scrollWidth: 320, clientWidth: 320, elements: [], projectKpis: [small] };
+	const verdict = runVerdict({ width: 320, csp: [], canvas: "#000000", want: "#000000", expect: "dark", measured, emulation: PHONE });
+	assert.equal(verdict.width.ok, true);
+	assert.match(verdict.failures[0], /primary 32 px type/, "a fitting page must still show its primary value as a primary value");
+});
+
+test("Connections' stacked labels have room for whole words even when narrow auto tracks fit the viewport", () => {
+	const label = { panel: "p-forges", label: "Polling", word: "Polling", wordPx: 35, fontPx: 11, available: 100 };
+	assert.deepEqual(stackedLabelProblems([label]), []);
+	const narrow = { ...label, available: 7 };
+	assert.match(stackedLabelProblems([narrow])[0], /no room for its longest word "Polling"/);
+	assert.match(stackedLabelProblems([{ ...label, wordPx: null }])[0], /no room/, "an unavailable canvas measurement cannot silently prove readability");
+	assert.match(stackedLabelProblems([{ ...label, fontPx: 8 }])[0], /smaller than 10 px/, "shrinking the label is not a fix for its column");
+	const measured = { scrollWidth: 390, clientWidth: 390, elements: [], stackedLabels: [narrow] };
+	const verdict = runVerdict({ width: 390, csp: [], canvas: "#000000", want: "#000000", expect: "dark", measured, emulation: PHONE });
+	assert.equal(verdict.width.ok, true);
+	assert.match(verdict.failures[0], /longest word/, "viewport fit alone does not establish a readable field label");
+});
+
+test("full-page width verdict uses its actual window and checks the actual phone or desktop emulation", () => {
+	for (const width of [390, 800, 1024, 1440]) {
+		const mobile = width <= PHONE_MAX;
+		const base = { width, csp: [], canvas: "#000000", want: "#000000", expect: "dark", measured: { scrollWidth: width, clientWidth: width, elements: [] }, emulation: mobile ? PHONE : desk(width) };
+		assert.deepEqual(runVerdict(base), { failures: [], notes: [], width: widthVerdict(base.measured, width) });
+		assert.equal(runVerdict({ ...base, measured: { ...base.measured, scrollWidth: width + 20 } }).width.ok, false, `${width}: the full page overflows`);
+		assert.ok(runVerdict({ ...base, emulation: mobile ? desk(width) : PHONE }).failures.length > 0, `${width}: wrong device mode fails`);
+		assert.ok(runVerdict({ ...base, csp: [{ directive: "style-src-attr", blocked: "inline" }] }).failures.length > 0, `${width}: CSP remains enforced`);
+	}
 });
 
 test("the shell sweep signs in as an operator, a viewer, a read-only console and the longest name the token rule takes", () => {
@@ -1640,8 +1727,8 @@ test("the workflow: the width step is in the required contract-tests job, after 
 	const width = step(job, (line) => line === `      - name: ${STEP_NAME}`);
 	assert.ok(width.index > install.index, "after the install");
 	assert.equal(width.key("if"), "(success() || failure()) && steps.install.outcome == 'success'", "runs after a red suite, never without node_modules");
-	assert.equal(width.key("timeout-minutes"), "15", "20 widths preserve prior coverage and add breakpoint neighbours; the step allows bounded browser time plus Chrome setup");
-	assert.equal(RUN_MS, 12 * 60_000, "the browser retains its hard 12-minute deadline");
+	assert.equal(width.key("timeout-minutes"), "23", "full-content exceptional states at nineteen widths retain prior shell coverage; the step allows bounded browser time plus Chrome setup");
+	assert.equal(RUN_MS, 20 * 60_000, "the expanded full-content matrix remains bounded after exceeding the measured old twelve-minute deadline");
 	assert.equal(NAV_MS, 20_000, "each navigation keeps its existing deadline");
 	assert.equal(Number(width.key("timeout-minutes")) * 60_000 - RUN_MS, 3 * 60_000, "the workflow reserves exactly three further minutes for download, verification and unzip");
 	assert.ok(job.some(line => line.includes(`${RUN_MS / 60_000} minutes a run`)), "workflow comment matches the script deadline");

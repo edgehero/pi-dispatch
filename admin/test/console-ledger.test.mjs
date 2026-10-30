@@ -1,3 +1,4 @@
+import { CONFIGURATION_PANEL_STATES } from "./helpers/configuration-goldens.mjs";
 import { TRIGGER_LIST_PANEL_STATES } from "./helpers/trigger-list-goldens.mjs";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -44,6 +45,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  SecretsScreen: 751, ConnectionsScreen: 751, ProjectDetail: 751,
   TriggersScreen: 750, TriggersViewer: 750, TriggersPhone: 750,
   ConfigScreen: 750, TriggerDetail: 750, TriggerEditor: 750,
   SpendScreen: 749, SpendBudgetSplit: 749, SpendCapacity: 749, SpendBreakdown: 749, TopologyScreen: 749, SpendPhone: 749,
@@ -88,6 +90,8 @@ const ISSUE_OWNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  ...CONFIGURATION_PANEL_STATES.map((key) => `panels/${key}`),
+  "secrets.operator", "secrets.viewer", "connections.operator", "connections.viewer", "project.operator", "project.viewer",
   "triggers.operator", "triggers.viewer", "triggers-filtered.operator", "triggers-filtered.viewer", "trigger-check.operator", "trigger-check.viewer",
   ...TRIGGER_LIST_PANEL_STATES.map(key => `panels/${key}`),
   "config.operator", "config.viewer", "trigger.operator", "trigger.viewer", "trigger-add.operator",

@@ -69,6 +69,8 @@ import { auditedWrite } from "../audited-write.mjs";
 import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
+import { resolverTextShown } from "./secrets-privacy.mjs";
+import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { html } from "./html.mjs";
 import { triggerWhoMayFire } from "../trigger-policy.mjs";
 import { cmd } from "./kit.mjs";
@@ -500,7 +502,7 @@ export const TRIGGER_FORM = "this form";
  * given, is the bar's lines in place of the planner's (the same words, with markup: a change's values in bold), and
  * `unchanged(plan)` what the no-change bar says beyond `UNCHANGED` (`{ unchanged, unchangedHtml }`).
  */
-function fileAction({ name, kind, build, target, write, bar = null, unchanged = null }) {
+function fileAction({ name, kind, build, target, write, bar = null, unchanged = null, privateResolvers = false }) {
   return {
     name,
     kind,
@@ -508,15 +510,36 @@ function fileAction({ name, kind, build, target, write, bar = null, unchanged = 
     bulk: false,
     needs: FILE_NEEDS,
     async preview(body, ctx) {
+      const resolverPaths = privateResolvers ? resolverPathsOf(ctx, body, name.endsWith("-add")) : [];
+      const shown = (text) => privateResolvers ? resolverTextShown(text, resolverPaths) : text;
       const got = planned(await build(body, ctx));
-      if (!got.plan) return got;
+      if (!got.plan) return got.refusal ? { ...got, refusal: shown(got.refusal) } : got;
       const p = got.plan;
       const file = target(ctx);
       const expect = Array.isArray(p.expect) ? p.expect : ctx.a.rm.writeInputs({ paths: [file], fs: ctx.fs });
-      return fileChange(ctx, { target: file, expect, summary: [p.title, ...(Array.isArray(p.summary) ? p.summary : [])], run: (fs, exp) => write(p, ctx, { fs, expect: exp }), plan: p, unchanged, barLines: typeof bar === "function" ? bar(p) : null });
+      const result = await fileChange(ctx, { target: file, expect, summary: [p.title, ...(Array.isArray(p.summary) ? p.summary : []), ...(privateResolvers ? [`Audited as ${kind}.`] : [])].map(shown), run: (fs, exp) => write(p, ctx, { fs, expect: exp }), payload: privateResolvers ? { resolverPaths } : {}, plan: p, unchanged, barLines: typeof bar === "function" ? bar(p) : null });
+      return result.refusal ? { ...result, refusal: shown(result.refusal) } : result;
     },
-    apply: applyFile,
+    async apply(entry, ctx) {
+      const result = await applyFile(entry, ctx);
+      return privateResolvers && result.invalid ? { ...result, invalid: resolverTextShown(result.invalid, [...(entry.payload.resolverPaths ?? []), ...resolverPathsOf(ctx)]) } : result;
+    },
   };
+}
+
+/** Raw paths known to the resolver planner, retained only on its server-side ticket for a refusal at confirm. */
+function resolverPathsOf(ctx, body = {}, withInput = false) {
+  const paths = Object.values(ctx.a.paths ?? {}).filter((v) => typeof v === "string" && (v.startsWith("/") || /^[A-Za-z]:[\\/]/.test(v)));
+  if (withInput && typeof body.path === "string" && /^(?:\/|[A-Za-z]:[\\/]|\\\\)/.test(body.path)) paths.push(body.path);
+  const overlay = ctx.a.rm.readSettingsView({ settingsFile: ctx.a.paths.settingsFile, fs: ctx.fs })?.overlay ?? {};
+  paths.push(...Object.values(overlay.secretProfiles ?? {}).filter((p) => typeof p === "string"));
+  for (const profile of Object.values(overlay.secretBundles ?? {})) if (typeof profile?.path === "string") paths.push(profile.path);
+  const env = ctx.a.env ?? {};
+  paths.push(...Object.values(ctx.a.rm.envSecretProfiles?.(env.PI_SECRET_PROFILES)?.profiles ?? {}));
+  for (const profile of Object.values(ctx.a.rm.envBundleProfiles?.(env.PI_SECRET_BUNDLES)?.profiles ?? {})) if (typeof profile?.path === "string") paths.push(profile.path);
+  if (typeof env.PI_SECRET_RESOLVER_ROOTS === "string") paths.push(...delimitedList(env.PI_SECRET_RESOLVER_ROOTS));
+  for (const path of [...paths]) { try { const real = ctx.fs.realpathSync(path); if (typeof real === "string") paths.push(real); } catch { /* The planner says when this host cannot judge a real path. */ } }
+  return [...new Set(paths)];
 }
 
 /**
@@ -701,6 +724,7 @@ const configActions = [
   fileAction({
     name: "secret-profile-add",
     kind: "secret-profile-add",
+    privateResolvers: true,
     // Issue #712: the env-declared names and the resolver roots judged before the confirm, as `/dispatch secrets add` does.
     build: (body, ctx) => ctx.a.plans.planSecretProfileAdd({ name: str(body, "name", { required: true, max: 64 }), path: str(body, "path", { required: true, max: 4096 }), profiles: profilesOf(ctx), envProfiles: ctx.a.rm.envSecretProfiles?.(ctx.a.env?.PI_SECRET_PROFILES)?.profiles ?? {}, env: ctx.a.env ?? null, settingsFile: ctx.a.paths.settingsFile, ...(ctx.fs ? { fs: ctx.fs } : {}) }),
     target: (ctx) => ctx.a.paths.settingsFile,
@@ -709,7 +733,8 @@ const configActions = [
   fileAction({
     name: "secret-profile-remove",
     kind: "secret-profile-remove",
-    build: (body, ctx) => ctx.a.plans.planSecretProfileRemove({ name: str(body, "name", { required: true, max: 64 }), profiles: profilesOf(ctx), settingsFile: ctx.a.paths.settingsFile }),
+    privateResolvers: true,
+    build: (body, ctx) => ctx.a.plans.planSecretProfileRemove({ name: str(body, "name", { required: true, max: 64 }), profiles: profilesOf(ctx), envProfiles: ctx.a.rm.envSecretProfiles?.(ctx.a.env?.PI_SECRET_PROFILES)?.profiles ?? {}, triggers: ctx.a.rm.readTriggers({ triggersPath: ctx.a.paths.triggersPath, fs: ctx.fs }), settingsFile: ctx.a.paths.settingsFile }),
     target: (ctx) => ctx.a.paths.settingsFile,
     write: writeSettingsOf,
   }),
@@ -718,6 +743,7 @@ const configActions = [
   fileAction({
     name: "secret-bundle-add",
     kind: "secret-bundle-add",
+    privateResolvers: true,
     build: (body, ctx) => ctx.a.plans.planSecretBundleAdd({ name: str(body, "name", { required: true, max: 64 }), path: str(body, "path", { required: true, max: 4096 }), format: str(body, "format", { required: true, max: 16 }), bundles: bundleProfilesOf(ctx), envBundles: ctx.a.rm.envBundleProfiles(ctx.a.env?.PI_SECRET_BUNDLES).profiles, env: ctx.a.env ?? null, settingsFile: ctx.a.paths.settingsFile, ...(ctx.fs ? { fs: ctx.fs } : {}) }),
     target: (ctx) => ctx.a.paths.settingsFile,
     write: writeSettingsOf,
@@ -725,6 +751,7 @@ const configActions = [
   fileAction({
     name: "secret-bundle-remove",
     kind: "secret-bundle-remove",
+    privateResolvers: true,
     build: (body, ctx) => {
       const name = str(body, "name", { required: true, max: 64 });
       return ctx.a.plans.planSecretBundleRemove({ name, bundles: bundleProfilesOf(ctx), bound: bundlesNaming(ctx, name), envBundles: ctx.a.rm.envBundleProfiles(ctx.a.env?.PI_SECRET_BUNDLES).profiles, settingsFile: ctx.a.paths.settingsFile });
@@ -1765,7 +1792,7 @@ function entryEditBack(out, { action, what, wrap }) {
 /** A resolver add's way back: remove it again, unless it REPLACED one, whose path the console keeps no copy of. */
 function resolverAddBack(out, { key, remove, what }) {
   const name = out.plan?.name;
-  if (Object.hasOwn(jsonOf(out.beforeText)?.[key] ?? {}, name)) return { undo: twice(`Put ${what} ${name} back by hand: this preview's diff shows the resolver it replaced; the console keeps no copy.`, `Put ${what} ${name} back by hand: the console kept no copy of the resolver it replaced.`), inverse: null };
+  if (Object.hasOwn(jsonOf(out.beforeText)?.[key] ?? {}, name)) return { undo: `Declare ${name} again with the previous resolver; the console keeps no full path to replay it.`, inverse: null };
   return { undo: `Remove ${what} ${name}`, inverse: { action: remove, body: { name } } };
 }
 
@@ -1863,9 +1890,9 @@ const WRITE_RULES = {
   "setting-set": { fields: ["key", "value"], danger: false, undo: (out) => settingBack(out, out.plan.key).undo, inverse: (out) => settingBack(out, out.plan.key).inverse, confirmLabel: confirmWord, done: settingDone },
   "setting-unset": { fields: ["key"], danger: false, undo: (out) => settingBack(out, out.plan.key).undo, inverse: (out) => settingBack(out, out.plan.key).inverse, confirmLabel: confirmWord, done: (out) => `Unset ${out.plan.key}` },
   "secret-profile-add": { fields: ["name", "path"], danger: false, undo: (out) => resolverAddBack(out, { key: "secretProfiles", remove: "secret-profile-remove", what: "profile" }).undo, inverse: (out) => resolverAddBack(out, { key: "secretProfiles", remove: "secret-profile-remove", what: "profile" }).inverse, confirmLabel: confirmWord, done: (out) => (replacedOne(out, "secretProfiles") ? `Replaced the resolver of profile ${out.plan.name}` : `Declared profile ${out.plan.name}`) },
-  "secret-profile-remove": { fields: ["name"], danger: true, undo: say(DELETED), inverse: none, confirmLabel: (out) => `Remove profile ${out.plan?.name}`, done: (out) => `Removed profile ${out.plan.name}` },
+  "secret-profile-remove": { fields: ["name"], danger: true, undo: (out) => `Declare ${out.plan?.name} again with the same resolver`, inverse: none, confirmLabel: (out) => `Remove profile ${out.plan?.name}`, done: (out) => `Removed profile ${out.plan.name}` },
   "secret-bundle-add": { fields: ["name", "path", "format"], danger: false, undo: (out) => resolverAddBack(out, { key: "secretBundles", remove: "secret-bundle-remove", what: "bundle resolver" }).undo, inverse: (out) => resolverAddBack(out, { key: "secretBundles", remove: "secret-bundle-remove", what: "bundle resolver" }).inverse, confirmLabel: confirmWord, done: (out) => (replacedOne(out, "secretBundles") ? `Replaced bundle resolver ${out.plan.name}` : `Declared bundle resolver ${out.plan.name}`) },
-  "secret-bundle-remove": { fields: ["name"], danger: true, undo: say(DELETED), inverse: none, confirmLabel: (out) => `Remove bundle resolver ${out.plan?.name}`, done: (out) => `Removed bundle resolver ${out.plan.name}` },
+  "secret-bundle-remove": { fields: ["name"], danger: true, undo: (out) => `Declare ${out.plan?.name} again with the same resolver`, inverse: none, confirmLabel: (out) => `Remove bundle resolver ${out.plan?.name}`, done: (out) => `Removed bundle resolver ${out.plan.name}` },
   "pause-window-add": { fields: PAUSE_FIELDS, danger: false, undo: (out) => `Delete ${atIndex("pause window", listBefore(out, "windows").length)}`, inverse: (out) => ({ action: "pause-window-delete", body: { index: listBefore(out, "windows").length } }), confirmLabel: confirmWord, done: (out) => `Added ${atIndex("pause window", listBefore(out, "windows").length)}` },
   "pause-window-edit": {
     fields: ["index", ...PAUSE_FIELDS],

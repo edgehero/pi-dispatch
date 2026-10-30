@@ -108,6 +108,8 @@ import {
   enqueueParkedAnswer,
 } from "./read-model.mjs";
 import { sandboxRetentionOf } from "./sandbox-verdict.mjs";
+import { readConfigTool } from "./config-tools.mjs";
+export { setConfigToolReadsForTest } from "./config-tools.mjs";
 // The operator session's write guard (issue #504 part C): pi's own `write`, `edit` and `powershell` blocked on the
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
 import { envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
@@ -1261,32 +1263,29 @@ function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  // Issue #499 part C: the projects file (INT-PROJECTS-FILE-CONTRACT). One read tool and three confirm-gated writes,
-  // through `planProjectsWrite`/`writeProjects` (the worker's own parser, tmp + rename). Confirm-gated because which
-  // project a repo is in decides which project row counts it: moving a repo out of a capped project widens what it may
-  // spend. A project's `name` is operator free text and is ESCAPED wherever it is shown (`escapeInterpreted`), so a
-  // bidi override in it is visible and reorders nothing; it never reaches a log line.
+  // These reads share the pages' explicit projections; resolver writes remain operator-only.
+  for (const kind of ["secrets", "connections"] as const) {
+    pi.registerTool({
+      name: `dispatch_${kind}`,
+      label: `pi-dispatch ${kind}`,
+      description: kind === "secrets"
+        ? "Read-only. Secret profile and bundle names, sources and problem states; variables as counts. Never variable names, resolver paths, roots, references or values. Resolver declarations stay with a person."
+        : "Read-only. Forge settings by deployment key name, egress per host, model endpoints and live fleet slots, provider key sources, MCP server and staged package names, and which deployment keys are set. No credential values or manager variable names. Configuration edits stay with a person.",
+      parameters: Type.Object({}),
+      async execute() {
+        const env = deploymentEnv();
+        return toolText(JSON.stringify(await readConfigTool(kind, { paths: resolvePaths(deploymentEnv()), env, deploymentDir: pointerState().deploymentDir ?? process.cwd(), pricing: { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVersion } })));
+      },
+    });
+  }
   pi.registerTool({
     name: "dispatch_projects",
     label: "pi-dispatch projects",
-    description:
-      "Read-only. Lists the projects (projects.json, PI_PROJECTS_FILE): each project's id, its display name (control and " +
-      "bidi characters shown escaped as \\u{...}), its members (forge-qualified repos such as github:acme/web, and absolute " +
-      "folders), and `limitRows`, the indexes of the scoped-limits rows (project:<id>) that cap it. A run records the id " +
-      "of the project its scope belonged to when it was picked up. Spend per project is dispatch_costs (byProject, or " +
-      "its project filter). `unset` means PI_PROJECTS_FILE is unset and the worker reads no projects.",
+    description: "Read-only. Projects, members, zero-based limitRows, spend against share with held amounts, current job size, size suggestion and its exact operator-confirmed call, bundle variable counts, and edit/delete refusals. Runs keep their recorded project id. No secret variable names, references or values.",
     parameters: Type.Object({}),
     async execute() {
-      const paths = resolvePaths(deploymentEnv());
-      const p: any = readProjects({ projectsPath: paths.projectsFile });
-      if (!Array.isArray(p?.projects)) return toolText(JSON.stringify(p?.invalid ? { invalid: escapeInterpreted(p.invalid) } : p));
-      const sl: any = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
-      const limits: any[] = Array.isArray(sl?.limits) ? sl.limits : [];
-      const projects = p.projects.map((pr: any) => ({
-        ...projectShown(pr),
-        limitRows: limits.flatMap((l: any, i: number) => (l?.scope === `project:${pr.id}` ? [i] : [])),
-      }));
-      return toolText(JSON.stringify(sl?.invalid ? { projects, limitsInvalid: true } : { projects }));
+      const env = deploymentEnv();
+      return toolText(JSON.stringify(await readConfigTool("projects", { paths: resolvePaths(deploymentEnv()), env, deploymentDir: pointerState().deploymentDir ?? process.cwd(), pricing: { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVersion } })));
     },
   });
 

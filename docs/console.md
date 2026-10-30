@@ -1746,6 +1746,7 @@ or a value you sent.
 |---|---|---|
 | 404 | no page at that address | Go to Runs, Go to Overview |
 | 404 | a run page (`/run?id=`) for an id that this host's run history, the fleet's run mirror, every queue (a stopped host's included, looked for again after you asked), the live transcript and the progress were each read for and found none of (when the console could not read one of those, or it did not answer in time, the run page itself answers 503 and says what it could not read) | the runs search filled with that id (only an id the search takes, and nowhere else on the page), Go to Runs, Go to Overview, with Runs marked as the page you are on |
+| 404 | Project not found: `/config/project?id=` names no project in a successfully read projects file; an unreadable file stays unavailable | Configuration and Runs, with Configuration current; existing records keep their project id |
 | 405 | an address that takes requests from the console's own buttons, not a page | Go to Overview |
 | 400 | a page refused its address (a filter or a cursor it cannot use); the sentence names the parameter and its rule | that page without its query (Runs, for a run page), and Overview |
 | 403 | the audit log, for a viewer | Go to Overview |
@@ -1914,7 +1915,8 @@ See [Watch findings](watch.md) and [Watch decisions and boards](watch-decisions.
 Configuration uses section pills with counts. Settings and triggers file locations appear below the title;
 paths never disclose the account home directory. All row labels count from 1. Edit and Delete on a row
 carry its machine index, so you never type a row number. Empty sections collapse to a single line.
-Packages, MCP servers and secret profiles/bundles remain available here until their dedicated pages arrive.
+Packages, MCP servers and secret profiles/bundles each keep a linked summary here. Their full sections live on
+[Secrets](#secrets) and [Connections](#connections), and each project links to [its own page](#one-project).
 Secret values and resolver references never appear.
 
 Open a trigger to see what starts it, who may fire it, its last 24 hours and last five runs, jobs in line,
@@ -1976,3 +1978,104 @@ consume an attempt. Confirm rechecks the trigger file, scheduler and admission g
 A second fire in the same minute is refused; it may still count as an attempt. A successful fire keeps the
 trigger's full model, image, secret and run configuration. Worker budget gates still run before spending.
 The result links the new job and offers cancellation while it has not started.
+
+## Secrets
+
+Open `/config/secrets` from Configuration. **Names and states only** introduces the profile and bundle tables.
+The worst problem leads: invalid env declarations, a name declared in both sources, empty resolver roots,
+a resolver whose jobs will be refused, then one no live host serves. Refusing rows are tinted and say why.
+Trigger links count rows from 1; a refused cron also names its next fire. A last resolve links its run.
+No declaration date is recorded, so an unused profile says **no run in view**.
+
+Bundle resolvers include declarations in both the `.env` and settings overlay. Each bound bundle shows its
+project, resolver, format, fork-review rule, OpenShell endpoint hosts, opt-outs and the newest run's received
+variable names, with its run and time. A project absent from projects.json is flagged. Binding a resolver to a
+project remains an edit of triggers.json.
+
+Operators can declare a profile or bundle resolver in one form; a bundle also chooses dotenv or json.
+The hint explains that the worker executes it as its own account, once per reference for a profile and once
+per job start for a bundle. Only overlay resolvers must sit inside `PI_SECRET_RESOLVER_ROOTS`.
+A relative path is refused under its field. Every preview and refusal shortens resolver/root paths to their
+last folder. No response contains a secret reference, a value or a resolver's full path.
+
+Remove previews the settings diff and effect before its red confirm. Removing an overlay-only profile
+refuses future jobs naming it before spend; removing an env/overlay duplicate ends ambiguity and leaves
+the env resolver in use. It names the affected triggers. The script stays on disk; Undo tells you to declare
+the same name again with the same resolver. A viewer or a read-only console has no declaration/removal controls.
+
+**What a run gets** explains profiles, bundles, resolver execution, variable/output bounds, precedence, all
+five bundle exclusions, and how local/Podman values differ from OpenShell placeholders. The safe agent read
+`dispatch_secrets` goes further than this person page: it returns variable counts, never variable names,
+paths, roots, references or values. See [Secrets](secrets.md).
+
+## Connections
+
+Open `/config/connections` from Configuration. It reads this deployment's sources on demand and changes
+nothing. A failed source leaves the other sections visible. The overview and `/api/state` do not pay for
+these extra file/lease reads.
+
+- **Forges:** receiver port, configured forges and their triggering rows, auth source and job token, webhook
+  verification and secret key presence, delivery identity, GitHub polling and who may fire. An unconfigured
+  forge explains its 404 route. Missing `WEBHOOK_SECRET` in the deployment's `.env` leads with a warning when
+  GitHub is armed: the receiver refuses to start unless its service environment supplies it. States pair a
+  glyph with a word. Webhook method/key state and route/delivery identity occupy separate lines; polling
+  shows its interval only when configured on. Phone fields keep readable label widths even for a forge armed
+  by many triggers; numeric trigger links retain their full accessible names. Receiver placement and delivery health are not published; use the forge's
+  delivery history for 401/404 refusals. The receiver log can help with 503 or enqueue failures. Early
+  400/401/404/405/413/415 responses write no receiver log line; not every 503 is logged.
+- **Egress:** policy posture, listed hosts and exact model endpoints, then each host's proxy check with its
+  date and age. An absent doctor check remains unknown. A failed proxy leads with its latest refused run and fix.
+- **Model endpoints:** id, host/port, keyless state and declared slot capacity. Live fleet occupancy is counted
+  only for endpoints outside the per-machine aliases `host.docker.internal` and `host.containers.internal`,
+  when the deployment declares `PI_WORKER_NAME`. Those aliases and deployments without that declaration
+  say **not counted**, with the declared capacity retained; a failed metadata or lease read says **unknown**.
+  A real fleet zero still reads `0 of N`. Per-host counts are not published. Each host's failing endpoints-file doctor check keeps its own fix.
+  Provider rows name the first candidate set in the `.env`, or say none is set there, with the configured
+  source at the row's end. Actual per-host credentials remain unpublished.
+- **Notifications:** fixed forge comments, triggers with status comments and the failure hook's last folder.
+  Hook execution history is in the worker log, not collected by this page. Timing, arguments and exclusions
+  are in the linked [hook reference](notifications.md).
+- **MCP servers:** transport, location, exposure, on/off and referenced variable names, with refused names and
+  reasons. The worker's forge server is described separately; its version belongs to the image. Import with
+  `pi-dispatch import-pi`; no form edits MCP here.
+- **Deployment environment:** safe numbers, switches and closed words only; secret/URL/token keys say set,
+  paths show their last folder, unset worker caps remain unknown. A shell/file disagreement says the service
+  reads the `.env`. Edit that file and restart the service.
+- **Staged packages:** exact package versions, receipt time and trigger opt-outs. Stage them using
+  `pi-dispatch import-pi --with-packages`; the receipt does not record who staged them.
+
+Viewers read fixes as sentences without commands to copy. `dispatch_connections` provides a safe agent read
+of names, hosts and key presence, with no credentials, references or full paths. See [Egress](egress.md) and
+[Notifications](notifications.md).
+
+## One project
+
+Open a project row's link, `/config/project?id=<id>`. The title gives its name/id, member count and projects
+filename, with **Open in Runs** filtered to that id. An unknown id in a readable projects file has its own
+not-found page; an unreadable file is an unavailable state.
+
+Three cards show spend against the current share (settled and held separately), 24-hour runs and jobs in line,
+and job size with each dimension's source. When combined spend is known but the settled/held split is not,
+the known total leads and the split is explicitly unknown. The allocation meter labels both total and share.
+No allocation envelope means no share. The main column has
+members with weekly/last runs, the measured size chart and the last five runs. Existing records keep the
+project recorded at pickup even after membership changes. Local folders appear by their last folder.
+
+Editing members uses the existing preview/confirm: joining counts from next pickup, leaving can widen spend,
+written records retain their id. The page's form edits members; project naming remains available through
+Configuration and the project tools. When a bundle names the project a short planner-backed refusal appears
+instead of the form. Invalid or unreadable triggers make bundle state unknown, never absent; the fixed source-load
+explanation never repeats parser text or secret references. The Delete section similarly names scoped-limit,
+bundle or envelope-floor blockers before any press, with a disabled Delete control. Otherwise delete uses a red confirm.
+
+The job-size chart plots peak memory over the last 30 days, at most 50 measured runs, against configured sizes
+(solid) and a suggestion (dashed); red dots mean confirmed out-of-memory kills. Worker memory/CPU verdicts
+explain the sample and host CPU ceiling. Memory verdicts use GiB beside the chart; the exact tool call keeps
+the worker's original units. Measurements are advisory. A viable suggestion shows its exact add/edit call
+and **Preview this size**, applying the correct scoped row through the existing confirm. No suggestion means
+no button and a reason. This section moves from Capacity; Capacity keeps host utilization.
+
+The side column shows allocation weight/floor/share/current split, scoped limits, bundle facts and trigger
+activity. A viewer sees the chart and facts with no copy call, member form, size preview or Delete.
+`dispatch_projects` includes safe spend/share, size suggestions/calls and edit/delete refusal facts; project
+and sizing writes still require a person. See [Projects](projects.md).

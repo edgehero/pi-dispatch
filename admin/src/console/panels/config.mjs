@@ -3,17 +3,7 @@
  * exports. The rules every panel keeps (one pure, deterministic renderer per region, every value through `html`, the
  * role and run-text rule, the action controls and the PATHS rule) are stated once, in `../panels.mjs`'s header.
  */
-import {
-  bundleDeclaredText,
-  bundleEndpointsText,
-  overlayBundleProfiles,
-  secretProfileNames,
-  triggerBundleOf,
-  PROFILE_ROOTS_TEXT,
-  PROFILE_SOURCE_TEXT,
-  profileHostsText,
-  profileLastText,
-} from "../../read-model.mjs";
+import { triggerBundleOf } from "../../read-model.mjs";
 import { VENUE_LABEL } from "../../words.mjs";
 import { html as escapedHtml } from "../html.mjs";
 // Keep indented source readable without emitting whitespace-only lines when an optional fragment is absent.
@@ -493,7 +483,7 @@ export const configProjects = fromSnapshot("Projects", (s, view) => {
       (p, i) =>
         html`<tr>
           <td>${i + 1}</td>
-          <td class="code">${cell(p.id)}</td>
+          <td class="code"><a href="${`/config/project?id=${encodeURIComponent(p.id)}`}">${cell(p.id)}</a></td>
           <td>${cell(p.name)}</td>
           <td class="mono">
             ${Array.isArray(p.members) && p.members.length > 0
@@ -533,247 +523,13 @@ export const configProjects = fromSnapshot("Projects", (s, view) => {
   ])}${projectsEditor(view)}`;
 });
 
-export const configMcp = fromSnapshot("MCP servers", (s) => {
-  const v = s.overlayMcp ?? {};
-  if (v.unreadable)
-    return html`<p class="warn">
-      The overlay's MCP file cannot be used (${String(v.unreadable)}).
-    </p>`;
-  const list = Array.isArray(v.servers) ? v.servers : [];
-  return html`${table(
-    "MCP servers",
-    ["Server", "Transport", "Where", "Exposure", "On", "References"],
-    list.map(
-      (m) =>
-        html`<tr>
-          <td class="mono">${cell(m.name)}</td>
-          <td>${cell(m.transport)}</td>
-          <td class="mono">${cell(m.where)}</td>
-          <td>${cell(m.exposure)}</td>
-          <td>${m.enabled ? "yes" : "no"}</td>
-          <td class="mono">
-            ${Array.isArray(m.refs) && m.refs.length > 0
-              ? m.refs.join(", ")
-              : "-"}
-          </td>
-        </tr>`,
-    ),
-    "The overlay declares no MCP server.",
-  )}${Array.isArray(v.refused) && v.refused.length > 0
-    ? html`<p class="warn">Refused: ${v.refused.join(", ")}</p>`
-    : null}`;
-});
+/** The detail pages own these panels and writes; Configuration keeps one useful line per source. */
+export const configMcp = fromSnapshot("MCP servers", (s) => html`<p>${s.overlayMcp?.servers?.length ?? "Unknown"} overlay servers. <a class="link" href="/config/connections#p-mcp">Open Connections</a></p>`);
+export const configPackages = fromSnapshot("Staged pi packages", (s) => html`<p>${s.stagedPackages?.packages?.length ?? "Unknown"} packages staged. <a class="link" href="/config/connections#p-packages">Open Connections</a></p>`);
+export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => html`<p>${s.secretProfiles?.profiles?.length ?? 0} profiles in view. <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p>`);
+export const configSecretBundles = fromSnapshot("Secret bundles", (s) => html`<p>${s.secretBundles?.bundles?.length ?? 0} project bundles in view. <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p>`);
 
-export const configPackages = fromSnapshot("Staged pi packages", (s) => {
-  const v = s.stagedPackages ?? {};
-  const list = Array.isArray(v.packages) ? v.packages : [];
-  if (list.length === 0)
-    return html`<p class="note">No pi package is staged.</p>`;
-  return html`${v.stagedAt
-      ? html`<p class="note">Staged ${v.stagedAt}.</p>`
-      : null}
-    <ul class="plain">
-      ${list.map((p) => html`<li class="mono">${p}</li>`)}
-    </ul>`;
-});
-
-/** The secret profiles editor: a name and its resolver's absolute path, never a reference or a value. */
-function profilesEditor(view) {
-  if (!canAct(view)) return null;
-  return editor(
-    "Change the secret profiles",
-    html`${actForm("secret-profile-add", {
-      fields: html`${field("name", "Name", { required: true, max: 64 })}${field(
-        "path",
-        "Resolver (absolute path)",
-        { required: true, max: 4096 },
-      )}`,
-      label: "Preview the add",
-    })}${actForm("secret-profile-remove", {
-      fields: field("name", "Name", { required: true, max: 64 }),
-      label: "Preview the removal",
-    })}`,
-  );
-}
-
-export const configSecretProfiles = fromSnapshot(
-  "Secret profiles",
-  (s, view) => {
-    const names = secretProfileNames(s.settings);
-    // Issue #712: the PI_SECRET_PROFILES names too (the snapshot's `secretProfilesEnv`), since the worker merges both; a
-    // name in both is the worker's ambiguity, which refuses every secrets job, and is marked so.
-    const env = s.secretProfilesEnv ?? null;
-    const fromEnv = Array.isArray(env?.names) ? env.names : [];
-    const envNote = env?.malformed
-      ? html`<p class="warn">
-          PI_SECRET_PROFILES does not parse, so the worker refuses to boot until
-          it is fixed.
-        </p>`
-      : null;
-    // "None" only where the console can see both sources; otherwise it names the one it read.
-    if (names.length === 0 && fromEnv.length === 0)
-      return html`<p class="note">
-          No secret profile is
-          declared${env?.seen === true ? "" : " in the settings overlay"}.
-        </p>
-        ${envNote}${profileUse(s.secretProfiles)}${profilesEditor(view)}`;
-    const overlayItem = (n) =>
-      fromEnv.includes(n)
-        ? html`<li class="mono warn">
-            ${n} (AMBIGUOUS: also in PI_SECRET_PROFILES, so the worker refuses
-            every secrets job)
-          </li>`
-        : html`<li class="mono">${n}</li>`;
-    return html`<p class="note">
-        Names only: a profile's resolver and its references stay in the settings
-        file${fromEnv.length > 0 ? " or the .env" : ""}.
-      </p>
-      <ul class="plain">
-        ${fromEnv.map(
-          (n) => html`<li class="mono">${n} (PI_SECRET_PROFILES)</li>`,
-        )}${names.map(overlayItem)}
-      </ul>
-      ${envNote}${profileUse(s.secretProfiles)}${profilesEditor(view)}`;
-  },
-);
-
-/**
- * Each profile's use (issue #712, the snapshot's `secretProfiles`, `secretProfilesView`): its source, where its resolver
- * stands against PI_SECRET_RESOLVER_ROOTS on this host, the triggers and projects that use it, the last resolve a run in
- * view recorded, and the live hosts that advertise it. Words and names only: the view carries no resolver path, so the
- * page cannot (REQ-OPERATOR-CONSOLE-SCREENS (g)). Nothing when no profile is declared or named.
- */
-function profileUse(v) {
-  const rows = Array.isArray(v?.profiles) ? v.profiles : [];
-  if (rows.length === 0) return null;
-  return table(
-    "Secret profiles in use",
-    [
-      "Profile",
-      "Source",
-      "Resolver roots",
-      "Triggers",
-      "Projects",
-      "Last resolve",
-      "Served by",
-    ],
-    rows.map((row) => {
-      // A trigger by the index the Triggers table above shows (issue #737: "index 0", one wording on the page).
-      const trig =
-        row.triggers.length > 0
-          ? `${row.triggers.map(triggerAt).join(", ")}${row.triggersMore > 0 ? ` and ${row.triggersMore} more` : ""}`
-          : "none";
-      const proj =
-        [
-          ...row.projects,
-          ...(row.projectsMore > 0 ? [`${row.projectsMore} more`] : []),
-          ...(row.anyRepo ? ["any (a webhook trigger)"] : []),
-        ].join(", ") || "-";
-      const last = row.last
-        ? html`${profileLastText(row.last).replace(/^last resolve: /, "")}${row
-            .last.jobId
-            ? html` (${runLink(row.last.jobId)})`
-            : null}`
-        : "no run in view";
-      const warnSource =
-        row.source === "ambiguous" || row.source === "undeclared";
-      const warnRoots = row.roots === "outside" || row.roots === "empty";
-      return html`<tr><td class="mono">${row.name}</td><td${warnSource ? html` class="warn"` : null}>${PROFILE_SOURCE_TEXT[row.source] ?? "-"}</td><td${warnRoots ? html` class="warn"` : null}>${row.roots !== null ? (PROFILE_ROOTS_TEXT[row.roots] ?? "-") : "not bounded (an env resolver)"}</td><td>${trig}</td><td class="mono">${proj}</td><td${row.last?.outcome === "refused" ? html` class="warn"` : null}>${last}</td><td class="mono">${profileHostsText(row, v).replace(/^served by: /, "")}</td></tr>`;
-    }),
-    "",
-  );
-}
-
-/** The bundle resolvers editor (issue #704): a name, its resolver's absolute path and the format it prints. */
-function bundleProfilesEditor(view) {
-  if (!canAct(view)) return null;
-  return editor(
-    "Change the bundle resolvers",
-    html`${actForm("secret-bundle-add", {
-      fields: html`${field("name", "Name", { required: true, max: 64 })}${field(
-        "path",
-        "Resolver (absolute path)",
-        { required: true, max: 4096 },
-      )}${field("format", "Format it prints (dotenv or json)", {
-        required: true,
-        max: 16,
-        placeholder: "dotenv",
-      })}`,
-      label: "Preview the add",
-    })}${actForm("secret-bundle-remove", {
-      fields: field("name", "Name", { required: true, max: 64 }),
-      label: "Preview the removal",
-    })}`,
-  );
-}
-
-/**
- * The project secret bundles (issue #704): the overlay's bundle resolvers (names and formats), then each bundle the
- * triggers file binds, with its project, its profile and whether this deployment declares it, fork reviews, the
- * endpoints, the triggers that opt out and the variable NAMES the newest run in view received. Never a reference or a
- * value, and nothing is resolved to draw it: `pi-dispatch doctor --secrets` does that on the host that runs the jobs.
- */
-export const configSecretBundles = fromSnapshot("Secret bundles", (s, view) => {
-  const resolvers = overlayBundleProfiles(s.settings);
-  const names = Object.keys(resolvers).sort();
-  const rows = Array.isArray(s.secretBundles?.bundles)
-    ? s.secretBundles.bundles
-    : [];
-  const declared =
-    names.length === 0
-      ? html`<p class="note">
-          No bundle resolver is declared in the settings overlay.
-        </p>`
-      : html`<p class="note">
-            Bundle resolvers in the settings overlay (names and formats; the
-            path stays in the file):
-          </p>
-          <ul class="plain">
-            ${names.map(
-              (n) =>
-                html`<li class="mono">${n} (${cell(resolvers[n].format)})</li>`,
-            )}
-          </ul>`;
-  return html`${declared}${table(
-    "Secret bundles",
-    [
-      "Bundle",
-      "Project",
-      "Profile",
-      "Fork reviews",
-      "Endpoints",
-      "Opted out",
-      "Last received",
-    ],
-    rows.map((b) => {
-      // Under the column headers, so each cell holds the value alone (final review: no repeated label).
-      const project = `${b.project ?? "-"}${b.projectKnown === false ? " (not in projects.json)" : ""}`;
-      const profile = `${b.profile ?? "-"} (${bundleDeclaredText(b)})`;
-      const fork = b.forkReviews ? "yes" : "no";
-      const ends =
-        Array.isArray(b.endpoints) && b.endpoints.length > 0
-          ? bundleEndpointsText(b)
-          : "none";
-      const opted =
-        Array.isArray(b.optedOut) && b.optedOut.length > 0
-          ? b.optedOut.map(triggerAt).join(", ")
-          : "none";
-      const last = b.last
-        ? html`${b.last.variables.length > 0
-            ? b.last.variables.join(", ")
-            : "none"}
-          (${b.last.jobId ? runLink(b.last.jobId) : "-"})`
-        : "no run in view";
-      return html`<tr><td class="mono">${cell(b.id)}</td><td>${project}</td><td${b.declared === "env" || b.declared === "overlay" ? null : html` class="warn"`}>${profile}</td><td>${fork}</td><td class="mono">${ends}</td><td>${opted}</td><td class="mono">${last}</td></tr>`;
-    }),
-    "The triggers file binds no secret bundle.",
-  )}${bundleProfilesEditor(view)}`;
-});
-
-const shortFile = (path, fallback) =>
-  typeof path === "string" && path
-    ? `…/${path.split(/[\\/]/).filter(Boolean).slice(-2).join("/")}`
-    : fallback;
+const shortFile = (path, fallback) => typeof path === "string" && path ? `…/${path.split(/[\\/]/).filter(Boolean).slice(-2).join("/")}` : fallback;
 export function configDescription(v) {
   const s = v.data?.snapshot;
   const locations = v.data?.configLocations ?? {};

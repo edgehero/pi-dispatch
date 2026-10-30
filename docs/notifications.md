@@ -12,6 +12,15 @@ previously-silent failures now comment.
 Every reason a run record can carry, and what to do about it, is explained in [reasons.md](reasons.md). Each
 reason below has its own entry there.
 
+## Inspect notifications in the console
+
+The Notifications section of `/config/connections` names forge comments, the trigger rows using status comments,
+and `PI_ON_FAILURE` by its last folder. Compact comment and hook rows give the current facts; the configured
+timeout (10 seconds by default), arguments, paid-failure rule and exclusions are documented below.
+Hook runs remain in the worker's log; the receiver publishes neither delivery health
+nor its host placement. The console does not invent a last hook run or notification setting. Viewers get the same
+facts with no command to copy. See [Connections](console.md#connections).
+
 ## The worker's own terminal comments
 
 These are always on, because they discharge a promise the spec already made ("exactly one completion or

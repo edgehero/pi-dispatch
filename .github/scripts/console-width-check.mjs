@@ -23,6 +23,9 @@
  * WHAT IT CHECKS ON THE GOLDENS, per page, role and theme (light and dark through `prefers-color-scheme`, plus one page
  * forced each way against the opposite system theme, with `data-theme` on `<html>` and the `color-scheme` meta exactly
  * as `html.mjs` `page()` draws them for that theme, which is what the theme cookie gets), at 375x812, `mobile: true`:
+ * Configuration details (#751), including every exceptional-state golden and project-not-found, also run at every
+ * CONFIG_DETAIL_WIDTHS in both themes: complete content at phone/intermediate/desktop sizes and card breakpoint
+ * neighbours, as phones through PHONE_MAX and desktops above. These are separate from the shell-only sweep.
  *   - no `securitypolicyviolation` (listeners installed before any page script, read back after load);
  *   - `document.scrollingElement.scrollWidth <= 375`, and every element whose box ends past the right edge sits inside
  *     an ancestor with computed `overflow-x: auto|scroll` whose own box fits (`<body>` and `<html>` excuse nothing:
@@ -139,6 +142,9 @@ const MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 export const VIEWPORT = Object.freeze({ width: 375, height: 812, scale: 2 });
 /** The window the shell sweep's desktop widths are drawn in: its height and scale (its width is the sweep's). */
 export const DESKTOP = Object.freeze({ height: 900, scale: 1 });
+/** Full configuration-detail pages and exceptional states, rather than the empty-data shell alone (#751). */
+export const CONFIG_DETAIL_PAGES = Object.freeze(["secrets", "connections", "project"]);
+export const CONFIG_DETAIL_WIDTHS = Object.freeze([320, 375, 390, 759, 760, 761, 800, 899, 900, 901, 999, 1000, 1001, 1024, 1099, 1100, 1101, 1280, 1440]);
 /**
  * The widths the shell is loaded at: the narrowest phone the console supports and the usual one (both emulated as a
  * phone), then the desktop range the reviews measured the top bar failing in, at the window sizes people use: from
@@ -241,7 +247,7 @@ export const NAV_MS = 20_000;
 const STEP_MS = 20_000;
 /** The longest the whole run may take; the workflow step's own `timeout-minutes` is the backstop above this. */
 // Five Spend routes and their exceptional states expand both the CSP sweep and the shell matrix.
-export const RUN_MS = 12 * 60_000;
+export const RUN_MS = 20 * 60_000;
 
 const USAGE = `usage: node .github/scripts/console-width-check.mjs [--require] [--shots <dir>]
        node .github/scripts/console-width-check.mjs --verify-zip <file> [--platform ${CFT_PLATFORMS.join("|")}]
@@ -453,7 +459,13 @@ export function injectTheme(html, from, to) {
  */
 export function planRuns(docs) {
 	const runs = [];
-	for (const doc of docs) for (const theme of THEMES) runs.push({ key: `${doc.id} ${theme}`, doc, emulated: theme, forced: null, expect: theme, label: theme });
+	for (const doc of docs) for (const theme of THEMES) {
+		runs.push({ key: `${doc.id} ${theme}`, doc, emulated: theme, forced: null, expect: theme, label: theme });
+		if (CONFIG_DETAIL_PAGES.includes(doc.page) || /^panels\.project-not-found\./.test(doc.id)) for (const width of CONFIG_DETAIL_WIDTHS) {
+			if (width === VIEWPORT.width) continue;
+			runs.push({ key: `${doc.id} ${theme} ${width}`, doc, width, emulated: theme, forced: null, expect: theme, label: `${theme}-${width}` });
+		}
+	}
 	const forced = docs.find((d) => d.id === FORCED_DOC);
 	if (!forced) throw new Error(`no golden ${FORCED_DOC}.html to try the forced themes on`);
 	for (const [system, theme] of [["light", "dark"], ["dark", "light"]]) runs.push({ key: `${forced.id} forced ${theme} (system ${system})`, doc: forced, emulated: system, forced: theme, expect: theme, label: `forced-${theme}` });
@@ -980,22 +992,65 @@ export function activeProgressProblems(rows = [], slack = EDGE_SLACK) {
 	return [...new Set(problems)];
 }
 
+/** SVG source font sizes are scaled by the viewBox; viewport fit alone cannot see six-pixel chart labels (#751). */
+export function projectChartTextProblems(charts = [], slack = EDGE_SLACK) {
+	const problems = [];
+	for (const chart of charts) {
+		if (!Array.isArray(chart.texts) || chart.texts.length === 0) problems.push("Project size chart: no readable numeric/date axes were measured");
+		for (const text of chart.texts ?? []) {
+			if (!Number.isFinite(text.screenPx) || text.screenPx < 10) problems.push(`Project size chart: axis ${JSON.stringify(text.label)} is ${Number.isFinite(text.screenPx) ? text.screenPx.toFixed(1) : "unknown"} px on screen; at least 10 px is required`);
+			const r = text.rect;
+			const c = chart.rect;
+			if (r.left < c.left - slack || r.right > c.right + slack || r.top < c.top - slack || r.bottom > c.bottom + slack) problems.push(`Project size chart: axis ${JSON.stringify(text.label)} leaves the SVG`);
+		}
+		for (let i = 0; i < (chart.texts ?? []).length; i++) for (let j = i + 1; j < chart.texts.length; j++) {
+			const a = chart.texts[i]; const b = chart.texts[j];
+			if (Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left) > slack && Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top) > slack) problems.push(`Project size chart: axes ${JSON.stringify(a.label)} and ${JSON.stringify(b.label)} overlap`);
+		}
+	}
+	return problems;
+}
+
+/** moneyHtml wraps its visible amount in a span: reading the surrounding b alone misses a smaller, muted value. */
+export function projectKpiTextProblems(values = []) {
+	const problems = [];
+	for (const value of values) {
+		if (!Number.isFinite(value.fontPx) || value.fontPx < 24) problems.push("Project spend headline: its primary type is smaller than 24 px");
+		if (!value.texts?.length || value.label.includes("$") && !value.texts.some((part) => part.text.includes("$"))) problems.push("Project spend headline: no visible primary amount was measured");
+		for (const part of value.texts ?? []) {
+			if (!Number.isFinite(part.fontPx) || Math.abs(part.fontPx - value.fontPx) > EDGE_SLACK) problems.push(`Project spend headline: ${JSON.stringify(part.text)} does not keep the primary ${value.fontPx} px type`);
+			if (part.color !== value.ink) problems.push(`Project spend headline: ${JSON.stringify(part.text)} does not keep the card's primary ink`);
+		}
+	}
+	return problems;
+}
+
+/** An auto grid track can fit the page while turning a stacked label into one letter per line. */
+export function stackedLabelProblems(labels = []) {
+	const problems = [];
+	for (const label of labels) {
+		if (!Number.isFinite(label.fontPx) || label.fontPx < 10) problems.push(`Connections ${label.panel}: label ${JSON.stringify(label.label)} is smaller than 10 px`);
+		if (!Number.isFinite(label.wordPx) || !Number.isFinite(label.available) || label.available + EDGE_SLACK < label.wordPx) problems.push(`Connections ${label.panel}: label ${JSON.stringify(label.label)} has no room for its longest word ${JSON.stringify(label.word)}`);
+	}
+	return problems;
+}
+
 /**
  * One golden run's verdict over what the page reported: `csp` (the probe's violations, null when it never ran),
  * `errors` (uncaught page errors: notes, since the script ran into the stubs), `canvas` (the computed `--canvas`) against
  * `want` (the `expect` theme's), `measured` (the width collector's), `emulation` (the probe's: a golden's window is
- * always a phone's) and `settled`. Returns `{ failures, notes, width }`.
+ * phone at and below the card breakpoint, desktop above it) and `settled`. Returns `{ failures, notes, width }`.
  */
-export function runVerdict({ csp, errors = [], canvas, want, expect, measured, emulation, settled = true }) {
-	const failures = [...cspFailures(csp), ...emulationProblems(emulation, true), ...activeProgressProblems(measured.activeProgress)];
+export function runVerdict({ csp, errors = [], canvas, want, expect, measured, emulation, settled = true, width = VIEWPORT.width, mobile = width <= PHONE_MAX }) {
+	const failures = [...cspFailures(csp), ...emulationProblems(emulation, mobile), ...activeProgressProblems(measured.activeProgress), ...projectChartTextProblems(measured.projectCharts), ...projectKpiTextProblems(measured.projectKpis), ...stackedLabelProblems(measured.stackedLabels)];
 	const notes = [];
 	if (!settled) notes.push("the page did not settle within 1.5 s (fonts or frames); measured anyway");
 	for (const e of errors) notes.push(`page error: ${e}`);
 	const got = String(canvas ?? "").trim().toLowerCase();
 	const wanted = String(want).toLowerCase();
 	if (got !== wanted) failures.push(`--canvas is ${got ? JSON.stringify(got) : "unset"}, not the ${expect} theme's ${wanted}`);
-	if (measured.clientWidth !== VIEWPORT.width) notes.push(`the layout viewport is ${measured.clientWidth} px, not ${VIEWPORT.width}`);
-	return { failures, notes, width: widthVerdict(measured) };
+	if (measured.clientWidth !== width) notes.push(`the layout viewport is ${measured.clientWidth} px, not ${width}`);
+	return { failures, notes, width: widthVerdict(measured, width) };
 }
 
 /**
@@ -1452,7 +1507,7 @@ const ERRORS_READ = "JSON.stringify(window.__pdErrors || [])";
  * `width` is the window's, never the page's `clientWidth`: a phone's viewport that a too-wide page zooms out widens
  * with the page (measured: a 2332 px title left nothing past a `clientWidth` edge), so the edge is the one the run set.
  */
-function measureSource(width, slack) {
+export function measureSource(width, slack) {
 	return `(() => {
 	const W = ${width};
 	const S = ${slack};
@@ -1494,7 +1549,53 @@ function measureSource(width, slack) {
 		}
 		activeProgress.push({ row: i + 1, cell: box(cell.getBoundingClientRect()), action: action ? box(action.getBoundingClientRect()) : null, parts });
 	}
-	return { scrollWidth: se.scrollWidth, clientWidth: document.documentElement.clientWidth, elements, activeProgress };
+	const projectCharts = [];
+	for (const svg of document.querySelectorAll("#p-proj-sizing svg.proj-chart")) {
+		const texts = [];
+		for (const el of svg.querySelectorAll("text.proj-axis")) {
+			const rect = el.getBoundingClientRect();
+			if (!(rect.width > 0 && rect.height > 0)) continue;
+			const matrix = el.getScreenCTM();
+			const screenPx = matrix ? parseFloat(getComputedStyle(el).fontSize) * Math.min(Math.abs(matrix.a), Math.abs(matrix.d)) : null;
+			texts.push({ label: el.textContent, screenPx, rect: box(rect) });
+		}
+		projectCharts.push({ rect: box(svg.getBoundingClientRect()), texts });
+	}
+	const projectKpis = [];
+	for (const headline of document.querySelectorAll("#p-proj-spend .proj-kv > b")) {
+		const texts = [];
+		const walk = document.createTreeWalker(headline, NodeFilter.SHOW_TEXT);
+		while (walk.nextNode()) {
+			const node = walk.currentNode;
+			const parent = node.parentElement;
+			if (!node.nodeValue.trim() || parent.closest('.sr,[hidden],[aria-hidden="true"],small,sup,sub')) continue;
+			const style = getComputedStyle(parent);
+			if (style.visibility !== "visible" || Number(style.opacity) === 0) continue;
+			const range = document.createRange(); range.selectNodeContents(node);
+			if (![...range.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0)) continue;
+			texts.push({ text: node.nodeValue.trim(), fontPx: parseFloat(style.fontSize), color: style.color });
+		}
+		projectKpis.push({ label: headline.textContent, fontPx: parseFloat(getComputedStyle(headline).fontSize), ink: getComputedStyle(headline.closest(".card")).color, texts });
+	}
+	if (document.querySelector("#p-proj-runs .card") && projectKpis.length === 0) projectKpis.push({ label: "", fontPx: null, ink: null, texts: [] });
+	const stackedLabels = [];
+	if (W <= ${PHONE_MAX}) {
+		const canvas = document.createElement("canvas");
+		const context = canvas.getContext("2d");
+		for (const cell of document.querySelectorAll('[data-page="connections"] .tbl--stack td[data-l]')) {
+			const rect = cell.getBoundingClientRect();
+			const style = getComputedStyle(cell);
+			const prefix = getComputedStyle(cell, "::before");
+			if (style.display === "none" || style.visibility !== "visible" || rect.height <= 0 || prefix.content === "none" || prefix.display === "none") continue;
+			const label = cell.getAttribute("data-l");
+			if (context) context.font = prefix.fontStyle + " " + prefix.fontWeight + " " + prefix.fontSize + " " + prefix.fontFamily;
+			const spacing = parseFloat(prefix.letterSpacing) || 0;
+			const words = label.split(/\\s+/).filter(Boolean).map((word) => ({ word, width: context ? context.measureText(word).width + spacing * Math.max(0, word.length - 1) : null }));
+			const widest = words.sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0];
+			stackedLabels.push({ panel: cell.closest("[data-panel]")?.id ?? "unknown", label, word: widest?.word ?? "", wordPx: widest?.width ?? null, fontPx: parseFloat(prefix.fontSize), available: rect.width - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0) - (parseFloat(style.borderLeftWidth) || 0) - (parseFloat(style.borderRightWidth) || 0) });
+		}
+	}
+	return { scrollWidth: se.scrollWidth, clientWidth: document.documentElement.clientWidth, elements, activeProgress, projectCharts, projectKpis, stackedLabels };
 })()`;
 }
 
@@ -1869,22 +1970,24 @@ async function openPage({ browser, key, url, metrics, emulated, clockMs, noScrip
 }
 
 async function checkOne({ browser, run, url, canvasOf, clockMs, shots }) {
-	const metrics = { width: VIEWPORT.width, height: VIEWPORT.height, deviceScaleFactor: VIEWPORT.scale, mobile: true };
+	const width = run.width ?? VIEWPORT.width;
+	const mobile = width <= PHONE_MAX;
+	const metrics = { width, height: mobile ? VIEWPORT.height : DESKTOP.height, deviceScaleFactor: mobile ? VIEWPORT.scale : DESKTOP.scale, mobile };
 	const { t, evaluate, settled } = await openPage({ browser, key: run.key, url, metrics, emulated: run.emulated, clockMs });
 	try {
 		const csp = JSON.parse(await evaluate(CSP_READ));
 		const errors = JSON.parse(await evaluate(ERRORS_READ));
 		const canvas = await evaluate(`getComputedStyle(document.documentElement).getPropertyValue("--canvas")`);
-		const measured = await evaluate(measureSource(VIEWPORT.width, EDGE_SLACK));
+		const measured = await evaluate(measureSource(width, EDGE_SLACK));
 		if (shots) {
 			const m = await t.send("Page.getLayoutMetrics");
 			const h = Math.ceil(m.cssContentSize.height);
-			const w = Math.max(VIEWPORT.width, measured.scrollWidth);
+			const w = Math.max(width, measured.scrollWidth);
 			const { data } = await t.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width: w, height: h, scale: 1 } });
 			writeFileSync(join(shots, `${run.doc.id}.${run.label}.png`), Buffer.from(data, "base64"));
 		}
 		const emulation = await evaluate(EMULATION_PROBE);
-		const verdict = runVerdict({ csp, errors, canvas, want: canvasOf(run.expect), expect: run.expect, measured, emulation, settled });
+		const verdict = runVerdict({ csp, errors, canvas, want: canvasOf(run.expect), expect: run.expect, measured, emulation, settled, width, mobile });
 		if (!verdict.width.ok) verdict.width.font = await platformFont(t, verdict.width.fontAt, measured.elements);
 		return { run, ...verdict };
 	} finally {

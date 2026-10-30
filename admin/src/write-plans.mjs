@@ -1169,7 +1169,7 @@ function projectPlan({ paths, env, mutate, planned, title, message, extra, fs })
 /** `planProjectsWrite` for a projects change, judged before the confirm: the plan, or the refusal. */
 function projectsPlanned(paths, env, mutate, fs) {
   const planned = planProjectsWrite({ projectsPath: paths.projectsFile, scopedLimitsPath: paths.scopedLimitsPath, triggersPath: paths.triggersPath ?? null, mutate, envelope: envelopeGuard(paths, env, fs), fs });
-  return planned.invalid ? { refusal: `rejected: ${escapeInterpreted(planned.invalid)}` } : { planned };
+  return planned.invalid ? { refusal: `rejected: ${escapeInterpreted(planned.invalid)}`, ...(planned.blocker ? { blocker: planned.blocker } : {}) } : { planned };
 }
 
 /** Plan a project add (`dispatch_project_add`): `params` `{ id, name?, members }`. `{ plan: { added, ... } }` or `{ refusal }`. */
@@ -1209,15 +1209,18 @@ export function planProjectEdit({ params, paths, env, fs = nodeFs }) {
   const judged = projectsPlanned(paths, env, mutate, fs);
   if (judged.refusal) return judged;
   const after = judged.planned.projects.find((p) => p.id === cur.id);
+  const joining = after.members.filter((m) => !cur.members.includes(m));
   const leaving = cur.members.filter((m) => !after.members.includes(m));
+  const joined = joining.length > 0 ? `\n${joining.map((m) => escapeInterpreted(m)).join(", ")} join${joining.length === 1 ? "s" : ""} the project: its runs record ${cur.id} from their next pickup, and count against ${cur.id}'s rows.` : "";
   const note = leaving.length > 0 ? `\n${leaving.map((m) => escapeInterpreted(m)).join(", ")} leave${leaving.length === 1 ? "s" : ""} the project: a project:${cur.id} row no longer counts ${leaving.length === 1 ? "it" : "them"}, which widens what ${leaving.length === 1 ? "it" : "they"} may spend.` : "";
+  const history = joining.length > 0 || leaving.length > 0 ? "\nRecords already written keep the project id they were written with." : "";
   return projectPlan({
     paths,
     env,
     mutate,
     planned: judged.planned,
     title: `Edit project ${cur.id}`,
-    message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\nto ${JSON.stringify(projectShown(after))}${note}`,
+    message: `project ${cur.id}:\n${JSON.stringify(projectShown(cur))}\nto ${JSON.stringify(projectShown(after))}${joined}${note}${history}`,
     extra: { before: cur, after },
     fs,
   });
@@ -1436,17 +1439,32 @@ export function planSecretProfileAdd({ name, path, profiles, envProfiles = {}, e
 }
 
 /** Plan removing profile `name` (`/dispatch secrets remove`). `{ plan: { name, profiles, mutate, ... } }` or `{ refusal }`. */
-export function planSecretProfileRemove({ name, profiles, settingsFile }) {
+export function planSecretProfileRemove({ name, profiles, envProfiles = {}, triggers = null, settingsFile }) {
   if (!name || !Object.hasOwn(profiles, name)) return { refusal: `no such profile. ${renderProfiles(profiles)}` };
   const next = { ...profiles };
   delete next[name];
+  // A collision poisons the whole merged profile registry. Removing one collision may leave another, and removing
+  // an unrelated profile never repairs one. This is the same global rule the bundle removal already explains.
+  const others = Object.keys(next).filter((n) => Object.hasOwn(envProfiles, n)).sort();
+  const still = others.length > 0 ? ` Still ambiguous after this: ${others.join(", ")} also ${others.length === 1 ? "collides" : "collide"} with PI_SECRET_PROFILES, and the worker refuses every secrets job until no name is in both.` : "";
+  const users = Array.isArray(triggers?.triggers) ? triggers.triggers.filter((t) => t?.secrets > 0 && (t.secretsProfile || "default") === name) : null;
+  const namedUsers = users?.map((t) => `trigger ${t.index + 1}${t.id ? ` (${escapeInterpreted(t.id)})` : ""}`).join(", ");
+  const effect = Object.hasOwn(envProfiles, name)
+    ? others.length > 0
+      ? `PI_SECRET_PROFILES also declares ${name}, so this removes one collision.${still}`
+      : `PI_SECRET_PROFILES also declares ${name}, so removing it here resolves the ambiguity: while both did, the worker refused every secrets job, and after this it runs PI_SECRET_PROFILES' resolver.`
+    : others.length > 0
+      ? `Every secrets job is refused already while a name is in both places, and removing ${name} does not change that.${still}`
+      : users?.length === 0
+        ? "No trigger in the triggers file names this profile, so none of its jobs depend on it."
+        : `Every trigger naming it is refused before spend after this, rather than running without its secrets${namedUsers ? `: ${namedUsers}` : ". The triggers file could not be read, so its users cannot be named"}.`;
   return {
     plan: {
       name,
       profiles: next,
       mutate: (o) => ({ ...o, secretProfiles: next }),
       target: settingsFile,
-      ...confirmOf("Remove a secret resolver", `${resolverText(name, profiles[name])}\n\nEvery trigger naming it refuses pre-spend after this, rather than running without its secrets.`),
+      ...confirmOf("Remove a secret resolver", `${resolverText(name, profiles[name])}\n\n${effect}\nThe resolver script stays on disk; only the declaration goes.`),
     },
   };
 }
@@ -1539,7 +1557,7 @@ export function planSecretBundleRemove({ name, bundles, bound = null, envBundles
       bundles: next,
       mutate: (o) => ({ ...o, secretBundles: next }),
       target: settingsFile,
-      ...confirmOf("Remove a secret bundle resolver", `${resolverText(name, bundles[name].path, bundles[name].format ?? null)}\n\n${effect}`),
+      ...confirmOf("Remove a secret bundle resolver", `${resolverText(name, bundles[name].path, bundles[name].format ?? null)}\n\n${effect}\nThe resolver script stays on disk; only the declaration goes.`),
     },
   };
 }

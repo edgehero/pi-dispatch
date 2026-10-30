@@ -476,6 +476,18 @@ failed, and never the reference, the resolver's path, or a byte of what it print
 
 ### From the panel
 
+The browser's dedicated `/config/secrets` page shows profile sources, resolver-root state, linked trigger rows,
+projects, last resolve and serving hosts, then both sources of bundle resolvers and each project's received
+variable names/run/time. It leads with the worst problem and says which jobs are refused. Its one declaration
+form and removals use the existing preview/confirm; removing an env/overlay duplicate ends the ambiguity,
+while removing an overlay-only declaration refuses jobs still naming it. The script stays on disk. Every
+preview/refusal abbreviates resolver/root paths by their last folder. Viewers have tables/help without writes.
+
+The agent read `dispatch_secrets` returns names, source/problem words and variable counts only. It omits even
+variable names, as well as paths, roots, references and values. Declaring/removing a resolver remains a person-only
+operation. [Console pages](console.md#secrets) explain the profiles, bundle limits and five exclusions together.
+
+
 `/dispatch secrets add` asks two questions (a name and the path to the script) and shows you the exact bytes
 before writing them. It is operator-typed only: there is no model-callable tool for it, because declaring a
 profile means naming a path the worker executes.

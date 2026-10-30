@@ -265,7 +265,7 @@
       ]
     },
     {
-      "el": "MCP references and secrets expose names only",
+      "el": "MCP retains a concise linked summary; full references move to Connections",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/config.mjs#configMcp",
@@ -273,10 +273,13 @@
       "golden": [
         "config.operator"
       ],
-      "shows": "References"
+      "shows": [
+        "1 overlay servers.",
+        "href=\"/config/connections\""
+      ]
     },
     {
-      "el": "Empty pi packages, profiles and bundles keep their own usable panels",
+      "el": "Profiles retain a concise linked summary; full empty and populated states move to Secrets",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/config.mjs#configSecretProfiles",
@@ -284,7 +287,10 @@
       "golden": [
         "config.operator"
       ],
-      "shows": "No secret profile"
+      "shows": [
+        "0 profiles in view.",
+        "href=\"/config/secrets\""
+      ]
     },
     {
       "el": "Rows and paths come from one snapshot",

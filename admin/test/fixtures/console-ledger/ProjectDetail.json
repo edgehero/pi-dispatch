@@ -1,0 +1,242 @@
+{
+  "card": "ProjectDetail",
+  "pr": 751,
+  "panels": [
+    "p-proj-spend",
+    "p-proj-runs",
+    "p-proj-size",
+    "p-proj-members",
+    "p-proj-sizing",
+    "p-proj-recent",
+    "p-proj-alloc",
+    "p-proj-limits",
+    "p-proj-bundle",
+    "p-proj-triggers",
+    "p-proj-delete"
+  ],
+  "elements": [
+    {
+      "el": "p-proj-spend",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectSpend",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ],
+      "shows": [
+        "$6.10",
+        "$2.00",
+        "$25.00"
+      ]
+    },
+    {
+      "el": "p-proj-runs",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectRuns",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-proj-size",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectSize",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-proj-members",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectMembers",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-proj-sizing",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectSizing",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ],
+      "shows": [
+        "proj-given",
+        "proj-suggested",
+        "proj-peak"
+      ]
+    },
+    {
+      "el": "p-proj-recent",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectRecent",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-proj-alloc",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectAllocation",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-proj-limits",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectLimits",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-proj-bundle",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectBundle",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ],
+      "shows": [
+        "STRIPE_KEY",
+        "DB_URL",
+        "gh-ebd7"
+      ]
+    },
+    {
+      "el": "p-proj-triggers",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectTriggers",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ],
+      "shows": [
+        "8 runs",
+        "2 runs",
+        "/config/trigger?index=2"
+      ]
+    },
+    {
+      "el": "p-proj-delete",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectDelete",
+      "golden": [
+        "panels/project-populated.operator",
+        "panels/project-populated.viewer"
+      ]
+    },
+    {
+      "el": "Settled and held spend against share without double counting",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectSpend"
+    },
+    {
+      "el": "24-hour outcomes, in-line jobs and worst reason",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectRuns"
+    },
+    {
+      "el": "Per-field configured size and its source, oversized warning",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectSize"
+    },
+    {
+      "el": "Members, counts, last run and actual edit refusal before any press",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectMembers"
+    },
+    {
+      "el": "Measured peaks and OOMs, configured solid size, dashed suggestion, chart key and exact confirmed call",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectSizing"
+    },
+    {
+      "el": "Last five runs and complete filtered Runs destination",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectRecent"
+    },
+    {
+      "el": "Weight/total, floor/share, current split provenance/expiry and refusals",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectAllocation"
+    },
+    {
+      "el": "Memory, CPUs, counts and local concurrency semantics",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectLimits"
+    },
+    {
+      "el": "Names, resolver/format, newest variables/run/time, opt-outs and fork reviews",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectBundle"
+    },
+    {
+      "el": "Trigger activity and forge/local membership rules",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectTriggers"
+    },
+    {
+      "el": "Actual planner blockers, otherwise a red confirmed delete",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectDelete"
+    },
+    {
+      "el": "The server provides only the existing worker facts, with unknown/unread states retained",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/project-view.mjs#readProjectView"
+    },
+    {
+      "el": "The exact viable size call uses the actual machine row and person confirm",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectSizing",
+      "panel": "p-proj-sizing",
+      "golden": [
+        "panels/project-populated.operator"
+      ],
+      "shows": [
+        "dispatch_limit_edit",
+        "row 3",
+        "Preview this size"
+      ]
+    },
+    {
+      "el": "Card sample names, amounts, runs and counts",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The published card uses illustrative data; the production fixture and behavioral counterexamples verify actual source semantics, not these sample values."
+    }
+  ]
+}
