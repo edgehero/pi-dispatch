@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { sandboxSmokeTty, sandboxSmokeTtyRaw, waitSandboxSmokeTty } from "../../.github/scripts/sandbox-smoke-tty.mjs";
+import { sandboxSmokeLines, sandboxSmokeTty, sandboxSmokeTtyRaw, waitSandboxSmokeTty } from "../../.github/scripts/sandbox-smoke-tty.mjs";
+
+test("actual Linux readline controls preserve exact oracle output without mistaking echoed command source for execution", () => {
+	const echo = "\u001b[?2004h\u001b]0;pi@container: /workspace\u0007pi@container:/workspace$ node -e 'console.log(\"SANDBOX_CREDE\rNTIALS_CLEAR\")'\r\n";
+	assert.equal(sandboxSmokeLines(echo).includes("SANDBOX_CREDENTIALS_CLEAR"), false, "wrapped, echoed source is never an executed result");
+	const actual = echo + "\u001b[?2004l\rSANDBOX_CREDENTIALS_CLEAR\r\n\u001b[?2004hpi@container:/workspace$ ";
+	assert.equal(sandboxSmokeLines(actual).includes("SANDBOX_CREDENTIALS_CLEAR"), true, "Linux bracketed-paste teardown may appear between newline and result");
+	assert.equal(sandboxSmokeLines("\u001b[?2004l\rSANDBOX_CREDENTIAL_KEYS:[\"TOKEN\"]\r\n").some((line) => line.startsWith("SANDBOX_CREDENTIAL_KEYS:")), true);
+	assert.equal(sandboxSmokeLines("prefix SANDBOX_CREDENTIALS_CLEAR suffix\r\n").includes("SANDBOX_CREDENTIALS_CLEAR"), false);
+	assert.equal(sandboxSmokeLines("SANDBOX_CREDENTIALS_CLEAR").includes("SANDBOX_CREDENTIALS_CLEAR"), false, "a partial chunk is not a complete output line");
+});
 
 test("smoke terminal observation accepts native TTY paths but never remote command text", () => {
 	assert.equal(sandboxSmokeTty("\r\nSANDBOX_REMOTE_TTY:/dev/pts/17\r\n"), "/dev/pts/17");

@@ -11,7 +11,7 @@ import { sandboxCommand } from "../../worker/src/sandbox-hosts.mjs";
 import { makeRedisClient } from "../../worker/src/connection.mjs";
 import { readSandboxSessions, requestSandboxEnd } from "../../worker/src/sandbox-sessions.mjs";
 import { readPodmanStore } from "../../worker/src/sandbox.mjs";
-import { waitSandboxSmokeTty } from "./sandbox-smoke-tty.mjs";
+import { sandboxSmokeLines, waitSandboxSmokeTty } from "./sandbox-smoke-tty.mjs";
 
 const execFile = promisify(execFileCallback);
 const venue = process.env.PI_SANDBOX_SMOKE_VENUE ?? "local";
@@ -103,8 +103,9 @@ try {
 	await runtimeAttached(opened);
 	opened.stdin.write("node -e 'const bad=Object.keys(process.env).filter(k=>/TOKEN|SECRET|PASSWORD|API_KEY/.test(k));if(bad.length){console.log(\"SANDBOX_CREDENTIAL_KEYS:\"+JSON.stringify(bad));process.exit(3);}console.log(\"SANDBOX_CREDENTIALS_CLEAR\")'\n");
 	await terminalUntil(opened, () => {
-		if (/\r?\nSANDBOX_CREDENTIAL_KEYS:/.test(opened.output)) throw new Error("sandbox shell contains credential key names");
-		return /\r?\nSANDBOX_CREDENTIALS_CLEAR\r?\n/.test(opened.output);
+		const lines = sandboxSmokeLines(opened.output);
+		if (lines.some((line) => line.startsWith("SANDBOX_CREDENTIAL_KEYS:"))) throw new Error("sandbox shell contains credential key names");
+		return lines.includes("SANDBOX_CREDENTIALS_CLEAR");
 	}, "credential-free shell environment");
 	opened.stdin.write("\x10\x11");
 	await until(() => opened.exitCode !== null, "terminal detach");
@@ -118,7 +119,7 @@ try {
 	const attached = terminal("attach");
 	await runtimeAttached(attached);
 	attached.stdin.write("printf 'SANDBOX_ATTACH_READY\\n'\n");
-	await terminalUntil(attached, () => /\r?\nSANDBOX_ATTACH_READY\r?\n/.test(attached.output), "SSH attach to original runtime");
+	await terminalUntil(attached, () => sandboxSmokeLines(attached.output).includes("SANDBOX_ATTACH_READY"), "SSH attach to original runtime");
 	assert.deepEqual(await requestSandboxEnd({ redis, ...recovered }), { ended: true });
 	await until(() => attached.exitCode !== null, "End reaching attached terminal");
 	assert.ok(fs.existsSync(workspace), "End preserves the kept workspace");

@@ -154,6 +154,8 @@ test("Windows enrollment removes previous explicit ACL grants before restricting
 	const result = await runOpener(["install", "--config", w.path], { env: w.env, deps: { platform: "win32", home: w.root, out: () => {}, execFile: async (bin, args) => { commands.push([bin, args]); return { stdout: bin === "whoami.exe" ? '"CI account","S-1-5-21-123-456-1001"' : "" }; } } });
 	assert.equal(result, 0);
 	assert.deepEqual(commands.slice(1, 3), [["icacls.exe", [openerDirectory(w.env), "/reset"]], ["icacls.exe", [openerDirectory(w.env), "/inheritance:r", "/grant:r", "*S-1-5-21-123-456-1001:(OI)(CI)F"]]]);
+	assert.match(commands.at(-1)[0], /WindowsPowerShell.*powershell\.exe$/);
+	assert.match(commands.at(-1)[1].at(-1), /SHChangeNotify\(0x08000000, 0x1000, \[System.IntPtr\]::Zero, \[System.IntPtr\]::Zero\)/, "the installed association is flushed to the native Shell after its registry command is written");
 	assert.equal(readSandboxHosts(join(openerDirectory(w.env), "hosts.json")).config.hosts.mini1.target, mapping.target);
 });
 

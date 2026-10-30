@@ -4,12 +4,12 @@ import { execFile as nodeExecFile, spawn as nodeSpawn } from "node:child_process
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { parseSandboxOpenUrl } from "./opener-protocol.mjs";
 import { readSandboxHosts, sandboxCommand } from "./sandbox-hosts.mjs";
-import { spawnTerminal, terminalLaunch } from "./opener-terminal.mjs";
+import { spawnTerminal, terminalLaunch, windowsPowerShellEnv } from "./opener-terminal.mjs";
 import { trustedChain } from "./service-env.mjs";
 
 // env-internal XDG_CONFIG_HOME, HOME, USERPROFILE: the native handler belongs to the current account and uses its config directory.
@@ -105,6 +105,13 @@ export async function runOpener(argv = [], { env = process.env, deps = {} } = {}
 				// The MIME registration and the desktop entry must use the same XDG directories.
 				await execFile(bin, args, { env, timeout: 30_000, maxBuffer: 1024 * 1024 });
 				if (i === 0 && plan.between) fs.writeFileSync(plan.between.path, plan.between.content, { mode: 0o600 });
+			}
+			if (platform === "win32") {
+				// Windows requires SHCNE_ASSOCCHANGED for registered protocols too; writing HKCU alone can leave
+				// the Shell's old association cached until reboot. No URL or configurable text enters this script.
+				const notification = `Add-Type -Namespace PiDispatch -Name ShellChange -MemberDefinition '[System.Runtime.InteropServices.DllImport("shell32.dll")] public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);'; [PiDispatch.ShellChange]::SHChangeNotify(0x08000000, 0x1000, [System.IntPtr]::Zero, [System.IntPtr]::Zero)`;
+				// env-internal SystemRoot: Windows' own PowerShell binary for its Shell association notification.
+				await execFile(win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", notification], { env: windowsPowerShellEnv(env), timeout: 30_000, maxBuffer: 64 * 1024 });
 			}
 			out("installed pi-dispatch-open for this account; commands wait for Enter in the terminal\n");
 			return 0;
