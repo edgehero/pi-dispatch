@@ -17,8 +17,8 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-10-28T09:33:23Z",
+    "at": "2026-10-30T12:16:27Z",
     "via": "Claude",
-    "note": "Start here: a concept map, a glossary, the sample deployment and three journey storyboards. Phone and viewer versions of Run live, Fleet, Triggers, Parked with a draft and Zero touch. Chips only for status, shorter button labels, and one sample deployment that tools/check_fixture.py holds every card to."
+    "note": "The design follows main: the screens built by #747 to #750 show Built, and the Parked phone card says where to read the question instead of showing it, as the shipped page does."
   }
 }
