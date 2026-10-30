@@ -1614,3 +1614,51 @@ stateTest("inline configuration errors keep unique stable associations across tw
   assert.ok(controls[1].closest(".field").classList.contains("field--err"),"another form retains its own error treatment");
 
 });
+
+stateTest("a provider refusal marks and focuses the active provider, never the hidden cron id", async () => {
+  const { triggerAdd } = await import("../src/console/panels/trigger.mjs");
+  const { planTriggerAdd } = await import("../src/write-plans.mjs");
+  const view={role:"operator",readOnly:false,data:{triggerEditor:{forges:["github"],backends:[{name:"local",serves:{liveTranscript:"yes",steering:"yes",recovery:"yes",sandboxShell:"yes"}}],defaults:{backend:"local"}}}};
+  const markup=String(page({title:"Add a trigger",name:"trigger-add",body:shellHtml("trigger-add",{session:OPERATOR,data:{now:NOW},query:{},theme:null},html`<section id="p-trigger-add" data-panel>${triggerAdd(view)}</section>`)}));
+  const w=boot(markup),form=w.document.querySelector('form[data-structured="trigger"]');
+  const provider=form.querySelector('[name="provider"]'),hiddenId=form.querySelector('[data-trigger-kind="cron"] [name="id"]');
+  form.querySelector('[name="flow"]').value="triage";
+  provider.value="bad provider";
+  assert.equal(form.querySelector('[name="kind"]').value,"label");
+  assert.ok(hiddenId.closest("fieldset").disabled,"the cron fields are inactive for a label trigger");
+  const refusal=planTriggerAdd({params:{kind:"label",flow:"triage",labels:["pi"],provider:provider.value},paths:{triggersPath:"triggers.json"},env:{PI_BACKENDS:"local"}}).refusal;
+  assert.match(refusal,/provider/);
+  w.submit(form);
+  await w.fetch.open("/api/act/trigger-add/preview").answer(400,{refusal});
+  assert.ok(w.document.activeElement===provider,"keyboard focus reaches the active invalid provider");
+  assert.equal(provider.getAttribute("aria-invalid"),"true");
+  assert.ok(provider.closest(".field").classList.contains("field--err"));
+  assert.equal(hiddenId.getAttribute("aria-invalid"),null);
+  assert.ok(!hiddenId.closest(".field").classList.contains("field--err"));
+  assert.equal(hiddenId.closest(".field").querySelector("[data-field-error]").hidden,true);
+  provider.value="anthropic";
+  w.submit(form);
+  await w.fetch.open("/api/act/trigger-add/preview").answer(200,{unchanged:true,html:String(unchangedBarHtml({summary:"The trigger is already configured"}))});
+  assert.equal(provider.getAttribute("aria-invalid"),null);
+  assert.equal(provider.getAttribute("aria-describedby"),null);
+  assert.ok(!provider.closest(".field").classList.contains("field--err"));
+  assert.equal(hiddenId.getAttribute("aria-invalid"),null,"correcting provider never marks the inactive id");
+  const { Event } = await import("./helpers/script-dom.mjs");
+  const kind=form.querySelector('[name="kind"]');
+  for (const option of kind.querySelectorAll("option")) option.liveSelected = option.value === "cron";
+  kind.dispatchEvent(new Event("change",{bubbles:true}));
+  assert.ok(!hiddenId.closest("fieldset").disabled,"the scheduler id is now active and visible");
+  hiddenId.value="nightly";
+  provider.value="bad provider";
+  const cronRefusal=planTriggerAdd({params:{kind:"cron",id:"nightly",pattern:"0 3 * * *",folder:"repository",flow:"triage",task:"Review",provider:provider.value},paths:{triggersPath:"triggers.json"},env:{PI_BACKENDS:"local"}}).refusal;
+  assert.match(cronRefusal,/run\.provider/);assert.match(cronRefusal,/provider id/);
+  w.submit(form);
+  await w.fetch.open("/api/act/trigger-add/preview").answer(400,{refusal:cronRefusal});
+  assert.ok(w.document.activeElement===provider,"an explicit run.provider address wins over the generic id noun");
+  assert.equal(provider.getAttribute("aria-invalid"),"true");
+  assert.ok(provider.closest(".field").classList.contains("field--err"));
+  assert.equal(hiddenId.getAttribute("aria-invalid"),null,"the active scheduler id is not the invalid provider id");
+  assert.ok(!hiddenId.closest(".field").classList.contains("field--err"));
+  assert.equal(hiddenId.closest(".field").querySelector("[data-field-error]").hidden,true);
+
+});

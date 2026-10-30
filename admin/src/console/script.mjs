@@ -1605,10 +1605,25 @@ ${FIT_JS}
   function fieldErrors(form, message) {
     var slots = form.querySelectorAll("[data-field-error]");
     var matched = false;
+    var tokens = typeof message === "string" ? message.toLowerCase().split(/[^a-z0-9_]+/) : [];
+    // A validator's "run.provider ... provider id" names provider, not the separate scheduler id field.
+    // Prefer its explicit field addresses; generic words are only a fallback for unqualified refusals.
+    var mentioned = [];
+    if (typeof message === "string") {
+      var address = /(?:^|[^a-z0-9_])(?:on|run)[.]([a-z0-9_]+)/g;
+      var found;
+      while ((found = address.exec(message.toLowerCase())) !== null) {
+        for (var si = 0; si < slots.length; si++) {
+          if (slots[si].getAttribute("data-field-error").toLowerCase() === found[1]) { mentioned.push(found[1]); break; }
+        }
+      }
+    }
+    var targets = mentioned.length > 0 ? mentioned : tokens;
     for (var i = 0; i < slots.length; i++) {
       var key = slots[i].getAttribute("data-field-error");
       var control = slots[i].parentElement.querySelector("input, select, textarea");
-      var applies = message && message.toLowerCase().indexOf(key.toLowerCase()) >= 0;
+      var active = control && !control.disabled && !(typeof control.closest === "function" && control.closest("fieldset[disabled]"));
+      var applies = active && targets.indexOf(key.toLowerCase()) >= 0;
       slots[i].textContent = applies ? message + " Nothing was changed." : "";
       slots[i].hidden = !applies;
       if (slots[i].parentElement.classList) {
