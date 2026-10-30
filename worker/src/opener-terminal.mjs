@@ -39,9 +39,9 @@ export function terminalLaunch({ platform, nodePath, cliPath, url, directory, en
 	}
 	if (platform === "win32") {
 		// env-internal SystemRoot: Windows' own system directory, not a variable forwarded to a container.
-		// Start-Process allocates a console using Windows' configured default terminal. Its ArgumentList is one
-		// command-line string, so quote for the receiving executable, then quote that string for PowerShell.
-		const script = `Start-Process -FilePath ${psString(nodePath)} -ArgumentList ${psString(args.map(windowsArgument).join(" "))} -Wait`;
+		// Start-Process re-enters ShellExecute, whose registry templates expand percent placeholders. Pass the
+		// fixed command line directly to CreateProcess instead, with a visible console using the OS terminal.
+		const script = `$start = [System.Diagnostics.ProcessStartInfo]::new(); $start.FileName = ${psString(nodePath)}; $start.Arguments = ${psString(args.map(windowsArgument).join(" "))}; $start.UseShellExecute = $false; $start.CreateNoWindow = $false; $start.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal; $child = [System.Diagnostics.Process]::Start($start); $child.WaitForExit(); exit $child.ExitCode`;
 		return { bin: win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args: ["-NoProfile", "-NonInteractive", "-Command", script], env: windowsPowerShellEnv(env) };
 	}
 	throw new Error("this operating system has no supported terminal opener; copy the sandbox command instead");

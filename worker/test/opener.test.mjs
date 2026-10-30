@@ -173,7 +173,8 @@ test("terminal launch starts an approval helper, never SSH or the sandbox, inclu
 	assert.doesNotMatch(fs.readFileSync(mac.args[0], "utf8"), /ssh| sandbox /);
 	assert.equal(fs.statSync(mac.args[0]).mode & 0o777, 0o700);
 	const windows = terminalLaunch({ ...common, platform: "win32" });
-	assert.match(windows.args.at(-1), /Start-Process/);
+	assert.match(windows.args.at(-1), /\$start\.UseShellExecute = \$false/);
+	assert.match(windows.args.at(-1), /\$start\.CreateNoWindow = \$false/);
 	assert.match(windows.args.at(-1), /opener.*prompt/);
 });
 
