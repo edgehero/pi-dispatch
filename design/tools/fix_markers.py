@@ -34,7 +34,7 @@ STATUS = {
     "OverviewPhone": (BUILT, "In main since #745."),
     "SetupScreen": (PROPOSED, "No issue yet. Today the overview draws the first-run checklist (#745); setting up from the browser is new."),
     "RunsScreen": (BUILT, "In main since #746."), "RunsPhone": (BUILT, "In main since #746."),
-    "ParkedPhone": (BUILT, "In main since #746, except the question text: the shipped page sends you to the run page to read it."),
+    "ParkedPhone": (BUILT, "In main since #746."),
     **{n: (BUILT, "Built by #747; managed forks added by #648. Watch remains separate work.") for n in ["RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered",
                                                       "RunSandboxed", "RunChatStates", "RunViewer"]},
     **{n: (BUILT, "Built by #748, Fleet with host and venue detail.") for n in ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail"]},

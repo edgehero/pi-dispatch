@@ -182,7 +182,7 @@ def parked_phone():
     q = f"""<section class="card card--ring tone-parked pp-card" id="p-questions" data-panel aria-labelledby="pp-q">
   <p class="pp-top"><span class="tile tile--sm tone-parked">{ic('parked', 'ic ic--sm')}</span><b id="pp-q"><span class="code">gh-2f6a</span> asks</b><span class="pp-wait">26m</span></p>
   <p class="pp-meta">{tag('api')}<a class="link" href="#">acme/api#131</a><span>triage, mini1</span></p>
-  <blockquote class="pp-quote">{E(PARKED_Q)}</blockquote>
+  <p class="pp-where">{ic('info', 'ic ic--sm')}<span>The question is the run's last message: read it on <a class="link" href="#">acme/api#131</a>, or on <a class="link" href="#">its run page</a> while its transcript is kept (24 hours after the run).</span></p>
   <label class="sr" for="pp-a">Your answer</label>
   <textarea id="pp-a" class="textarea" rows="3" placeholder="Write your answer"></textarea>
   <div class="pp-act">{btn("Preview answer", "answer", "parked", sm=False)}{btn("Open run", "ghost", sm=False)}</div>
@@ -204,7 +204,8 @@ def parked_phone():
 .pp-top .code { font-size: 14px; font-weight: 700; }
 .pp-wait { font-size: 12px; font-weight: 700; color: var(--parked-ink); }
 .pp-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--ink-muted); }
-.pp-quote { padding: 12px 14px; border-radius: var(--radius-md); background: var(--parked-tint); font-size: 16px; line-height: 23px; font-weight: 600; }
+.pp-where { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-md); background: var(--parked-tint); font-size: 13px; line-height: 20px; }
+.pp-where .ic { flex: none; margin-top: 3px; }
 .pp-act { display: flex; gap: 6px; flex-wrap: wrap; }
 .pp-act .btn { flex: 1 1 auto; }
 .pp-act .btn--ghost { flex: 0 0 auto; }
@@ -213,14 +214,14 @@ def parked_phone():
 .pp-risk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-muted); }
 .seg b { font-weight: 800; }
 """
-    write("ParkedPhone", card_marker("Screens, phone", 1300, 390, "Parked on a phone: the question, the answer box, one tap to preview"),
+    write("ParkedPhone", card_marker("Screens, phone", 1300, 390, "Parked on a phone: who asks and where to read the question, the answer box, one tap to preview"),
           "Parked on a phone", body, style)
     readme("ParkedPhone", """
-The Parked page at phone width: each parked question is a card with the question, its target and wait time, and an answer box one tap from the preview.
+The Parked page at phone width: each parked run is a card with who asks, its target and wait time, where to read the question, and an answer box one tap from the preview.
 
 ## How a person uses it
 - The person opens the console from a notification. Questions and approvals share the inbox and its count.
-- The question card shows who asked, the project and target, how long it has waited and the question in large text.
+- The question card shows who asked, the project and target, how long it has waited, and where to read the question: on its issue or pull request, or on its run page while its transcript is kept.
 - **Preview answer** opens the same two-step confirm as the run page. Nothing is posted until they confirm.
 - Below the questions, a compact card shows the approval that also waits (#649): the action, the target, the risk line, and Approve or Decline as full-width buttons.
 - Everything fits 390px with no sideways scroll; the nav pills scroll inside their own row.
@@ -229,10 +230,13 @@ The Parked page at phone width: each parked question is a card with the question
 `p-questions`, `p-approvals`.
 
 ## The server provides
-Parked runs (questions and approval requests) with their target, project, wait time, question or gate text (untrusted, escaped) and whether an answer can be built here.
+Parked runs (questions and approval requests) with their target, project and wait time, and whether an answer can be built here. Never the question or the gate's text.
+
+## Why it works this way
+The question is the run's last message, text a run wrote after reading issue text. The console shows it on the run page and nowhere else (REQ-CONSOLE-SECURITY (l)), so this card says where to read it, as the shipped page does.
 
 ## Fixture note
-From the fixture: gh-2f6a, acme/api#131, triage on mini1, parked 26 minutes. The question text and the budget-raise approval are sample content. Approval controls are built by #649.
+From the fixture: gh-2f6a, acme/api#131, triage on mini1, parked 26 minutes. The budget-raise approval is sample content. Approval controls are built by #649.
 """)
 
 # ======================================================================
