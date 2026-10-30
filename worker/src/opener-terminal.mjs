@@ -42,7 +42,9 @@ export function terminalLaunch({ platform, nodePath, cliPath, url, directory, en
 		// Start-Process re-enters ShellExecute, whose registry templates expand percent placeholders. Pass the
 		// fixed command line directly to CreateProcess instead, with a visible console using the OS terminal.
 		const script = `$start = [System.Diagnostics.ProcessStartInfo]::new(); $start.FileName = ${psString(nodePath)}; $start.Arguments = ${psString(args.map(windowsArgument).join(" "))}; $start.UseShellExecute = $false; $start.CreateNoWindow = $false; $start.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal; $child = [System.Diagnostics.Process]::Start($start); $child.WaitForExit(); exit $child.ExitCode`;
-		return { bin: win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args: ["-NoProfile", "-NonInteractive", "-Command", script], env: windowsPowerShellEnv(env) };
+		// EncodedCommand preserves this fixed script through PowerShell 5's command-line parser, including the
+		// nested quotes in Arguments. The URI is still validated data in a quoted literal, never script input.
+		return { bin: win32.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), args: ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], env: windowsPowerShellEnv(env) };
 	}
 	throw new Error("this operating system has no supported terminal opener; copy the sandbox command instead");
 }
