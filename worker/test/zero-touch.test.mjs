@@ -157,6 +157,40 @@ test("waits sum clipped run-hours and end at trusted receipt rather than eventua
 	assert.equal(result.projects[0].zeroTouch, false);
 });
 
+test("an ancient park without retained answer proof makes only its wait and streak unknown", () => {
+	const old = record("old-approval", 60, { reason: "awaiting-approval" });
+	const current = record("current", 1), peer = record("peer", 1, { project: "web", touchScopeId: "b".repeat(64) });
+	const options = { records: [old, current, peer], events: [event("current", "steer")], windowDays: 7, coverage: { fromMs: NOW - 50 * DAY } };
+	const result = compute(options);
+	assert.deepEqual([result.totals.runs, result.totals.touched, result.totals.rate], [2, 1, 50], "current-window rate still has complete evidence");
+	assert.equal(result.coverage.partial, false);
+	assert.deepEqual([result.totals.waitingPartial, result.totals.waitingUnknown, result.totals.waitingHours, result.totals.pending], [true, 1, null, null]);
+	assert.deepEqual(result.totals.waitingNow, [], "no guessed old pending run is published");
+	const affected = result.projects.find(p => p.project === "api");
+	assert.deepEqual([affected.streakDays, affected.zeroTouch, affected.repositories[0].streakDays, affected.repositories[0].zeroTouch], [null, false, null, false]);
+	assert.equal(result.projects.find(p => p.project === "web").zeroTouch, true, "a peer's complete observation is unaffected");
+	const proven = compute({ ...options, events: [...options.events, event("old-approval", "approval-decision", 59)] });
+	assert.deepEqual([proven.totals.waitingPartial, proven.totals.waitingHours, proven.totals.pending], [false, 0, 0], "a retained terminal decision resolves the old park even before the index epoch");
+});
+
+test("system approval expiry and policy revocation end waiting without adding a touch or answer sample", () => {
+	const records = [record("expired", 3, { reason: "awaiting-approval" }), record("revoked", 2, { reason: "awaiting-approval" })];
+	const events = [
+		{ type: "wait-end", reason: "approval-expired", runId: "expired", at: NOW - 2.5 * DAY },
+		{ type: "wait-end", reason: "approval-policy-changed", runId: "revoked", at: NOW - DAY },
+	];
+	const result = compute({ records, events });
+	assert.deepEqual([result.totals.runs, result.totals.touched, result.totals.rate, result.totals.stopped], [2, 0, 0, 0]);
+	assert.deepEqual([result.totals.pending, result.totals.waitingHours, result.totals.medianWaitMs], [0, 36, null]);
+	assert.equal(result.causes.reduce((sum, row) => sum + row.count, 0), 0);
+	const earlierHuman = compute({ records, events: [...events, event("expired", "approval-decision", 2.75)] });
+	assert.equal(earlierHuman.totals.touched, 1);
+	assert.equal(earlierHuman.totals.waitingHours, 30, "the earliest actual closure wins");
+	assert.equal(earlierHuman.totals.medianWaitMs, DAY / 4);
+	const question = compute({ records: [record("question", 1, { reason: "awaiting-input" })], events: [{ type: "wait-end", reason: "approval-expired", runId: "question", at: NOW - DAY / 2 }] });
+	assert.deepEqual([question.totals.pending, question.totals.waitingHours, question.totals.touched], [1, 24, 0], "approval terminal facts cannot close a question's wait");
+});
+
 test("thirty observed days need activity and no outstanding park", () => {
 	assert.equal(compute({ records: [record("work")] }).projects[0].zeroTouch, true);
 	assert.equal(compute({ records: [record("old", 40)] }).projects[0].zeroTouch, false);

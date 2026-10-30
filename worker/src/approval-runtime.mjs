@@ -19,6 +19,39 @@ export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now()
 		if (request && (out.digest !== request.configDigest || !job?.gates?.includes(request.action))) return { refused: "approval-policy-changed" };
 		return out;
 	};
+	const waitWriter = touchOutbox ?? (touchStore ? { begin: typeof touchStore.begin === "function" ? (event) => touchStore.begin(event) : async (event) => ({ event }), applied: (intent) => touchStore.write(intent.event), abort: (intent) => touchStore.abort?.(intent.event) } : null);
+	const waitEvent = (request, reason, at = now()) => {
+		if (reason === "approval-expired") {
+			if (request.decision?.actor?.kind !== "system" || request.decision.actor.id !== "expiry") return null;
+			at = Number.isSafeInteger(request.expiresAt) ? Math.min(request.expiresAt, request.decision.at) : request.decision.at;
+		} else if (Number.isSafeInteger(request.decision?.at)) {
+			at = request.decision.actor?.kind === "system" && request.decision.actor.id === "expiry" && Number.isSafeInteger(request.expiresAt) ? Math.min(request.expiresAt, request.decision.at) : request.decision.at;
+		}
+		return cleanTouch({ type: "wait-end", reason, runId: request.runId, at, parkedAt: request.createdAt, scopeId: touchScopeOf(request.resumeJob, host), nonce: request.requestId });
+	};
+	const beginWait = async (event) => {
+		if (!waitWriter || !event) return null;
+		try { return await waitWriter.begin(event); } catch { return { event, error: "touch-index-unavailable" }; }
+	};
+	const publishWait = async (request, reason, intent = null, at = now()) => {
+		const event = waitEvent(request, reason, at);
+		if (!waitWriter || !event) return null;
+		try {
+			intent ??= await beginWait(event);
+			const sent = await waitWriter.applied({ ...intent, event });
+			return sent?.ok ? null : "touch-tracking-incomplete";
+		} catch { return "touch-tracking-incomplete"; }
+	};
+	const terminalMove = async (request, reason, move) => {
+		const at = now();
+		// Persist intent before the approval transition. A later publication fault repairs only this fact,
+		// never repeats the cancellation, decline or paid continuation that already happened.
+		const intent = await beginWait(cleanTouch({ type: "wait-end", reason, runId: request.runId, at, parkedAt: request.createdAt, scopeId: touchScopeOf(request.resumeJob, host), nonce: request.requestId }));
+		const result = await move();
+		if (!result.ok) { try { if (intent) await waitWriter.abort(intent); } catch {} return result; }
+		const touchWarning = await publishWait(result.request, reason, intent, at);
+		return touchWarning ? { ...result, touchWarning } : result;
+	};
 	return {
 		finish: ({ requestId, jobId } = {}) => store.finish({ requestId, jobId }),
 		async before(job) {
@@ -45,15 +78,16 @@ export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now()
 			const checked = initiating.ok ? await policy(job, request) : initiating;
 			if (!checked.ok) {
 				if (checked.refused !== "approval-policy-changed") return checked;
-				const cancelled = await store.cancel({ requestId: request.requestId, jobId: job.id });
-				return cancelled.ok ? { refused: "approval-policy-changed", request: cancelled.request, audit: approvalAudit(cancelled.request) } : failed(cancelled);
+				const cancelled = await terminalMove(request, "approval-policy-changed", () => store.cancel({ requestId: request.requestId, jobId: job.id }));
+				return cancelled.ok ? { refused: "approval-policy-changed", request: cancelled.request, audit: approvalAudit(cancelled.request), ...(cancelled.touchWarning ? { touchWarning: cancelled.touchWarning } : {}) } : failed(cancelled);
 			}
 			if (configInvalid) return { refused: "approval-config-invalid" };
 			const expiryJob = job.id === approvalExpiryJobId(request.requestId) && job.approvalRequestId === request.requestId && job.trigger?.deliveryId === `expiry-${request.requestId}`;
 			if (expiryJob) {
 				if (request.decision?.actor?.kind !== "system" || request.decision?.actor?.id !== "expiry" || request.decision?.decision !== "declined") return { refused: "approval-expiry-invalid" };
+				await publishWait(request, "approval-expired");
 			} else {
-				if (request.decision?.actor?.kind === "system") return { refused: "approval-expired" };
+				if (request.decision?.actor?.kind === "system") { const touchWarning = await publishWait(request, "approval-expired"); return { refused: "approval-expired", ...(touchWarning ? { touchWarning } : {}) }; }
 				if (!job.trigger?.comment || typeof job.trigger.comment.body !== "string") return { refused: "approval-pending" };
 				if (job.approvalRequestId !== request.requestId) return { refused: "approval-request-unbound" };
 				const actor = approvalActor(job);
@@ -66,7 +100,7 @@ export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now()
 				request = decided.request;
 				// A human racing the exact deadline may cause the store to persist an expiry decline. Only its own
 				// synthetic job may consume it; otherwise both the human job and the sweep could start containers.
-				if (request.decision.actor.kind === "system") { if (intent) await writer.abort(intent); return { refused: "approval-expired" }; }
+				if (request.decision.actor.kind === "system") { if (intent) await writer.abort(intent); const touchWarning = await publishWait(request, "approval-expired"); return { refused: "approval-expired", ...(touchWarning ? { touchWarning } : {}) }; }
 				const event = cleanTouch({ ...touch, at: request.decision.at, nonce: request.decision.decisionId });
 				if (intent) await writer.applied({ ...intent, event });
 				else if (touchStore) await touchStore.write(event);
@@ -120,7 +154,7 @@ export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now()
 				const checked = await policy(read.request.resumeJob, read.request);
 				if (!checked.ok) {
 					if (checked.refused === "approval-policy-changed") {
-						const cancelled = await store.cancel({ requestId: id, jobId: approvalExpiryJobId(id) });
+						const cancelled = await terminalMove(read.request, "approval-policy-changed", () => store.cancel({ requestId: id, jobId: approvalExpiryJobId(id) }));
 						if (!cancelled.ok) failures.push({ requestId: id, ...failed(cancelled) });
 						else {
 							try { await comment(cancelled.request, APPROVAL_REVOKED_COMMENT); } catch { failures.push({ requestId: id, error: "approval-expiry-comment-failed" }); }
@@ -128,7 +162,7 @@ export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now()
 					} else failures.push({ requestId: id, ...checked });
 					continue;
 				}
-				const expired = await store.expire(id);
+				const expired = await terminalMove(read.request, "approval-expired", () => store.expire(id));
 				if (!expired.ok) {
 					if (expired.refused !== "already-decided" && expired.refused !== "request-stale") failures.push({ requestId: id, ...failed(expired) });
 					continue;

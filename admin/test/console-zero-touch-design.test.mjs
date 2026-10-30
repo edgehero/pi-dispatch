@@ -24,7 +24,7 @@ test("all three cards have ledgers and the phone's merged KPI panels stay explic
   const panels = ZERO_TOUCH_PANELS.map(([id]) => id);
   for (const card of ["ZeroTouchScreen", "ZeroTouchViewer", "ZeroTouchPhone"]) {
     const ledger = JSON.parse(readFileSync(new URL(`./fixtures/console-ledger/${card}.json`, import.meta.url), "utf8"));
-    assert.equal(ledger.pr, 770);
+    assert.equal(ledger.pr, 777);
     for (const id of ledger.panels) assert.ok(panels.includes(id));
     assert.ok(ledger.elements.some((e) => /Standing answers/.test(e.el) && e.status === "absent"));
   }

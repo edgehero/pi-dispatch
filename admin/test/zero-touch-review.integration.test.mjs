@@ -61,6 +61,33 @@ test("the actual touched-run service keeps missing and literally unassigned proj
   assert.deepEqual((await f.service.runs({ filter: { project: "~", touched: "1" }, scopeId: namedScope, windowDays: 7 })).runs, [], "scope and missing-project predicates both apply");
 });
 
+test("the actual service scopes fix rows and grouping-status totals with its project and repository", { skip }, async t => {
+  const f = await fixture(t), missingScope = "a".repeat(64), namedScope = "b".repeat(64);
+  f.record("missing", missingScope, { reason: "awaiting-input" });
+  f.record("named", namedScope, { project: "unassigned", reason: "awaiting-input" });
+  const groups = makeQuestionGroupStore({ redis: f.redis, now: f.now, retentionDays: 365 });
+  for (const [runId, scopeId, project] of [["missing", missingScope, null], ["named", namedScope, "unassigned"]]) {
+    assert.equal((await groups.capture({ runId, scopeId, project, text: "Which package manager applies?", redact: value => value })).ok, true);
+  }
+  await groups.setStatus("missing", "pending");
+  const fixes = makeZeroTouchFixStore({ redis: f.redis, now: f.now, retentionDays: 365 });
+  for (const [runId, scopeId, project] of [["fix-missing", missingScope, null], ["fix-named", namedScope, "unassigned"]]) {
+    assert.equal((await fixes.add({ kind: "config", runId, scopeId, project, reason: "secret-unresolved", at: NOW - DAY })).ok, true);
+  }
+  const missing = await f.service.read({ project: "~", windowDays: 7 });
+  assert.deepEqual(missing.fixes.map(row => row.runId), ["fix-missing"]);
+  assert.deepEqual([missing.grouping.pending, missing.grouping.unassigned, missing.ungroupedRunIds], [1, 1, ["missing"]]);
+  const named = await f.service.read({ project: "unassigned", windowDays: 7 });
+  assert.deepEqual(named.fixes.map(row => row.runId), ["fix-named"]);
+  assert.deepEqual([named.grouping.pending, named.grouping.unassigned, named.ungroupedRunIds], [0, 1, ["named"]]);
+  const contradictory = await f.service.read({ project: "~", scopeId: namedScope, windowDays: 7 });
+  assert.deepEqual(contradictory.fixes, []);
+  assert.deepEqual([contradictory.grouping.pending, contradictory.grouping.unassigned, contradictory.ungroupedRunIds], [0, 0, []]);
+  const repository = await f.service.read({ scopeId: missingScope, windowDays: 7 });
+  assert.deepEqual(repository.fixes.map(row => row.runId), ["fix-missing"]);
+  assert.deepEqual([repository.grouping.pending, repository.grouping.unassigned], [1, 1]);
+});
+
 test("applying the identical instruction after Undo records a new current fix", { skip }, async t => {
   const f = await fixture(t), scopeId = "c".repeat(64);
   f.record("source", scopeId, { reason: "awaiting-input" });

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { normalize } from "node:path";
 
-/** Closed human-intervention facts. Text belongs to the run's private transcript, never this index. */
+/** Closed intervention and terminal-wait facts. Text belongs to the run's private transcript, never this index. */
 export const TOUCH_CAUSES = Object.freeze(["question-answer", "approval-decision", "rerun", "config-fix", "steer", "cancel"]);
+export const WAIT_END_REASONS = Object.freeze(["approval-expired", "approval-policy-changed"]);
 export const TOUCH_INDEX = "touch:index";
 export const TOUCH_META = "touch:meta";
 export const TOUCH_PENDING = "touch:pending";
@@ -28,17 +29,17 @@ export function touchScopeOf(job, host = null) {
 /** Rebuild, never spread: even an invalid optional field refuses the event rather than carrying arbitrary text. */
 export function cleanTouch(value) {
 	if (!value || typeof value !== "object" || Array.isArray(value) || !ID.test(value.runId ?? "") || !ms(value.at)) return null;
-	if (value.type !== undefined && !["stop", "touch"].includes(value.type)) return null;
-	if (value.type !== "stop" && !TOUCH_CAUSES.includes(value.cause)) return null;
+	if (value.type !== undefined && !["stop", "touch", "wait-end"].includes(value.type)) return null;
+	if (value.type === "wait-end" ? value.cause !== undefined || !WAIT_END_REASONS.includes(value.reason) : value.type !== "stop" && !TOUCH_CAUSES.includes(value.cause)) return null;
 	if (value.answerSource !== undefined && !["forge", "console", "panel", "draft"].includes(value.answerSource)) return null;
 	if (value.draftRunId !== undefined && !ID.test(value.draftRunId)) return null;
 	if (value.scopeId !== undefined && value.scopeId !== null && !HASH.test(value.scopeId)) return null;
 	if (value.project !== undefined && value.project !== null && !PROJECT.test(value.project)) return null;
 	if (value.target !== undefined && value.target !== null && !TARGET.test(value.target)) return null;
 	for (const key of ["endedAt", "parkedAt", "receivedAt"]) if (value[key] !== undefined && value[key] !== null && !ms(value[key])) return null;
-	const type = value.type === "stop" ? "stop" : "touch";
-	const id = HASH.test(value.id ?? "") ? value.id : digest(`${type}\0${value.runId}\0${value.cause ?? ""}\0${value.nonce ?? value.at}`);
-	return { v: 1, id, type, runId: value.runId, ...(type === "touch" ? { cause: value.cause } : {}), at: value.at,
+	const type = value.type === "stop" ? "stop" : value.type === "wait-end" ? "wait-end" : "touch";
+	const id = HASH.test(value.id ?? "") ? value.id : digest(`${type}\0${value.runId}\0${value.cause ?? value.reason ?? ""}\0${value.nonce ?? value.at}`);
+	return { v: 1, id, type, runId: value.runId, ...(type === "touch" ? { cause: value.cause } : {}), ...(type === "wait-end" ? { reason: value.reason } : {}), at: value.at,
 		...(value.scopeId ? { scopeId: value.scopeId } : {}), ...(value.project ? { project: value.project } : {}),
 		...(value.target ? { target: value.target } : {}), ...(value.answerSource ? { answerSource: value.answerSource } : {}), ...(value.draftRunId ? { draftRunId: value.draftRunId } : {}), ...Object.fromEntries(["endedAt", "parkedAt", "receivedAt"].filter((k) => ms(value[k])).map((k) => [k, value[k]])) };
 }

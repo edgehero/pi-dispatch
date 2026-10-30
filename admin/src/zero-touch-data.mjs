@@ -56,12 +56,13 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         try { cfg = config(); } catch { configUnavailable = true; }
         const [questions, changes] = await Promise.all([groups.publicSnapshot({ names: cfg?.names ?? {} }), fixes.publicSnapshot()]);
         const selectedGroups = questions.groups.filter((g) => zeroTouchProjectMatches(g.project, project) && (!scopeId || g.scopeId === scopeId));
+        const selectedSources = questions.rows.filter((r) => zeroTouchProjectMatches(r.project, project) && (!scopeId || r.scopeId === scopeId));
         const report = await readZeroTouch({ redis, logsDir: paths.logsDir, retentionDays, localHost: env.PI_WORKER_NAME ?? null, now, windowDays, project, scopeId, groups: selectedGroups, fixes: changes.fixes, fs, includeRecords: true });
         const knownSources = new Set(questions.rows.map((r) => r.runId));
         const missingSources = cfg?.capture && questions.state === "ok" ? report.records.filter((r) => r.reason === "awaiting-input" && zeroTouchProjectMatches(r.project, project) && (!scopeId || r.touchScopeId === scopeId) && !knownSources.has(r.jobId)).map((r) => ({ runId: r.jobId, status: "source-unavailable" })) : [];
-        report.grouping = { enabled: cfg?.capture === true, state: configUnavailable ? "configuration-unavailable" : questions.state, partial: questions.partial, pending: questions.rows.filter((r) => r.status === "pending").length, unassigned: questions.rows.filter((r) => !r.groupId).length };
-        report.ungroupedRunIds = questions.rows.filter((r) => !r.groupId && zeroTouchProjectMatches(r.project, project) && (!scopeId || r.scopeId === scopeId)).map((r) => r.runId);
-        report.groupingStatuses = [...questions.rows.filter((r) => !r.groupId && zeroTouchProjectMatches(r.project, project) && (!scopeId || r.scopeId === scopeId)).map((r) => ({ runId: r.runId, status: r.status })), ...missingSources];
+        report.grouping = { enabled: cfg?.capture === true, state: configUnavailable ? "configuration-unavailable" : questions.state, partial: questions.partial, pending: selectedSources.filter((r) => r.status === "pending").length, unassigned: selectedSources.filter((r) => !r.groupId).length };
+        report.ungroupedRunIds = selectedSources.filter((r) => !r.groupId).map((r) => r.runId);
+        report.groupingStatuses = [...selectedSources.filter((r) => !r.groupId).map((r) => ({ runId: r.runId, status: r.status })), ...missingSources];
         report.grouping.partial = questions.partial || missingSources.length > 0;
         report.fixes = report.fixes.map((f) => f.groupId && report.grouping.partial ? { ...f, partial: true, worked: false, status: "observing" } : f);
         report.fixesPartial = changes.partial;

@@ -22,7 +22,8 @@ and changes against the preceding interval are absent when their comparison is n
 
 Tracking begins with this release. Upgrade every worker, receiver, CLI and admin process participating in the fleet
 before relying on its coverage. Older clients cannot publish interventions they were never written to record.
-`PI_LOG_RETENTION_DAYS` and the mirror's retained count also bound the report. The text-free touch index is bounded to
+`PI_LOG_RETENTION_DAYS` and the mirror's retained count also bound the report. Retained older parks still contribute
+current waiting time. With unlimited local retention, this on-demand reader scans the retained history to find them. The text-free touch index is bounded to
 365 days and 30,000 events even when ordinary history is retained indefinitely; its loss and trimming are partial.
 
 Waiting hours sum the time each parked run waited within the interval. A proven answer uses the service's original
@@ -30,6 +31,14 @@ receipt time rather than later worker pickup, so queue delay does not inflate th
 answers do not prove a resume. Approval decisions count when a person's decision is accepted; system expiry does
 not. The median covers completed waits, and open waits show run links. A 30-day zero-touch project needs complete
 coverage, actual workload activity and no outstanding wait; inactivity is not a badge.
+
+Authenticated approval expiry and trigger-policy revocation end the corresponding wait without recording a human
+touch. Their terminal times bound waiting hours; they do not enter the median of human answer times.
+
+A retained park can outlive the touch history that proved its answer. When a park predates that history and no
+terminal answer survives in the index or records, waiting hours and the pending count say they are not known.
+Affected project and repository streaks also remain unknown. This separate waiting-history warning preserves a
+current touch rate whose own ended-run interval is still covered. Restoring retained answer evidence resolves it.
 
 ## Group repeated questions
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { TOUCH_CAUSES, TOUCH_MAX_EVENTS, TOUCH_MAX_RETENTION_DAYS } from "../src/touch-state.mjs";
+import { TOUCH_CAUSES, WAIT_END_REASONS, TOUCH_MAX_EVENTS, TOUCH_MAX_RETENTION_DAYS } from "../src/touch-state.mjs";
 import { QUESTION_GROUP_LIMITS, QUESTION_GROUP_STATUSES } from "../src/question-groups.mjs";
 import { validateQuestionGroupingInput } from "../../image/runner/src/question-grouping.mjs";
 
@@ -12,6 +12,8 @@ const jsonList = (id) => JSON.parse(section(id).match(/```json\n([^`]+)\n\s*```/
 test("the touch and grouping spec vocabularies equal their producers in both directions", () => {
 	assert.deepEqual(jsonList("INT-TOUCH-INDEX"), TOUCH_CAUSES);
 	assert.deepEqual(jsonList("INT-QUESTION-GROUPS"), QUESTION_GROUP_STATUSES);
+	const reasons = section("INT-TOUCH-INDEX").match(/closed reason `([^`]+)` or\n  `([^`]+)`/);
+	assert.deepEqual(reasons?.slice(1), WAIT_END_REASONS);
 });
 
 test("the documented finite touch/corpus bounds stay tied to their source constants", () => {
