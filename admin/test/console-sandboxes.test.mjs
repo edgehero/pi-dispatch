@@ -9,6 +9,14 @@ import { outLink } from "../src/console/kit.mjs";
 import { SANDBOX_CSS } from "../src/console/sandbox-css.mjs";
 import { PAGES } from "../src/console/pages.mjs";
 import { PAGE_CSS, pageCss } from "../src/console/page-css.mjs";
+import { chromeLaunchArgs } from "../../.github/scripts/console-width-check.mjs";
+
+test("both console browser checks keep the local Chrome sandbox and use the established CI startup flags without bypassing document security", () => {
+  assert.deepEqual(chromeLaunchArgs(), ["--use-mock-keychain"]);
+  assert.deepEqual(chromeLaunchArgs({ sandbox: true }), ["--use-mock-keychain"]);
+  assert.deepEqual(chromeLaunchArgs({ sandbox: false }), ["--use-mock-keychain", "--no-sandbox"]);
+  for (const sandbox of [true, false]) assert.equal(chromeLaunchArgs({ sandbox }).some((arg) => /disable-web-security|disable-features.*ContentSecurityPolicy|bypass.*csp/i.test(arg)), false);
+});
 
 test("the screen's Open and Attach links carry the exact host/id/verb; copied commands use that host's saved deployment", async () => {
   const markup = await SANDBOX_DRAW["sandboxes-populated.operator"]();
