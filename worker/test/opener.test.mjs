@@ -194,10 +194,10 @@ test("a Windows terminal child derives PS5 module paths even when its Node paren
 	const env = { ...w.env, PSModulePath: "C:\\Program Files\\PowerShell\\7\\Modules", pSmOdUlEpAtH: "another incompatible path", SystemRoot: "C:\\Windows" };
 	const plan = terminalLaunch({ platform: "win32", nodePath: "C:\\node\\node.exe", cliPath: "C:\\dispatch cli.mjs", url: uri(), directory: w.root, env });
 	let options;
-	await spawnTerminal(plan, { spawn: (_bin, _args, passed) => { options = passed; const child = new EventEmitter(); queueMicrotask(() => child.emit("close", 0)); return child; } });
+	await spawnTerminal(plan, { spawn: (_bin, _args, passed) => { options = passed; const child = new EventEmitter(); child.stdout = new PassThrough(); queueMicrotask(() => { child.stdout.write("pid=123;parentJob=False;childJob=False;initialExit=259\n"); child.emit("close", 0); }); return child; } });
 	assert.equal(Object.keys(options.env).some((key) => key.toLowerCase() === "psmodulepath"), false);
 	assert.equal(options.env.SystemRoot, "C:\\Windows");
-	assert.equal(options.detached, true, "the finite dispatcher does not give libuv ownership of its console's lifetime");
+	assert.equal(options.detached, false, "PowerShell runs normally; libuv silently breaks away the newly created console");
 	assert.equal(env.PSModulePath, "C:\\Program Files\\PowerShell\\7\\Modules", "the invoking shell's environment is untouched");
 });
 
@@ -226,12 +226,26 @@ test("a successful Windows dispatcher drains its bounded process diagnostic befo
 	child.emit("exit", 0);
 	await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(settled, false, "the exit event does not prove the diagnostic pipe has drained");
-	child.stdout.write("x".repeat(5_000));
+	child.stdout.write("x".repeat(5_000) + "\n");
 	child.stdout.write("pid=123;parentJob=False;childJob=False;initialExit=259\n");
 	child.emit("close", 0);
 	const result = await pending;
 	assert.equal(result.stdout.length, 4096);
 	assert.match(result.stdout, /pid=123;parentJob=False;childJob=False;initialExit=259\n$/);
+});
+
+test("a Windows dispatcher zero exit without creation receipt refuses, while optional unknown observations do not", async () => {
+	for (const receipt of ["", "not-a-receipt", "pid=0;parentJob=False;childJob=False;initialExit=259"]) {
+		await assert.rejects(spawnTerminal({ bin: "powershell.exe", args: [], waitForExit: true }, { spawn: () => {
+			const child = new EventEmitter(); child.stdout = new PassThrough();
+			queueMicrotask(() => { child.stdout.write(receipt); child.emit("close", 0); }); return child;
+		} }), /could not open an interactive console/);
+	}
+	const result = await spawnTerminal({ bin: "powershell.exe", args: [], waitForExit: true }, { spawn: () => {
+		const child = new EventEmitter(); child.stdout = new PassThrough();
+		queueMicrotask(() => { child.stdout.write("pid=123;parentJob=unknown:5;childJob=unknown:5;initialExit=unknown:5\r\n"); child.emit("close", 0); }); return child;
+	} });
+	assert.match(result.stdout, /pid=123;/);
 });
 
 test("a failed Windows console dispatcher makes the opener refuse instead of announcing an opened terminal", async () => {

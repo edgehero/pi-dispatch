@@ -18,8 +18,8 @@ export function windowsArgument(value) {
 	return `"${String(value).replace(/(\\*)"/g, "$1$1\\\"").replace(/(\\+)$/, "$1$1")}"`;
 }
 const psString = (value) => `'${String(value).replaceAll("'", "''")}'`;
-// A detached dispatcher's standard handles are NUL. Neither ProcessStartInfo's window preference nor
-// inheriting those handles creates an interactive terminal. The console owns fresh keyboard/screen buffers.
+// Redirected dispatcher handles do not create an interactive terminal. The new console owns fresh
+// keyboard/screen buffers instead of inheriting the dispatcher's pipes or NUL input.
 const WINDOWS_CONSOLE_SOURCE = `using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -102,19 +102,27 @@ export function terminalLaunch({ platform, nodePath, cliPath, url, directory, en
 }
 export function spawnTerminal(plan, { spawn = nodeSpawn, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
 	return new Promise((resolve, reject) => {
-		// Detachment also keeps libuv's process-job lifetime from owning the independently created console.
-		const child = spawn(plan.bin, plan.args, { detached: true, stdio: plan.waitForExit ? ["ignore", "pipe", "pipe"] : "ignore", windowsHide: true, ...(plan.env ? { env: plan.env } : {}) });
+		// Windows PowerShell can exit successfully without running its command under DETACHED_PROCESS.
+		// Await its finite dispatcher normally. libuv's job has SILENT_BREAKAWAY_OK, so the console that
+		// dispatcher creates is not owned by the URL handler's lifetime (Node 22.19, win/process.c).
+		const child = spawn(plan.bin, plan.args, { detached: !plan.waitForExit, stdio: plan.waitForExit ? ["ignore", "pipe", "pipe"] : "ignore", windowsHide: true, ...(plan.env ? { env: plan.env } : {}) });
 		let timer;
 		let stdout = "", stderr = "";
 		child.stdout?.on("data", (chunk) => { stdout = (stdout + chunk.toString("utf8")).slice(-4096); });
 		child.stderr?.on("data", (chunk) => { stderr = (stderr + chunk.toString("utf8")).slice(-4096); });
-		const failed = (code) => Object.assign(new Error("Windows could not open an interactive console; check Windows PowerShell and use Copy until it is available"), { code, stderr });
+		const failed = (code) => Object.assign(new Error("Windows could not open an interactive console; check Windows PowerShell and use Copy until it is available"), { code, stdout, stderr });
 		child.once("error", (error) => { clearTimer(timer); reject(error); });
 		if (plan.waitForExit) {
 			// This dispatcher exits as soon as CreateProcessW returns. Waiting catches a refused launch without
 			// waiting for the person to press Enter, and the deadline bounds a blocked PowerShell/compiler.
 			timer = setTimer(() => { child.kill(); reject(failed()); }, 30_000);
-			child.once("close", (code) => { clearTimer(timer); if (code === 0) resolve({ stdout, stderr }); else reject(failed(code)); });
+			child.once("close", (code) => {
+				clearTimer(timer);
+				// Exit zero alone does not establish that PowerShell executed the fixed dispatcher at all.
+				const receipt = stdout.trim().split(/\r?\n/).at(-1);
+				const created = /^pid=[1-9]\d*;parentJob=(?:True|False|unknown:-?\d+);childJob=(?:True|False|unknown:-?\d+);initialExit=(?:\d+|unknown:-?\d+)$/.test(receipt);
+				if (code === 0 && created) resolve({ stdout, stderr }); else reject(failed(code));
+			});
 		} else child.once("spawn", () => { child.unref(); resolve(); });
 	});
 }
