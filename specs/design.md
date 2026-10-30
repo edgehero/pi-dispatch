@@ -14402,9 +14402,9 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   - **Parked: a card per question, and no question text** (`parkedQuestions`, `ui.questionCard`). The question is the
     run's last assistant message, transcript text, which `REQ-CONSOLE-SECURITY` (l) shows only in the run page's
     transcript section, and a parked row carries none by construction; so each card says where the question is read
-    (`PARKED_QUESTION_WHERE`), for both roles; the ParkedPhone card draws the question in large text, and the page does
-    not. The desktop page is the Parked frame the ApprovalRequest card draws, with its Questions tab alone and no
-    Approvals tab. **AMENDED 2026-10-28 (#649):** ApprovalRequest is Built; typed requests share this inbox, whose title says Questions and approvals when they are present. Gate identifiers are public, summaries stay in the private transcript.
+    (`PARKED_QUESTION_WHERE`), for both roles. The ParkedPhone card drew the question in large text until 2026-10-30;
+    it now says where the question is read, as the page does. The desktop page is the Parked frame the ApprovalRequest
+    card draws, with its Questions tab alone and no Approvals tab. **AMENDED 2026-10-28 (#649):** ApprovalRequest is Built; typed requests share this inbox, whose title says Questions and approvals when they are present. Gate identifiers are public, summaries stay in the private transcript.
   - **The answer form follows the planner's own check.** A box that refuses after the answer is typed wastes the typing,
     and a pull request's park, expired job data and a comment trigger that would not route a reply are refused by the
     planner whatever the page draws. So the page reads `parkedAnswerCheckOf` (the predicate `planParkedAnswer` asks
@@ -14559,9 +14559,9 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   - **The runs filters in the title bar** (2026-10-26, #737 PR 4a; the RunsScreen card draws them there). The title bar
     is static markup that no swap reaches, and the chips and lists are live; drawn there they would be the first load's
     until a reload. They are the first panel under it.
-  - **Question text on a Parked card** (2026-10-26, #737 PR 4a; the ParkedPhone card draws it). It is transcript text,
-    which only the run page's transcript section shows, and the parked fold reads records, which hold none; reading the
-    transcript for each card would put a run's model output on a list page every role opens.
+  - **Question text on a Parked card** (2026-10-26, #737 PR 4a; the ParkedPhone card drew it until 2026-10-30). It is
+    transcript text, which only the run page's transcript section shows, and the parked fold reads records, which hold
+    none; reading the transcript for each card would put a run's model output on a list page every role opens.
   - **Keeping the outcome filter to the record's three values** (2026-10-26, #737 PR 4a; #710's choice). It matched
     exactly what the record held, but the page now counts and links by the console's words, and a count whose link finds
     other runs (a recovery end counted failed and found only under `policy`, a run awaiting input counted apart and
@@ -16436,3 +16436,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-29 (#749, review) | `DES-COST-FOLD-BY-SCAN` clarified: record cost and enforcement ledger charges are distinct in unreserved/legacy runs, so no display infers zero paid work from a zero reservation. `DES-OPERATOR-CONSOLE` retains unknown/floor/estimate marks and role-independent history facts. Graph input validation now shares the worker loader and the display reader’s byte snapshot. Enforcement and static-export privacy UNCHANGED, checked. |
 | 2026-10-30 (#750) | `DES-OPERATOR-CONSOLE`, `DES-ADMIN-VIA-PI-EXTENSION` and `DES-AI-TRIGGER-FLOW-GATE` AMENDED: Pulse configuration and shared bounded trigger fire. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: no paid container starts here, worker gates and isolation still apply; no merge path is added. |
 | 2026-10-30 (#750, trigger list) | `DES-OPERATOR-CONSOLE` AMENDED: TriggersScreen, TriggersViewer and TriggersPhone, actual receiver-filter reuse behind a private read POST, bounded role-safe history and timezone-aware schedules, and corrected quiet-window scope copy. `DES-ADMIN-VIA-PI-EXTENSION`, worker delivery handling, paid-start gates, queue payloads, container isolation and merge policy UNCHANGED, checked. |
+| 2026-10-30 (#737, design) | `DES-OPERATOR-CONSOLE` AMENDED, words only: the ParkedPhone card no longer draws the question; like the shipped Parked page it says where the question is read (`PARKED_QUESTION_WHERE`), so the design and `REQ-CONSOLE-SECURITY` (l) agree. The page, its panels and the rejected alternative's reason UNCHANGED, checked. |
