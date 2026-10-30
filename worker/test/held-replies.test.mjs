@@ -139,7 +139,7 @@ test("THE TAKE: the first held reply is enqueued (with the window) on the queue 
 	assert.equal(env.calls.closes.length, 1);
 	assert.equal(env.calls.closes[0].runId, "gh-d-ask");
 	assert.equal(env.calls.closes[0].targetKey, awaitTargetKeyOf(runData()), "the close takes the run off its target");
-	assert.deepEqual(env.calls.adds, [{ queue: "pi-jobs@h1", kind: "github", fields: fallbackFor("d-1") }], "a host queue stays on its host");
+	assert.deepEqual(env.calls.adds, [{ queue: "pi-jobs@h1", kind: "github", fields: { ...fallbackFor("d-1"), replyReceivedAt: T0 } }], "a host queue stays on its host and keeps the original receiver receipt");
 	assert.deepEqual(env.calls.comments.map((c) => c.text), [HELD_EXTRA_REPLY], "one comment however many replies followed");
 	assert.equal(env.calls.comments[0].job.id, "gh-d-ask");
 	assert.deepEqual(env.logs, [["held_reply_resumed", { jobId: "gh-d-1", runId: "gh-d-ask", n: 3, queue: "pi-jobs@h1" }]]);
@@ -428,6 +428,7 @@ test("live, end to end (H1): a reply held before the park is the ONE resumed job
 	// hold the reply under the surviving id. `hold` is null when the enqueue created a job.
 	const reply = async (number, id, over) => {
 		const fields = delivery(number, id, over);
+		fields.trigger.comment = { body: "the answer" };
 		const r = await enqueueGitHubJob(q, fields);
 		if (!r.deduplicated) return { r, hold: null };
 		return { r, hold: await holdReply({ redis, runId: r.survivingJobId, entry: { id: forgeMessageId(id), at: Date.now(), route: "dedup", fallback: { ...fields, kind: "github", jobId: r.jobId } } }) };

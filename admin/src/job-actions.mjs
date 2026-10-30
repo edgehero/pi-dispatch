@@ -1,3 +1,5 @@
+import { makeTouchStore, touchScopeOf } from "@edgehero/pi-dispatch/touch-state";
+import { trackTouchAction } from "@edgehero/pi-dispatch/touch-outbox";
 /**
  * The job actions the operator console adds to what the `/dispatch` TUI and the tools can do (issue #642): retry and
  * remove a failed job, the same in bulk, re-run a finished run, and answer a parked run from the browser.
@@ -167,8 +169,8 @@ async function actOnFailed(found, jobId, expect, act) {
   if (now.attemptsMade !== expect.attemptsMade || now.finishedOn !== expect.finishedOn) {
     return { invalid: `Nothing was done: it failed again since the preview (it changed since the preview); look again; job ${jobId}` };
   }
-  await act(found.job);
-  return { ok: true, jobId, queue: found.queue };
+  const result = await act(found.job);
+  return { ok: true, jobId, queue: found.queue, ...(result?.touchWarning ? { touchWarning: result.touchWarning } : {}) };
 }
 
 /** The `expect` a retry or remove must carry, or the refusal for one that does not. */
@@ -195,8 +197,8 @@ function expectProblem(expect) {
  * Found by id with `getJob` on every fleet queue, `queue` (the preview's, optional) first: a job far below the bulk
  * preview's newest-100 window is still found and acted on.
  */
-export async function retryFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 } = {}) {
-  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, act: (job) => job.retry("failed") })).single;
+export async function retryFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, touchStore = null, touchOutbox = null, now = Date.now } = {}) {
+  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", act: (job) => job.retry("failed") })).single;
 }
 
 /**
@@ -218,8 +220,8 @@ export async function removeFailedJob({ url, jobId, expect, queue = null, redisF
  * still go: `{ results: [{ jobId, ok: true, queue } | { jobId, invalid }] }`, in the list's order, or `{ invalid }` for a
  * list that is not one, or `{ unreachable }` when the fleet could not be read at all.
  */
-export async function retryFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 } = {}) {
-  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, act: (job) => job.retry("failed") }));
+export async function retryFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, touchStore = null, touchOutbox = null, now = Date.now } = {}) {
+  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", act: (job) => job.retry("failed") }));
 }
 
 /** Remove every job a bulk preview listed (issue #642), `retryFailedJobs`' shapes and per-job re-check. */
@@ -242,7 +244,7 @@ function bulkOf(res) {
  * The one body behind the four failed-job actions: one fleet discovery, one re-check and one act per job, every queue
  * closed after. `single` is the first result for the single-job spellings.
  */
-async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, timeoutMs, act }) {
+async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, timeoutMs, act, touchCause = null, touchStore = null, touchOutbox = null, now = Date.now }) {
   if (!Array.isArray(jobs)) return { invalid: "jobs must be the preview's list", single: { invalid: "jobs must be the preview's list" } };
   if (jobs.length > BULK_MAX) return { invalid: `at most ${BULK_MAX} jobs per action; this list has ${jobs.length}`, single: { invalid: "too many jobs" } };
   const results = [];
@@ -262,7 +264,13 @@ async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, time
       fleet ??= await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
       try {
         const found = await fleet.find(jobId, entry.queue);
-        const res = found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, act) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
+        const trackedAct = touchCause ? async (job) => {
+          const q = fleet.queueOf(found.queue);
+          const redis = q.client ? await q.client : null;
+          const store = touchStore ?? (redis ? makeTouchStore({ redis, now }) : null);
+          return trackTouchAction({ store, outbox: touchOutbox, event: { runId: jobId, cause: touchCause, at: now(), endedAt: entry.finishedOn ?? undefined, scopeId: touchScopeOf(job.data), nonce: `retry:${jobId}:${entry.attemptsMade}:${entry.finishedOn}` }, act: async () => { await act(job); return { ok: true }; } });
+        } : act;
+        const res = found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, trackedAct) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
         results.push(res.ok ? res : { jobId, invalid: res.invalid });
       } catch (err) {
         // One job's Valkey error is that job's result; a bulk action reports per job and goes on.
@@ -499,6 +507,27 @@ function currentTriggerFor(entries, kind, data) {
     if (!routed) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} runs ${JSON.stringify(run.flow)} now, not ${JSON.stringify(data.flow)})` };
   }
   return { run };
+}
+
+/** A fix must retain the source trigger's identity, not merely reuse its array position and forge kind. */
+export async function checkTriggerFixSource({ url, jobId, index, triggersPath, fs = nodeFs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, readRetainedJob = null } = {}) {
+  if (!JOB_ID_RE.test(jobId ?? "") || !Number.isSafeInteger(index) || index < 0) return { refusal: "The source run and trigger index are not valid." };
+  let fleet;
+  try {
+    const text = fs.readFileSync(triggersPath, "utf8");
+    const entries = parseTriggers(text, triggersPath);
+    const raw = JSON.parse(text);
+    const found = await within((async () => {
+      if (readRetainedJob) return readRetainedJob(jobId);
+      fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+      return (await fleet.find(jobId))?.job?.data ?? null;
+    })(), timeoutMs, () => null);
+    if (!found) return { refusal: "The queue no longer holds the source run's trigger identity. Open the current trigger configuration instead." };
+    if (found.trigger?.matched?.type === "comment" && typeof found.trigger.matched.phrase === "string" && entries[index]?.on.phrase !== found.trigger.matched.phrase) return { refusal: "The comment trigger phrase changed. Review the current trigger before adding instructions." };
+    if (found.trigger?.matched?.index !== index || currentTriggerFor(entries, found.kind, found).refusal || !raw.triggers?.[index]) return { refusal: "The trigger that started this run changed or moved. Review the current trigger before adding instructions." };
+    return { ok: true, runId: jobId, index, triggerDigest: createHash("sha256").update(JSON.stringify(raw.triggers[index])).digest("hex") };
+  } catch { return { refusal: "The source trigger identity could not be checked. Reload and try again; nothing was changed." }; }
+  finally { if (fleet) void fleet.close(); }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -817,7 +846,7 @@ export function boundedText(text) {
  * within `timeoutMs` for each phase whatever Valkey does: its queues' close is started, never awaited (`releaseOf`).
  * `removeQueuedJobFn` is a seam (the worker's `removeQueuedJob` by default).
  */
-export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, removeQueuedJobFn = removeQueuedJob, timeoutMs = 2500 } = {}) {
+export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, removeQueuedJobFn = removeQueuedJob, timeoutMs = 2500, touchStore = undefined, touchOutbox = null, now = Date.now } = {}) {
   if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { invalid: "a job id is letters, digits and . _ : -, at most 200 characters" };
   const problem = cancelExpectProblem(expect);
   if (problem) return { invalid: problem };
@@ -862,14 +891,14 @@ export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisC
     };
     let res;
     try {
-      res = await within(Promise.resolve().then(() => removeQueuedJobFn({ redis, queue: q, job: found.job, jobId, state, guard })), timeoutMs, () => ({ timedOut: true }));
+      res = await within(Promise.resolve().then(() => removeQueuedJobFn({ redis, queue: q, job: found.job, jobId, state, guard, touchStore, touchOutbox, now })), timeoutMs, () => ({ timedOut: true }));
     } catch {
       return removalUnknown(jobId, held, false);
     }
     // `partial`: the removal was asked for, so the job may be gone or its hold may be. The console's bar then says it did
     // not finish, never "nothing was changed" (actions.mjs `funnelResult`, the confirm's `partial` state).
     if (res?.timedOut) return removalUnknown(jobId, held, true);
-    if (res?.ok) return { ok: true, jobId, queue: found.queue, held: res.held === true };
+    if (res?.ok) return { ok: true, jobId, queue: found.queue, held: res.held === true, ...(res.touchWarning ? { touchWarning: res.touchWarning } : {}) };
     // The guard refused: nothing was sent.
     if (res !== null && typeof res === "object" && Object.hasOwn(res, "refused")) return { invalid: typeof res.refused === "string" ? res.refused : unreadBeforeRemoval(jobId) };
     if (typeof res?.invalid === "string" && res.cleared === true) {
@@ -1043,6 +1072,7 @@ export async function planRerun({
     const read = await readRunById(redis, { logsDir, jobId, fs, timeoutMs });
     if (!read.record) return { refusal: recordReadRefusal(read, jobId, "re-run") };
     const record = read.record;
+    const touchSource = ["policy", "failed"].includes(record.outcome) ? { runId: jobId, cause: "rerun", ...(Number.isSafeInteger(Date.parse(record.endedAt)) ? { endedAt: Date.parse(record.endedAt) } : {}), scopeId: record.touchScopeId ?? touchScopeOf(record, record.host), ...(record.project ? { project: record.project } : {}) } : null;
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     const found = await fleet.find(jobId);
     const data = found?.job?.data ?? null;
@@ -1068,7 +1098,7 @@ export async function planRerun({
       if (schedule.data?.command !== undefined) return { refusal: `cron trigger "${triggerId}" runs the command /${schedule.data.command}, and a /command run is not re-run from the console; it runs from its reviewed trigger` };
       const folder = folderRefusal(schedule.data.folder, { localRepoProblemFn, gitDirtyFn, cron: true });
       if (folder) return { refusal: `cron trigger "${triggerId}": ${folder}` };
-      return { plan: { kind: "cron", jobId, queue: localQueueName(env), schedule, job: schedule.data, reserve: reserveOf(schedule.data) } };
+      return { plan: { kind: "cron", jobId, ...(touchSource ? { touchSource } : {}), queue: localQueueName(env), schedule, job: schedule.data, reserve: reserveOf(schedule.data) } };
     }
 
     if (kind === "local") {
@@ -1077,7 +1107,7 @@ export async function planRerun({
       const folder = folderRefusal(data.folder, { localRepoProblemFn, gitDirtyFn });
       if (folder) return { refusal: folder };
       const job = { folder: data.folder, flow: data.flow, task: data.task };
-      return { plan: { kind: "local", jobId, queue: localQueueName(env), job, reserve: reserveOf(job) } };
+      return { plan: { kind: "local", jobId, ...(touchSource ? { touchSource } : {}), queue: localQueueName(env), job, reserve: reserveOf(job) } };
     }
 
     if (isForgeKind(kind)) {
@@ -1105,7 +1135,7 @@ export async function planRerun({
         ...(data.replica !== undefined ? { replica: data.replica } : {}),
         trigger: { ...(data.trigger ?? {}), deliveryId },
       };
-      return { plan: { kind: "forge", forge: kind, jobId, deliveryId, queue: forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), reserve: reserveOf(job) } };
+      return { plan: { kind: "forge", forge: kind, jobId, ...(touchSource ? { touchSource } : {}), deliveryId, queue: forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), reserve: reserveOf(job) } };
     }
     // Unreachable: `rerunRefusalOf` refused every kind that is neither local nor a forge's. Kept so a kind added to one
     // and not the other still refuses rather than returning nothing.
@@ -1129,7 +1159,7 @@ export async function planRerun({
  * minute's, or a forge job's 10-minute semantic window (the same target and flow ran or is running). `{ refusal }` for a
  * plan that is not one, `{ unreachable }` for Valkey.
  */
-export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now() } = {}) {
+export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now(), touchStore = null, touchOutbox = null } = {}) {
   const kind = plan?.kind;
   if (kind !== "local" && kind !== "cron" && kind !== "forge") return { refusal: "not a re-run plan" };
   if (typeof plan.queue !== "string" || !(plan.queue === QUEUE || plan.queue.startsWith(`${QUEUE}@`))) return { refusal: "the plan names no queue" };
@@ -1138,24 +1168,38 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
     if (folder) return { refusal: `${folder} (it changed since the preview). Nothing was queued` };
   }
   let queue = null;
+  let intent = null;
+  let tracker = null;
+  const done = async (result) => {
+    if (!intent) return result;
+    const tracked = await tracker.applied(intent);
+    intent = null;
+    return tracked?.ok ? result : { ...result, touchWarning: "touch-tracking-incomplete" };
+  };
   try {
     queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: plan.queue });
+    const store = touchStore ?? (queue.client ? makeTouchStore({ redis: await queue.client, now }) : null);
+    if (plan.touchSource && (store || touchOutbox)) {
+      tracker = touchOutbox ?? { begin: (event) => store.begin(event), applied: (pending) => store.write(pending.event), abort: (pending) => store.abort(pending.event) };
+      intent = await tracker.begin({ ...plan.touchSource, at: now(), nonce: `rerun:${plan.jobId}:${plan.deliveryId ?? now()}` });
+    }
     if (kind === "local") {
       const { id, existing } = await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task });
       if (existing) return { refusal: swallowedRunSentence(id, existing), deduplicated: true, jobId: id };
-      return { ok: true, jobId: id, queue: plan.queue };
+      return await done({ ok: true, jobId: id, queue: plan.queue });
     }
     if (kind === "cron") {
       const { id, existing } = await enqueueTriggerRunReporting(queue, plan.schedule, { now: new Date(now()) });
       if (existing) return { refusal: swallowedRunSentence(id, existing), deduplicated: true, jobId: id };
-      return { ok: true, jobId: id, queue: plan.queue };
+      return await done({ ok: true, jobId: id, queue: plan.queue });
     }
     const res = await enqueueForgeJob(queue, plan.forge, plan.job);
     if (res.deduplicated) return { refusal: `the same target and flow ran or is running within the last 10 minutes (job ${res.survivingJobId}), so the queue's semantic window took this re-run as a duplicate and nothing was queued. Try again once that window has passed`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
-    return { ok: true, jobId: res.jobId, queue: plan.queue };
+    return await done({ ok: true, jobId: res.jobId, queue: plan.queue });
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
+    if (intent) await tracker.abort(intent);
     if (queue) await queue.close().catch(() => {});
   }
 }

@@ -85,7 +85,7 @@ test("a steer-armed awaitInput park that took a held reply answers its late stee
 	const NOW = 1_800_000_000_000;
 	const lateId = "a".repeat(32);
 	const late = { v: 1, id: lateId, mode: "steer", source: "forge", author: { kind: "forge", id: 5, association: "OWNER" }, text: "late words", at: NOW, deliveryId: "d-late" };
-	const heldEntry = { id: "b".repeat(32), at: NOW, route: "dedup", fallback: { kind: "github", repo: "acme/web", target: { type: "issue", number: 3 }, flow: "ask", resume: true, awaitInput: true, trigger: { deliveryId: "d-held", sender: { id: 5 } }, jobId: "gh-d-held" } };
+	const heldEntry = { id: "b".repeat(32), at: NOW, route: "dedup", fallback: { kind: "github", repo: "acme/web", target: { type: "issue", number: 3 }, flow: "ask", resume: true, awaitInput: true, trigger: { deliveryId: "d-held", sender: { id: 5 }, comment: { id: 6, body: "use the staging database" } }, jobId: "gh-d-held" } };
 	const redis = fakeRedis();
 	// The steer inbox's close (settleInbox): one late forge message, closed for the first time.
 	redis.eval = async () => [[JSON.stringify(late)], [lateId, "late"], 1];

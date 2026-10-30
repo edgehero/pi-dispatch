@@ -1,3 +1,4 @@
+import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
 import { forkArchiveFact, recordedFork } from "./fork-job.mjs";
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -205,7 +206,7 @@ export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"
  * with the mount and a key; named for MCP_RUNNER_REASONS' reason, the operator's fix is not a budget.
  */
 export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer-no-exit-key"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -958,7 +959,7 @@ function rebuildUsage(u) {
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null, touchTracking = false }) {
 	const data = job.data ?? {};
 	const fork = recordedFork(data.fork, sourceModel(result, error));
 	const kind = data.kind ?? job.name;
@@ -982,7 +983,9 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
 	return {
 		jobId: job.id,
-		kind: kind ?? null,
+		// Internal references can refuse before they resolve to a local execution envelope. Keep the public
+		// forge/local vocabulary intact; purpose below identifies this analysis without inventing a forge kind.
+		kind: kind === "question-grouping" ? null : kind ?? null,
 		target: targetFor(kind, data),
 		flow: data.flow ?? null,
 		startedAt: startedAt ?? null,
@@ -1224,6 +1227,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(secretsProfile !== null ? { secretsProfile } : {}),
 		// Effective turn budget captured at pickup, not the settings as they stand when the run ends (#747).
 		...(Number.isSafeInteger(maxTurns) && maxTurns > 0 ? { maxTurns } : {}),
+		// Both an unresolved internal reference's refusal and its resolved classifier run stay out of workload
+		// rates. Keep their ordinary history and spend: analysis must not improve the rate by adding idle runs.
+		...(kind === "question-grouping" || data.purpose === "zero-touch-grouping" && data.questionGrouping ? { purpose: "zero-touch-grouping" } : {}),
+		...(touchTracking ? { touchTrackingVersion: 1, touchScopeId: touchScopeOf(data, host) } : {}),
+		...(Array.isArray(source.touches) ? { touches: source.touches.slice(0, 16).map(cleanTouch).filter(Boolean) } : {}),
+		...(source.touchLineageSkipped === "source-unavailable" ? { touchLineageSkipped: "source-unavailable" } : {}),
 	};
 }
 

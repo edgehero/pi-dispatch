@@ -22,6 +22,14 @@ export async function enqueueWatchJob(queue, fields, { now = Date.now, phase = "
 	return id;
 }
 
+/** A confirmed grouping request has no private text and one paid attempt. Collection failures never buy another. */
+export async function enqueueQuestionGroupJob(queue, { runId, digest, configDigest }, { nonce = randomUUID } = {}) {
+	if (!/^[A-Za-z0-9._:-]{1,200}$/.test(runId ?? "") || !/^[a-f0-9]{64}$/.test(digest ?? "") || !/^[a-f0-9]{64}$/.test(configDigest ?? "")) throw new Error("invalid question grouping reference");
+	const jobId = `question-group-${nonce()}`;
+	await queue.add("question-grouping", { kind: "question-grouping", questionGrouping: { runId, digest, configDigest } }, { jobId, attempts: 1, removeOnComplete: { age: 31 * 86400, count: 5000 }, removeOnFail: { age: 31 * 86400, count: 5000 } });
+	return jobId;
+}
+
 /**
  * The queue a HOST-AFFINE job goes to (issue #57): work only one machine can do, because the folder, the
  * secret resolver or the wait-check script lives there.
@@ -429,9 +437,10 @@ export async function enqueueLateForgeJob(queue, kind, fields) {
 }
 
 /** The forge job's id, its data (an explicit field list, see `enqueueForgeJob`) and its semantic dedup id. Throws on a bad delivery id or console name. */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	if (approvalRequestId !== undefined && (typeof approvalRequestId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(approvalRequestId))) throw new TypeError("approval-request-invalid");
+	if (replyReceivedAt !== undefined && (!Number.isSafeInteger(replyReceivedAt) || replyReceivedAt < 0 || resume !== true || typeof trigger?.comment?.body !== "string")) throw new TypeError("reply-receipt-invalid");
 	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
 	// else. Rebuilt from the one field rather than copied, `parkedReply`'s rule for durable job data, and refused when the
 	// name is not a console token's: the worker prints it on the forge in the answer's trail comment, so a name outside
@@ -512,6 +521,9 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// A phrase-free reply to a parked issue (issue #625), gated by the worker on the key's `parked` mark. Never part
 		// of an id: it says how the delivery was routed, not what it is.
 		...(parkedReply === true && { parkedReply: true }),
+		// The held-reply settle supplies the receiver's original clock, not a timestamp from comment text.
+		// It is private accounting metadata, so /job/event.json's trigger remains byte-identical.
+		...(replyReceivedAt !== undefined && { replyReceivedAt }),
 		// Issue #642: the console answer's provenance, at JOB level and never inside `trigger` (copied verbatim into
 		// /job/event.json): it is for the worker's trail comment, not for the agent. Never part of an id.
 		...(consoleBy !== null && { console: { by: consoleBy } }),

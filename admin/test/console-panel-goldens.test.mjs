@@ -1,3 +1,4 @@
+import { ZERO_TOUCH_PANEL_STATES } from "./helpers/zero-touch-goldens.mjs";
 import { CONFIGURATION_PANEL_STATES } from "./helpers/configuration-goldens.mjs";
 import { TRIGGER_LIST_PANEL_STATES } from "./helpers/trigger-list-goldens.mjs";
 import { test } from "node:test";
@@ -49,7 +50,7 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   const runs = ["runs-mirror-off.operator", "runs-mirror-degraded.operator", "runs-truncated.operator", "runs-unreadable.viewer", "runs-empty.viewer", "runs-unknown-reason.viewer"];
   const parked = ["parked-approval.operator", "parked-approval.viewer", "parked-answerable.operator", "parked-unanswerable.operator", "parked-being-answered.operator", "parked-unknown.operator", "parked-empty.viewer"];
   const more = ["run-not-found.operator", "run-not-found.viewer", "confirm-refused-timeout.operator", "confirm-preview-resume-incomplete.operator", "confirm-preview-many-queues.operator"];
-  assert.deepEqual([...PANEL_STATES], [...CONFIGURATION_PANEL_STATES,...TRIGGER_LIST_PANEL_STATES, ...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
+  assert.deepEqual([...PANEL_STATES], [...ZERO_TOUCH_PANEL_STATES, ...CONFIGURATION_PANEL_STATES,...TRIGGER_LIST_PANEL_STATES, ...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
   // `<state>.<role>`, the role one the width check knows (`console-width-check.mjs` `GOLDEN_ROLES`).
   for (const state of PANEL_STATES) assert.match(state, /^[a-z0-9][a-z0-9-]*\.(?:operator|viewer|anonymous)$/, state);
 });

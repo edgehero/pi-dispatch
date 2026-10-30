@@ -439,7 +439,10 @@ export function makeSessionStore({
 				fs.writeFileSync(staged, "");
 			}
 			log("session_resolved", { key, resume: verdict.resume, reason: verdict.reason });
-			return { hostDir, key, modelId, venue, ...verdict };
+			// Bind answer lineage to the descriptor's transcript, not an earlier park lookup. Another flow on
+			// this issue may have promoted a different park while this job was passing its admission gates.
+			const parkedSource = verdict.resume ? readBoundParkedSource(key, judged) : null;
+			return { hostDir, key, modelId, venue, ...verdict, ...(parkedSource ? { parkedSource } : {}) };
 		} catch (err) {
 			// A history fault must never fail the prepare that asked.
 			log("session_store_failed", { phase: "resolve", reason: err?.message });
@@ -549,7 +552,7 @@ export function makeSessionStore({
 		return st.isDirectory() ? `${st.dev}:${st.ino}` : null;
 	}
 
-	function promoteSession(session, { piVersion = null, context = null, parked = false } = {}) {
+	function promoteSession(session, { piVersion = null, context = null, parked = false, parkedSource = null } = {}) {
 		// The second DI-seam backstop, and unreachable for the same reason as the `!sessionsDir` return
 		// above: sessionKeyFor is total and binary (null, or 32 hex chars), so resolveSession returns null
 		// rather than a keyless session, and processor.mjs only calls this when prepare handed it one. Kept
@@ -721,7 +724,7 @@ export function makeSessionStore({
 				// it is reporting.
 				writeSidecar(dir, RESUME_CHAIN_FILE, session.key, chainValue(session));
 				writeContextSidecar(dir, session, context);
-				writeParkedSidecar(dir, session, parked);
+				writeParkedSidecar(dir, session, parked, parkedSource);
 			} finally {
 				fs.closeSync(fd);
 				try {
@@ -853,9 +856,12 @@ export function makeSessionStore({
 
 	// Issue #625: `parked` is set by a run that ended awaiting-input, and cleared by every other promotion, so the
 	// marker always describes the transcript beside it. Caught like its siblings: the promotion already happened.
-	function writeParkedSidecar(dir, session, parked) {
+	function writeParkedSidecar(dir, session, parked, parkedSource = null) {
 		if (parked === true) {
-			writeSidecar(dir, PARKED_FILE, session.key, String(now()));
+			const at = now();
+			const transcriptIdentity = readIdentity(canonicalFile(session.key));
+			const source = transcriptIdentity && typeof parkedSource?.runId === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(parkedSource.runId) ? { v: 2, runId: parkedSource.runId, at, transcriptIdentity } : null;
+			writeSidecar(dir, PARKED_FILE, session.key, source ? JSON.stringify(source) : String(at));
 			return;
 		}
 		try {
@@ -1373,6 +1379,28 @@ export function makeSessionStore({
 	 * which costs a token to read, which is why a phrase-free reply is routed on issues only and this resolves no PR.
 	 * The key's own name must `lstat` as a real directory, resolveSession's first gate, so a planted link answers no.
 	 */
+	function readParkedInfo(job) {
+		if (!sessionsDir || job?.target?.type === "pull_request") return null;
+		const key = sessionKeyFor(job);
+		if (!key) return null;
+		try { if (!inspectKeyDir(key).ok) return null; } catch { return null; }
+		const raw = readSidecar(key, PARKED_FILE);
+		try {
+			const value = JSON.parse(raw);
+			if ([1, 2].includes(value?.v) && /^[A-Za-z0-9._:-]{1,200}$/.test(value.runId ?? "") && Number.isSafeInteger(value.at) && value.at >= 0) return { runId: value.runId, at: value.at };
+		} catch {}
+		// An older timestamp still proves a park, but cannot name a source run or manufacture answer lineage.
+		return null;
+	}
+
+	function readBoundParkedSource(key, transcriptIdentity) {
+		try {
+			const value = JSON.parse(readSidecar(key, PARKED_FILE));
+			if (transcriptIdentity && value?.v === 2 && value.transcriptIdentity === transcriptIdentity && /^[A-Za-z0-9._:-]{1,200}$/.test(value.runId ?? "") && Number.isSafeInteger(value.at) && value.at >= 0) return { runId: value.runId, at: value.at };
+		} catch {}
+		return null;
+	}
+
 	function isParked(job) {
 		if (!sessionsDir || job?.target?.type === "pull_request") return false;
 		const key = sessionKeyFor(job);
@@ -1462,5 +1490,5 @@ export function makeSessionStore({
 		}
 	}
 
-	return { resolveSession, promoteSession, reapSessions, isParked, stageRecovered };
+	return { resolveSession, promoteSession, reapSessions, isParked, readParkedInfo, stageRecovered };
 }

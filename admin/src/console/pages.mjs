@@ -1,3 +1,5 @@
+import { ZERO_TOUCH_PANELS, zeroTouchTabs, zeroTouchControls } from "./panels/zero-touch.mjs";
+import { zeroTouchView } from "../zero-touch-view.mjs";
 /**
  * The console's screens (issue #641, REQ-OPERATOR-CONSOLE-SCREENS): which screens exist, what each one's query may say,
  * what each one reads, and how each one is drawn from its panels.
@@ -127,6 +129,7 @@ import { RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
 export const PAGES = Object.freeze({
   overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview", icon: "home" }),
   runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs", icon: "runs" }),
+  "zero-touch": Object.freeze({ path: "/runs/zero-touch", auth: "viewer", live: false, title: "Zero touch", nav: null, icon: "flag" }),
   run: Object.freeze({ path: "/run", auth: "viewer", live: true, title: "Run", nav: null, icon: "runs" }),
   parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked", icon: "parked" }),
   insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: SPEND_TITLE, nav: SPEND_TITLE, icon: "spend" }),
@@ -152,6 +155,7 @@ export const PAGES = Object.freeze({
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
+  "zero-touch": ZERO_TOUCH_PANELS,
   secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
   connections: [["p-connection-problems", connectionsProblems], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
   project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
@@ -209,6 +213,7 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  "zero-touch": [{ cls: "cards-4 zt-kpis", items: ["p-zt-rate", "p-zt-streak", "p-zt-wait", "p-zt-handled"] }, { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions"] }, { cls: "stack zt-side", items: ["p-zt-causes", "p-zt-fixes"] }] }],
   connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-forges", "p-egress", "p-endpoints"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
   project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
   triggers: [{ cls: "stack", items: ["p-tr-tabs", "p-tr-viewer"] }, { cls: "cards-3 triggers-kpis", items: ["p-tr-count", "p-tr-next", "p-tr-spend"] }, { cls: "cols triggers-layout", items: [{ cls: "stack triggers-rules", items: ["p-tr-filters", "p-tr-week", "p-tr-schedule", "p-tr-github", "p-tr-gitlab", "p-tr-forgejo", "p-tr-azure", "p-tr-unknown"] }, { cls: "stack triggers-check-side", items: ["p-tr-check"] }] }],
@@ -230,6 +235,10 @@ const PAGE_LAYOUT = Object.freeze({
 /** The panel ids a layout places, in the order it draws them. */
 const layoutIds = (items) => items.flatMap((it) => (typeof it === "string" ? [it] : layoutIds(it.items)));
 
+function zeroTouchLayout(role) {
+  if (role === "operator") return PAGE_LAYOUT["zero-touch"];
+  return [PAGE_LAYOUT["zero-touch"][0], { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions", "p-zt-fixes"] }, { cls: "stack zt-side", items: ["p-zt-causes"] }] }];
+}
 for (const [name, layout] of Object.entries(PAGE_LAYOUT)) {
   const placed = layoutIds(layout);
   const own = PAGE_PANELS[name].map(([id]) => id);
@@ -252,7 +261,8 @@ export function panelIds(name) {
 /** The parameters each screen takes; any other refuses the request. */
 const PAGE_PARAMS = Object.freeze({
   overview: ["rows", "zoom", "project"],
-  runs: [...RUN_FILTER_FIELDS, "before"],
+  runs: [...RUN_FILTER_FIELDS, "before", "touched", "days", "scope"],
+  "zero-touch": ["days", "project", "scope"],
   run: ["id"],
   parked: [],
   insights: ["range", "project", "whatif", "flow", "runs", "paths"],
@@ -321,6 +331,13 @@ export function parsePageQuery(name, searchParams) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) return { refusal: "there is no such page on this console" };
   const params = asParams(searchParams);
   if (params === null) return { refusal: "the query is not readable" };
+  if (["config", "trigger", "trigger-add", "secrets", "connections", "project"].includes(name) && params.has("becauseRun")) {
+    const source = params.get("becauseRun");
+    if (params.getAll("becauseRun").length !== 1 || !/^[A-Za-z0-9._:-]{1,200}$/.test(source ?? "")) return { refusal: "becauseRun must be one retained run id" };
+    const rest = new URLSearchParams(params); rest.delete("becauseRun");
+    const parsed = parsePageQuery(name, rest);
+    return parsed.refusal ? parsed : { query: Object.freeze({ ...parsed.query, becauseRun: source }) };
+  }
   const allowed = PAGE_PARAMS[name];
   let n = 0;
   for (const [key, value] of params) {
@@ -356,16 +373,35 @@ export function parsePageQuery(name, searchParams) {
     }
     case "watch":
     case "watch-board": return parseWatchQuery(params, { board: name === "watch-board" });
+    case "zero-touch": {
+      const days = one("days") ?? "30";
+      if (!["7", "30", "90"].includes(days)) return { refusal: "days must be one of 7, 30, 90" };
+      const project = one("project");
+      if (project !== null && project !== "~" && !PROJECT_ID_RE.test(project)) return { refusal: "project must be a project id or ~ for no project" };
+      const scope = one("scope");
+      if (scope !== null && !/^[a-f0-9]{64}$/.test(scope)) return { refusal: "scope must be an opaque scope id" };
+      return { query: Object.freeze({ days: Number(days), project, scope }) };
+    }
     case "runs": {
-      const f = parseRunFilter(params);
+      const touched = one("touched");
+      if (touched !== null && touched !== "1") return { refusal: "touched must be 1 or left out" };
+      const missingProject = touched === "1" && one("project") === "~";
+      const runParams = missingProject ? new URLSearchParams(params) : params;
+      if (missingProject) runParams.delete("project");
+      const f = parseRunFilter(runParams);
       if (f.refusal) return { refusal: f.refusal };
+      const days = one("days") ?? "30";
+      const scope = one("scope");
+      if (!["7", "30", "90"].includes(days)) return { refusal: "days must be one of 7, 30, 90" };
+      if (scope !== null && !/^[a-f0-9]{64}$/.test(scope)) return { refusal: "scope must be an opaque scope id" };
+      if (touched === null && (one("days") !== null || scope !== null)) return { refusal: "days and scope require touched=1 on Runs" };
       const raw = one("before");
       let before = null;
       if (raw !== null) {
         if (!RUNS_BEFORE_RE.test(raw) || !Number.isSafeInteger(Number(raw))) return { refusal: "before must be a whole number of milliseconds" };
         before = Number(raw);
       }
-      return { query: Object.freeze({ filter: f.filter, before }) };
+      return { query: Object.freeze({ filter: touched ? Object.freeze({ ...f.filter, ...(missingProject ? { project: "~" } : {}), touched, days, ...(scope ? { scope } : {}) }) : f.filter, before }) };
     }
     case "project": {
       const id = one("id");
@@ -435,12 +471,17 @@ export function parsePageQuery(name, searchParams) {
 export function pageQueryString(name, query) {
   const p = new URLSearchParams();
   const q = query ?? {};
+  if (name === "zero-touch") {
+    p.set("days", String(q.days ?? 30));
+    if (q.project) p.set("project", q.project);
+    if (q.scope) p.set("scope", q.scope);
+  }
   if (name === "trigger" && Number.isSafeInteger(q.index)) p.set("index", String(q.index));
   if (name === "triggers" && q.kind && q.kind !== "all") p.set("kind", q.kind);
   if (name === "watch" || name === "watch-board") {
     for (const k of ["rule", "finding"]) if (q[k]) p.set(k, q[k]);
   } else if (name === "runs") {
-    for (const k of RUN_FILTER_FIELDS) if (q.filter?.[k] !== undefined) p.set(k, q.filter[k]);
+    for (const k of [...RUN_FILTER_FIELDS, "touched", "days", "scope"]) if (q.filter?.[k] !== undefined) p.set(k, q.filter[k]);
     if (q.before !== null && q.before !== undefined) p.set("before", String(q.before));
   } else if ((name === "host" || name === "venue") && q.name) p.set("name", q.name);
   else if ((name === "run" || name === "project") && q.id) p.set("id", q.id);
@@ -507,6 +548,7 @@ export function returnPathOf(raw) {
  * `/api/state`, and a reader built to read them would make every other screen pay for a read it never draws.
  */
 const PAGE_READS = Object.freeze({
+  "zero-touch": ["parkedCount"],
   overview: ["snapshot", "waiting"],
   runs: ["runsPage", "subscriptions", "runsWindow", "parkedCount"],
   run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
@@ -654,6 +696,11 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
   if (name === "watch" || name === "watch-board") data.watch = await loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true });
   const reads = PAGE_READS[name];
+  if (name === "zero-touch") {
+    try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role }) : null; } catch { data.zeroTouch = null; }
+    // Role projection happens before page data can be inspected or reused, not just while rendering a group panel.
+    data.zeroTouch = zeroTouchView(data.zeroTouch, { role: who?.role, windowDays: q.days, nowMs: now });
+  }
   if (["config", "trigger", "trigger-add", "triggers"].includes(name) && typeof deps.configLocations === "function") data.configLocations = deps.configLocations();
   // The by-id lookups' one question for this load (see above): the hub's, or this request's, read before any of them.
   const lookup = who?.live === true ? { live: true } : typeof deps.fleet?.lookupQuestion === "function" ? deps.fleet.lookupQuestion() : {};
@@ -712,7 +759,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (reads.includes("subscriptions")) data.subscriptions = await subscriptionsOf(deps);
   if (reads.includes("runsPage")) {
     try {
-      data.runsPage = await deps.fleet.runsPage({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter ?? null });
+      data.runsPage = q.filter?.touched === "1" ? await deps.zeroTouchRuns({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter, windowDays: Number(q.filter.days), scopeId: q.filter.scope ?? null }) : await deps.fleet.runsPage({ before: q.before ?? null, limit: RUNS_PER_PAGE, filter: q.filter ?? null });
     } catch {
       data.runsPage = null;
       data.readFailed = true;
@@ -990,13 +1037,13 @@ export async function renderPage(name, ctx) {
   const extra = name === "run" && !ctx?.data?.run?.invalid ? html`<div id="transcript" class="run-transcript">${runTranscriptSection(viewOf(name, ctx))}</div>` : null;
   const sections = new Map(panels.map(({ id, fragment }) => [id, html`<section id="${id}" data-panel>${fragment}</section>`]));
   if (name === "run" && extra !== null) sections.set("p-transcript", html`${sections.get("p-transcript")}${extra}`);
-  const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
+  const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : name === "zero-touch" ? zeroTouchLayout(role) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
   const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
   const titleOptions = configOptions ?? triggerListOptions ?? (name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
-  const body = shellHtml(name, ctx, html`${name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${inner}`, { ...titleOptions, ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
+  const body = shellHtml(name, ctx, html`${["runs", "zero-touch"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = name === "project" && ctx?.data?.projectView?.state !== "ready" || places !== null && !runPlaces(places).shown ? 503 : 200;
-  return { status, html: page({ title: `pi-dispatch console: ${["host", "venue"].includes(name) ? ctx?.query?.name ?? meta.title : meta.title}`, name, body, live, query, theme }) };
+  return { status, html: page({ title: `pi-dispatch console: ${["host", "venue"].includes(name) ? ctx?.query?.name ?? meta.title : meta.title}`, name, body, live, query, theme, becauseRun: ctx?.query?.becauseRun ?? null }) };
 }

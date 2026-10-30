@@ -757,3 +757,11 @@ Resumable forge flows may declare typed approval gates with `run.gates`, an opti
 ## Reviewed model roles
 
 Use `run.model: "role:editor"` with an operator-reviewed `modelRoles` block to move all jobs of a role with one edit. See [model-roles.md](model-roles.md) for deployment/project precedence, agent inheritance and policy checks, [model-proposals.md](model-proposals.md) for catalog and retirement notices, and [canary.md](canary.md) for capped replay comparisons before adopting a candidate.
+
+
+## Zero touch grouping configuration
+
+The optional top-level `zeroTouch` section enables bounded private question capture and declares the classifier,
+cap, confidence threshold and human-written group names. It never sends an answer. Grouping is an operator-confirmed
+job through every normal budget/model/credential gate. See [Zero touch](zero-touch.md#group-repeated-questions) for
+the schema, limits and privacy boundaries. It is separate from answer rules (#772).

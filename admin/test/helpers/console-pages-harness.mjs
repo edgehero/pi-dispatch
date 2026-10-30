@@ -1,3 +1,4 @@
+import { zeroTouchFixture } from "./zero-touch-goldens.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -57,6 +58,7 @@ export const SHOTS = Object.freeze([
   // Issue #737: the timeline by host over its widest window, the overview's other grouping, through its query.
   ["overview-host", "overview", "rows=host&zoom=24h"],
   ["runs", "runs", ""],
+  ["zero-touch", "zero-touch", "days=30"],
   ["runs-filtered", "runs", "project=web&outcome=completed"],
   // Issue #737: the runs that did not complete, and a search by a job id (the parked run's), its row found by its id.
   ["runs-problems", "runs", "problems=1"],
@@ -459,6 +461,7 @@ async function renderInChild() {
         now: () => NOW,
       }),
       pricedModels: () => ["acme/model-1", "acme/model-2"],
+      zeroTouch: async () => zeroTouchFixture(NOW),
       // The audit page as serve wires it (`cli.mjs` `pageDeps`, issue #737): the reader asked for each row's place, and
       // the chain's walk asked for its last good row, stamped with when it ran (serve caches it for 30 s, so the page
       // says how old it is). The fixture's four rows and the damaged line after them are what both read.
@@ -483,11 +486,11 @@ async function renderInChild() {
       if (parsed.refusal) throw new Error(`${shot}: ${parsed.refusal}`);
       const data = await P.loadPageData(name, parsed.query, deps);
       for (const role of ROLES) {
-        pages[`${shot}.${role}`] = await draw(name, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data: name === "watch-board" ? await P.loadPageData(name, parsed.query, deps, { role }) : data, readOnly: false });
+        pages[`${shot}.${role}`] = await draw(name, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data: ["watch-board", "zero-touch"].includes(name) ? await P.loadPageData(name, parsed.query, deps, { role }) : data, readOnly: false });
       }
       // The operator's page on a read-only console (serve's read-only mode, issue #737 review round 2): the frame draws
       // its chip and every write form is withheld, so it is a page of its own, held to the same rules but to no golden.
-      readOnly[shot] = await draw(name, { query: parsed.query, session: { name: "ops", role: "operator" }, data: name === "watch-board" ? await P.loadPageData(name, parsed.query, deps, { role: "operator", readOnly: true }) : data, readOnly: true });
+      readOnly[shot] = await draw(name, { query: parsed.query, session: { name: "ops", role: "operator" }, data: ["watch-board", "zero-touch"].includes(name) ? await P.loadPageData(name, parsed.query, deps, { role: "operator", readOnly: true }) : data, readOnly: true });
     }
     if (hostile) {
       // The hostile run's own detail page: its id is outside the run-id charset, so the query is refused before any read.

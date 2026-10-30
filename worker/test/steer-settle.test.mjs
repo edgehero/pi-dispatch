@@ -104,9 +104,9 @@ test("BY SHAPE: every record write in index.mjs is immediately preceded by the s
 		if (l.startsWith("*")) continue; // inside a block comment
 		sites.push(i);
 	}
-	// 2 above the gate (the never-fits refusal, the wait gate's refusal) and the 9 post-gate paths project-pickup counts,
+	// 3 above the gate (grouping source project, never-fits and wait refusals) and the 9 post-gate paths project-pickup counts,
 	// including a failover job with no eligible candidate.
-	assert.equal(sites.length, 11, "a new record site must be counted here, and settled");
+	assert.equal(sites.length, 12, "a new record site must be counted here, and settled");
 	for (const i of sites) {
 		const l = code(lines[i]);
 		const arg = /\{ job, (result: outcome|result|error: expired|error: loop|error)[,}]/.exec(l)?.[1];

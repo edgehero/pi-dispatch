@@ -1,3 +1,4 @@
+import { readQuestionGrouping, executeQuestionGrouping } from "./src/question-grouping.mjs";
 import { existsSync } from "node:fs";
 import { readWatchDecision, executeWatchDecision } from "./src/watch-decision.mjs";
 import { readWatchTools, createWatchTools } from "./src/watch-tools.mjs";
@@ -192,10 +193,13 @@ async function main() {
 	// Diagnose the shared mount boundary before inspecting optional watch or role files.
 	const watchReadOnly = readWatchMode();
 	const watchDecisionInput = readWatchDecision();
+	const questionGroupingInput = readQuestionGrouping();
+	if (questionGroupingInput && (watchReadOnly || watchDecisionInput || cfg.maxCostMicros === null)) throw configError("question grouping requires its own mode and a cost cap", "question-group-refused");
+	if (questionGroupingInput) assertWatchCompatible(cfg);
 	if (watchDecisionInput && (!watchReadOnly || cfg.maxCostMicros === null)) throw configError("watch decisions require a read-only marker and a cost cap", "watch-config-invalid");
 	const watchToolsConfig = watchReadOnly && !watchDecisionInput ? readWatchTools() : null;
 	const roleInputs = readRoleInputs();
-	if (watchReadOnly) assertWatchCompatible(cfg, { roles: roleInputs });
+	if (watchReadOnly || questionGroupingInput) assertWatchCompatible(cfg, { roles: roleInputs });
 	// Issue #704 part 3: a project secret bundle's plain variables on a gateway venue, from the job's own directory into
 	// this process's environment (pi's), before any runtime or request exists. Same moment, same exit code: a flag
 	// without a usable file refuses before spend rather than running the job without a variable it was given.
@@ -221,7 +225,7 @@ async function main() {
 	// (src/mcp.mjs `readJobMcp`). Null for a job whose trigger names none, which then builds exactly what it always has.
 	// Read first, since the job's MCP adds the names an exclusion may carry (codemode, a server's tools).
 	const mcpDocument = readJobMcp();
-	if (watchReadOnly) assertWatchCompatible(cfg, { roles: roleInputs, mcp: mcpDocument });
+	if (watchReadOnly || questionGroupingInput) assertWatchCompatible(cfg, { roles: roleInputs, mcp: mcpDocument });
 	if (cfg.excludeTools.length > 0) assertExcludeToolsKnown(cfg.excludeTools, [...excludableToolNames(), ...mcpExcludableNames(mcpDocument)]);
 
 	// A command job's prompt is rebuilt from PI_COMMAND rather than read from disk: one in-container
@@ -270,7 +274,7 @@ async function main() {
 	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = cfg.fork
 		? openForkSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, fork: cfg.fork })
 		: openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
-	if (watchReadOnly && sessionResumed) throw configError("watch jobs require a fresh session", "watch-config-invalid");
+	if ((watchReadOnly || questionGroupingInput) && sessionResumed) throw configError("watch jobs require a fresh session", "watch-config-invalid");
 	applyApprovalDecision(sessionManager, approvalDecisionFromEvent(cfg.approvalDecision, { jobDir: JOB_DIR }));
 	const rootSessionId = sessionManager.getSessionId();
 	// Issue #645: a recovery attempt resumes the checkpoint the worker staged, or it does not run. An empty or quarantined
@@ -371,10 +375,10 @@ async function main() {
 	});
 
 
-	if (watchDecisionInput) {
+	if (watchDecisionInput || questionGroupingInput) {
 		// A deterministic classifier owns this container. No extension loader or agent session exists.
 		let result;
-		try { result = await executeWatchDecision({ input: watchDecisionInput, runtime: modelRuntime }); }
+		try { result = questionGroupingInput ? await executeQuestionGrouping({ input: questionGroupingInput, runtime: modelRuntime }) : await executeWatchDecision({ input: watchDecisionInput, runtime: modelRuntime }); }
 		finally { usageMeter.uninstall(); failureObserver.uninstall(); }
 		const stop = meterStopAtExit();
 		const outcome = stop ?? (result.ok ? { code: 0, reason: "stop" } : { code: 2, reason: result.reason });

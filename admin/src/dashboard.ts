@@ -2207,7 +2207,7 @@ function cancelNote(res: any): string {
   if (res?.ack !== undefined) return `cancel accepted by ${res.ack === "" ? "the worker" : say(res.ack)} — stopping the container (~30s)`;
   if (res?.timeout) return "no worker acknowledged: the job may have just finished, gone back to the queue (cancel it again to remove it), or its host is unreachable; nothing was changed";
   // Issue #477: the job's past from its own counter (`ranBefore`), as the CLI says it: a held retry had run.
-  if (res?.ok) return `cancelled ${say(res.jobId)}: ${ranBefore(res)}`;
+  if (res?.ok) return `cancelled ${say(res.jobId)}: ${ranBefore(res)}${res.touchWarning ? "; touch tracking is incomplete. Do not repeat the cancellation." : ""}`;
   if (res?.invalid) return `rejected: ${say(res.invalid)}`;
   return "cancel failed — check the worker log";
 }

@@ -323,6 +323,7 @@ test("every cancel answer driven names its job once and last, after what happene
 	const answers = [];
 	const alive = setInterval(() => {}, 1000); // the bounds' timers are unref'd; a real client's socket would hold the loop
 	let coverage;
+	let warnedRemovalCalls = 0;
 	try {
 		// cancel-queued: a fleet of the shared queue (and pi-jobs@h1 when `elsewhere`), a job that never started on it.
 		const states = (...seq) => {
@@ -342,6 +343,8 @@ test("every cancel answer driven names its job once and last, after what happene
 				expect: o.expect === undefined ? { queue: "pi-jobs", attemptsMade: 0, stalledCounter: 0 } : o.expect,
 				parseConnectionFn: () => ({}),
 				timeoutMs: T,
+				touchStore: o.touchStore,
+				now: () => NOW,
 				redisFn: () => {
 					made += 1;
 					if (o.clientThrows !== undefined && made === 2) throw o.clientThrows;
@@ -381,6 +384,7 @@ test("every cancel answer driven names its job once and last, after what happene
 			holdUnread: { hget: async () => { throw new Error("ECONNRESET"); } },
 			checkUnanswered: { getJob: never },
 			removed: {},
+			removedWithTrackingWarning: { remove: removeQueuedJob, job: { remove: async () => { warnedRemovalCalls++; } }, touchStore: { begin: async (event) => ({ ok: true, event }), write: async () => ({ error: "touch-index-unavailable" }), abort: async () => ({ ok: true }) } },
 			removalThrew: { remove: () => { throw new Error("bug"); } },
 			heldRemovalThrew: { held: true, remove: () => { throw new Error("bug"); } },
 			removalUnanswered: { remove: never },
@@ -464,6 +468,8 @@ test("every cancel answer driven names its job once and last, after what happene
 	assert.ok(answers.some(([, a]) => a?.partial === true) && answers.some(([, a]) => typeof a?.invalid === "string" && a.partial !== true && a.invalid.endsWith(last)), "both kinds were driven");
 	// The two doors say one thing of one outcome: a held job's removal asked for and not answered within the bound.
 	const said = Object.fromEntries(answers);
+	assert.deepEqual(said["cancelQueuedJob removedWithTrackingWarning"], { ok: true, jobId: id, queue: "pi-jobs", held: false, touchWarning: "touch-tracking-incomplete" }, "a successful removal retains its failed publication warning");
+	assert.equal(warnedRemovalCalls, 1, "the publication failure never repeats the successful removal");
 	assert.deepEqual(said["cancelHeldJob removalUnanswered"], said["cancelQueuedJob heldRemovalUnanswered"]);
 	assert.equal(said["cancelHeldJob removalUnanswered"].partial, true);
 	// The never-started rules refuse in their own words at the confirm as at the preview.

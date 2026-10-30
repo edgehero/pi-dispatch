@@ -1,0 +1,33 @@
+/** The Zero touch read projection (#770). Only named facts cross this boundary; private classifier input never does. */
+const CAUSES = Object.freeze(["question-answer", "approval-decision", "rerun", "config-fix", "steer", "cancel"]);
+const id = (v) => typeof v === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(v) ? v : null;
+const number = (v) => Number.isFinite(v) && v >= 0 ? v : null;
+const count = (v) => Number.isSafeInteger(v) && v >= 0 ? v : 0;
+const text = (v, max = 200) => typeof v === "string" && [...v].length <= max && !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(v) ? v : null;
+const scope = (v) => typeof v === "string" && /^[a-f0-9]{32,64}$/.test(v) ? v : null;
+const causes = (v) => CAUSES.map((cause) => ({ cause, count: count(Array.isArray(v) ? v.find((row) => row?.cause === cause)?.count : v?.[cause]) }));
+const runIds = (v) => Array.isArray(v) ? [...new Set(v.map(id).filter(Boolean))].slice(0, 5000) : [];
+function breakdown(row, repository = false) {
+  const out = { project: text(row?.project ?? row?.id, 64), scopeId: scope(row?.scopeId), name: text(row?.name ?? row?.target ?? row?.project ?? row?.id) ?? "Unassigned", target: text(row?.target), runs: count(row?.runs), touched: count(row?.touched), rate: number(row?.rate), deltaPoints: Number.isFinite(row?.deltaPoints) ? row.deltaPoints : null, previousRate: number(row?.previousRate), streakDays: number(row?.streakDays), zeroTouch: row?.zeroTouch === true, waitingNow: count(row?.waitingNow ?? row?.waiting), topCause: CAUSES.includes(row?.topCause) ? row.topCause : null, causes: causes(row?.causes), touchedRunIds: runIds(row?.touchedRunIds) };
+  if (!repository) out.repositories = Array.isArray(row?.repositories) ? row.repositories.map((r) => breakdown(r, true)) : [];
+  return out;
+}
+export function zeroTouchView(raw, { role = "viewer", windowDays = 30, nowMs = 0 } = {}) {
+  const observed = raw?.coverage ?? raw?.window;
+  const unobserved = Array.isArray(observed?.reasons) && observed.reasons.includes("touch-index-unavailable") || observed?.partial === true && number(observed.fromMs) !== null && observed.fromMs >= (number(raw?.nowMs) ?? nowMs);
+  if (!raw || typeof raw !== "object" || raw.state === "unavailable" || unobserved) return { state: "unavailable", nowMs, windowDays, coverage: { partial: true, reasons: [] }, totals: {}, projects: [], causes: causes([]), trend: [], groups: [], fixes: [], fixesPartial: true, touchedRunIds: [], waitingRuns: [], ungroupedRunIds: [], grouping: { enabled: false, pending: 0, unassigned: 0, state: "disabled", sources: [] } };
+  const totals = raw.totals ?? raw.summary ?? {};
+  const coverage = raw.coverage ?? raw.window ?? {};
+  const out = { state: "ready", nowMs: number(raw.nowMs) ?? nowMs, windowDays: [7, 30, 90].includes(raw.windowDays ?? raw.days) ? raw.windowDays ?? raw.days : windowDays,
+    coverage: { requestedFromMs: number(coverage.requestedFromMs), fromMs: number(coverage.fromMs), partial: coverage.partial === true || coverage.complete === false, reasons: Array.isArray(coverage.reasons) ? coverage.reasons.map((v) => text(v)).filter(Boolean) : [] },
+    totals: { runs: count(totals.runs), touched: count(totals.touched), rate: number(totals.rate), previousRate: number(totals.previousRate), stopped: count(totals.stopped), stoppedUnattributed: count(totals.stoppedUnattributed), waitingHours: number(totals.waitingHours), medianWaitMs: number(totals.medianWaitMs) ?? (number(totals.medianWaitHours) === null ? null : totals.medianWaitHours * 3600000), pending: count(totals.pending ?? totals.waitingNow), draftAnswers: count(totals.draftAnswers), deltaPoints: Number.isFinite(totals.deltaPoints) ? totals.deltaPoints : null },
+    projects: Array.isArray(raw.projects) ? raw.projects.map((r) => breakdown(r)) : [], causes: causes(raw.causes),
+    trend: Array.isArray(raw.trend) ? raw.trend.slice(-8).map((r) => ({ atMs: number(r?.atMs ?? r?.at), rate: number(r?.rate), runs: count(r?.runs), touched: count(r?.touched), partial: r?.partial === true })) : [],
+    waitingRuns: Array.isArray(raw.waitingRuns ?? totals.waitingNow) ? (raw.waitingRuns ?? totals.waitingNow).map((r) => ({ runId: id(r?.runId ?? r?.jobId), parkedAt: number(r?.parkedAt) })).filter((r) => r.runId && r.parkedAt !== null) : [],
+    touchedRunIds: runIds(raw.touchedRunIds), ungroupedRunIds: role === "operator" ? runIds(raw.ungroupedRunIds) : [], groups: [], fixes: [], fixesPartial: raw.fixesPartial === true, grouping: { enabled: raw.grouping?.enabled === true, partial: raw.grouping?.partial === true, pending: count(raw.grouping?.pending), unassigned: count(raw.grouping?.unassigned), state: ["ready", "ok", "disabled", "pending", "partial", "failed", "configuration-unavailable", "unavailable"].includes(raw.grouping?.state) ? raw.grouping.state : "disabled", sources: role === "operator" && Array.isArray(raw.grouping?.sources ?? raw.groupingStatuses) ? (raw.grouping?.sources ?? raw.groupingStatuses).map((r) => ({ runId: id(r?.runId), status: ["unassigned", "pending", "assigned", "source-expired", "source-unavailable", "source-oversize", "candidates-expired", "group-limit", "stale", "refused", "failed"].includes(r?.status) ? r.status : "source-unavailable" })).filter((r) => r.runId) : [] } };
+  // Viewer fix descriptions are generated from closed kinds; instruction text and actor identity are absent for both roles.
+  out.fixes = Array.isArray(raw.fixes) ? raw.fixes.map((f) => ({ id: id(f?.id), at: number(f?.at), undoneAt: number(f?.undoneAt), kind: ["instructions", "config"].includes(f?.kind) ? f.kind : "config", groupId: id(f?.groupId), reason: typeof f?.reason === "string" && /^[a-z][a-z0-9-]{0,79}$/.test(f.reason) ? f.reason : null, triggerIndex: Number.isSafeInteger(f?.triggerIndex) && f.triggerIndex >= 0 ? f.triggerIndex : null, beforeCount: number(f?.beforeCount), afterCount: number(f?.afterCount), spanMs: number(f?.spanMs), partial: f?.partial !== false, subsequentRuns: count(f?.subsequentRuns), status: ["observing", "improved", "unchanged", "worse"].includes(f?.status) ? f.status : "observing" })).filter((f) => f.id) : [];
+  if (role === "operator") out.groups = Array.isArray(raw.groups) ? raw.groups.map((g) => ({ id: id(g?.id), name: text(g?.name, 120), scopeId: scope(g?.scopeId), repo: text(g?.repo), project: text(g?.project, 64), count: count(g?.count), runIds: runIds(g?.runIds), status: ["open", "fixed", "unassigned"].includes(g?.status) ? g.status : "open", fixedAt: number(g?.fixedAt), triggerIndex: Number.isSafeInteger(g?.triggerIndex) && g.triggerIndex >= 0 ? g.triggerIndex : null })).filter((g) => g.id) : [];
+  return out;
+}
+export const ZERO_TOUCH_CAUSE_KEYS = CAUSES;

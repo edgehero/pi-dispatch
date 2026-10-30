@@ -2955,3 +2955,43 @@ test("stageRecovered refuses a link at the checkpoint's name and a missing file,
 	assert.equal(existsSync(join(jobDir, "session")), false);
 	assert.equal(store.stageRecovered({}), null);
 });
+
+test("park lineage is host-authored source and time, while timestamp-only legacy marks remain readable", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	const session = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(session.hostDir, SESSION_FILE_NAME), HEADER);
+	assert.equal(store.promoteSession(session, { piVersion: PI, parked: true, parkedSource: { runId: "source-run" } }).promoted, true);
+	assert.equal(store.isParked(ghIssue), true);
+	assert.deepEqual(store.readParkedInfo(ghIssue), { runId: "source-run", at: NOW });
+	const key = sessionKeyFor(ghIssue);
+	writeFileSync(join(sessionsDir, key, PARKED_FILE), String(NOW));
+	assert.equal(store.isParked(ghIssue), true);
+	assert.equal(store.readParkedInfo(ghIssue), null, "a timestamp cannot invent the original run id");
+	writeFileSync(join(sessionsDir, key, PARKED_FILE), JSON.stringify({ v: 1, runId: "private text!", at: NOW }));
+	assert.equal(store.readParkedInfo(ghIssue), null);
+});
+
+test("staged answer lineage follows the canonical transcript replaced after an early park lookup", () => {
+	const { root, store, jobDir, sessionsDir } = fixture();
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), `${HEADER}{"source":"first"}\n`);
+	assert.equal(store.promoteSession(first, { piVersion: PI, parked: true, parkedSource: { runId: "first-run" } }).promoted, true);
+	const early = store.readParkedInfo(ghIssue);
+	const markerPath = join(sessionsDir, sessionKeyFor(ghIssue), PARKED_FILE);
+	const oldMarker = readFileSync(markerPath, "utf8");
+	const replacement = store.resolveSession(ghIssue, { jobDir: mkdtempSync(join(root, "replacement-")), piVersion: PI });
+	writeFileSync(join(replacement.hostDir, SESSION_FILE_NAME), `${HEADER}{"source":"second"}\n`);
+	assert.equal(store.promoteSession(replacement, { piVersion: PI, parked: true, parkedSource: { runId: "second-run" } }).promoted, true);
+	const staged = store.resolveSession(ghIssue, { jobDir: mkdtempSync(join(root, "answer-")), piVersion: PI });
+	assert.deepEqual(early, { runId: "first-run", at: NOW });
+	assert.deepEqual(staged.parkedSource, { runId: "second-run", at: NOW }, "the source belongs to the actual staged bytes");
+	assert.equal(readFileSync(join(staged.hostDir, SESSION_FILE_NAME), "utf8"), `${HEADER}{"source":"second"}\n`);
+	writeFileSync(markerPath, oldMarker);
+	const stale = store.resolveSession(ghIssue, { jobDir: mkdtempSync(join(root, "stale-marker-")), piVersion: PI });
+	assert.equal(stale.resume, true, "accounting uncertainty must not change session continuity");
+	assert.equal(stale.parkedSource, undefined, "an old sidecar cannot bind a new canonical transcript");
+	writeFileSync(markerPath, JSON.stringify({ v: 1, runId: "first-run", at: NOW }));
+	const legacy = store.resolveSession(ghIssue, { jobDir: mkdtempSync(join(root, "legacy-marker-")), piVersion: PI });
+	assert.equal(legacy.resume, true);
+	assert.equal(legacy.parkedSource, undefined, "v1 marks lack the transcript identity required to prove a parent");
+});

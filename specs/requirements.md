@@ -1495,6 +1495,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
+- **Extension (#770)**: Issue #770 adds the on-demand, viewer-readable second Runs tab and its operator-only question groups. Covered windows, theme/role/width states and native no-script reads follow `REQ-ZERO-TOUCH-RATE`; no question text enters a list.
+
 - **Statement**: The operator console shall show the whole deployment on the pages of `PAGES` and as one JSON snapshot (`GET /api/state`); shall
   read all of it through the read model's one fleet reader (`createFleetReader`), the same reader the `/dispatch`
   panel uses; shall keep every open live page current within about two seconds of a change in Valkey by sending only
@@ -2971,6 +2973,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
 
+- **Extension (#770)**: Issue #770 adds the Zero touch console-only grouping, human-name, instruction-append and safe-Undo actions, plus explicitly source-linked ordinary configuration writes; all use the existing guards and preview/Confirm funnel. See `REQ-ZERO-TOUCH-RATE` and `INT-ZERO-TOUCH-FIXES`.
+
 - **AMENDED 2026-10-30 (#750)**: paid `trigger-fire` shares `dispatch_trigger_fire`'s planner and bounds. Page load
   and preview consume no hourly allowance. Confirm revalidates the file version, queue scheduler and current local
   admission gates, then counts the attempt before enqueueing the complete validated schedule. Concurrent fires in
@@ -3850,75 +3854,51 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-ZERO-TOUCH-RATE
 
-- **Status**: **PROPOSED, spec only** (2026-10-27, issue #753). Nothing of it ships and no test holds it yet. The
-  design is `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT`; the cards are `design/system/components/ZeroTouchScreen`, with
-  `ZeroTouchViewer` and `ZeroTouchPhone` beside it.
-- **Statement**: The console shall show, per project and per repository or local folder, the **touch rate**. With it,
-  it shows what touched those runs, and the fixes that removed a cause, so an operator can drive a project to zero
-  touch.
-- **What the rate is out of.** The touch rate is the share of runs that needed a person, out of the runs with a run
-  record that ended in the window.
-  - Jobs a person stopped before they started (`cancel-held`, `cancel-queued`, `held-cancel-all`, a CLI cancel of a
-    queued or held job) have no record. They are counted beside the rate as "stopped before they ran", never inside
-    it.
-- **A touch.** A run is touched when a person:
-  - answered its parked question, by a forge reply that resumed it or the console's `parked-answer`;
-  - decided its approval (`REQ-APPROVAL-GATES`, #649);
-  - re-ran it after a failure or a refusal (`run-rerun`, `failed-retry`, `failed-retry-all`);
-  - changed configuration because of its refusal (a configuration write started from that refusal);
-  - steered it (`steer`);
-  - cancelled it while it ran (`operator-cancel`).
-- **What a touch is not.**
-  - A run counts once, however many touches it had.
-  - Merging a pull request is never a touch: `CONST-MERGE-NEVER-AUTOMATIC` makes every merge a person's, so counting
-    it would put a floor under every rate.
-  - Neither is reading a run, opening its sandbox, or starting one by a label or a comment. That is the ask, not a
-    touch.
-  - Sending a draft from an answer rule (`REQ-PARKED-ANSWERER`) **is** a touch: a person confirmed it. The page shows
-    such answers apart, as quicker touches. A run answered with no person exists only if `OQ-051` admits it.
-- **Recorded fleet wide, with no free text.** The audit log is per host, and its Valkey mirror holds only the
-  console's last 500 rows (`INT-CONSOLE-AUDIT-LOG`), so the rate cannot be read from audit rows alone. So a touch is
-  recorded as a closed word with the run's id by whichever process makes it (the console, the panel, the CLI, or the
-  worker for a resume):
-  - on the run's own record when the run is the one touched (a resumed run's reply source, a re-run's source run, the
-    steer counts, `operator-cancel`);
-  - otherwise in a fleet-wide touch index in Valkey, kept as long as the run records it points at.
-
-  The audit log stays the per-host evidence.
-- **Bounded by what is kept.** Run records and audit files are reaped on `PI_LOG_RETENTION_DAYS` (30 by default), and
-  the run mirror holds the newest 5,000 runs. A window longer than what is kept is drawn as partial, naming the first
-  day it covers. Only windows that fit the deployment's retention are offered as whole.
-- **Questions that repeat** (operator only).
-  - A decision model assigns parked questions to groups by meaning, as a job like any other, reserving before it
-    calls (`CONST-BUDGET-BEFORE-TOKENS`).
-  - A group is named by a person, never by a model: a name a model writes from the questions would be transcript text
-    under another label.
-  - The page shows each group's name, count, repository and run ids, never question text. The question is read on
-    the run page (`REQ-CONSOLE-SECURITY` (l)).
-- **Fixes.** A fix is a write started from a cause:
-  - a sentence added to a trigger's `run.instructions` (`REQ-PER-TRIGGER-INSTRUCTION`), previewed with its diff;
-  - a standing answer (`REQ-PARKED-ANSWERER`);
-  - a configuration change.
-
-  The page shows the cause's count over equal spans before and after the fix.
-- **Who sees what.** A viewer sees the rates, counts, causes, streaks and fixes. A viewer never sees the question
-  groups or an action.
-- **Why**: What keeps a project from running by itself is the run that stops for a person. Counting those runs by
-  cause turns "it keeps asking" into a number a person can drive down. Pairing each cause with the write that removes
-  it closes the loop: an instruction that stops the question being asked is the fix that reaches zero.
-- **Traces to**: `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT`, `REQ-AWAIT-INPUT`, `REQ-OPERATOR-CONSOLE-ACTIONS`,
-  `REQ-STEER-RUNNING-JOB`, `REQ-OPERATOR-JOB-CANCEL`, `REQ-PER-TRIGGER-INSTRUCTION`, `REQ-PARKED-ANSWERER`,
-  `REQ-CONSOLE-SECURITY`, `REQ-DURABLE-RUN-HISTORY`, `CONST-MERGE-NEVER-AUTOMATIC`, `OQ-051`
-- **Acceptance**:
-  - **Counts.** Given the records and touch index of a window, the page's counts equal a recount by the rules above.
-    A run with three touches counts once. A merged run with no other touch is untouched. A job cancelled before it
-    started is counted beside the rate and not in it.
-  - **Fleet wide.** Given touches made on two hosts, one console counts both.
-  - **Partial windows.** Given a 90-day window over 30 days of records, the page says the window is partial and from
-    when.
-  - **No question text.** Given a question group, no page, panel, event or `/api/state` body carries question text,
-    for either role.
-  - **Roles.** Given a viewer's session, the groups and every action are absent.
+- **Status**: Implemented in issue #770. Its design is `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT`; its cards are
+  `ZeroTouchScreen`, `ZeroTouchViewer` and `ZeroTouchPhone`.
+- **Statement**: Runs has a second, Zero touch tab over 7, 30 or 90 days, per project and repository or local folder.
+  It shows the share of ended workload runs that needed a person, the weekly trend, zero-touch streaks, hours waiting
+  for a person, causes, operator-only question groups and explicitly linked fixes.
+- **Denominator**: distinct workload runs with a record ending in the displayed covered interval. Internal question
+  grouping jobs remain in ordinary history and spend but are excluded from this workload measure, so analysing the
+  rate cannot dilute it. Jobs stopped before their first attempt have no run record and are counted beside the rate.
+- **Touches**: a run counts once when a person answers its parked question through a proven source resume, accepts or
+  declines its approval, successfully requests a rerun or failed retry after failure/refusal, makes a configuration
+  fix explicitly linked to its refusal, delivers steering, or cancels it while running. System approval expiry,
+  undelivered/withdrawn steering, refused or deduplicated requests, reading, sandbox use, ordinary automatic starts
+  and merging contribute none. A future confirmed answer-rule draft is still a touch (#772), not an unattended answer.
+- **Causes**: retain all closed cause tags. The charts partition distinct touched runs by their earliest successful
+  intervention, with a fixed vocabulary order breaking timestamp ties. Cause filtering can still find every tag.
+- **Fleet evidence**: every caller uses shared domain writers, not host audit inference. Idempotent telemetry and
+  pending intents preserve source facts across retries and record replacement. An applied action whose telemetry
+  cannot finish is repaired without repeating the action; until repaired its coverage is incomplete.
+- **Coverage**: distinguish the requested interval from the actually covered interval. Retention, mirror start/loss,
+  count truncation, expired bodies, missing touch instrumentation and unreadable evidence cannot be interpreted as
+  untouched history. Trends and changes state when comparable history is missing. A zero denominator has no rate.
+- **Waiting and streaks**: source park identity and trusted reply receipt time survive queue delays. A held or refused
+  reply does not prove an answer. Sum run-hours clipped to the interval, show completed-wait median separately and
+  identify current waits by run id. A zero-touch project needs 30 complete observed days, workload activity and no
+  outstanding human wait; missing history or inactivity never earns the badge.
+- **Questions**: an operator explicitly previews and confirms a capped classification job. A decision model assigns
+  opaque groups by meaning; only a person names them. Opt-in private, redacted, bounded excerpts support unnamed
+  exemplars across hosts. Expiry, unavailable source, limits, stale input and uncertain model output are named, never
+  replaced with invented groups or question summaries. No question text enters a page, panel, generic tool result,
+  event, state body or audit row; the existing operator run-page transcript is the explicit text surface.
+- **Fixes**: the write carries an explicit source run/cause or group. A console-only instruction append previews the
+  exact trigger diff and requires Confirm; it obeys `REQ-PER-TRIGGER-INSTRUCTION`, including its cron restriction and
+  model-tool prohibition. Other linked configuration writes use their ordinary guarded funnels. Before/after counts
+  use a typed refusal-reason or question-group predicate, including unanswered questions and untouched refusals,
+  equal elapsed observation spans and their workload exposure. Missing coverage or no later runs is not evidence that
+  a fix worked. Standing answers and draft sends belong to #772.
+- **Roles**: viewers see aggregate rates, counts, causes, streaks and safe fix descriptions, without question groups,
+  actor names, instruction text or actions. Operators on a read-only console retain reads and cannot act.
+- **Acceptance**: independent recounts reconcile across hosts; multiple touches count once; exclusions and pre-start
+  stops are tested; same-basename folders stay distinct; loss and rollout are partial; private text cannot leak;
+  classifier free refusals precede every reserve/call; previews bind exact changes and reject stale files; all three
+  card ledgers, responsive/theme/role states and actual-CSP browser interactions are verified.
+- **Traces to**: `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT`, `REQ-AWAIT-INPUT`, `REQ-APPROVAL-GATES`,
+  `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-STEER-RUNNING-JOB`, `REQ-OPERATOR-JOB-CANCEL`, `REQ-PER-TRIGGER-INSTRUCTION`,
+  `REQ-CONSOLE-SECURITY`, `REQ-DURABLE-RUN-HISTORY`, `CONST-MERGE-NEVER-AUTOMATIC`, `OQ-051`.
 
 ## REQ-AI-TRIGGERED-RUNS
 
@@ -8085,3 +8065,4 @@ instead of drifting.
 | 2026-10-30 (#751, stacked-label review) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: bounded phone forge tracks, full-row polling facts and accessible numeric trigger links prevent long state content from squeezing labels into vertical letters. Actual pseudo-element word widths join the browser oracle; a many-trigger fixture exercises the case. Existing viewport, chart, typography, CSP, role and worker-contract assertions are UNCHANGED, checked. |
 | 2026-10-30 (#751, observation coverage) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: fleet endpoint occupancy is shown only where worker host-queue and per-machine gates take those leases; uncounted and unknown retain declared capacity. Delivery guidance distinguishes quiet 401/404 refusals in forge history from receiver logs that can help with 503/enqueue failures. Worker slot enforcement, receiver logging, security guards and every unrelated requirement UNCHANGED, checked. |
 | 2026-10-30 (#751, endpoint phone review) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: uncounted endpoint explanations retain declared capacity without squeezing adjacent phone table labels into zero-width tracks. The same actual-font word-width oracle checks mixed, unnamed and unknown fleet coverage. Worker rules, privacy, confirmation and every unrelated requirement UNCHANGED, checked. |
+| 2026-10-30 (#770) | Issue #770 implements the Zero touch view. `REQ-ZERO-TOUCH-RATE` AMENDED: exact workload denominator, six human causes, fleet evidence and rollout coverage, safe scope identity, waits/streaks, private paid grouping, explicit fixes and role boundaries. Internal grouping jobs are explicitly excluded from workload rates while retaining ordinary history/spend. UNCHANGED, checked: pi pins; container isolation; merge restriction; budget ordering; infrastructure-only retry; automatic answer prohibition (`OQ-051`); #771 and #772 scope. |

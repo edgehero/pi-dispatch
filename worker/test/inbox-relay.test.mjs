@@ -729,3 +729,17 @@ test("frames: closeStdin ends the pipe at once and the relay goes on marking ack
 	assert.equal(inbox.state[a.id], "delivered");
 	await relay.stop();
 });
+
+test("touch provenance follows verified delivery only, once per inbox transition and without message text", async () => {
+	const inbox = fakeInbox();
+	const a = inbox.push(entry());
+	const writes = [];
+	const { relay } = relayWith(inbox, { onDelivered: async (event) => writes.push(event) });
+	await relay.start(); relay.afterBaseline(); await relay.tick();
+	assert.equal(writes.length, 0, "queued or written messages have not intervened in the run");
+	await relay.delivered(a.id);
+	await relay.delivered(a.id);
+	assert.deepEqual(writes, [{ runId: "run-1", id: a.id, at: T0 }]);
+	assert.ok(!JSON.stringify(writes).includes(a.text));
+	await relay.stop();
+});

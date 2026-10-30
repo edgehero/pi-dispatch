@@ -225,3 +225,63 @@ test("estimateReserve equals what the worker holds for the same job: trigger nar
 	assert.deepEqual(estimateReserve(forge, { env: {} }), { slots: 1, dollarsMicros: null, capMicros: null, zeroRated: false });
 	assert.match(estimateReserve(forge, { overlay: { maxCostUsd: "1e3" } }).invalid, /maxCostUsd must be a dollar amount/);
 });
+
+test("human touch lineage names the exact park only after the runner proves a resume, using receipt time", async () => {
+	const parkedAt = NOW.getTime() - 6 * 3600_000;
+	const receivedAt = parkedAt + 3600_000;
+	const writes = [];
+	const { deps: d } = deps({
+		readParkedInfo: () => ({ runId: "replaced-before-prepare", at: parkedAt - 1000 }), replyReceivedAt: receivedAt,
+		prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j", session: { parkedSource: { runId: "original-park", at: parkedAt } } }),
+		recordTouch: async (fact) => writes.push(fact), runContainer: async () => ({ code: 0, session: { resumed: true, reason: "resumed" } }),
+	});
+	const result = await runJob(answer("private answer"), d);
+	assert.equal(result.outcome, "completed");
+	assert.equal(writes.length, 1);
+	assert.equal(writes[0].runId, "original-park");
+	assert.equal(writes[0].at, receivedAt, "queue delay after receipt is not human waiting");
+	assert.equal(writes[0].answerSource, "console");
+	assert.deepEqual(result.touches, writes, "record fallback survives an index publication failure");
+	assert.ok(!JSON.stringify(writes).includes("private answer"));
+	for (const resumed of [false, undefined]) {
+		writes.length = 0;
+		d.runContainer = async () => ({ code: 0, session: { resumed } });
+		assert.equal((await runJob(answer("private answer"), d)).touches, undefined);
+		assert.equal(writes.length, 0);
+	}
+});
+
+test("a refused reply or a legacy park without exact source cannot invent an answered touch", async () => {
+	const writes = [];
+	const { deps: d } = deps({ readParkedInfo: () => ({ runId: "old", at: NOW.getTime() - 1000 }), recordTouch: async (e) => writes.push(e), isParked: () => false });
+	assert.equal((await runJob(answer("private"), d)).reason, "not-parked");
+	assert.equal(writes.length, 0);
+	d.isParked = () => true;
+	d.readParkedInfo = () => null;
+	d.runContainer = async () => ({ code: 0, session: { resumed: true } });
+	const unknown = await runJob(answer("private"), d);
+	assert.equal(writes.length, 0);
+	assert.equal(unknown.touchLineageSkipped, "source-unavailable", "a proven resume with no staged parent names its accounting gap");
+});
+
+test("park capture uses the full job redactor and refuses private text when that redactor is unavailable", async () => {
+	const captured = [];
+	let reads = 0;
+	const prepared = { workspaceDir: "/w", jobDir: "/j", session: { hostDir: "/private-session" }, questionRedact: (text) => text.replaceAll("opaque-provider-credential", "[redacted]").replaceAll("opaque-forwarded-credential", "[redacted]") };
+	const { deps: d } = deps({
+		prepareWorkspace: async () => prepared,
+		runContainer: async () => ({ code: 0, exitReason: "awaiting-input", session: { resumed: false } }),
+		promoteSession: () => ({ promoted: true }), questionCaptureEnabled: () => true,
+		questionGroupStore: { capture: async (value) => { captured.push(value); return { ok: true, status: value.sourceStatus ?? "unassigned" }; } },
+		readQuestionContext: ({ redact }) => { reads++; return { status: "ready", text: redact("Question opaque-provider-credential opaque-forwarded-credential") }; },
+	});
+	await runJob({ ...answer("private answer"), awaitInput: true }, d);
+	assert.equal(captured.length, 1);
+	assert.equal(captured[0].text, "Question [redacted] [redacted]");
+	assert.ok(!JSON.stringify(captured).includes("opaque-provider-credential"));
+	delete prepared.questionRedact;
+	await runJob({ ...answer("private answer"), awaitInput: true }, d);
+	assert.equal(reads, 1, "no weaker redactor is manufactured at capture time");
+	assert.equal(captured[1].text, null);
+	assert.equal(captured[1].sourceStatus, "source-unavailable");
+});

@@ -79,7 +79,7 @@ const SYSTEM_HEAD = Object.freeze({ attr: null, scheme: SYSTEM_SCHEME });
  * ever read as markup: the script passes them to `EventSource` as a URL. `theme` (issue #737) is the person's theme
  * choice (`THEME_HEAD`); the theme button's script changes the same two places when it is clicked.
  */
-export function page({ title, name, body, live = null, query = "", theme = null }) {
+export function page({ title, name, body, live = null, query = "", theme = null, becauseRun = null }) {
   const liveAttrs = live ? html` data-live="${live}" data-query="${query ?? ""}"` : null;
   const head = typeof theme === "string" && Object.hasOwn(THEME_HEAD, theme) ? THEME_HEAD[theme] : SYSTEM_HEAD;
   return html`<!doctype html>
@@ -93,7 +93,7 @@ export function page({ title, name, body, live = null, query = "", theme = null 
 <link rel="stylesheet" href="/static/console.css">
 <script src="/static/console.js" defer></script>
 </head>
-<body data-page="${name}"${liveAttrs}>
+<body data-page="${name}"${liveAttrs}${typeof becauseRun === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(becauseRun) ? html` data-because-run="${becauseRun}"` : null}>
 ${body}
 </body>
 </html>

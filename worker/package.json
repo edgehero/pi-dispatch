@@ -92,6 +92,9 @@
 		"./size-suggest": "./src/size-suggest.mjs",
 		"./capacity": "./src/capacity.mjs",
 		"./capacity-records": "./src/capacity-records.mjs",
+		"./touch-state": "./src/touch-state.mjs",
+		"./touch-outbox": "./src/touch-outbox.mjs",
+		"./zero-touch": "./src/zero-touch.mjs",
 		"./capacity-cli": "./src/capacity-cli.mjs",
 		"./live-jobs": "./src/live-jobs.mjs",
 		"./host-telemetry": "./src/host-telemetry.mjs",
@@ -153,7 +156,10 @@
     "./watch-store": "./src/watch-store.mjs",
     "./watch-decision": "./src/watch-decision.mjs",
     "./watch-board": "./src/watch-board.mjs",
-    "./watch-trace": "./src/watch-trace.mjs"
+    "./watch-trace": "./src/watch-trace.mjs",
+    "./question-groups": "./src/question-groups.mjs",
+    "./question-group-runtime": "./src/question-group-runtime.mjs",
+    "./zero-touch-fixes": "./src/zero-touch-fixes.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

@@ -2689,7 +2689,7 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// The allocation audit files (issue #504 part B) second: boot reaps them right after the logs, and a tick re-runs that
 	// same closure in the same place.
 	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
-	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "sandbox", "session", "recovery_host_lost"], "boot's own order");
+	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "session", "recovery_host_lost"], "boot's own order");
 	assert.equal(captured.extraClosers.length, 5, "runtimeQueue + registry + watch recovery drainer + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
@@ -6067,4 +6067,51 @@ test("terminal approval failure closes only the exhausted job's claim; an interm
 		}
 		await redis.quit();
 	}
+});
+
+test("Zero touch boot shares tracking and private grouping dependencies, rereads capture opt-in and stamps analysis history", { skip }, async () => {
+	const dir = tempDir("zero-touch-start-");
+	const triggersPath = join(dir, "triggers.json");
+	const grouping = { capture: true, model: "openrouter/typesafe/jev-1.13", maxCostUsd: "0.05", names: {} };
+	writeFileSync(triggersPath, JSON.stringify({ triggers: [], zeroTouch: grouping }));
+	const nowMs = Date.UTC(2026, 9, 30, 12);
+	const calls = [], written = [];
+	const touchStore = { initialize: async () => (calls.push("initialize"), { ok: true }) };
+	const outbox = { repair: async () => (calls.push("repair"), { repaired: 0, pending: 0, invalid: 0 }) };
+	const groupStore = { sentinel: "private grouping store" };
+	const groupRuntime = { sentinel: "grouping runtime" };
+	let storeOptions, runtimeOptions, outboxOptions;
+	const boot = await runStart({
+		env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath, PI_LOGS_DIR: join(dir, "logs"), PI_SWEEP_INTERVAL_HOURS: "0" },
+		now: () => nowMs,
+		makeRecordWriter: () => (record) => written.push(record),
+		durable: {
+			makeTouchStore: (options) => (storeOptions = options, touchStore),
+			makeTouchOutbox: (options) => (outboxOptions = options, outbox),
+			makeQuestionGroupStore: (options) => { assert.equal(options.redis, storeOptions.redis); assert.equal(options.now(), nowMs); return groupStore; },
+			makeQuestionGroupRuntime: (options) => (runtimeOptions = options, groupRuntime),
+		},
+		whileRunning: async ({ captured, deps }) => {
+			assert.deepEqual(calls, ["initialize", "repair"], "tracking starts and repairs before work is handed off");
+			assert.equal(deps.touchStore, touchStore);
+			assert.equal(deps.touchOutbox, outbox);
+			assert.equal(deps.questionGroupStore, groupStore);
+			assert.equal(deps.questionGroupRuntime, groupRuntime);
+			assert.equal(deps.touchNow(), nowMs);
+			assert.equal(typeof deps.readParkedInfo, "function");
+			assert.equal(deps.questionCaptureEnabled(), true);
+			writeFileSync(triggersPath, JSON.stringify({ triggers: [], zeroTouch: { ...grouping, capture: false } }));
+			assert.equal(deps.questionCaptureEnabled(), false, "capture opt-out does not wait for a worker restart");
+			captured.recordRun({ job: { id: "grouping-boot", data: { kind: "question-grouping", questionGrouping: { runId: "source", digest: "a".repeat(64), configDigest: "b".repeat(64) } } }, result: { outcome: "policy", reason: "question-group-refused", budgetReserved: false }, startedAt: new Date(nowMs).toISOString(), endedAt: new Date(nowMs).toISOString() });
+		},
+	});
+	assert.equal(storeOptions.now(), nowMs);
+	assert.equal(outboxOptions.store, touchStore);
+	assert.equal(outboxOptions.dir, join(dir, "logs", "touch-outbox"));
+	assert.equal(runtimeOptions.store, groupStore);
+	assert.equal(runtimeOptions.getSettings().provider, boot.captured.getSettings().provider);
+	const classifier = runtimeOptions.resolveClassifier({ provider: "openrouter", id: "typesafe/jev-1.13" });
+	assert.equal(classifier.type, "classifier", "the real pinned catalog, not a text-model-only lookup, reaches grouping preflight");
+	assert.equal(written.at(-1).purpose, "zero-touch-grouping");
+	assert.equal(written.at(-1).touchTrackingVersion, 1);
 });

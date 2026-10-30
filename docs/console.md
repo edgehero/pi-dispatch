@@ -2079,3 +2079,16 @@ The side column shows allocation weight/floor/share/current split, scoped limits
 activity. A viewer sees the chart and facts with no copy call, member form, size preview or Delete.
 `dispatch_projects` includes safe spend/share, size suggestions/calls and edit/delete refusal facts; project
 and sizing writes still require a person. See [Projects](projects.md).
+
+
+## Zero touch
+
+Runs has a second tab, **Zero touch**, with 7, 30 and 90 day workload touch rates, project/repository breakdowns,
+streaks, waits, causes and linked fixes. Longer or incomplete history is explicitly partial. Question groups and
+all writes are for operators only; the page never quotes questions. Grouping is an explicitly confirmed capped job,
+not a page-load model call. Read [Zero touch](zero-touch.md) for counting rules, opt-in private capture, retention,
+source-linked instruction/configuration fixes and incomplete-accounting repair.
+
+The touched-run view uses `touched=1` with `days=7`, `30` or `90` and optional opaque `scope`; these page controls
+persist through pagination and live updates. Configuration pages may carry `becauseRun=<retained refusal id>` to
+link their confirmed changes to that refusal. Ordinary record-field filters remain unchanged.

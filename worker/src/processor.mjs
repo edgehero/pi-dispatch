@@ -1,3 +1,5 @@
+import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
+import { readQuestionContext } from "./question-context.mjs";
 import { stageModelRoleInputs } from "./agent-snapshot.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
 import { validateFork, forkBranch, forkArchiveFact, FORK_THINKING_LEVELS } from "./fork-job.mjs";
@@ -308,6 +310,29 @@ async function endDurableRun(d, deps) {
 }
 
 export async function runJob(job, deps) {
+	const touches = [];
+	let touchLineageSkipped = null;
+	const recordTouch = async (value) => {
+		const event = cleanTouch(value);
+		if (!event) return;
+		touches.push(event);
+		try {
+			if (deps.touchOutbox) { const intent = await deps.touchOutbox.begin(event); await deps.touchOutbox.applied(intent); }
+			else if (deps.touchStore) await deps.touchStore.write(event);
+			else await deps.recordTouch?.(event);
+		} catch { deps.log?.("touch_record_pending", {}); }
+	};
+	try {
+		const result = await runJobInner(job, { ...deps, recordTouch, recordTouchGap: () => { touchLineageSkipped = "source-unavailable"; } });
+		return result && typeof result === "object" && (touches.length || touchLineageSkipped) ? { ...result, ...(touches.length ? { touches } : {}), ...(touchLineageSkipped ? { touchLineageSkipped } : {}) } : result;
+	} catch (error) {
+		if (touches.length && error && typeof error === "object") error.touches = touches;
+		if (touchLineageSkipped && error && typeof error === "object") error.touchLineageSkipped = touchLineageSkipped;
+		throw error;
+	}
+}
+
+async function runJobInner(job, deps) {
 	// Queue fields never confer approval authority. Resolve the host-owned decision before the mint or any reserve.
 	job = { ...job };
 	delete job.approvalDecision;
@@ -1172,6 +1197,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 
 		const credentialJobs = [job];
 		if (job.watch && job.watchDecisionModel && job.watchDecisionModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.watchDecisionModel.provider, model: job.watchDecisionModel.id });
+		if (job.questionGrouping && job.questionGroupModel && job.questionGroupModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.questionGroupModel.provider, model: job.questionGroupModel.id });
 		for (const credentialJob of credentialJobs) {
 			const credential = await checkProviderCredential(credentialJob, { modelEndpoints });
 			if (credential.unavailable) {
@@ -1568,7 +1594,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// carry `secrets` the current set would refuse, and buildContainerEnv would write every one of them.
 		// The same set the loader uses, imported, so the two cannot drift, and checked before the resolver so
 		// no wiring of it can skip the check.
-		const secondaryCredentialNames = new Set(job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []);
+		const secondaryCredentialNames = new Set(job.questionGrouping && job.questionGroupModel ? providerKeyCandidates(job.questionGroupModel.provider) : job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []);
 		const loadReserved = secretsArmed(job) ? Object.keys(job.secrets ?? {}).find((name) => RESERVED_ENV_NAMES.has(name) || secondaryCredentialNames.has(name)) : undefined;
 		const resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: RESERVED_ENV_NAMES.has(loadReserved) } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
 		if (resolved.profileUnknown) {
@@ -1879,7 +1905,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Refused here, after prepare and before the token-cap read and every reserve: free, determinate, never retried. A
 		// resolved folder in no project is not refused, because the named spelling is the operator's own membership
 		// (a symlinked member is listed by the path the triggers use, docs/projects.md).
-		if (job.kind === "local" && typeof folderProject === "function" && typeof prepared?.workspace === "string") {
+		if (job.kind === "local" && !job.questionGrouping && typeof folderProject === "function" && typeof prepared?.workspace === "string") {
 			const resolvedProject = folderProject(prepared.workspace);
 			if (resolvedProject !== null && resolvedProject !== pickupProject) {
 				await comment(job, REFUSAL_COMMENTS["local-folder-project-changed"]);
@@ -2267,6 +2293,19 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
 		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		const answeredPark = prepared.session?.parkedSource;
+		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
+		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
+		if (!deps.approvalRequest && session?.resumed === true && (job.parkedReply === true || typeof job.trigger?.comment?.body === "string" && (answeredPark || Number.isSafeInteger(job.replyReceivedAt)))) {
+			if (answeredPark) {
+				const receivedAt = Number.isSafeInteger(deps.replyReceivedAt) ? deps.replyReceivedAt : now.getTime();
+				await deps.recordTouch({ runId: answeredPark.runId, cause: "question-answer", at: Math.max(answeredPark.at, receivedAt), receivedAt: Math.max(answeredPark.at, receivedAt), answerSource: job.console?.by === "panel" ? "panel" : job.console ? "console" : "forge", parkedAt: answeredPark.at, scopeId: touchScopeOf(job, hostName), project: pickupProject ?? undefined, nonce: sourceRunId });
+			} else {
+				deps.recordTouchGap();
+				log("touch_lineage_unavailable", { reason: "source-unavailable" });
+			}
+		}
+
 		containerRan = true;
 		watchPolicyRefused = code === EXIT_POLICY;
 		watchUsage = Number.isFinite(tokens?.cost) && tokens.cost >= 0 ? { costUsd: tokens.cost } : null;
@@ -2530,7 +2569,17 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				// job is ignored, since that runner was never offered the tool.
 				const approvalParked = exitReason === "awaiting-approval" && Array.isArray(job.gates) && job.gates.includes(approvalMetadata?.action);
 				const parked = (exitReason === "awaiting-input" || approvalParked) && job.awaitInput === true;
-				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked }) : null;
+				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked, ...(sourceRunId ? { parkedSource: { runId: sourceRunId } } : {}) }) : null;
+				if (parked && !approvalParked && promoted?.promoted === true && deps.questionCaptureEnabled?.() === true && deps.questionGroupStore && sourceRunId) {
+					try {
+						const context = typeof prepared.questionRedact === "function"
+							? (deps.readQuestionContext ?? readQuestionContext)({ path: join(prepared.session.hostDir, "current.jsonl"), redact: prepared.questionRedact })
+							: { status: "source-unavailable" };
+						const captured = await deps.questionGroupStore.capture({ runId: sourceRunId, scopeId: touchScopeOf(job, hostName), project: pickupProject ?? null, repo: job.repo ?? null, at: deps.touchNow?.() ?? Number(now), text: context.text ?? null, sourceStatus: context.status === "ready" ? null : context.status, contextTruncated: context.truncated === true, redact: (text) => text, ...(Number.isSafeInteger(job.trigger?.matched?.index) ? { triggerIndex: job.trigger.matched.index } : {}) });
+						if (!captured?.ok || captured.status !== "unassigned") log("question_capture_partial", { status: captured?.status ?? "source-unavailable" });
+					} catch { log("question_source_unavailable", {}); }
+				}
+
 				if (deps.approvalRequest) {
 					const ended = await deps.approvalRuntime.finish({ requestId: deps.approvalRequest.requestId, jobId: deps.approvalJobId });
 					if (!ended.ok) return { outcome: "policy", reason: "approval-finish-unavailable", exitCode: code, turns, tokens, budgetReserved: true, session: mergeSession(prepared, session, promoted) };
@@ -2759,6 +2808,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		throw e;
 	} finally {
 		if (prepared && job.watch) await collectWatch({ job, prepared, completed: watchCompleted, policyRefused: watchPolicyRefused, usage: watchUsage }).catch(() => {});
+		if (prepared && job.questionGrouping) await deps.questionGroupRuntime?.collect({ job, prepared, completed: watchCompleted }).catch(() => {});
 		if (prepared) await cleanup(prepared).catch(() => {});
 	}
 }

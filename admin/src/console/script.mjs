@@ -189,6 +189,7 @@
  * would be Node's own (its `fetch` reaches the network).
  */
 import { PR_ACTIONS } from "@edgehero/pi-dispatch/triggers";
+import { CONFIG_FIX_ACTIONS } from "./actions.mjs";
 import { FIT_JS } from "../graph-html.mjs";
 import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID } from "./confirm-view.mjs";
 import { PAGES } from "./pages.mjs";
@@ -253,6 +254,7 @@ export const CONSOLE_SCRIPT = `"use strict";
 (function () {
   var page = document.body ? document.body.getAttribute("data-page") : null;
   var PAGE_PATHS = ${JSON.stringify(Object.values(PAGES).map((p) => p.path))};
+  var CONFIG_FIX_ACTIONS = ${JSON.stringify(CONFIG_FIX_ACTIONS)};
   // The console's outcome words (words.mjs, issue #710), written in from the one table: a stream's end says "refused",
   // never the record's "policy". An outcome not in it shows as itself.
   // The closed lists this script switches on, written in from their one source each (issue #737): why a session ended
@@ -1379,6 +1381,8 @@ ${FIT_JS}
     var body;
     fieldErrors(form, null);
     try { body = bodyOf(form); } catch (e) { fieldErrors(form, e.message); slotSays(e.message + "; nothing was sent."); return; }
+    var becauseRun = document.body.getAttribute("data-because-run");
+    if (becauseRun && CONFIG_FIX_ACTIONS.indexOf(action) >= 0) body.becauseRun = becauseRun;
     post("/api/act/" + action + "/preview", body, true).then(function (r) {
       if (mine !== slotGen) return;
       var b = r.body || {};
@@ -1555,6 +1559,15 @@ ${FIT_JS}
     }
   });
   var configControls = typeof document.querySelectorAll === "function" ? document.querySelectorAll("[data-config-controls]") : [];
+  var fixSource = document.body.getAttribute("data-because-run");
+  if (fixSource && /^[A-Za-z0-9._:-]{1,200}$/.test(fixSource)) {
+    var configLinks = document.querySelectorAll('a[href^="/config"]');
+    for (var ci = 0; ci < configLinks.length; ci++) {
+      var fixLink = new URL(configLinks[ci].getAttribute("href"), location.origin);
+      fixLink.searchParams.set("becauseRun", fixSource);
+      configLinks[ci].setAttribute("href", fixLink.pathname + fixLink.search + fixLink.hash);
+    }
+  }
   for (var ci = 0; ci < configControls.length; ci++) configControls[ci].disabled = false;
   // One native picker keeps keyboard and touch behavior, while both declarations use their existing action paths.
   function resolverFields(form) {

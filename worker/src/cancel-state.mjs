@@ -1,3 +1,17 @@
+import { makeTouchStore, touchScopeOf } from "./touch-state.mjs";
+import { trackTouchAction } from "./touch-outbox.mjs";
+import { isProjectId } from "./project-id.mjs";
+
+const isWorkload = (job) => job.data?.kind !== "question-grouping" && !(job.data?.purpose === "zero-touch-grouping" && job.data?.questionGrouping);
+
+function stopTouch(job, queue, jobId, now) {
+	const data = job.data ?? {};
+	const owner = /^pi-jobs@([A-Za-z0-9._-]{1,64})$/.exec(queue?.name ?? "")?.[1] ?? null;
+	// A shared-queue local job has no owning machine yet. Hashing an empty host manufactures a different
+	// folder identity from its eventual run, so leave that attribution unknown rather than claiming a mismatch.
+	const knownScope = /^[a-f0-9]{64}$/.test(data.touchScopeId ?? "") || !(data.kind === "local" || data.folder) || owner !== null;
+	return { type: "stop", runId: jobId, at: now(), ...(knownScope ? { scopeId: touchScopeOf(data, owner) } : {}), ...(isProjectId(data.projectId) ? { project: data.projectId } : {}), nonce: `stop:${jobId}` };
+}
 /**
  * The `cancel:` keyspace: how an operator's cancel reaches the worker that owns a running job (issue #287).
  *
@@ -120,7 +134,7 @@ async function holdInPlace(redis, jobId) {
  * is none); `attemptsMade` is what the job had done before, for the caller's sentence (`ranBefore`, issue #477): a job
  * held again on a retry has made attempts, and whatever they recorded stays.
  */
-export async function removeHeldJob({ redis, queue, jobId }) {
+export async function removeHeldJob({ redis, queue, jobId, touchStore = undefined, touchOutbox = null, now = Date.now }) {
 	// Set as the first hold key's delete is sent, before it is answered: a delete lost in transit may still have landed.
 	let cleared = false;
 	try {
@@ -156,9 +170,10 @@ export async function removeHeldJob({ redis, queue, jobId }) {
 			const holder = await redis.get(leaseKey(hash.dedupId));
 			if (holder === jobId) await redis.del(leaseKey(hash.dedupId));
 		}
-		await job.remove();
+		const store = touchStore === undefined ? (typeof redis?.eval === "function" ? makeTouchStore({ redis, now }) : null) : touchStore;
+		const removal = await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
 		// Issue #477: what the job had done, for the caller's sentence (`ranBefore`); read off the job just removed.
-		return { ok: true, jobId, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0 };
+		return { ok: true, jobId, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };
 	} catch (err) {
 		const invalid = err?.message ?? String(err);
 		return cleared ? { invalid, cleared: true } : { invalid };
@@ -208,30 +223,32 @@ export const QUEUED_STATES = Object.freeze(["delayed", "waiting", "prioritized",
  *                                                            run, which BullMQ refuses to remove); `state` is read again.
  * `attemptsMade` is the job's own count for the caller's sentence (`ranBefore`), 0 when it is not a positive whole number.
  */
-export async function removeQueuedJob({ redis, queue, job, jobId, state = null, timeoutMs = 2_000, guard = null }) {
+export async function removeQueuedJob({ redis, queue, job, jobId, state = null, timeoutMs = 2_000, guard = null, touchStore = undefined, touchOutbox = null, now = Date.now }) {
 	const hash = await Promise.resolve()
 		.then(() => redis.hgetall(jobKey(jobId)))
 		.catch(() => null);
 	if (hash?.since) {
 		const stop = await guarded(guard, job);
 		if (stop !== null) return stop;
-		const res = await removeHeldJob({ redis, queue, jobId });
+		const res = await removeHeldJob({ redis, queue, jobId, touchStore, touchOutbox, now });
 		if (!res.ok) return res.cleared === true ? { invalid: res.invalid, cleared: true } : { invalid: res.invalid };
 		await dropDeferRecord(redis, jobId, timeoutMs);
-		return { ok: true, held: true, jobId: res.jobId, attemptsMade: res.attemptsMade };
+		return { ok: true, held: true, jobId: res.jobId, attemptsMade: res.attemptsMade, ...(res.touchWarning ? { touchWarning: res.touchWarning } : {}) };
 	}
 	if (!job) return { notQueued: true, state: "unknown" };
 	const current = typeof state === "string" ? state : await stateOf(job);
 	if (!QUEUED_STATES.includes(current)) return { notQueued: true, state: current };
 	const stop = await guarded(guard, job);
 	if (stop !== null) return stop;
+	let removal;
 	try {
-		await job.remove();
+		const store = touchStore === undefined ? (typeof redis?.eval === "function" ? makeTouchStore({ redis, now }) : null) : touchStore;
+		removal = await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
 	} catch (error) {
 		return { raced: true, state: await stateOf(job), error };
 	}
 	await dropDeferRecord(redis, jobId, timeoutMs);
-	return { ok: true, held: false, jobId, state: current, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0 };
+	return { ok: true, held: false, jobId, state: current, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };
 }
 
 /** `removeQueuedJob`'s guard asked: null to go on (no guard, or a null answer), else `{ refused }`, or `{ refused: null, error }` for a throw. */

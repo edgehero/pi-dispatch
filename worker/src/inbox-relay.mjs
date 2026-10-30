@@ -114,7 +114,7 @@ export function steerTargetOf(job, { steerTargetKey = inboxModule.steerTargetKey
  * `frames` (issue #686): `{ exitKey, macRunId, budget? }` selects the stdin frame transport (the header); absent, the
  * file transport, byte-identical to before. `macRunId` is the container's PI_JOB_ID, which the runner MACs a frame by.
  */
-export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKey = null, host, ref = null, forge = null, now = Date.now, log = () => {}, pollMs = RELAY_POLL_MS, fs = defaultFs, inbox = inboxModule, frames = null } = {}) {
+export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKey = null, host, ref = null, forge = null, now = Date.now, log = () => {}, pollMs = RELAY_POLL_MS, fs = defaultFs, inbox = inboxModule, frames = null, onDelivered = null } = {}) {
 	const framed = frames !== null && typeof frames === "object" && typeof frames.exitKey === "string" && frames.exitKey !== "" && typeof frames.macRunId === "string" && frames.macRunId !== "";
 	const budget = framed && Number.isSafeInteger(frames.budget) && frames.budget > 0 ? frames.budget : STEER_STDIN_BUDGET_BYTES;
 	// The frame transport's own state: the pipe, whether it can still take a write, the bytes written (the key frame's
@@ -409,7 +409,10 @@ export function makeInboxRelay({ redis, runId, jobId = runId, inboxDir, targetKe
 			// `withdrawn` too: a written message is withdrawn best effort, and a verified ack is proof the agent got it.
 			const m = await inbox.markState({ redis, runId, id, from: ["written", "queued", "withdrawn"], to: "delivered" });
 			if (m?.error) fault("mark-delivered", codeOf(m));
-			else if (m?.ok === true) counts.delivered += 1;
+			else if (m?.ok === true) {
+				counts.delivered += 1;
+				try { await onDelivered?.({ runId, id, at: now() }); } catch { fault("touch-delivered", "touch-index-unavailable"); }
+			}
 			unlinkId(id);
 		},
 		tick,

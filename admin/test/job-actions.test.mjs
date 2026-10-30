@@ -1279,6 +1279,23 @@ test("failed-job and steering refusals keep the result before a long job id", as
   assert.ok(missing.invalid.endsWith(jobId));
 });
 
+test("single and bulk failed retries preserve publication warnings without repeating the retry", async () => {
+  let retries = 0;
+  const job = { data: { kind: "github", repo: "acme/api" }, attemptsMade: 1, finishedOn: 1, getState: async () => "failed", retry: async () => { retries++; } };
+  const fakes = {
+    url: "redis://unused", now: () => 1000, parseConnectionFn: () => ({}), timeoutMs: 200,
+    redisFn: () => ({ on() {}, smembers: async () => [], scan: async () => ["0", []], disconnect() {} }),
+    queueFn: (_connection, { name }) => ({ name, getJob: async () => job, close: async () => {} }),
+    touchStore: { begin: async (event) => ({ event, ok: true }), write: async () => ({ error: "touch-index-unavailable" }), abort: async () => ({ ok: true }) },
+  };
+  const one = await retryFailedJob({ ...fakes, jobId: "failed-one", expect: { attemptsMade: 1, finishedOn: 1 } });
+  assert.equal(one.ok, true);
+  assert.equal(one.touchWarning, "touch-tracking-incomplete");
+  const many = await retryFailedJobs({ ...fakes, jobs: [{ jobId: "failed-two", attemptsMade: 1, finishedOn: 1 }] });
+  assert.equal(many.results[0].touchWarning, "touch-tracking-incomplete");
+  assert.equal(retries, 2, "each authorized retry happens once even when metric publication fails");
+});
+
 
 test("Fire now uses the served BullMQ scheduler, preserves the cron template, and shares dispatch_run's hourly counter (#750)", live, async () => {
   const v = await freshValkey();

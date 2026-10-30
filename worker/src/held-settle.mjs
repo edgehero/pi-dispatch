@@ -191,7 +191,9 @@ export function makeHeldSettle({ redis, queues, comment = async () => {}, log = 
 			tried = true;
 			try {
 				if (!route.queue) throw Object.assign(new Error("no queue"), { code: "no-queue" });
-				const r = await enqueue(route.queue, job.data.kind, fields);
+				// The queue's enqueue timestamp is later than the receiver's trusted receipt. Keep that receipt
+				// outside the payload so a held answer does not acquire artificial human waiting time.
+				const r = await enqueue(route.queue, job.data.kind, { ...fields, replyReceivedAt: recent[i].at });
 				if (r?.deduplicated === true) {
 					// Swallowed by the window: another job holds it (an answer between the release and the take, which is
 					// then the resumed run), or this run's own (its release failed, so nothing was started).

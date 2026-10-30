@@ -1,3 +1,4 @@
+import { validateZeroTouchConfig } from "./question-groups.mjs";
 /**
  * Shared trigger-file schema + validator (issue #20). One `triggers.json` of `{ on, run }` entries is
  * the single reviewed source of standing triggers for BOTH services: the worker owns `on.type:"cron"`
@@ -346,7 +347,9 @@ export function parseTriggersDocument(text, path) {
 	const secretBundles = validateSecretBundles(parsed.secretBundles, path);
 	const modelRoles = validateModelRoles(parsed.modelRoles);
 	for (const key of Object.keys(parsed)) if (key !== "modelRoles" && isModelRolesField(key)) throw configError("triggers file: use modelRoles");
-	return { triggers, secretBundles, modelRoles, ...(parsed.watchSources !== undefined ? { watchSources } : {}) };
+	let zeroTouch;
+	try { zeroTouch = validateZeroTouchConfig(parsed.zeroTouch); } catch (error) { throw configError(error.message); }
+	return { triggers, secretBundles, modelRoles, ...(parsed.zeroTouch !== undefined ? { zeroTouch } : {}), ...(parsed.watchSources !== undefined ? { watchSources } : {}) };
 }
 
 function normalizeTrigger(entry, index, path, state) {
