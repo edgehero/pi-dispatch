@@ -10263,6 +10263,15 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 
 ## INT-CONSOLE-TOKENS-FILE-CONTRACT
 
+- **AMENDED 2026-10-31 (#774, decided, not implemented)**: the CLI-only writer rule below gains two narrow
+  uses of the same hardened expected-input writer under `INT-CONSOLE-SETUP-HOST`: host `up --console` may create
+  an operator entry, and a granted operator browser may create/revoke a viewer entry. Browser input never names
+  an operator/agent role. These paths discard durable plaintext, retain the existing hash-only shape and modes,
+  audit their actual actor and preserve generation/revocation rules. Only the existing explicit `token add` and
+  `token rotate` commands print durable tokens. A viewer revoke binds the exact created entry, refusing a rotated
+  or replaced name. A failure minting a code after a write reports the retained entry and CLI recovery; an audit
+  intent is not proof that the two files changed atomically. No existing tool gains token-write authority.
+
 - **Upgrade order (#766)**: Upgrade both console and host `pi-dispatch` before minting an `agent` token. Older readers reject the whole file for its unknown role; older doctor/service installation fail and older up cannot establish operator readiness. The format version stays 1; roles form a closed vocabulary.
 
 **`pi-dispatch-console token ...` → the console server and doctor.** Who may sign in to the operator console, by
@@ -10304,7 +10313,8 @@ in.
 - **Refusal rules at start**: no file, a refused file, or a file with no `operator` entry refuses `serve`, with a
   sentence naming `pi-dispatch-console token add --name <n> --role operator`. A file inside
   any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`) is a doctor failure (a job that mounts the folder could read the names and roles).
-- **Write protocol**: only the CLI writes it (`token add`, `token revoke`, `token rotate`, `sessions end-all`). Each
+- **Write protocol**: except for the narrowly scoped #774 setup writers above, only the CLI writes it
+  (`token add`, `token revoke`, `token rotate`, `sessions end-all`). Each
   write reads the file, builds the new text, creates a temporary file in the same directory exclusively (`wx`) at
   0600, re-checks that the file did not change since it was read, and renames over it; a symlinked target is
   refused. `token add` creates the file at 0600 when it is absent and refuses a name that exists. `token rotate`
@@ -10322,6 +10332,13 @@ in.
 - **Acceptance**: `REQ-CONSOLE-SECURITY` (a) and (i).
 
 ## INT-CONSOLE-AUDIT-LOG
+
+- **Decided, not implemented (#774)**: setup preserves audit-before-apply and compensating failed rows.
+  `INT-CONSOLE-SETUP-HOST` adds only safe operation/effect metadata through the existing row schema. Provider
+  values, secret-derived input digests, raw child diagnostics, token/code bodies and private ticket payloads never
+  enter a row. Confirm's intent is not an applied receipt or a cross-file transaction: partial/unknown effects
+  must be reported from typed readback, never automatically retried. Existing actor/chain/mirror rules are
+  UNCHANGED, checked. Concrete setup action kinds and exhaustive schema tests land with their implementation.
 
 - **Agent receipts (#766)**: `actor.role` additionally accepts `agent`. HTTP uses the minted token name; pi tools use the scrubbed account login, even when a person confirmed. `action: "write"` remains the audit-before-write intent and compensating failed outcome. A successful agent write appends correlated `action: "write-applied"`, same ticket/kind/target, only after the side effect; bulk actions append one receipt per successful target. Receipt failure is reported as incomplete accounting and never retries a side effect. The overview counts verified local-console applied receipts since UTC midnight with bounded pagination, explicitly partial for an unresolved intent, retained prefix, scan bound, damaged/unavailable chain or newer rows beyond verification. Its link filters `role=agent&action=write-applied`; audit history has a broader time scope. No draft/question or standing text enters this log.
 
@@ -10473,6 +10490,90 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   cannot be appended is logged and swallowed, leaving an `ok` row for a write that did not land: the safe direction
   to be wrong in. The setup wizard's writes are not audited (`DES-ADMIN-VIA-PI-EXTENSION`).
 - **Acceptance**: `REQ-CONSOLE-SECURITY` (f), (g) and (h), `REQ-OPERATOR-CONSOLE-ACTIONS` (j) and (k).
+
+## INT-CONSOLE-SETUP-HOST
+
+- **Status**: **DECIDED, NOT IMPLEMENTED** (issue #774), prerequisite to the code PR. This is a local setup
+  protocol and private action-state contract, not an additional listener, shell API or public snapshot format.
+- **Authority**: the console process must be started with `serve --host-setup`, explicitly persisted only by
+  `service install --console --host-setup` or the shown equivalent in `up --console`. Bind it to the canonical
+  deployment directory, current uid, Linux user systemd/macOS LaunchAgent manager and verified durable worker
+  package/entry. Resolve these on the host, never from action input. Existing services default off; reinstall
+  without the flag and restart revokes the grant and terminates its children/private state. It cannot be
+  activated by `.env`, deployment pointer, shared queue/host metadata or a model tool. Other hosts/accounts,
+  Windows, Linux system scope, ambiguous entries and foreign units refuse with the supported terminal path.
+- **Operation set**: version 1 permits install-and-start/start/stop/restart for the deployment's own worker or
+  installed receiver user service, start-only of its missing/stopped egress proxy after runtime endpoint-locality
+  verification, ordinary non-live/non-fixing doctor, create-only provider API-key assignment, and viewer add/revoke
+  through the hardened token writer.
+  The implementation's registration/protocol/policy enumerations must be checked both ways. No arbitrary command,
+  executable, argument vector, path, environment, forge credential or operator-token mutation comes from HTTP.
+  Existing `up` performs bootstrap only on the host and is never a browser operation.
+- **Plan and apply**: the shared planner supplies server-derived target identity, exact effect plan, expected
+  file/unit/runtime identities and current exposure facts. Preview performs no mutation. Existing single-use
+  session/action tickets bind the plan; confirm bodies cannot swap it. Refuse a missing host grant, wrong role,
+  read-only console, changed sign-in, changed plan, unsafe ownership or stale file/unit before apply. Incomplete
+  queue/cron exposure refuses operations that can start/restart a worker; key writes, viewer operations and
+  doctor do not acquire an unrelated queue-scan prerequisite. A per-deployment lock serializes setup mutations
+  across callers. Revalidate after taking it; no lock is represented as stopping ordinary job admission. Record
+  audit intent before the first effect. Recheck the authorizing session/grant immediately before dispatch, monitor
+  their loss and abort further dispatches. An already submitted service-manager action may finish after
+  cancellation; bound its child lifetime and report observed partial/unknown effects without retrying it. Do not
+  promise an in-memory parent session can atomically revoke an external manager action already submitted.
+- **Transport and bounds**: run the known worker entry with `shell:false` and fixed argv. The child receives one
+  versioned JSON request on stdin (at most 64 KiB), with server-chosen operation id and validated operation
+  fields; the key value, if any, never rides argv/environment. Unknown versions, keys and operations refuse.
+  Output is at most 256 KiB of versioned typed result/progress; raw stdout/stderr, error text and uncontrolled
+  strings are not console response content. Bound service/egress operations to 60 seconds and doctor to 120,
+  terminate then kill after a 2-second grace, and clean up on shutdown. The child loads only its own validated
+  deployment service environment. Console environment and bundle retain their secret/provider-SDK exclusions.
+- **Result**: report a server-chosen operation id, closed operation/stage/reason tokens and validated effects.
+  Distinguish unchanged, applied, partial, unknown and refused. A timeout or broken result after dispatch may mean
+  partial/unknown, not "nothing changed". Never retry it automatically. "Unit written", "start accepted" and
+  "waiting for heartbeat" are distinct from Ready: the last requires actual published heartbeat/doctor evidence
+  within a bounded 90-second readiness wait. A timer expiring leaves a named timeout/check state with recovery.
+  Audit intent or a zero exit cannot manufacture readiness. Bounded progress may reach operator live panels;
+  observer projections include safe state only and no account/path, body, token or private result.
+- **Service/exposure checks**: include actual multi-unit dependencies and configuration effects; refuse adoption,
+  shared/foreign ownership or unpreviewable disruption. Show timestamped current queue/cron counts and existing
+  paid-action reserve estimates. Unknown/partial exposure refuses start, never reads zero. No budget is reserved
+  for the setup action. Worker admission and reservations remain per job. Stop/restart/Undo explicitly warn of
+  interruption, including work arriving after preview, and never claim to undo spent money. Proxy mutation is
+  start-only; destructive restart/removal/rules refresh retain terminal recovery and its active-job precautions.
+- **Private key state**: only canonical API-key names selected by the server are writable; reject bearer/OAuth
+  slots and providers without a supported key slot. Limit UTF-8 values to 4 KiB and private entries to 32 per
+  process, at most one per session, with at most 60 seconds lifetime. Reject at capacity rather than silently
+  evicting a preview the person is confirming. Keep value/expected inputs outside ordinary diff/flash/live/cache
+  metadata. Private input comparison hashes never enter audit or public output. Expiry runs without new traffic;
+  guarded Cancel, any redeem attempt, logout/revocation/role change and shutdown release the state. Best-effort
+  buffer clearing is not a guarantee about JavaScript string copies. Reject controls/command references,
+  duplicate/nonblank assignments, shadowed sources and managed-binding conflicts. The writer rechecks owner,
+  mode, real target and bytes before exclusive temporary-file creation, then repeats the expected-input check
+  immediately before atomic rename; unsafe or intervening inputs change nothing. Browser submission clears the
+  field/transient value references and bypasses ordinary retained request bodies and Preview again replay; a
+  refusal or expiry requires re-entry. The preview countdown uses this 60-second lifetime. A successful save
+  never implicitly restarts a worker or claims its running environment reloaded.
+- **Private viewer result**: the token role is fixed to viewer; the existing unique-name/expected-input writer
+  supplies the entry and discards plaintext. Mint a one-use 60-second login code only after its audit/write
+  succeeds. Bind the private code record to the exact created token hash/incarnation, viewer role and current
+  tokens-file generation; redemption revalidates all three before making a session. Rotation, role change,
+  revocation/recreation with the same name, or generation change invalidates it. Return a same-origin
+  `/login/code#<code>&next=/setup` link only to the initiating operator's confirm response. A dedicated private
+  success path displays/copies it rather than using the generic success reload. It is absent from SSR,
+  shared flash, caches, state APIs, SSE/reconnect and logs. Never persist that DOM result to browser storage;
+  remove it when its result expires or sign-in changes. Explain loopback/tunnel reachability and that a link
+  grants a session, not a retained token. If minting fails, explicitly report the retained viewer entry and host
+  recovery. Revoke is separately confirmed against that exact entry, never an independent same-name replacement.
+- **Bootstrap link**: host `up --console` preserves or creates an operator entry without printing/retaining its
+  durable plaintext, asks explicitly among multiple operators and prints the existing one-use 60-second link
+  only after bounded console health succeeds. Failure after token/service mutation reports what remains and
+  exact recovery. `token add`/`token rotate` retain their existing one-line durable-token output; no browser
+  operator mint or new token-print exception is admitted.
+- **Projection**: `/api/state`'s public shape is UNCHANGED, checked by this prerequisite. `/setup` reuses existing
+  panel/SSE framing with role-separated caches. Setup action progress is bounded state, not authority; private
+  tickets/keys/invitation links never enter the snapshot. `dispatch_setup` remains a read, never a setup executor.
+- **Acceptance**: `REQ-BROWSER-FIRST-RUN-SETUP`; future tests must verify the real packaged child boundary,
+  expected-input writer, session isolation, lifecycle limits, counterexamples and meaningful end-to-end effects.
 
 ## INT-CONSOLE-STATE-API
 
@@ -11980,6 +12081,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#774, prerequisite specs) | NEW `INT-CONSOLE-SETUP-HOST`, DECIDED, NOT IMPLEMENTED: local process grant, fixed versioned child protocol, bounded lifecycle, revalidated effect/exposure plans, private key cancellation/expiry, session-only viewer link and typed applied/partial/unknown outcomes. `INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` AMENDED narrowly for setup writers and safe intent/result reporting. Hash-only token shape, modes, roles, revocation, audit-chain format, public `INT-CONSOLE-STATE-API`, ordinary `INT-CONSOLE-EVENT-STREAM` framing, trigger/pointer/run-record/container contracts, auth stores and deploy mirrors UNCHANGED, checked. |
 | 2026-10-31 (#781) | NEW `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE` and `INT-SUBSCRIPTION-QUOTA-KEY`; `INT-SDK-SESSION-OPTIONS`, `INT-CONTAINER-JOB-INPUTS`, `INT-PI-PACKAGES-FILE-CONTRACT`, `INT-DEFER-REASON-KEY` and the runner/history cost-refusal vocabulary AMENDED through those explicit contracts. `INT-SUBSCRIPTIONS-FILE-CONTRACT` corrects its obsolete blanket OAuth rationale; analytics-only enforcement UNCHANGED, checked. Model cooldown storage, ordinary container mounts, queue data, recovery checkpoint model, sandbox credentials, session promotion, forged-output rejection, model ceilings and the ordinary reservation/settlement ledgers UNCHANGED, checked. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |
 | 2026-10-31 (#773) | INT-DOCTOR-RESULTS-KEY AMENDED with the explicitly typed/redacted proposal-detail exception, preserving unrelated successful-check privacy. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |
 | 2026-10-29 (#735, #743) | NEW `INT-WATCH-EVENT-CONTRACT`, `INT-WATCH-FINDINGS-FILE`, `INT-WATCH-TRACE-STREAM` and `INT-WATCH-BOARD-FILE`; `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-OUTBOX-CONTRACT`, `INT-CONSOLE-AUDIT-LOG` and optional public decision summary AMENDED by reference. Ordinary forge envelopes, credential custody, runtime exit signing, session resumption UNCHANGED, checked. Limits are owned by code constants and covered by contract tests, not trusted copies.  The run-record reason enum includes the watch catalog, pinned in both directions. Watch workspaces use existing paths with read-only workspace permissions; ordinary jobs keep their mount permissions. |
