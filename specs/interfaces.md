@@ -11884,6 +11884,18 @@ persist a replacement before the transaction completes. A durable uncertain mark
 an ambiguous remote or persistence result must not repeat that rotation blindly. Authentication/refresh failure
 returns a closed actionable reason. Only named transient transport/store faults retry as infrastructure.
 
+Host policy, credential-store and adapter-validation reads use the shared determinate-filesystem-error
+allowlist. Missing or malformed policy/adapter metadata and determinate path faults return closed policy
+refusals; credential-store absence still reads as disconnected. Permission/ownership validation remains a
+policy refusal, while an unanswered read such as EACCES, EIO or an unknown errno is retryable infrastructure.
+Dependency existence checks must propagate unanswered stat errors rather than certify a missing package.
+The complete read boundary includes directory/file lstat, open, fstat, read and close; private paths and
+credential text are removed from its diagnostics. These refusals never fall through to another credential.
+If the default adapter's read-only validation fails after the durable refresh marker, its internal
+`beforeRefresh` proof restores the exact pre-marker row before returning that refusal. No provider request
+has begun in this branch. A provider error code alone supplies no such proof; terminal remote rejection and
+ambiguous network rotation keep their existing disconnect or uncertain-marker outcomes.
+
 An insufficient access lifetime with a known future earliest refresh instant defers as `subscription-auth`
 before the uncertain marker or refresh network request. It spends no queue attempt. A quota/owner change found
 during selected preparation uses the same closed free-delay path. The host releases all slot/endpoint holds
@@ -12328,3 +12340,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-10-31 (#771, initial live snapshot) | INT-CONSOLE-EVENT-STREAM initial Sandboxes subscriptions retain server-rendered panels until a fresh coalesced read succeeds, preventing a cached empty view from hiding newer cleanup warnings; failures keep those panels with a stale indication. Cursor replay, other pages, event framing/fields, stream limits, authorization, public state, sandbox control/session/inventory wire contracts and every other interface UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | NEW `INT-ANSWER-DRAFT-STORE`; `INT-STEER-INBOX-CONTRACT`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API` and `INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED: answer rule/standing schemas, agent role, applied receipts, safe projections and digest-bound result. Ordinary exit numbers/MAC, trigger run payloads, parent transcript promotion, approval decisions, global overlay, deploy mirrors and dependency pins UNCHANGED, checked. |
 | 2026-10-31 (#781, local credential custody) | INT-CONTAINER-JOB-INPUTS, INT-RUN-HISTORY-FILE-CONTRACT and INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: every local job refuses a mount containing the private refresh store, including unbound API jobs, future paths, symlink parents and directory aliases, as the fixed path-free local-folder-holds-subscription-auth reason. The free pickup gate precedes token minting and final preparation repeats the check on the resolved mount source before reservation or container start; transient boundary reads remain infrastructure failures. The store path stays in host closures. Container environment and exit protocol, forge contracts, paid meter, hook reasons and other interfaces UNCHANGED, checked. |
+| 2026-10-31 (#781, host filesystem refusals) | INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: policy, private-store, OpenAI pinned-source and community-adapter validation classify all filesystem reads by the shared determinate errno allowlist, including outer path checks and descriptor close. Malformed metadata and known path faults refuse; credential-store absence still reads disconnected; EACCES, EIO and unknown faults remain retryable without changing the durable grant. Dependency existence uses strict stat rather than suppressing I/O errors. An explicitly marked read-only adapter preflight failure after the durable refresh marker restores the pre-marker row because no remote rotation began; an error code alone never proves this. Fixed diagnostics carry no path or token. Credential schemas, permission/owner checks, remote refresh rotation and uncertainty, snapshots, container/image transports, adapter source/output pins, public telemetry and all other interfaces UNCHANGED, checked. |

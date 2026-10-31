@@ -103,13 +103,15 @@
  * #284's class): Chrome for Testing at the exact version `.github/chrome-for-testing.json` pins, the pin itself checked
  * before anything is downloaded (`--check-pin`, which prints the url derived from the pinned version) and the zip
  * against its sha256 before it is unzipped (`--verify-zip`); time zone UTC, locale en-US and the page's clock fixed one
- * minute after the fixture's instant, over the DevTools protocol; one tab at a time (the held streams would otherwise
- * run into Chrome's six connections per origin); a deadline per navigation and per run, so a wait that never ends fails
+ * minute after the fixture's instant, over the DevTools protocol; two isolated browser/server lanes, each with one tab
+ * at a time (the held streams would otherwise run into Chrome's six connections per origin). Both lanes calibrate
+ * against both negative controls. The complete page and shell run lists are partitioned, never shortened. A deadline
+ * per navigation and per run means a wait that never ends fails
  * the step instead of holding the job. No virtual time: pausing it while a stub holds a fetch open never resumes.
  *
  * NO CHROME (none at `CHROME`, `google-chrome` or `chromium` on PATH, or the macOS app): exit 0 "skipped", or exit 1
  * with `--require`, which CI passes. `--shots <dir>` also writes a full-page PNG per golden run and a window-sized one
- * per shell run (the PR's screenshots).
+ * per shell run (the PR's screenshots), in a separate lane-N directory for each browser.
  *
  * The same build CI uses, locally on an Apple silicon Mac: download the url `--check-pin --platform mac-arm64` prints,
  * check it with `--verify-zip <zip> --platform mac-arm64`, unzip it outside the repository, and run with
@@ -249,6 +251,8 @@ const STEP_MS = 20_000;
 /** The longest the whole run may take; the workflow step's own `timeout-minutes` is the backstop above this. */
 // Five Spend routes and their exceptional states expand both the CSP sweep and the shell matrix.
 export const RUN_MS = 20 * 60_000;
+/** Separate processes and origins let their frame waits overlap without sharing focus, streams or request ownership. */
+export const BROWSER_LANES = 2;
 
 const USAGE = `usage: node .github/scripts/console-width-check.mjs [--require] [--shots <dir>]
        node .github/scripts/console-width-check.mjs --verify-zip <file> [--platform ${CFT_PLATFORMS.join("|")}]
@@ -1803,15 +1807,49 @@ export function chromeLaunchArgs({ sandbox = true } = {}) {
 	return ["--use-mock-keychain", ...(sandbox ? [] : ["--no-sandbox"])];
 }
 
+/** Partition the complete existing schedules, retaining their order and every run field inside each lane. */
+export function browserLanePlans(docs, sweep = []) {
+	const pages = planRuns(docs);
+	const shell = planShellRuns(sweep);
+	return Array.from({ length: BROWSER_LANES }, (_, index) => ({
+		id: index + 1,
+		pages: pages.filter((_, run) => run % BROWSER_LANES === index),
+		shell: shell.filter((_, run) => run % BROWSER_LANES === index),
+		noScript: index === 0 ? noScriptRun(sweep) : null,
+		extras: index === 0,
+	}));
+}
+
+/** Each lane owns a complete server and browser. Await both cleanups even when one refuses before returning results. */
+export async function checkPages(args, { checkLane = checkPageLane } = {}) {
+	const plans = browserLanePlans(args.docs, args.shellDocs);
+	const outcomes = await Promise.allSettled(plans.map(async (lanePlan) => {
+		const work = join(args.work, `lane-${lanePlan.id}`);
+		const shots = args.shots ? join(args.shots, `lane-${lanePlan.id}`) : null;
+		mkdirSync(work);
+		if (shots) mkdirSync(shots, { recursive: true });
+		return checkLane({ ...args, lanePlan, work, shots, log: (line) => args.log(`[lane ${lanePlan.id}] ${line}`) });
+	}));
+	const failures = outcomes.flatMap((outcome, index) => outcome.status === "rejected"
+		? [new Refusal(`lane ${plans[index].id}: ${outcome.reason?.message ?? outcome.reason}`)] : []);
+	if (failures.length) throw new AggregateError(failures, failures.map((failure) => failure.message).join("; "));
+	const values = outcomes.map((outcome) => outcome.value);
+	if (values.some((value) => value.product !== values[0].product)) throw new Refusal("the console width lanes did not use the same Chrome build");
+	return {
+		product: values[0].product,
+		results: values.flatMap((value) => value.results),
+		shell: values.flatMap((value) => value.shell),
+		controls: values.flatMap((value, index) => value.controls.map((control) => ({ ...control, lane: plans[index].id }))),
+	};
+}
+
 /**
- * Serve `docs` (each `{ id, path, html }`), `shellDocs`, the negative `controls` (`controlDoc`'s and
- * `phoneControlDoc`'s: each page, its stylesheet and its script, if any) and the console's static files with the
- * console's security headers, drive `chrome` through every run (the controls first, the run without scripts last), and
- * return the results. `heads` is `themeHead` of a page drawn with no theme (`system`) and with each theme; `liveStates`
- * the live pill's distinct `{ cls, word }`. `log` prints a line; `onOpen` is handed the browser once it runs, so the
- * caller's exit handler can remove what Chrome leaves behind.
+ * Serve the full doc and asset maps with the console's security headers in one browser/server lane. Its controls run
+ * first, then its assigned page/shell cases, followed by no-script and interactive checks when assigned. `onOpen`
+ * hands each browser to the caller's exit cleanup. Interactive checks deliberately retain every route, including
+ * those whose width cases belong to the other lane.
  */
-export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls = [], heads, liveStates = [], css, script, applyHeaders, canvasOf, clockMs, shots, sandbox, work, children, log, onOpen }) {
+export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], controls = [], heads, liveStates = [], css, script, applyHeaders, canvasOf, clockMs, shots, sandbox, work, children, log, onOpen, lanePlan }, { openBrowser = openChrome, makeServer = createServer } = {}) {
 	const byPath = new Map([...docs, ...sweep, ...controls].map((d) => [d.path, d]));
 	const assets = new Map(controls.flatMap((c) => [[`${c.path}.css`, ["text/css", c.css]], ...(c.js ? [[`${c.path}.js`, ["text/javascript", c.js]]] : [])]));
 	for (const theme of THEMES) {
@@ -1821,7 +1859,7 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 	const held = new Set();
 	let current = null;
 	const strays = [];
-	const server = createServer((req, res) => {
+	const server = makeServer((req, res) => {
 		applyHeaders(res);
 		const path = new URL(req.url, "http://127.0.0.1").pathname;
 		const doc = byPath.get(path);
@@ -1864,8 +1902,7 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 	// loopback address this server listens on is excluded, because Chrome applies the rules to an IP literal too
 	// (measured: ERR_NAME_NOT_RESOLVED without the exclusion).
 	const extraArgs = chromeLaunchArgs({ sandbox });
-	const browser = await openChrome({ chrome, work, children, Refusal, stepMs: STEP_MS, env: { HOME: join(work, "home") }, extraArgs, captureStderr: true, resolverRules: "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" });
-	onOpen?.(browser);
+	let browser = null;
 	const results = [];
 	const shell = [];
 	const controlResults = [];
@@ -1875,6 +1912,8 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 		current = null;
 	};
 	try {
+		browser = await openBrowser({ chrome, work, children, Refusal, stepMs: STEP_MS, env: { HOME: join(work, "home") }, extraArgs, captureStderr: true, resolverRules: "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" });
+		onOpen?.(browser);
 		const version = await browser.send("Browser.getVersion");
 		const product = String(version.product ?? "");
 		log(`Chrome ${product} (revision ${version.revision ?? "?"}) at ${chrome}${sandbox ? "" : ", --no-sandbox"}`);
@@ -1884,39 +1923,39 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 			controlResults.push(await checkShell({ browser, run, url: origin + control.path, clockMs, shots, liveStates }));
 			after();
 		}
-		for (const run of planRuns(docs)) {
+		for (const run of lanePlan.pages) {
 			current = run.key;
 			const path = run.forced ? forcedPath(run.doc, run.forced) : run.doc.path;
 			results.push(await checkOne({ browser, run, url: origin + goldenUrl(run.doc, path), canvasOf, clockMs, shots }));
 			after();
 		}
-		for (const run of planShellRuns(sweep)) {
+		for (const run of lanePlan.shell) {
 			current = run.key;
 			shell.push(await checkShell({ browser, run, url: origin + run.doc.path, clockMs, shots, liveStates }));
 			after();
 		}
-		const run = noScriptRun(sweep);
+		const run = lanePlan.noScript;
 		if (run) {
 			current = run.key;
 			shell.push(await checkNoScript({ browser, run, url: origin + run.doc.path, clockMs, shots }));
 			after();
 		}
-		if (docs.some((d) => d.page === "insights-flows")) {
+		if (lanePlan.extras && docs.some((d) => d.page === "insights-flows")) {
 			current = "spend-browser";
 			results.push(...await checkSpendBrowser({ browser, docs, origin, openPage, clockMs, shots }));
 			after();
 		}
-		if (docs.some((d) => d.page === "trigger-add")) {
+		if (lanePlan.extras && docs.some((d) => d.page === "trigger-add")) {
 			current = "config-browser";
 			results.push(...await checkConfigBrowser({ browser, docs, origin, openPage, clockMs, shots }));
 			after();
 		}
-		if (docs.some((d) => d.page === "triggers")) {
+		if (lanePlan.extras && docs.some((d) => d.page === "triggers")) {
 			current = "triggers-browser";
 			results.push(...await checkTriggersBrowser({ browser, docs, origin, openPage, clockMs, shots }));
 			after();
 		}
-		if (docs.some((d) => d.page === "zero-touch")) {
+		if (lanePlan.extras && docs.some((d) => d.page === "zero-touch")) {
 			current = "zero-touch-browser";
 			results.push(...await checkZeroTouchBrowser({ browser, docs, origin, openPage, clockMs, shots }));
 			after();
@@ -1928,11 +1967,17 @@ export async function checkPages({ chrome, docs, shellDocs: sweep = [], controls
 		}
 		return { product, results, shell, controls: controlResults };
 	} finally {
-		await browser.close();
-		browser.removeSingleton();
-		for (const res of held) res.destroy();
-		server.closeAllConnections();
-		await new Promise((resolve) => server.close(resolve));
+		try {
+			await browser?.close();
+		} finally {
+			try {
+				browser?.removeSingleton();
+			} finally {
+				for (const res of held) res.destroy();
+				server.closeAllConnections();
+				await new Promise((resolve) => server.close(resolve));
+			}
+		}
 	}
 }
 
@@ -2188,10 +2233,11 @@ export async function runCheck(opts, { find, modules, fixtures = FIXTURES, check
 		chrome: choice.path,
 	});
 	// Each control against its own run, by id: one that never ran is `got: null`, a problem of its own.
-	const measuredControls = controls.map((c) => {
-		const r = (outcome.controls ?? []).find((x) => x.run?.key === c.id);
-		return { name: c.name, what: c.what, width: c.width, want: c.expected, got: r ? r.failures : null, notes: r?.notes ?? [] };
-	});
+	// The expected schedule is fixed here. Deriving it from returned controls would let a missing second lane pass.
+	const measuredControls = Array.from({ length: BROWSER_LANES }, (_, index) => index + 1).flatMap((lane) => controls.map((c) => {
+		const r = (outcome.controls ?? []).find((x) => x.lane === lane && x.run?.key === c.id);
+		return { name: lane === 1 ? c.name : `${c.name} (lane ${lane})`, what: c.what, width: c.width, want: c.expected, got: r ? r.failures : null, notes: r?.notes ?? [] };
+	}));
 	const s = summarize({ setup, product: outcome.product, pin: m.pin, ci, results: outcome.results, shell: outcome.shell, controls: measuredControls, pages: [...new Set(docs.map((d) => d.page))], seconds: ((Date.now() - started) / 1000).toFixed(1) });
 	for (const line of s.lines) log(line);
 	return s.code;
@@ -2203,7 +2249,7 @@ async function main(opts) {
 	if (opts.shots) mkdirSync(opts.shots, { recursive: true });
 	let work = null;
 	const children = new Set();
-	let browser = null;
+	const browsers = new Set();
 	let deadline = null;
 	const cleanup = () => {
 		for (const child of children) {
@@ -2213,7 +2259,7 @@ async function main(opts) {
 				// already gone
 			}
 		}
-		browser?.removeSingleton();
+		for (const browser of browsers) browser.removeSingleton();
 		if (work) rmSync(work, { recursive: true, force: true });
 	};
 	// The sandbox, and why it is off on GitHub's runners only: ubuntu-24.04 restricts unprivileged user namespaces
@@ -2239,7 +2285,7 @@ async function main(opts) {
 			cleanup();
 			process.exit(1);
 		}, RUN_MS);
-		return checkPages({ ...args, shots: opts.shots, sandbox: !ci, work, children, log: (line) => console.log(line), onOpen: (b) => (browser = b) });
+		return checkPages({ ...args, shots: opts.shots, sandbox: !ci, work, children, log: (line) => console.log(line), onOpen: (browser) => browsers.add(browser) });
 	};
 	try {
 		return await runCheck(opts, { find: () => findChrome(), modules, check, ci, log: (line) => console.log(line), started });

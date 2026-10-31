@@ -74,6 +74,8 @@ creates the store. Existing and dangling symlink parents are resolved for this c
 mode 0700 and credential files are owned regular files with mode 0600. Do not copy a connection's refresh
 credentials to several independent worker stores: the declared owner serializes renewal and persists rotating
 replacements. A refresh with an uncertain result requires reauthentication rather than blindly replaying it.
+An unreadable filesystem retries without disconnecting the stored credential. Missing or damaged adapter
+metadata refuses until the reviewed adapter is restored or staged again; it does not spend an API key instead.
 If the provider declares an earliest refresh time and the existing access token is too short for the job, the
 job waits until that instant without a refresh call, uncertain marker or spent queue attempt. The same free
 deferral handles quota or owner state that changed during selected preparation.

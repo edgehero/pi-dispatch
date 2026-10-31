@@ -63,7 +63,7 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 			if (row.ownerHost !== host) return safe(row, null, config.bindings[row.provider] === row.id, "other-host");
 			let saved;
 			try { saved = store.read(row.id); if (saved && !matching(row, saved)) return safe(row, null, config.bindings[row.provider] === row.id, "adapter-unavailable"); await validate(row); }
-			catch (error) { const compatibility = error.code === "ENOENT" ? "unstaged" : error.code === "auth-adapter-version-mismatch" ? "version-mismatch" : ["auth-adapter-source-mismatch", "auth-adapter-unpinned"].includes(error.code) ? "unpinned" : "unavailable"; return safe(row, null, config.bindings[row.provider] === row.id, "adapter-unavailable", compatibility); }
+			catch (error) { const compatibility = ["ENOENT", "auth-adapter-unstaged"].includes(error.code) ? "unstaged" : error.code === "auth-adapter-version-mismatch" ? "version-mismatch" : ["auth-adapter-source-mismatch", "auth-adapter-unpinned"].includes(error.code) ? "unpinned" : "unavailable"; return safe(row, null, config.bindings[row.provider] === row.id, "adapter-unavailable", compatibility); }
 			return safe(row, saved, config.bindings[row.provider] === row.id);
 		}));
 	}
@@ -123,7 +123,9 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 					current = { ...current, credential, state: "connected", generation: current.generation + 1, lastRefreshAt: now() };
 					await write(current);
 				} catch (error) {
-					if (error.code?.startsWith("auth-") && error.uncertain !== true) await write({ ...current, state: error.transient ? "connected" : "reauth-required", ...(error.transient ? {} : { credential: null }) });
+					// Only the adapter's read-only preflight can prove the old grant never reached a provider.
+					if (error.beforeRefresh === true) await write(current);
+					else if (error.code?.startsWith("auth-") && error.uncertain !== true) await write({ ...current, state: error.transient ? "connected" : "reauth-required", ...(error.transient ? {} : { credential: null }) });
 					return { ok: false, reason: error.code?.startsWith("auth-") ? error.code : "auth-refresh-uncertain", unavailable: error.transient === true };
 				}
 			}

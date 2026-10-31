@@ -2,6 +2,7 @@
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { isDeterminateFsCode } from "./transient.mjs";
 
 export function authError(code, { transient = false, uncertain = false } = {}) {
 	const error = new Error(code);
@@ -9,6 +10,12 @@ export function authError(code, { transient = false, uncertain = false } = {}) {
 	error.transient = transient;
 	error.uncertain = uncertain;
 	return error;
+}
+
+function storeReadError(error) {
+	if (error?.code?.startsWith("auth-")) return error;
+	const invalid = error instanceof SyntaxError || isDeterminateFsCode(error?.code);
+	return authError(invalid ? "auth-store-invalid" : "auth-store-unavailable", { transient: !invalid });
 }
 
 export const AUTH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -30,18 +37,20 @@ export function createAuthStore({ dir, fs = nodeFs, lock = null, uid = process.g
 		if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile()) || (stat.mode & 0o077) !== 0 || (uid !== undefined && stat.uid !== uid)) throw authError("auth-store-permissions");
 	}
 	function initialize() {
-		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-		secure(dir, true);
+		try {
+			fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+			secure(dir, true);
+		} catch (error) { throw storeReadError(error); }
 	}
 	function pathFor(id) {
 		if (typeof id !== "string" || !AUTH_ID_RE.test(id)) throw authError("auth-connection-invalid");
 		return join(dir, `${id}.json`);
 	}
 	function read(id) {
-		try { secure(dir, true); } catch (error) { if (error.code === "ENOENT") return null; throw error; }
-		const path = pathFor(id);
-		try { secure(path); } catch (error) { if (error.code === "ENOENT") return null; throw error; }
 		try {
+			try { secure(dir, true); } catch (error) { if (error.code === "ENOENT") return null; throw error; }
+			const path = pathFor(id);
+			try { secure(path); } catch (error) { if (error.code === "ENOENT") return null; throw error; }
 			const fd = fs.openSync(path, nodeFs.constants.O_RDONLY | nodeFs.constants.O_NOFOLLOW);
 			let text;
 			try { if (fs.fstatSync(fd).size > 512 * 1024) throw authError("auth-store-invalid"); text = fs.readFileSync(fd, "utf8"); } finally { fs.closeSync(fd); }
@@ -49,7 +58,10 @@ export function createAuthStore({ dir, fs = nodeFs, lock = null, uid = process.g
 			if (row?.version !== 1 || row.id !== id || !Number.isSafeInteger(row.generation) || row.generation < 0 || !["connected", "disconnected", "reauth-required", "refresh-uncertain"].includes(row.state) || typeof row.accountGroup !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(row.accountGroup) || (row.lastRefreshAt !== null && !Number.isSafeInteger(row.lastRefreshAt)) || (row.extraUsage !== undefined && !["unknown", "enabled", "disabled"].includes(row.extraUsage))) throw authError("auth-store-invalid");
 			if (row.credential !== null) validateAuthCredential(row.credential, { provider: row.provider });
 			return row;
-		} catch (error) { if (error.code?.startsWith("auth-")) throw error; throw authError("auth-store-invalid"); }
+		} catch (error) {
+			// Only malformed bytes or a determinate path error can certify a policy refusal.
+			throw storeReadError(error);
+		}
 	}
 	function write(id, row) {
 		const path = pathFor(id);

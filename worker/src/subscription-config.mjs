@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import * as realFs from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { createAuthService, parseAuthConnections } from "./auth-connections.mjs";
 import { makeSubscriptionQuotaStore } from "./subscription-quota.mjs";
@@ -10,20 +10,22 @@ import { readStageManifest, containerPackagePaths } from "./packages.mjs";
 import { authError } from "./auth-store.mjs";
 import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-adapters.mjs";
 import { insideDirectory, privateStoreExposed } from "./private-store-boundary.mjs";
+import { isDeterminateFsCode } from "./transient.mjs";
 
 const inside = insideDirectory;
-export function readAuthPolicy(path, { uid = process.getuid?.() } = {}) {
-	let fd;
+export function readAuthPolicy(path, { uid = process.getuid?.(), fs = realFs } = {}) {
 	try {
-		fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-		const stat = fs.fstatSync(fd);
-		if (!stat.isFile() || stat.size > 65_536 || (stat.mode & 0o022) !== 0 || (uid !== undefined && stat.uid !== uid && stat.uid !== 0)) throw Object.assign(new Error("the subscription connection policy must be a private, owned regular file"), { code: "auth-policy-invalid" });
-		return parseAuthConnections(fs.readFileSync(fd, "utf8"));
+		const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+		try {
+			const stat = fs.fstatSync(fd);
+			if (!stat.isFile() || stat.size > 65_536 || (stat.mode & 0o022) !== 0 || (uid !== undefined && stat.uid !== uid && stat.uid !== 0)) throw Object.assign(new Error("the subscription connection policy must be a private, owned regular file"), { code: "auth-policy-invalid" });
+			return parseAuthConnections(fs.readFileSync(fd, "utf8"));
+		} finally { fs.closeSync(fd); }
 	} catch (error) {
 		if (error.code?.startsWith("auth-")) throw error;
-		const transient = ["EIO", "EAGAIN", "EMFILE", "ENFILE"].includes(error.code);
+		const transient = !isDeterminateFsCode(error?.code) && !(error instanceof SyntaxError);
 		throw authError(transient ? "auth-policy-unavailable" : "auth-policy-invalid", { transient });
-	} finally { if (fd !== undefined) fs.closeSync(fd); }
+	}
 }
 
 export function configuredSubscriptions({ config, redis, now = Date.now, adapters, fetch } = {}) {

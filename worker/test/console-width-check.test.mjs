@@ -1486,7 +1486,7 @@ const repoModules = () => (loaded ??= loadModules());
  * id) says what it failed with, or null for one that never ran, and `noScript` says what the run without scripts
  * failed with (null: it never ran), so what fails is the glue's own.
  */
-async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }), fixtures = FIXTURES, product = null, ci = true, controlFailures = {}, noScript = [], edit = (m) => m } = {}) {
+async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }), fixtures = FIXTURES, product = null, ci = true, controlFailures = {}, secondLaneControlFailures = {}, noScript = [], edit = (m) => m } = {}) {
 	const modules = edit(await repoModules());
 	product ??= `HeadlessChrome/${modules.pin.version}`;
 	const lines = [];
@@ -1497,10 +1497,10 @@ async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }),
 		const shell = planShellRuns(args.shellDocs).map((run) => ({ run, failures: [], notes: [] }));
 		const bare = noScriptRun(args.shellDocs);
 		if (bare && noScript !== null) shell.push({ run: bare, failures: noScript, notes: [] });
-		const controls = args.controls.flatMap((c) => {
-			const failures = controlFailures[c.id] === undefined ? c.expected : controlFailures[c.id];
-			return failures === null ? [] : [{ run: { key: c.id }, failures, notes: [] }];
-		});
+		const controls = [controlFailures, secondLaneControlFailures].flatMap((overrides, index) => args.controls.flatMap((c) => {
+			const failures = overrides[c.id] === undefined ? c.expected : overrides[c.id];
+			return failures === null ? [] : [{ lane: index + 1, run: { key: c.id }, failures, notes: [] }];
+		}));
 		return { product, results, shell, controls };
 	};
 	const code = await runCheck({ require }, { find, modules, fixtures, check, ci, log: (line) => lines.push(line), started: 0 });
@@ -1579,6 +1579,16 @@ test("the glue: a negative control not failed exactly as it was built, or not ru
 	assert.ok(easy.lines.includes("::error::the phone's negative control was not failed with: a click on More did not open its menu"));
 	const phoneNever = await fakeRun({ controlFailures: { "control-phone": null } });
 	assert.ok(phoneNever.lines.includes(`::error::the phone's negative control (${phone.what}) never ran, so a measure blind to what it breaks would pass every page`));
+});
+
+test("the glue: passing first-lane controls cannot excuse missing or blind second-lane controls", async () => {
+	const never = await fakeRun({ secondLaneControlFailures: { control: null, "control-phone": null } });
+	assert.equal(never.code, 1);
+	assert.ok(never.lines.some((line) => line.startsWith("::error::the negative control (lane 2)") && line.includes("never ran")));
+	assert.ok(never.lines.some((line) => line.startsWith("::error::the phone's negative control (lane 2)") && line.includes("never ran")));
+	const blind = await fakeRun({ secondLaneControlFailures: { control: [] } });
+	assert.equal(blind.code, 1);
+	assert.ok(blind.lines.some((line) => line.startsWith("::error::the negative control (lane 2) was not failed with:")));
 });
 
 test("the glue: the run without page scripts never made, or made with its scripts on, fails a run whose every page passed", async () => {

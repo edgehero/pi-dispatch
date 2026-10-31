@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { createJiti } from "jiti";
 import { createHash } from "node:crypto";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { prepareCommunityAuthAdapter, verifyCommunityAuthAdapter } from "../src/community-auth-adapters.mjs";
+import { createDefaultAuthAdapters, prepareCommunityAuthAdapter, verifyCommunityAuthAdapter } from "../src/community-auth-adapters.mjs";
 import { loadCommunityAuthHelper } from "../src/community-auth-helper.mjs";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { COMMUNITY_ADAPTED_SOURCE_PINS } from "../src/community-auth-output-pins.mjs";
@@ -64,6 +64,17 @@ test("real primary artifact + exact SDK0.124.0 preserve final hooks, guard refus
 	const approved = prepareCommunityAuthAdapter({ adapter: primary, root });
 	for (const [path, hash] of Object.entries(COMMUNITY_ADAPTED_SOURCE_PINS[primary])) assert.equal(createHash("sha256").update(fs.readFileSync(join(root, path))).digest("hex"), hash);
 	assert.equal(verifyCommunityAuthAdapter({ adapter: primary, root, digest: approved.digest }).compatibility, "verified");
+	await t.test("actual SDK dependency existence faults remain retryable instead of unresolved", () => {
+		const connection = { root, digest: approved.digest };
+		assert.equal(createDefaultAuthAdapters({ now })[primary].validate(connection).compatibility, "verified");
+		for (const code of ["EIO", "EACCES", "EFUTURE", undefined]) {
+			const view = { ...fs, statSync(path, ...args) {
+				if (path === join(root, "node_modules/@anthropic-ai/sdk/package.json")) throw Object.assign(new Error(`private path ${root}`), { code });
+				return fs.statSync(path, ...args);
+			} };
+			assert.throws(() => createDefaultAuthAdapters({ now, fs: view })[primary].validate(connection), error => error.code === "auth-adapter-unavailable" && error.transient === true && !error.message.includes(root));
+		}
+	});
 	const loader = createJiti(import.meta.url, { fsCache: false, moduleCache: false, alias: { "@earendil-works/pi-ai": fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")) } });
 	const { streamAnthropicOAuth } = await loader.import(join(root, "src/stream.ts"));
 	await t.test("checked complete JSON is the actual SDK request and retained hard rules reach the wire", async () => {
