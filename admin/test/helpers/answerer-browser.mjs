@@ -21,11 +21,11 @@ import * as RM from "../../src/read-model.mjs";
 import { parkedAnswerRefusalOf } from "../../src/job-actions.mjs";
 import { readAgentWritesToday } from "../../src/agent-write-count.mjs";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
-import { answererFixture } from "./answerer-goldens.mjs";
+import { answererFixture, answererLongNames } from "./answerer-goldens.mjs";
 
 export const ANSWERER_BROWSER_TOKENS = Object.freeze({ operator: `pdc_${"o".repeat(43)}`, viewer: `pdc_${"v".repeat(43)}`, agent: `pdc_${"a".repeat(43)}` });
 
-export async function startAnswererBrowserFixture(dir, { url = process.env.VALKEY_TEST_URL, readOnly = false } = {}) {
+export async function startAnswererBrowserFixture(dir, { url = process.env.VALKEY_TEST_URL, readOnly = false, longNames = false } = {}) {
   if (!url) throw new Error("The answerer browser requires VALKEY_TEST_URL.");
   const base = new URL(url); base.pathname = "/15"; const valkeyUrl = base.href;
   const redis = makeRedisClient(valkeyUrl); redis.on("error", () => {});
@@ -38,6 +38,7 @@ export async function startAnswererBrowserFixture(dir, { url = process.env.VALKE
   const paths = { valkeyUrl, triggersPath: join(dir, "triggers.json"), projectsPath: join(dir, "projects.json"), scopedLimitsPath: join(dir, "limits.json"), logsDir: join(dir, "logs") };
   mkdirSync(paths.logsDir, { recursive: true });
   const model = answererFixture(NOW);
+  if (longNames) answererLongNames(model);
   const doc = { triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix", resume: true, awaitInput: true } }, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", resume: true, awaitInput: true, maxCostUsd: "0.05" } }], answerRules: model.rules, standingAnswers: model.standing.map(({ used, ...answer }) => answer) };
   const saveDoc = value => writeFileSync(paths.triggersPath, JSON.stringify(value, null, 2), { mode: 0o600 });
   saveDoc(doc);
@@ -50,7 +51,7 @@ export async function startAnswererBrowserFixture(dir, { url = process.env.VALKE
   seedWorker = new Worker(queue.name, null, { connection: parseConnection(valkeyUrl, { failFast: true }), autorun: false });
   seedWorker.on("error", () => {});
   for (const [index, repo, number, project] of [[0, "acme/web", 512, "web"], [1, "acme/api", 131, "api"]]) {
-    const job = { repo, target: { type: "issue", number, title: "Synthetic question", body: "Synthetic issue data" }, flow: "fix", resume: true, awaitInput: true, trigger: { event: "issues", action: "labeled", deliveryId: `browser-answer-${index}`, sender: { id: 5 }, matched: { index: 0, type: "label", label: "pi" } } };
+    const job = { repo, target: { type: "issue", number, title: "Synthetic question", body: "Synthetic issue data" }, flow: "fix", resume: true, awaitInput: true, trigger: { event: "issues", action: "labeled", deliveryId: longNames && index === 0 ? model.rows[0].runId.slice(3) : `browser-answer-${index}`, sender: { id: 5 }, matched: { index: 0, type: "label", label: "pi" } } };
     const { jobId } = await enqueueForgeJob(queue, "github", job);
     const seedToken = `browser-fixture-${index}`;
     const claimed = await seedWorker.getNextJob(seedToken, { block: false });

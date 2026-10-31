@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import { renderPage, pagePanels, parsePageQuery, loadPageData } from "../src/console/pages.mjs";
 import { answerForm } from "../src/console/kit.mjs";
 import { answererParked, answererProbabilities, offeredAnswerDraft } from "../src/console/panels/answerer.mjs";
-import { ANSWERER_CSS } from "../src/console/answerer-css.mjs";
+import { ANSWERER_CSS, ANSWERER_CSS_SHA256 } from "../src/console/answerer-css.mjs";
 import { AGENT_POLICY_CSS } from "../src/console/agent-policy-css.mjs";
 import { parseAuditQuery, auditQueryString, readAuditView } from "../src/console/audit-view.mjs";
 import { answererFixture, answererParkedRows, renderAnswererState } from "./helpers/answerer-goldens.mjs";
@@ -120,6 +121,7 @@ test("answerer and action capability CSS are exact copies of the correctly style
   assert.equal(ANSWERER_CSS, css + extra + variants);
   const actions = readFileSync(new URL("../../design/tools/gen_components.py", import.meta.url), "utf8");
   assert.equal(AGENT_POLICY_CSS, actions.match(/^AGENT_POLICY_CSS = """([\s\S]*?)"""/m)[1]);
+  assert.equal(createHash("sha256").update(ANSWERER_CSS).digest("hex"), ANSWERER_CSS_SHA256);
 });
 
 test("agent audit filter is native, closed, preserved in cursors and isolates roles sharing one name", async () => {

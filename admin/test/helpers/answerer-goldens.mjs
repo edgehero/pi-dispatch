@@ -17,6 +17,26 @@ export function answererParkedRows(now) {
   return [{ jobId: "gh-2f6a", project: "api", target: "acme/api#131", kind: "github", flow: "triage", host: "mini1", reason: "awaiting-input", ageMs: 26 * 60000, endedAt: new Date(now - 26 * 60000).toISOString(), pendingScan: { jobId: null } }, { jobId: "gh-6e1d", project: "web", target: "acme/web#512", kind: "github", flow: "fix", host: "mini2", reason: "awaiting-input", ageMs: 4 * 60000, endedAt: new Date(now - 4 * 60000).toISOString(), pendingScan: { jobId: null } }];
 }
 
+/** The same valid long labels feed the page golden and actual session/server browser fixture. */
+export function answererLongNames(model) {
+  const runId = `gh-${"a".repeat(190)}`;
+  model.rows[0].runId = runId;
+  model.standing[0].title = "s".repeat(159);
+  const { used, ...standing } = model.standing[0];
+  model.rows[0].sources[0] = answerStandingSource(standing);
+  const repository = model.rows[0].sources[1];
+  repository.name = `${"deep/".repeat(30)}CONTRIBUTING.md`;
+  repository.id = answerConfigDigest({ kind: repository.kind, name: repository.name, revision: repository.revision });
+  repository.url = `https://github.com/acme/web/blob/${repository.revision}/${repository.name}`;
+  const unbroken = { ...repository, name: `${"x".repeat(190)}.md` };
+  unbroken.id = answerConfigDigest({ kind: unbroken.kind, name: unbroken.name, revision: unbroken.revision });
+  unbroken.url = `https://github.com/acme/web/blob/${unbroken.revision}/${unbroken.name}`;
+  model.rows[0].sources.push(unbroken);
+  const { question, draft, sources } = model.privateDraft;
+  model.privateDraft.digest = answerConfigDigest({ question, draft, sources });
+  return runId;
+}
+
 export async function renderAnswererState(state = "populated", role = "operator", { now, readOnly = false } = {}) {
   const { renderPage } = await import("../../src/console/pages.mjs");
   const model = answererFixture(now);
@@ -33,7 +53,7 @@ export async function renderAnswererState(state = "populated", role = "operator"
   if (state === "no-sources") { model.rows[0].draftExists = false; model.rows[0].status = "passed"; model.rows[0].passReason = "uncovered"; model.rows[0].sources = []; }
   if (state === "stale") { model.privateDraft = null; model.privateDraftProblem = "config-changed"; }
   if (state === "dropped") { model.privateDraft = null; model.rows[0].draftExists = false; model.rows[0].status = "dropped"; }
-  if (state === "long-names") { parked[1].jobId = `gh-${"a".repeat(190)}`; model.rows[0].runId = parked[1].jobId; model.rows[0].sources[1].name = `${"deep/".repeat(30)}CONTRIBUTING.md`; }
+  if (state === "long-names") parked[1].jobId = answererLongNames(model);
   const data = { now, env: {}, answerer: model, snapshot: { parked, queue: { counts: {} }, hostBudgets: [] }, parkedChecks: Object.fromEntries(parked.map(p => [p.jobId, { ok: true }])) };
   const query = page === "run" ? { id: model.rows[0].runId } : {};
   if (page === "run") Object.assign(data, { run: { record: { jobId: model.rows[0].runId, project: "web", host: "mini2", backend: "local", kind: "github", target: "acme/web#512", reason: "awaiting-input", outcome: "completed", startedAt: new Date(now - 600000).toISOString(), endedAt: new Date(now - 240000).toISOString() } }, chat: { state: "parked", mode: "reply", jobState: "completed" }, chatAnswer: { ok: true }, transcript: { exists: true, ended: true } });
