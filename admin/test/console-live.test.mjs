@@ -122,6 +122,91 @@ function hubOn({ now = clock(), content = {}, alive = new Set(["s1", "s2", "s3"]
 const OP = { name: "rob", role: "operator" };
 const VIEW = { name: "vic", role: "viewer" };
 
+test("an initial Sandboxes stream never replays a warm view over a fresher HTTP document, even within the data TTL; cursor reconnects keep their cadence", async () => {
+  let value = "old shell list", reads = 0;
+  const h = hubOn({ pageMinMs: { sandboxes: 5000 }, load: async () => { reads++; return { value }; }, pagePanels: async (_page, { data }) => [{ id: "p-sb-open", html: data.value }] });
+  try {
+    const warm = fakeRes();
+    const leave = h.hub.subscribe({ res: warm, sessionId: "s1", session: OP, page: "sandboxes" });
+    await h.hub.tick();
+    assert.equal(reads, 1);
+    value = "fresh HTTP cleanup warning";
+    const joined = fakeRes();
+    h.hub.subscribe({ res: joined, sessionId: "s2", session: OP, page: "sandboxes" });
+    assert.deepEqual(panelsIn(joined.text()), [], "the cached old shell list is not sent while the fresh read is pending");
+    await h.hub.tick();
+    assert.equal(reads, 2, "the first stream read bypasses the still-young five-second data cache");
+    const fresh = panelsIn(joined.take());
+    assert.deepEqual(fresh.map((p) => p.html), [value]);
+    const reconnect = fakeRes();
+    h.hub.subscribe({ res: reconnect, sessionId: "s3", session: OP, page: "sandboxes", lastEventId: fresh[0].seq });
+    await h.hub.tick();
+    assert.equal(reads, 2, "a cursor reconnect and ordinary ticks retain the data cadence");
+    assert.deepEqual(panelsIn(reconnect.text()), []);
+    leave();
+  } finally { h.hub.close(); }
+});
+
+test("new Sandboxes subscriptions joining an older in-flight load coalesce a fresh read afterwards, and a cold view cannot reuse the departed view's data", async () => {
+  const now = clock();
+  let value = "warm", reads = 0, releaseOld;
+  let signalOld;
+  const oldStarted = new Promise((resolve) => { signalOld = resolve; });
+  const oldRead = new Promise((resolve) => { releaseOld = resolve; });
+  const h = hubOn({ now, pageMinMs: { sandboxes: 5000 }, load: async () => {
+    reads++;
+    const captured = { value };
+    if (reads === 2) { signalOld(); await oldRead; }
+    return captured;
+  }, pagePanels: async (_page, { data }) => [{ id: "p-sb-open", html: data.value }] });
+  try {
+    const warm = fakeRes(), leaves = [];
+    leaves.push(h.hub.subscribe({ res: warm, sessionId: "s1", session: OP, page: "sandboxes" }));
+    await h.hub.tick(); warm.take();
+    now.advance(5000); value = "older in-flight result";
+    const running = h.hub.tick(); await oldStarted;
+    value = "fresh HTTP warning";
+    const joined = [fakeRes(), fakeRes()];
+    for (let i = 0; i < joined.length; i++) leaves.push(h.hub.subscribe({ res: joined[i], sessionId: `s${i + 2}`, session: OP, page: "sandboxes" }));
+    for (const res of joined) assert.deepEqual(panelsIn(res.text()), [], "no cached replay while an older read is in flight");
+    releaseOld(); await running;
+    assert.equal(reads, 3, "both new subscribers share exactly one read after the older in-flight read");
+    for (const res of joined) assert.deepEqual(panelsIn(res.text()).map((p) => p.html), [value], "the older in-flight result never reaches a fresh document");
+    for (const leave of leaves) leave();
+    assert.deepEqual(h.hub.size(), { streams: 0, views: 0, timer: false });
+    value = "new cold document";
+    const cold = fakeRes(); h.hub.subscribe({ res: cold, sessionId: "s1", session: OP, page: "sandboxes" });
+    await h.hub.tick();
+    assert.equal(reads, 4, "a remaining data-cache entry cannot overwrite a new cold document");
+    assert.deepEqual(panelsIn(cold.text()).map((p) => p.html), [value]);
+  } finally { releaseOld(); h.hub.close(); }
+});
+
+test("failed fresh Sandboxes loads retain HTTP panels and invalidate the old data instead of reviving it after the new subscriber leaves", async () => {
+  for (const failure of ["throw", "readFailed"]) {
+    let value = "old warm data", mode = "ok", reads = 0;
+    const h = hubOn({ pageMinMs: { sandboxes: 5000 }, load: async () => {
+      reads++;
+      if (mode === "throw") throw new Error("unavailable");
+      return { value, ...(mode === "readFailed" ? { readFailed: true } : {}) };
+    }, pagePanels: async (_page, { data }) => [{ id: "p-sb-open", html: data.value }] });
+    try {
+      const warm = fakeRes(); h.hub.subscribe({ res: warm, sessionId: "s1", session: OP, page: "sandboxes" });
+      await h.hub.tick(); warm.take();
+      mode = failure; value = "degraded data must not replace HTTP";
+      const joined = fakeRes();
+      const leave = h.hub.subscribe({ res: joined, sessionId: "s2", session: OP, page: "sandboxes" });
+      await h.hub.tick();
+      assert.deepEqual(panelsIn(joined.text()), [], `${failure}: preserve the HTTP document, never old or degraded panels`);
+      assert.deepEqual(namesIn(joined.text()), ["stale"], `${failure}: report the failed fresh load`);
+      const before = reads; leave(); mode = "ok"; value = "recovered fresh data";
+      await h.hub.tick();
+      assert.equal(reads, before + 1, `${failure}: the old data cache was invalidated before the failed refresh`);
+      assert.deepEqual(panelsIn(warm.take()).map((p) => p.html), [value]);
+    } finally { h.hub.close(); }
+  }
+});
+
 test("a new stream gets every panel first; later ticks send only the panels that changed, under a new id", async () => {
   const content = { overview: new Map([["p-a", "a1"], ["p-b", "b1"]]) };
   const h = hubOn({ content });

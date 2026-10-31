@@ -10671,7 +10671,13 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
 
 ## INT-CONSOLE-EVENT-STREAM
 
-**Extension (#771).** The Sandboxes page and its five panels require the operator role before data is read or a stream is registered. Viewer events never contain shell leases, commands, opener links or preparation results. Existing lifecycle, limits and person/session binding are UNCHANGED, checked.
+**Extension (#771).** The Sandboxes page and its five panels require the operator role before data is read or a stream is registered. Viewer events never contain shell leases, commands, opener links or preparation results. Stream admission, lifetime, limits and person/session binding are UNCHANGED, checked.
+
+An initial Sandboxes subscription without `Last-Event-ID` holds the panels its HTTP response rendered until a fresh
+bounded load succeeds. It never replays a previously cached empty view over newer cleanup warnings. Initial reads
+coalesce by data key on the queued tick and bypass that page's ordinary five-second data reuse window. A failed read
+marks the held panels stale and cannot fall back to an older cached snapshot. Reconnects with a cursor, other pages,
+wire fields, event framing, admission and role/session guards remain unchanged.
 
 **The console → its own pages.** `GET /api/events?page=<name>&<that page's query>`: the Server-Sent Events stream
 that keeps an open page live (issue #641, `DES-OPERATOR-CONSOLE`, the live hub and the stream lifecycle). The served
@@ -12108,3 +12114,4 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-30 (#771, native encoding) | INT-SANDBOX-OPENER-CONTRACT implementation escapes literal percent signs in fixed Windows registry paths independently of the single URI placeholder; native measurements also exercise an encoded run ID. Podman SSH measurements send separate attended detach keystrokes, matching its measured 4.9.3 input parser. Wire grammar, local authority, Enter boundary, credential-free container, shell lease/End identity and every other interface UNCHANGED, checked. |
 | 2026-10-30 (#771, native terminal) | INT-SANDBOX-OPENER-CONTRACT's Windows helper uses CreateProcessW with a new console and fresh keyboard/screen handles, without inheriting redirected handles or re-entering ShellExecute; only its bounded dispatcher is awaited, with launch failures reported. Its fixed launcher uses UTF16LE EncodedCommand so nested argv quotes survive PowerShell 5's command-line transport. Native verification requires real input/output TTYs, the approved command and a pending real Enter prompt, as well as no sandbox action before Enter. URL grammar, local enrollment, deployment settings, isolation and every other interface UNCHANGED, checked. |
 | 2026-10-30 (#771, dispatcher lifetime and startup refusal) | INT-SANDBOX-OPENER-CONTRACT's finite Windows dispatcher runs without process detachment and must return its fixed console-creation receipt; a zero exit without that receipt refuses. Native verification also requires the pending helper to survive the original URL handler's actual exit. Worker startup-refusal cleanup now waits for each queue's initialization and observes asynchronous disconnect failures while preserving its existing deadline and original refusal. URL grammar, enrollment, Enter boundary, control transport, shell leases, inventory, paid admission and every other interface UNCHANGED, checked. |
+| 2026-10-31 (#771, initial live snapshot) | INT-CONSOLE-EVENT-STREAM initial Sandboxes subscriptions retain server-rendered panels until a fresh coalesced read succeeds, preventing a cached empty view from hiding newer cleanup warnings; failures keep those panels with a stale indication. Cursor replay, other pages, event framing/fields, stream limits, authorization, public state, sandbox control/session/inventory wire contracts and every other interface UNCHANGED, checked. |
