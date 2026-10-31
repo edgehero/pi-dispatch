@@ -27,6 +27,7 @@ import { trackTouchAction } from "@edgehero/pi-dispatch/touch-outbox";
 import * as nodeFs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
+import { makeAnswerDraftStore } from "@edgehero/pi-dispatch/answerer";
 import { makeApprovalStore } from "@edgehero/pi-dispatch/approval-state";
 import { QUEUE, makeQueue, enqueueForgeJob, enqueueLocalJobReporting, enqueueTriggerRunReporting, forgeDeliveryJobId, hostQueueName, swallowedRunSentence } from "@edgehero/pi-dispatch/queue";
 import { jobNeeds, routeForgeJob } from "@edgehero/pi-dispatch/capabilities";
@@ -846,7 +847,7 @@ export function boundedText(text) {
  * within `timeoutMs` for each phase whatever Valkey does: its queues' close is started, never awaited (`releaseOf`).
  * `removeQueuedJobFn` is a seam (the worker's `removeQueuedJob` by default).
  */
-export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, removeQueuedJobFn = removeQueuedJob, timeoutMs = 2500, touchStore = undefined, touchOutbox = null, now = Date.now } = {}) {
+export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, removeQueuedJobFn = removeQueuedJob, timeoutMs = 2500, touchStore = undefined, touchOutbox = null, now = Date.now, interventionOrigin = "human" } = {}) {
   if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { invalid: "a job id is letters, digits and . _ : -, at most 200 characters" };
   const problem = cancelExpectProblem(expect);
   if (problem) return { invalid: problem };
@@ -891,7 +892,7 @@ export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisC
     };
     let res;
     try {
-      res = await within(Promise.resolve().then(() => removeQueuedJobFn({ redis, queue: q, job: found.job, jobId, state, guard, touchStore, touchOutbox, now })), timeoutMs, () => ({ timedOut: true }));
+      res = await within(Promise.resolve().then(() => removeQueuedJobFn({ redis, queue: q, job: found.job, jobId, state, guard, touchStore, touchOutbox, now, interventionOrigin })), timeoutMs, () => ({ timedOut: true }));
     } catch {
       return removalUnknown(jobId, held, false);
     }
@@ -1159,7 +1160,7 @@ export async function planRerun({
  * minute's, or a forge job's 10-minute semantic window (the same target and flow ran or is running). `{ refusal }` for a
  * plan that is not one, `{ unreachable }` for Valkey.
  */
-export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now(), touchStore = null, touchOutbox = null } = {}) {
+export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now(), touchStore = null, touchOutbox = null, interventionOrigin = "human" } = {}) {
   const kind = plan?.kind;
   if (kind !== "local" && kind !== "cron" && kind !== "forge") return { refusal: "not a re-run plan" };
   if (typeof plan.queue !== "string" || !(plan.queue === QUEUE || plan.queue.startsWith(`${QUEUE}@`))) return { refusal: "the plan names no queue" };
@@ -1179,7 +1180,7 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
   try {
     queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: plan.queue });
     const store = touchStore ?? (queue.client ? makeTouchStore({ redis: await queue.client, now }) : null);
-    if (plan.touchSource && (store || touchOutbox)) {
+    if (interventionOrigin !== "agent" && plan.touchSource && (store || touchOutbox)) {
       tracker = touchOutbox ?? { begin: (event) => store.begin(event), applied: (pending) => store.write(pending.event), abort: (pending) => store.abort(pending.event) };
       intent = await tracker.begin({ ...plan.touchSource, at: now(), nonce: `rerun:${plan.jobId}:${plan.deliveryId ?? now()}` });
     }
@@ -1290,6 +1291,9 @@ export async function planParkedAnswer({
   jobId,
   text,
   by,
+  draftRunId = null,
+  draftDigest = null,
+  answerStoreFn = makeAnswerDraftStore,
   from = "console",
   triggersPath = null,
   overlay = {},
@@ -1321,13 +1325,20 @@ export async function planParkedAnswer({
     const read = await readRunById(redis, { logsDir, jobId, fs, timeoutMs });
     if (!read.record) return { refusal: recordReadRefusal(read, jobId, "answered") };
     const record = read.record;
+    let draftBinding = null;
+    if (draftRunId !== null || draftDigest !== null) {
+      if (record.reason === "awaiting-approval" || !JOB_ID_RE.test(draftRunId ?? "") || !/^[a-f0-9]{64}$/.test(draftDigest ?? "")) return { refusal: "A draft source needs its retained run id and digest, and cannot answer an approval." };
+      const source = await within(answerStoreFn({ redis, now }).privateDraft(jobId), timeoutMs, () => null);
+      if (!source?.draft || source.meta?.runId !== jobId || source.meta?.draftRunId !== draftRunId || source.digest !== draftDigest) return { refusal: "The draft changed or expired. Reload its run page and preview the answer again." };
+      draftBinding = { draftRunId, draftDigest, draftSourceRunId: jobId };
+    }
     if (record.outcome !== "completed" || !["awaiting-input", "awaiting-approval"].includes(record.reason)) return { refusal: notParkedRefusal(jobId, record) };
     // Answered = a LATER run on the same kind and target (readParkedRuns' rule): the newest runs of this host and the
     // mirror, the fleet reader's wide window, which holds any run newer than this one.
     const runs = runsFn ? await runsFn() : await answeredWindow(redis, { logsDir, fs, now, timeoutMs });
     const at = runAt(record);
     const key = targetKeyOf(record.kind, record.target);
-    const later = (Array.isArray(runs) ? runs : []).find((r) => key !== null && targetKeyOf(r?.kind, r?.target) === key && runAt(r) > at);
+    const later = (Array.isArray(runs) ? runs : []).find((r) => r?.purpose !== "answer-draft" && key !== null && targetKeyOf(r?.kind, r?.target) === key && runAt(r) > at);
     if (later) return { refusal: `${jobId} was already answered: ${String(later.jobId ?? "a later run")} ran on ${String(record.target)} after it` };
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     const found = await fleet.find(jobId);
@@ -1370,7 +1381,7 @@ export async function planParkedAnswer({
       ...runFieldsOf(rule.run, rule.run.flow),
       parkedReply: !(approval && data.target.type !== "issue"),
       ...(approval ? { approvalRequestId: record.approval.requestId } : {}),
-      console: { by: who },
+      console: { by: who, ...(draftBinding ?? {}) },
       trigger: {
         event: delivery.event,
         action: delivery.action,

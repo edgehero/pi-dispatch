@@ -69,6 +69,7 @@ export const SHOTS = Object.freeze([
   // Issue #644: a running job's detail (no record yet), with a progress snapshot that declared phases and left a note.
   ["run-live", "run", "id=gh-b3d7"],
   ["parked", "parked", ""],
+  ["answer-rules", "answer-rules", ""],
   ["insights", "insights", "range=7d"],
   // The what-if (the insights move to the console): a priced model over the fixture's ledgered fix runs, at the scan's
   // own ceiling, with the canned pricing below so a pi bump moves no byte of it.

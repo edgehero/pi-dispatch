@@ -2168,7 +2168,7 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
  * own words (`removeHeldJob`'s refusal can be a client's error, or a parse of the job's data) reach the answer only
  * through `boundedText`: this answer is a page's, the audit's and the model's.
  */
-export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, queueFn = makeQueue, timeoutMs = 2500, touchStore = undefined, touchOutbox = null, now = Date.now } = {}) {
+export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, queueFn = makeQueue, timeoutMs = 2500, touchStore = undefined, touchOutbox = null, now = Date.now, interventionOrigin = "human" } = {}) {
   if (typeof jobId !== "string" || jobId === "") return { invalid: "a job id is required" };
   let redis;
   const queues = [];
@@ -2219,7 +2219,7 @@ export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, que
       // worker's cancel-state.mjs since issue #287 gave it a second caller: one body, imported rather than
       // re-implemented, which is this module's own rule for everything it shares with the worker.
       asked = true;
-      const res = await removeHeldJob({ redis, queue, jobId, touchStore, touchOutbox, now });
+      const res = await removeHeldJob({ redis, queue, jobId, touchStore, touchOutbox, now, interventionOrigin });
       if (res?.ok) return res;
       if (res?.cleared !== true) return heldRefused(jobId, res?.invalid);
       // The hold is gone and the job stayed (issue #737): never "nothing was changed", and never the error's own words.
@@ -5056,11 +5056,11 @@ export function createFleetReader(
     async pauseQueue({ queue, paused }) {
       return setQueuePausedOne({ url: paths.valkeyUrl, queue, paused, makeQueueFn, parseConnectionFn, redisFn });
     },
-    async cancelActive({ jobId }) {
+    async cancelActive({ jobId, interventionOrigin = "human" }) {
       // The CLI's channel, byte for byte (issue #287, worker/src/cancel-state.mjs): a request key the owning worker
       // answers, carried on the reader's own held client -- `cancelJob` lives in the worker process and nothing here
       // can raise it directly.
-      return requestCancel({ redis, jobId });
+      return requestCancel({ redis, jobId, interventionOrigin });
     },
     // Only dedicated operator page/action reads ask for these. snapshot()/api/state never carry them.
     async sandboxInventory() {
@@ -6562,7 +6562,7 @@ function readChainCount(sessionsDir, key, fs) {
  * read, so a caller that shows only the waiting ones (the fleet reader) pays no fs call for a run nobody waits on.
  */
 export function readParkedRuns({ runs, now = Date.now(), sessionsDir = null, fs = nodeFs, unansweredOnly = false } = {}) {
-  const list = Array.isArray(runs) ? runs.filter((r) => r && typeof r === "object") : [];
+  const list = Array.isArray(runs) ? runs.filter((r) => r && typeof r === "object" && r.purpose !== "answer-draft") : [];
   const nowMs = typeof now === "function" ? now() : now;
   const latest = new Map(); // kind + target (`targetKeyOf`) -> the newest run's instant
   for (const r of list) {
@@ -7800,6 +7800,7 @@ export async function readPendingOnTargets({ queues, targets, budget = PENDING_S
     };
     const fromData = (id, data) => {
       if (data === null || typeof data !== "object") return;
+      if (data.purpose === "answer-draft" || data.answerDraft) return;
       let target = null;
       try {
         target = targetFor(data.kind, data);

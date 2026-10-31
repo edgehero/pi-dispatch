@@ -1,5 +1,6 @@
 Every state of the two-step write, from asking for a preview to the audit row.
 
+- **Agent capability.** Every preview names whether an agent may act alone, needs a person to confirm, or only a person may act, with the evaluated reason. Undo uses its inverse action under current permissions.
 - **Previewing.** The confirm bar opens at once with its title and grey lines; Confirm stays disabled until the preview arrives.
 - **No change.** When the change would write what is already there, the bar says so and offers only Close.
 - **Paid.** Under the list, the preview says what the job will hold, in one of the repo's sentences: a per-job cap, zero-rated, no per-job cap, unknown, or a dollar setting that does not parse. Bulk previews list each job with its own reserve, say how many more match but are not in this action (at most 100), and total what they hold.

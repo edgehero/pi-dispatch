@@ -9,6 +9,7 @@ import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "../src/record-reas
 import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { MCP_REFUSAL_COMMENT } from "../src/mcp-preflight.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { computeZeroTouch } from "../src/zero-touch.mjs";
 
 // The job-count ledger list the processor takes (issue #499 part B), from a `budgetCapsFor`-shaped object.
 const asLedgers = (c) => (c ? [{ scope: c.scope, keyPrefix: scopeKeyPrefix(c.scope), caps: c.caps, reason: "scope-cap" }] : []);
@@ -73,6 +74,16 @@ test("over budget refuses AFTER prepare but BEFORE the container -- no provider 
 	assert.equal(r.reason, "over-budget");
 	assert.ok(calls.includes("prepare"), "prepared (free work) before the budget gate");
 	assert.ok(!calls.includes("run-container"), "over budget => NO container, no money spent");
+});
+
+test("answer helpers retain the ordinary budget and image gates while every refusal comment is suppressed", async () => {
+	for (const missingCapability of [false, true]) {
+		const { deps: d, calls } = deps({ redis: fakeRedis(10), imagePreflight: async () => ({ ok: true, piVersion: "1.4.0", capabilities: missingCapability ? ["answerDraft"] : ["answerDraft", "exitAuth"] }) });
+		const result = await runJob({ ...ghJob, answerDraft: { runId: "parent", ruleId: "help" }, purpose: "answer-draft" }, d);
+		assert.equal(result.reason, missingCapability ? "job-image-answer-draft-unsupported" : "over-budget");
+		assert.equal(calls.includes("run-container"), false); assert.equal(calls.some(c => c.startsWith("comment:")), false, "even refusal and status paths cannot post for an answer helper");
+		if (missingCapability) { assert.equal(d.redis.incrCalls, 0); assert.equal(calls.some(c => c.startsWith("mint:")), false, "untrusted output transport refuses before mint"); }
+	}
 });
 
 test("soft-hold refuses AFTER prepare but BEFORE the container, with a distinct soft-hold reason", async () => {
@@ -209,6 +220,18 @@ test("an abort carrying abortReason operator-cancel classifies as operator-cance
 	assert.equal(r.outcome, "policy");
 	assert.equal(r.reason, "operator-cancel", "the record must say an operator did it, not the timer");
 	assert.equal(r.budgetReserved, true, "the container ran; the slot stays counted exactly as worker-abort's does");
+});
+
+test("an authenticated agent cancellation ends as agent-cancel and never creates a human touch (#766)", async () => {
+	const at = Date.UTC(2026, 9, 31, 12);
+	const comments = [];
+	const { deps: d } = deps({ now: new Date(at), comment: async (_job, text) => comments.push(text), runContainer: async () => ({ code: 137, aborted: true, abortReason: "agent-cancel" }) });
+	const result = await runJob(ghJob, d);
+	assert.equal(result.reason, "agent-cancel"); assert.equal(result.outcome, "policy");
+	assert.deepEqual(comments, [TERMINAL_COMMENTS["agent-cancel"]]);
+	const record = buildRecord({ job: { id: "agent-stopped", data: ghJob }, result, touchTracking: true, startedAt: new Date(at - 1000).toISOString(), endedAt: new Date(at).toISOString() });
+	const counted = computeZeroTouch({ records: [record], nowMs: at + 1, windowDays: 7, coverage: { fromMs: at - 7 * 86400000 } });
+	assert.equal(counted.totals.touched, 0, "the delegated cancel is not relabelled as a person's intervention");
 });
 
 test("the abortReason match is CLOSED: shutdown, the timer's reason, and garbage all stay worker-abort", async () => {

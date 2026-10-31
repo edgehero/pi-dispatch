@@ -1,3 +1,4 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -159,7 +160,7 @@ function registeredTools() {
   indexMod.default(pi);
   return tools;
 }
-const toolByName = (name) => registeredTools().find((t) => t.name === name);
+const toolByName = (name) => withOperatorDiagnosis(registeredTools().find((t) => t.name === name));
 const confirming = () => ({ hasUI: true, ui: { confirm: async () => true } });
 
 /** Run `fn` with the deployment's env pointed at a fresh triggers file and `logsDir`, restoring both after. */
@@ -179,16 +180,16 @@ async function withDeployment(logsDir, fn) {
   }
 }
 
-test("a tool write is audited as the panel in the deployment's PI_LOGS_DIR, and the file changes after the ok row", async () => {
+test("a tool write is audited as an agent in the deployment's PI_LOGS_DIR, and the file changes after the ok row", async () => {
   const logsDir = tempDir("pd-642-tool-");
   await withDeployment(logsDir, async ({ triggersPath }) => {
     await toolByName("dispatch_trigger_add").execute("id", { kind: "label", flow: "fix", labels: ["bug"] }, undefined, undefined, confirming());
     assert.equal(JSON.parse(readFileSync(triggersPath, "utf8")).triggers.length, 1, "the write landed");
     const rows = rowsOf(logsDir);
-    assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.target, r.actor.role]), [["trigger-add", "ok", triggersPath, "panel"]]);
+    assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.target, r.actor.role]), [["trigger-add", "ok", triggersPath, "agent"], ["trigger-add", "ok", triggersPath, "agent"]]);
     // A refused one: the loader rejects a gitlab action word on github, after the ok row.
     await assert.rejects(toolByName("dispatch_trigger_add").execute("id", { kind: "pull_request", flow: "fix", action: ["update"] }, undefined, undefined, confirming()), /rejected:/);
-    assert.deepEqual(rowsOf(logsDir).slice(1).map((r) => r.outcome), ["ok", "failed"]);
+    assert.deepEqual(rowsOf(logsDir).slice(2).map((r) => r.outcome), [], "the shared dry-run refuses invalid fields before any write intent");
   });
 });
 
@@ -197,7 +198,7 @@ test("an append failure refuses a tool write, a command write, the kill switch a
   await withDeployment(logsDir, async ({ triggersPath, settingsFile }) => {
     await assert.rejects(
       toolByName("dispatch_trigger_add").execute("id", { kind: "label", flow: "fix", labels: ["bug"] }, undefined, undefined, confirming()),
-      { message: `rejected: ${AUDIT_REFUSAL}` },
+      { message: AUDIT_REFUSAL },
     );
     assert.deepEqual(JSON.parse(readFileSync(triggersPath, "utf8")).triggers, [], "the triggers file is untouched");
     // The kill switch and the paid enqueue refuse BEFORE reaching Valkey: no queue is needed to prove it.
@@ -410,4 +411,25 @@ test("defaultFailure: a bare ok:false is a failure, a carried reason wins over i
   const res = auditedWrite({ audit: makeConsoleAudit({ logsDir }), actor: ACTOR, kind: "setting-set", target: "/d/s.json" }, () => ({ ok: false }));
   assert.deepEqual(res, { ok: false });
   assert.deepEqual(rowsOf(logsDir).map((r) => [r.outcome, r.reason ?? null]), [["ok", null], ["failed", "the write was refused"]]);
+});
+
+test("an agent success has a correlated applied receipt; a failed write has none (#766)", async () => {
+  const rows = [];
+  const opts = { audit: { append: (row) => rows.push(row) }, actor: { name: "automation", role: "agent", session: null }, kind: "fleet-pause", target: "fleet", ticket: "123456abcdef" };
+  assert.deepEqual(await auditedWrite(opts, async () => ({ ok: true })), { ok: true });
+  assert.deepEqual(rows.map((r) => [r.action, r.outcome, r.ticket]), [["write", "ok", opts.ticket], ["write-applied", "ok", opts.ticket]]);
+  rows.length = 0;
+  assert.deepEqual(await auditedWrite(opts, async () => ({ invalid: "stale" })), { invalid: "stale" });
+  assert.deepEqual(rows.map((r) => r.action), ["write", "write"]);
+  assert.equal(rows[1].outcome, "failed");
+});
+
+test("a lost agent receipt reports successful action with incomplete accounting, never retries it (#766)", async () => {
+  let calls = 0;
+  const rows = [], logs = [];
+  const result = await auditedWrite({ audit: { append(row) { rows.push(row); if (row.action === "write-applied") throw new Error("private failure"); } }, actor: { name: "automation", role: "agent", session: null }, kind: "fleet-pause", target: "fleet", log: (line) => logs.push(line) }, async () => { calls++; return { ok: true }; });
+  assert.deepEqual(result, { ok: true, warning: "tracking-incomplete" });
+  assert.equal(calls, 1);
+  assert.equal(rows.length, 2);
+  assert.doesNotMatch(logs.join(""), /private failure/);
 });

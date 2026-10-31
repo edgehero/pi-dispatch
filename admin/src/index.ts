@@ -26,9 +26,8 @@
  * It also registers LLM-callable tools: reads (`dispatch_status`, `dispatch_runs`,
  * `dispatch_costs`, `dispatch_triggers`), the durable-but-reversible on/off controls (`dispatch_pause`/
  * `dispatch_resume`), the gated PAID enqueue (`dispatch_run`), and the confirm-gated
- * writes (`dispatch_set`, `dispatch_trigger_add`/`_edit`/`_delete`) -- each of which
- * refuses unless a human operator approves a confirmation dialog showing the concrete
- * change. There is still no log tool (raw `.log` bytes never enter model context), and
+ * writes (`dispatch_set`, `dispatch_trigger_add`/`_edit`/`_delete`). Every UI write confirms;
+ * a headless write needs the real process grant plus the shared unattended transition policy. There is still no log tool (raw `.log` bytes never enter model context), and
  * a live dashboard overlay renders on the bare `/dispatch` command. The extension also
  * ships an `operate-pi-dispatch` skill, advertised via `resources_discover`, that tells
  * the model how to use those human-in-the-loop write gates.
@@ -55,6 +54,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
+import { CAPACITY_WINDOWS } from "@edgehero/pi-dispatch/capacity";
 import {
   resolvePaths,
   panelEnv,
@@ -116,7 +116,7 @@ import { envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
 import { consolePageLines } from "./console/link.mjs";
 import { CONSOLE_PAGE_WORDS, consoleCommand } from "./console-command.mjs";
 import { loginCodesDir } from "./console/login-codes.mjs";
-import { WHATIF_MODEL_RE } from "./console/whatif.mjs";
+import { whatIfAnswer, WHATIF_MODEL_RE } from "./console/whatif.mjs";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 // The insights payload's assembly, pi-free so the operator console shares it (issue #641). The allocation seams live
 // there too, because its split reads through them; the tests keep reaching them, and the slices, through this module.
@@ -145,8 +145,7 @@ import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
 import { SUGGEST_WINDOW_DAYS, coresText, cpusText, notEnoughRunsText } from "@edgehero/pi-dispatch/size-suggest";
 import { runDollars } from "./dollar-windows.mjs";
 import { tokensFilePath } from "@edgehero/pi-dispatch/console-tokens";
-import { defaultWorkerName, modelEndpointsFilePath } from "@edgehero/pi-dispatch/config";
-import { loadModelEndpoints, readOverlayModels } from "@edgehero/pi-dispatch/model-endpoints";
+import { defaultWorkerName } from "@edgehero/pi-dispatch/config";
 import { builtinModel } from "@edgehero/pi-dispatch/model-catalog";
 // The deployment pointer (INT-DEPLOYMENT-POINTER-CONTRACT): the wizard-written file that aims this
 // extension at a deployment built in another directory. Layered into process.env once at factory load
@@ -216,6 +215,12 @@ export { blessedBackends, buildTriggerEntry, ISSUE_CLOSE_WORD, SIZE_FIELD_RIDES,
 // One audit chain (issue #642): every write this extension makes, from a tool, a command or the panel, lands in the
 // operator console's audit log as actor `panel`, appended BEFORE the write (`audited-write.mjs`).
 import { panelWrite } from "./audited-write.mjs";
+import { modelToolRefusal, modelToolReadFailure, publicToolRefusal } from "./tool-refusals.mjs";
+import { actionAgentPolicy } from "./action-policy.mjs";
+import { TOOL_ACTIONS, executeToolAction } from "./tool-actions.mjs";
+import { readOperationalTool, waitingForAgent, runForAgent, readHeldForAgent } from "./tool-reads.mjs";
+export { setToolReadDepsForTest } from "./tool-reads.mjs";
+import { agentReadProjection } from "./agent-read.mjs";
 
 // The single source of truth for the ExtensionAPI surface this extension
 // consumes. It grows only when a task actually uses a new member.
@@ -495,45 +500,18 @@ function toolText(text: string): { content: { type: "text"; text: string }[]; de
   return { content: [{ type: "text", text }], details: {} };
 }
 
-/** The Fire now tool's injectable boundary; the audit writer itself is never replaceable in tests. */
-export async function executeTriggerFire(params: any, ctx: any, { planFn = planTriggerFire, enqueueFn = enqueueTriggerFire }: any = {}) {
-  const env = deploymentEnv();
-  const paths = resolvePaths(deploymentEnv());
-  let modelEndpoints = null;
-  try {
-    const endpoints = loadModelEndpoints({ modelEndpointsFile: modelEndpointsFilePath(env), valkeyUrl: paths.valkeyUrl }, { cwd: pointerState().deploymentDir ?? process.cwd() });
-    let models = null;
-    if (endpoints.length) { try { models = readOverlayModels(paths.globalPiDir); } catch {} }
-    modelEndpoints = { endpoints, models };
-  } catch { /* An unread endpoint declaration never earns a zero-rated estimate. */ }
-  const options = { triggersPath: paths.triggersPath, url: paths.valkeyUrl, env, overlay: readSettingsView({ settingsFile: paths.settingsFile }).overlay ?? {}, modelEndpoints, builtinModel };
-  const planned: any = await planFn({ index: params.index, ...options });
-  if (planned.refusal || planned.unreachable) throw new Error(planned.refusal ?? planned.unreachable);
-  const plan = planned.plan;
-  const reserve = plan.reserve;
-  const dollars = !reserve || reserve.unknown || reserve.invalid ? "the reserve cannot be estimated here" : reserve.dollarsMicros === null ? "one job slot is reserved, with no dollar reserve" : `one job slot and up to $${formatMicros(reserve.dollarsMicros)} are reserved per run`;
-  const result = await confirmedWrite(ctx, { title: plan.title, message: `${plan.message}\nPaid: ${dollars}.` }, async () => {
-    const res: any = await panelWrite(paths.logsDir, { kind: "trigger-fire", target: plan.schedulerId, beforeDigest: plan.fileDigest, reserve: Number.isSafeInteger(reserve?.dollarsMicros) ? reserve.dollarsMicros : null, failure: (r: any) => r?.invalid ?? r?.refused ?? r?.refusal ?? (r?.unreachable ? "could not reach the queue" : null) }, () => enqueueFn(plan, options));
-    if (res.invalid || res.refused || res.refusal || res.unreachable) throw new Error(res.invalid ?? res.refused ?? res.refusal ?? res.unreachable);
-    return { queued: true, index: params.index, jobId: res.jobId, queue: res.queue };
-  });
-  return toolText(JSON.stringify(result));
-}
-
 /**
  * Register the LLM-callable tools. Reads: `dispatch_status`, `dispatch_runs`, `dispatch_costs`,
  * `dispatch_triggers`, `dispatch_projects` (and the other reads below). On/off:
- * `dispatch_pause`/`dispatch_resume` (durable, reversible, money-safe -- no confirm). The gated PAID enqueue:
+ * `dispatch_pause`/`dispatch_resume` (UI-confirmed durable controls). The gated PAID enqueue:
  * `dispatch_run`. Confirm-gated writes: `dispatch_set` (a limit/setting), `dispatch_trigger_add`/`_edit`/
  * `_delete`, and the project writes `dispatch_project_add`/`_edit`/`_delete`. There is still NO log tool -- raw `.log` bytes never enter model context (DES-ADMIN-VIA-PI-EXTENSION
  * injection boundary; REQ acceptance).
  *
- * The write tools do NOT weaken the money/trigger gates: each routes through `confirmedWrite`, which refuses
- * unless a human operator is present (`ctx.hasUI`) and approves a `ctx.ui.confirm` dialog showing the concrete
- * before->after. The model emits only the tool CALL; the operator answers the CONFIRM, so a prompt-injected
- * session cannot raise the cap or add a paid trigger without a human keypress it cannot forge (the same human
- * approval the operator-typed `/dispatch set` and the overlay CRUD already require). Without an interactive UI
- * (print/headless) the write is refused, never silently applied.
+ * Every interactive model write confirms its concrete preview and Undo. Headless writes require the real
+ * process grant captured when this pi session registers, and the same exact-transition policy as the console.
+ * The model supplies a proposal; it cannot mark its own action unattended or answer a person's confirm.
+ * Unknown and person-only actions refuse. A cap raise or a trigger retarget still needs a human keypress.
  *
  * `dispatch_run` takes no spend-knob params (model/maxTurns/dailyCap/concurrency resolve worker-side) and is
  * bounded producer-side by the folder allowlist, the committed per-flow ai-trigger gate read at a pre-agent
@@ -543,7 +521,53 @@ export async function executeTriggerFire(params: any, ctx: any, { planFn = planT
  * which pi reports to the model as an error rather than a false success.
  */
 function registerTools(pi: ExtensionAPI): void {
-  pi.registerTool({
+  // Capture process grants once per pi session; the deployment pointer and .env never grant writes.
+  // env-internal PI_DISPATCH_AGENT_WRITES: host process/session grant, deliberately never a deployment .env setting.
+  const grantsEnv = Object.freeze({ PI_DISPATCH_AGENT_WRITES: process.env.PI_DISPATCH_AGENT_WRITES, PI_DISPATCH_RUN_ROOTS: process.env.PI_DISPATCH_RUN_ROOTS, PI_DISPATCH_RUN_PER_HOUR: process.env.PI_DISPATCH_RUN_PER_HOUR });
+  const granted = grantsEnv.PI_DISPATCH_AGENT_WRITES === "1";
+  const registerTool = (definition: any) => pi.registerTool(Object.hasOwn(TOOL_ACTIONS, definition.name) ? {
+    ...definition,
+    description: `${definition.description} Action policy default: ${actionAgentPolicy(TOOL_ACTIONS[definition.name]).mode}. ${actionAgentPolicy(TOOL_ACTIONS[definition.name]).reason} Every interactive call confirms. Headless calls require PI_DISPATCH_AGENT_WRITES=1 captured from the pi process and an unattended exact transition; deployment files and tool arguments grant nothing.`,
+    async execute(_id: any, params: any, _signal: any, _onUpdate: any, ctx: any) {
+      try {
+        const env = deploymentEnv();
+        const paths = resolvePaths(env);
+        return toolText(JSON.stringify(await executeToolAction(definition.name, params, ctx, { paths, env, grantsEnv, granted, deploymentDir: pointerState().deploymentDir ?? null, sizingNoteFn: (scope: string) => sizingNote(paths, scope, Date.now()) })));
+      } catch (error) {
+        // Planner diagnostics can contain existing private paths or job text. Only the local operator
+        // receives them. The model gets a fixed refusal unless the producing path marked its own text safe.
+        try {
+          const local = gateDialogs(ctx);
+          if (local?.hasUI && typeof local?.ui?.notify === "function") local.ui.notify(error instanceof Error ? error.message : "The dispatch action failed.", "error");
+        } catch {} // A stale UI getter or failed notice must not replace the original model-safe refusal.
+        throw new Error(modelToolRefusal(error));
+      }
+    },
+  } : {
+    ...definition,
+    async execute(...args: any[]) {
+      try {
+        const result = await definition.execute(...args);
+        // These typed readers rebuild their own records and the setup command catalogue. They still
+        // share this exception boundary; their source failures are no more public than file diagnostics.
+        if (["dispatch_failed", "dispatch_waiting", "dispatch_setup", "dispatch_hosts"].includes(definition.name)) return result;
+        return { ...result, content: (result.content ?? []).map((part: any) => {
+          if (part.type !== "text") return part;
+          const value = JSON.parse(part.text);
+          return { type: "text", text: JSON.stringify(agentReadProjection(value)) };
+        }) };
+      } catch (error) {
+        // Keep the read, response extraction, parsing and projection inside one boundary. Even a
+        // failing local UI getter must not replace this original exception with private model text.
+        try {
+          const local = gateDialogs(args[4]);
+          if (local?.hasUI && typeof local?.ui?.notify === "function") local.ui.notify(error instanceof Error ? error.message : "The operational read failed.", "error");
+        } catch {}
+        throw new Error(modelToolReadFailure(error));
+      }
+    },
+  });
+  registerTool({
     name: "dispatch_status",
     label: "pi-dispatch status",
     description:
@@ -563,7 +587,7 @@ function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_runs",
     label: "pi-dispatch runs",
     description:
@@ -577,7 +601,8 @@ function registerTools(pi: ExtensionAPI): void {
       // A record's `bundle` reaches the model as counts only (`modelRunRecord`, issue #704): its variable names are the
       // operator's manager's contents and stay in the operator's own views. Issue #712: an openshell run's rule hosts ride
       // only here, by id; the list below carries their count.
-      if (params.jobId) return toolText(JSON.stringify(modelRunRecord(readRun({ logsDir: paths.logsDir, jobId: params.jobId }))));
+      const runShown = (record: any) => runForAgent(record, { self: deploymentEnv().PI_WORKER_NAME ?? hostname(), retention: (jobId: string) => sandboxRetentionOf(paths, jobId, { env: deploymentEnv(), venuePolicy: "unknown" }) });
+      if (params.jobId) return toolText(JSON.stringify(runShown(readRun({ logsDir: paths.logsDir, jobId: params.jobId }))));
       // `{runs, hosts, mirror}` rather than a bare array (issue #57, Gap 3). The one deliberate tool-shape
       // change here, and this surface's own doctrine is the justification: typed dollars carry their
       // `class` so a model consuming them cannot launder an estimate into a fact by dropping the label, and
@@ -585,11 +610,11 @@ function registerTools(pi: ExtensionAPI): void {
       // says whether the list is the whole deployment ("ok"), this host alone ("off"), capped
       // ("truncated"), or unknown ("unreachable ...").
       const merged: any = await listRunsMerged({ logsDir: paths.logsDir, limit: params.limit ?? 10, url: paths.valkeyUrl });
-      return toolText(JSON.stringify(Array.isArray(merged?.runs) ? { ...merged, runs: merged.runs.map((r: any) => modelRunRecord(r, { list: true })) } : merged));
+      return toolText(JSON.stringify(Array.isArray(merged?.runs) ? { ...merged, runs: merged.runs.map((r: any) => modelRunRecord(runShown(r), { list: true })) } : merged));
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_costs",
     label: "pi-dispatch costs",
     description:
@@ -607,16 +632,17 @@ function registerTools(pi: ExtensionAPI): void {
       "floor, refunded or unreserved, and the boundExceeded count; null for a folder or model row, which a run record " +
       "cannot name); `runs` lists the per-run `dollars` of this window's records, newest first. All amounts are " +
       "integer micro-dollars (1 USD = 1000000).",
-    parameters: Type.Object({ window: Type.Optional(Type.String()), flow: Type.Optional(Type.String()), repo: Type.Optional(Type.String()), project: Type.Optional(Type.String()) }),
+    parameters: Type.Object({ window: Type.Optional(Type.String()), flow: Type.Optional(Type.String()), repo: Type.Optional(Type.String()), project: Type.Optional(Type.String()), whatif: Type.Optional(Type.String()), runs: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const window = params.window ?? "mtd";
       if (!COSTS_WINDOWS.includes(window)) {
-        throw new Error(`unknown window '${window}' (7d|30d|mtd)`);
+        throw publicToolRefusal(`unknown window '${window}' (7d|30d|mtd)`);
       }
       // Issue #499 part C: an id or nothing, so a typo is an error rather than a fold of nothing that reads as no spend.
       if (params.project !== undefined && !PROJECT_KEY_RE.test(String(params.project))) {
-        throw new Error("project must be a project id (lowercase letters, digits and \"-\", 1 to 32 characters); dispatch_projects lists them");
+        throw publicToolRefusal("project must be a project id (lowercase letters, digits and \"-\", 1 to 32 characters); dispatch_projects lists them");
       }
+      if (params.whatif !== undefined && (!WHATIF_MODEL_RE.test(params.whatif) || params.runs !== undefined && !["24h", "week"].includes(params.runs)) || params.whatif === undefined && params.runs !== undefined) throw publicToolRefusal("whatif needs a provider/model and runs must be 24h or week");
       const paths = resolvePaths(deploymentEnv());
       const res = assembleCosts(paths, window, params.flow, params.repo, params.project);
       if (res.unreachable) throw new Error(`could not read the run history: ${res.unreachable}`);
@@ -625,64 +651,39 @@ function registerTools(pi: ExtensionAPI): void {
       // this window's records, filtered like the fold. Integers and fixed tokens, so nothing a job chose rides along.
       const windows = await readDollarWindows({ paths, env: deploymentEnv() });
       const runs = runDollars(res.records);
-      // ONLY when there is something to say (PR #550's review): no window, no run carrying dollars and no unreadable
-      // setting is a deployment that sets no dollar cap, and its result stays byte-identical to what it always was.
-      const anyDollars = windows.windows.length > 0 || runs.runs.length > 0 || Array.isArray((windows as any).invalid);
-      if (!anyDollars) return toolText(JSON.stringify({ window, fold: res.fold }));
       const dollars = { ...windows, ...runs };
+      const nowMs = Date.now();
+      const held = await readHeldForAgent({ paths, env: deploymentEnv(), nowMs, project: params.project ?? null });
+      let whatif;
+      if (params.whatif !== undefined) {
+        const sample = assembleCosts(paths, "7d", params.flow, params.repo, params.project);
+        whatif = whatIfAnswer({ model: params.whatif, pricing: { getPricedModel, listPricedModels, isZeroRated, reprice, piAiVersion }, records: sample.records, project: params.project ?? null, runs: params.runs ?? "24h", nowMs });
+      }
       // The fold's dollars are TYPED `{ usd, class, floor, ... }` on purpose: the class rides beside every
       // number in this JSON, so a model consuming it cannot launder an estimate into a fact by dropping
       // the label -- the same discipline fmtCost enforces on the text views.
-      return toolText(JSON.stringify({ window, fold: res.fold, dollars }));
+      return toolText(JSON.stringify({ window, fold: res.fold, dollars, held, ...(whatif ? { whatif } : {}) }));
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_pause",
     label: "pi-dispatch pause",
     description:
       "Durably pauses pi-dispatch job processing: NEW jobs stop starting; running containers finish; jobs still enqueue. Survives worker restart. Reversible via dispatch_resume.",
     executionMode: "sequential",
-    parameters: Type.Object({}),
-    async execute() {
-      // The CLI's kill-switch rule (PR #475's review, round 3): both Valkeys when this process's VALKEY_URL and the
-      // deployment .env's disagree, every URL shown without its userinfo.
-      const set: any = await panelWrite(auditDir(), { kind: "fleet-pause", target: "fleet", failure: switchFailure }, async () => await killSwitchSet({ paused: true }));
-      if (set.refused) throw new Error(set.refused);
-      const lines = [];
-      for (const { shown, res } of set.results) {
-        const at = set.results.length > 1 ? ` at ${shown}` : "";
-        if (res.unreachable && !res.partial) throw new Error(`could not reach the queue at ${shown}: ${res.unreachable}`);
-        // A PARTIAL result is the dangerous one: some queues switched, one did not, and reporting a bare
-        // "paused" for it tells an operator the deployment is stopped while a host keeps spending.
-        if (res.partial) throw new Error(`paused ${res.partial.done.join(", ")}${at} but FAILED at ${res.partial.failed}: the deployment is half paused: ${res.partial.error}`);
-        lines.push(`paused${at}${res.queues.length > 1 ? ` (${res.queues.length} queues)` : ""}`);
-      }
-      return toolText(`${set.disagreement ? `${set.disagreement}: paused both. ` : ""}${lines.join("; ")}`);
-    },
+    parameters: Type.Object({ queue: Type.Optional(Type.String()) }),
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_resume",
     label: "pi-dispatch resume",
     description: "Re-enables PAID job processing after a pause. Only call when the user explicitly asks to resume.",
     executionMode: "sequential",
-    parameters: Type.Object({}),
-    async execute() {
-      const set: any = await panelWrite(auditDir(), { kind: "fleet-resume", target: "fleet", failure: switchFailure }, async () => await killSwitchSet({ paused: false }));
-      if (set.refused) throw new Error(set.refused);
-      const { shown, res } = set.results[0];
-      if (res.unreachable && !res.partial) {
-        throw new Error(`could not reach the queue at ${shown}: ${res.unreachable}`);
-      }
-      if (res.partial) {
-        throw new Error(`resumed ${res.partial.done.join(", ")} but FAILED at ${res.partial.failed} — the deployment is half resumed: ${res.partial.error}`);
-      }
-      return toolText(`resumed${res.queues.length > 1 ? ` (${res.queues.length} queues)` : ""}`);
-    },
+    parameters: Type.Object({ queue: Type.Optional(Type.String()) }),
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_run",
     label: "pi-dispatch run",
     description:
@@ -693,26 +694,12 @@ function registerTools(pi: ExtensionAPI): void {
       "AI-triggerable and a /name flow is refused.",
     executionMode: "sequential",
     parameters: Type.Object({ folder: Type.String(), flow: Type.String(), task: Type.String() }),
-    async execute(_toolCallId, params) {
-      const res: any = await panelWrite(auditDir(), { kind: "run-enqueue", target: params.folder, failure: enqueueFailure }, () => enqueueDispatchRun({
-        folder: params.folder,
-        flow: params.flow,
-        task: params.task,
-        aiInvoked: true,
-        env: deploymentEnv(),
-      }));
-      if (res.refused) throw new Error(res.refused);
-      if (res.unreachable) throw new Error(`could not reach the queue: ${res.unreachable}`);
-      // Issue #524: a swallowed duplicate is said as one, so the model never reports a run that was not queued.
-      if (res.deduplicated) return toolText(JSON.stringify({ jobId: res.jobId, folder: params.folder, flow: params.flow, queued: false, note: res.said }));
-      return toolText(JSON.stringify({ jobId: res.jobId, folder: params.folder, flow: params.flow }));
-    },
   });
 
   // Issue #599, phase 2: how busy each host is and was (REQ-CAPACITY-INSIGHTS, INT-CAPACITY-REPORT), through the CLI's
   // own read and function (`readCapacity`), so the tool, `pi-dispatch capacity` and doctor never disagree. Read-only:
   // the registry is read without its prune and the mirror reader writes nothing.
-  pi.registerTool({
+  registerTool({
     name: "dispatch_capacity",
     label: "pi-dispatch capacity",
     description:
@@ -727,13 +714,14 @@ function registerTools(pi: ExtensionAPI): void {
     async execute(_toolCallId, params) {
       const paths = resolvePaths(deploymentEnv());
       const window = params.window ?? "7d";
+      if (!Object.hasOwn(CAPACITY_WINDOWS, window)) throw publicToolRefusal(`window must be one of ${Object.keys(CAPACITY_WINDOWS).join(", ")} (got ${JSON.stringify(window)})`);
       const res: any = await readCapacity({ url: paths.valkeyUrl, env: deploymentEnv(), window, host: params.host });
       if (res.error) throw new Error(res.error);
       return toolText(JSON.stringify({ window, text: res.text, report: res.report }));
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_triggers",
     label: "pi-dispatch triggers",
     description:
@@ -753,39 +741,18 @@ function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_set",
     label: "pi-dispatch set limit",
     description:
-      "Changes a pi-dispatch runtime setting/limit and applies it live. The operator MUST approve a confirm " +
-      "dialog showing the exact before->after; with no interactive operator the change is refused, never " +
-      "applied. Omit `value` (or pass empty) to unset a key back to its default. Valid keys: " +
+      "Changes a pi-dispatch runtime setting/limit and applies it live. Every UI call confirms. Headless requires " +
+      "the process grant and may only decrease a cap explicitly present in the settings file. Omit `value` (or pass empty) to unset a key back to its default. Valid keys: " +
       KNOWN_KEYS.join(", ") + ".",
     executionMode: "sequential",
     parameters: Type.Object({ key: Type.String(), value: Type.Optional(Type.String()) }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      const env = deploymentEnv(); // the dollar settings' source for the confirm (settingShown)
-      const shown = { deploymentDir: pointerState().deploymentDir ?? null };
-      // Judged BEFORE the confirm (`planSettingChange`, write-plans.mjs): an unknown key; an invalid file (issue #501;
-      // a BLANK one reads as missing, #540); a dollar value the worker's own parser refuses (#501 part 7); a model or
-      // provider id outside the worker's shape (#673, `modelIdProblem`/`providerIdProblem`); a change that
-      // would leave the allocation envelope unloadable (#504 part C). A dollar change that leaves a window uncapped in
-      // the merged overlay is WARNED in the confirm, never refused (PR #542's review): the worker's cap may come from its
-      // service unit, which the admin cannot see.
-      const planned: any = planSettingChange({ key: params.key, value: params.value, paths, env, shown });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: plan.unset ? "setting-unset" : "setting-set", target: paths.settingsFile }, () => writeSettings({ settingsFile: paths.settingsFile, mutate: plan.mutate, expect: plan.expect }));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, key: params.key, value: plan.value };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_trigger_add",
     label: "pi-dispatch add trigger",
     description:
@@ -866,26 +833,9 @@ function registerTools(pi: ExtensionAPI): void {
       // own validator refuses a non-boolean before the confirm.
       steer: Type.Optional(Type.Boolean()),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      // Judged BEFORE the confirm (`planTriggerAdd`): the tool-proof fields and their near misses (#501 part 7), the
-      // kind and then every field that kind does not take, by name (#737: a schema does not refuse extra keys, and a
-      // field the kind's arm never reads was dropped in silence), the backend against what PI_BACKENDS blesses (#227,
-      // refused under an empty set too), and the provider, model and turn limit with the loader's own message (#502),
-      // so the operator never approves an entry the write then refuses or that lacks what was asked for.
-      const paths = resolvePaths(deploymentEnv());
-      const planned: any = planTriggerAdd({ params, paths, env: process.env });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "trigger-add", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: plan.mutate, expect: plan.expect }));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, added: plan.entry };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_trigger_fire",
     label: "pi-dispatch fire trigger",
     description:
@@ -895,12 +845,9 @@ function registerTools(pi: ExtensionAPI): void {
       "and shared hourly limit at enqueue. A second fire in the same minute is refused. With no UI it is refused.",
     executionMode: "sequential",
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      return executeTriggerFire(params, ctx);
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_trigger_edit",
     label: "pi-dispatch edit trigger",
     description:
@@ -908,12 +855,11 @@ function registerTools(pi: ExtensionAPI): void {
       "optionally which `backend` (venue) its container is built in, chosen from the names PI_BACKENDS " +
       "blesses, and which `provider`, `model` and `maxTurns` its jobs run on (omitted, the trigger keeps what it has), and " +
       "`progress` / `statusComment` / `recover` / `steer` (booleans, as on dispatch_trigger_add; omitted, the trigger keeps what it has). " +
-      "The operator MUST approve a confirm dialog showing the before->after; with no interactive " +
-      "operator it is refused.",
+      "Every UI call confirms. Headless requires the process grant and can only turn existing true execution flags off; other edits need a person.",
     executionMode: "sequential",
     parameters: Type.Object({
       index: Type.Integer({ minimum: 0 }),
-      flow: Type.String(),
+      flow: Type.Optional(Type.String()),
       backend: Type.Optional(Type.String()),
       // #502. Which model the trigger's jobs run on. Checked below with the LOADER's own validator before
       // the operator is asked, so a confirm dialog never shows a value the write would then refuse.
@@ -928,26 +874,9 @@ function registerTools(pi: ExtensionAPI): void {
       // Issue #646, the same merge, judged against the entry's own run.command.
       steer: Type.Optional(Type.Boolean()),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      // Judged BEFORE the confirm (`planTriggerEdit`): the tool-proof fields, the index, a non-empty flow, the backend
-      // against PI_BACKENDS (#227; the picker bounds what an operator can choose, the worker what actually runs), and the
-      // provider and model with the loader's own validator, alone and MERGED with the entry's own run (#502, PR #536).
-      const paths = resolvePaths(deploymentEnv());
-      const planned: any = planTriggerEdit({ params, paths, env: process.env });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        // `backend`, `provider` and `model` are merged only when the caller sent them (`plan.mutate`), so an edit that
-        // changes just the flow leaves the entry byte-identical in every other key.
-        const res: any = panelWrite(auditDir(), { kind: "trigger-edit", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: plan.mutate, expect: plan.expect }));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, index: params.index, flow: plan.flow, ...(plan.backend !== undefined && { backend: plan.backend }), ...plan.ref, ...plan.flags };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_pauses",
     label: "pi-dispatch pause windows",
     description:
@@ -962,7 +891,7 @@ function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_pause_add",
     label: "pi-dispatch add pause window",
     description:
@@ -971,7 +900,7 @@ function registerTools(pi: ExtensionAPI): void {
       "folder path, or \"*\" for all) are DEFERRED between `from` and `to` (\"HH:MM\" 24h; from>to = overnight) " +
       "and resume automatically after — nothing is dropped, and deferring costs no budget. Optional `tz` (IANA, " +
       "default UTC), `days` (mon..sun), `dateFrom`/`dateTo` (\"YYYY-MM-DD\"). The operator MUST approve a confirm " +
-      "dialog showing the window; refused with no interactive operator.",
+      "dialog showing the window in UI; headless addition requires the process grant and the unattended policy.",
     executionMode: "sequential",
     parameters: Type.Object({
       scope: Type.String(),
@@ -982,19 +911,9 @@ function registerTools(pi: ExtensionAPI): void {
       dateFrom: Type.Optional(Type.String()),
       dateTo: Type.Optional(Type.String()),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      const plan: any = planPauseWindowAdd({ fields: params, paths }).plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "pause-window-add", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: plan.mutate, expect: plan.expect }));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, added: plan.entry };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_pause_delete",
     label: "pi-dispatch delete pause window",
     description:
@@ -1002,21 +921,9 @@ function registerTools(pi: ExtensionAPI): void {
       "MUST approve a confirm dialog showing the window; refused with no interactive operator.",
     executionMode: "sequential",
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      const planned: any = planPauseWindowDelete({ index: params.index, paths });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "pause-window-delete", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: plan.mutate, expect: plan.expect }));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, deletedIndex: params.index };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_pause_edit",
     label: "pi-dispatch edit pause window",
     description:
@@ -1036,23 +943,9 @@ function registerTools(pi: ExtensionAPI): void {
       dateFrom: Type.Optional(Type.String()),
       dateTo: Type.Optional(Type.String()),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      // A provided field replaces; an omitted one keeps the current value, rebuilt through the shared builder so the
-      // result is validated the same way as an add (`planPauseWindowEdit`).
-      const planned: any = planPauseWindowEdit({ index: params.index, fields: params, paths });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "pause-window-edit", target: paths.pauseWindowsPath }, () => writePauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, mutate: plan.mutate, expect: plan.expect }));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, index: params.index, window: plan.entry };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_limits",
     label: "pi-dispatch scoped limits",
     description:
@@ -1080,7 +973,7 @@ function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_waits",
     label: "pi-dispatch held jobs",
     description:
@@ -1093,42 +986,25 @@ function registerTools(pi: ExtensionAPI): void {
     async execute() {
       const paths = resolvePaths(deploymentEnv());
       const held = await readHeldJobs({ url: paths.valkeyUrl });
-      return toolText(JSON.stringify(held));
+      return toolText(JSON.stringify(waitingForAgent(held)));
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_wait_cancel",
     label: "pi-dispatch cancel a held job",
     description:
-      "Removes a job that is waiting on a run.waitFor condition, so it never runs. The operator MUST approve " +
-      "a confirm dialog naming the job and what it was waiting on; refused with no interactive operator. " +
+      "Removes a job that is waiting on a run.waitFor condition, so it never runs. UI callers confirm; headless " +
+      "callers need the process grant and the unattended policy. " +
       "Use dispatch_waits for the job id. The operator can also do this without a model: `pi-dispatch cancel " +
       "<jobId>` at a terminal, or the panel's held view (h, then x). A held job spends nothing while it waits, so " +
       "no budget cap will stop it, and deleting the trigger does not reach a job already enqueued. " +
       "Cancelling writes no run record of its own.",
     executionMode: "sequential",
     parameters: Type.Object({ jobId: Type.String({ minLength: 1 }) }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      const held = await readHeldJobs({ url: paths.valkeyUrl });
-      if ((held as any).unreachable) throw new Error(`queue unreachable: ${(held as any).unreachable}`);
-      const row = ((held as any).rows ?? []).find((r: any) => r.jobId === params.jobId);
-      if (!row) throw new Error(`no held job ${params.jobId} (dispatch_waits lists the ids that are waiting)`);
-      const result = await confirmedWrite(
-        ctx,
-        { title: `Cancel held job ${row.jobId}`, message: `Cancel ${row.target ?? row.jobId}, waiting on ${row.label ?? "a condition"}. It will never run.` },
-        async () => {
-          const res: any = await panelWrite(auditDir(), { kind: "cancel-held", target: params.jobId }, () => cancelHeldJob({ url: paths.valkeyUrl, jobId: params.jobId }));
-          if ((res as any).invalid) throw new Error(`rejected: ${(res as any).invalid}`);
-          return { applied: true, jobId: params.jobId, ...(res.touchWarning ? { warning: "The job was removed; touch tracking is incomplete. Do not repeat the cancellation." } : {}) };
-        },
-      );
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_limit_add",
     label: "pi-dispatch add scoped limit",
     description:
@@ -1159,8 +1035,7 @@ function registerTools(pi: ExtensionAPI): void {
       "(job-size-exceeds-host, -share); a job on the shared queue waits for a host it fits on. A row may " +
       "carry a size and nothing else. The file stays " +
       "version 1 unless a row needs version 2, or 3 for a size field (a worker older than this one then refuses the " +
-      "file, so upgrade every worker first). The operator MUST approve a confirm dialog showing the entry; refused " +
-      "with no interactive operator.",
+      "file, so upgrade every worker first). UI callers confirm. Headless addition requires the process grant, an ordinary restrictive row and no size/minJobs fields.",
     executionMode: "sequential",
     parameters: Type.Object({
       scope: Type.String(),
@@ -1177,25 +1052,9 @@ function registerTools(pi: ExtensionAPI): void {
       // Issue #596: a project row's job size (version 3), one table for both tools (`SIZE_FIELD_SCHEMAS`).
       ...SIZE_FIELD_SCHEMAS,
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      // Judged BEFORE the confirm (`planLimitAdd`): the dollar and size fields by the worker's parsers, then the whole
-      // change without writing (the parser, the project pair and the allocation envelope, issue #504 part C), so the
-      // operator is never asked to approve a row the write would refuse, such as one below an envelope floor. `expect` is
-      // the files as the change is built from them (PR #569's second review).
-      const planned: any = planLimitAdd({ params, paths, env: deploymentEnv() });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "limit-add", target: paths.scopedLimitsPath }, () => writeScopedLimits(plan.writeArgs));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, added: plan.entry, ...(res.pending ? { pending: res.pending } : {}) };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_limit_delete",
     label: "pi-dispatch delete scoped limit",
     description:
@@ -1203,21 +1062,9 @@ function registerTools(pi: ExtensionAPI): void {
       "approve a confirm dialog showing the limit; refused with no interactive operator.",
     executionMode: "sequential",
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      const planned: any = planLimitDelete({ index: params.index, paths, env: deploymentEnv() });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "limit-delete", target: paths.scopedLimitsPath }, () => writeScopedLimits(plan.writeArgs));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, deletedIndex: params.index, ...(res.pending ? { pending: res.pending } : {}) };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_limit_edit",
     label: "pi-dispatch edit scoped limit",
     description:
@@ -1231,8 +1078,7 @@ function registerTools(pi: ExtensionAPI): void {
       "row's used runs and dollars do not carry over, and jobs already running keep their slot under the old scope " +
       "until they finish while the new row counts from zero, so with `concurrent: N` up to 2N jobs can run until " +
       "then. A new size applies to the project's NEXT jobs; a running job keeps the size it started with. The file stays " +
-      "version 1 unless a row needs version 2, or 3 for a size field. The operator MUST approve a confirm dialog showing the before->after; " +
-      "refused with no interactive operator.",
+      "version 1 unless a row needs version 2, or 3 for a size field. UI always confirms. Headless requires the process grant and may only decrease explicit caps in the same scope, preserving size and minimums.",
     executionMode: "sequential",
     parameters: Type.Object({
       index: Type.Integer({ minimum: 0 }),
@@ -1246,27 +1092,11 @@ function registerTools(pi: ExtensionAPI): void {
       monthUsd: Type.Optional(Type.String()),
       ...SIZE_FIELD_SCHEMAS,
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      // Judged BEFORE the confirm (`planLimitEdit`): a dollar field (#501 part 7) and a size field (#596) by the worker's
-      // parsers; a provided field replaces and an omitted one is CARRIED, never dropped, so an edit of a count cannot
-      // silently remove a dollar cap or a size; then the whole change without writing, like an add. A size change adds
-      // the project's evidence to the confirm (`sizingNote`).
-      const planned: any = planLimitEdit({ params, paths, env: deploymentEnv(), sizingNoteFn: (scope: any) => sizingNote(paths, scope, Date.now()) });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "limit-edit", target: paths.scopedLimitsPath }, () => writeScopedLimits(plan.writeArgs));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, index: params.index, limit: plan.entry, ...(res.pending ? { pending: res.pending } : {}) };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
   // These reads share the pages' explicit projections; resolver writes remain operator-only.
   for (const kind of ["secrets", "connections"] as const) {
-    pi.registerTool({
+    registerTool({
       name: `dispatch_${kind}`,
       label: `pi-dispatch ${kind}`,
       description: kind === "secrets"
@@ -1279,7 +1109,7 @@ function registerTools(pi: ExtensionAPI): void {
       },
     });
   }
-  pi.registerTool({
+  registerTool({
     name: "dispatch_projects",
     label: "pi-dispatch projects",
     description: "Read-only. Projects, members, zero-based limitRows, spend against share with held amounts, current job size, size suggestion and its exact operator-confirmed call, bundle variable counts, and edit/delete refusals. Runs keep their recorded project id. No secret variable names, references or values.",
@@ -1290,7 +1120,7 @@ function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_project_add",
     label: "pi-dispatch add project",
     description:
@@ -1307,21 +1137,9 @@ function registerTools(pi: ExtensionAPI): void {
       name: Type.Optional(Type.String()),
       members: Type.Array(Type.String(), { minItems: 1 }),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      const planned: any = planProjectAdd({ params, paths, env: deploymentEnv() });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "project-add", target: paths.projectsFile }, () => writeProjects({ ...plan.writeArgs, envelope: envelopeGuard(paths, deploymentEnv()) }));
-        if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-        return { applied: true, added: projectShown(plan.added), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_project_edit",
     label: "pi-dispatch edit project",
     description:
@@ -1337,22 +1155,9 @@ function registerTools(pi: ExtensionAPI): void {
       name: Type.Optional(Type.String()),
       members: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      // A member leaving a capped project is named in the confirm (`planProjectEdit`): it WIDENS what it may spend.
-      const planned: any = planProjectEdit({ params, paths, env: deploymentEnv() });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "project-edit", target: paths.projectsFile }, () => writeProjects({ ...plan.writeArgs, envelope: envelopeGuard(paths, deploymentEnv()) }));
-        if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-        return { applied: true, project: projectShown(plan.after), ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_project_delete",
     label: "pi-dispatch delete project",
     description:
@@ -1362,48 +1167,22 @@ function registerTools(pi: ExtensionAPI): void {
       "dispatch_limit_edit. The operator MUST approve a confirm dialog naming the project; refused with no interactive operator.",
     executionMode: "sequential",
     parameters: Type.Object({ id: Type.String() }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      // Judged BEFORE the confirm (`planProjectDelete`): a row naming the project refuses here, so the operator is never
-      // asked to approve it.
-      const planned: any = planProjectDelete({ id: params.id, paths, env: deploymentEnv() });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "project-delete", target: paths.projectsFile }, () => writeProjects({ ...plan.writeArgs, envelope: envelopeGuard(paths, deploymentEnv()) }));
-        if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-        return { applied: true, deleted: plan.deleted, ...(res.pending ? { pending: escapeInterpreted(res.pending) } : {}) };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_trigger_delete",
     label: "pi-dispatch delete trigger",
     description:
       "Removes a trigger from triggers.json (by array index from dispatch_triggers) and applies it live. The " +
-      "operator MUST approve a confirm dialog showing the entry; with no interactive operator it is refused.",
+      "operator must confirm deletion in UI; a headless session cannot delete triggers.",
     executionMode: "sequential",
     parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const paths = resolvePaths(deploymentEnv());
-      const planned: any = planTriggerDelete({ index: params.index, paths });
-      if (planned.refusal) throw new Error(planned.refusal);
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, () => {
-        const res: any = panelWrite(auditDir(), { kind: "trigger-delete", target: paths.triggersPath }, () => writeTriggers({ triggersPath: paths.triggersPath, mutate: plan.mutate, expect: plan.expect }));
-        if (res.invalid) throw new Error(`rejected: ${res.invalid}`);
-        return { applied: true, deletedIndex: params.index };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
   // Issue #504 part C: delegated allocation (REQ-DELEGATED-ALLOCATION, DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE). One
-  // read, the delegated write that needs no keypress, and the confirm-gated envelope write. Every rule is the worker's:
+  // read, the bounded delegated write (confirmed in UI, granted headless), and the confirmed envelope write. Every rule is the worker's:
   // the envelope through `parseEnvelope`, a plan through `applyPlan`. No result of any of the three carries a plan's
   // reason text: it is agent-authored, so it lives in `alloc:plan` and the audit file and is drawn only by the panel.
-  pi.registerTool({
+  registerTool({
     name: "dispatch_allocations",
     label: "pi-dispatch allocations",
     description:
@@ -1425,12 +1204,12 @@ function registerTools(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_priorities_set",
     label: "pi-dispatch set priorities",
     description:
       "Sets a priorities plan: a WEIGHT per project (an integer 0 to 1000), and pi-dispatch splits the envelope's " +
-      "headroom by it. NO confirm, and it works with no interactive operator: it can only move money between projects " +
+      "headroom by it. UI confirms; headless requires the process's PI_DISPATCH_AGENT_WRITES=1 grant: it can only move money between projects " +
       "inside the operator's envelope, never above the total, below a floor or by more than the envelope's step per " +
       "plan. `projects` must name every project of the envelope (dispatch_allocations lists them); `_other` (the jobs " +
       "in no listed project) keeps its current weight when it is left out. `reason` (at most 200 characters, no " +
@@ -1455,15 +1234,9 @@ function registerTools(pi: ExtensionAPI): void {
       ),
       validDays: Type.Optional(Type.Integer({ minimum: 1 })),
     }),
-    // NO confirmedWrite, on purpose (REQ-ADMIN-VIA-PI-EXTENSION, the delegated allocation write): the bound is the
-    // envelope's arithmetic, not a keypress, and a confirm refused headless would make the unattended manager impossible.
-    async execute(_id, params) {
-      const res = await setPriorities(params.projects, params.validDays);
-      return toolText(JSON.stringify(res));
-    },
   });
 
-  pi.registerTool({
+  registerTool({
     name: "dispatch_envelope_set",
     label: "pi-dispatch set the allocation envelope",
     description:
@@ -1487,52 +1260,18 @@ function registerTools(pi: ExtensionAPI): void {
       minIntervalHours: Type.Optional(Type.Integer()),
       maxPlanDays: Type.Optional(Type.Integer()),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      // Judged BEFORE the confirm (`planEnvelope`), so the operator is never asked to approve an envelope the worker would
-      // refuse; a change the file already says is no write at all.
-      const env = deploymentEnv();
-      const paths = resolvePaths(deploymentEnv());
-      const planned: any = planEnvelope({ params, paths, env });
-      if (planned.refusal) throw new Error(planned.refusal);
-      if (planned.unchanged) return toolText(JSON.stringify({ applied: false, reason: planned.unchanged }));
-      const plan = planned.plan;
-      const result = await confirmedWrite(ctx, { title: plan.title, message: plan.message }, async () => {
-        const res: any = await panelWrite(auditDir(), { kind: "envelope-set", target: paths.envelopeFile, beforeDigest: plan.beforeDigest, afterDigest: plan.digest }, () => writeEnvelope({ ...plan.files, change: plan.change, expect: plan.expect, url: paths.valkeyUrl, ...allocRedis() }));
-        if (res.invalid) throw new Error(`rejected: ${escapeInterpreted(res.invalid)}`);
-        return { applied: true, digest: res.digest, previousDigest: res.previousDigest, changed: plan.lines };
-      });
-      return toolText(JSON.stringify(result));
-    },
   });
 
-}
-
-/**
- * The single human-in-the-loop gate for every write tool. It is what lets a model-callable tool touch the
- * cap or the triggers file without breaking CONST-BUDGET-BEFORE-TOKENS / CONST-TRIGGER-AUTHOR-GATE: the model
- * emits the CALL, but the mutation runs only after the OPERATOR approves a `ctx.ui.confirm` dialog that shows
- * the concrete change. Fail-closed: with no confirm-capable UI (print/headless, `ctx.hasUI` false) it THROWs
- * rather than apply -- no operator, no write. An explicit decline is a determinate, non-error outcome
- * (`{ applied:false }`) -- the caller must not loop-retry it.
- */
-async function confirmedWrite(
-  rawCtx: any,
-  prompt: { title: string; message: string },
-  doWrite: () => any,
-): Promise<any> {
-  // THE TOOL DOOR (issue #404). A tool's `execute` gets its own `ctx` straight from pi and never passes
-  // through the command handler, so the gate there does not reach it -- and this confirm body interpolates
-  // the MODEL's own parameters: `dispatch_trigger_edit`'s `flow` put an erase-display and an OSC-52 write
-  // into it, measured. Every tool that confirms does it through this one function.
-  const ctx = gateDialogs(rawCtx);
-  if (!ctx?.hasUI || typeof ctx?.ui?.confirm !== "function") {
-    throw new Error(
-      "refused: this change needs an interactive operator to confirm it, and no confirm-capable UI is available (e.g. print/headless mode).",
-    );
+  for (const [name, kind] of [["dispatch_failed", "failed"], ["dispatch_waiting", "waiting"], ["dispatch_setup", "setup"], ["dispatch_hosts", "hosts"]]) {
+    registerTool({ name, label: `pi-dispatch ${kind}`, description: "Read-only machine facts. Never raw failure, operator or job text.", parameters: Type.Object({}),
+      async execute() { const env = deploymentEnv(); return toolText(JSON.stringify(await readOperationalTool(kind, { paths: resolvePaths(env), env }))); },
+    });
   }
-  const ok = await ctx.ui.confirm(prompt.title, prompt.message);
-  if (!ok) return { applied: false, reason: "operator declined" };
-  return doWrite();
+  registerTool({ name: "dispatch_cancel", label: "pi-dispatch cancel", description: "Cancel an active, queued or held job, or all held jobs. UI confirms; headless requires the process grant.", executionMode: "sequential", parameters: Type.Object({ jobId: Type.Optional(Type.String()), queue: Type.Optional(Type.String()), allHeld: Type.Optional(Type.Boolean()) }) });
+  for (const name of ["dispatch_retry_failed", "dispatch_remove_failed"]) registerTool({ name, label: name, description: "Retry (person confirmed) or remove failed jobs. Set all for a bounded bulk operation by queue or repository; retry previews per-job reserves.", executionMode: "sequential", parameters: Type.Object({ jobId: Type.Optional(Type.String()), queue: Type.Optional(Type.String()), repo: Type.Optional(Type.String()), all: Type.Optional(Type.Boolean()) }) });
+  registerTool({ name: "dispatch_rerun", label: "pi-dispatch re-run", description: "Re-run a local or cron run through the current folder, committed flow opt-in, clean tree and hourly bounds. Forge, command and portfolio runs are refused.", executionMode: "sequential", parameters: Type.Object({ jobId: Type.String() }) });
+  registerTool({ name: "dispatch_allocation_revert", label: "pi-dispatch revert allocation", description: "Revert a priorities history row. Requires a person's confirm.", executionMode: "sequential", parameters: Type.Object({ index: Type.Integer({ minimum: 0 }) }) });
+
 }
 
 // ---- delegated allocation (issue #504 part C) ----

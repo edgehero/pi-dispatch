@@ -106,7 +106,7 @@ test("BY SHAPE: every record write in index.mjs is immediately preceded by the s
 	}
 	// 3 above the gate (grouping source project, never-fits and wait refusals) and the 9 post-gate paths project-pickup counts,
 	// including a failover job with no eligible candidate.
-	assert.equal(sites.length, 13, "the twelve pickup records and the pre-slot sandbox refusal must all settle");
+	assert.equal(sites.length, 13, "the twelve pickup records and the shared pre-slot boundary recorder must all settle");
 	let beforePickup = 0;
 	for (const i of sites) {
 		const l = code(lines[i]);
@@ -117,10 +117,10 @@ test("BY SHAPE: every record write in index.mjs is immediately preceded by the s
 		if (code(lines[j]) === "await settleSteerBeforePickup({ job, result });") {
 			beforePickup++;
 			assert.equal(arg, "result");
-			assert.equal(code(lines[j - 1]), "const result = { ...sandboxBoundary, budgetReserved: false };");
+			assert.equal(code(lines[j - 1]), "const result = { ...boundary, budgetReserved: false };");
 		} else assert.equal(code(lines[j]), `await settleSteer({ ${arg} });`, `line ${i + 1} is preceded by the settle of the same outcome`);
 	}
-	assert.equal(beforePickup, 1, "only the pre-slot sandbox boundary uses the keeper-free settler");
+	assert.equal(beforePickup, 1, "all pre-slot boundaries share one keeper-free recorder");
 	// The helper is defined before the first site, decides finality itself (inbox-settle.mjs), and only for steer jobs.
 	const def = src.indexOf("const settleSteer = async");
 	assert.ok(def !== -1 && def < src.indexOf("await settleSteer("));
@@ -266,7 +266,7 @@ const forgeEntry = (n, over = {}) => ({ v: 1, id: forgeMessageId(GUID(n)), mode:
 // The receiver's fallback (receiver/src/steer.mjs fallbackJobOf): the filter's job plus kind and its delivery job id.
 const fallbackFor = (n, over = {}) => ({ kind: "github", jobId: `gh-${GUID(n)}`, repo: "o/r", target: { type: "issue", number: 7, title: "t", body: "b" }, flow: "fix", trigger: { deliveryId: GUID(n), matched: { type: "comment" } }, provider: "p", model: "m", maxTurns: 5, resume: true, steer: true, ...over });
 
-function lateEnv({ fallbacks = {}, readError = null, preseed = { seeded: 1 }, addThrows = null, jobOver = {}, release = null } = {}) {
+function lateEnv({ fallbacks = {}, readError = null, preseed = { seeded: 1 }, addThrows = null, jobOver = {}, release = null, canPublish } = {}) {
 	const calls = { adds: [], comments: [], preseeds: [], releases: [], reads: [] };
 	const logs = [];
 	const mkQueue = (name) => ({
@@ -300,6 +300,7 @@ function lateEnv({ fallbacks = {}, readError = null, preseed = { seeded: 1 }, ad
 		now: () => 1_800_000_000_000,
 		inbox,
 		...(release ? { release } : {}),
+		...(canPublish ? { canPublish } : {}),
 	});
 	return { onLateForge, calls, logs, runJob };
 }
@@ -327,6 +328,14 @@ test("BRANCH A: the first late message's fallback resumes, so it is enqueued on 
 	assert.ok(!JSON.stringify(env.logs).includes("SECRET"), "never text in a log line");
 });
 
+test("a refused or unread current source releases its window without reading, enqueueing or posting a late private fallback", async () => {
+	for (const canPublish of [async () => false, async () => { throw new Error("unavailable"); }]) {
+		const env = lateEnv({ fallbacks: { [forgeEntry(1).id]: fallbackFor(1) }, canPublish });
+		await env.onLateForge([forgeEntry(1)], { job: env.runJob, result: { outcome: "policy", reason: "answer-draft-config-changed" } });
+		assert.deepEqual(env.calls.releases, ["removed"]); assert.deepEqual(env.calls.reads, []); assert.deepEqual(env.calls.adds, []); assert.deepEqual(env.calls.comments, []);
+	}
+});
+
 test("BRANCH B: no resume, no fallback stored, a fallback for another target: one fixed reply, no job", async () => {
 	for (const [label, fallbacks] of [
 		["resume off", { [forgeEntry(1).id]: fallbackFor(1, { resume: false }) }],
@@ -350,8 +359,8 @@ test("BRANCH B: no resume, no fallback stored, a fallback for another target: on
 	assert.equal(STEER_LATE_REPLY, "This run had already finished when your message arrived, so it did not see it. Comment again with the trigger phrase to start a new run.");
 });
 
-test("BRANCH B: an operator-cancel never starts the work again, whatever the fallback says", async () => {
-	for (const ctx of [{ result: { outcome: "policy", reason: "operator-cancel" } }, { error: { reason: "operator-cancel" } }]) {
+test("BRANCH B: a human or agent cancellation never starts the work again, whatever the fallback says", async () => {
+	for (const reason of ["operator-cancel", "agent-cancel"]) for (const ctx of [{ result: { outcome: "policy", reason } }, { error: { reason } }]) {
 		const env = lateEnv({ fallbacks: { [forgeEntry(1).id]: fallbackFor(1) } });
 		await env.onLateForge([forgeEntry(1)], { job: env.runJob, ...ctx });
 		assert.equal(env.calls.adds.length, 0);
@@ -488,7 +497,7 @@ test("enqueueLateForgeJob: the forge job's id, data and retry policy without the
 
 test("BY SHAPE: start.mjs wires one makeLateForge into all three settle sites (the processor's deps, the host-lost sweep, the failed listener)", () => {
 	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
-	assert.match(src, /const lateForge = makeLateForge\(\{ redis, queues: recoveryQueues, comment, log, now \}\);/);
+	assert.match(src, /const lateForge = makeLateForge\(\{ redis, queues: recoveryQueues, comment, log, now, canPublish: draftReplyMayPost \}\);/);
 	assert.match(src, /const lateForgeShared = \(entries, context\) => lateForge\(entries, \{ \.\.\.context, queueName: QUEUE \}\);/);
 	assert.match(src, /deps: \{[\s\S]{0,400}onLateForge: lateForge,/);
 	assert.match(src, /void settleInbox\(\{ redis, job, error: \{ reason: [^}]+\}, log, onLateForge: lateForge \}\);/);

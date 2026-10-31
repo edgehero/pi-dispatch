@@ -1313,7 +1313,10 @@ test("enqueueDispatchRun says a swallowed duplicate queued nothing, with the sha
 
 test("index.ts never says queued for a swallowed duplicate, on the tool or the command (#524)", () => {
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-  assert.match(src, /if \(res\.deduplicated\) return toolText\(JSON\.stringify\(\{ jobId: res\.jobId, folder: params\.folder, flow: params\.flow, queued: false, note: res\.said \}\)\);/);
+  const actions = readFileSync(new URL("../src/console/actions.mjs", import.meta.url), "utf8");
+  assert.match(actions, /if \(res\?\.deduplicated\) return \{ invalid: "An equivalent run is already queued; nothing new was queued\." \};/);
+  const adapter = readFileSync(new URL("../src/tool-actions.mjs", import.meta.url), "utf8");
+  assert.match(adapter, /if \(!result\?\.ok[^]*?throw new Error\(result\?\.invalid/);
   assert.match(src, /if \(res\.deduplicated\) \{\n\s*notify\?\.\(res\.said, "info"\);\n\s*return;\n\s*\}\n\s*notify\?\.\(`queued \$\{res\.jobId\}/);
 });
 

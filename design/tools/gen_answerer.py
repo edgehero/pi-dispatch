@@ -1,7 +1,11 @@
-"""Parked with an answerer: a dispatcher that may draft or send answers to parked questions for the person,
-from sources the person already decided, with a wait to step in. Planned and proposed. Pulse kit."""
+"""Answer rules draft from cited, already-decided sources; a person reviews and sends every answer. Pulse kit."""
 from pulse import *
-from gen_watchboard import probs
+def probs(rows, chosen, title):
+    out = []
+    for option, probability in rows:
+        selected = option == chosen
+        out.append(f'<li class="wb-p{" wb-p--on" if selected else ""}"><span class="wb-p__o">{ic("done", "ic ic--sm") if selected else ""}{E(option)}</span><svg class="wb-p__b" height="8" role="img" aria-label="{E(title)}: {E(option)}, {probability:.2f}"><rect class="wb-p__bed" width="100%" height="8" rx="4"/><rect class="wb-p__fill" width="{probability*100:.4f}%" height="8" rx="4"/></svg><b>{probability:.2f}</b></li>')
+    return '<ul class="wb-probs">' + ''.join(out) + '</ul>'
 
 NAME = "ParkedAnswerer"
 
@@ -71,12 +75,13 @@ Q_B = f"""<section class="card card--ring tone-running pa-q" id="p-drafted" data
     <p class="pa-why__h">{ic('spend', 'ic ic--sm')}<span>Why it may draft: Jev, 2 questions, $0.00002</span></p>
     <div class="pa-why__g">
       <div><p class="pa-why__q">{code('category')}<span>choice</span></p>
-        {probs([('convention', .86), ('product_decision', .06), ('security', .02), ('other', .06)], 'convention')}</div>
+        {probs([('convention', .86), ('how-to', .03), ('decided', .02), ('product', .04), ('security', .01), ('money', .01), ('scope', .01), ('approval', .01), ('uncovered', .01)], 'convention', 'category')}</div>
       <div><p class="pa-why__q">{code('answerable_from_sources')}<span>yes or no</span></p>
-        {probs([('yes', .91), ('no', .09)], 'yes')}</div>
+        {probs([('yes', .91), ('no', .09)], 'yes', 'answerable_from_sources')}</div>
     </div>
-    <p class="pa-why__n">It drafted because the category is allowed for web and both answers reach 0.80.</p>
+    <p class="pa-why__n">The check marks identify the selected options. All nine category probabilities are recorded; the no probability is the complement of the recorded binary yes confidence. Both selected options reach 0.80.</p>
   </div>
+  <p class="pap-jev">{ic("spend", "ic ic--sm")}<span>Decision: convention 0.86, answerable from sources 0.91</span></p>
   <p class="pa-post">{ic('comment', 'ic ic--sm')}<span>When you send it, it posts to acme/web#512 as yours: <b>&ldquo;Answered from the operator console by ops&rdquo;</b>, naming the draft run it came from.</span></p>
   <div class="pa-act">
     {btn('Open the draft', 'answer', 'chev-r', sm=False)}{btn('Answer myself', 'ghost', 'parked', sm=False)}
@@ -233,7 +238,7 @@ def viewer_page():
     return shell("Parked", inner, "Parked", sub="Runs that stopped to wait for a person.", end=SHOW, parked=2, role="viewer")
 
 VARIANT_CSS = """
-.pap-jev { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.pap-jev { display: none; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 18px; color: var(--ink-muted); }
 .pap-jev > .ic { flex: none; margin-top: 2px; color: var(--running-ink); }
 .pap-jev .code { font-size: 12px; color: var(--ink); }
 .pav-grid { align-items: start; }
@@ -241,7 +246,7 @@ VARIANT_CSS = """
 .pav-st > .ic { flex: none; color: var(--parked-ink); }
 .pav-st b { color: var(--ink); }
 #p-answered.collapsed .code, #p-answerer.collapsed .code { font-size: 13px; }
-@media (max-width: 760px) { .pav-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 760px) { .pav-grid { grid-template-columns: minmax(0, 1fr); } .pap-jev { display: flex; } }
 """
 
 CSS = """
@@ -372,8 +377,41 @@ CSS = """
 }
 """
 
+CSS += """
+.pa-phone-rule, .pa-phone-sent { display: none; }
+.pa-desktop-actions { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+.pa-draft-controls { border: 0; padding: 0; margin: 0; min-width: 0; }
+.pa-rule-code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 18px; }
+.pa-private { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
+.pa-prob { width: 100%; height: 28px; overflow: visible; }
+.pa-prob__bed { fill: var(--surface-3); }
+.pa-prob__fill { fill: var(--running); }
+.pa-prob text { fill: var(--ink); font: 12px system-ui, sans-serif; }
+.pa-standing-editor form, .pa-standing-editor fieldset { display: grid; gap: 10px; min-width: 0; }
+.pa-standing-editor fieldset { margin: 0; padding: 0; border: 0; }
+.pa-standing-editor summary { cursor: pointer; margin-bottom: 10px; }
+.pa-st__a, .pa-src, .pa-q, .pa-lvlrow { min-width: 0; overflow-wrap: anywhere; }
+.pa-q .code, .pa-done .code { overflow-wrap: anywhere; }
+.pa-src .link { color: inherit; }
+.pa-q .qform { margin-top: 0; }
+.qform>fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 10px; }
+.pa-q .qform__act>.btn--answer { flex: none; }
+.pa-q h2 { min-width: 0; }
+@media (max-width: 760px) {
+  .pa-q .qform__act>.btn--answer { flex: 1 1 auto; }
+  .pa-desktop-rule, .pa-desktop-actions, .pa-why, .pa-post, .pa-wait__t, .pa-pass>a, .pa-revision, .pa-q .qform__act>a, .pa-sent>.card { display: none; }
+  .pa-phone-rule, .pa-phone-sent { display: flex; }
+  .pa-why__g { grid-template-columns: minmax(0, 1fr); }
+  .pa-q .card__head { flex-wrap: wrap; }
+  .pa-q .card__head .end { margin-left: 0; }
+  .pa-q h2 .code { font-size: 15px; }
+  .pa-lvlrow { flex-wrap: wrap; }
+  .pa-lvl { flex-wrap: wrap; }
+}
+"""
+
 README = """
-The Parked page with an answer rule (proposed): when a run of a listed project parks, the worker starts a draft job that classifies the question and drafts an answer from cited sources. A person sends it, edits it, or answers otherwise. Product decisions, security, money, scope and every approval are never drafted.
+The Parked page with an answer rule (answer rules): when a run of a listed project parks, the worker starts a draft job that classifies the question and drafts an answer from cited sources. A person sends it, edits it, or answers otherwise. Product decisions, security, money, scope and every approval are never drafted.
 
 **How a person uses it.**
 - **No question or draft text on this page.** Each card says where to read the question and links to the runs.
@@ -413,7 +451,7 @@ The Parked page with an answer rule (proposed): when a run of a listed project p
 - **No rule edits here.** The rule is written by hand in triggers.json, and no tool may set it.
 - **Jev gives no reasons.** The cited sources are the why.
 
-**Fixture note.** gh-2f6a, acme/api#131, triage on mini1 and parked 26 minutes come from the fixture. Everything else is sample, because answer rules are proposed (issue #753, REQ-PARKED-ANSWERER):
+**Fixture note.** gh-2f6a, acme/api#131, triage on mini1 and parked 26 minutes come from the fixture. Everything else is sample, because answer rules are implemented under issue #772 (REQ-PARKED-ANSWERER):
 - the rule and its numbers;
 - gh-6e1d, gh-5a02, the draft runs gh-91d4 and gh-a07c, and their sources;
 - the standing answers;
@@ -430,7 +468,7 @@ if __name__ == "__main__":
     write("ParkedDraftPhone", card_marker("Phone", 1560, 390, "Parked on a phone with a drafted answer: two cards, where to read each question, the draft's sources, one action each"),
           "Parked on a phone, with a draft", phone_page(), CSS + VARIANT_CSS)
     readme("ParkedDraftPhone", """
-The Parked page on a phone, with an answer rule drafting (proposed). Two questions wait; each card has one action, and neither shows the question or the draft.
+The Parked page on a phone, with an answer rule drafting (answer rules). Two questions wait; each card has one action, and neither shows the question or the draft.
 
 **How a person uses it.**
 - **Yours to answer.** gh-2f6a on acme/api#131: where to read the question (the issue, or its run page), why no draft was made ("a product decision"), the answer box and **Preview answer**.
@@ -443,12 +481,12 @@ The Parked page on a phone, with an answer rule drafting (proposed). Two questio
 
 **Who sees what.** An operator's phone. A viewer's phone shows ParkedDraftViewer's content, stacked.
 
-**Fixture note.** As ParkedAnswerer: gh-2f6a, acme/api#131, triage on mini1 and parked 26 minutes are the fixture; gh-6e1d, gh-5a02, gh-a07c and the sources are sample, because answer rules are proposed (issue #753, REQ-PARKED-ANSWERER).
+**Fixture note.** As ParkedAnswerer: gh-2f6a, acme/api#131, triage on mini1 and parked 26 minutes are the fixture; gh-6e1d, gh-5a02, gh-a07c and the sources are sample, because answer rules are implemented under issue #772 (REQ-PARKED-ANSWERER).
 """)
     write("ParkedDraftViewer", card_marker("Planned and proposed", 900, 1440, "Parked as a viewer sees it: that two questions wait and for how long, that one has a draft, and who answered the earlier one"),
           "Parked, as a viewer", viewer_page(), CSS + VARIANT_CSS)
     readme("ParkedDraftViewer", """
-The Parked page as a viewer sees it, with an answer rule drafting (proposed). A viewer learns that runs wait for a person and for how long, never what they asked or what was drafted.
+The Parked page as a viewer sees it, with an answer rule drafting (answer rules). A viewer learns that runs wait for a person and for how long, never what they asked or what was drafted.
 
 **How a person uses it.**
 - **Waiting for a person, 2.** One card per question: the run, its project and target, what ran where, when it parked and how long it has waited, and where the question can be read (its issue). gh-2f6a waits for an answer; gh-6e1d has a draft ready, which an operator reads and sends.

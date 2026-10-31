@@ -114,6 +114,9 @@ import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
 import { SPEND_TITLE, VENUE_LABEL, recordReason } from "../words.mjs";
 import { RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
+import { agentReadProjection } from "../agent-read.mjs";
+import { runAnswerDraft } from "./panels/run.mjs";
+import { overviewAgentWrites } from "./panels/agent-writes.mjs";
 
 /**
  * The screens. `path` is the route, `auth` the least role that may open it, `live` whether the page opens the event
@@ -134,6 +137,7 @@ export const PAGES = Object.freeze({
   "zero-touch": Object.freeze({ path: "/runs/zero-touch", auth: "viewer", live: false, title: "Zero touch", nav: null, icon: "flag" }),
   run: Object.freeze({ path: "/run", auth: "viewer", live: true, title: "Run", nav: null, icon: "runs" }),
   parked: Object.freeze({ path: "/parked", auth: "viewer", live: true, title: "Parked inbox", nav: "Parked", icon: "parked" }),
+  "answer-rules": Object.freeze({ path: "/parked/rules", auth: "operator", live: false, title: "Answer rules", nav: null, icon: "parked" }),
   insights: Object.freeze({ path: "/insights", auth: "viewer", live: false, title: SPEND_TITLE, nav: SPEND_TITLE, icon: "spend" }),
   "insights-budget-split": Object.freeze({ path: "/insights/budget-split", auth: "viewer", live: false, title: SPEND_TITLE, nav: null, icon: "spend" }),
   "insights-capacity": Object.freeze({ path: "/insights/capacity", auth: "viewer", live: false, title: SPEND_TITLE, nav: null, icon: "spend" }),
@@ -168,10 +172,11 @@ const PAGE_PANELS = Object.freeze({
   // what runs and what it costs, the timeline and the caps, then the waitlists and the hosts. Every one of the eleven is
   // on the page in both states (`panels/overview.mjs`'s header), so the stream moves a first run to the overview by
   // swapping panels; on a phone, where the layout is one column, Needs you comes first once the checklist is gone.
-  overview: [["p-setup", overviewSetup], ["p-setup-pi", overviewSetupPi], ["p-setup-empty", overviewSetupEmpty], ["p-needs", overviewNeeds], ["p-waiting", overviewWaiting], ["p-active", overviewActive], ["p-spend", overviewSpend], ["p-timeline", overviewTimeline], ["p-caps", overviewCaps], ["p-waitlists", overviewWaitlists], ["p-hosts", overviewHosts]],
+  overview: [["p-setup", overviewSetup], ["p-setup-pi", overviewSetupPi], ["p-setup-empty", overviewSetupEmpty], ["p-needs", overviewNeeds], ["p-waiting", overviewWaiting], ["p-active", overviewActive], ["p-spend", overviewSpend], ["p-agent-writes", overviewAgentWrites], ["p-timeline", overviewTimeline], ["p-caps", overviewCaps], ["p-waitlists", overviewWaitlists], ["p-hosts", overviewHosts]],
   runs: [["p-filters", runsFilters], ["p-summary", runsSummary], ["p-runs", runsTable]],
-  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
+  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-answer-draft", runAnswerDraft], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
   parked: [["p-questions", parkedQuestions]],
+  "answer-rules": [["p-questions", parkedQuestions]],
   ...SPEND_PANELS,
   fleet: [["p-fleetbar", fleetBar], ["p-queues", fleetQueues], ["p-active", fleetActive], ["p-held", fleetHeld], ["p-failed", fleetFailed], ["p-delayed", fleetDelayed], ["p-schedules", fleetSchedulers], ["p-hosts", fleetHosts], ["p-doctor", fleetDoctor], ["p-venues", fleetVenues]],
   host: [["p-hoststate", hostState], ["p-hostjobs", hostJobs], ["p-hostsandboxes", hostSandboxes], ["p-hostbudget", hostBudget], ["p-hostcap", hostCapacity], ["p-hostrow", hostRow], ["p-hostdoctor", hostDoctor]],
@@ -228,11 +233,11 @@ const PAGE_LAYOUT = Object.freeze({
   fleet: [{ cls: "stack", items: ["p-fleetbar", "p-active"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-queues", "p-held", "p-failed", "p-delayed", "p-schedules"] }, { cls: "stack", items: ["p-hosts", "p-doctor"] }] }, { cls: "stack", items: ["p-venues"] }],
   host: [{ cls: "stack", items: ["p-hoststate"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-hostjobs", "p-hostsandboxes", "p-hostbudget", "p-hostcap"] }, { cls: "stack", items: ["p-hostrow", "p-hostdoctor"] }] }],
   venue: [{ cls: "cols", items: [{ cls: "stack", items: ["p-venue-props"] }, { cls: "stack", items: ["p-venue", "p-venue-serves", "p-venue-hosts", "p-venue-fix"] }] }, { cls: "stack", items: ["p-venue-compare"] }],
-  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-terminal", "p-inbox", "p-run", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
+  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-answer-draft", "p-terminal", "p-inbox", "p-run", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
   overview: Object.freeze([
     Object.freeze({ cls: "cols", items: Object.freeze(["p-setup", Object.freeze({ cls: "stack", items: Object.freeze(["p-setup-pi", "p-setup-empty"]) })]) }),
     Object.freeze({ cls: "cards-4", slotAfter: true, items: Object.freeze(["p-needs", "p-waiting", "p-active", "p-spend"]) }),
-    Object.freeze({ cls: "cols", items: Object.freeze([Object.freeze({ cls: "stack", items: Object.freeze(["p-timeline", "p-caps"]) }), Object.freeze({ cls: "stack", items: Object.freeze(["p-waitlists", "p-hosts"]) })]) }),
+    Object.freeze({ cls: "cols", items: Object.freeze([Object.freeze({ cls: "stack", items: Object.freeze(["p-agent-writes", "p-timeline", "p-caps"]) }), Object.freeze({ cls: "stack", items: Object.freeze(["p-waitlists", "p-hosts"]) })]) }),
   ]),
 });
 
@@ -270,6 +275,7 @@ const PAGE_PARAMS = Object.freeze({
   "zero-touch": ["days", "project", "scope"],
   run: ["id"],
   parked: [],
+  "answer-rules": [],
   insights: ["range", "project", "whatif", "flow", "runs", "paths"],
   "insights-budget-split": ["range", "project", "paths"],
   "insights-capacity": ["range", "paths"],
@@ -574,6 +580,7 @@ const PAGE_READS = Object.freeze({
   runs: ["runsPage", "subscriptions", "runsWindow", "parkedCount"],
   run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
   parked: ["snapshot", "parkedChecks"],
+  "answer-rules": ["snapshot", "parkedCount"],
   insights: ["insights", "parkedCount"],
   "insights-budget-split": ["insights", "parkedCount"],
   "insights-capacity": ["insights", "parkedCount"],
@@ -717,8 +724,16 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
   if (name === "watch" || name === "watch-board") data.watch = await loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true });
   const reads = PAGE_READS[name];
+  if (["parked", "answer-rules", "run"].includes(name) && deps.answerer) {
+    const operatorRead = who?.role === "operator" || who?.live === true && who?.role === undefined;
+    try { data.answerer = await deps.answerer.read({ role: operatorRead ? "operator" : who?.role ?? "viewer", ...(name === "run" && operatorRead ? { runId: q.id } : {}) }); }
+    catch { data.answerer = { state: "unavailable", partial: true, rows: [] }; }
+  }
+  if (name === "overview" && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.agentWrites === "function") {
+    try { data.agentWrites = await deps.agentWrites(); } catch { data.agentWrites = { unavailable: true, partial: true }; }
+  }
   // Private workspace and opener configuration reads never join /api/state or a viewer's shared load.
-  if ((who?.role === "operator" || who?.live === true && who?.role !== "viewer") && ["sandboxes", "run", "host", "trigger"].includes(name) && deps.sandboxes) {
+  if ((who?.role === "operator" || who?.live === true && who?.role === undefined) && ["sandboxes", "run", "host", "trigger"].includes(name) && deps.sandboxes) {
     try { const hosts = deps.sandboxes.hosts(); data.sandboxHosts = hosts.config ?? null; data.sandboxHostsProblem = hosts.refusal ?? null; } catch { data.sandboxHosts = null; data.sandboxHostsProblem = "Terminal host configuration could not be read. Inspect its owner, permissions and format."; }
     if (name === "sandboxes") {
       try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }
@@ -963,7 +978,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     data.parkedChecks = Object.fromEntries(rows.map((p, i) => [p.jobId, got[i]]));
   }
   if (reads.includes("parkedCount")) data.parkedCount = await parkedCountOf(deps);
-  return data;
+  return who?.role === "agent" ? agentReadProjection(data) : data;
 }
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------

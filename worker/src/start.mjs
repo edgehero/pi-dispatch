@@ -5,6 +5,9 @@ import { makeTouchStore } from "./touch-state.mjs";
 import { makeTouchOutbox } from "./touch-outbox.mjs";
 import { makeQuestionGroupStore } from "./question-groups.mjs";
 import { makeQuestionGroupRuntime } from "./question-group-runtime.mjs";
+import { makeAnswerDraftStore } from "./answerer.mjs";
+import { makeAnswerDraftRuntime, readAnswerPending } from "./answerer-runtime.mjs";
+import { enqueueAnswerDraftJob } from "./queue.mjs";
 import { makeWatchRuntime } from "./watch-runtime.mjs";
 import { makeWatchDrainer } from "./watch-drainer.mjs";
 import { makeWatchIssuePublisher } from "./watch-issue.mjs";
@@ -30,7 +33,8 @@ import { valkeyClientContext } from "./valkey-endpoint.mjs";
 import { authRefusalFor, makeRedisClient, onValkeyError, parseConnection, valkeyAuthState, valkeyPasswordFor } from "./connection.mjs";
 import { reconcileGated, reloadSchedules } from "./cron.mjs";
 import { makeGitHubAuth } from "./get-token.mjs";
-import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING } from "./processor.mjs";
+import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, checkDraftAnswerSource } from "./processor.mjs";
+import { consoleDraftOf } from "./console-answer.mjs";
 import { FAILED_COMMENT, FAILED_COMMENT_BY_REASON, RECOVERY_HOST_LOST_COMMENT } from "./comment-tables.mjs";
 import { transientError } from "./transient.mjs";
 import { makeGitHubHost } from "./github-host.mjs";
@@ -85,7 +89,7 @@ import { optionalUsdMicros } from "./money.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
-import { hostQueueName, makeQueue, enqueueWatchJob, QUEUE } from "./queue.mjs";
+import { hostQueueName, makeQueue, enqueueWatchJob, discoverHostQueuesReporting, QUEUE } from "./queue.mjs";
 import { endpointShown, execDockerBounded, makeDockerEndpointResolver, makeJobContainerLister, makeLocalBackend, makeReaper, makeStopContainer, quotedShown } from "./backend-local.mjs";
 import { NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, runtimeFromFacts } from "./netns-keeper.mjs";
 import { makeBackendRegistry, reapAll, resolveBackendName } from "./backend-registry.mjs";
@@ -1644,6 +1648,11 @@ export async function startWorker(
 	// `{ id }` or null; `statusEdit` answers `{ ok: true }`, `{ stop }` for a 403, 404 or 429 (the comment is gone, the
 	// token may not edit it, or the forge is rate limiting: editing on would only repeat the refusal) and `{ ok: false }`
 	// for any other failure, which the commenter tries again on its next edit. Logs carry the job id and the status.
+	const draftReplyMayPost = async job => {
+		if (!consoleDraftOf(job?.console)) return true;
+		try { return await checkDraftAnswerSource(job, { answerDraftStore, answerDraftRuntime }) === null; }
+		catch { return false; }
+	};
 	const statusAuth = async (job) => {
 		const forge = forgeFor(job);
 		if (!forge?.host) return null;
@@ -1658,7 +1667,9 @@ export async function startWorker(
 		return auth ? { forge, auth } : null;
 	};
 	const statusPost = async (job, text) => {
+		if (job?.answerDraft || job?.purpose === "answer-draft") return null;
 		try {
+			if (!await draftReplyMayPost(job)) return null;
 			const ready = await statusAuth(job);
 			if (!ready || typeof ready.forge.host.postStatusComment !== "function") return null;
 			const token = await ready.auth.mintToken(job);
@@ -1670,7 +1681,9 @@ export async function startWorker(
 		}
 	};
 	const statusEdit = async (job, id, text) => {
+		if (job?.answerDraft || job?.purpose === "answer-draft") return { stop: "answer-draft" };
 		try {
+			if (!await draftReplyMayPost(job)) return { stop: "answer-source-changed" };
 			const ready = await statusAuth(job);
 			if (!ready) return { ok: false }; // auth unreachable just now: the next edit asks again
 			if (typeof ready.forge.host.editStatusComment !== "function") return { stop: "no-edit" };
@@ -1899,6 +1912,22 @@ export async function startWorker(
 			const base = builtinModel(provider, id);
 			const override = entry?.modelOverrides?.[id];
 			return base ? { ...base, ...override, cost: { ...base.cost, ...override?.cost } } : null;
+		},
+	});
+	const answerDraftStore = makeAnswerDraftStore({ redis, now, retentionDays: config.logRetentionDays });
+	const answerDraftRuntime = makeAnswerDraftRuntime({ store: answerDraftStore, triggersPath: onceTriggersFile, now, log,
+		enqueue: fields => enqueueAnswerDraftJob(runtimeQueue, fields),
+		readParkedInfo: sessionStore.readParkedInfo,
+		readApproval: source => approvalStore.find(source),
+		readPendingAnswer: async source => {
+			const found = await discoverHostQueuesReporting(redis);
+			if (found.incomplete || found.names.length > 64) return { unknown: true };
+			const queues = [runtimeQueue, ...found.names.map(name => recoveryQueues.host(name))];
+			return readAnswerPending({ queues, source, runId: source.runId });
+		},
+		identity: async job => {
+			const auth = forgeFor(job)?.auth ?? await ensureAuth(job.kind);
+			return auth ? { selfId: job.kind === "azure" ? auth.selfId?.id : auth.selfId, apiUrl: job.kind === "github" ? "https://api.github.com" : job.kind === "azure" ? config.azure?.orgUrl : config[job.kind]?.apiUrl } : null;
 		},
 	});
 
@@ -2486,10 +2515,13 @@ export async function startWorker(
 	// A first source can arrive through live configuration after boot. Recovery and quiet-close
 	// draining must already exist then, even when the initial source registry was empty.
 	extraClosers.push(makeWatchDrainer({ runtime: watchRuntime, log }));
+	extraClosers.push(makeWatchDrainer({ runtime: answerDraftRuntime, log: () => log("answer_handoff_unavailable", {}) }));
 
 	// HOISTED out of the deps literal (issue #288): the terminal failed listener below needs the same
 	// adapter the processor gets, and two bodies would drift exactly where drift costs a public comment.
 	const comment = async (job, text) => {
+		if (job?.answerDraft || job?.purpose === "answer-draft") return;
+		if (!await draftReplyMayPost(job)) return;
 		// Best-effort: the processor awaits comment() inside its try, so a rejection here would
 		// corrupt the job outcome and could drive a wrong retry / second PR (CONST-RETRY-INFRA-ONLY).
 		// This adapter NEVER throws.
@@ -2527,7 +2559,7 @@ export async function startWorker(
 	// outcome, for all three settle sites (the processor, the host-lost sweep, the failed listener): the run's semantic
 	// window released, then a resumed job on the queue that ran the run or one fixed reply through `comment` above. The
 	// recovery queues are the same handles a #645 recovery is routed through, so a host queue is reached by its name.
-	const lateForge = makeLateForge({ redis, queues: recoveryQueues, comment, log, now });
+	const lateForge = makeLateForge({ redis, queues: recoveryQueues, comment, log, now, canPublish: draftReplyMayPost });
 	// The host-lost sweep's run ended on a host that is gone, so its resumed job goes to the shared queue, never to that
 	// host's queue, where nothing would ever take it.
 	const lateForgeShared = (entries, context) => lateForge(entries, { ...context, queueName: QUEUE });
@@ -2542,6 +2574,8 @@ export async function startWorker(
 	// the label must not flip an outcome. A local job has no forge and no marker. Issues only: a pull request's reply is
 	// routed on the phrase (parked.mjs).
 	const parkedLabel = async (job, on, approval = false) => {
+		if (job?.answerDraft || job?.purpose === "answer-draft") return;
+		if (!await draftReplyMayPost(job)) return;
 		const forge = forgeFor(job);
 		if (!forge?.host?.setParkedLabel || job?.target?.type !== "issue") return;
 		try {
@@ -2805,6 +2839,8 @@ export async function startWorker(
 			settleHeld: heldSettle,
 			// The take inside the park sequence (processor.mjs), which starts the held answer before the parked comment.
 			takeHeld: heldSettle.take,
+			answerDraftRuntime,
+			answerDraftStore,
 			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses
 			// only on a FOREIGN positive mark (index.mjs binds the real queue jobId so a retry of the
 			// spending delivery is excused). In the compose topology this check is the once-enforcement
@@ -2824,7 +2860,7 @@ export async function startWorker(
 			// Issue #503: `modelEndpoints` is the pickup's snapshot, the same one runContainer hands buildContainerEnv.
 			checkProviderCredential: (job, { modelEndpoints = null } = {}) => {
 				try {
-					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: job.watch || job.questionGrouping ? [] : config.forwardEnv, modelEndpoints });
+					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: job.answerDraft || job.watch || job.questionGrouping ? [] : config.forwardEnv, modelEndpoints });
 					return { ok: true };
 				} catch (error) {
 					// Only OUR determinate refusal. Anything else (a bug here, an fs fault the module does not model)
@@ -3146,6 +3182,7 @@ export async function startWorker(
 			// never sees: the stall-kill (maxStalledCount 0 fails a crashed worker's job at next pickup)
 			// and the wait-gate rethrow that escapes above the processor's catch.
 			if (job?.finishedOn) {
+				if (job.data?.answerDraft) void answerDraftRuntime.refused(job.data, { reason: "failed" }).catch(() => log("answer_terminal_unavailable", {}));
 				// An exhausted retry has no future container to consume its claim. Close only this queue job's
 				// authority, never another job's, and let a new authorized run request a fresh approval.
 				if (job.data?.approvalRequestId) {

@@ -99,6 +99,7 @@ import { outcomeWord, recordReason } from "../words.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { STREAM_SHUTDOWN, streamEndOf } from "./session-ends.mjs";
 import { transcriptEntryHtml, transcriptEntryJson } from "./transcript.mjs";
+import { agentReadProjection, agentReasonToken } from "../agent-read.mjs";
 
 /**
  * `pageMinMs`: pages whose data is read at most once per that many ms, however often the loop ticks. The runs page
@@ -214,7 +215,7 @@ export function makeLiveHub({
 
   const viewKeyOf = (sub) => `${sub.page}\n${sub.qkey}\n${sub.session.role}\n${sub.session.name}`;
   /** The stream's data key: its page and the canonical text of the part of its query the load reads (`dataKeyOf`). */
-  const dataKeyOfSub = (sub) => `${sub.page}\n${sub.dkey}`;
+  const dataKeyOfSub = (sub) => `${sub.page}\n${sub.dkey}${sub.session.role === "agent" ? "\nagent" : ""}`;
   const isPage = (sub) => sub.kind === "page";
   const pageSubs = () => [...subs].filter(isPage);
   const nextSeq = () => `${epoch}-${(counter += 1)}`;
@@ -424,7 +425,7 @@ export function makeLiveHub({
       try {
         if (held && t - held.at < minMs && (viewersOnly || !held.viewersOnly)) data = held.data;
         else {
-          data = await loadPageData(page, query, viewersOnly ? { role: "viewer", readOnly, live: true } : { readOnly, live: true });
+          data = await loadPageData(page, query, group.every((sub) => sub.session.role === "agent") ? { role: "agent", readOnly, live: true } : viewersOnly ? { role: "viewer", readOnly, live: true } : { readOnly, live: true });
           if (minMs > 0 && !(refresh && data?.readFailed === true)) loaded.set(dk, { at: t, data, viewersOnly });
         }
       } catch (e) {
@@ -782,6 +783,12 @@ export const STATE_VERSION = 1;
  * Every `unreachable` is a boolean: whatever the reader caught stays in this process. `version` is `STATE_VERSION`.
  */
 export function stateOf(snapshot, role, { now = Date.now() } = {}) {
+  if (role === "agent") {
+    const projected = agentReadProjection(stateOf(snapshot, "viewer", { now }));
+    projected.role = "agent";
+    projected.failed.rows = projected.failed.rows.map((row, i) => ({ ...row, reason: agentReasonToken(recordReason(snapshot?.failed?.rows?.[i])) }));
+    return projected;
+  }
   const s = snapshot ?? {};
   const operator = role === "operator";
   const q = s.queue ?? {};

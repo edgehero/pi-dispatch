@@ -115,7 +115,7 @@ for (const name of Object.values(LIVE_GLYPHS)) if (!ICON_NAMES.includes(name)) t
 const liveGlyph = (state, name) => html`<svg class="ic ic--sm live__${state}" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 
 /** A role as the top bar names it. */
-const ROLE_WORDS = Object.freeze({ operator: "Operator", viewer: "Viewer" });
+const ROLE_WORDS = Object.freeze({ operator: "Operator", viewer: "Viewer", agent: "Agent" });
 
 /** Whether `role` may open page `name` (the route table's rule: an operator page is the operator's alone). */
 const mayOpen = (name, role) => PAGES[name].auth !== "operator" || role === "operator";
@@ -296,7 +296,7 @@ export function shellHtml(name, ctx, inner, { headline = null, description = nul
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const role = roleOf(ctx?.session);
   const meta = mayOpen(name, role) ? PAGES[name] : { ...PAGES[name], live: false };
-  const here = !mayOpen(name, role) ? null : ["secrets", "connections", "project"].includes(name) ? "config" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
+  const here = !mayOpen(name, role) ? null : ["secrets", "connections", "project"].includes(name) ? "config" : name === "answer-rules" ? "parked" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
   // Drawn on a live page always, so the stream has a panel to fill; elsewhere only when there is a count to show.
   const count = navParkedHtml(ctx?.data);
   const parked = meta.live || String(count) !== "" ? html`<span id="${NAV_PARKED_ID}" data-panel>${count}</span>` : null;

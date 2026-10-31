@@ -21,7 +21,7 @@ import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
 import { html } from "../src/console/html.mjs";
 import { fieldNamed, UNNAMED_FIELD } from "../src/words.mjs";
-import { FLASH_MAX_BYTES } from "../src/console/sessions.mjs";
+import { FLASH_MAX_BYTES, makeSessionStore } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { readJobsData } from "../src/console/job-data.mjs";
 import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parkedQuestions, runSummary, runActionsPanel } from "../src/console/panels.mjs";
@@ -42,12 +42,14 @@ const T0 = Date.UTC(2026, 9, 15, 12, 0, 0);
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const OP_TOKEN = `pdc_${"o".repeat(43)}`;
 const VIEW_TOKEN = `pdc_${"v".repeat(43)}`;
+const AGENT_TOKEN = `pdc_${"a".repeat(43)}`;
 const FILE = {
   version: 1,
   generation: 0,
   tokens: [
     { name: "alice", role: "operator", sha256: sha256(OP_TOKEN), createdAt: "2026-10-01T00:00:00.000Z" },
     { name: "vic", role: "viewer", sha256: sha256(VIEW_TOKEN), createdAt: "2026-10-01T00:00:00.000Z" },
+    { name: "automation", role: "agent", sha256: sha256(AGENT_TOKEN), createdAt: "2026-10-01T00:00:00.000Z" },
   ],
 };
 // The answer text the parked test types: it must reach the job and never an audit row, a log line or a session id.
@@ -182,7 +184,8 @@ after(async () => {
 });
 
 /** A running console over `paths` with the real tickets and audit log; `actionDeps` overrides go in `a`. */
-async function start({ paths, a = {}, readOnly = false, hub = null } = {}) {
+async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false } = {}) {
+  const tokenFile = structuredClone(FILE);
   let t = T0;
   const now = () => t;
   const logsDir = paths.logsDir;
@@ -211,7 +214,7 @@ async function start({ paths, a = {}, readOnly = false, hub = null } = {}) {
       return stored;
     },
   };
-  const sessions = fakeSessions();
+  const sessions = realSessions ? makeSessionStore({ now }) : fakeSessions();
   const server = createConsoleServer({
     config: { allowedHosts: [], readOnly, maxMs: 12 * 3600000, pauseWindowsPath: paths.pauseWindowsPath, dir: null },
     now,
@@ -221,7 +224,7 @@ async function start({ paths, a = {}, readOnly = false, hub = null } = {}) {
     tickets: makeConfirmTickets({ now }),
     limiter: makeLoginLimiter({ now }),
     log: (line) => seen.logs.push(line),
-    readTokens: () => ({ file: FILE }),
+    readTokens: () => ({ file: tokenFile }),
     findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha256(presented)) ?? null,
     consumeLoginCode: () => ({ refusal: "unknown" }),
     writePauseWindows: RM.writePauseWindows,
@@ -278,13 +281,22 @@ async function start({ paths, a = {}, readOnly = false, hub = null } = {}) {
     const c = await confirm(name, pj.ticket);
     return { preview: pj, confirm: c };
   }
-  return { server, audit, sessions, post, op, cookieFor, act, confirm, both, advance: (ms) => (t += ms), writeHeaders, send };
+  return { server, audit, sessions, tokenFile, post, op, cookieFor, act, confirm, both, advance: (ms) => (t += ms), writeHeaders, send };
 }
 
 const read = (p) => readFileSync(p, "utf8");
 const lastWrite = (c) => c.audit.rows.filter((r) => r.action === "write").at(-1);
 /** A sentence as the page's markup escapes it (the console's own `html`). */
 const esc = (s) => String(html`${s}`);
+/** Check the policy disclosure separately, then retain the confirm bar's exact shape assertions. */
+function confirmHtml(preview) {
+  assert.ok(["unattended", "confirm", "person"].includes(preview.agent?.mode));
+  const titles = { unattended: "Agent may act alone", confirm: "Person confirms for an agent", person: "Person only" };
+  const prefix = `<p class="agent-policy"><b>${titles[preview.agent.mode]}</b>: ${esc(preview.agent.reason)}</p>`;
+  assert.ok(preview.html.startsWith(prefix), "the displayed policy and reason are exactly the evaluated transition");
+  return preview.html.slice(prefix.length);
+}
+
 
 // ---- the table -------------------------------------------------------------------------------------------------------
 
@@ -301,6 +313,8 @@ test("the action table: unique names, the audit kind charset, two generated rout
   assert.deepEqual(Object.fromEntries(ACTIONS.map((a) => [a.name, a.kind])), {
     "sandbox-prepare": "sandbox-prepare", "sandbox-pin": "sandbox-pin", "sandbox-end": "sandbox-end", "sandbox-host-set": "sandbox-host-set",
     "cancel-active": "cancel-active",
+    "run-enqueue": "run-enqueue",
+    "standing-answer-add": "standing-answer-add", "answer-draft-drop": "answer-draft-drop",
     "cancel-held": "cancel-held",
     "cancel-all-held": "held-cancel-all",
     "cancel-queued": "cancel-queued",
@@ -343,7 +357,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "zero-touch-group": "zero-touch-group", "zero-touch-name": "zero-touch-name", "zero-touch-instruction": "zero-touch-instruction", "zero-touch-undo": "zero-touch-undo",
     "board-freeze": "board-freeze", "board-unfreeze": "board-unfreeze", "board-clear": "board-clear", "board-revert": "board-revert", "board-adopt": "board-adopt",
   });
-  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-fork", "steer", "trigger-fire", "zero-touch-group"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-enqueue", "run-fork", "steer", "trigger-fire", "zero-touch-group"]);
   assert.deepEqual(ACTIONS.filter((a) => a.bulk).map((a) => a.name).sort(), ["cancel-all-held", "remove-all-failed", "retry-all-failed"]);
   assert.equal(BULK_MAX, RM.BULK_MAX, "the console's bulk bound is job-actions' own");
 });
@@ -353,12 +367,13 @@ test("the action table: unique names, the audit kind charset, two generated rout
 test("every action has frozen fields, a danger flag never beside paid, and its undo, inverse and confirm label", () => {
   const pause = ["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"];
   const FIELDS = {
+    "run-enqueue": ["folder", "flow", "task"], "standing-answer-add": ["title", "text", "projects", "repo", "runId"], "answer-draft-drop": ["runId", "draftRunId", "digest"],
     "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
     "run-fork": ["jobId", "entry", "position", "point", "provider", "model", "thinking", "message"],
     "trigger-fire": ["index"],
-    rerun: ["jobId"], "parked-answer": ["jobId", "text", "decision"], steer: ["jobId", "mode", "text"], "steer-withdraw": ["jobId", "id"],
+    rerun: ["jobId"], "parked-answer": ["jobId", "text", "decision", "draftRunId", "draftDigest"], steer: ["jobId", "mode", "text"], "steer-withdraw": ["jobId", "id"],
     "fleet-pause": [], "fleet-resume": [], "queue-pause": ["queue"], "queue-resume": ["queue"],
     "pause-windows": ["windows"], "trigger-add": ["trigger"], "trigger-edit": ["index", "flow", "backend", "provider", "model", "maxTurns", "progress", "statusComment", "recover", "steer"], "trigger-delete": ["index"],
     "setting-set": ["key", "value"], "setting-unset": ["key"],
@@ -370,7 +385,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "zero-touch-group": ["runId"], "zero-touch-name": ["groupId", "name"], "zero-touch-instruction": ["runId", "groupId", "index", "sentence"], "zero-touch-undo": ["fixId"],
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
-  assert.equal(ACTIONS.length, 53);
+  assert.equal(ACTIONS.length, 56);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -427,6 +442,9 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   const windows = { scope: "*", from: "01:00", to: "02:00", tz: "UTC" };
   // [action, out, undo, inverse (or null), label, done, done's result for a bulk act]
   const rows = [
+    ["run-enqueue", { reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Start run for up to $2.00", "Queued the local run"],
+    ["standing-answer-add", {}, twice("Remove the standing answer by hand from triggers.json after reviewing any draft that cited it."), null, "Adopt standing answer", "Adopted the standing answer"],
+    ["answer-draft-drop", {}, twice("Write your own answer on the run page. Dropping a draft never changes the parked question."), null, "Drop draft", "Dropped the draft; the question still waits for you"],
     ["sandbox-prepare", { payload: { params: { host: "mini1" } } }, twice("The host sweeps the prepared clone when its retention window ends. No shell starts until you open it."), null, "Prepare sandbox", "Requested sandbox preparation on mini1"],
     ["sandbox-pin", { payload: { params: { id: "gh-1" } } }, twice("The workspace is swept after its host's pin window. Restore an earlier deadline only from that host."), null, "Pin workspace", "Requested a pin for gh-1"],
     ["sandbox-end", { payload: { params: { id: "gh-1" } } }, twice("Open a new shell from the kept workspace; the ended shell's processes cannot be restored."), null, "End this shell", "Ended the shell for gh-1"],
@@ -531,7 +549,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   }
   // A re-run's way back is the cancel of the job it queued, asked again at the confirm with the apply's answer
   // (`atConfirm`); no other rule is, and no bulk one can be (a bulk confirm asks no rule again).
-  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-fork", "trigger-fire", "rerun", "zero-touch-instruction"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-enqueue", "run-fork", "trigger-fire", "rerun", "zero-touch-instruction"]);
   assert.ok(ACTIONS.every((a) => typeof a.atConfirm === "boolean" && !(a.atConfirm && a.bulk)), "atConfirm is a single act's, and a boolean on every action");
   const rerun = ACTIONS.find((a) => a.name === "rerun");
   const landed = { ok: true, jobId: "cron:t0:1760000000000", queue: "pi-jobs@build3" };
@@ -1320,7 +1338,7 @@ test("the confirm button says what it does: a paid act's most, a destructive act
   const label = async (name, body = {}) => (await c.act(name, body)).json();
   const paid = await label("retry-failed", { jobId: "gh-z" });
   assert.deepEqual([paid.confirmLabel, paid.danger, paid.paid], ["Retry for up to $1.50", false, true]);
-  assert.match(paid.html, /^<div class="confirm confirm--paid"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-spend"><\/use><\/svg>Retry failed job gh-z on pi-jobs, 1 attempt<\/p>/, "a real plural");
+  assert.match(confirmHtml(paid), /^<div class="confirm confirm--paid"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-spend"><\/use><\/svg>Retry failed job gh-z on pi-jobs, 1 attempt<\/p>/, "a real plural");
   assert.match(paid.html, /<button class="btn btn--confirm-paid" type="button" data-confirm>Retry for up to \$1\.50<\/button><button class="btn btn--ghost" type="button" data-cancel>Cancel<\/button><span class="ticket">Preview expires in <b data-expires="300000">5:00<\/b><\/span><\/div><\/div>$/, "the expiry is the time left, which the script counts down");
   assert.equal(paid.expiresAt, T0 + 300000);
   // No inverse: "No undo:" and the sentence, in one run after the icon, nothing bold.
@@ -1333,7 +1351,7 @@ test("the confirm button says what it does: a paid act's most, a destructive act
   writeFileSync(paths.settingsFile, `${JSON.stringify({ maxTurns: 30, maxCostUsd: "2" }, null, 2)}\n`);
   const danger = await label("fleet-pause");
   assert.deepEqual([danger.confirmLabel, danger.danger, danger.undo], ["Pause the fleet", true, "Resume the fleet"]);
-  assert.match(danger.html, /^<div class="confirm confirm--danger"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-attention">/);
+  assert.match(confirmHtml(danger), /^<div class="confirm confirm--danger"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-attention">/);
   assert.match(danger.html, /<button class="btn btn--confirm-danger" type="button" data-confirm>Pause the fleet<\/button>/);
   assert.ok(danger.html.includes("<use href=\"#i-rerun\"></use></svg><span>Undo: <b>Resume the fleet</b></span></p>"), "the act alone in bold, in one run with \"Undo:\"");
   assert.equal((await label("queue-pause", { queue: "pi-jobs" })).confirmLabel, "Pause queue pi-jobs");
@@ -1347,7 +1365,7 @@ test("the confirm button says what it does: a paid act's most, a destructive act
   assert.equal((await label("project-delete", { id: "web" })).confirmLabel, "Delete project web");
   const plain = await label("setting-set", { key: "maxTurns", value: "40" });
   assert.deepEqual([plain.confirmLabel, plain.danger, plain.undo], ["Confirm", false, "Set maxTurns back to 30"]);
-  assert.match(plain.html, /^<div class="confirm"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-done"><\/use><\/svg>Set maxTurns<\/p>/);
+  assert.match(confirmHtml(plain), /^<div class="confirm"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-done"><\/use><\/svg>Set maxTurns<\/p>/);
   assert.match(plain.html, /<button class="btn btn--confirm" type="button" data-confirm>Confirm<\/button>/);
   // The change in words, its values in bold (the Actions card): the planner says "maxTurns: 30 to 40".
   assert.ok(plain.html.includes('<ul class="confirm__list"><li>maxTurns: <b>30</b> to <b>40</b></li></ul>'), plain.html);
@@ -1601,7 +1619,7 @@ test("cancel-queued: the preview says why the job waits, red with no undo; the c
   assert.deepEqual(plans, [{ url: paths.valkeyUrl, jobId: "gh-q1", queue: null }], "the planner asked by id, the queue left to it");
   assert.deepEqual([pj.kind, pj.paid, pj.danger, pj.confirmLabel, pj.undo], ["cancel-queued", false, true, "Cancel the queued job", UNDO_SENTENCES.cancelledQueued]);
   assert.deepEqual(pj.summary, ["Cancel queued job gh-q1 (acme/web#4<b>)", "build3 has no free job slot", CANCEL_LINE]);
-  assert.match(pj.html, /^<div class="confirm confirm--danger"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-attention"><\/use><\/svg>Cancel queued job gh-q1 \(acme\/web#4&lt;b&gt;\)<\/p>/);
+  assert.match(confirmHtml(pj), /^<div class="confirm confirm--danger"><p class="confirm__h"><svg class="ic" aria-hidden="true"><use href="#i-attention"><\/use><\/svg>Cancel queued job gh-q1 \(acme\/web#4&lt;b&gt;\)<\/p>/);
   assert.ok(pj.html.includes(`<ul class="confirm__list"><li>build3 has no free job slot</li><li>${CANCEL_LINE}</li></ul>`), pj.html);
   assert.ok(pj.html.includes(`<span>No undo: ${esc(UNDO_SENTENCES.cancelledQueued)}</span>`), "no inverse: muted, nothing bold");
   assert.ok(pj.html.includes('<button class="btn btn--confirm-danger" type="button" data-confirm>Cancel the queued job</button>'));
@@ -1618,7 +1636,7 @@ test("cancel-queued: the preview says why the job waits, red with no undo; the c
   plan = queuedPlan("gh-q1");
   const ok = await c.both("cancel-queued", { jobId: "gh-q1" });
   assert.equal(ok.confirm.status, 200, ok.confirm.text);
-  assert.deepEqual(removals.at(-1), { url: paths.valkeyUrl, jobId: "gh-q1", expect: { queue: "pi-jobs@build3", attemptsMade: 0, stalledCounter: 0 } });
+  assert.deepEqual(removals.at(-1), { url: paths.valkeyUrl, jobId: "gh-q1", expect: { queue: "pi-jobs@build3", attemptsMade: 0, stalledCounter: 0 }, interventionOrigin: "human" });
   const done = ok.confirm.json();
   assert.deepEqual([done.ok, done.jobId, done.queue, done.held], [true, "gh-q1", "pi-jobs@build3", false]);
   assert.deepEqual([done.change.summary, done.change.undo, done.change.inverse, done.change.kind], ["Cancelled queued job gh-q1", UNDO_SENTENCES.cancelledQueued, null, "cancel-queued"]);
@@ -2153,7 +2171,7 @@ test("retry-all-failed shows each job's reserve and the sum; a job whose data ca
   // Issue #737: the bar said what Confirm does, with a floor where a reserve is unknown; the answer links the rows.
   assert.deepEqual([p.confirmLabel, p.danger, p.undo], ["Retry 2, at least $1.50", false, UNDO_SENTENCES.retried]);
   assert.match(p.html, /<button class="btn btn--confirm-paid" type="button" data-confirm>Retry 2, at least \$1\.50<\/button>/);
-  assert.match(p.html, /^<div class="confirm confirm--paid">/);
+  assert.match(confirmHtml(p), /^<div class="confirm confirm--paid">/);
   assert.deepEqual([r.change.auditSeq, r.change.auditLast, r.change.count, r.change.inverse], [rows[0].seq, rows[1].seq, 2, null], "the first and the last ok row, never a compensating one");
   // What happened, how many of how many, in the attention tone, since one job was not done.
   assert.deepEqual([r.change.summary, r.change.done, r.change.count], ["Retried failed jobs: 1 of 2 done", 1, 2]);
@@ -2704,7 +2722,7 @@ test("parked-answer on Valkey: the queued job is the plan's, by the session's to
     // A body naming its own author is refused by name (issue #737): `by` is the session's, never the body's.
     const claimed = await c.act("parked-answer", { jobId, text: `${ANSWER}\n<b>bold</b>`, by: "mallory" });
     assert.equal(claimed.status, 400);
-    assert.equal(claimed.json().error, "parked-answer takes jobId, text, decision only; by is not one of them, so nothing was changed");
+    assert.equal(claimed.json().error, "parked-answer takes jobId, text, decision, draftRunId, draftDigest only; by is not one of them, so nothing was changed");
     const p = await c.act("parked-answer", { jobId, text: `${ANSWER}\n<b>bold</b>` });
     assert.equal(p.status, 200, p.text);
     const pj = p.json();
@@ -2991,6 +3009,229 @@ test("sandbox controls use the HTTP preview/ticket/audit pipeline; audit failure
 // Issue #737: the copy rules `heldToCopyRules` holds each preview to reached every action's preview at
 // least once, so "no bar says an arrow or draws an empty item" covers the whole table, not the actions a test happened to
 // name. Several actions are previewed only against Valkey, so the claim is made where those tests run.
+test("agent HTTP sessions narrow explicit caps and cannot use the resulting Undo to raise them", async () => {
+  const { paths } = deployment();
+  const c = await start({ paths });
+  const agent = await c.cookieFor(AGENT_TOKEN);
+  const p = await c.act("setting-set", { key: "maxTurns", value: "20" }, agent);
+  assert.equal(p.status, 200, p.text);
+  assert.equal(p.json().agent.mode, "unattended");
+  assert.doesNotMatch(p.text, /op:\/\/vault|secret-ref-canary/);
+  const applied = await c.confirm("setting-set", p.json().ticket, agent);
+  assert.equal(applied.status, 200, applied.text);
+  assert.equal(JSON.parse(read(paths.settingsFile)).maxTurns, 20);
+  assert.deepEqual(c.audit.rows.filter(r => r.kind === "setting-set").map(r => [r.action, r.actor.role, r.actor.name, r.outcome]), [["write", "agent", "automation", "ok"], ["write-applied", "agent", "automation", "ok"]]);
+  const inverse = applied.json().change.inverse;
+  assert.deepEqual(inverse, { action: "setting-set", body: { key: "maxTurns", value: "30" } });
+  assert.equal((await c.act(inverse.action, inverse.body, agent)).status, 403, "Undo has the same authority check as the original action");
+  assert.equal((await c.confirm("setting-set", p.json().ticket, agent)).status, 409, "single use, even for a permitted change");
+  const before = read(paths.settingsFile);
+  for (const [name, body] of [["setting-set", { key: "maxTurns", value: "21" }], ["setting-set", { key: "maxTokens", value: "100" }], ["setting-unset", { key: "maxTurns" }], ["trigger-add", {}], ["fleet-resume", {}], ["retry-failed", { jobId: "gh-old" }], ["parked-answer", { jobId: "gh-old", text: ANSWER }], ["standing-answer-add", { title: "x", text: ANSWER, projects: ["web"], repo: "github:acme/web" }]]) {
+    const res = await c.act(name, body, agent);
+    assert.equal(res.status, 403, `${name}: ${res.text}`);
+    assert.match(res.json().error, new RegExp(`^${name} is (?:confirm|person):`));
+    assert.equal(res.json().ticket, undefined);
+  }
+  assert.equal(read(paths.settingsFile), before);
+});
+
+test("agent HTTP cap tickets bind the session and current file; revoked roles, read-only and cross-origin writes do nothing", async () => {
+  const { paths } = deployment();
+  const c = await start({ paths, realSessions: true });
+  const agent = await c.cookieFor(AGENT_TOKEN);
+  const other = await c.cookieFor(AGENT_TOKEN);
+  const p = await c.act("setting-set", { key: "maxTurns", value: "20" }, agent);
+  assert.equal(p.status, 200, p.text);
+  assert.equal((await c.confirm("setting-set", p.json().ticket, other)).status, 409);
+  writeFileSync(paths.settingsFile, '{"maxTurns":15,"maxCostUsd":"2"}\n');
+  const stale = await c.confirm("setting-set", p.json().ticket, agent);
+  assert.equal(stale.status, 409, stale.text);
+  assert.equal(JSON.parse(read(paths.settingsFile)).maxTurns, 15);
+  const fresh = await c.act("setting-set", { key: "maxTurns", value: "10" }, agent);
+  assert.equal(fresh.status, 200, fresh.text);
+  c.tokenFile.tokens.find(t => t.role === "agent").role = "viewer";
+  const changed = await c.confirm("setting-set", fresh.json().ticket, agent);
+  assert.equal(changed.status, 401, changed.text);
+  assert.equal(JSON.parse(read(paths.settingsFile)).maxTurns, 15);
+  const ro = await start({ paths, readOnly: true });
+  const readOnlyAgent = await ro.cookieFor(AGENT_TOKEN);
+  assert.equal((await ro.act("setting-set", { key: "maxTurns", value: "10" }, readOnlyAgent)).status, 403);
+  const deniedOrigin = await c.post("/api/act/setting-set/preview", { key: "maxTurns", value: "10" }, { cookie: other, origin: "https://example.invalid" });
+  assert.equal(deniedOrigin.status, 403);
+  assert.equal(JSON.parse(read(paths.settingsFile)).maxTurns, 15);
+});
+
+test("agent mutation previews, refusals and receipts do not disclose job labels or private planner diagnostics", async () => {
+  const { paths } = deployment();
+  const secret = "PRIVATE_JOB_PROSE_SENTINEL_766";
+  const origins = [];
+  let failed = false;
+  const c = await start({ paths, a: { rm: { ...RM,
+    planCancelQueued: async () => failed ? { refusal: secret } : queuedPlan("gh-q1", null, { target: secret }),
+    cancelQueuedJob: async args => { origins.push(args.interventionOrigin); return { ok: true, jobId: "gh-q1", queue: "pi-jobs", target: secret, diagnostic: secret }; },
+  } } });
+  const agent = await c.cookieFor(AGENT_TOKEN);
+  const preview = await c.act("cancel-queued", { jobId: "gh-q1" }, agent);
+  assert.equal(preview.status, 200, preview.text);
+  assert.ok(!preview.text.includes(secret));
+  const done = await c.confirm("cancel-queued", preview.json().ticket, agent);
+  assert.equal(done.status, 200, done.text);
+  // A target is normally a fixed identifier, but a planner-supplied job label grants no read authority.
+  assert.ok(!done.text.includes(secret));
+  assert.deepEqual(origins, ["agent"]);
+  failed = true;
+  const refused = await c.act("cancel-queued", { jobId: "gh-q1" }, agent);
+  assert.equal(refused.status, 400, refused.text);
+  assert.ok(!refused.text.includes(secret));
+  assert.match(refused.json().error, /^cancel-queued preview refused/);
+});
+
+test("agent HTTP limit and trigger transitions enforce narrowing and reject mixed or deferred widening", async () => {
+  const { paths } = deployment();
+  writeFileSync(paths.scopedLimitsPath, JSON.stringify({ version: 3, limits: [{ scope: "acme/web", day: 10, week: 30 }, { scope: "project:web", concurrent: 3, hostShare: 70 }] }));
+  writeFileSync(paths.projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }, { id: "spare", members: ["github:acme/spare"] }, { id: "sized", members: ["github:acme/sized"] }] }));
+  const triggers = JSON.parse(read(paths.triggersPath));
+  triggers.triggers[0].run.progress = true;
+  writeFileSync(paths.triggersPath, JSON.stringify(triggers));
+  const c = await start({ paths }); const agent = await c.cookieFor(AGENT_TOKEN);
+  const apply = async (action, body) => {
+    const p = await c.act(action, body, agent);
+    assert.equal(p.status, 200, p.text);
+    const done = await c.confirm(action, p.json().ticket, agent);
+    assert.equal(done.status, 200, done.text);
+  };
+  await apply("limit-edit", { index: 0, limit: { day: 8 } });
+  await apply("limit-edit", { index: 1, limit: { hostShare: 60 } });
+  await apply("limit-add", { limit: { scope: "acme/api", day: 4 } });
+  await apply("trigger-edit", { index: 0, progress: false });
+  const limitsBefore = read(paths.scopedLimitsPath), triggersBefore = read(paths.triggersPath);
+  for (const [action, body] of [
+    ["limit-edit", { index: 0, limit: { day: 7, week: 31 } }],
+    ["limit-edit", { index: 0, limit: { scope: "acme/elsewhere", day: 7 } }],
+    ["limit-add", { limit: { scope: "project:spare", concurrent: 2, memory: "1g", minJobs: 1 } }],
+    ["limit-add", { limit: { scope: "project:sized", memory: "1g" } }],
+    ["trigger-edit", { index: 0, maxTurns: 5 }],
+    ["trigger-edit", { index: 0, progress: true }],
+    ["pause-window-edit", { index: 0, scope: "*", from: "01:00", to: "03:00" }],
+  ]) {
+    const personPreview = await c.act(action, body);
+    assert.equal(personPreview.status, 200, `${action} is a valid person-confirmed transition: ${personPreview.text}`);
+    const denied = await c.act(action, body, agent);
+    assert.equal(denied.status, 403, `${action}: ${denied.text}`);
+    assert.equal(denied.json().ticket, undefined);
+  }
+  assert.equal(read(paths.scopedLimitsPath), limitsBefore);
+  assert.equal(read(paths.triggersPath), triggersBefore);
+  const rows = JSON.parse(limitsBefore).limits;
+  assert.deepEqual([rows[0].day, rows[0].week, rows[1].hostShare, rows[2].day], [8, 30, 60, 4]);
+  assert.equal(JSON.parse(triggersBefore).triggers[0].run.progress, false);
+  assert.equal(c.audit.rows.filter(row => row.action === "write-applied" && row.actor.role === "agent").length, 4);
+});
+
+test("agent HTTP bulk receipts count only applied targets and a lost receipt never repeats the mutation", async () => {
+  const { paths } = deployment();
+  const secret = "PRIVATE_FAILURE_SENTINEL_766";
+  const jobs = [{ jobId: "gh-a", queue: "pi-jobs", attemptsMade: 1, finishedOn: 2 }, { jobId: "gh-b", queue: "pi-jobs", attemptsMade: 1, finishedOn: 3 }];
+  let writes = 0;
+  const c = await start({ paths, a: { rm: { ...RM,
+    planFailedBulk: async () => ({ jobs, more: 0 }),
+    removeFailedJobs: async () => { writes++; return { results: [{ jobId: "gh-a", ok: true }, { jobId: "gh-b", invalid: secret }] }; },
+  } } });
+  const agent = await c.cookieFor(AGENT_TOKEN);
+  const first = await c.act("remove-all-failed", {}, agent);
+  assert.equal(first.status, 200, first.text);
+  const done = await c.confirm("remove-all-failed", first.json().ticket, agent);
+  assert.equal(done.status, 200, done.text); assert.equal(done.json().done, 1);
+  assert.ok(!done.text.includes(secret));
+  const rows = c.audit.rows.filter(row => row.kind === "failed-remove-all");
+  assert.deepEqual(rows.map(row => [row.action, row.target, row.outcome]), [["write", "gh-a", "ok"], ["write", "gh-b", "ok"], ["write", "gh-b", "failed"], ["write-applied", "gh-a", "ok"]]);
+  assert.ok(rows.every(row => row.actor.role === "agent"));
+  assert.ok(!JSON.stringify(rows).includes(secret));
+  const second = await c.act("remove-all-failed", {}, agent);
+  // Two intents and the compensating failure land, then the applied receipt loses its disk write.
+  c.audit.failAfter = 3;
+  const partialAccounting = await c.confirm("remove-all-failed", second.json().ticket, agent);
+  assert.equal(partialAccounting.status, 200, partialAccounting.text);
+  assert.equal(partialAccounting.json().warning, "tracking-incomplete");
+  assert.equal(partialAccounting.json().done, 1); assert.equal(writes, 2);
+  assert.equal((await c.confirm("remove-all-failed", second.json().ticket, agent)).status, 409);
+  assert.equal(writes, 2);
+});
+
+test("agent HTTP re-run revalidates the current cron execution fields before spending its hourly allowance", async () => {
+  const { paths } = deployment();
+  let source = { folder: "/srv/repos/example", flow: "nightly", model: "old-model", task: "old task", maxCostUsd: "2" };
+  let enqueues = 0;
+  const admission = [];
+  const c = await start({ paths, a: {
+    grantsEnv: { PI_DISPATCH_RUN_ROOTS: "/srv/repos", PI_DISPATCH_RUN_PER_HOUR: "3" },
+    rm: { ...RM,
+      planRerun: async () => ({ plan: { kind: "cron", jobId: "cron:nightly:123", queue: "pi-jobs", job: structuredClone(source), schedule: { schedulerId: "nightly", data: structuredClone(source) }, reserve: { slots: 1, dollarsMicros: 2000000 } } }),
+      checkDispatchRun: async args => { admission.push(args.consumeRate); return {}; },
+      enqueueRerun: async () => { enqueues++; return { ok: true, jobId: "cron:nightly:new", queue: "pi-jobs" }; },
+    },
+  } });
+  const agent = await c.cookieFor(AGENT_TOKEN);
+  for (const change of [{ flow: "different" }, { model: "new-model" }, { task: "changed task" }, { maxCostUsd: "1" }]) {
+    const p = await c.act("rerun", { jobId: "cron:nightly:123" }, agent);
+    assert.equal(p.status, 200, p.text);
+    source = { ...source, ...change };
+    const refused = await c.confirm("rerun", p.json().ticket, agent);
+    assert.equal(refused.status, 409, refused.text);
+    assert.equal(enqueues, 0);
+  }
+  assert.ok(admission.every(consume => consume === false), "a changed source never consumes a paid-start allowance");
+  const fresh = await c.act("rerun", { jobId: "cron:nightly:123" }, agent);
+  assert.equal(fresh.status, 200, fresh.text);
+  const applied = await c.confirm("rerun", fresh.json().ticket, agent);
+  assert.equal(applied.status, 200, applied.text);
+  assert.equal(enqueues, 1); assert.equal(admission.filter(Boolean).length, 1);
+});
+
+test("an agent's limit Undo contains only changed caps, never the private scope or unrelated file fields", async () => {
+  const { paths } = deployment();
+  const scope = "/private/operator-only/project";
+  writeFileSync(paths.scopedLimitsPath, JSON.stringify({ version: 1, limits: [{ scope, day: 10, week: 30 }] }));
+  const c = await start({ paths }); const agent = await c.cookieFor(AGENT_TOKEN);
+  const p = await c.act("limit-edit", { index: 0, limit: { day: 5 } }, agent);
+  assert.equal(p.status, 200, p.text); assert.ok(!p.text.includes(scope));
+  const done = await c.confirm("limit-edit", p.json().ticket, agent);
+  assert.equal(done.status, 200, done.text); assert.ok(!done.text.includes(scope));
+  assert.deepEqual(done.json().change.inverse, { action: "limit-edit", body: { index: 0, limit: { day: 10 } } });
+  const row = JSON.parse(read(paths.scopedLimitsPath)).limits[0];
+  assert.deepEqual([row.scope, row.day, row.week], [scope, 5, 30]);
+  const inverse = done.json().change.inverse;
+  assert.equal((await c.act(inverse.action, inverse.body, agent)).status, 403, "a private-safe Undo still cannot raise the bound without a person");
+});
+
+test("the local start and person-owned answer actions use the same HTTP ticket funnel", async () => {
+  const { paths } = deployment();
+  let enqueues = 0, adopted = 0, dropped = 0;
+  const c = await start({ paths, a: {
+    grantsEnv: { PI_DISPATCH_RUN_ROOTS: "/srv/repos", PI_DISPATCH_RUN_PER_HOUR: "3" },
+    rm: { ...RM, checkDispatchRun: async () => ({}), enqueueDispatchRun: async () => { enqueues++; return { ok: true, jobId: "local-123" }; } },
+    answerer: {
+      preview: async (name, params) => ({ plan: { target: params.runId ?? "standing", summary: [name === "standing-answer-add" ? "Adopt reviewed answer" : "Drop draft"], expect: { digest: "a".repeat(64) } } }),
+      apply: async name => { if (name === "standing-answer-add") adopted++; else dropped++; return { ok: true }; },
+    },
+  } });
+  const agent = await c.cookieFor(AGENT_TOKEN);
+  const p = await c.act("run-enqueue", { folder: "/srv/repos/example", flow: "triage", task: "review tests" }, agent);
+  assert.equal(p.status, 200, p.text); assert.equal(enqueues, 0);
+  const queued = await c.confirm("run-enqueue", p.json().ticket, agent);
+  assert.equal(queued.status, 200, queued.text); assert.equal(enqueues, 1);
+  assert.deepEqual(queued.json().change.inverse, { action: "cancel-queued", body: { jobId: "local-123", queue: "pi-jobs" } });
+  for (const [name, body] of [["standing-answer-add", { title: "reviewed", text: ANSWER, projects: ["web"], repo: "github:acme/web" }], ["answer-draft-drop", { runId: "gh-source", draftRunId: "gh-draft", digest: "b".repeat(64) }]]) {
+    const preview = await c.act(name, body);
+    assert.equal(preview.status, 200, preview.text);
+    const sent = await c.confirm(name, preview.json().ticket);
+    assert.equal(sent.status, 200, sent.text);
+    assert.equal((await c.confirm(name, preview.json().ticket)).status, 409);
+    assert.equal((await c.act(name, body, agent)).status, 403);
+  }
+  assert.deepEqual([adopted, dropped], [1, 1]);
+});
+
 test("every action's preview was held to the copy rules: no arrow, no empty item", live, () => {
   assert.deepEqual(ACTIONS.map((a) => a.name).filter((n) => !seen.previewed.has(n)), [], "every action previewed through act()");
 });

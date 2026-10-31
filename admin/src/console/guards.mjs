@@ -122,6 +122,7 @@ export function readOnlyRefusal(config) {
 
 /** A route that needs the operator role refuses a viewer. Ranks are fixed: none < viewer < operator. */
 export function roleRefusal(session, need) {
+  if (session?.role === "agent" && need === "viewer") return null;
   const rank = { none: 0, viewer: 1, operator: 2 };
   const have = session ? rank[session.role] ?? 0 : 0;
   if (have >= (rank[need] ?? 2)) return null;

@@ -200,8 +200,8 @@ One command puts a live terminal view over the whole deployment:
 
 - **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`
   in the list shows each project's share and spend, the applied plan with the reasons it gave, and the history.
-  `r` on a history row reverts to it after a yes or no. `dispatch_priorities_set` sets a plan of weights with
-  no confirm, because it can only move money inside the envelope; `dispatch_envelope_set` changes the envelope
+  `r` on a history row reverts to it after a yes or no. `dispatch_priorities_set` sets a plan of weights inside the envelope,
+  confirmed in an interactive session or delegated headless with the explicit process grant; `dispatch_envelope_set` changes the envelope
   behind your confirm; `dispatch_allocations` reads the split. pi's own `write` and `edit` tools are blocked on
   the envelope, `projects.json`, `scoped-limits.json`, `triggers.json` and the settings file
   ([`docs/allocation.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/allocation.md)).
@@ -220,17 +220,26 @@ One command puts a live terminal view over the whole deployment:
   anything waits (the target, the condition and how long), and a **failed** section for jobs the queue
   marked failed after their last attempt. `dispatch_waits` lists held jobs and `dispatch_wait_cancel` stops one behind your confirm
   ([`docs/wait-for.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/wait-for.md)).
-- **AI operable, with a human gate.** Model callable tools can change limits (global and scoped) and
-  manage triggers and pause windows. Every **config** change asks the operator in a prompt the model
-  cannot answer, and is refused when no operator is present. `dispatch_pause` and `dispatch_resume` skip
-  that confirm on purpose: they are reversible and spend nothing.
-- **One tool is not money safe.** `dispatch_run` queues a **paid** run that edits a local folder in place
-  with no undo, without a confirm. Six separate limits bound it instead: the `PI_DISPATCH_RUN_ROOTS` folder
-  allowlist, a committed per flow `ai-trigger: allow` opt in (read at a commit fixed before the agent
-  starts), a dirty tree refusal with no force option, no spend settings on the tool, a per hour rate limit
-  and the worker's daily cap. It cannot run commands, and a chained job asking for a `command` is refused.
-  Read [`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md) before you enable it.
-  The bundled `operate-pi-dispatch` skill teaches the agent these gates.
+- **AI operable, with explicit authority.** Every model write uses the same action policy as the browser.
+  Interactive sessions confirm every change, including pause, priorities and paid starts. Headless sessions
+  need `PI_DISPATCH_AGENT_WRITES=1` in the actual pi process before it starts, and can use only unattended
+  actions. That includes explicit cap decreases, adding ordinary restrictive limit rows and pauses,
+  turning existing run flags off, cancellation, failed-job removal and bounded priorities. Scope, size,
+  minimums, inherited limits and mixed widening requests stay confirmed. The deployment file and pointer
+  cannot grant this authority. Answers, draft decisions, standing-answer adoption and forge reruns remain
+  person actions. Tool writes are audited as agents; human-confirmed intervention is tracked separately.
+- **Paid starts stay bounded.** `dispatch_run`, Fire now and local or cron reruns need explicit valid
+  `PI_DISPATCH_RUN_ROOTS` and `PI_DISPATCH_RUN_PER_HOUR` values in the pi process environment. They check the
+  current committed flow's `ai-trigger: allow`, a clean tree and the shared hourly allowance again before
+  enqueue. They accept no spend settings, cannot run commands or portfolio flows, and still pass the
+  worker's budget gates. A paid run edits its folder in place. Read
+  [`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md) before enabling it.
+  The bundled `operate-pi-dispatch` skill explains each action mark and refusal.
+- **Agent reads expose operational facts.** Failed jobs, all waiting jobs, hosts and setup have dedicated
+  read tools. Runs report local retention when known; hosts report budgets, holds, CPU reserve, orphans,
+  kept sandboxes, doctor counts and qualified venue declarations. Costs include running holds and bounded
+  what-if estimates. Model results omit private job/operator text, question and draft content, variable
+  names and host paths. Setup suggestions come from the trusted command catalogue.
 - **Logs stay put.** Raw container output shows only in the panel's viewer, never in model context.
 
 **A web console as well.** The same package installs `pi-dispatch-console`, a separate process that serves a live web
@@ -300,10 +309,11 @@ when that file is yours and nobody else can write it. A key your env sets differ
 warning, never with its value. The switches that grant a capability (`PI_BACKENDS`, `PI_EGRESS`,
 `DOCKER_HOST`, `PI_DISPATCH_RUN_ROOTS`) are never read from a file.
 
-`dispatch_run` does nothing until you set one more variable yourself. `PI_DISPATCH_RUN_ROOTS` is empty by
-default, and an empty allowlist refuses every folder. The deployment pointer cannot set it (it carries
-paths, never capability grants), so widening that allowlist is always your own env edit. No allowlist
-reaches commands either: a `run.command` fires from the reviewed triggers file only.
+Paid model starts do nothing until both `PI_DISPATCH_RUN_ROOTS` and `PI_DISPATCH_RUN_PER_HOUR` are set
+explicitly and valid in the actual pi process environment. Headless mutation additionally requires
+`PI_DISPATCH_AGENT_WRITES=1`. None is loaded from the deployment pointer or its `.env`. A reviewed external
+skill may use private owner context to propose a permitted operation, but it cannot grant authority or
+send an answer. Upgrade the host runtime and console together before using an agent token.
 
 ## Get the whole thing
 
@@ -321,9 +331,9 @@ row, with a diff, confirmation and Undo. Human row numbers count from 1; tool in
 The editor and its JSON fallback preserve the add tool's secret-bundle opt-out.
 
 `dispatch_trigger_edit` also takes `maxTurns` and the four run-option flags. `dispatch_trigger_fire(index)`
-shares the console's Fire now planner, reserve and refusals. It fires a served cron trigger only after a
-person confirms and its folder, committed flow, clean tree and hourly attempt count pass the same bounds
-as `dispatch_run`. Configure `PI_DISPATCH_RUN_ROOTS` in the pi or console process environment to grant this.
+shares the console's Fire now planner, reserve and refusals. It fires a served cron trigger after the same fresh folder, committed flow, clean tree and hourly checks
+as `dispatch_run`. Interactive callers confirm; headless callers need the process write grant and both
+paid-start grant values in the pi or console process environment.
 Viewers see trigger facts and runs without private prompt text or write controls.
 
 The Triggers page groups rules by schedule and forge, with retained history, spend and a timezone-aware

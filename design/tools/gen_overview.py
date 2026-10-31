@@ -203,7 +203,8 @@ def overview(clear=False):
     body = f'<div class="cols"><div class="stack">{tl_card(ROWS_CLEAR if clear else ROWS_PROBLEM)}{caps_card()}</div><div class="stack">{waitlists(clear)}{hosts_card(clear)}</div></div>'
     title = "Overview"
     sub = "All clear. 4 jobs running, nothing needs you." if clear else ""
-    return shell("Overview", kpis + body, title, sub=sub, end=FILTERS, parked=0 if clear else 1)
+    agent_writes = card("Agent writes today", '<p class="kpi"><b>3</b><span>confirmed applied writes</span></p><p class="card__sub">mini1, UTC today; local audit only</p><a class="link" href="#">Open this host’s agent audit history</a><p class="card__sub">The history includes earlier days. Incomplete evidence is labelled partial; unavailable is never zero.</p>', id_="p-agent-writes")
+    return shell("Overview", kpis + agent_writes + body, title, sub=sub, end=FILTERS, parked=0 if clear else 1)
 
 if __name__ == "__main__":
     write("OverviewScreen", card_marker("Screens", 1520, 1440, "Overview with problems: what needs you, what is in line and on what it waits, runs by project"),

@@ -33,7 +33,7 @@ import { escapeControls } from "./projects.mjs";
 
 export const CONSOLE_AUDIT_DIR = "console-audit";
 export const CONSOLE_AUDIT_KEY = "console:audit";
-export const CONSOLE_AUDIT_ACTIONS = Object.freeze(["login", "login-failed", "login-code", "logout", "refused", "write", "token-added", "token-revoked", "token-rotated", "sessions-ended", "serve-started"]);
+export const CONSOLE_AUDIT_ACTIONS = Object.freeze(["login", "login-failed", "login-code", "logout", "refused", "write", "write-applied", "token-added", "token-revoked", "token-rotated", "sessions-ended", "serve-started"]);
 export const CONSOLE_AUDIT_OUTCOMES = Object.freeze(["ok", "refused", "failed"]);
 // A string field's cap, in code points, AFTER its controls are written out: a row stays small enough for the bounded tail
 // read below whatever a caller hands in (a Host header, a refusal reason), and no field can bury the others.

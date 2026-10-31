@@ -1120,6 +1120,7 @@ ${FIT_JS}
   var slotAction = null;
   var slotLabel = "";
   var slotTicket = null;
+  var slotBody = null;
   // Bumped whenever the slot is opened or closed, so an answer that comes back for a slot since re-used is dropped.
   var slotGen = 0;
   // Why the bar in the slot says this browser is someone else's now (the person refusal's ended, "switched"), or null:
@@ -1381,6 +1382,7 @@ ${FIT_JS}
     var body;
     fieldErrors(form, null);
     try { body = bodyOf(form); } catch (e) { fieldErrors(form, e.message); slotSays(e.message + "; nothing was sent."); return; }
+    slotBody = body;
     var becauseRun = document.body.getAttribute("data-because-run");
     if (becauseRun && CONFIG_FIX_ACTIONS.indexOf(action) >= 0) body.becauseRun = becauseRun;
     post("/api/act/" + action + "/preview", body, true).then(function (r) {
@@ -1414,6 +1416,19 @@ ${FIT_JS}
       if (mine !== slotGen) return;
       var b = c.body || {};
       if (c.ok) {
+        // Adoption is a distinct human act. Keep the exact confirmed reply in memory, never in a URL or storage,
+        // and open its own editor rather than silently turning an answer into standing policy.
+        var keep = slotAction === "parked-answer" && slotForm && slotForm.querySelector("[data-keep-standing]");
+        var adoption = keep && keep.checked && document.querySelector("[data-standing-adoption]");
+        if (adoption && slotBody && typeof slotBody.text === "string") {
+          var adoptedText = adoption.querySelector("textarea[name=text]");
+          if (adoptedText) adoptedText.value = slotBody.text;
+          adoption.open = true;
+          closeSlot();
+          var adoptedTitle = adoption.querySelector("input[name=title]");
+          if (adoptedTitle) adoptedTitle.focus();
+          return;
+        }
         var refused = false;
         if (b.results && b.results.length) for (var i = 0; i < b.results.length; i++) if (b.results[i] && b.results[i].ok === false) refused = true;
         if (refused && typeof b.html === "string") refill(b.html);
@@ -1462,7 +1477,7 @@ ${FIT_JS}
     var active = document.activeElement;
     if (active && panel.contains(active) && isField(active) && active.closest && active.closest(HELD_FORMS)) return true;
     var fields = panel.querySelectorAll("form[data-action] input:not([type=hidden]), form[data-action] textarea, form.filterbar input:not([type=hidden]), form[data-live-hold] input:not([type=hidden]), form[data-live-hold] textarea");
-    for (var i = 0; i < fields.length; i++) if (fields[i].value !== fields[i].defaultValue) return true;
+    for (var i = 0; i < fields.length; i++) if (fields[i].type === "checkbox" ? fields[i].checked !== fields[i].defaultChecked : fields[i].value !== fields[i].defaultValue) return true;
     var lists = panel.querySelectorAll("form.filterbar select, form[data-live-hold] select");
     for (var j = 0; j < lists.length; j++) if (picked(lists[j])) return true;
     return false;
@@ -1497,6 +1512,7 @@ ${FIT_JS}
       // This panel's fresh server state is authoritative (including expiry/not-kept reasons). A previous entry's
       // connection status must not overwrite it when question/tail slots are refilled after another panel swap.
       if (el.id === "p-transcript") tstate = null;
+      try { enableAnswererControls(el); } catch (e) { /* actions remain disabled if they cannot be armed */ }
       try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
       try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
       try { foldBars(el); } catch (e) { /* the swapped panel's filters stay shown */ }
@@ -1560,6 +1576,11 @@ ${FIT_JS}
       outputs[i].textContent = valid && weight !== undefined ? "about " + (sum > 0 ? Math.round(weight / sum * 100) : 0) + "%" : "Share unknown";
     }
   });
+  function enableAnswererControls(root) {
+    var controls = typeof root.querySelectorAll === "function" ? root.querySelectorAll("[data-answerer-control]") : [];
+    for (var ac = 0; ac < controls.length; ac++) controls[ac].disabled = false;
+  }
+  enableAnswererControls(document);
   var configControls = typeof document.querySelectorAll === "function" ? document.querySelectorAll("[data-config-controls]") : [];
   var fixSource = document.body.getAttribute("data-because-run");
   if (fixSource && /^[A-Za-z0-9._:-]{1,200}$/.test(fixSource)) {

@@ -17,6 +17,10 @@
  * on, so run-job refuses that before the prompt (awaitInputShadow) and the tool_call hook blocks it after.
  */
 
+import { dirname, join } from "node:path";
+import { writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+
 export const AWAIT_INPUT_TOOL = "await_human_input";
 export const AWAIT_INPUT_FACTORY = "job-await-input";
 // The exit reason of a parked run lives in outcome.mjs (AWAITING_INPUT), one spelling, beside the other reasons.
@@ -29,6 +33,7 @@ const DESCRIPTION = [
 	"you are working on, with the forge CLI this job uses, so the person sees it. Then call this tool on its own,",
 	"as the only tool call in your message. The run ends after it; your work so far is kept, and the next run",
 	"continues from here with the person's reply.",
+	"If your forge returned the posted comment's id, supply questionCommentId so an answer rule can verify that exact question. Never supply a URL or a guessed id.",
 ].join(" ");
 
 /**
@@ -36,8 +41,8 @@ const DESCRIPTION = [
  * the run actually ENDED on it is the terminal's to say (parkedTerminal), because a call batched with a tool
  * that does not terminate leaves pi's loop running.
  */
-export function createAwaitInput() {
-	const state = { called: false };
+export function createAwaitInput({ sessionFile = null, writeFile = writeFileSync } = {}) {
+	const state = { called: false, questionRefDigest: null };
 	const factories = [
 		{
 			name: AWAIT_INPUT_FACTORY,
@@ -47,8 +52,15 @@ export function createAwaitInput() {
 					label: "await human input",
 					description: DESCRIPTION,
 					promptSnippet: "end the run and wait for a person's answer to a question you posted",
-					parameters: { type: "object", properties: {} },
-					async execute() {
+					parameters: { type: "object", properties: { questionCommentId: { type: "string", pattern: "^(?:[1-9][0-9]{0,19}|[a-fA-F0-9-]{36})$" } }, additionalProperties: false },
+					async execute(_id, args = {}) {
+						if (Object.keys(args).some(k => k !== "questionCommentId") || args.questionCommentId !== undefined && !/^(?:[1-9][0-9]{0,19}|[a-fA-F0-9-]{36})$/.test(args.questionCommentId)) return { content: [{ type: "text", text: "The question comment id is invalid; post the question first and supply its actual forge id." }], details: {}, isError: true };
+						state.questionRefDigest = null;
+						if (args.questionCommentId !== undefined && sessionFile) {
+							const ref = JSON.stringify({ version: 1, commentId: args.questionCommentId });
+							writeFile(join(dirname(sessionFile), "question-ref.json"), ref, { mode: 0o600 });
+							state.questionRefDigest = createHash("sha256").update(ref).digest("hex");
+						}
 						state.called = true;
 						return {
 							content: [{ type: "text", text: "The run ends here. The next run continues from this point with the reply." }],

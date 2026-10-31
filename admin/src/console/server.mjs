@@ -847,7 +847,9 @@ async function dispatch(req, res, deps) {
       // a reload into the other person's console.
       return sendJson(res, 409, { error: PERSON_CHANGED, ended: "switched", ...(route.write && { html: String(refusalHtml({ sentence: PERSON_CHANGED, status: 409, state: "changed" })) }) });
     }
-    const role = roleRefusal(ctx.session, route.auth);
+    // An agent reaches only the action policy, never an operator-only read route. The policy checks
+    // the exact planned delta and rechecks it when the session-bound ticket is redeemed.
+    const role = ctx.session.role === "agent" && route.action ? null : roleRefusal(ctx.session, route.auth);
     if (role) {
       if (route.write) record({ actor: actorOf(ctx), action: "refused", target: route.path, outcome: "refused", reason: `role: ${role}` });
       return sendFailure(ctx, 403, role, { page: { kind: "operators-only" } });

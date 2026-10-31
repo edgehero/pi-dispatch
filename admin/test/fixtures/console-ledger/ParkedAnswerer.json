@@ -1,0 +1,320 @@
+{
+  "card": "ParkedAnswerer",
+  "pr": 772,
+  "panels": [
+    "p-yours",
+    "p-drafted",
+    "p-answered",
+    "p-standing",
+    "p-answerer",
+    "p-level"
+  ],
+  "elements": [
+    {
+      "el": "p-yours",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Yours to answer"
+      ]
+    },
+    {
+      "el": "p-drafted",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Drafted for you"
+      ]
+    },
+    {
+      "el": "p-answered",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Sent from a draft today"
+      ]
+    },
+    {
+      "el": "p-standing",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Standing answers"
+      ]
+    },
+    {
+      "el": "p-answerer",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Answer rule:"
+      ]
+    },
+    {
+      "el": "p-level",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "How much it may do"
+      ]
+    },
+    {
+      "el": "Question and draft stay on the run pages",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "The question and draft are on the run page"
+      ]
+    },
+    {
+      "el": "Named cited sources",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererSources",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "docs/CONTRIBUTING.md",
+        "Test command"
+      ]
+    },
+    {
+      "el": "Two probabilities and minimum confidence",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererProbabilities",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "category",
+        "0.86",
+        "0.91",
+        "0.80"
+      ]
+    },
+    {
+      "el": "The person sends, edits or answers otherwise",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Open the draft",
+        "Answer myself",
+        "Don&#39;t draft these"
+      ]
+    },
+    {
+      "el": "Read-only handwritten rule and locked sending",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererRules",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Read only here",
+        "Send without me",
+        "OQ-051"
+      ]
+    },
+    {
+      "el": "Scoped standing adoption has its own human ticket",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#standingAnswerEditor",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "standing-answer-add",
+        "Repository (forge:owner/repository)",
+        "Preview standing answer"
+      ]
+    },
+    {
+      "el": "Retained outcome counts and settled draft cost",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererRules",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "sent as drafted",
+        "edited, then sent",
+        "dropped for your own",
+        "passed to you",
+        "$0.0090"
+      ]
+    },
+    {
+      "el": "State: pending",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-pending.operator"
+      ],
+      "shows": [
+        "queued or running"
+      ]
+    },
+    {
+      "el": "State: refused",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-refused.operator"
+      ],
+      "shows": [
+        "refused by a cap"
+      ]
+    },
+    {
+      "el": "State: no-sources",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-no-sources.operator"
+      ],
+      "shows": [
+        "sources do not cover"
+      ]
+    },
+    {
+      "el": "State: shadow",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-shadow.operator"
+      ],
+      "shows": [
+        "only classifies"
+      ]
+    },
+    {
+      "el": "State: unavailable",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-unavailable.operator"
+      ],
+      "shows": [
+        "could not be read"
+      ]
+    },
+    {
+      "el": "State: partial",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-partial.operator"
+      ],
+      "shows": [
+        "history is partial"
+      ]
+    },
+    {
+      "el": "State: stale",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-answer-draft",
+      "source": "admin/src/console/panels/answerer.mjs#answererRun",
+      "golden": [
+        "panels/answerer-stale.operator"
+      ],
+      "shows": [
+        "draft cannot be offered"
+      ]
+    },
+    {
+      "el": "State: dropped",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-chat",
+      "source": "admin/src/console/panels/run.mjs#runChat",
+      "golden": [
+        "panels/answerer-dropped.operator"
+      ],
+      "shows": [
+        "Write your answer"
+      ]
+    },
+    {
+      "el": "State: run",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-chat",
+      "source": "admin/src/console/panels/run.mjs#runChat",
+      "golden": [
+        "panels/answerer-run.operator"
+      ],
+      "shows": [
+        "draftRunId"
+      ]
+    },
+    {
+      "el": "The sample deployment ids and sources illustrate behavior",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Synthetic fixtures use the published-source cards\u2019 repository names and records; actual worker ids differ without changing authority or behavior."
+    }
+  ]
+}

@@ -30,6 +30,7 @@
  * command, no `run.resume`) a reply on the forge would not resume the run either (the receiver's rule), so the banner
  * adds no "answer on the forge" of its own.
  */
+import { answererParked } from "./answerer.mjs";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { DEFER_PROJECT_RE } from "@edgehero/pi-dispatch/defer-reasons";
 import { forgeLinkOf } from "../../read-model.mjs";
@@ -149,7 +150,7 @@ function answerOf(p, i, view) {
   // Its own key only: a run id may be `__proto__`, which a plain object's lookup would answer with its prototype.
   const checks = view.data?.parkedChecks;
   const check = checks !== null && typeof checks === "object" && Object.hasOwn(checks, p.jobId) ? checks[p.jobId] : null;
-  if (check?.ok === true) return p.reason === "awaiting-approval" ? ui.approvalForms({ jobId: p.jobId, id: `approval-${i + 1}` }) : ui.answerForm({ jobId: p.jobId, id: `answer-${i + 1}`, hint: PARKED_ANSWER_HINT, runHref: hrefTo(view, "run", { id: p.jobId }) });
+  if (check?.ok === true) return p.reason === "awaiting-approval" ? ui.approvalForms({ jobId: p.jobId, id: `approval-${i + 1}` }) : ui.answerForm({ jobId: p.jobId, id: `answer-${i + 1}`, hint: PARKED_ANSWER_HINT, guarded: Boolean(view.data?.answerer?.rules?.length), runHref: hrefTo(view, "run", { id: p.jobId }) });
   if (typeof check?.refusal === "string") {
     const said = check.refusal.trim();
     return ui.banner({ status: "attention", title: PARKED_ELSEWHERE_TITLE, body: `${capitalised(said)}${/[.!?]$/.test(said) ? "" : "."}` });
@@ -177,6 +178,8 @@ function cardOf(p, i, view) {
  * main column, and how answers work in the side one. A count is drawn on the tab only where the list was read whole.
  */
 export function parkedQuestions(view) {
+  const prepared = answererParked(view, { manualAnswer: (row, i) => answerOf(row, i, view) });
+  if (prepared !== null) return prepared;
   const s = view?.data?.snapshot ?? null;
   const unread = s === null ? OVERVIEW_UNREAD_TEXT : typeof s.parkedUnreachable === "string" && s.parkedUnreachable !== "" ? parkedUnreadText(s.parkedUnreachable) : null;
   const rows = s !== null && unread === null && Array.isArray(s.parked) ? s.parked : [];

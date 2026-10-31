@@ -1566,3 +1566,42 @@ What to do: Check the Zero touch grouping status and reviewed configuration befo
 The job image does not declare isolated question grouping.
 
 What to do: Check the Zero touch grouping status and reviewed configuration before trying again.
+
+
+### agent-cancel
+
+A delegated agent stopped this run through the bounded control surface. It is cancelled, not retried, and does not
+count as a person’s intervention. An interactive tool proposal that a person confirms uses the human cancellation
+origin instead, even though the tool’s audit actor is agent.
+
+What to do: review the agent’s audit record before starting replacement work.
+
+### answer-draft-refused
+
+The reviewed answer-draft inputs or restricted execution profile could not be admitted. No answer was sent.
+An absent, unsafe, oversized or invalid UTF-8 flow also refuses; the worker does not silently substitute a generic
+flow. A known credential in source/flow/draft text is refused before it can become a cited proposal.
+
+What to do: check the hand-written answer rule, committed flow and source run. The parked question still needs a
+person. See [answer-rules.md](answer-rules.md).
+
+### answer-draft-config-changed
+
+The reviewed answer configuration, retained source or forge identity changed before the draft could be used. This is a determinate refusal,
+not permission to replay an earlier rule.
+
+What to do: review the current rule and answer the parked question as a person.
+
+### answer-draft-unavailable
+
+The draft’s private source or state could not be read or published. No answer was sent. Detailed store failures
+remain separate from a source that has passed to a person.
+
+What to do: check the deployment’s store and retained sources. Do not repeat a paid job merely to repair a metric.
+
+### job-image-answer-draft-unsupported
+
+The selected image does not declare the restricted, authenticated `answerDraft` capability. No draft container
+starts and nothing is spent.
+
+What to do: rebuild and verify the job image before enabling answer rules. See [job-image.md](job-image.md).

@@ -313,7 +313,7 @@ and a session that ended in the meantime (its idle limit, say) ends then, with i
 
 | Command | What it does |
 |---|---|
-| `token add --name <n> --role operator\|viewer` | Creates a token and prints it once. Refuses a name that exists. |
+| `token add --name <n> --role operator\|viewer\|agent` | Creates a token and prints it once. Refuses a name that exists. |
 | `token list` | Names, roles and creation dates. Never a token or a hash. |
 | `token rotate --name <n>` | A new secret for that name, printed once. Its sessions end. |
 | `token revoke --name <n>` | Removes the name. Its sessions end. |
@@ -2132,3 +2132,50 @@ source-linked instruction/configuration fixes and incomplete-accounting repair.
 The touched-run view uses `touched=1` with `days=7`, `30` or `90` and optional opaque `scope`; these page controls
 persist through pagination and live updates. Configuration pages may carry `becauseRun=<retained refusal id>` to
 link their confirmed changes to that refusal. Ordinary record-field filters remain unchanged.
+
+
+## Delegated agent control
+
+Upgrade the console and the host’s `pi-dispatch` before adding an agent token. Older versions reject the whole
+access file when it contains an unknown role, which also blocks sign-in, doctor and console service installation.
+Create the token on the host, print it once and keep it outside job-visible folders:
+
+```sh
+pi-dispatch-console token add --name automation --role agent
+```
+
+An agent reads a redacted viewer copy: typed counts and reason tokens, without job/operator prose, variable names,
+resolver paths or private answer data. It uses the same preview and single-use Confirm tickets as an operator.
+Every action shows one policy and its reason: unattended, person-confirmed, or person-only. A cap decrease is
+unattended only when the file explicitly sets the old cap. Raising, unsetting or inheriting one requires a person.
+Undo is checked again; it cannot raise a cap an agent just lowered. Revocation ends sessions on their next request.
+
+The pi tools use the same planners and policy. With a UI, every model write asks a person. Without a UI, unattended
+writes additionally require `PI_DISPATCH_AGENT_WRITES=1` in that pi process’s own environment. This is a process
+lifetime grant, never read from the deployment `.env` or pointer. Restart pi to remove it. Disable pi’s own bash,
+write and edit tools for such a session; those tools are outside the dispatch action policy.
+
+Agent Fire now and local/cron re-run require explicit `PI_DISPATCH_RUN_ROOTS` and `PI_DISPATCH_RUN_PER_HOUR` in
+the console/pi process. Current HEAD flow permission, realpath containment, a clean tree and the shared hourly
+attempt count are checked again before enqueue. Commands and portfolio starts refuse; a forge re-run stays with
+a person. These starts still use the chosen trigger’s model, secrets, turns and forge token and can spend outside
+its schedule. The worker’s own gates apply when it consumes the job.
+
+Audit filters include `role=agent`. The overview’s count uses this console host’s verified applied-write receipts
+since UTC midnight, not a fleet total or a pre-write intent. Partial/unavailable counts say so. Its audit link has
+the broader retained history. A missing receipt after a successful write is an accounting warning, not a reason
+to repeat the action. Interactive model proposals are audited as agent writes; their human confirmation still
+counts as a human intervention for Zero touch.
+
+## Cited answer drafts
+
+[Answer rules](answer-rules.md) start an isolated, capped draft job when an eligible run parks. The Parked list shows
+an operator its verdict and source names. The question and draft stay on operator run pages, where the draft fills
+the existing answer form. Preview and Confirm send it as the signed-in person’s answer, naming its draft run.
+Editing it is allowed. Dropping it changes no question. “Don’t draft these” opens a narrower rule proposal for a
+reviewed hand edit, including classify-only mode when the final category would otherwise be removed.
+
+Viewers and agents see that a question waits, that a draft exists and who answered. They see no question, draft,
+sources, probabilities, rule or standing answers. Operators can read `/parked/rules`; only a person may adopt a
+standing answer. The adoption checkbox prepares a separate preview after sending; it does not silently save text.
+A successful send followed by a refused adoption remains a successful send with an unsaved standing proposal.

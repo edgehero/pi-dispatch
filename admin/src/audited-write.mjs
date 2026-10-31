@@ -1,7 +1,8 @@
 /**
  * One audit chain for every write (issue #642, DES-OPERATOR-CONSOLE "one audit chain"): the writes the `/dispatch` TUI,
  * its commands and the pi extension's tools make land in the operator console's audit log
- * (`PI_LOGS_DIR/console-audit/`, INT-CONSOLE-AUDIT-LOG) beside the console's own, as actor role `panel`. Before this,
+ * (`PI_LOGS_DIR/console-audit/`, INT-CONSOLE-AUDIT-LOG) beside the console's own. Typed commands and the panel use
+ * role `panel`; model tools use role `agent`, including a proposal a person confirms. Before this,
  * only allocation writes were audited outside the console, so the log said what a browser changed and nothing about
  * the same change made from a terminal.
  *
@@ -36,6 +37,11 @@ export function panelActor(userInfoFn = userInfo) {
   }
   const scrubbed = name.replace(/[^A-Za-z0-9._@-]/g, "_").slice(0, 64);
   return { name: scrubbed === "" ? "unknown" : scrubbed, role: "panel", session: null };
+}
+
+/** A tool's actor remains an agent even when a person confirms its proposal. */
+export function agentActor(userInfoFn = userInfo) {
+  return { ...panelActor(userInfoFn), role: "agent" };
 }
 
 /** A fresh correlation id for one write's rows: 12 hex, the console ticket digest's length. */
@@ -88,7 +94,16 @@ export function auditedWrite({ audit, actor, kind, target, beforeDigest = null, 
   };
   const judge = (result) => {
     const why = failure(result);
-    if (why !== null && why !== undefined) compensate(why);
+    if (why !== null && why !== undefined) { compensate(why); return result; }
+    if (actor?.role === "agent") {
+      try {
+        // An intent says a write was attempted. This correlated receipt is evidence that it landed.
+        audit.append({ ...row, action: "write-applied", outcome: "ok" });
+      } catch {
+        log("panel: agent write succeeded but its audit receipt could not be written; accounting is incomplete, do not repeat the action");
+        return result !== null && typeof result === "object" ? { ...result, warning: "tracking-incomplete" } : { ok: true, value: result, warning: "tracking-incomplete" };
+      }
+    }
     return result;
   };
   const threw = (e) => {

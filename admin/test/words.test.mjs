@@ -55,7 +55,7 @@ test("REASON_WORDS: every key is a catalog reason, each qualifies one outcome, a
   assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.word])), {
     "awaiting-approval": "awaiting approval",
     "awaiting-input": "awaiting input",
-    "operator-cancel": "cancelled",
+    "operator-cancel": "cancelled", "agent-cancel": "cancelled",
     "recovery-cap": "failed",
     "recovery-checkpoint-absent": "failed",
     "recovery-unsafe-extensions": "failed",
@@ -65,7 +65,7 @@ test("REASON_WORDS: every key is a catalog reason, each qualifies one outcome, a
   assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.says])), {
     "awaiting-approval": true,
     "awaiting-input": true,
-    "operator-cancel": true,
+    "operator-cancel": true, "agent-cancel": true,
     "recovery-cap": false,
     "recovery-checkpoint-absent": false,
     "recovery-unsafe-extensions": false,
@@ -172,13 +172,15 @@ test("the console's status (issue #737): completed ok, refused refused, failed f
   assert.deepEqual(STATUS_KINDS, ["running", "parked", "failed", "refused", "attention", "ok", "idle", "cancelled"]);
   assert.ok(Object.isFrozen(STATUS_KINDS));
   assert.deepEqual(Object.fromEntries(Object.entries(OUTCOME_WORDS).map(([k, v]) => [k, v.status])), { completed: "ok", policy: "refused", failed: "failed" });
-  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.status])), { "awaiting-approval": "parked", "awaiting-input": "parked", "operator-cancel": "cancelled", "recovery-cap": "failed", "recovery-checkpoint-absent": "failed", "recovery-unsafe-extensions": "failed" });
+  assert.deepEqual(Object.fromEntries(Object.entries(REASON_WORDS).map(([k, v]) => [k, v.status])), { "awaiting-approval": "parked", "awaiting-input": "parked", "operator-cancel": "cancelled", "agent-cancel": "cancelled", "recovery-cap": "failed", "recovery-checkpoint-absent": "failed", "recovery-unsafe-extensions": "failed" });
   // outcomeWord hands the status on, and a qualifier changes it only under its own outcome, as it does the word.
   const status = (o, r) => outcomeWord(o, r).status;
   assert.equal(status("completed"), "ok");
   assert.equal(status("completed", "awaiting-input"), "parked");
   assert.equal(status("policy", "scope-cap"), "refused");
   assert.equal(status("policy", "operator-cancel"), "cancelled");
+  assert.equal(status("policy", "agent-cancel"), "cancelled");
+  assert.equal(status("completed", "agent-cancel"), "ok", "an agent-cancel reason cannot relabel another outcome");
   assert.equal(status("policy", "awaiting-input"), "refused", "a qualifier under another outcome keeps the outcome's status");
   assert.equal(status("failed", "operator-cancel"), "failed");
   assert.equal(status("policy", "recovery-cap"), "failed", "a recovery end is a failure (issue #737)");

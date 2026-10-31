@@ -56,6 +56,7 @@ export const REASON_WORDS = Object.freeze({
   "awaiting-approval": Object.freeze({ outcome: "completed", word: "awaiting approval", glyph: "✔", tone: "warning", status: "parked", says: true }),
   "awaiting-input": Object.freeze({ outcome: "completed", word: "awaiting input", glyph: "✔", tone: "warning", status: "parked", says: true }),
   "operator-cancel": Object.freeze({ outcome: "policy", word: "cancelled", glyph: "⚠", tone: "warning", status: "cancelled", says: true }),
+  "agent-cancel": Object.freeze({ outcome: "policy", word: "cancelled", glyph: "⚠", tone: "warning", status: "cancelled", says: true }),
   "recovery-cap": Object.freeze({ outcome: "policy", word: "failed", glyph: "✘", tone: "error", status: "failed", says: false }),
   "recovery-checkpoint-absent": Object.freeze({ outcome: "policy", word: "failed", glyph: "✘", tone: "error", status: "failed", says: false }),
   "recovery-unsafe-extensions": Object.freeze({ outcome: "policy", word: "failed", glyph: "✘", tone: "error", status: "failed", says: false }),

@@ -1,4 +1,4 @@
-The Parked page on a phone, with an answer rule drafting (proposed). Two questions wait; each card has one action, and neither shows the question or the draft.
+The Parked page on a phone, with an answer rule drafting (answer rules). Two questions wait; each card has one action, and neither shows the question or the draft.
 
 **How a person uses it.**
 - **Yours to answer.** gh-2f6a on acme/api#131: where to read the question (the issue, or its run page), why no draft was made ("a product decision"), the answer box and **Preview answer**.
@@ -11,4 +11,4 @@ The Parked page on a phone, with an answer rule drafting (proposed). Two questio
 
 **Who sees what.** An operator's phone. A viewer's phone shows ParkedDraftViewer's content, stacked.
 
-**Fixture note.** As ParkedAnswerer: gh-2f6a, acme/api#131, triage on mini1 and parked 26 minutes are the fixture; gh-6e1d, gh-5a02, gh-a07c and the sources are sample, because answer rules are proposed (issue #753, REQ-PARKED-ANSWERER).
+**Fixture note.** As ParkedAnswerer: gh-2f6a, acme/api#131, triage on mini1 and parked 26 minutes are the fixture; gh-6e1d, gh-5a02, gh-a07c and the sources are sample, because answer rules are implemented under issue #772 (REQ-PARKED-ANSWERER).

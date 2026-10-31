@@ -147,8 +147,8 @@ test("panels state degraded reads instead of drawing nothing: no snapshot, a flo
   // The shell's Parked count (`p-nav-parked`) is a panel too; with no snapshot it is drawn empty, never "could not be read".
   // Issue #737: the overview's eight say so; the first run's three draw nothing (no snapshot is never a first run).
   const none = (await pagePanels("overview", ctxOf("viewer", { snapshot: null }))).filter((p) => !SHELL_PANEL_IDS.includes(p.id)).map((p) => p.html);
-  assert.equal(none.length, 11);
-  assert.equal(none.filter((h) => h === "").length, 3);
+  assert.equal(none.length, 12);
+  assert.equal(none.filter((h) => h === "").length, 4, "the three setup panels and operator-only agent-write count stay empty for a viewer");
   for (const h of none.filter((x) => x !== "")) assert.match(h, /could not be read/);
   const some = (await pagePanels("overview", ctxOf("viewer", { snapshot: snapshot() }))).map((p) => p.html).join("");
   assert.match(some, /Partly paused/);
@@ -255,7 +255,7 @@ function auditPanels(audit, query = parseAuditQuery("").query, role = "operator"
 const label = (r) => `${r.entry.seq ?? `line${r.pos.split(":")[1]}`}:${r.state}`;
 
 test("parseAuditQuery: each parameter by a closed list or a charset, a refusal naming the parameter, never its value", () => {
-  assert.deepEqual(AUDIT_PARAMS, ["before", "who", "action", "outcome", "q", "seq"]);
+  assert.deepEqual(AUDIT_PARAMS, ["before", "who", "role", "action", "outcome", "q", "seq"]);
   assert.deepEqual(parseAuditQuery("").query, { before: null, who: null, action: null, outcome: null, q: null, seq: null });
   assert.ok(Object.isFrozen(parseAuditQuery("").query));
   assert.deepEqual(parseAuditQuery("before=2026-10%3A12&who=ops&action=write&outcome=refused&q=pause-windows").query, { before: "2026-10:12", who: "ops", action: "write", outcome: "refused", q: "pause-windows", seq: null });
@@ -277,11 +277,11 @@ test("parseAuditQuery: each parameter by a closed list or a charset, a refusal n
     ["seq=01", /^seq must be/],
     [`seq=${"9".repeat(17)}`, /^seq must be/],
     ["seq=4&before=2026-10:3", /^seq and before do not go together/],
-    ["seq=4&who=bob", /^seq must not be combined with who, action, outcome or q/],
+    ["seq=4&who=bob", /^seq must not be combined with who, role, action, outcome or q/],
     ["seq=4&action=login", /^seq must not be combined/],
     ["seq=4&outcome=ok", /^seq must not be combined/],
     ["seq=4&q=x", /^seq must not be combined/],
-    [`${SECRET}=1`, /^the audit page takes only before, who, action, outcome, q, seq$/],
+    [`${SECRET}=1`, /^the audit page takes only before, who, role, action, outcome, q, seq$/],
     ["who=a&who=b", /^who is given more than once$/],
   ];
   for (const [query, why] of refused) {
@@ -1735,7 +1735,7 @@ const overviewOf = async (snap, role = "viewer") => (await pagePanels("overview"
 
 test("the overview: the first run's three, then what needs a person, what waits, what runs and spend, the timeline and caps, waitlists and hosts (#710, #737)", async () => {
   const ids = (await overviewOf(snapshot())).map(([id]) => id);
-  assert.deepEqual(ids.filter((id) => !SHELL_PANEL_IDS.includes(id)), ["p-setup", "p-setup-pi", "p-setup-empty", "p-needs", "p-waiting", "p-active", "p-spend", "p-timeline", "p-caps", "p-waitlists", "p-hosts"]);
+  assert.deepEqual(ids.filter((id) => !SHELL_PANEL_IDS.includes(id)), ["p-setup", "p-setup-pi", "p-setup-empty", "p-needs", "p-waiting", "p-active", "p-spend", "p-agent-writes", "p-timeline", "p-caps", "p-waitlists", "p-hosts"]);
   assert.deepEqual(ids.filter((id) => SHELL_PANEL_IDS.includes(id)).sort(), [...SHELL_PANEL_IDS].sort(), "and the shell's Parked count and headline");
 });
 

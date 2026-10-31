@@ -1,3 +1,4 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -35,7 +36,7 @@ function load() {
   const commands = [];
   const pi = new Proxy({}, { get: (_t, k) => (k === "registerTool" ? (t) => tools.push(t) : k === "registerCommand" ? (n, d) => commands.push(d) : () => {}) });
   indexMod.default(pi);
-  return { tool: (name) => tools.find((t) => t.name === name), command: commands[0] };
+  return { tool: (name) => withOperatorDiagnosis(tools.find((t) => t.name === name)), command: commands[0] };
 }
 const read = () => JSON.parse(readFileSync(settingsFile, "utf8"));
 function consoleCtx() {

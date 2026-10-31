@@ -34,7 +34,7 @@ export const PORTFOLIO_NO_ENVELOPE = "portfolio-no-envelope";
 import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
 import { callableModelRefs, zeroRatedFor } from "./reserve-estimate.mjs";
 import { outputCapView } from "./output-cap.mjs";
-import { answerTrailComment, consoleAnswerBy } from "./console-answer.mjs";
+import { answerTrailComment, consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
 import { forgeDeliveryJobId } from "./job-id.mjs";
 // The forge-comment tables (issue #710): every fixed sentence this file posts, in one leaf the reason catalog can import
 // without the job path. Re-exported below under the names they always had here.
@@ -309,7 +309,26 @@ async function endDurableRun(d, deps) {
 	if (deps.runBudgetLedger) await quietly("ledger", () => deps.runBudgetLedger.remove(d.runId));
 }
 
+/** A confirmed draft still belongs to the forge/account where it was captured. Check before even a
+ * refusal/approval comment can mint credentials; a restarted worker may serve another configured instance. */
+export async function checkDraftAnswerSource(job, deps) {
+	const provenance = consoleDraftOf(job?.console);
+	if (!provenance) return null;
+	const refused = reason => ({ outcome: "policy", reason, budgetReserved: false });
+	if (provenance.invalid || job.parkedReply !== true || !deps?.answerDraftStore || typeof deps.answerDraftRuntime?.checkSource !== "function") return refused("answer-draft-refused");
+	let meta, input;
+	try {
+		meta = await deps.answerDraftStore.readMeta(provenance.draftSourceRunId);
+		input = await deps.answerDraftStore.privateInput(provenance.draftSourceRunId);
+	} catch { throw new InfraRetry("answer draft provenance could not be read", { reason: "container-never-started", budgetReserved: false }); }
+	if (!meta || !["drafted", "sent"].includes(meta.status) || meta.draftRunId !== provenance.draftRunId || meta.draftDigest !== provenance.draftDigest || input?.source?.kind !== job.kind || String(input.source.repo).toLowerCase() !== String(job.repo).toLowerCase() || input.source.target?.type !== job.target?.type || input.source.target?.number !== job.target?.number || (input.source.projectId ?? null) !== (job.projectId ?? null) || (input.source.azure?.projectId ?? null) !== (job.azure?.projectId ?? null)) return refused("answer-draft-refused");
+	try { return await deps.answerDraftRuntime.checkSource(input.source) === true ? null : refused("answer-draft-config-changed"); }
+	catch { throw new InfraRetry("answer draft current forge identity could not be read", { reason: "container-never-started", budgetReserved: false }); }
+}
+
 export async function runJob(job, deps) {
+	const sourceRefusal = await checkDraftAnswerSource(job, deps);
+	if (sourceRefusal) return sourceRefusal;
 	const touches = [];
 	let touchLineageSkipped = null;
 	const recordTouch = async (value) => {
@@ -591,7 +610,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// never sets it classifies every abort as worker-abort, exactly as before.
 		runContainer,
 		cleanup, // (dirs) => void
-		comment, // (job, text) => void   (issue status; no-op for local jobs)
+		comment: rawComment, // (job, text) => void   (issue status; no-op for local jobs)
 		log = () => {},
 		// The outbox chain collector (INT-OUTBOX-CONTRACT). No-op default so a job whose wiring omits it --
 		// or a github job with no /outbox -- chains nothing. It NEVER throws (outbox.mjs), so its counts are
@@ -717,7 +736,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 	const wantsForgeToken = isForgeBacked || job.github === true;
 	let token = null;
 	let prepared = null;
+	const comment = job.answerDraft ? async () => {} : rawComment;
 	let watchCompleted = false;
+	let answerUsage = null;
 	let watchUsage = null;
 	let watchPolicyRefused = false;
 	// The job-count reservations still standing, in reserve order (issue #499 part B): what `reserveLedgers` took and
@@ -1020,6 +1041,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			await comment(job, required.comment(img.image ?? job.image ?? "selected image", "lacks authenticated exit support"));
 			return { outcome: "policy", reason: "job-image-model-failover-unsupported", exitCode: null, turns: null, tokens: null, budgetReserved: false };
 		}
+		if (job.answerDraft && !(img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY)) return { outcome: "policy", reason: "job-image-answer-draft-unsupported", budgetReserved: false };
 		if (job.gates && !(img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY)) {
 			await comment(job, APPROVAL_COMMENTS["job-image-approval-auth-unsupported"]);
 			return { outcome: "policy", reason: "job-image-approval-auth-unsupported", exitCode: null, turns: null, tokens: null, budgetReserved: false };
@@ -1125,6 +1147,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 
 		if (job.watch?.project && job.watch.project !== pickupProject) return { outcome: "policy", reason: "watch-project-mismatch", budgetReserved: false };
+		if (job.answerDraft?.project && job.answerDraft.project !== pickupProject) return { outcome: "policy", reason: "answer-draft-config-changed", budgetReserved: false };
 
 		// Is there a credential to run this job with at all? FREE, determinate and I/O-light: a pure function
 		// of the job's provider, the worker env, and (only when the env has no key) one small readFileSync of
@@ -1198,6 +1221,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		const credentialJobs = [job];
 		if (job.watch && job.watchDecisionModel && job.watchDecisionModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.watchDecisionModel.provider, model: job.watchDecisionModel.id });
 		if (job.questionGrouping && job.questionGroupModel && job.questionGroupModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.questionGroupModel.provider, model: job.questionGroupModel.id });
+		if (job.answerDraft && job.answerDecisionModel && job.answerDecisionModel.provider !== job.provider) credentialJobs.push({ ...job, provider: job.answerDecisionModel.provider, model: job.answerDecisionModel.id });
 		for (const credentialJob of credentialJobs) {
 			const credential = await checkProviderCredential(credentialJob, { modelEndpoints });
 			if (credential.unavailable) {
@@ -1594,7 +1618,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// carry `secrets` the current set would refuse, and buildContainerEnv would write every one of them.
 		// The same set the loader uses, imported, so the two cannot drift, and checked before the resolver so
 		// no wiring of it can skip the check.
-		const secondaryCredentialNames = new Set(job.questionGrouping && job.questionGroupModel ? providerKeyCandidates(job.questionGroupModel.provider) : job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []);
+		const secondaryCredentialNames = new Set(job.answerDraft && job.answerDecisionModel ? providerKeyCandidates(job.answerDecisionModel.provider) : job.questionGrouping && job.questionGroupModel ? providerKeyCandidates(job.questionGroupModel.provider) : job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []);
 		const loadReserved = secretsArmed(job) ? Object.keys(job.secrets ?? {}).find((name) => RESERVED_ENV_NAMES.has(name) || secondaryCredentialNames.has(name)) : undefined;
 		const resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: RESERVED_ENV_NAMES.has(loadReserved) } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
 		if (resolved.profileUnknown) {
@@ -2250,7 +2274,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		if (job.parkedReply === true && job.console !== undefined) {
 			const by = consoleAnswerBy(job.console);
 			if (by === null) log("console_answer_by_invalid", { kind: job.kind ?? null });
-			else if (await claimConsoleTrail(redis, job, log)) await comment(job, answerTrailComment(by, job.trigger?.comment?.body));
+			else if (await claimConsoleTrail(redis, job, log)) await comment(job, answerTrailComment(by, job.trigger?.comment?.body, job.console?.draftRunId));
 		}
 
 		// The user the gate above decided is the user that runs: one answer, never two call sites that agree.
@@ -2299,7 +2323,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		if (!deps.approvalRequest && session?.resumed === true && (job.parkedReply === true || typeof job.trigger?.comment?.body === "string" && (answeredPark || Number.isSafeInteger(job.replyReceivedAt)))) {
 			if (answeredPark) {
 				const receivedAt = Number.isSafeInteger(deps.replyReceivedAt) ? deps.replyReceivedAt : now.getTime();
-				await deps.recordTouch({ runId: answeredPark.runId, cause: "question-answer", at: Math.max(answeredPark.at, receivedAt), receivedAt: Math.max(answeredPark.at, receivedAt), answerSource: job.console?.by === "panel" ? "panel" : job.console ? "console" : "forge", parkedAt: answeredPark.at, scopeId: touchScopeOf(job, hostName), project: pickupProject ?? undefined, nonce: sourceRunId });
+				await deps.recordTouch({ runId: answeredPark.runId, cause: "question-answer", at: Math.max(answeredPark.at, receivedAt), receivedAt: Math.max(answeredPark.at, receivedAt), answerSource: job.console?.draftRunId ? "draft" : job.console?.by === "panel" ? "panel" : job.console ? "console" : "forge", ...(job.console?.draftRunId ? { draftRunId: job.console.draftRunId } : {}), parkedAt: answeredPark.at, scopeId: touchScopeOf(job, hostName), project: pickupProject ?? undefined, nonce: sourceRunId });
 			} else {
 				deps.recordTouchGap();
 				log("touch_lineage_unavailable", { reason: "source-unavailable" });
@@ -2309,6 +2333,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		containerRan = true;
 		watchPolicyRefused = code === EXIT_POLICY;
 		watchUsage = Number.isFinite(tokens?.cost) && tokens.cost >= 0 ? { costUsd: tokens.cost } : null;
+		answerUsage = { tokens };
 		if (sourcePrimed && !lingering && !detached && !aborted && code === EXIT_COMPLETED) {
 			const rootKey = sessionKeyFor(job).split(".")[0];
 			const transcriptPath = join(prepared.session?.hostDir ?? prepared.live?.hostDir ?? join(prepared.jobDir, "session"), "current.jsonl");
@@ -2507,7 +2532,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// `abortReason` itself never reaches the record -- buildRecord copies named fields only.
 		// exitCode/turns/tokens carry the container's own exit, turn count, and usage totals; budgetReserved true post-reserve.
 		if (aborted) {
-			const reason = abortReason === "operator-cancel" ? "operator-cancel" : "worker-abort";
+			const reason = ["operator-cancel", "agent-cancel"].includes(abortReason) ? abortReason : "worker-abort";
 			// Awaited bare like every determinate refusal above: the adapter never throws by contract, and
 			// the one swallowed comment in this file (the catch's) justifies itself by its position.
 			await comment(job, TERMINAL_COMMENTS[reason]);
@@ -2550,11 +2575,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				// finishes before control leaves to cleanup. NOT reached on any other branch (policy, abort,
 				// over-budget, infra): an InfraRetry job is retried, so chaining there would double-enqueue.
 				// collectChain never throws; chainEnqueued/chainRefused are additive telemetry only.
-				const chain = await collectChain({ job, prepared });
+				const chain = job.answerDraft ? { enqueued: 0, refused: 0 } : await collectChain({ job, prepared });
 				// Issue #505: the plan, after the chain and on this branch only, for the reason the chain is here: a policy or
 				// infra exit collects nothing, and a retried job must not apply what its failed attempt wrote. `portfolio` is
 				// the pickup's decision; the collector asks the live file again, and both must agree. Never throws.
-				const plan = await collectPlan({ job, prepared, portfolio });
+				const plan = job.answerDraft ? null : await collectPlan({ job, prepared, portfolio });
 				// COMPLETED-ONLY PROMOTION, and the exclusivity is the point rather than an optimisation.
 				// A policy or infra exit leaves the canonical transcript byte-identical to what it was
 				// before this run, so a retry starts from exactly what the first attempt did -- promote on
@@ -2614,6 +2639,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				else if (job.awaitInput === true || job.parkedReply === true) await parkedLabel(job, false);
 				if (parked) await Promise.resolve().then(releaseParkedWindow).catch(() => {});
 				const taken = parked ? await Promise.resolve().then(takeHeldReplies).catch(() => null) : null;
+				if (parked && !approvalParked && promoted?.promoted === true && deps.answerDraftRuntime && sourceRunId) {
+					await deps.answerDraftRuntime.afterPark({ job, prepared, runId: sourceRunId, project: pickupProject, startedAt: now.getTime(), taken: Boolean(taken?.taken || Number(taken?.resumed) > 0) }).catch(() => log("answer_draft_enqueue_unavailable", {}));
+				}
 				// `taken` "other": a reply that got in between the release and the take already is the resumed job, so the
 				// comment says the run continues there too, never "Reply here" (review round 2).
 				if (parked) await comment(job, approvalParked ? APPROVAL_COMMENTS["awaiting-approval"] : taken?.taken === "here" || taken?.taken === "other" || Number(taken?.resumed) > 0 ? HELD_TAKEN_COMMENT : parkedComment(job.target));
@@ -2809,6 +2837,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 	} finally {
 		if (prepared && job.watch) await collectWatch({ job, prepared, completed: watchCompleted, policyRefused: watchPolicyRefused, usage: watchUsage }).catch(() => {});
 		if (prepared && job.questionGrouping) await deps.questionGroupRuntime?.collect({ job, prepared, completed: watchCompleted }).catch(() => {});
+		if (prepared && job.answerDraft) await deps.answerDraftRuntime?.collect({ job, prepared, completed: watchCompleted, result: answerUsage }).catch(() => {});
 		if (prepared) await cleanup(prepared).catch(() => {});
 	}
 }

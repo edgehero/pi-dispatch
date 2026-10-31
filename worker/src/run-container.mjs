@@ -315,7 +315,7 @@ export function makeRunContainer({
 		const env = beforeSpawn(() => buildContainerEnv({
 			size,
 			provider: job.provider,
-			...(job.questionGrouping && job.questionGroupModel ? { secondaryProvider: job.questionGroupModel.provider } : job.watch && job.watchDecisionModel ? { secondaryProvider: job.watchDecisionModel.provider } : {}),
+			...(job.answerDraft && job.answerDecisionModel ? { secondaryProvider: job.answerDecisionModel.provider } : job.questionGrouping && job.questionGroupModel ? { secondaryProvider: job.questionGroupModel.provider } : job.watch && job.watchDecisionModel ? { secondaryProvider: job.watchDecisionModel.provider } : {}),
 			model: job.model,
 			fork: job.fork ?? null,
 			thinkingLevel: job.thinkingLevel ?? null,
@@ -330,7 +330,7 @@ export function makeRunContainer({
 			hostEnv,
 			egress, // REQ-EGRESS-ALLOWLIST: emits HTTPS_PROXY/HTTP_PROXY/NO_PROXY/NODE_USE_ENV_PROXY, or nothing
 			egressProxy,
-			allowGlobalExtensions: job.watch || job.questionGrouping ? false : allowGlobalExtensions,
+			allowGlobalExtensions: job.answerDraft || job.watch || job.questionGrouping ? false : allowGlobalExtensions,
 			// REQ-GLOBAL-PI-OVERLAY: the per-job value comes off `job` (like maxTurns), the staged set off
 			// the closure (like allowGlobalExtensions) -- so a trigger can withhold what the operator staged.
 			// `!== false`, because staged packages LOAD unless a trigger explicitly opts out
@@ -342,7 +342,7 @@ export function makeRunContainer({
 			// Issue #683: the staged packages' container paths are the overlay's, so on the sandbox layout their prefix moves
 			// with it (`/opt/pi-global` to `/sandbox/pi-global`). A path not under the overlay is passed as it was.
 			packagePaths: (job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths).map((p) => (layout !== "mounts" && typeof p === "string" && p.startsWith(`${CONTAINER_GLOBAL_PI_DIR}/`) ? `${paths.global}${p.slice(CONTAINER_GLOBAL_PI_DIR.length)}` : p)),
-			forwardEnv: job.watch || job.questionGrouping ? [] : forwardEnv,
+			forwardEnv: job.answerDraft || job.watch || job.questionGrouping ? [] : forwardEnv,
 			// REQ-RESUMABLE-SESSION: the fixed container path, emitted only when this job HAS a transcript file, which
 			// since issue #643 is every prepared job (the live file), resume or not. The constant is imported rather than
 			// re-typed so the mount below and this variable name one path -- two literals is how they drift with both
@@ -449,7 +449,7 @@ export function makeRunContainer({
 			// Both facts, the kind the preparers branch on AND containment in this job's own directory, so a kind added later
 			// that works on a folder in place fails closed rather than relabelling it.
 			workspaceOwned: job?.kind !== "local" && insideDir(prepared.jobDir, prepared.workspace),
-			workspaceReadOnly: Boolean(job.watch || job.questionGrouping),
+			workspaceReadOnly: Boolean(job.answerDraft || job.watch || job.questionGrouping),
 			// Issue #545: `-i`, so the container's stdin is the pipe the key is written to. Absent otherwise, and the argv is
 			// byte-identical to one built before the signed exit line.
 			...(exitKey !== null ? { extraFlags: ["-i"] } : {}),
@@ -624,7 +624,7 @@ export function makeRunContainer({
 		// deletes what the stage made.
 		let sink;
 		try {
-			sink = openJobLog(name, { exitKey, ...(job.watch ? { suppressCapture: true } : {}) });
+			sink = openJobLog(name, { exitKey, ...(job.watch || job.answerDraft ? { suppressCapture: true } : {}) });
 		} catch (error) {
 			await teardown();
 			removeInbox();
@@ -704,7 +704,7 @@ export function makeRunContainer({
 			}
 			// A throwing sink.write is swallowed so a misbehaving sink cannot break the tee or hang the run.
 			const tee = (chunk) => {
-				if (!job.watch) onOutput(chunk);
+				if (!job.watch && !job.answerDraft) onOutput(chunk);
 				try {
 					sink.write(chunk);
 				} catch {}
@@ -831,6 +831,8 @@ export function makeRunContainer({
 				// the retry class from `code` alone; this only picks the label inside exit 2.
 				let exitReason = null;
 				let approval = null;
+				let answerDraftDigest = null;
+				let questionRefDigest = null;
 				// Issue #501 (PR #542's review, round 3): the decisive exit line's own `code` (decisiveExitLine), which the
 				// dollar settlement compares with the container's real exit code before it trusts that line's cost.
 				let exitLineCode = null;
@@ -856,7 +858,7 @@ export function makeRunContainer({
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null } = await sink.close());
+					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -901,6 +903,8 @@ export function makeRunContainer({
 				}
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
+				if (job.answerDraft && code === 0 && exitKey !== null && exitAuthResult === "verified" && /^[a-f0-9]{64}$/.test(answerDraftDigest ?? "")) Object.defineProperty(prepared, "answerDraftDigest", { value: answerDraftDigest, configurable: true });
+				if (job.awaitInput && code === 0 && exitReason === "awaiting-input" && exitKey !== null && exitAuthResult === "verified" && /^[a-f0-9]{64}$/.test(questionRefDigest ?? "")) Object.defineProperty(prepared, "questionRefDigest", { value: questionRefDigest, configurable: true });
 				// `exitWhy` only when the line named one, so every other run resolves the object it always did.
 				const why = { ...(exitKey !== null && exitAuthResult === "verified" && modelRoles ? { modelRoles } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(exitKey !== null && exitAuthResult === "verified" && providerFailure ? { providerFailure } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof toolsStarted === "boolean" ? { toolsStarted } : {}), ...(exitKey !== null && exitAuthResult === "verified" && typeof replaySafe === "boolean" ? { replaySafe } : {}) };
 				// `resources` (issue #596) only when the exit line carried a block, so every other run resolves the object it always did.

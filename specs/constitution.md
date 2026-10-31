@@ -60,11 +60,14 @@ passing, on the record — issue #80.)
 
 ## CONST-ISOLATION-CONTAINER-PER-JOB
 
+- **AMENDED 2026-10-31 (#772)**: A draft job adds only a bounded, host-written answer input under `/job`, alongside the existing job inputs. Its workspace is read only. It receives no Valkey, console token, canonical parent session, resolver, overlay extension, arbitrary command or executable repository context. Only the trusted answer-source readers and classifier are available; their structured result is bound to an authenticated exit digest. Existing worker-owned container/network arguments remain the boundary.
+
 - **Statement**: Every agent invocation shall execute inside a single-use container, destroyed on
   completion. **No harness-invoked pi process shall run on the host** — the harness never invokes pi on
-  the host; every job agent runs inside its ephemeral container. An operator's own interactive pi session
-  (for example one hosting the admin extension) is out of scope: it processes no adversarial input, is
-  operator-present, and holds no harness credentials. The constraint governs harness-invoked agents
+  the host; every job agent runs inside its ephemeral container. An operator’s own pi process
+  (for example one hosting the admin extension, including explicitly delegated headless operation under #766) is
+  out of scope: the harness does not invoke it and grants it no job credentials. Its bounded tools and prompt-injection
+  residual are described in `DES-ADMIN-VIA-PI-EXTENSION` and `SECURITY.md`. The constraint governs harness-invoked agents
   against untrusted input.
 - **Why**: pi ships no permission system. Untrusted issue text drives an unrestricted agent holding our
   credentials; without the container it runs as the harness user, on the host, with the harness user's
@@ -1503,3 +1506,4 @@ passing, on the record — issue #80.)
 | 2026-10-29 (#749) | Every constitutional entry UNCHANGED, checked. `CONST-BUDGET-BEFORE-TOKENS` keeps all free determinate refusals before spend; hold telemetry records successful existing reservations, never adds a reservation. `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, `CONST-MERGE-NEVER-AUTOMATIC` and container isolation are unchanged. Console views and estimates add no agent execution or automatic action. |
 | 2026-10-30 (#751) | Every constitutional constraint UNCHANGED, checked. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, `CONST-MERGE-NEVER-AUTOMATIC`, container isolation and token custody retain their worker boundaries; Configuration detail pages invoke no resolver, model, container or automatic action and their writes keep person confirmation. |
 | 2026-10-30 (#771) | UNCHANGED, checked for #771: CONST-ISOLATION-CONTAINER-PER-JOB (ordinary jobs unchanged; manual shells reuse existing isolation), CONST-TOKEN-SCOPED-PER-JOB (prepare clone token is host-only and discarded), CONST-BUDGET-BEFORE-TOKENS (no agent/provider call or paid reservation in preparation; all free refusals precede mint/clone), CONST-RETRY-INFRA-ONLY (policy returns and infrastructure retries), CONST-NO-CONTEXT-FILES-MANDATORY (prepared arbitrary-ref workspace never enters a job), CONST-PI-VERSION-PINNED and CONST-MERGE-NEVER-AUTOMATIC. No constitutional exception introduced. |
+| 2026-10-31 (#766, #772) | `CONST-ISOLATION-CONTAINER-PER-JOB` AMENDED for the bounded read-only answer input/profile. `CONST-BUDGET-BEFORE-TOKENS` and `CONST-TRIGGER-AUTHOR-GATE` UNCHANGED, checked: unattended writes only narrow explicit authority, current paid-start admission repeats before enqueue, all worker free gates still precede tokens/reserve, and only a person confirms a console answer. `CONST-PI-VERSION-PINNED`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked; no dependency pin, retry meaning or merge path changes. |

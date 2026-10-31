@@ -1,0 +1,2 @@
+/** Action capability styling, copied from design/tools/gen_components.py. */
+export const AGENT_POLICY_CSS = "\n.agent-policy { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px 10px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-2); color: var(--ink-muted); font-size: 13px; line-height: 19px; overflow-wrap: anywhere; }\n.agent-policy b { color: var(--ink); }\n.agent-policy .ic { flex: none; }\n";

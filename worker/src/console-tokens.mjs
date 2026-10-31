@@ -31,7 +31,7 @@ export const TOKEN_PREFIX = "pdc_";
 export const TOKEN_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 
 /** The roles a token can carry: an operator may write, a viewer only reads. */
-export const TOKEN_ROLES = Object.freeze(["operator", "viewer"]);
+export const TOKEN_ROLES = Object.freeze(["operator", "viewer", "agent"]);
 
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_FILE = "console-tokens.json";

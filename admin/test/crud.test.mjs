@@ -1,3 +1,4 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
@@ -15,7 +16,7 @@ const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const indexMod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
 const { handleDashboardAction } = indexMod;
-// Issue #642: every write these drive is audited as the panel into PI_LOGS_DIR's console-audit chain, so the file's
+// Issue #642: every write these drive is audited as agents with correlated applied receipts into PI_LOGS_DIR's console-audit chain, so the file's
 // writes land in a directory of its own rather than the account's default logs directory.
 process.env.PI_LOGS_DIR = tempDir("pi-crud-logs-");
 
@@ -26,7 +27,7 @@ function registeredTools() {
   indexMod.default(pi);
   return tools;
 }
-const toolByName = (name) => registeredTools().find((t) => t.name === name);
+const toolByName = (name) => withOperatorDiagnosis(registeredTools().find((t) => t.name === name));
 /** A ctx whose `confirm` records the (title, message) it is shown and returns a canned answer. */
 function toolCtx({ hasUI = true, answer = true } = {}) {
   const shown = [];
@@ -185,7 +186,7 @@ test("a build without the dialog primitives degrades to a notice, no write", asy
 
 /**
  * The model-callable WRITE tools are the confirm gate in code: the model emits the call, a human answers the
- * confirm. These prove the three arms of `confirmedWrite` at the tool boundary -- no UI refuses (throws), a
+ * confirm. These prove the approval/grant arms of the shared tool action adapter at the tool boundary -- no UI refuses (throws), a
  * decline applies nothing, an approval writes -- plus that the confirm shows the concrete change, plus the
  * out-of-range guard. Each tool reads its paths from process.env, so the temp files are wired through it.
  */
@@ -201,7 +202,7 @@ test("dispatch_set: refuses (throws) with no interactive operator and writes not
   const { ctx } = toolCtx({ hasUI: false });
   await assert.rejects(
     () => toolByName("dispatch_set").execute("id", { key: "dailyCap", value: "99" }, undefined, undefined, ctx),
-    /refused|interactive operator/,
+    /PI_DISPATCH_AGENT_WRITES=1/,
   );
   assert.equal(read(settingsFile).dailyCap, 25, "no write without a confirm-capable UI");
 });
@@ -232,34 +233,34 @@ test("dispatch_set: a dollar key's confirm shows the EFFECTIVE before-value and 
     withSettings({});
     let probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "1000000" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: 2 \(env PI_MAX_COST_USD\) to 1000000$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 2 \(env PI_MAX_COST_USD\) to 1000000\nUndo: .+$/);
     withSettings({ maxCostUsd: "1.50" });
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to 3$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to 3\nUndo: .+$/);
     delete process.env.PI_MAX_COST_USD;
     withSettings({});
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
     // No deployment pointer here: pi's environment is not the worker's, so an absent variable proves nothing.
-    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) to 3$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) to 3\nUndo: .+$/);
     // An EMPTY variable is unset, the worker's own reading.
     process.env.PI_MAX_COST_USD = "";
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "3" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) to 3$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: \(not in the overlay; the worker's environment is not visible here\) to 3\nUndo: .+$/);
     delete process.env.PI_MAX_COST_USD;
     // The AFTER side of an unset is the value the key falls back to, by the same rule.
     process.env.PI_MAX_COST_USD = "2.00";
     withSettings({ maxCostUsd: "1.50" });
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to 2\.00 \(env PI_MAX_COST_USD\)$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to 2\.00 \(env PI_MAX_COST_USD\)\nUndo: .+$/);
     delete process.env.PI_MAX_COST_USD;
     withSettings({ maxCostUsd: "1.50" });
     probe = toolCtx({ answer: false });
     await toolByName("dispatch_set").execute("id", { key: "maxCostUsd", value: "" }, undefined, undefined, probe.ctx);
-    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to \(not in the overlay; the worker's environment is not visible here\)$/);
+    assert.match(probe.shown[0].message, /^maxCostUsd: 1\.50 \(overlay\) to \(not in the overlay; the worker's environment is not visible here\)\nUndo: .+$/);
   } finally {
     if (saved === undefined) delete process.env.PI_MAX_COST_USD;
     else process.env.PI_MAX_COST_USD = saved;
@@ -289,7 +290,7 @@ test("dispatch_set: a blank settings file (whitespace or a BOM only) is written 
     const outNo = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCap", value: "7" }, undefined, undefined, declined.ctx));
     assert.equal(outNo.applied, false);
     assert.equal(declined.shown.length, 1, `the operator is asked, as over a missing file (${JSON.stringify(text)})`);
-    assert.match(declined.shown[0].message, /^dailyCap: \(unset\) to 7$/);
+    assert.match(declined.shown[0].message, /^dailyCap: \(unset\) to 7\nUndo: .+$/);
     assert.equal(readFileSync(settingsFile, "utf8"), text, "a decline leaves the blank file alone");
     const approved = toolCtx({ answer: true });
     const outYes = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCap", value: "7" }, undefined, undefined, approved.ctx));
@@ -341,7 +342,7 @@ test("dispatch_trigger_add: a file changed while the confirm was open is refused
   const ctx = { hasUI: true, ui: { confirm: async () => (writeFileSync(path, JSON.stringify(other)), true) } };
   await assert.rejects(
     toolByName("dispatch_trigger_add").execute("id", { kind: "label", flow: "frontend-fix", labels: ["pi:fix"] }, undefined, undefined, ctx),
-    /changed after this change was built from it/,
+    /changed since its preview/,
   );
   assert.deepEqual(read(path), other, "nothing of the stale confirm was written over the other session's change");
 });
@@ -592,7 +593,7 @@ test("dispatch_pause_add: an invalid window (from==to) is rejected, nothing writ
 test("dispatch_pause_add: refuses with no interactive operator and writes nothing", async () => {
   const path = tmpPauses({ windows: [] });
   const { ctx } = toolCtx({ hasUI: false });
-  await assert.rejects(() => toolByName("dispatch_pause_add").execute("id", { scope: "x", from: "22:00", to: "06:00" }, undefined, undefined, ctx), /refused|interactive operator/);
+  await assert.rejects(() => toolByName("dispatch_pause_add").execute("id", { scope: "x", from: "22:00", to: "06:00" }, undefined, undefined, ctx), /PI_DISPATCH_AGENT_WRITES=1/);
   assert.equal(read(path).windows.length, 0);
 });
 
@@ -645,7 +646,7 @@ test("dispatch_pause_edit: out-of-range index throws and writes nothing", async 
 test("dispatch_pause_edit: refuses with no interactive operator and writes nothing", async () => {
   const path = tmpPauses({ windows: [{ scope: "acme/web", from: "22:00", to: "06:00" }] });
   const { ctx } = toolCtx({ hasUI: false });
-  await assert.rejects(() => toolByName("dispatch_pause_edit").execute("id", { index: 0, to: "07:00" }, undefined, undefined, ctx), /refused|interactive operator/);
+  await assert.rejects(() => toolByName("dispatch_pause_edit").execute("id", { index: 0, to: "07:00" }, undefined, undefined, ctx), /PI_DISPATCH_AGENT_WRITES=1/);
   assert.equal(read(path).windows[0].to, "06:00");
 });
 
@@ -999,7 +1000,7 @@ test("dispatch_limit_add: a row that limits nothing is rejected by the shared pa
 test("dispatch_limit_add: refused with no interactive operator (headless)", async () => {
   const path = tmpLimits({ version: 1, limits: [] });
   const { ctx } = toolCtx({ hasUI: false });
-  await assert.rejects(() => toolByName("dispatch_limit_add").execute("id", { scope: "a/b", day: 1 }, undefined, undefined, ctx), /interactive operator/);
+  await assert.rejects(() => toolByName("dispatch_limit_add").execute("id", { scope: "a/b", day: 1 }, undefined, undefined, ctx), /PI_DISPATCH_AGENT_WRITES=1|is confirm:/);
   assert.deepEqual(read(path).limits, []);
 });
 
@@ -1235,8 +1236,9 @@ test("dispatch_set: a window that would leave no maxCostUsd anywhere is warned i
     assert.deepEqual(read(settingsFile), { dailyCostUsd: "10" }, "approved: written");
     process.env.PI_MAX_COST_USD = "2";
     const fine = toolCtx({ answer: false });
-    await toolByName("dispatch_set").execute("id", { key: "dailyCostUsd", value: "10" }, undefined, undefined, fine.ctx);
-    assert.doesNotMatch(fine.shown[0].message, /Warning/);
+    const unchanged = textOf(await toolByName("dispatch_set").execute("id", { key: "dailyCostUsd", value: "10" }, undefined, undefined, fine.ctx));
+    assert.deepEqual(unchanged, { applied: false, unchanged: true }, "an identical cap is explicitly a no-op");
+    assert.deepEqual(fine.shown, [], "no write or confirmation for a no-op");
   } finally {
     if (saved === undefined) delete process.env.PI_MAX_COST_USD;
     else process.env.PI_MAX_COST_USD = saved;
@@ -1271,7 +1273,8 @@ function envelopeBody(over = {}) {
 
 /** A deployment with an envelope, the env pointed at it, and the allocation seams on the fake; restored after. */
 async function withAllocation(fn, { envelope = envelopeBody(), limits = null, settings = { maxCostUsd: "2" }, redis = fakeAllocRedis() } = {}) {
-  const saved = Object.fromEntries(ALLOC_ENV_KEYS.map((k) => [k, process.env[k]]));
+  const saved = Object.fromEntries([...ALLOC_ENV_KEYS, "PI_DISPATCH_AGENT_WRITES"].map((k) => [k, process.env[k]]));
+  process.env.PI_DISPATCH_AGENT_WRITES = "1";
   const dir = tempDir("pd-504c-");
   const files = {
     projects: join(dir, "projects.json"),
@@ -1379,7 +1382,7 @@ test("dispatch_allocations: envelope numbers, the split, spend under the worker'
 test("dispatch_envelope_set is refused headless and writes nothing; a declined confirm writes nothing either (#504)", async () => {
   await withAllocation(async ({ files, redis }) => {
     const before = readFileSync(files.envelope, "utf8");
-    await assert.rejects(() => toolByName("dispatch_envelope_set").execute("id", { minIntervalHours: 0 }, undefined, undefined, { hasUI: false, ui: {} }), /interactive operator/);
+    await assert.rejects(() => toolByName("dispatch_envelope_set").execute("id", { minIntervalHours: 0 }, undefined, undefined, { hasUI: false, ui: {} }), /PI_DISPATCH_AGENT_WRITES=1|is confirm:/);
     assert.equal(readFileSync(files.envelope, "utf8"), before, "headless: the file is untouched");
     const no = toolCtx({ answer: false });
     const out = textOf(await toolByName("dispatch_envelope_set").execute("id", { minIntervalHours: 0 }, undefined, undefined, no.ctx));
@@ -1543,7 +1546,7 @@ test("a revert (operator-revert) skips the interval and the step, and is still r
 });
 
 // Issue #642: the allocation writes land in the console's audit chain as the panel too, beside their own audit file.
-test("dispatch_priorities_set and dispatch_envelope_set are audited as the panel in the deployment's console-audit chain (#642)", async () => {
+test("dispatch_priorities_set and dispatch_envelope_set are audited as agents with correlated applied receipts in the deployment's console-audit chain (#642)", async () => {
   await withAllocation(async ({ files }) => {
     const { ctx } = headless();
     await toolByName("dispatch_priorities_set").execute("id", { projects: [{ id: "shop", weight: 3 }, { id: "platform", weight: 1 }] }, undefined, undefined, ctx);
@@ -1551,9 +1554,12 @@ test("dispatch_priorities_set and dispatch_envelope_set are audited as the panel
     await toolByName("dispatch_envelope_set").execute("id", { totalUsd: "120" }, undefined, undefined, confirm.ctx);
     const dir = join(files.logs, "console-audit");
     const rows = readFileSync(join(dir, readdirSync(dir).find((n) => n.endsWith(".jsonl"))), "utf8").trim().split("\n").map((l) => JSON.parse(l));
-    assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.actor.role]), [["priorities-set", "ok", "panel"], ["envelope-set", "ok", "panel"]]);
-    assert.equal(rows[1].target, files.envelope);
-    assert.notEqual(rows[1].beforeDigest, rows[1].afterDigest, "the envelope row carries the digests the confirm judged");
+    assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.actor.role]), [["priorities-set", "ok", "agent"], ["priorities-set", "ok", "agent"], ["envelope-set", "ok", "agent"], ["envelope-set", "ok", "agent"]]);
+    assert.deepEqual(rows.map((r) => r.action), ["write", "write-applied", "write", "write-applied"]);
+    assert.equal(rows[0].ticket, rows[1].ticket);
+    assert.equal(rows[2].ticket, rows[3].ticket);
+    assert.equal(rows[2].target, files.envelope);
+    assert.notEqual(rows[2].beforeDigest, rows[2].afterDigest, "the envelope row carries the digests the confirm judged");
   });
 });
 
@@ -1578,4 +1584,16 @@ test("the operator-typed paths refuse a change that would break the envelope too
     },
     { limits: [{ scope: "github:acme/zzz", weekUsd: "5" }] },
   );
+});
+
+test("interactive priorities always require a person's confirm even when headless writes were granted (#766)", async () => {
+  await withAllocation(async ({ redis }) => {
+    const declined = toolCtx({ answer: false });
+    const out = textOf(await toolByName("dispatch_priorities_set").execute("call", { projects: [{ id: "shop", weight: 3 }, { id: "platform", weight: 1 }] }, null, null, declined.ctx));
+    assert.equal(out.applied, false);
+    assert.equal(declined.shown.length, 1);
+    assert.match(declined.shown[0].message, /shop: weight 3/);
+    assert.match(declined.shown[0].message, /Undo:/);
+    assert.equal(redis.store.has("alloc:plan"), false, "decline performs no allocation write");
+  });
 });

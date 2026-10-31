@@ -1,3 +1,4 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync } from "node:fs";
@@ -29,7 +30,7 @@ function registeredTools() {
   indexMod.default(pi);
   return tools;
 }
-const toolByName = (name) => registeredTools().find((t) => t.name === name);
+const toolByName = (name) => withOperatorDiagnosis(registeredTools().find((t) => t.name === name));
 function toolCtx({ answer = true } = {}) {
   const shown = [];
   const ui = { confirm: async (title, message) => { shown.push({ title, message }); return answer; } };
@@ -103,11 +104,12 @@ test("the views say a project's size with its hostShare and minJobs, which the h
   assert.equal(text, "Scoped limits:\n  project:shop: <=2 at once · memory 1536m · 0.5 CPUs · 1 member");
 });
 
-test("dispatch_limits lists a sized row with its size in the summary", async () => {
+test("dispatch_limits lists a sized row with typed size fields", async () => {
   deployment({ version: 3, limits: [{ scope: "project:shop", memory: "2g", cpus: 0.5, dayUsd: "5" }] });
   process.env.VALKEY_URL = "not-a-url"; // degrade synchronously
   const rows = JSON.parse((await toolByName("dispatch_limits").execute("id", {}, undefined, undefined, {})).content[0].text);
-  assert.match(rows[0].summary, /memory 2g · 0\.5 CPUs/);
+  assert.equal(rows[0].summary, undefined);
+  assert.equal(rows[0].cpus, 0.5);
   assert.equal(rows[0].memory, "2g");
 });
 

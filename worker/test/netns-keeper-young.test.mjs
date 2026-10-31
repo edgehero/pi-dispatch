@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildRecord } from "../src/run-history.mjs";
 import { NETNS_KEEPER_AFTER_PROXY_GRACE_MS, NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_YOUNG_HOLD_MAX_MS, NETNS_KEEPER_YOUNG_MARGIN_MS, judgeNetnsKeeper, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence, netnsKeeperYoungWaitMs } from "../src/netns-keeper.mjs";
-import { NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING } from "../src/processor.mjs";
+import { NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL_COMMENTS } from "../src/processor.mjs";
 import { sandboxKeeperCheck } from "../src/sandbox.mjs";
 
 // Issue #476: a keeper that is merely young is not a keeper that does not hold. When the podman stack starts together,
@@ -558,7 +558,7 @@ test("a poll read hung on an unreachable Valkey does not hold a finished job's o
 
 // Gate round 4 of PR #479: the SUCCESS path. The poll stops at the container's observed exit, and again as runJob
 // returns, before anything is recorded.
-function runWorld({ get, runDelayMs = 10, code = 0, egress = { ok: true }, egressDelayMs = 0, cleanupDelayMs = 0 } = {}) {
+function runWorld({ get, runDelayMs = 10, code = 0, egress = { ok: true }, egressDelayMs = 0, cleanupDelayMs = 0, collectChain } = {}) {
 	const controller = new AbortController();
 	const w = bugWorld({ cancelPollMs: 5, get, cancelJob: (_id, reason) => (controller.abort(reason), true) });
 	const processor = mod.makeProcessor({
@@ -579,6 +579,7 @@ function runWorld({ get, runDelayMs = 10, code = 0, egress = { ok: true }, egres
 		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, weeklyCap: null, monthlyCap: null, concurrency: 3, softHoldPct: null }),
 		deps: {
 			egressPreflight: async () => (egressDelayMs ? await new Promise((r) => setTimeout(r, egressDelayMs)) : null, egress),
+			...(collectChain ? { collectChain } : {}),
 			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
 			// Ignores the abort, as a container that exits on its own at the same moment does.
 			runContainer: async () => (await new Promise((r) => setTimeout(r, runDelayMs)), { code, aborted: false, turns: 1 }),
@@ -612,14 +613,19 @@ test("a cancel read in flight as the container exits is never acknowledged, and 
 });
 
 test("a cancel acknowledged before the container's exit was seen is the cancel, even if it exited on its own (#476, PR #479 gate round 4)", { skip }, async () => {
-	const w = runWorld({ runDelayMs: 30 });
-	w.keys.set("cancel:req:local-bug", "operator-cancel");
-	const result = await w.processor(w.job, "tok", w.controller.signal);
-	assert.deepEqual([result.outcome, result.reason], ["policy", "operator-cancel"], "as the operator was told");
-	assert.deepEqual(w.ops, [["set", "cancel:ack:local-bug"], ["del", "cancel:req:local-bug"]]);
-	assert.deepEqual([buildRecord(w.records.at(-1)).outcome, buildRecord(w.records.at(-1)).reason], ["policy", "operator-cancel"]);
-	assert.ok(w.logs.some((l) => l.event === "cancel_acked_as_container_exited" && l.exitCode === 0), "the race is named");
-	assert.ok(w.comments.includes("Stopped: the operator cancelled this run. Partial work may exist. Not retried."), "the run took the existing cancel path, not a completed one relabelled");
+	for (const reason of ["operator-cancel", "agent-cancel"]) {
+		let chained = 0;
+		const w = runWorld({ runDelayMs: 30, collectChain: async () => { chained++; return null; } });
+		const prefix = reason === "agent-cancel" ? "cancel:agent:" : "cancel:";
+		w.keys.set(`${prefix}req:local-bug`, reason);
+		const result = await w.processor(w.job, "tok", w.controller.signal);
+		assert.deepEqual([result.outcome, result.reason], ["policy", reason], "as the caller was told");
+		assert.deepEqual(w.ops, [["set", `${prefix}ack:local-bug`], ["del", `${prefix}req:local-bug`]]);
+		assert.deepEqual([buildRecord(w.records.at(-1)).outcome, buildRecord(w.records.at(-1)).reason], ["policy", reason]);
+		assert.ok(w.logs.some((l) => l.event === "cancel_acked_as_container_exited" && l.exitCode === 0), "the race is named");
+		assert.ok(w.comments.includes(TERMINAL_COMMENTS[reason]), "the run took the exact cancel path, not a completed one relabelled");
+		assert.equal(chained, 0, "the raced cancellation stops before completed-only paid follow-up collection");
+	}
 });
 
 test("a cancel acknowledged before a pre-spend refusal returned is recorded as the cancel, the refusal named in the log (#476, PR #479 gate round 4)", { skip }, async () => {

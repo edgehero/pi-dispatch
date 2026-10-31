@@ -1,15 +1,121 @@
 {
   "card": "OverviewAllClear",
   "pr": 3,
-  "panels": [],
+  "panels": [
+    "p-agent-writes"
+  ],
   "elements": [
-    {"el":"The headline: All clear. 4 jobs running, nothing needs you.","kind":"readme","status":"new","panel":"p-headline","source":"admin/src/console/panels/overview.mjs#overviewHeadline","golden":["panels/overview-all-clear.operator","panels/overview-all-clear.viewer"],"shows":"All clear. 4 jobs running, nothing needs you."},
-    {"el":"Needs you's empty state","kind":"readme","status":"new","panel":"p-needs","source":"admin/src/console/panels/overview.mjs#overviewNeeds","sentence":"admin/src/console/panels/overview.mjs#NEEDS_EMPTY.body","golden":["panels/overview-all-clear.operator","panels/overview-all-clear.viewer"]},
-    {"el":"The same panels as the problem state, so nothing jumps","kind":"readme","status":"new","source":"admin/src/console/pages.mjs#panelIds","golden":["panels/overview-all-clear.operator"],"shows":"<section id=\"p-waitlists\" data-panel>"},
-    {"el":"In line still counts the retry","kind":"readme","status":"new","panel":"p-waiting","source":"admin/src/console/panels/overview.mjs#overviewWaiting","golden":["panels/overview-all-clear.operator"],"shows":"job waiting to start"},
-    {"el":"A quiet grey timeline, only running jobs in colour","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","golden":["panels/overview-all-clear.operator"],"shows":"tp--run"},
-    {"el":"Hosts with every doctor passing (Doctor: 40 passing)","kind":"readme","status":"new","panel":"p-hosts","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["panels/overview-all-clear.operator"],"shows":"Doctor: 40 passing"},
-    {"el":"No job waits for a slot, another run, or a time or check.","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","sentence":"admin/src/console/panels/overview.mjs#WAITLISTS_CALM","golden":["panels/overview-all-clear.operator","panels/overview-all-clear.viewer"]},
-    {"el":"Sample values","kind":"sample","status":"illustrative","reason":"sample values; the panel golden draws its own canned deployment in the fixture's names"}
+    {
+      "el": "The headline: All clear. 4 jobs running, nothing needs you.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-headline",
+      "source": "admin/src/console/panels/overview.mjs#overviewHeadline",
+      "golden": [
+        "panels/overview-all-clear.operator",
+        "panels/overview-all-clear.viewer"
+      ],
+      "shows": "All clear. 4 jobs running, nothing needs you."
+    },
+    {
+      "el": "Needs you's empty state",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-needs",
+      "source": "admin/src/console/panels/overview.mjs#overviewNeeds",
+      "sentence": "admin/src/console/panels/overview.mjs#NEEDS_EMPTY.body",
+      "golden": [
+        "panels/overview-all-clear.operator",
+        "panels/overview-all-clear.viewer"
+      ]
+    },
+    {
+      "el": "The same panels as the problem state, so nothing jumps",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#panelIds",
+      "golden": [
+        "panels/overview-all-clear.operator"
+      ],
+      "shows": "<section id=\"p-waitlists\" data-panel>"
+    },
+    {
+      "el": "In line still counts the retry",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waiting",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaiting",
+      "golden": [
+        "panels/overview-all-clear.operator"
+      ],
+      "shows": "job waiting to start"
+    },
+    {
+      "el": "A quiet grey timeline, only running jobs in colour",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-timeline",
+      "source": "admin/src/console/timeline.mjs#timelineHtml",
+      "golden": [
+        "panels/overview-all-clear.operator"
+      ],
+      "shows": "tp--run"
+    },
+    {
+      "el": "Hosts with every doctor passing (Doctor: 40 passing)",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-hosts",
+      "source": "admin/src/console/panels/overview.mjs#overviewHosts",
+      "golden": [
+        "panels/overview-all-clear.operator"
+      ],
+      "shows": "Doctor: 40 passing"
+    },
+    {
+      "el": "No job waits for a slot, another run, or a time or check.",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaitlists",
+      "sentence": "admin/src/console/panels/overview.mjs#WAITLISTS_CALM",
+      "golden": [
+        "panels/overview-all-clear.operator",
+        "panels/overview-all-clear.viewer"
+      ]
+    },
+    {
+      "el": "Sample values",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "sample values; the panel golden draws its own canned deployment in the fixture's names"
+    },
+    {
+      "el": "p-agent-writes",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/agent-writes.mjs#overviewAgentWrites",
+      "golden": [
+        "panels/agent-writes-populated.operator"
+      ],
+      "shows": [
+        "Agent writes today",
+        "mini1, UTC today; local audit only",
+        "confirmed applied writes"
+      ]
+    },
+    {
+      "el": "Agent count is unavailable or a partial lower bound when evidence cannot prove an exact total",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-agent-writes",
+      "source": "admin/src/console/panels/agent-writes.mjs#overviewAgentWrites",
+      "golden": [
+        "panels/agent-writes-partial.operator"
+      ],
+      "shows": [
+        "read is partial"
+      ]
+    }
   ]
 }

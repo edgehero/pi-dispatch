@@ -150,6 +150,18 @@
       "kind": "sample",
       "status": "illustrative",
       "reason": "sample values"
+    },
+    {
+      "el": "Every action carries an agent capability and evaluated reason",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/actions.mjs#previewAction",
+      "holds": "agent-policy",
+      "golden": [
+        "panels/confirm-preview.operator"
+      ],
+      "shows": "Person confirms for an agent",
+      "reason": "The shared transition policy chooses the mark and reason for the actual before and after values; behavioral policy tests verify narrowing and widening counterexamples."
     }
   ]
 }

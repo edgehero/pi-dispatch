@@ -2558,8 +2558,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-ADMIN-VIA-PI-EXTENSION
 
+- **AMENDED 2026-10-31 (#766)**: One action policy and exact transition evidence span console and tools.
+  Agent reads have a closed typed projection, and agent mutations receive correlated applied audit receipts.
+
 - **AMENDED 2026-10-30 (#750)**: The confirm-gated writes include `dispatch_trigger_fire`. It shares the console fire planner/executor,
-  preserves the complete schedule payload, and adds maxTurns to trigger-edit parity. No new unattended role is added.
+  preserves the complete schedule payload, and adds maxTurns to trigger-edit parity. Issue #766 adds the unattended agent role described below.
 
 - **Decision**: The admin surface is a **pi extension** shipped in an `admin/` workspace, loaded into the
   operator's own interactive pi session (via `-e`, `~/.pi/agent/extensions`, or a trust-gated
@@ -2839,26 +2842,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   three wires through the forge title, the five badges on their loops and the mention pair; with the title
   rule removed it reports the long name on the climbing mention wire; with the reading rule removed it
   reports labels beside other edges on five of its pages; after the fix, nothing. The
-  LLM-callable tools are the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs` (which returns
-  the fold as JSON whose every monetary value carries its `class`, so a model consuming it cannot launder
-  an estimate into a fact; the `dollars` beside it are enforcement amounts in integer micro-dollars, with no
-  class), `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`,
-  `dispatch_secrets`, `dispatch_connections`, `dispatch_allocations`, `dispatch_capacity` (issue #599: the capacity report through the CLI's own read and
-  function, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue**
-  `dispatch_run`; the **confirm-gated writes** `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`,
-  `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`,
-  `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete`, `dispatch_wait_cancel`,
-  `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`, `dispatch_envelope_set`; and the
-  **delegated allocation write** `dispatch_priorities_set`. **This
-  list is the pin**, scanned by `admin/test/wiring.test.mjs` exactly as `REQ-ADMIN-VIA-PI-EXTENSION`'s is:
-  the two enumerations drifted identically and undetectably, which is the argument for a mechanism over
-  prose in both places. The delegated allocation write (issue #504) applies a priorities plan with no confirm and
-  with no interactive operator, and is the one write that does not route through `confirmedWrite`
-  (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`). It calls the worker's own `applyPlan` through `read-model.mjs`
-  (`applyPriorities`), writer `operator-session`, and fills the plan's `basis` itself from the state it reconciled
-  to; a plan that leaves `_other` out keeps `_other`'s current weight, any other project left out is
-  `plan-incomplete`. The allocation read and the priorities write return enums, ids and micro-dollars through an
-  allowlist of fields, never a plan's reason text. The envelope write plans the change through the worker's
+  LLM-callable tools are the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_secrets`, `dispatch_connections`, `dispatch_allocations`, `dispatch_capacity`, `dispatch_failed`, `dispatch_waiting`, `dispatch_hosts`, `dispatch_setup`; and the **writes** `dispatch_pause`, `dispatch_resume`, `dispatch_run`, `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`, `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`, `dispatch_envelope_set`, `dispatch_priorities_set`, `dispatch_cancel`, `dispatch_retry_failed`, `dispatch_remove_failed`, `dispatch_rerun`, `dispatch_allocation_revert`.
+  **This list is the pin**, compared both ways with registrations in `admin/test/wiring.test.mjs`.
+  The shared `ACTIONS` table declares unattended, confirm or person for every action, with a reason and tool
+  mapping. `action-policy.mjs` judges the normalized transition; HTTP and pi adapters use the same judgment.
+  Every interactive pi write confirms. Headless writes need the actual process grant captured at registration
+  and an unattended transition. No deployment file, pointer, model argument or external decision skill is an
+  authority source. Source-built command suggestions are the sole argv exception in model reads.
+  The envelope write plans the change through the worker's
   `parseEnvelope` before its confirm, then sets `alloc:envelope:expected` to the new digest BEFORE it replaces the
   file (`replaceFile`, the projects writer's) and puts the key back when the file is not written: a file written
   first is what a host reads as a hand edit. The project, limit and per-job cap writers judge their result against
@@ -2935,11 +2926,19 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   cannot hold the view on "reading" for the panel's life (past the bound the next `u` reads again), an answer that arrives after Esc is not drawn, and the 7 days are labelled with the minute the report
   was read, so they cannot read as contradicting the live lines above them. Its hint rides the runs divider
   beside `j`, after it, so a long project filter clips the hint rather than its id. A
-  write can be **operator-typed** (`ctx.ui` `select`/`input`/`confirm` dialogs from the overlay, or a
-  `/dispatch set` command) **or model-initiated but operator-approved**: a write tool routes through
-  `confirmedWrite`, which applies the change only after the operator approves a `ctx.ui.confirm` showing the
-  concrete before/after, and **refuses — writing nothing — when no interactive operator is present**
-  (`ctx.hasUI` false). The model emits the call; the human answers the confirm. Both paths reach the same
+  write can be **operator-typed** through the panel/commands, or model-initiated through the shared
+  tool action adapter. It previews through the same action, shows a human confirm and Undo whenever UI is
+  present, then replans and compares authority fingerprints before applying. Headless use requires the
+  process's session-captured `PI_DISPATCH_AGENT_WRITES=1` plus a policy-proven unattended exact transition.
+  Person actions are refused by every tool, including one called from an interactive operator session.
+  Planner exceptions do not become model text. A source-owned WeakMap marks public policy/request-only
+  diagnostics; all other errors become a fixed refusal and the full diagnosis goes only to the gated local
+  operator UI. The read adapter applies the same boundary around execution, JSON extraction and projection,
+  including typed operational readers: malformed retention and unreachable allocation errors are private
+  diagnoses, not model facts. A stale UI getter cannot replace the original fixed model error. A charset or
+  path-redaction regex was rejected as proof that source prose is safe.
+  Atomic writers recheck file digests and policy under their lock; no cached approval can widen a changed
+  transition. Both paths reach the same
   `writeTriggers`/`writeSettings` (validated by the shared `parseTriggers`/`writeOverlay`, atomic tmp+rename,
   fail-closed) and both services **live-reload** `triggers.json`/`settings.json`, so a change takes effect
   without a restart (`OQ-008`), keeping the running config on an invalid edit. The extension also ships an
@@ -3093,7 +3092,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
     The gate is one wrapper per DOOR -- anywhere a `ctx` enters this extension from pi -- rather than at the
     75 call sites, which is the shape `send` took. There are six: the command handler, the exported
-    dashboard action, `confirmedWrite` (every tool that confirms), the secrets command, the setup wizard and
+    dashboard action, the shared tool action adapter (every model write), the secrets command, the setup wizard and
     the `session_start` handler.
     Scrubbing is per LINE, since a confirm body is written with newlines, and **the selection is translated
     BACK to the caller's own option**: pi returns the exact string it was handed, so handing it a scrubbed
@@ -3246,57 +3245,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     `DES-ONE-SHOT-DISARM-IN-THE-FILE`, which owns `on.disarmed`. The record is PII-free and worker-written, so
     this is not a trust judgement about the data: it is a property of the TERMINAL. A byte that moves the
     cursor, clears the screen or opens a hyperlink must not reach it from a stored field, whoever wrote
-    that field. One residual is named and accepted: a prompt injection in the operator's session
-    can invoke `dispatch_pause`/`dispatch_resume`, accepted because the outcome is durable-but-reversible
-    and money-safe — neither tool spends tokens nor raises the cap (`CONST-BUDGET-BEFORE-TOKENS`), so the
-    worst case is a queue stall the operator observes and undoes.
-    A **second residual is named but is NOT money-safe**, and is bounded by structure rather than by
-    reversibility: a prompt injection in the operator's session can invoke **`dispatch_run`**, which
-    enqueues a **paid** run that edits a folder in place with no undo. This **supersedes the Decision's
-    "reads plus `pause`/`resume` only" categorical** — `dispatch_run` is an *enqueue*, a third KIND of
-    model-callable tool beside the reads and the queue controls, admitted under `DES-AI-TRIGGER-FLOW-GATE`
-    and its companion requirement. "Third" is the kind, never a running count of tools: the Decision's list
-    is the inventory, and it is scanned rather than counted. `dispatch_run` still takes no spend knobs. The
-    injected call is bounded by six independent limits, not by
-    undo: (1) the operator-preconfigured **folder allowlist** (`PI_DISPATCH_RUN_ROOTS`, realpath +
-    containment) — the tool can fire only inside folders the operator chose; (2) the **per-flow committed
-    opt-in** (default deny, read at a pre-agent SHA, `DES-AI-TRIGGER-FLOW-GATE`); (3) the final
-    **dirty-tree refusal** — the tool has no force option (`DES-CLI-TRIGGER-FOR-LOCAL`); (4) **no spend-knob
-    params on the tool** — `model`, `maxTurns`, `dailyCap`, and `concurrency` are **not** tool arguments;
-    they resolve from the overlay/env per `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, so an injected call cannot
-    widen per-job spend; (5) a **per-hour rate limit** on `dispatch_run`; and (6) the **daily cap**
-    (`CONST-BUDGET-BEFORE-TOKENS`), the ultimate money bound, resolved consumer-side in the processor. The
-    money-safe framing therefore applies only to `dispatch_pause`/`dispatch_resume`, not to `dispatch_run`.
-    A **third residual is named and bounded by a human confirm, not by structure**: **every** confirm-gated
-    write tool the Decision lists -- deliberately not re-enumerated here, because this paragraph carried its
-    own copy of that list and the copy went stale at four names while eleven shipped (issue #280), and the
-    scan that now pins the Decision's list does not read this field -- can change a limit (the daily cap
-    included), add a paid trigger, open or move a pause window, set a per-scope spend cap, or cancel a held
-    job. Each routes through `confirmedWrite`, which **refuses unless the operator
-    is present** (`ctx.hasUI`) **and approves a `ctx.ui.confirm` dialog showing the concrete before/after** —
-    so a prompt-injected session emits only the *call*; the *approval* is a human keypress it cannot forge,
-    and with no interactive UI (print/headless) the write is refused, not silently applied. This is the same
-    human-approval gate the operator-typed `/dispatch set` and overlay CRUD already were; it does not weaken
-    `CONST-BUDGET-BEFORE-TOKENS` (the cap is still checked before tokens — only its *value* changes, under an
-    operator confirm, exactly as a typed `set` would) or `CONST-TRIGGER-AUTHOR-GATE` (whose webhook
-    author-gating is untouched; the confirm is the human approval for a locally-configured trigger). The
-    residual that remains is an inattentive operator rubber-stamping a confirm; the dialog defaults to deny
-    and shows the concrete change to make that a deliberate act, and the `operate-pi-dispatch` skill tells the
-    model to state the change plainly and to accept a decline rather than retry it. Strictly, tool absence was
-    safer than a confirm — that trade is taken deliberately to make the surface AI-operable, and the write
-    tools are `sequential` so two writes cannot interleave.
-    A **fourth residual is named and bounded by arithmetic rather than a keypress** (issue #504):
-    `dispatch_priorities_set` writes a priorities plan with no confirm, and works headless. Its parameters are
-    weights, reasons, repo weights and a plan life only, so it cannot reach the envelope, a floor, a cap, a trigger or
-    a setting; the envelope's only model-callable writer is `dispatch_envelope_set`, which is confirm-gated like the
-    third residual's tools.
-    What an injected call can do is move spend between projects, and the worker bounds that by the rules of
-    `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`: no project below its floor, no total above the envelope's, and no
-    project moved by more than `maxStepPct` of the total per `minIntervalHours`. The worst case, worked: $100 a
-    week, floors of $10, a 25% step and a 24-hour interval. An injection can push one project to $90 and the other
-    to $10 in four days, and total spend stays at or under $100. One extra step per Valkey flush is named there
-    too. The trade is deliberate: the bound is arithmetic, not presence, so a confirm would buy nothing and would
-    make the unattended portfolio job impossible. The tool is `sequential` like every write.
+    that field.  - **Prompt injection remains a bounded residual.** All interactive tool writes require a person to
+    confirm their concrete preview and Undo. A granted headless session can only use declared unattended
+    transitions: explicit cap decreases, ordinary restrictive limit additions, existing flag-off changes,
+    new pauses, cancellation/removal, bounded priorities, and admitted local starts. Mixed requests are
+    refused as a whole. It cannot resume another person's pause, restore inherited limits, alter scope,
+    size or minimums, add/retarget triggers, or bypass a confirmed retry. The worker still enforces every
+    budget gate. A paid run still edits its folder in place and cannot undo that work: roots, current HEAD
+    flow opt-in, clean tree, no spend arguments, shared hourly allowance and the worker's cap remain six
+    independent bounds. Fire now and local/cron reruns share the fresh admission path and require both
+    process grant values explicitly. Forge reruns remain with a person. Bounded priorities remain an
+    arithmetic delegation under the envelope; a headless caller additionally needs the process write grant,
+    and an interactive caller now confirms. An inattentive person can approve a harmful confirmed change;
+    the preview and bundled skill make that trade explicit. An external owner-controlled decision skill may
+    supply proposals from private context, but cannot grant authority, widen caps or send a parked answer.
   - **The operator's pi version is uncontrolled**, so the extension runs a **load-time capability probe**
     of the exact API surface it uses and, on any miss, registers **nothing** — all-or-nothing rather than
     half-loading. The supported version is the pin, `0.99.1` (`CONST-PI-VERSION-PINNED`; it was `0.80.7` until issue #509). Residual risk,
@@ -3343,10 +3305,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   layer (control bytes replaced with spaces, C0 + DEL + C1 since issue #337 and wider since #402, 120-char cap, the
   `job_failed` line's own bound); `OQ-035` records
   that the belt is a bound, not a classification. The view states the retention split (31d forge, 7d
-  local/cron) because a uniform claim would be false for half the rows. REJECTED here: a
-  `dispatch_failed` model tool and a `failed` subcommand (both enumeration-pinned surfaces bought for
-  a keypress the panel already answers -- "one keypress away" is the acceptance, and the panel is the
-  keypress); a per-job delayed classifier (the breakdown line names parts counted from their own
+  local/cron) because a uniform claim would be false for half the rows. AMENDED #766: the earlier
+  rejection of a model failed-job read is reversed. Agents need the same closed failure facts to decide
+  cancellation, removal or a confirmed retry; the new read strips failedReason prose and returns only IDs,
+  queue, attempt count and a known reason token. A `failed` slash subcommand remains unimplemented.
+  Still rejected: a per-job delayed classifier (the breakdown line names parts counted from their own
   sources, `INT-WAIT-PROFILES-CONTRACT`'s refusal of a guessing classifier stands). AMENDED 2026-10-25 (#737,
   PR 3a): that refusal's two grounds were a guess and a job's data, and neither holds for what replaced the need:
   the worker records why it deferred each job (`INT-DEFER-REASON-KEY`), and the console's `readWaiting` lists the
@@ -3776,6 +3739,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE`, `DES-WORKER-ON-HOST`
 
 ## DES-AI-TRIGGER-FLOW-GATE
+
+- **AMENDED 2026-10-31 (#766)**: Delegated Fire now and re-run of local/cron jobs also pass the same realpath roots, clean tree, current-HEAD flow permission and shared per-hour allowance at preview and again at enqueue (only enqueue consumes). Both grants must be explicit in the console/tool process environment; deployment files and pointers cannot supply them. Command and portfolio starts refuse, forge re-runs stay person-only on every model tool path, and paid worker gates still run independently. A model’s persona, project brief or rationale never grants authority.
 
 - **AMENDED 2026-10-30 (#750)**: Manual cron fire from either console or tool uses the same process-granted roots, clean-tree rule,
   current-HEAD flow opt-in and hourly attempt counter as dispatch_run. Preview checks without consuming an attempt;
@@ -7653,6 +7618,8 @@ free local model, or using a few successful live probes as proof of every routin
   `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY`.
 
 ## DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY
+
+- **AMENDED 2026-10-31 (#766, #772)**: An answer originating from a completed draft must remain on its captured forge/account even in late or failure callbacks. A changed or unreadable source closes/counts the inbox and releases the semantic window, but suppresses fallback reads, enqueue and comments with the fixed `steer_late_source_unavailable` diagnostic. It never carries private answer text to a newly configured instance. Both `operator-cancel` and `agent-cancel` prevent continuation, including a container exit racing the cancellation; agent origin remains excluded from human-touch accounting. Ordinary admitted late messages are UNCHANGED, checked.
 
 - **Status**: issue #646, part 1 (2026-10-17): the close and the operator branch. Part 2 (2026-10-17): the forge
   branches and the window release, with comment routing. `worker/src/inbox-settle.mjs` (`settleInbox`,
@@ -15953,7 +15920,13 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
 
 ## DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN
 
-- **Status**: **PROPOSED, spec only** (2026-10-27, issue #753). Nothing of it ships. It is the design of
+- **Current source and terminal state (#772)**: Before constructing paid execution data, resolve checks the exact canonical parked run and timestamp, the live approval store and pending-answer queues. Cleared/replaced/answered sources pass without spending; unknown or partial authority reads throw for infrastructure retry. A terminal classification/submission cannot be overwritten by concurrent calls or a late collector; passed/dropped/sent state cannot be revived. The configured repository flow is materialized as bounded reviewed text at the prepared SHA instead of silently ignored by the restricted loader. Known credential bytes and common encodings are refused before classification/citation/persistence; this is accident protection with the existing eight-character floor, not a promise to detect unknown or arbitrarily transformed secrets.
+
+- **Platform extension (#766, #772)**: External private skills may interpret a user’s persona and project specifications, then propose the same bounded platform actions or supply data through a trusted injected source reader. Core contracts contain no personal profile, private repository locator, persona selector or new credential channel. Guidance never changes admission or unattended authority. Adding a new citation source requires an explicit trusted reader/contract review, not a model-supplied endpoint. Classified drafts remain proposals; sending and adopting standing guidance stay person-only.
+
+- **Concrete boundary (#772)**: The host persists a private source reference, derives one immutable refs-only queued job and uses the ordinary forge admission, reserve and settlement. A no-post profile withholds executable context, builtin tools, global/loose extensions, staged packages, arbitrary forwarding and parent sessions. Trusted read tools fetch the actual posted question, read-only default-branch files, project-and-repository-scoped standing answers and admitted earlier replies; they never offer a forge write verb. GitHub App permissions are narrowed for this read job; existing PATs cannot be attenuated, so the restricted tool profile remains their enforcement boundary. The decision model is called through `ModelRuntime.classify` at exact npm pi 1.4.0, and both classifier and generation calls share the cap meter. Structured submit requires an allowed category, normalized probability evidence, independent source coverage and citations actually read. A host check binds the output to the authenticated exit digest and current rule/source identities. A worker drainer retries only pending scheduling infrastructure; determinate passes are recorded without silent no-ops. The console never connects the model to its own privileged write API.
+
+- **Status**: **IMPLEMENTED** (2026-10-31, issue #772). It is the design of
   `REQ-PARKED-ANSWERER`. Its open questions are `OQ-051`.
 - **Decision**: An answer rule starts a **draft job**, and a **person** replies through the console's existing
   parked-answer plan, using the draft or not. No new process reads untrusted text with any reach, and no new door onto
@@ -15975,7 +15948,7 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     the person.
   - **Sources are cited, or the form is not prefilled.** A citation is what lets the person check an answer in
     seconds, and what makes "drafted from what was already decided" true rather than claimed.
-  - **The question and the draft stay on the run pages.** Both are transcript text. The Parked page shows the verdict
+  - **The question and the draft stay on the run pages.** Both are private bounded text. The Parked page shows the verdict
     and the sources by name, and links to the runs.
 - **Why**: Many parked questions were already answered somewhere. A draft turns each of them into a quick check
   without adding a sender, a credential or a channel. And everything the draft job does is something a job already
@@ -16511,3 +16484,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-30 (#771) | Built DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL and amended DES-OPERATOR-CONSOLE outbound-link rule and private Sandboxes UI. Recorded explicit local enrollment, Enter-only argv execution, clean deployment environment, separate bounded control transport, immutable shell identity and durable inventory. UNCHANGED, checked: DES-SANDBOX-IS-A-FRESH-CONTAINER isolation principles, DES-DOCTOR-RESULTS-PUBLISHED existing records, ordinary paid processors and OQ-050 browser-terminal rejection. |
 | 2026-10-30 (#771, phone identifier review) | `DES-OPERATOR-CONSOLE` CORRECTED after the complete browser width sweep: Sandboxes identifiers and request-state banners wrap complete values inside their cards, including 193-character workspace ids and every preparation state at 320/375-pixel phone widths. Generator and console page rules agree; real-CSP browser counterexamples retain full text across both themes and intermediate/desktop widths. Shared visual tokens/stylesheets, all worker/control/session/inventory contracts, role boundaries and confirmation behavior UNCHANGED, checked. |
 | 2026-10-31 (#771, initial live snapshot) | DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL and DES-OPERATOR-CONSOLE keep a fresh Sandboxes page's cleanup warnings until a fresh live read replaces them. Rejected replaying an old cached empty view and waiting for a later timer tick to repair it. Failed fresh reads retain the rendered panels with stale status. Other-page cache/replay policy, cursor reconnects, shared visual tokens/styles, role guards, actions and all worker/container contracts UNCHANGED, checked. |
+| 2026-10-31 (#766, #772) | `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AI-TRIGGER-FLOW-GATE`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` and `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN` AMENDED: explicit transition authority, private no-post classifier jobs, evidence-bound drafts and generic external-guidance extension seams. `DES-OPERATOR-CONSOLE` uses the existing ticket/guard/visual system; parent session ownership, approval authority, ordinary queue contracts and all unrelated decisions UNCHANGED, checked. |

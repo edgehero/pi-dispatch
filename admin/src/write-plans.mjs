@@ -384,6 +384,20 @@ function mcpFieldNearMiss(key) {
 
 /** The refusal for a call that carries a tool-proof field or a near miss of one (see `TOOL_PROOF_FIELDS`), or null. */
 export function wideningFieldRefusal(params, tool) {
+  const visited = new Set();
+  const operatorAnswerField = (value) => {
+    if (!value || typeof value !== "object" || visited.has(value)) return null;
+    visited.add(value);
+    for (const [key, entry] of Object.entries(value)) {
+      const folded = key.toLowerCase().replace(/[_\-. ]/g, "");
+      if (["answerrule", "answerrules", "standinganswer", "standinganswers"].includes(folded)) return folded.startsWith("standing") ? "standingAnswers" : "answerRules";
+      const nested = operatorAnswerField(entry);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  const answerField = operatorAnswerField(params);
+  if (answerField) return `${tool} cannot set ${answerField}: answer rules are hand-written and standing answers are adopted only by a person in the console`;
   const seen = new Set();
   const hasRoles = (value) => {
     if (!value || typeof value !== "object" || seen.has(value)) return false;
@@ -438,22 +452,29 @@ export function triggerList(paths, fs = nodeFs) {
   return Array.isArray(t?.triggers) ? t.triggers : [];
 }
 
+/** Pure request validation: no file, environment or queue values can enter these diagnostics. */
+export function triggerRequestRefusal(params, tool = "dispatch_trigger_add") {
+  const widening = wideningFieldRefusal(params, tool);
+  if (widening !== null) return widening;
+  // Issue #737: the kind first (its fields depend on it), then every field it does not take, by name, before anything
+  // else is judged. The tool-proof sweep above stays first, so a near miss of a cap is refused as the widening it is,
+  // never as a mere unknown field.
+  // The kinds it takes are named and the sent one never is (issue #737, the rule for a field: a caller's bytes do not
+  // travel into a sentence a page or a model reads).
+  if (typeof params.kind !== "string" || !Object.hasOwn(TRIGGER_ADD_FIELDS, params.kind)) return `unknown trigger kind: kind must be one of ${Object.keys(TRIGGER_ADD_FIELDS).join(", ")}`;
+  const unknown = unknownTriggerField(params, params.kind);
+  if (unknown !== null) return `${tool} does not take ${fieldNamed(unknown)} for a ${params.kind} trigger; it takes ${TRIGGER_ADD_FIELDS[params.kind].join(", ")}. Nothing was changed`;
+  return null;
+}
+
 /**
  * Plan a trigger add (`dispatch_trigger_add`): the widening fields, the blessed backend, the model reference (the
  * loader's own `validateModelRef`), then the entry from `buildTriggerEntry`. `env` is where PI_BACKENDS is read.
  * `{ plan: { entry, mutate, target, expect, title, message, summary } }` or `{ refusal }`.
  */
 export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_add", surface = "tool", fs = nodeFs }) {
-  const widening = wideningFieldRefusal(params, tool);
-  if (widening !== null) return { refusal: widening };
-  // Issue #737: the kind first (its fields depend on it), then every field it does not take, by name, before anything
-  // else is judged. The tool-proof sweep above stays first, so a near miss of a cap is refused as the widening it is,
-  // never as a mere unknown field.
-  // The kinds it takes are named and the sent one never is (issue #737, the rule for a field: a caller's bytes do not
-  // travel into a sentence a page or a model reads).
-  if (typeof params.kind !== "string" || !Object.hasOwn(TRIGGER_ADD_FIELDS, params.kind)) return { refusal: `unknown trigger kind: kind must be one of ${Object.keys(TRIGGER_ADD_FIELDS).join(", ")}` };
-  const unknown = unknownTriggerField(params, params.kind);
-  if (unknown !== null) return { refusal: `${tool} does not take ${fieldNamed(unknown)} for a ${params.kind} trigger; it takes ${TRIGGER_ADD_FIELDS[params.kind].join(", ")}. Nothing was changed` };
+  const requestRefusal = triggerRequestRefusal(params, tool);
+  if (requestRefusal !== null) return { refusal: requestRefusal };
   if (params.backend !== undefined) {
     const venue = backendRefusal(params.backend, env);
     if (venue !== null) return { refusal: venue };
@@ -505,8 +526,8 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   const cur = list[params.index];
   if (!cur) return { refusal: surface === "console" ? `no trigger at row ${params.index + 1} (have ${list.length})` : `no trigger at index ${params.index} (have ${list.length})` };
   const row = rowName("trigger", params.index, surface);
-  const flow = String(params.flow ?? "").trim();
-  if (!flow) return { refusal: "flow must be non-empty" };
+  const flow = params.flow === undefined ? undefined : String(params.flow).trim();
+  if (flow === "") return { refusal: "flow must be non-empty" };
   // #227, the same allowlist the add applies and for the same reason: the picker bounds what an operator
   // can choose, and the worker bounds what actually runs (DES-PER-TRIGGER-SECRET-PROFILE -- the overlay
   // is not the reviewed artifact).
@@ -551,11 +572,12 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
   // What the edit changes, each as `[key, before, after]` in the order the message has always listed them: the flow,
   // then the venue, the provider and the model it was sent, then the flags. The console bolds the two values.
   const changes = [
-    ["flow", String(cur.flow ?? "-"), flow],
+    ...(flow === undefined ? [] : [["flow", String(cur.flow ?? "-"), flow]]),
     ...(backend === undefined ? [] : [["backend", String(cur.backend ?? "-"), backend]]),
     ...["provider", "model", "maxTurns"].filter((k) => ref[k] !== undefined).map((k) => [k, String(rawRun[k] ?? "-"), String(ref[k])]),
     ...Object.keys(flags).map((k) => [k, String(rawRun[k] ?? "-"), String(flags[k])]),
   ];
+  if (changes.length === 0) return { refusal: "send at least one trigger field to edit" };
   return {
     plan: {
       index,
@@ -569,7 +591,7 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
       row,
       type: cur.type,
       changes,
-      mutate: (raw) => raw.map((tr, i) => (i === index ? { ...tr, run: { ...tr.run, flow, ...(backend !== undefined && { backend }), ...ref, ...flags } } : tr)),
+      mutate: (raw) => raw.map((tr, i) => (i === index ? { ...tr, run: { ...tr.run, ...(flow !== undefined && { flow }), ...(backend !== undefined && { backend }), ...ref, ...flags } } : tr)),
       target: paths.triggersPath,
       expect,
       ...confirmOf(`Edit ${row}`, `${row} (${cur.type}) ${changeText(changes)}`),

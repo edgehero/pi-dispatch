@@ -1,3 +1,4 @@
+import { answererRun, standingAnswerEditor, offeredAnswerDraft } from "./answerer.mjs";
 import { sandboxLinks } from "../sandbox-links.mjs";
 import { modelRolesTelemetryOf } from "@edgehero/pi-dispatch/run-history";
 /**
@@ -438,6 +439,7 @@ export function runChat(view) {
   if (refusedBeforeStart(record)) return html``;
 
   const title = "Chat";
+  if (record?.purpose === "answer-draft") return titled(title, html`<p>This draft helper takes no replies. Review and send the answer from the parked source run ${runLink(record.answerDraft?.sourceRunId)}.</p>`);
   if (chat.unreachable) return titled(title, html`<p class="warn">The queue could not be read (is Valkey reachable?), so whether this run can chat is unknown. The next refresh tries again.</p>`);
   const jobId = typeof view.query?.id === "string" && RUN_ID_RE.test(view.query.id) ? view.query.id : null;
   const answering = chat.state === "answered" && typeof chat.answeringJobId === "string";
@@ -465,6 +467,7 @@ export function runChat(view) {
     return titled(title, html`${status}${via}${send}${readOnly}`);
   }
   if (chat.mode === "reply") {
+    const offered = view.query?.id === view.data?.answerer?.privateDraft?.meta?.runId ? offeredAnswerDraft(view) : null;
     const link = view.data?.run?.record ? targetLink(view.data.run.record, view.env) : "-";
     // Issue #647: the form only where the planner would plan the answer (`parkedAnswerCheck`, its own predicate): a pull
     // request's park, a forge without a reply route or expired job data shows the planner's sentence instead. A check that
@@ -474,9 +477,9 @@ export function runChat(view) {
     const why = check?.unreachable ? html`<p class="warn">Whether it can be answered from here could not be read; the preview checks again.</p>` : null;
     const keptTranscript = view.data?.transcript?.exists === true;
     const question = keptTranscript ? html`<div data-run-question></div><p class="card__sub">The question is the last assistant entry of the transcript <a href="#transcript">below</a>.</p>` : html`<p>Read the question on the forge thread: ${link}. The live transcript is no longer kept.</p>`;
-    const answer = refusal !== null ? ui.banner({ status: "attention", sm: true, title: PARKED_ELSEWHERE_TITLE, body: refusal, actions: forgeLinkOf(record, view.env) ? ui.outLink({ href: forgeLinkOf(record, view.env), label: "Answer on the forge", btn: "primary" }) : null }) : canAct(view) ? record?.reason === "awaiting-approval" ? ui.approvalForms({ jobId, id: "run-approval" }) : ui.answerForm({ jobId, id: "run-answer", hint: "Preview the answer before posting it and resuming the run." }) : readOnly;
+    const answer = refusal !== null ? ui.banner({ status: "attention", sm: true, title: PARKED_ELSEWHERE_TITLE, body: refusal, actions: forgeLinkOf(record, view.env) ? ui.outLink({ href: forgeLinkOf(record, view.env), label: "Answer on the forge", btn: "primary" }) : null }) : canAct(view) ? record?.reason === "awaiting-approval" ? ui.approvalForms({ jobId, id: "run-approval" }) : ui.answerForm({ jobId, id: "run-answer", hint: "Preview the answer before posting it and resuming the run.", guarded: Boolean(view.data?.answerer?.rules?.length), value: offered?.draft ?? "", draft: offered ? { draftRunId: offered.meta.draftRunId, digest: offered.digest } : null, keepStanding: Boolean(view.data?.answerer?.rules?.length && record?.project) }) : readOnly;
     const gate = record?.reason === "awaiting-approval" ? html`<p>Awaiting approval for <span class="code">${record.approval?.action ?? "unknown action"}</span>.</p><p>${record.approval?.action === "budget-raise" ? "Worker-enforced: the declared cap remains subject to deployment and scoped budgets." : "Advisory: the worker does not enforce this external action."}</p>` : null;
-    return ui.questionCard({ jobId, waited: Number.isFinite(msOf(record?.endedAt)) ? ageText(view.now - msOf(record.endedAt)) : null, project: record?.project, target: link, body: html`${gate}${question}${why}`, answer });
+    return ui.questionCard({ jobId, waited: Number.isFinite(msOf(record?.endedAt)) ? ageText(view.now - msOf(record.endedAt)) : null, project: record?.project, target: link, body: html`${gate}${question}${why}`, answer: html`${answer}${view.data?.answerer?.rules?.length && record?.project && canAct(view) && record?.reason !== "awaiting-approval" ? standingAnswerEditor({ id: "standing-from-answer", projects: [record.project], runId: jobId, repo: `${record.kind}:${String(record.target ?? "").split("#")[0]}` }) : null}` });
   }
   // fork: whether the record names a session the host-local fork can find, said before the command is offered.
   const kept = sessionSavedOf(record);
@@ -930,3 +933,6 @@ function forkLine(r, view) {
     ${ui.field({ label: "Message (optional)", id: "fork-message", control: ui.input({ id: "fork-message", name: "message" }) })}
     ${ui.btn({ type: "submit", label: "Preview a fork", kind: ["sm", "paid"], icon: "rerun" })}</form>`;
 }
+
+/** Private answer-rule text is mounted only on operator run pages. */
+export const runAnswerDraft = answererRun;

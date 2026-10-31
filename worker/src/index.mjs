@@ -9,8 +9,8 @@ import { jobContainerName } from "./backend-local.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { cleanTouch } from "./touch-state.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
-import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey } from "./cancel-state.mjs";
-import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL_COMMENTS, runJob } from "./processor.mjs";
+import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey, agentCancelReqKey, agentCancelAckKey } from "./cancel-state.mjs";
+import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL_COMMENTS, runJob, checkDraftAnswerSource } from "./processor.mjs";
 import { CANCELLED_BEFORE_START_COMMENT, SIZE_REFUSAL_COMMENTS } from "./comment-tables.mjs";
 import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
@@ -267,10 +267,10 @@ export function makeRunningJobs() {
 
 // A free pre-pickup refusal needs its own project snapshot, before settlement can await a live configuration edit.
 // It never enters pickup, whose one snapshot must stay after lost-lock checks and immediately before pause gates.
-function makeSandboxBoundaryRecorder({ projects, settleSteerBeforePickup, recordRun, now }) {
-	return async (job, sandboxBoundary) => {
+function makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun, now }) {
+	return async (job, boundary) => {
 		const project = projectOf(job.data, projects());
-		const result = { ...sandboxBoundary, budgetReserved: false };
+		const result = { ...boundary, budgetReserved: false };
 		await settleSteerBeforePickup({ job, result });
 		await recordRun({ job, result, project, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
 		return result;
@@ -286,7 +286,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	const rejectedSeen = new Set();
 	// Watch producer refusals finish before pickup and cannot carry a steering session.
 	const recordWatchOutcome = recordRun;
-	// A kept-folder refusal happens before pickup creates a keeper or takes a host slot. Its existing inbox and
+	// A free boundary refusal happens before pickup creates a keeper or takes a host slot. Its existing inbox and
 	// held replies still need a final close before the record, just as every terminal path inside pickup does.
 	const settleSteerBeforePickup = async ({ job, result }) => {
 		let held = null;
@@ -297,7 +297,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const steered = await settleInbox({ redis, job, result, log: deps?.log ?? (() => {}), lateContext: { heldResumed: Number(held?.resumed) > 0 }, ...(typeof deps?.onLateForge === "function" ? { onLateForge: deps.onLateForge } : {}) });
 		if (steered) result.steered = steered;
 	};
-	const recordSandboxBoundary = makeSandboxBoundaryRecorder({ projects, settleSteerBeforePickup, recordRun, now });
+	const recordBeforePickup = makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun, now });
 	// THE ONE DEFERRAL (issue #737, `defer-write.mjs`): every gate below that puts the job back on the delayed set goes
 	// through `deferTo`, which records the gate's reason in `defer:job:<id>` (bounded, fail-open) and then makes the move
 	// and the `DelayedError` throw the gates always made; `noteRetry` records an infrastructure retry's backoff before its
@@ -1060,7 +1060,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const modelAttemptId = `${job.queueName ?? QUEUE}:${job.id}`;
 		if (!settingsThrew && !settings?.invalid) {
 			try {
-				let effective = resolveModelRoles(effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields })), job.data.watch ? {} : await readModelRoles(), project, { authoredProvider: job.data.provider });
+				let effective = resolveModelRoles(effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields })), job.data.watch || job.data.answerDraft ? {} : await readModelRoles(), project, { authoredProvider: job.data.provider });
 				selectedEffective = effective;
 				if (effective.fallbackModels !== undefined || (effective.recover === true && effective.recoveryOf)) {
 					const endpoints = modelEndpoints?.() ?? [];
@@ -1391,7 +1391,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					cancelPolling = true;
 					cancelTick = (async () => {
 						try {
-							const req = await redis.get(cancelReqKey(job.id));
+							const humanReq = await redis.get(cancelReqKey(job.id));
+							const agentReq = humanReq == null ? await redis.get(agentCancelReqKey(job.id)) : null;
+							const req = humanReq ?? agentReq;
 							if (req === null || req === undefined) return;
 							// Stopped while this read was in flight: the outcome is being decided, so this request is left
 							// unanswered (its requester's timeout re-reads the job), never acknowledged after the fact.
@@ -1399,12 +1401,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 							// Bound to this worker (the injection comment in createWorker): `false` means the job
 							// left the tracked map in this same instant, in which case the finally below clears
 							// this interval anyway and the request's TTL reaps the key.
-							const took = await Promise.resolve(cancelJob(job.id, "operator-cancel")).catch(() => false);
+							const took = await Promise.resolve(cancelJob(job.id, agentReq === null ? "operator-cancel" : "agent-cancel")).catch(() => false);
 							if (took === false) return;
 							// Ack first, then consume the request: losing the DEL to a blip costs one redundant
 							// re-read, losing the ack costs the operator a false "nobody answered".
-							await redis.set(cancelAckKey(job.id), hostName, "PX", CANCEL_ACK_TTL_MS).catch(() => {});
-							await redis.del(cancelReqKey(job.id)).catch(() => {});
+							await redis.set(agentReq === null ? cancelAckKey(job.id) : agentCancelAckKey(job.id), hostName, "PX", CANCEL_ACK_TTL_MS).catch(() => {});
+							await redis.del(agentReq === null ? cancelReqKey(job.id) : agentCancelReqKey(job.id)).catch(() => {});
 							clearInterval(cancelPoll);
 						} catch {
 							// Fail open: the next tick re-asks.
@@ -1620,7 +1622,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						liveRan = r && typeof r === "object" && typeof r.liveSkipped === "string" ? r.liveSkipped : null;
 						openshellRan = r && typeof r === "object" && r.openshell !== null && typeof r.openshell === "object" ? r.openshell : null;
 						await stopCancelPoll();
-						const raced = r && r.aborted !== true && signal.aborted === true && signal.reason === "operator-cancel";
+						const raced = r && r.aborted !== true && signal.aborted === true && ["operator-cancel", "agent-cancel"].includes(signal.reason);
 						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });
 						const run = raced ? { ...r, aborted: true } : r;
 						return run?.aborted ? { ...run, abortReason: typeof signal.reason === "string" ? signal.reason : null } : run;
@@ -1698,9 +1700,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// the cancel the operator was told of, the result it replaced named in the log.
 			await stopCancelPoll();
 			let outcome = result;
-			if (signal.aborted === true && signal.reason === "operator-cancel" && result?.reason !== "operator-cancel") {
+			if (signal.aborted === true && ["operator-cancel", "agent-cancel"].includes(signal.reason) && result?.reason !== signal.reason) {
 				deps.log?.("cancel_acked_before_result", { jobId: job.id, was: `${result?.outcome}/${result?.reason ?? ""}` });
-				outcome = { ...result, outcome: "policy", reason: "operator-cancel" };
+				outcome = { ...result, outcome: "policy", reason: signal.reason };
 			}
 			await settleSteer({ result: outcome });
 			recordAfterGate({ job, result: outcome, startedAt, endedAt: new Date().toISOString() });
@@ -1731,19 +1733,21 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// so it survives the restart.
 			// `readPending: false` asks only whether the poll ALREADY acknowledged a cancel (the signal), and leaves a request it
 			// had not read unanswered.
+			let cancellationReason = signal?.reason === "agent-cancel" ? "agent-cancel" : "operator-cancel";
 			const operatorCancelled = async ({ readPending = true } = {}) => {
-				if (signal?.aborted === true) return signal.reason === "operator-cancel";
+				if (signal?.aborted === true) return ["operator-cancel", "agent-cancel"].includes(signal.reason);
 				if (!readPending) return false;
 				if (typeof redis?.get !== "function") return false;
 				let req = null;
 				try {
 					req = await redis.get(cancelReqKey(job.id));
+					if (req == null) { req = await redis.get(agentCancelReqKey(job.id)); if (req != null) cancellationReason = "agent-cancel"; }
 				} catch {
 					return false;
 				}
 				if (req === null || req === undefined) return false;
-				await Promise.resolve(redis.set?.(cancelAckKey(job.id), hostName, "PX", CANCEL_ACK_TTL_MS)).catch(() => {});
-				await Promise.resolve(redis.del?.(cancelReqKey(job.id))).catch(() => {});
+				await Promise.resolve(redis.set?.(cancellationReason === "agent-cancel" ? agentCancelAckKey(job.id) : cancelAckKey(job.id), hostName, "PX", CANCEL_ACK_TTL_MS)).catch(() => {});
+				await Promise.resolve(redis.del?.(cancellationReason === "agent-cancel" ? agentCancelReqKey(job.id) : cancelReqKey(job.id))).catch(() => {});
 				return true;
 			};
 			// A retry that already spent (a container that ran and exited as infra) keeps what it spent on the record (and, issue
@@ -1755,9 +1759,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			const endCancelled = async ({ retryable }) => {
 				const spent = error?.budgetReserved === true;
 				const beforeStart = retryable && !spent;
-				const result = { outcome: "policy", reason: "operator-cancel", exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null), ...(error?.dollars ? { dollars: error.dollars } : {}), ...(spent && error?.resources ? { resources: error.resources } : {}), ...(spent && error?.progress ? { progress: error.progress } : {}) };
+				const result = { outcome: "policy", reason: cancellationReason, exitCode: spent ? (error.exitCode ?? null) : null, turns: spent ? (error.turns ?? null) : null, tokens: spent ? (error.tokens ?? null) : null, ...(spent && error.usage ? { usage: error.usage } : {}), provider: error?.provider ?? null, model: error?.model ?? null, session: error?.session ?? null, budgetReserved: retryable ? spent : (error?.budgetReserved ?? null), ...(error?.dollars ? { dollars: error.dollars } : {}), ...(spent && error?.resources ? { resources: error.resources } : {}), ...(spent && error?.progress ? { progress: error.progress } : {}) };
 				deps?.log?.("job_cancelled_instead_of_retry", { jobId: job.id, spent, retryable, ...(retryable ? {} : { failure: scrubCredentials(String(error?.message ?? error)).slice(0, 300) }) });
-				if (deps?.comment) await Promise.resolve(deps.comment(job.data, beforeStart ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS["operator-cancel"])).catch(() => {});
+				if (deps?.comment) await Promise.resolve(deps.comment(job.data, beforeStart && cancellationReason !== "agent-cancel" ? CANCELLED_BEFORE_START_COMMENT : TERMINAL_COMMENTS[cancellationReason])).catch(() => {});
 				await settleSteer({ result });
 				recordAfterGate({ job, result, startedAt, endedAt: new Date().toISOString() });
 				return result;
@@ -1900,6 +1904,19 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 	};
 	return async function processor(job, token, signal) {
+		const sourceRefusal = await checkDraftAnswerSource(job.data, deps);
+		if (sourceRefusal) {
+			return recordBeforePickup(job, sourceRefusal);
+		}
+		if (job.data?.kind === "answer-draft" || job.data?.answerDraft) {
+			if (!deps.answerDraftRuntime) return { outcome: "policy", reason: "answer-draft-unavailable", budgetReserved: false };
+			const resolved = await deps.answerDraftRuntime.resolve(job.data, job.id);
+			if (resolved.result) {
+				await recordWatchOutcome({ job, result: resolved.result, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
+				return resolved.result;
+			}
+			job.data = resolved.data;
+		}
 		if (job.data?.kind === "zero-touch-grouping" || job.data?.questionGrouping) {
 			if (!deps.questionGroupRuntime) return { outcome: "policy", reason: "question-group-unavailable", budgetReserved: false };
 			const resolved = await deps.questionGroupRuntime.resolve(job.data, job.id);
@@ -1923,15 +1940,20 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const sandboxBoundary = await deps.checkSandboxWorkspace?.(job.data);
 		if (sandboxBoundary?.unavailable) throw new InfraRetry("the local workspace sandbox boundary could not be read");
 		if (sandboxBoundary?.outcome === "policy") {
-			return recordSandboxBoundary(job, sandboxBoundary);
+			return recordBeforePickup(job, sandboxBoundary);
 		}
-		if (!hostBudget) return pickup(job, token, signal, { budgetDeferred: false });
+		if (!hostBudget) {
+			const result = await pickup(job, token, signal, { budgetDeferred: false });
+			if (job.data?.answerDraft && result?.outcome !== "completed") await deps.answerDraftRuntime?.refused(job.data, result).catch(() => {});
+			return result;
+		}
 		// The pickup's TICKET: the ledger entry this pickup takes carries it, and only this pickup's release or
 		// orphan can act on that entry, so a second pickup of the same job id (a stalled scheduled job handed back while
 		// its first attempt still runs here) can never give back the first's hold.
 		const budgetState = { budgetDeferred: false, ticket: hostBudget.enter(job.id) };
 		try {
 			const result = await pickup(job, token, signal, budgetState);
+			if (job.data?.answerDraft && result?.outcome !== "completed") await deps.answerDraftRuntime?.refused(job.data, result).catch(() => {});
 			hostBudget.forget(job.id);
 			return result;
 		} catch (error) {

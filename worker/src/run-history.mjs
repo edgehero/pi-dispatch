@@ -1,4 +1,5 @@
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
+import { ANSWER_ID_RE, ANSWER_RUN_RE } from "./answerer.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
 import { forkArchiveFact, recordedFork } from "./fork-job.mjs";
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -141,6 +142,17 @@ function decisiveExitLine(text) {
 	return last;
 }
 
+/** File-result receipt. Only the log sink's authenticated branch may hand this to the collector. */
+export function parseExitAnswerDraftDigest(text) {
+	const line = decisiveExitLine(text);
+	return line?.code === 0 && /^[a-f0-9]{64}$/.test(line?.answerDraftDigest ?? "") ? line.answerDraftDigest : null;
+}
+
+export function parseExitQuestionRefDigest(text) {
+	const line = decisiveExitLine(text);
+	return line?.code === 0 && line.reason === "awaiting-input" && /^[a-f0-9]{64}$/.test(line?.questionRefDigest ?? "") ? line.questionRefDigest : null;
+}
+
 /**
  * Recover the agent's turn count from buffered container stdout, or `null` if it is not reported.
  *
@@ -187,6 +199,7 @@ export function parseExitTurns(text) {
  * Live from the first image that declares `mcp`: an image built before the worker named them prints the same line.
  */
 export const MCP_RUNNER_REASONS = Object.freeze(["mcp-unavailable", "mcp-config-invalid", "mcp-config-mismatch", "mcp-secret-missing", "mcp-command-missing", "mcp-shadowed"]);
+export const ANSWER_DRAFT_RUNNER_REASONS = Object.freeze(["answer-draft-refused"]);
 /**
  * The runner's exit-2 refusals of a job armed with `run.awaitInput` (issue #625), each before the prompt: another
  * extension registers the tool a parked run ends on (`await-input-shadowed`), or the job has no session file to park
@@ -206,7 +219,7 @@ export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"
  * with the mount and a key; named for MCP_RUNNER_REASONS' reason, the operator's fix is not a budget.
  */
 export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer-no-exit-key"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -985,7 +998,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		jobId: job.id,
 		// Internal references can refuse before they resolve to a local execution envelope. Keep the public
 		// forge/local vocabulary intact; purpose below identifies this analysis without inventing a forge kind.
-		kind: kind === "question-grouping" ? null : kind ?? null,
+		kind: kind === "question-grouping" || kind === "answer-draft" ? null : kind ?? null,
 		target: targetFor(kind, data),
 		flow: data.flow ?? null,
 		startedAt: startedAt ?? null,
@@ -1230,6 +1243,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// Both an unresolved internal reference's refusal and its resolved classifier run stay out of workload
 		// rates. Keep their ordinary history and spend: analysis must not improve the rate by adding idle runs.
 		...(kind === "question-grouping" || data.purpose === "zero-touch-grouping" && data.questionGrouping ? { purpose: "zero-touch-grouping" } : {}),
+		...(data.purpose === "answer-draft" && ANSWER_RUN_RE.test(data.answerDraft?.runId ?? "") && ANSWER_ID_RE.test(data.answerDraft?.ruleId ?? "") ? { purpose: "answer-draft", answerDraft: { sourceRunId: data.answerDraft.runId, ruleId: data.answerDraft.ruleId } } : {}),
 		...(touchTracking ? { touchTrackingVersion: 1, touchScopeId: touchScopeOf(data, host) } : {}),
 		...(Array.isArray(source.touches) ? { touches: source.touches.slice(0, 16).map(cleanTouch).filter(Boolean) } : {}),
 		...(source.touchLineageSkipped === "source-unavailable" ? { touchLineageSkipped: "source-unavailable" } : {}),
@@ -1511,6 +1525,8 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const exitAuth = exitText === "" ? "unverified" : "verified";
 			const exitReason = parseExitReason(exitText);
 			const approval = parseExitApproval(exitText);
+			const answerDraftDigest = keyed && exitAuth === "verified" ? parseExitAnswerDraftDigest(exitText) : null;
+			const questionRefDigest = keyed && exitAuth === "verified" ? parseExitQuestionRefDigest(exitText) : null;
 			const exitLineCode = parseExitCode(exitText);
 			const exitWhy = parseExitWhy(exitText);
 			const modelRoles = keyed && exitAuth === "verified" ? parseExitModelRoles(exitText) : null;
@@ -1555,7 +1571,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

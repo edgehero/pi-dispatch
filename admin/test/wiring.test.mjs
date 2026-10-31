@@ -25,6 +25,8 @@ process.env.PI_CODING_AGENT_DIR = tempDir("admin-wiring-agent-");
 const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
+const sharedIndex = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
+sharedIndex.setToolReadDepsForTest({ held: async () => ({ heldMicros: 0, heldJobs: 0, unknownHosts: [] }) });
 const indexPath = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 // The wizard module through the SAME loader, for its exported pins (the skew notice compares against
 // RUNTIME_VERSION, and a test restating the literal would drift from it).
@@ -349,13 +351,17 @@ const WRITE_TOOLS = ["dispatch_trigger_fire", "dispatch_set", "dispatch_trigger_
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
   const { calls } = await loadRegistered();
   const names = calls.registerTool.map((t) => t.name).sort();
-  assert.equal(calls.registerTool.length, 32, "exactly thirty-two tools");
+  assert.equal(calls.registerTool.length, 41, "all forty-one documented tools");
   assert.deepEqual(names, [
+    "dispatch_allocation_revert",
     "dispatch_allocations",
+    "dispatch_cancel",
     "dispatch_capacity",
     "dispatch_connections",
     "dispatch_costs",
     "dispatch_envelope_set",
+    "dispatch_failed",
+    "dispatch_hosts",
     "dispatch_limit_add",
     "dispatch_limit_delete",
     "dispatch_limit_edit",
@@ -370,11 +376,15 @@ test("registers exactly the read/control/enqueue/write tools, and never a raw-lo
     "dispatch_project_delete",
     "dispatch_project_edit",
     "dispatch_projects",
+    "dispatch_remove_failed",
+    "dispatch_rerun",
     "dispatch_resume",
+    "dispatch_retry_failed",
     "dispatch_run",
     "dispatch_runs",
     "dispatch_secrets",
     "dispatch_set",
+    "dispatch_setup",
     "dispatch_status",
     "dispatch_trigger_add",
     "dispatch_trigger_delete",
@@ -382,6 +392,7 @@ test("registers exactly the read/control/enqueue/write tools, and never a raw-lo
     "dispatch_trigger_fire",
     "dispatch_triggers",
     "dispatch_wait_cancel",
+    "dispatch_waiting",
     "dispatch_waits",
   ]);
   for (const name of names) {
@@ -825,8 +836,11 @@ test("argument completion offers subcommands then run ids", async () => {
   assert.ok(subs.some((i) => i.value === "setup"), "setup completes as a first token");
   assert.deepEqual(await def.getArgumentCompletions("setu"), [{ value: "setup", label: "setup" }]);
   assert.deepEqual(await def.getArgumentCompletions("insi"), [{ value: "insights", label: "insights" }], "insights completes as a first token (issue #181)");
-  // Empty logs dir -> no ids to complete -> null (not []).
-  assert.equal(await def.getArgumentCompletions("logs "), null);
+  // Completeness does not depend on another test's last history fixture.
+  const prior = process.env.PI_LOGS_DIR;
+  process.env.PI_LOGS_DIR = tempDir("admin-completion-empty-");
+  try { assert.equal(await def.getArgumentCompletions("logs "), null); }
+  finally { if (prior === undefined) delete process.env.PI_LOGS_DIR; else process.env.PI_LOGS_DIR = prior; }
   // No subcommand matches -> null.
   assert.equal(await def.getArgumentCompletions("zzz"), null);
 });
@@ -1456,7 +1470,7 @@ test("the TOOL door is gated too, and it is the model-reachable one (#404)", asy
   // the gate there does not reach it. A first version of this change called the whole class "not
   // model-reachable" in three places including a spec row; `dispatch_trigger_edit`'s confirm body
   // interpolates the MODEL's own `flow` parameter, and this one interpolates a stored `scope`. Every tool
-  // that confirms does it through `confirmedWrite`, which is the door.
+  // that confirms does it through `executeToolAction`, which is the door.
   const { calls } = await loadRegistered();
   const tool = calls.registerTool.map((entry) => (Array.isArray(entry) ? entry[0] : entry)).find((t) => t?.name === "dispatch_pause_delete");
   assert.ok(tool, "the tool is registered");
@@ -1498,6 +1512,7 @@ test("every door that takes a pi `ctx` gates it (#404)", async () => {
   // separate places a `ctx` enters this extension from pi, and a gate on some of them is the
   // covered-on-one-path shape #382's render gates were refuted for.
   const sources = {
+    "tool-actions.mjs": readFileSync(new URL("../src/tool-actions.mjs", import.meta.url), "utf8"),
     "index.ts": readFileSync(new URL("../src/index.ts", import.meta.url), "utf8"),
     "secrets-command.ts": readFileSync(new URL("../src/secrets-command.ts", import.meta.url), "utf8"),
     "setup-wizard.ts": readFileSync(new URL("../src/setup-wizard.ts", import.meta.url), "utf8"),
@@ -1505,7 +1520,7 @@ test("every door that takes a pi `ctx` gates it (#404)", async () => {
   // NOT A HEAD COUNT, which is how the first version of this got it wrong: it asserted index.ts had exactly
   // three, so adding a sixth door and GATING it turned the test red -- a pin that punishes the fix. The rule
   // is the convention instead: a door names its parameter `rawCtx`, and every `rawCtx` must be gated.
-  for (const door of ["dispatch", "handleDashboardAction", "confirmedWrite", "runSecretsCommand", "runSetupWizard", "session_start"]) {
+  for (const door of ["dispatch", "handleDashboardAction", "executeToolAction", "runSecretsCommand", "runSetupWizard", "session_start"]) {
     assert.ok(Object.values(sources).some((src) => src.includes(door)), `${door} is still a door`);
   }
   // THE RULE ITSELF: a door names its parameter `rawCtx`, so every one of them must be matched by a
@@ -1517,7 +1532,7 @@ test("every door that takes a pi `ctx` gates it (#404)", async () => {
   // naming is what makes a missing gate visible when reading the function head -- and it is also why the
   // second assertion below exists, which refuses a `.ui` read off a rawCtx.
   for (const [file, src] of Object.entries(sources)) {
-    const params = (src.match(/\brawCtx\b\s*:/g) ?? []).length;
+    const params = (src.match(/\brawCtx\b\s*[:,]/g) ?? []).length;
     const gated = (src.match(/gateDialogs\(rawCtx\)/g) ?? []).length;
     assert.equal(gated, params, `${file}: ${params} door(s) take a rawCtx and ${gated} gate it`);
     // And none of them reaches the dialogs directly: a `rawCtx.ui` anywhere means a door gated its ctx and
@@ -1613,14 +1628,20 @@ test("the gated context follows pi when it swaps or invalidates its ui (#404)", 
 test("index.ts resolves paths and the worker name only through deploymentEnv (#471)", () => {
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");
   const calls = [...src.matchAll(/\bresolvePaths\(/g)].map((m) => src.slice(m.index, m.index + 30));
-  assert.deepEqual(calls.filter((c) => !c.startsWith("resolvePaths(deploymentEnv())")), [], "every resolvePaths call takes the resolved environment");
+  assert.deepEqual(calls.filter((c) => !c.startsWith("resolvePaths(deploymentEnv())")), ["resolvePaths(env);\n        ret", "resolvePaths(env), env }))); }"], "only the two shared tool adapters use the captured deployment environment");
+  assert.match(src, /const env = deploymentEnv\(\);\n\s*const paths = resolvePaths\(env\);/);
+  assert.match(src, /const env = deploymentEnv\(\); return toolText/);
   // Two fewer since the rebase over issue #468: the pause and resume tools resolve their Valkeys through `killSwitchSet`
   // (the CLI's rule over the pointer's `.env`, read by this issue's one reader), not through resolvePaths.
   assert.ok(calls.length > 18, "and there are still the call sites there were");
-  assert.equal([...src.matchAll(/await killSwitchSet\(\{ paused/g)].length, 3, "the two tools and /dispatch pause|resume");
+  assert.equal([...src.matchAll(/await killSwitchSet\(\{ paused/g)].length, 1, "operator-typed pause/resume uses the shared kill switch directly; model tools use ACTIONS");
+  const adapter = readFileSync(new URL("../src/tool-actions.mjs", import.meta.url), "utf8");
+  assert.match(adapter, /killSwitchPlan\(\{ paused, env \}\)/);
   assert.doesNotMatch(src, /process\.env\.PI_WORKER_NAME/);
   assert.match(src, /enqueueDispatchRun\(\{ folder, flow, task, aiInvoked: false, env: deploymentEnv\(\) \}\)/);
-  assert.match(src, /aiInvoked: true,\n\s*env: deploymentEnv\(\),/);
+  const actions = readFileSync(new URL("../src/console/actions.mjs", import.meta.url), "utf8");
+  assert.match(actions, /checkDispatchRun\(\{ folder, flow, env, aiInvoked: true,/);
+  assert.match(src, /executeToolAction\(definition.name, params, ctx, \{ paths, env, grantsEnv, granted, deploymentDir: pointerState\(\)\.deploymentDir/);
 });
 
 test("console set dailyCostUsd / unset maxCostUsd with no cap anywhere WRITE and WARN, never refuse (#501, PR #542)", async () => {

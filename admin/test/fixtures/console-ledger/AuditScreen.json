@@ -1,29 +1,219 @@
 {
   "card": "AuditScreen",
   "pr": 2,
-  "panels": ["p-audit","p-audit-about","the chain banner"],
+  "panels": [
+    "p-audit",
+    "p-audit-about",
+    "the chain banner"
+  ],
   "elements": [
-    {"el":"p-audit","kind":"panel","status":"real","source":"admin/src/console/panels/audit.mjs#auditLog","golden":["audit.operator"],"reason":"the log is PR 1's panel, converted to the Pulse markup in PR 2"},
-    {"el":"p-audit-about","kind":"panel","status":"new","source":"admin/src/console/panels/audit.mjs#auditAbout","golden":["audit.operator"],"reason":"beside the log from 1600 px, under it below (page-css.mjs AUDIT_LAYOUT.sideMin): the card stands them side by side at 1440 with its short sample rows, where the widest rows the console writes leave the log's reason column too narrow to read"},
-    {"el":"the chain banner","kind":"panel","status":"new","as":"p-audit-chain","source":"admin/src/console/panels/audit.mjs#auditChain","golden":["audit.operator","panels/audit-damaged.operator","panels/audit-not-verified.operator"]},
-    {"el":"The banner says how far the chain is verified","kind":"readme","status":"new","panel":"p-audit-chain","source":"admin/src/console/panels/audit.mjs#auditChain","holds":"Chain verified","golden":["audit.operator"],"shows":"Chain verified"},
-    {"el":"A damaged row: what it means and what to do (keep the file, compare it with a backup)","kind":"readme","status":"new","panel":"p-audit-chain","source":"admin/src/console/panels/audit.mjs#auditChain","holds":"compare it with your last backup","golden":["panels/audit-damaged.operator"],"shows":"compare it with your last backup","reason":"the banner and About name the damaged place by the line the check names (\"Line 7 of 2026-10.jsonl is damaged\"), where the card's sample says \"Row 7\": the number a damaged line carries is what the chain does not vouch for, a line that is no row carries none, and audit verify names the line"},
-    {"el":"Filters: a search for targets and reasons, and closed lists for who, action and outcome","kind":"readme","status":"new","panel":"p-audit-filter","source":"admin/src/console/panels/audit.mjs#auditFilter","golden":["audit.operator"],"shows":"Search targets and reasons"},
-    {"el":"The table: Seq, At (UTC), Who (name and role), Action, Target, Outcome and Reason","kind":"readme","status":"real","panel":"p-audit","source":"admin/src/console/panels/audit.mjs#auditLog","holds":"\"Target\", \"Outcome\", \"Reason\"","golden":["audit.operator"],"reason":"At is two lines as the card draws it, but the date over the time and zone, not the time over the date: the browser script rewrites each time to the reader's zone as one text, so it can only break at a space; every cell beside the reason is bounded and the reason never narrower than 200 px (page-css.mjs AUDIT_LAYOUT)"},
-    {"el":"Outcome: a badge with a glyph and a word (ok, refused, damaged, not verified)","kind":"readme","status":"new","source":"admin/src/console/audit-view.mjs#AUDIT_OUTCOME_WORDS"},
-    {"el":"A damaged row is tinted red","kind":"readme","status":"new","panel":"p-audit","source":"admin/src/console/panels/audit.mjs#auditLog","golden":["panels/audit-damaged.operator"],"shows":"row--failed"},
-    {"el":"The damaged row's sentence, inline","kind":"readme","status":"new","panel":"p-audit","source":"admin/src/console/panels/audit.mjs#auditLog","golden":["panels/audit-damaged.operator"],"shows":"The chain check says:"},
-    {"el":"Rows after it are marked not verified","kind":"readme","status":"new","panel":"p-audit","source":"admin/src/console/audit-view.mjs#auditRowState","golden":["panels/audit-not-verified.operator"],"shows":"Not verified: it follows the damaged row.","reason":"the row BEFORE a break whose line shows no prev that matches it (a prev that does not match, a prev that is not a hash, a line that does not parse) is marked not verified too, with its own sentence (\"the link to the row after it does not hold\"): only the next line's matching prev vouches for a row, so the banner's verified range ends one row earlier than the card's sample, which says verified through row 6 for row 7's broken hash"},
-    {"el":"About this log: the verified range and who can see the page (operators only)","kind":"readme","status":"new","panel":"p-audit-about","source":"admin/src/console/panels/audit.mjs#auditAbout","holds":"operators only; viewers do not see this page","golden":["audit.operator"],"shows":"operators only; viewers do not see this page"},
-    {"el":"About this log: how many rows the log holds","kind":"readme","status":"illustrative","reason":"the console does not count the whole log: a page reads 50 rows and a search at most 2,000, so a total would be a read of every month file; the table's foot says how many rows the page shows and their range"},
-    {"el":"The rows, newest first, 50 per page","kind":"provides","status":"real","source":"admin/src/console/pages.mjs#AUDIT_PER_PAGE"},
-    {"el":"Each row's verification state","kind":"provides","status":"new","source":"admin/src/console/audit-view.mjs#readAuditView","reason":"judged by the row's place in the chain, read with the worker's opt-in positions, against the verifier's opt-in last vouched row and suspect"},
-    {"el":"The first damaged row, if any","kind":"provides","status":"real","source":"worker/src/console-audit.mjs#verifyConsoleAudit","holds":"broken"},
-    {"el":"A search examines at most 2,000 rows and says where it stopped","kind":"provides","status":"new","source":"admin/src/console/audit-view.mjs#AUDIT_EXAMINE_MAX","reason":"the console's bound on the card's search, so a search never reads the whole log"},
-    {"el":"?seq= opens the page that holds that row","kind":"provides","status":"new","source":"admin/src/console/audit-view.mjs#readAuditView","holds":"seqPlace(chain, seq)","reason":"the done banner's audit row links here; the row ASKED for is found by its number through the verifier's opt-in files index (each month file's first seq), its chunk read from the newest of its rows the check counted and checked there (seq and place), however many rows came since; a walk from the newest row, bounded at 2,000, only for a row the check did not count or a place that no longer holds its row, and the page says which, found or not"},
-    {"el":"The chain check is cached for 30 s","kind":"provides","status":"new","source":"admin/src/console/cli.mjs#AUDIT_VERIFY_CACHE_MS"},
-    {"el":"An avatar in the Who cell","kind":"readme","status":"illustrative","reason":"a row shows the token's name and role; the avatar is the signed-in person's, in the top bar"},
-    {"el":"Rows 7 (damaged) and 8 (not verified)","kind":"sample","status":"illustrative","reason":"sample data (the card's note); the damaged and not-verified states are panel goldens"},
-    {"el":"Rows 1 to 6","kind":"sample","status":"illustrative","reason":"the card's fixture; the console's audit golden is seeded by its own harness"}
+    {
+      "el": "p-audit",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/audit.mjs#auditLog",
+      "golden": [
+        "audit.operator"
+      ],
+      "reason": "the log is PR 1's panel, converted to the Pulse markup in PR 2"
+    },
+    {
+      "el": "p-audit-about",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/audit.mjs#auditAbout",
+      "golden": [
+        "audit.operator"
+      ],
+      "reason": "beside the log from 1600 px, under it below (page-css.mjs AUDIT_LAYOUT.sideMin): the card stands them side by side at 1440 with its short sample rows, where the widest rows the console writes leave the log's reason column too narrow to read"
+    },
+    {
+      "el": "the chain banner",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-audit-chain",
+      "source": "admin/src/console/panels/audit.mjs#auditChain",
+      "golden": [
+        "audit.operator",
+        "panels/audit-damaged.operator",
+        "panels/audit-not-verified.operator"
+      ]
+    },
+    {
+      "el": "The banner says how far the chain is verified",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-audit-chain",
+      "source": "admin/src/console/panels/audit.mjs#auditChain",
+      "holds": "Chain verified",
+      "golden": [
+        "audit.operator"
+      ],
+      "shows": "Chain verified"
+    },
+    {
+      "el": "A damaged row: what it means and what to do (keep the file, compare it with a backup)",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-audit-chain",
+      "source": "admin/src/console/panels/audit.mjs#auditChain",
+      "holds": "compare it with your last backup",
+      "golden": [
+        "panels/audit-damaged.operator"
+      ],
+      "shows": "compare it with your last backup",
+      "reason": "the banner and About name the damaged place by the line the check names (\"Line 7 of 2026-10.jsonl is damaged\"), where the card's sample says \"Row 7\": the number a damaged line carries is what the chain does not vouch for, a line that is no row carries none, and audit verify names the line"
+    },
+    {
+      "el": "Filters: a search for targets and reasons, and closed lists for who, actor role, action and outcome",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-audit-filter",
+      "source": "admin/src/console/panels/audit.mjs#auditFilter",
+      "golden": [
+        "audit.operator"
+      ],
+      "shows": [
+        "Search targets and reasons",
+        "name=\"role\"",
+        "value=\"agent\">Role: agent"
+      ]
+    },
+    {
+      "el": "The table: Seq, At (UTC), Who (name and role), Action, Target, Outcome and Reason",
+      "kind": "readme",
+      "status": "real",
+      "panel": "p-audit",
+      "source": "admin/src/console/panels/audit.mjs#auditLog",
+      "holds": "\"Target\", \"Outcome\", \"Reason\"",
+      "golden": [
+        "audit.operator"
+      ],
+      "reason": "At is two lines as the card draws it, but the date over the time and zone, not the time over the date: the browser script rewrites each time to the reader's zone as one text, so it can only break at a space; every cell beside the reason is bounded and the reason never narrower than 200 px (page-css.mjs AUDIT_LAYOUT)"
+    },
+    {
+      "el": "Outcome: a badge with a glyph and a word (ok, refused, damaged, not verified)",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/audit-view.mjs#AUDIT_OUTCOME_WORDS"
+    },
+    {
+      "el": "A damaged row is tinted red",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-audit",
+      "source": "admin/src/console/panels/audit.mjs#auditLog",
+      "golden": [
+        "panels/audit-damaged.operator"
+      ],
+      "shows": "row--failed"
+    },
+    {
+      "el": "The damaged row's sentence, inline",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-audit",
+      "source": "admin/src/console/panels/audit.mjs#auditLog",
+      "golden": [
+        "panels/audit-damaged.operator"
+      ],
+      "shows": "The chain check says:"
+    },
+    {
+      "el": "Rows after it are marked not verified",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-audit",
+      "source": "admin/src/console/audit-view.mjs#auditRowState",
+      "golden": [
+        "panels/audit-not-verified.operator"
+      ],
+      "shows": "Not verified: it follows the damaged row.",
+      "reason": "the row BEFORE a break whose line shows no prev that matches it (a prev that does not match, a prev that is not a hash, a line that does not parse) is marked not verified too, with its own sentence (\"the link to the row after it does not hold\"): only the next line's matching prev vouches for a row, so the banner's verified range ends one row earlier than the card's sample, which says verified through row 6 for row 7's broken hash"
+    },
+    {
+      "el": "About this log: the verified range and who can see the page (operators only)",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-audit-about",
+      "source": "admin/src/console/panels/audit.mjs#auditAbout",
+      "holds": "operators only; viewers do not see this page",
+      "golden": [
+        "audit.operator"
+      ],
+      "shows": "operators only; viewers do not see this page"
+    },
+    {
+      "el": "About this log: how many rows the log holds",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "the console does not count the whole log: a page reads 50 rows and a search at most 2,000, so a total would be a read of every month file; the table's foot says how many rows the page shows and their range"
+    },
+    {
+      "el": "The rows, newest first, 50 per page",
+      "kind": "provides",
+      "status": "real",
+      "source": "admin/src/console/pages.mjs#AUDIT_PER_PAGE"
+    },
+    {
+      "el": "Each row's verification state",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/audit-view.mjs#readAuditView",
+      "reason": "judged by the row's place in the chain, read with the worker's opt-in positions, against the verifier's opt-in last vouched row and suspect"
+    },
+    {
+      "el": "The first damaged row, if any",
+      "kind": "provides",
+      "status": "real",
+      "source": "worker/src/console-audit.mjs#verifyConsoleAudit",
+      "holds": "broken"
+    },
+    {
+      "el": "A search examines at most 2,000 rows and says where it stopped",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/audit-view.mjs#AUDIT_EXAMINE_MAX",
+      "reason": "the console's bound on the card's search, so a search never reads the whole log"
+    },
+    {
+      "el": "?seq= opens the page that holds that row",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/audit-view.mjs#readAuditView",
+      "holds": "seqPlace(chain, seq)",
+      "reason": "the done banner's audit row links here; the row ASKED for is found by its number through the verifier's opt-in files index (each month file's first seq), its chunk read from the newest of its rows the check counted and checked there (seq and place), however many rows came since; a walk from the newest row, bounded at 2,000, only for a row the check did not count or a place that no longer holds its row, and the page says which, found or not"
+    },
+    {
+      "el": "The chain check is cached for 30 s",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/cli.mjs#AUDIT_VERIFY_CACHE_MS"
+    },
+    {
+      "el": "An avatar in the Who cell",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "a row shows the token's name and role; the avatar is the signed-in person's, in the top bar"
+    },
+    {
+      "el": "Rows 7 (damaged) and 8 (not verified)",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "sample data (the card's note); the damaged and not-verified states are panel goldens"
+    },
+    {
+      "el": "Rows 1 to 6",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "the card's fixture; the console's audit golden is seeded by its own harness"
+    },
+    {
+      "el": "Agent role finds applied, refused and compensated attempts without hiding damage",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/audit-view.mjs#readAuditView",
+      "reason": "Native GET role filtering and pagination retain the actor role; damaged rows remain visible and verification stays independent of the filter."
+    }
   ]
 }

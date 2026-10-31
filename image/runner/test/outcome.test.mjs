@@ -584,8 +584,8 @@ test("run-job.mjs caps every exit line and hands decideExit the pinned retry pre
 	// host-side on a big body, and a decideExit call without isRetryable silently turns #437 off.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	const exitLines = src.match(/exitWriter\.writeExit\(\{[^\n]*/g) ?? [];
-	assert.equal(exitLines.length, 3, "the runner has chat, deterministic watch classifier and preflight-throw exit paths");
-	for (const line of exitLines.slice(0, 2)) assert.match(line, /\.\.\.capExitMessage\(outcome\)/, "both classifier and chat outcomes are capped");
+	assert.equal(exitLines.length, 4, "the runner has chat, deterministic watch classifier, answer classifier/pass and preflight-throw exit paths");
+	for (const line of exitLines.slice(0, 3)) assert.match(line, /\.\.\.capExitMessage\(outcome\)/, "every classifier and chat outcome is capped");
 	assert.match(exitLines[0], /\.\.\.capExitMessage\(outcome\)/, "the decided outcome's exit line must be capped");
 	assert.match(src, /const capped = capExitMessage\(outcome\);\s*exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the throw path's exit line must be capped");
 	assert.match(src, /loadRetryPredicate\(\{ module: usageMeter\.ok \? usageMeter\.module : null, candidates: resolvePiAiCompat\(\) \}\)/);

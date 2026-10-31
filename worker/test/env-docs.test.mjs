@@ -53,7 +53,8 @@ const SOURCE_EXTS = new Set([".mjs", ".js", ".cjs", ".ts", ".mts"]);
 const SKIP_DIRS = new Set(["test", "node_modules", "dist"]);
 
 // The receivers an environment read is allowed to have. `process.env.X` presents as `env` too.
-const ENV_RECEIVERS = new Set(["env", "hostEnv"]);
+const ENV_RECEIVERS = new Set(["env", "hostEnv", "grantsEnv"]);
+// grantsEnv is a captured allowlist of the real host process environment, never the deployment file.
 // Names that END in "env" and are not one. Empty today, and a maintainer adding a `Env` enum or a
 // `containerEnv` map they BUILD rather than read puts it here with the reason, which is the escape hatch
 // that lets the check below stay loud instead of being loosened.
@@ -235,9 +236,9 @@ const allSources = () => TREES.flatMap((t) => sourceFiles(join(REPO_ROOT, t)));
 const rel = (f) => f.slice(REPO_ROOT.length + 1);
 
 const READ_PATTERNS = [
-	/(?:^|[^\w$.])(?:process\.env|env|hostEnv)\??\.([A-Z][A-Z0-9_]{2,})\b/g, // env.NAME
-	/(?:^|[^\w$.])(?:process\.env|env|hostEnv)\??\[\s*["']([A-Z][A-Z0-9_]{2,})["']\s*\]/g, // env["NAME"]
-	/\(\s*(?:process\.env|env|hostEnv)\s*,\s*["']([A-Z][A-Z0-9_]{2,})["']/g, // positiveInt(env, "NAME", 3)
+	/(?:^|[^\w$.])(?:process\.env|env|hostEnv|grantsEnv)\??\.([A-Z][A-Z0-9_]{2,})\b/g, // env.NAME
+	/(?:^|[^\w$.])(?:process\.env|env|hostEnv|grantsEnv)\??\[\s*["']([A-Z][A-Z0-9_]{2,})["']\s*\]/g, // env["NAME"]
+	/\(\s*(?:process\.env|env|hostEnv|grantsEnv)\s*,\s*["']([A-Z][A-Z0-9_]{2,})["']/g, // positiveInt(env, "NAME", 3)
 ];
 
 /** Every environment variable name read in the deployment trees, mapped to the files reading it. */
@@ -332,7 +333,7 @@ test("a read shape the scan cannot see is refused rather than missed", () => {
 	const offenders = [];
 	for (const f of allSources()) {
 		const code = stripComments(readFileSync(f, "utf8"));
-		for (const m of code.matchAll(/\{[^{}]*\}\s*=\s*(?:process\.env|env|hostEnv)\b/g)) {
+		for (const m of code.matchAll(/\{[^{}]*\}\s*=\s*(?:process\.env|env|hostEnv|grantsEnv)\b/g)) {
 			offenders.push(`${rel(f)}: ${m[0].replace(/\s+/g, " ").slice(0, 60)}`);
 		}
 	}

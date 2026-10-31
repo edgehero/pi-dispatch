@@ -1,6 +1,9 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
+import { executeToolAction, TOOL_ACTIONS } from "../src/tool-actions.mjs";
+import * as readModel from "../src/read-model.mjs";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -49,7 +52,7 @@ const LIVE = process.env.VALKEY_TEST_URL
     })()
   : null;
 
-const ENV_KEYS = ["PI_LOGS_DIR", "PI_TRIGGERS_FILE", "PI_SETTINGS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "VALKEY_URL", "PI_WORKER_NAME"];
+const ENV_KEYS = ["PI_DISPATCH_AGENT_WRITES", "PI_DISPATCH_RUN_ROOTS", "PI_DISPATCH_RUN_PER_HOUR", "PI_LOGS_DIR", "PI_TRIGGERS_FILE", "PI_SETTINGS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "VALKEY_URL", "PI_WORKER_NAME"];
 const ALLOC_NOW = Date.parse("2026-10-05T12:00:00Z");
 
 /** Every audit row in `logsDir`, oldest first. */
@@ -71,6 +74,9 @@ function rowsOf(logsDir) {
  */
 function deployment({ alloc = false, valkey = NO_VALKEY } = {}) {
   const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+  process.env.PI_DISPATCH_AGENT_WRITES = "1";
+  process.env.PI_DISPATCH_RUN_ROOTS = "/test-root";
+  process.env.PI_DISPATCH_RUN_PER_HOUR = "3";
   const dir = tempDir("pd-642-wiring-");
   const files = {
     triggers: join(dir, "triggers.json"),
@@ -129,7 +135,7 @@ function tools() {
   const list = [];
   const pi = new Proxy({}, { get: (_t, k) => (k === "registerTool" ? (t) => list.push(t) : () => {}) });
   indexMod.default(pi);
-  return Object.fromEntries(list.map((t) => [t.name, t]));
+  return Object.fromEntries(list.map((t) => [t.name, withOperatorDiagnosis(t)]));
 }
 /** The `/dispatch` handler. */
 function dispatchHandler() {
@@ -266,9 +272,9 @@ const NOT_REACHED = /could not reach the queue|FAILED at/;
  */
 const CASES = [
   // ---- the extension's tools ----
-  { site: "index.ts:fleet-pause", name: "dispatch_pause", kind: "fleet-pause", outcomes: ["ok", "failed"], reason: NOT_REACHED, run: () => tool("dispatch_pause", {}) },
-  { site: "index.ts:fleet-resume", name: "dispatch_resume", kind: "fleet-resume", outcomes: ["ok", "failed"], reason: NOT_REACHED, run: () => tool("dispatch_resume", {}) },
-  { site: "index.ts:run-enqueue", name: "dispatch_run", kind: "run-enqueue", outcomes: ["ok", "failed"], reason: /./, run: () => tool("dispatch_run", { folder: "/nowhere", flow: "fix", task: "t" }) },
+  { site: "index.ts:fleet-pause", name: "dispatch_pause", kind: "fleet-pause", outcomes: ["ok"], live: true, run: () => tool("dispatch_pause", {}) },
+  { site: "index.ts:fleet-resume", name: "dispatch_resume", kind: "fleet-resume", outcomes: ["ok"], live: true, run: () => tool("dispatch_resume", {}) },
+  { site: "index.ts:run-enqueue", name: "dispatch_run", kind: "run-enqueue", outcomes: [], run: () => tool("dispatch_run", { folder: "/nowhere", flow: "fix", task: "t" }) },
   { site: "index.ts:setting-unset|setting-set", name: "dispatch_set", kind: "setting-set", outcomes: ["ok"], state: (fx) => bytes(fx.files.settings), run: () => tool("dispatch_set", { key: "dailyCap", value: "4" }) },
   { site: "index.ts:trigger-add", name: "dispatch_trigger_add", kind: "trigger-add", outcomes: ["ok"], state: (fx) => bytes(fx.files.triggers), run: () => tool("dispatch_trigger_add", { kind: "label", flow: "fix", labels: ["bug"] }) },
   { site: "index.ts:trigger-edit", name: "dispatch_trigger_edit", kind: "trigger-edit", outcomes: ["ok"], state: (fx) => bytes(fx.files.triggers), run: () => tool("dispatch_trigger_edit", { index: 0, flow: "review" }) },
@@ -289,7 +295,7 @@ const CASES = [
     run: async (fx) => {
       try {
         const res = await tool("dispatch_wait_cancel", { jobId: fx.jobId });
-        assert.equal(res.threw, `rejected: the job is no longer in the queue (job ${fx.jobId})`, "the tool found the held row and reached the cancel");
+        assert.equal(res.threw, `the job is no longer in the queue (job ${fx.jobId})`, "the tool found the held row and reached the cancel");
       } finally {
         await dropHeld(fx.jobId);
       }
@@ -338,13 +344,14 @@ const CASES = [
     outcomes: ["ok"],
     state: (fx) => fx.fired ?? 0,
     run: async (fx) => {
-      await indexMod.executeTriggerFire({ index: 0 }, { hasUI: true, ui: { confirm: async () => true } }, {
-        planFn: async () => ({ plan: { title: "Fire cron trigger now", message: "Fire daily now", schedulerId: "daily", fileDigest: "a".repeat(64), reserve: { dollarsMicros: 2_000_000 } } }),
-        enqueueFn: async () => { fx.fired = (fx.fired ?? 0) + 1; return { ok: true, jobId: "manual:daily:1", queue: "pi-jobs" }; },
-      }).catch((e) => { assert.match(e.message, /audit log/); });
+      await executeToolAction("dispatch_trigger_fire", { index: 0 }, { hasUI: true, ui: { confirm: async () => true } }, { paths: resolvedPaths(), env: {}, grantsEnv: { PI_DISPATCH_RUN_ROOTS: "/test-root", PI_DISPATCH_RUN_PER_HOUR: "3" }, readModel: { ...readModel,
+        planTriggerFire: async () => ({ plan: { title: "Fire cron trigger now", message: "Fire daily now", schedulerId: "daily", fileDigest: "a".repeat(64), reserve: { dollarsMicros: 2_000_000 } } }),
+        enqueueTriggerFire: async () => { fx.fired = (fx.fired ?? 0) + 1; return { ok: true, jobId: "manual:daily:1", queue: "pi-jobs" }; },
+      } }).catch((e) => { assert.match(e.message, /audit log/); });
     },
   },
   // ---- the operator-typed /dispatch subcommands ----
+  { site: "index.ts:priorities-set", name: "/dispatch priorities set", kind: "priorities-set", alloc: true, outcomes: ["ok"], state: (fx) => fx.redis.store.get("alloc:plan") ?? "<none>", run: () => command("priorities set shop=3 platform=1") },
   { site: "index.ts:run-enqueue", name: "/dispatch run", kind: "run-enqueue", outcomes: ["ok", "failed"], reason: /./, run: () => command("run /nowhere fix go") },
   { site: "index.ts:fleet-pause|fleet-resume", name: "/dispatch pause", kind: "fleet-pause", outcomes: ["ok", "failed"], reason: NOT_REACHED, run: () => command("pause") },
   {
@@ -453,6 +460,8 @@ const CASES = [
 ];
 
 for (const c of CASES) {
+  const isTool = c.name.startsWith("dispatch_");
+  const expected = c.outcomes.flatMap((outcome) => isTool && outcome === "ok" && c.outcomes.length === 1 ? [[c.kind, outcome, "write", "agent", null], [c.kind, outcome, "write-applied", "agent", null]] : [[c.kind, outcome, "write", isTool ? "agent" : "panel", null]]);
   const opts = { timeout: 30_000, ...(c.live && !LIVE ? { skip: "needs VALKEY_TEST_URL" } : {}) };
   test(`${c.name}: appends ${c.kind} (${c.outcomes.join(" then ")}) as the panel${c.state ? ", and writes nothing when the row cannot be appended" : ""}`, opts, async () => {
     const fx = deployment({ alloc: c.alloc, valkey: c.live ? LIVE : NO_VALKEY });
@@ -462,9 +471,9 @@ for (const c of CASES) {
       const state0 = c.state?.(fx);
       await c.run(fx);
       const rows = rowsOf(fx.files.logs).slice(before);
-      assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.action, r.actor.role, r.actor.session]), c.outcomes.map((o) => [c.kind, o, "write", "panel", null]), JSON.stringify(rows));
-      assert.equal(new Set(rows.map((r) => r.ticket)).size, 1, "one ticket ties the write's rows");
-      if (c.reason) assert.match(rows.at(-1).reason, c.reason);
+      assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.action, r.actor.role, r.actor.session]), expected, JSON.stringify(rows));
+      assert.equal(new Set(rows.map((r) => r.ticket)).size, rows.length ? 1 : 0, "one ticket ties an attempted write's rows");
+      if (c.reason) assert.match(rows.at(-1).reason, isTool ? /^action-refused$/ : c.reason);
       if (c.state) assert.notEqual(c.state(fx), state0, "the write landed");
     } finally {
       fx.restore();
@@ -500,8 +509,11 @@ function sitesIn(file) {
 
 test("the table has exactly one row per audited call site in index.ts, secrets-command.ts and dashboard.ts", () => {
   const sites = ["index.ts", "secrets-command.ts", "dashboard.ts"].flatMap(sitesIn).sort();
-  const table = CASES.map((c) => c.site).sort();
-  assert.ok(sites.length >= 40, `the scan found the call sites (${sites.length})`);
+  const table = CASES.filter((c) => !c.name.startsWith("dispatch_")).map((c) => c.site).sort();
+  assert.ok(sites.length >= 20, `the scan found the operator call sites (${sites.length}); model writes share one adapter`);
+  const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.equal([...source.matchAll(/executeToolAction\(definition.name/g)].length, 1, "registered write tools have one audited adapter");
+  for (const c of CASES.filter((c) => c.name.startsWith("dispatch_"))) assert.ok(Object.hasOwn(TOOL_ACTIONS, c.name), `${c.name} is delegated through the shared adapter`);
   assert.deepEqual(table, sites, "a write path with no row here (or a row whose call site is gone)");
   // Every site's row exercises a kind its literals name, so a row cannot stand in for a different call.
   for (const c of CASES) {

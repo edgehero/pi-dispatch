@@ -1,4 +1,5 @@
 import { prepareQuestionGrouping } from "./question-group-runtime.mjs";
+import { stageAnswerDraft } from "./answerer-runtime.mjs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -187,7 +188,7 @@ export function makePrepareWorkspace({
 		const prepare = preparers[job.kind];
 		if (prepare) {
 			const host = forgeFor?.(job)?.host;
-			return withLiveFile(discardOnPolicy(
+			return withLiveFile(discardOnPolicy(stageAnswerDraft(job,
 				stampSandbox(
 					await prepare(job, token, {
 						jobDir,
@@ -203,8 +204,7 @@ export function makePrepareWorkspace({
 					}),
 					sandbox,
 				),
-				jobDir,
-			));
+			), jobDir));
 		}
 		throw new Error(`unknown job kind: ${job.kind}`);
 	}

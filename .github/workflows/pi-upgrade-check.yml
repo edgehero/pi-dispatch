@@ -531,6 +531,13 @@ jobs:
         timeout-minutes: 5
         run: CHROME="$RUNNER_TEMP/cft/chrome-linux64/chrome" node .github/scripts/console-sandboxes-browser.mjs --require
 
+      - name: "Agent controls and answer drafts work under the real console CSP (#766, #772)"
+        if: (success() || failure()) && steps.install.outcome == 'success'
+        timeout-minutes: 5
+        env:
+          VALKEY_TEST_URL: "redis://127.0.0.1:6379"
+        run: CHROME="$RUNNER_TEMP/cft/chrome-linux64/chrome" node .github/scripts/console-answerer-browser.mjs --require
+
   image:
     name: the job image holds its contract
     runs-on: ubuntu-latest
