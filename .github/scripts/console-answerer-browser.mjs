@@ -8,6 +8,7 @@ import { openChrome } from "../../launch/chrome-pipe.mjs";
 import { findChrome, chromeLaunchArgs } from "./console-width-check.mjs";
 import { startAnswererBrowserFixture, ANSWERER_BROWSER_TOKENS } from "../../admin/test/helpers/answerer-browser.mjs";
 import { SECURITY_HEADERS } from "../../admin/src/console/headers.mjs";
+import { checkModelsBrowser } from "./console-models-browser.mjs";
 
 export async function checkAnswererBrowser({ chrome, shots = null, sandbox = process.env.GITHUB_ACTIONS !== "true" } = {}) {
   const work = mkdtempSync(join(tmpdir(), "pd-answerer-browser-")), children = new Set();
@@ -329,5 +330,8 @@ export async function checkAnswererBrowser({ chrome, shots = null, sandbox = pro
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const found = findChrome(); const chrome = typeof found === "string" ? found : found?.path;
   const shotsAt = process.argv.indexOf("--shots");
-  checkAnswererBrowser({ chrome, shots: shotsAt >= 0 ? process.argv[shotsAt + 1] : null }).then(result => console.log(JSON.stringify(result)), error => { console.error(error.stack); process.exitCode = 1; });
+  const shots = shotsAt >= 0 ? process.argv[shotsAt + 1] : null;
+  // Both siblings exercise person-only transitions under the production role/session/CSP guards.
+  // Keeping them in this required browser entry point makes a new Models regression fail the same CI context.
+  (async () => ({ answerer: await checkAnswererBrowser({ chrome, shots }), models: await checkModelsBrowser({ chrome, shots }) }))().then(result => console.log(JSON.stringify(result)), error => { console.error(error.stack); process.exitCode = 1; });
 }

@@ -57,14 +57,13 @@ import { linkContent, signInContent } from "./signin.mjs";
 import { themeLabel } from "./theme.mjs";
 
 /**
- * The navigation, in its order: the screens a person works in, then Configuration. Watch and Models are not in it until
- * their issues land. Every name is a `PAGES` key with a `nav` label; the shell test holds `NAV` and
+ * The navigation, in its order: the screens a person works in, then Configuration. Watch stays in Triggers; Models is first in More. Every name is a `PAGES` key with a `nav` label; the shell test holds `NAV` and
  * `NAV_MORE` together to exactly those pages.
  */
 export const NAV = Object.freeze(["overview", "runs", "parked", "fleet", "insights", "triggers", "config"]);
 
-/** What the More menu holds: the audit log, for operators only, so a viewer has no More at all. */
-export const NAV_MORE = Object.freeze(["audit"]);
+/** Models is readable by every signed-in role; Audit follows it for operators. */
+export const NAV_MORE = Object.freeze(["models", "audit"]);
 
 /** The Parked count's panel id (see the header). */
 export const NAV_PARKED_ID = "p-nav-parked";
@@ -256,7 +255,7 @@ function navHtml(here, role, parked) {
   const more = NAV_MORE.filter((n) => mayOpen(n, role));
   const menu = more.length === 0
     ? null
-    : html`<details class="more"><summary aria-label="${`More: ${more.map((n) => PAGES[n].nav).join(", ")}`}" title="More">${ui.icon("more")}</summary><div>${more.map((n) => navLink(n, here, null))}</div></details>`;
+    : html`<details class="more"><summary${more.includes(here) ? html` aria-current="page"` : null} aria-label="${`More: ${more.map((n) => PAGES[n].nav).join(", ")}`}" title="More">${ui.icon("more")}</summary><div>${more.map((n) => navLink(n, here, null))}</div></details>`;
   return html`<nav class="pillnav" aria-label="Console screens">${NAV.filter((n) => mayOpen(n, role)).map((n) => navLink(n, here, parked))}${menu}</nav>`;
 }
 

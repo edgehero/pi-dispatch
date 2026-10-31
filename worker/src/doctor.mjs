@@ -68,7 +68,7 @@ import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs"
 import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
-import { resolveModelRoles } from "./model-roles.mjs";
+import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs, RADIUS_COST_CAP_LABEL, RADIUS_COST_CAP_FIX } from "./model-observation.mjs";
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
 import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, RENAMED_PROVIDERS, baseUrlTarget, endpointsAt, keylessVerdict, loadModelEndpoints, providerRenameHint, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
@@ -5572,17 +5572,7 @@ export async function defaultReadAppliedSplit(url) {
 	}
 }
 
-/** The configured failover models, never arbitrary keyspace members. Non-failover jobs add no read. */
-export function cooldownModelRefs(runs, deployment, { modelRoles = {}, projects = [], envList = null } = {}) {
-	const refs = new Set();
-	for (const run of resolveDoctorModelRuns({ runs, deployment, envList, modelRoles, projects }).runs) {
-		if (!Array.isArray(run.fallbackModels) || run.fallbackModels.length === 0) continue;
-		for (const ref of [`${run.provider ?? deployment.provider}/${run.model ?? deployment.model}`, ...run.fallbackModels]) {
-			if (splitModelEntry(ref)) refs.add(ref);
-		}
-	}
-	return [...refs];
-}
+export { cooldownModelRefs } from "./model-observation.mjs";
 
 /** A failed bounded read is visible, never reported as "no cooldown". */
 export async function defaultReadModelCooldowns(url, refs, options) {
@@ -5918,33 +5908,7 @@ export function boundModelOf({ provider, id }, { builtinModel, overlay = null })
 	return builtin;
 }
 
-/** The same role resolver as pickup, expanded over every project a broad forge trigger can reach. */
-export function resolveDoctorModelRuns({ runs = [], deployment, envList = null, modelRoles = {}, projects = [], resolveFolder = realpathSync }) {
-	const resolved = [];
-	const checks = [];
-	for (const run of runs) {
-		if (Object.keys(modelRoles).length === 0 && !run.model?.startsWith("role:")) { resolved.push(run); continue; }
-		const list = run.models ?? envList;
-		const job = { ...run, provider: run.provider ?? deployment.provider, model: run.model ?? deployment.model, ...(list ? { models: list } : {}) };
-		// Forge events without a fully qualified repository can reach any matching project. Azure
-		// run.repository alone is only a repository name, not enough to infer a project-qualified scope.
-		if (job.kind === "local" && typeof job.folder === "string") {
-			try { job.folder = resolveFolder(job.folder); } catch { /* The folder diagnostic names an unreadable workspace. */ }
-		}
-		const fixed = run.kind === "local" || typeof run.repo === "string";
-		const possible = fixed ? [projectOf(job, projects)] : [null, ...projects.filter((project) => project.members?.some((member) => typeof member === "string" && member.startsWith(`${run.kind}:`))).map((project) => project.id)];
-		for (const project of new Set(possible)) {
-			const label = project === null ? run.label : `${run.label} (project ${project})`;
-			try {
-				const selected = resolveModelRoles(job, modelRoles, project, { authoredProvider: run.provider });
-				resolved.push({ ...selected, label });
-			} catch (error) {
-				checks.push({ ok: false, warn: true, label: `${label}: reviewed model roles refuse this job (${error.modelSelectionReason ?? "model-roles-invalid"})`, fix: "review triggers.json modelRoles and this trigger's provider/model/allowed list; project roles override defaults" });
-			}
-		}
-	}
-	return { runs: resolved, checks };
-}
+export { resolveConfiguredModelRuns as resolveDoctorModelRuns } from "./model-observation.mjs";
 
 /**
  * Who runs on which models under which cap (issues #501 and #502), as the worker resolves a job: the deployment's own
@@ -6050,8 +6014,8 @@ export function costCapFitChecks(subjects, modelOf, { unboundable = () => false,
 		out.push({
 			ok: false,
 			warn: true,
-			label: `Radius (pi-messages) has no verified local cost bound, including zero-rate routes and custom gateways, so the runner refuses every call under a per-job cost cap as unboundable: ${items.join("; ")}`,
-			fix: "use a provider with a locally bounded API for capped jobs; raising the cap or changing catalog rates cannot bound Radius: docs/costs.md",
+			label: `${RADIUS_COST_CAP_LABEL}: ${items.join("; ")}`,
+			fix: RADIUS_COST_CAP_FIX,
 		});
 	}
 	if (unbounded.size > 0) {

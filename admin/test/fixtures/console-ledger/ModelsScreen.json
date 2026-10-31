@@ -1,0 +1,260 @@
+{
+  "card": "ModelsScreen",
+  "pr": 773,
+  "panels": [
+    "p-model-problems",
+    "p-roles",
+    "p-cooldowns",
+    "p-models",
+    "p-proposals"
+  ],
+  "elements": [
+    {
+      "el": "p-model-problems",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/models.mjs#modelsProblems",
+      "golden": [
+        "panels/models-populated.operator",
+        "panels/models-populated.viewer"
+      ]
+    },
+    {
+      "el": "p-roles",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/models.mjs#modelsRoles",
+      "golden": [
+        "panels/models-populated.operator",
+        "panels/models-populated.viewer"
+      ],
+      "shows": "Repository agents may name roles"
+    },
+    {
+      "el": "p-cooldowns",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/models.mjs#modelsCooldowns",
+      "golden": [
+        "panels/models-populated.operator",
+        "panels/models-populated.viewer"
+      ],
+      "shows": "No fallback: its jobs start on"
+    },
+    {
+      "el": "p-models",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/models.mjs#modelsInUse",
+      "golden": [
+        "panels/models-populated.operator",
+        "panels/models-populated.viewer"
+      ],
+      "shows": "$32.46 of $80.00"
+    },
+    {
+      "el": "p-proposals",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/models.mjs#modelsProposals",
+      "golden": [
+        "panels/models-populated.operator",
+        "panels/models-populated.viewer"
+      ],
+      "shows": "Known cost: 2 source and 2 candidate runs"
+    },
+    {
+      "el": "Banners first",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-model-problems",
+      "source": "admin/src/console/panels/models.mjs#modelsProblems"
+    },
+    {
+      "el": "Default roles, project overrides, ordered fallbacks and trigger rows",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-roles",
+      "source": "admin/src/console/panels/models.mjs#modelsRoles"
+    },
+    {
+      "el": "Reviewed triggers-file role edit and inverse undo",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-roles",
+      "source": "admin/src/console/panels/models.mjs#modelRoleForm"
+    },
+    {
+      "el": "Cooldown kind, UTC end, qualified routing, waiters and fallback history",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cooldowns",
+      "source": "admin/src/console/panels/models.mjs#modelsCooldowns"
+    },
+    {
+      "el": "Model provider, price, window spend and state",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-models",
+      "source": "admin/src/console/panels/models.mjs#modelsInUse"
+    },
+    {
+      "el": "Per-host proposals and retained canary comparison",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proposals",
+      "source": "admin/src/console/panels/models.mjs#modelsProposals"
+    },
+    {
+      "el": "Triggers-file role map and effective associations",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/models-view.mjs#modelsViewOf"
+    },
+    {
+      "el": "Configured cooldowns, current waiters and retained fallback records",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/models-view.mjs#readModelsView"
+    },
+    {
+      "el": "Failover pricing and dollar window counters",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/models-view.mjs#readModelsView"
+    },
+    {
+      "el": "Doctor labels and bounded canary/source metrics with partial coverage",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/models-view.mjs#modelsViewOf"
+    },
+    {
+      "el": "models-radius.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-model-problems",
+      "source": "admin/src/console/panels/models.mjs#modelsProblems",
+      "golden": [
+        "panels/models-radius.operator"
+      ],
+      "shows": "A capped Radius model cannot start"
+    },
+    {
+      "el": "models-undeclared.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-model-problems",
+      "source": "admin/src/console/panels/models.mjs#modelsProblems",
+      "golden": [
+        "panels/models-undeclared.operator"
+      ],
+      "shows": "Undeclared model role"
+    },
+    {
+      "el": "models-provider-clash.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-model-problems",
+      "source": "admin/src/console/panels/models.mjs#modelsProblems",
+      "golden": [
+        "panels/models-provider-clash.operator"
+      ],
+      "shows": "Provider and role disagree"
+    },
+    {
+      "el": "models-fallback-clash.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-model-problems",
+      "source": "admin/src/console/panels/models.mjs#modelsProblems",
+      "golden": [
+        "panels/models-fallback-clash.operator"
+      ],
+      "shows": "Two fallback lists"
+    },
+    {
+      "el": "models-populated.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-roles",
+      "source": "admin/src/console/panels/models.mjs#modelsRoles",
+      "golden": [
+        "panels/models-populated.operator"
+      ],
+      "shows": "Project web"
+    },
+    {
+      "el": "models-populated.viewer",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-proposals",
+      "source": "admin/src/console/panels/models.mjs#modelsProposals",
+      "golden": [
+        "panels/models-populated.viewer"
+      ],
+      "shows": "131,900"
+    },
+    {
+      "el": "models-readonly.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-roles",
+      "source": "admin/src/console/panels/models.mjs#modelsRoles",
+      "golden": [
+        "panels/models-readonly.operator"
+      ],
+      "shows": "Repository agents"
+    },
+    {
+      "el": "models-partial-canary.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-proposals",
+      "source": "admin/src/console/panels/models.mjs#modelsProposals",
+      "golden": [
+        "panels/models-partial-canary.operator"
+      ],
+      "shows": "Partial canary comparison"
+    },
+    {
+      "el": "models-empty.viewer",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-roles",
+      "source": "admin/src/console/panels/models.mjs#modelsRoles",
+      "golden": [
+        "panels/models-empty.viewer"
+      ],
+      "shows": "No model roles are configured"
+    },
+    {
+      "el": "models-unreadable.viewer",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-model-problems",
+      "source": "admin/src/console/panels/models.mjs#modelsProblems",
+      "golden": [
+        "panels/models-unreadable.viewer"
+      ],
+      "shows": "Models unavailable"
+    },
+    {
+      "el": "models-long-names.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-roles",
+      "source": "admin/src/console/panels/models.mjs#modelsRoles",
+      "golden": [
+        "panels/models-long-names.operator"
+      ],
+      "shows": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "el": "Sample model names, row numbers, times and money",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The source card uses sample deployment values; production reads the reviewed configuration and retained records, and the golden fixture holds those separately."
+    }
+  ]
+}

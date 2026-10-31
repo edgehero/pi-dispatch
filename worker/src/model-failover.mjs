@@ -4,9 +4,7 @@ import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { modelDollarRows } from "./scoped-limits.mjs";
 import { dayKey, weekKey, monthKey } from "./budget.mjs";
-import { builtinChatModels, builtinModel, checkModelsKnown } from "./model-catalog.mjs";
-import { modelEntryOf } from "./model-endpoints.mjs";
-import { outputCapView, outputUnboundable } from "./output-cap.mjs";
+import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { egressRefusalFor } from "./egress-allowlist.mjs";
 
 export { MODEL_WHY, PROVIDER_FAILURE_KINDS, providerFailureOf } from "./model-failover-protocol.mjs";
@@ -15,28 +13,12 @@ export function failoverEgressRequired(job, { egress = false, defaultBackend = "
 	return egress || ["openshell", "openshell-bind"].includes(resolveBackendName(job, defaultBackend));
 }
 
-export const MODEL_COOLDOWN_MAX_MS = 6 * 60 * 60 * 1000;
-export const MODEL_RECHECK_MS = 60_000;
-// This copy is pinned to the runner's PRICED_APIS by model-failover.test.mjs. The published worker cannot import
-// the image workspace, and a new runner API must not silently become eligible before its free bound is verified.
-export const FAILOVER_PRICED_APIS = Object.freeze(["anthropic-messages", "azure-openai-responses", "bedrock-converse-stream", "cloudflare-workers-ai-system-one", "google-generative-ai", "google-vertex", "mistral-conversations", "openai-codex-responses", "openai-completions", "openai-decisions", "openai-responses", "typesafe-system-one"]);
-const digest = (value) => createHash("sha256").update(value).digest("hex");
-export const modelCooldownKey = (ref) => `dispatch:model-cooldown:${digest(ref)}`;
-export const modelAttemptKey = (id) => `dispatch:model-attempt:${digest(id)}`;
-
-export async function readModelCooldown(redis, ref, { now = () => Date.now() } = {}) {
-	const raw = await redis.get(modelCooldownKey(ref));
-	if (raw === null || raw === undefined) return null;
-	let row;
-	try { row = JSON.parse(raw); } catch { throw new Error("invalid model cooldown"); }
-	if (!providerFailureOf(row) || !Number.isSafeInteger(row.until) || row.until < 0 || row.until > 253_402_300_799_999 || row.kind === "context-overflow") throw new Error("invalid model cooldown");
-	return row.until > now() ? { ref, kind: row.kind, until: row.until } : null;
-}
-
-export async function readModelCooldowns(redis, refs, options = {}) {
-	const rows = await Promise.all([...new Set(refs)].map((ref) => readModelCooldown(redis, ref, options)));
-	return rows.filter(Boolean);
-}
+import { MODEL_COOLDOWN_MAX_MS, MODEL_RECHECK_MS, modelCooldownKey, readModelCooldown, readModelCooldowns } from "./model-cooldowns.mjs";
+import { FAILOVER_PRICED_APIS, failoverModelView, failoverPriceEligible } from "./model-status.mjs";
+export { MODEL_COOLDOWN_MAX_MS, MODEL_RECHECK_MS, modelCooldownKey, readModelCooldown, readModelCooldowns };
+export { FAILOVER_PRICED_APIS, failoverModelView };
+const modelAttemptKey = (id) => `dispatch:model-attempt:${createHash("sha256").update(id).digest("hex")}`;
+export { modelAttemptKey };
 
 export async function markModelCooldown(redis, ref, failure, { now = () => Date.now() } = {}) {
 	const signal = providerFailureOf(failure);
@@ -65,18 +47,6 @@ export async function writeModelAttempt(redis, id, { ref, safe = false, failure 
 	await redis.set(modelAttemptKey(id), JSON.stringify({ ref, safe: safe === true, failure: providerFailureOf(failure), ...(MODEL_WHY.includes(modelWhy) ? { modelWhy } : {}) }));
 }
 
-/** Catalog/overlay composition is shared with the existing output-cap gate, rather than guessed from a URL or id. */
-export function failoverModelView(ref, { models = null, lookup = builtinModel } = {}) {
-	const split = splitModelEntry(ref);
-	if (!split) return null;
-	const { provider, model } = split;
-	const view = outputCapView({ models, provider, modelId: model, builtinModel: lookup, builtinChatModels });
-	const { defined, override } = modelEntryOf(models, provider, model);
-	// pi provider-composer.js modelFromJson defaults, held to the pinned artifact by the test.
-	const base = defined ? { ...defined, contextWindow: defined.contextWindow ?? 128000, maxTokens: defined.maxTokens ?? 16384 } : lookup(provider, model);
-	return view ? { ...view, contextWindow: override?.contextWindow ?? base?.contextWindow, maxTokens: override?.maxTokens ?? base?.maxTokens } : null;
-}
-
 export async function checkFailoverCandidate(job, { models = null, endpoints = [], credential, egress = false, allowlist = [], lookup = builtinModel } = {}) {
 	// The second ref makes the existing declared-provider-fallback check enforce this attempt's singleton too.
 	const known = checkModelsKnown([{ provider: job.provider, id: job.model, main: true }, { provider: job.provider, id: job.model }], { readOverlay: () => models });
@@ -84,7 +54,7 @@ export async function checkFailoverCandidate(job, { models = null, endpoints = [
 	if (known.unknown) return "model-unknown";
 	if (known.fallbackUnlisted) return "model-not-allowed";
 	const view = failoverModelView(`${job.provider}/${job.model}`, { models, lookup });
-	if (!view || !FAILOVER_PRICED_APIS.includes(view.api) || outputUnboundable(view) || !Number.isFinite(view.maxTokens) || view.maxTokens <= 0 || !["input", "output", "cacheRead", "cacheWrite"].every((key) => Number.isFinite(view.cost?.[key]) && view.cost[key] >= 0)) return "model-unpriced";
+	if (!failoverPriceEligible(view)) return "model-unpriced";
 	if (credential) {
 		const checked = await credential(job, { modelEndpoints: { models, endpoints } });
 		if (checked.unavailable) throw new Error("provider credential unavailable");

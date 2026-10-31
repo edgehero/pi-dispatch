@@ -1,3 +1,4 @@
+import { MODELS_PANEL_STATES } from "./helpers/models-goldens.mjs";
 import { ZERO_TOUCH_PANEL_STATES } from "./helpers/zero-touch-goldens.mjs";
 import { CONFIGURATION_PANEL_STATES } from "./helpers/configuration-goldens.mjs";
 import { TRIGGER_LIST_PANEL_STATES } from "./helpers/trigger-list-goldens.mjs";
@@ -46,6 +47,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  ModelsScreen: 773,
   ParkedAnswerer: 779, ParkedDraftViewer: 779, ParkedDraftPhone: 779,
   SandboxesScreen: 771,
   ZeroTouchScreen: 777, ZeroTouchViewer: 777, ZeroTouchPhone: 777,
@@ -81,7 +83,6 @@ const IN_SCOPE_CARDS = Object.freeze({
 const ISSUE_OWNED_CARDS = Object.freeze({
   ApprovalRequest: Object.freeze([649]),
   ForkRun: Object.freeze([648]),
-  ModelsScreen: Object.freeze([716, 717]),
   WatchScreen: Object.freeze([735]),
   WatchBoard: Object.freeze([743]),
 });
@@ -94,6 +95,7 @@ const ISSUE_OWNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  "models.operator", "models.viewer", ...MODELS_PANEL_STATES.map((key) => `panels/${key}`),
   "sandboxes.operator", "panels/sandboxes-populated.operator",
   ...ZERO_TOUCH_PANEL_STATES.map((key) => `panels/${key}`),
   ...CONFIGURATION_PANEL_STATES.map((key) => `panels/${key}`),

@@ -57,7 +57,7 @@ test("flag-only edits do not carry a hidden flow, model, turn, scope or rule cha
 });
 
 test("agent API and headless tools share refusal semantics; persona cannot grant authority", () => {
-  for (const action of ["fleet-resume", "retry-failed", "trigger-add", "parked-answer", "standing-answer-add", "answer-draft-drop", "sandbox-prepare"]) {
+  for (const action of ["fleet-resume", "retry-failed", "trigger-add", "parked-answer", "standing-answer-add", "answer-draft-drop", "sandbox-prepare", "model-role-edit"]) {
     for (const surface of ["api", "tool"]) assert.equal(authorizeTransition({ actor: agent, action, surface, granted: true, transition: { persona: { approved: true }, safe: true } }).ok, false, action);
   }
   assert.equal(authorizeTransition({ actor: agent, action: "fleet-pause", surface: "tool" }).ok, false);

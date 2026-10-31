@@ -72,3 +72,16 @@ to a declared endpoint and have recorded prices. Doctor proposes it only when al
 no higher and at least one is lower. Tiered or unknown rates produce no cheaper claim. Source prices
 come from the overlay or the pinned catalog. Operator-recorded gateway prices are declarations, not
 live quotes or measured savings. Run a capped canary before editing the role map.
+
+## Proposals in Models
+
+**More → Models** reads the doctor results each host already published. Loading or reloading the page makes
+no lifecycle request. Explicitly typed proposal checks retain bounded redacted labels even when successful;
+other successful doctor labels remain private. The read-only model tool receives only typed proposal facts,
+not those labels. Missing, stale or older evidence is not a claim that no new model exists.
+
+Retained canary comparisons appear beside proposals. Adopt opens the ordinary role-edit form, requires an
+explicit scope and carries the comparison identity and digest into a new preview. The server rechecks the
+comparison and repeats its observed numbers before confirmation. Neither opening the form nor confirming
+the map edit starts a canary or any other run. There is no proposal date or Dismiss action because no proposal
+store exists. See [canary.md](canary.md) for the measured comparison and host command.

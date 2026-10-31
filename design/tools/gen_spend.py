@@ -263,82 +263,56 @@ SPEND_CSS = """
 def spend_page():
     return shell("Spend", spend_tabs("Spend") + spend_body(), "Spend", sub="Money and tokens against every cap, and where they went.", end=RANGE + projseg())
 
-# ============================================================ MODELS (planned)
+# ============================================================ MODELS (#773)
 def models_page():
-    radius = banner("attention", "attention", "Radius bills, no local cap",
-                    "Jobs routed through the Radius gateway are billed by Radius. This deployment cannot hold them to its dollar windows; only the job and token caps apply.",
-                    btn("Review Radius", "", "spend"))
-    roles_tbl = f"""<div class="tbl-wrap"><table class="tbl">
-  <thead><tr><th>Role</th><th>Model</th><th>Fallbacks, in order</th><th>Used by</th><th class="act"><span class="sr">Actions</span></th></tr></thead>
-  <tbody>
-    <tr><td><b>planner</b></td><td><span class="code">claude-sonnet-5-5</span></td><td><span class="code">kimi-for-coding</span></td><td class="muted">fix, frontend-fix, triage</td><td class="act">{btn("Edit", "ghost")}</td></tr>
-    <tr class="md-editing"><td><b>editor</b></td><td><span class="code">claude-sonnet-5-5</span></td><td><span class="faint">none: its jobs wait while it cools down</span></td><td class="muted">fix, frontend-fix</td><td class="act">{chip("editing", "running")}</td></tr>
-    <tr><td><b>explorer</b></td><td><span class="code">claude-sonnet-5-5</span></td><td><span class="code">claude-haiku-5-5</span></td><td class="muted">review, triage</td><td class="act">{btn("Edit", "ghost")}</td></tr>
-    <tr><td><b>reviewer</b></td><td><span class="code">claude-sonnet-5-5</span></td><td><span class="faint">none</span></td><td class="muted">review</td><td class="act">{btn("Edit", "ghost")}</td></tr>
-    <tr><td><b>tidier</b></td><td><span class="code">kimi-for-coding</span> <span class="muted">on a plan</span></td><td><span class="faint">none</span></td><td class="muted">tidy</td><td class="act">{btn("Edit", "ghost")}</td></tr>
-  </tbody></table></div>"""
-    edit = f"""<div class="md-edit">
-  <div class="formrow">
-    <div class="field"><label for="md-r">Role</label><select id="md-r" class="select"><option>editor</option></select></div>
-    <div class="field"><label for="md-m">Model</label><select id="md-m" class="select"><option>claude-sonnet-5-5</option></select></div>
-    <div class="field md-grow"><label for="md-f">Fallbacks, in order</label><input id="md-f" class="input input--code" value="kimi-for-coding"></div>
-    <button class="btn btn--primary" type="button">Preview the change</button>
-  </div>
-  {diff("settings.json, models.roles", [("ctx", '"roles": {'), ("ctx", '  "planner":  { "model": "anthropic/claude-sonnet-5-5", "fallback": ["kimi/kimi-for-coding"] },'),
-     ("del", '  "editor":   { "model": "anthropic/claude-sonnet-5-5" },'), ("add", '  "editor":   { "model": "anthropic/claude-sonnet-5-5", "fallback": ["kimi/kimi-for-coding"] },'),
-     ("ctx", '  "explorer": { "model": "anthropic/claude-sonnet-5-5", "fallback": ["anthropic/claude-haiku-5-5"] },'), ("gap", '  …')])}
-  {confirm("safe", "Map editor to claude-sonnet-5-5 with fallback kimi-for-coding",
-           ["The next attempt of every <b>fix</b> and <b>frontend-fix</b> job uses the fallback while claude-sonnet-5-5 cools down.",
-            "The fallback is chosen before spend, and a run that falls back says so on its page.",
-            "kimi-for-coding runs on <b>plan:kimi</b>: it counts against job and token caps, not dollar windows."],
-           "Remove the editor fallback", "Save role map")}
-</div>"""
-    roles = card("Model roles", roles_tbl + edit, sub="flows name a role; you map each role to a model once", id_="p-roles",
-                 end=f'<span class="card__sub">Settings file: <span class="code">…/deploy/settings.json</span></span>')
-
-    cool = f"""<div class="md-cool">
-  {ring(13/21, "attention", size=88, stroke=9, label="13 of 21 minutes of cooldown left", hold=None)}
-  <div><p class="md-cool__t"><span class="code">claude-sonnet-5-5</span></p><p class="md-cool__s">Rate limited at <b>15:31 UTC</b>. Cooling until <b>15:52 UTC</b>, 13m left.</p>
-  <p class="md-cool__s">anthropic said: <span class="code">429 rate_limit_error</span></p></div>
-</div>
-<ul class="rows md-next">
-  <li class="rowpill">{ic('chain', 'ic ic--sm')}<b>planner</b><span>next attempts run on</span><span class="code">kimi-for-coding</span></li>
-  <li class="rowpill">{ic('chain', 'ic ic--sm')}<b>explorer</b><span>next attempts run on</span><span class="code">claude-haiku-5-5</span></li>
-  <li class="rowpill tone-attention">{ic('hourglass', 'ic ic--sm')}<b>editor, reviewer</b><span>no fallback: 2 jobs wait</span><a class="rowpill__act" href="#">Waitlists</a></li>
-</ul>
-<div class="md-note">{badge('running', 'Ran on fallback')}<p><span class="code">gh-c41f</span> ran on fallback <span class="code">kimi-for-coding</span> because the primary was rate limited.</p></div>"""
-    cooling = card("Cooling down", cool, sub="1 model", id_="p-cooldowns")
-
-    canary = f"""<div class="md-prop">
-  <div class="md-prop__h"><span class="tile tone-running">{ic('bolt')}</span><div><p class="md-prop__t">claude-haiku-5-5 for the <b>explorer</b> role</p><p class="card__sub">Proposed Wed 7 Oct from the anthropic catalog. Canary: 12 review and triage runs, run beside the current model.</p></div></div>
-  <div class="tbl-wrap"><table class="tbl md-can">
-    <thead><tr><th>Over 12 canary runs</th><th class="num">claude-sonnet-5-5 now</th><th class="num">claude-haiku-5-5 candidate</th><th class="num">Change</th></tr></thead>
-    <tbody>
-      <tr><td>Cost per run</td><td class="num">$0.19</td><td class="num">$0.06</td><td class="num"><span class="tinted tone-ok"><b>68% less</b></span></td></tr>
-      <tr><td>Completed</td><td class="num">12 of 12</td><td class="num">11 of 12</td><td class="num"><span class="tinted tone-failed"><b>1 fewer</b></span></td></tr>
-      <tr><td>Turns, average</td><td class="num">9.4</td><td class="num">11.2</td><td class="num"><span class="tinted tone-attention"><b>1.8 more</b></span></td></tr>
-      <tr><td>Tokens, average</td><td class="num">118,400</td><td class="num">131,900</td><td class="num"><span class="muted">11% more</span></td></tr>
-    </tbody></table></div>
-  <p class="md-prop__act">{btn("Adopt for explorer", "paid", "spend")}{btn("Run 12 more", "", "rerun")}{btn("Dismiss", "ghost")}</p>
-</div>"""
-    proposals = card("New model available", canary, sub="1 proposal", id_="p-proposals")
-
-    def mrow(model, sub, state, cls=""):
-        return f'<li class="md-m{cls}"><span class="md-m__t"><span class="code">{model}</span><small>{sub}</small></span>{state}</li>'
-    inuse = '<ul class="md-ms">' + "".join([
-        mrow("claude-sonnet-5-5", "anthropic, listed price. $32.46 of $80.00 this week", badge('attention', 'Cooling until 15:52')),
-        mrow("claude-haiku-5-5", "anthropic, listed price. Deployment windows", badge('ok', 'Ready')),
-        mrow("kimi-for-coding", "kimi on plan:kimi. Not counted in dollar windows", badge('ok', 'Ready')),
-        mrow("radius/auto", "Radius gateway, billed by Radius. No local cap", badge('attention', 'No local cap'), " md-m--radius"),
-    ]) + '</ul>'
-    models = card("Models in use", inuse, sub="a model without a price is skipped as a fallback", id_="p-models", flush=False)
-    inner = radius + f'<div class="cols"><div class="stack">{roles}</div><div class="stack">{cooling}{models}</div></div>' + proposals
-    return shell("Models", inner, "Models", sub="Which model each role uses, what it falls back to, and what is cooling down.",
-                 end=btn("Spend", "", "spend", sm=False))
+    problems = '<section id="p-model-problems" data-panel>' + banner("attention", "attention", "A capped Radius model cannot start",
+        "Doctor on mini1 says Radius cannot be bounded by a per-job dollar cap. Choose a priced, boundable model for this capped role or trigger.") + '</section>'
+    rows = [
+        ("default", "planner", "anthropic/claude-sonnet-5-5", "openai/gpt-5", "Row 1, fix; row 3, triage"),
+        ("default", "editor", "anthropic/claude-sonnet-5-5", "None", "Row 2, frontend-fix"),
+        ("web", "planner", "anthropic/claude-haiku-5-5", "openai/gpt-5", "Row 4, review"),
+    ]
+    roles_tbl = '<div class="tbl-wrap"><table class="tbl tbl--stack"><caption class="sr">Model roles by scope</caption><thead><tr><th>Scope and role</th><th>Model</th><th>Fallbacks, in order</th><th>Triggers and flows</th><th>Actions</th></tr></thead><tbody>'
+    for scope, role, model, fallback, used in rows:
+        roles_tbl += f'<tr><td data-l="Role and scope"><b>{role}</b><small>{scope}</small></td><td data-l="Model"><span class="code">{model}</span></td><td data-l="Fallbacks, in order"><span class="code">{fallback}</span></td><td data-l="Triggers and flows">{used}</td><td data-l="Actions">{btn("Edit", "ghost")}</td></tr>'
+    roles_tbl += '</tbody></table></div>'
+    edit = f"""<details class="md-edit" open><summary class="link">Edit default / editor</summary><div class="formrow">
+      <div class="field md-grow"><label for="md-m">Model</label><input id="md-m" class="input input--code" value="anthropic/claude-sonnet-5-5"></div>
+      <div class="field md-grow"><label for="md-f">Fallbacks, in order</label><input id="md-f" class="input input--code" value="openai/gpt-5"></div>{btn("Preview the change", "primary")}</div>
+      {diff("triggers.json, modelRoles", [("ctx", '"modelRoles": { "default": {'), ("del", '  "editor": "anthropic/claude-sonnet-5-5"'), ("add", '  "editor": { "model": "anthropic/claude-sonnet-5-5", "fallbackModels": ["openai/gpt-5"] }'), ("ctx", '} }')])}
+      {confirm("safe", "Map default / editor to claude-sonnet-5-5", ["Trigger row 2 moves on its next delivery. Nothing runs now.", "Recovery keeps the model of the lost attempt."], "Map editor back to its previous model", "Save role map")}</details>"""
+    roles = card("Model roles", roles_tbl + edit + '<p class="md-foot">Repository agents may name roles, but their declarations are not readable here. The map is modelRoles in the triggers file.</p>', sub="default, then project overrides", id_="p-roles")
+    cool = f"""<div class="md-cool"><span class="tile tone-attention">{ic('clock')}</span><div><p class="md-cool__t"><span class="code">anthropic/claude-sonnet-5-5</span></p><p class="md-cool__s">Rate limited. Cooling until <b>15:52 UTC</b>.</p></div></div>
+      <ul class="rows md-next"><li class="rowpill"><b>default / planner</b><span>First candidate by price and cooldown: openai/gpt-5, subject to host credentials, egress, windows and endpoint room.</span></li><li class="rowpill"><b>default / editor</b><span>No fallback: its jobs start on anthropic/claude-sonnet-5-5.</span></li></ul>
+      <p class="md-foot"><a class="link" href="/#p-waitlists">2 jobs wait on model cooldown or model window</a>: <a class="link code" href="/#p-waitlists">gh-77c1</a>, <a class="link code" href="/#p-waitlists">gh-80e1</a>.</p><p class="md-note"><a class="link code" href="/run?id=gh-c41f">gh-c41f</a> ran on fallback openai/gpt-5 because the primary was cooling down.</p>"""
+    cooling = card("Cooling down", cool, sub="configured models only", id_="p-cooldowns")
+    inuse = '<ul class="md-ms"><li class="md-m"><span class="md-m__t"><span class="code">anthropic/claude-sonnet-5-5</span><small>anthropic, priced. $32.46 of $80.00 this week</small></span>' + badge('attention', 'Cooling down') + '</li><li class="md-m"><span class="md-m__t"><span class="code">openai/gpt-5</span><small>openai, priced. Deployment windows also apply</small></span>' + badge('ok', 'Configured') + '</li></ul>'
+    models = card("Models in use", inuse, sub="unpriced fallbacks are skipped", id_="p-models")
+    canary = f"""<div class="md-prop"><p class="md-prop__t">Doctor on <b>mini1</b>: a newer model is available for planner.</p><p class="card__sub">Retained canary for planner, fix flow. Partial history is labelled; these are observations, not a recommendation.</p>
+      <div class="tbl-wrap"><table class="tbl tbl--stack md-can"><caption class="sr">Retained canary against source runs</caption><thead><tr><th>Observed metric</th><th>Source models</th><th>Candidate</th></tr></thead><tbody><tr><td data-l="Observed metric">Cost per run</td><td data-l="Source runs">$0.19</td><td data-l="Candidate">$0.06</td></tr><tr><td data-l="Observed metric">Completed</td><td data-l="Source runs">3 of 3</td><td data-l="Candidate">2 of 3</td></tr><tr><td data-l="Observed metric">Turns, average</td><td data-l="Source runs">9.4</td><td data-l="Candidate">11.2</td></tr><tr><td data-l="Observed metric">Tokens, average</td><td data-l="Source runs">118,400</td><td data-l="Candidate">131,900</td></tr></tbody></table></div>
+      <p class="md-foot">Source and candidate rows link to their run pages. <a class="link" href="/insights/breakdown?whatif=anthropic%2Fclaude-haiku-5-5&flow=fix">What if</a></p><p>{btn("Adopt for planner", "primary")}</p><p class="md-foot">Adopt fills the role form. Choose its scope explicitly, review the exact diff and confirm. Nothing runs now.</p>
+      <div class="cmd"><code>pi-dispatch canary --role planner --model anthropic/claude-haiku-5-5 --flow fix --cap-usd &lt;cap-usd&gt; --count 1</code></div><p class="md-foot">Replace &lt;cap-usd&gt; with the new experiment total dollar cap. Run on the host with a first-party Anthropic or OpenAI model on local Docker. Its deployment lease holds every other start. One flow, at most 10 runs.</p></div>"""
+    proposals = card("Proposals and canaries", canary, sub="doctor checks per host, retained run comparisons", id_="p-proposals")
+    inner = problems + '<div class="cols models-layout"><div class="stack">' + roles + '</div><div class="stack">' + cooling + models + '</div></div>' + proposals
+    return shell("Models", inner, "Models", sub="Which model each role runs, what it falls back to, and what is cooling down.", end='<span class="card__sub">Drawn at 15:39 UTC, not live</span>' + btn("Reload", "ghost", "rerun", sm=False), live="off").replace("\n  \n", "\n\n")
 
 MODELS_CSS = """
-.md-edit { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); }
-.md-grow { flex: 1; min-width: 220px; }
+.md-edit { min-width: 0; display: block; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.md-edit > * { min-width: 0; max-width: 100%; margin-top: 12px; }
+.md-edit .input { width: 100%; min-width: 0; }
+.md-grow { flex: 1; min-width: min(220px, 100%); }
+.models-layout { grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); }
+.md-foot { margin-top: 12px; color: var(--ink-muted); font-size: 13px; }
+#p-roles .code, #p-cooldowns .code, #p-models .code { white-space: normal; overflow-wrap: anywhere; }
+#p-roles td small { display: block; color: var(--ink-muted); }
+@media (max-width: 1100px) { .models-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 600px) { .md-cool { align-items: flex-start; } .md-m { align-items: flex-start; flex-wrap: wrap; } }
+@media (max-width: 760px) {
+  #p-roles .tbl--stack tr, #p-proposals .tbl--stack tr { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  #p-roles .tbl--stack td, #p-proposals .tbl--stack td { width: 100%; min-width: 0; }
+  #p-roles .tbl--stack td[data-l]::before, #p-proposals .tbl--stack td[data-l]::before { display: block; margin-bottom: 5px; line-height: 16px; }
+}
+.md-remove .btn { max-width: 100%; min-width: 0; height: auto; min-height: 30px; padding: 6px 13px; white-space: normal; overflow-wrap: anywhere; line-height: 18px; }
 .md-editing td { background: var(--running-tint); }
 .md-ms { display: grid; gap: 6px; }
 .md-m { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); }
@@ -462,30 +436,29 @@ READMES = {
 
 **Fixture note.** The same as Spend.
 """,
-"ModelsScreen": """Models maps each role to a model once, lists the fallbacks used on a rate limit, shows what is cooling down, and proposes new models with a canary, never adopting them by itself.
+"ModelsScreen": """Models shows scoped model roles, ordered fallbacks, configured cooldowns, prices, dollar windows, doctor proposals and retained canaries. A person reviews every role edit; the page starts no run.
 
 **How a person uses it.**
-- **Radius banner.** The page opens with an attention banner when a Radius gateway is configured: Radius bills, so there is no local cap.
-- **Model roles.** A table of planner, editor, explorer, reviewer and tidier, with each role's model, its fallbacks in order and the flows that use it. Editing a row opens the form, a diff of the settings file and a safe confirm bar with an undo line.
-- **Cooling down.** Which model is rate limited and until when, as a ring of the time left. It also says where each role's next attempt goes and which jobs wait because their role has no fallback. A run that fell back says so: "gh-c41f ran on fallback kimi-for-coding because the primary was rate limited".
-- **New model available.** A proposal with a canary run beside the current model, comparing cost per run, completed runs, turns and tokens. Adopt is a paid act and is confirmed first. Dismiss and more canary runs are always offered.
-- **Models in use.** Each model's provider, whether it has a price, which dollar windows count it, and its state.
+- **Banners first.** Doctor's capped Radius warning and pickup conflicts name their fix before the role map.
+- **Model roles.** Default roles, then project overrides, with the primary, ordered fallbacks, skipped unpriced fallbacks, linked trigger row numbers and flows. Role names are free, with at most sixteen per scope. Phone tables stack each field across the full card width with its label on a separate line. Repository-agent declarations are not readable here.
+- **Edit a role.** An operator reviews modelRoles in the triggers file, the exact diff, affected trigger rows, a confirm and an inverse undo. Nothing runs now; recovery keeps its model. Removing an override reveals a default where one exists.
+- **Cooling down.** Configured models show kind and UTC end only. Roles with no fallback still start on their primary. The first candidate is ordered by price and cooldown only; credentials, egress, dollar windows and endpoint availability still decide pickup; waiters and recent fallback runs are linked.
+- **Models in use.** Primary, fallback and trigger models show provider, failover price status, applicable dollar windows, spend, cap and state, including a trigger-policy refusal. Unknown amounts are not zero.
+- **Proposals and canaries.** Doctor labels per host and comparisons rebuilt from retained candidate and source records show cost per run, completion, turns and tokens with coverage. Adopt fills the form with explicit scope selection. Run more is a host command for one flow and at most ten runs, warning that its deployment lease holds every other start.
 
-**Panels.** `p-roles`, `p-proposals`, `p-cooldowns`, `p-models`.
+**Panels.** `p-model-problems`, `p-roles`, `p-cooldowns`, `p-models`, `p-proposals`.
 
 **The server provides.**
-- The role map and the fallback lists from settings.
-- Cooldowns with their reason and end time.
-- Canary results.
-- Price status per model, and whether a gateway bills outside the local caps.
+- The triggers-file role map and effective trigger associations, with source availability.
+- Configured cooldowns, current waiters and retained fallback records, never provider text or a start time.
+- Per-model failover price status and applicable dollar window counters.
+- Doctor proposal labels per host and bounded retained canary/source metrics, including partial coverage and the exclusion of incomplete or unmetered costs from exact averages.
 
-**Why it works this way.**
-- Models change only by a reviewed edit: the role map is written to the settings file through a preview and a confirm, never by a job or a model.
-- A proposal is never adopted until a person confirms it, and adopting starts no run by itself.
-- A run that fell back says so on its own run page too, so a cheaper or slower result is never a surprise.
-- A model without a price is skipped as a fallback, so a fallback can never spend outside the dollar windows unseen.
+**Who sees what.** Viewers and agents read every factual panel. Only an operator on a writable console sees Edit, role forms, Adopt or a command. The page is drawn once; Reload refreshes it. JavaScript is required for preview and confirm, never for facts and navigation.
 
-**Fixture note.** This is a planned screen (#716, #717, #693). All of it is sample, except the model names (claude-sonnet-5-5, kimi-for-coding, claude-haiku-5-5) and the $80.00 weekly window for claude-sonnet-5-5.
+**Why it works this way.** Models change only after a person reviews the triggers-file diff. A read tool exposes the same facts and cannot mutate roles. Canary observations are not adoption or a new run, and missing history is not a zero-cost success.
+
+**Fixture note.** Models, counts and money are sample data. This card preserves the Pulse components while using the contracts implemented by #773; it does not claim a Radius gateway or a subscription bypass.
 """,
 "WatchScreen": """Watch shows configured sources and rules before the first finding, retained finding outcomes, cooldown left, and suppressed or capped counts. Built by #735.
 
@@ -506,7 +479,7 @@ READMES = {
 if __name__ == "__main__":
     write("SpendScreen", card_marker("Screens", 1900, 1440, "Spend: caps, spend over time, where it went, job sizes and a what-if"), "Spend", spend_page(), SPEND_CSS)
     write("SpendPhone", card_marker("Screens, phone", 4680, 390, "Spend at 390px, one column"), "Spend on a phone", spend_page(), SPEND_CSS)
-    write("ModelsScreen", card_marker("Planned for 5.0.0", 1500, 1440, "Models: role map, fallbacks, cooldowns, canary proposals and the Radius flag"), "Models", models_page(), MODELS_CSS)
+    write("ModelsScreen", card_marker("Screens", 1500, 1440, "Models: role map, fallbacks, cooldowns, canary proposals and the Radius flag"), "Models", models_page(), MODELS_CSS)
     write("WatchScreen", card_marker("Planned for 5.0.0", 1500, 1440, "Watch: sources, triggers, fingerprints and a finding with what it started"), "Watch", watch_page(), WATCH_CSS)
     for name, text in READMES.items():
         open(f"{ROOT}/{name}/README.md", "w").write(text)

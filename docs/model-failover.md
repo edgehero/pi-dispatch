@@ -37,3 +37,16 @@ If every otherwise usable candidate is cooling down, has a full model window or 
 The run record carries the actual `provider` and `model`, plus `modelWhy`: `primary`, `fallback-cooldown`, `fallback-window`, `fallback-unavailable` or `fallback-context`. A classified terminal error adds only the closed `providerFailure` detail. `pi-dispatch doctor` shows configured models cooling down, their cause and reset time. The console's Doctor panel shows the same published warnings and how old the observation is.
 
 Jobs without `fallbackModels` keep their existing behavior. Subscription logins remain refused, and portfolio weights do not choose models.
+
+## Models in the console
+
+**More → Models** shows configured cooldowns with their fixed cause and UTC end, model-window usage and
+recent fallback runs in sentences. It reads the configured failover keys, never scans arbitrary model keys.
+A missing observation is unknown, not proof that a model is ready or a window is empty.
+
+The next-candidate explanation is advisory: it reflects the displayed price/cooldown evidence and reserves
+nothing. Credentials, egress, per-job dollar bounds, windows and endpoint slots are checked again at pickup.
+A role with no fallback may still be used by a trigger with its own fallback list; the page distinguishes
+those effective policies. Jobs with no effective fallback start on their primary and do not consult cooldowns.
+Waiting cooldown/window jobs link to Overview. Run detail uses the same model-choice and provider-failure
+words. Provider error bodies and a cooldown start time are not stored or invented.

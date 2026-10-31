@@ -1,3 +1,4 @@
+import { MODELS_CSS } from "../src/console/models-css.mjs";
 import { AGENT_POLICY_CSS } from "../src/console/agent-policy-css.mjs";
 import { ANSWERER_CSS } from "../src/console/answerer-css.mjs";
 import assert from "node:assert/strict";
@@ -43,10 +44,10 @@ test("bundle.css and tokens.json are pasted verbatim: each module's text hashes 
 });
 
 test("the stylesheet is the tokens, then bundle.css, the shell and pages, and it fetches nothing", () => {
-  assert.equal(CONSOLE_CSS, [tokenCss(), PULSE_CSS, SHELL_CSS, AGENT_POLICY_CSS, pageCss(), CONFIG_CSS, TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, PROJECT_CSS].join("\n"));
+  assert.equal(CONSOLE_CSS, [tokenCss(), PULSE_CSS, SHELL_CSS, AGENT_POLICY_CSS, pageCss(), CONFIG_CSS, TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, PROJECT_CSS, MODELS_CSS].join("\n"));
   assert.ok(CONSOLE_CSS.startsWith(tokenCss()), "the tokens come first, so every later rule reads them");
   assert.ok(CONSOLE_CSS.indexOf(PULSE_CSS) > tokenCss().length - 1, "bundle.css after the tokens");
-  assert.ok(CONSOLE_CSS.endsWith([TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, PROJECT_CSS].join("\n")), "the page rules follow the configuration, bundle and shell in their declared order");
+  assert.ok(CONSOLE_CSS.endsWith([TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, PROJECT_CSS, MODELS_CSS].join("\n")), "the page rules follow the configuration, bundle and shell in their declared order");
   assert.doesNotMatch(CONSOLE_CSS, /--pd-|\.legacy/);
   // Plain rules: no element a page could be broken out by, nothing loaded, no remote font or image.
   for (const needle of ["<", "@import", "url(", "expression(", "@font-face", "javascript:"]) assert.ok(!CONSOLE_CSS.includes(needle), `no ${needle}`);

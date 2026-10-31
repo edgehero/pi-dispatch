@@ -72,7 +72,7 @@ export function cheaperRouteChecks(roles, routes, models, endpoints, builtin = g
 		if (!active.has(route.model)) continue;
 		const a = lookup(route.model, false), b = lookup(route.alternative, true);
 		const fields = ["input", "output", "cacheRead", "cacheWrite"];
-		if (a && b && !a.tiers && !b.tiers && fields.every((f) => Number.isFinite(a[f]) && a[f] >= 0 && Number.isFinite(b[f]) && b[f] >= 0 && b[f] <= a[f]) && fields.some((f) => b[f] < a[f])) checks.push({ ok: true, label: `Model proposal: ${route.alternative} has lower recorded rates than ${route.model} through a declared endpoint; equivalence is operator-declared, review with a capped canary` });
+		if (a && b && !a.tiers && !b.tiers && fields.every((f) => Number.isFinite(a[f]) && a[f] >= 0 && Number.isFinite(b[f]) && b[f] >= 0 && b[f] <= a[f]) && fields.some((f) => b[f] < a[f])) checks.push({ proposal: { kind: "cheaper-route", model: route.model, candidate: route.alternative }, ok: true, label: `Model proposal: ${route.alternative} has lower recorded rates than ${route.model} through a declared endpoint; equivalence is operator-declared, review with a capped canary` });
 	}
 	return checks;
 }
@@ -82,12 +82,12 @@ export async function doctorModelProposalChecks(env, { cwd, credentials = {}, no
 	try { config = parseProposalConfig(read(join(cwd, "model-proposals.json"))); }
 	catch (error) {
 		if (error?.code === "ENOENT") return [];
-		return [{ ok: false, warn: true, label: "Model proposals: model-proposals.json is unreadable or invalid", fix: "use version 1 with explicit lifecycleProviders, proxyUrl and optional noticeDays, replacements or equivalent routes" }];
+		return [{ proposal: { kind: "unavailable" }, ok: false, warn: true, label: "Model proposals: model-proposals.json is unreadable or invalid", fix: "use version 1 with explicit lifecycleProviders, proxyUrl and optional noticeDays, replacements or equivalent routes" }];
 	}
 	const checks = [];
 	let roles;
 	try { roles = parseTriggersDocument(read(env.PI_TRIGGERS_FILE ?? join(cwd, "triggers.json"))).modelRoles ?? {}; }
-	catch { return [{ ok: false, warn: true, label: "Model proposals: current role map unavailable", fix: "fix triggers.json before evaluating proposals" }]; }
+	catch { return [{ proposal: { kind: "unavailable" }, ok: false, warn: true, label: "Model proposals: current role map unavailable", fix: "fix triggers.json before evaluating proposals" }]; }
 	const catalogs = {};
 	for (const provider of config.lifecycleProviders) {
 		try {
@@ -95,8 +95,8 @@ export async function doctorModelProposalChecks(env, { cwd, credentials = {}, no
 			const allowed = parseAllowlist(read(join(cwd, "egress-allowlist.conf")));
 			if (!allowlistEntryFor(allowed, host) || !credentials[KEYS[provider]]) throw new Error("lifecycle egress or credential unavailable");
 			catalogs[provider] = await fetch(provider, { key: credentials[KEYS[provider]], proxyUrl: config.proxyUrl });
-			checks.push({ ok: true, label: `Model proposals: ${provider} lifecycle catalog checked through declared proxy` });
-		} catch { checks.push({ ok: false, warn: true, label: `Model proposals: ${provider} lifecycle catalog unavailable`, fix: "check the opt-in proxy, egress allowlist and API credential; no model was changed" }); }
+			checks.push({ proposal: { kind: "catalog-checked", provider }, ok: true, label: `Model proposals: ${provider} lifecycle catalog checked through declared proxy` });
+		} catch { checks.push({ proposal: { kind: "unavailable", provider }, ok: false, warn: true, label: `Model proposals: ${provider} lifecycle catalog unavailable`, fix: "check the opt-in proxy, egress allowlist and API credential; no model was changed" }); }
 	}
 	checks.push(...roleProposalChecks({ roles, catalogs, replacements: config.replacements, now: now(), noticeDays: config.noticeDays }));
 	if (config.routes?.length) try {
@@ -104,6 +104,6 @@ export async function doctorModelProposalChecks(env, { cwd, credentials = {}, no
 		if (parsed.error) throw new Error("overlay unavailable");
 		const endpoints = suppliedEndpoints ?? loadModelEndpoints({ modelEndpointsFile: env.PI_MODEL_ENDPOINTS_FILE }, { cwd });
 		checks.push(...cheaperRouteChecks(roles, config.routes, parsed.value, endpoints));
-	} catch { checks.push({ ok: false, warn: true, label: "Model proposals: declared route prices or endpoints unavailable", fix: "check the overlay models.json and declared endpoints; no route was changed" }); }
+	} catch { checks.push({ proposal: { kind: "unavailable" }, ok: false, warn: true, label: "Model proposals: declared route prices or endpoints unavailable", fix: "check the overlay models.json and declared endpoints; no route was changed" }); }
 	return checks;
 }
