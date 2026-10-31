@@ -1,0 +1,285 @@
+{
+  "issue": 781,
+  "parentCommit": "1d5c97e3278d99b9d59fcdede1f4dcf6d242c992",
+  "afterFrontendSourceSetSha256": "e28cb43c4c4a8bf30094e90db5411c9bc3db973da0e9785e31fcc0b1e2e8f1c9",
+  "captures": "Synthetic controlled fixtures, no live provider sign-in or quota evidence. Application images used real HTTP/session/server rendering under the application production CSP. References used locally served repository published-source cards.",
+  "referenceLimitations": [
+    "Remote claude.ai artifact was inaccessible; no direct remote comparison is claimed.",
+    "Published-source preview Copy buttons are static. Production Copy interaction was separately exercised under the application CSP.",
+    "At desktop1440 the Connections source card is906px wide and the actual card917px wide, both677px high, due to existing different page-grid tracks. Fourteen of sixteen default card dimensions match exactly.",
+    "Synthetic fixture dates differ between source cards and actual application."
+  ],
+  "fonts": "Native system stack, document.fonts.status loaded. No external web font is expected.",
+  "browser": "Chrome for Testing155.0.8059.39",
+  "node": "22.19.0",
+  "applicationBrowserResult": {
+    "ok": true,
+    "paints": 144,
+    "checks": [
+      "Both themes; operator, viewer, agent and read-only facts/commands",
+      "Production CSP with negative control; real Copy interaction and keyboard behavior",
+      "No-JavaScript facts; staleness/reset/trial and monitoring-focus counterexamples",
+      "Valid64-character owner-host and connection identifiers at320/375/390/768/1440 with every rendered text line inside its own/card box"
+    ]
+  },
+  "images": [
+    {
+      "file": "images/before-connections-light-1440.png",
+      "sha256": "da45270ae2ee3dbb898dc1ef4e4e8e0019d08c8bc1a2eb509cb9a9a0ba5a886c",
+      "pixels": {
+        "width": 1440,
+        "height": 1489
+      },
+      "viewportWidth": 1440,
+      "theme": "light",
+      "role": "operator",
+      "page": "connections",
+      "kind": "parent application",
+      "sourceFile": "before-connections-light-1440.png",
+      "parentCommit": "1d5c97e3278d99b9d59fcdede1f4dcf6d242c992"
+    },
+    {
+      "file": "images/after-connections-light-1440.png",
+      "sha256": "056a64b19d810ed7d69cec49d600c74124f5bb2215cf41737215b702397fd6c4",
+      "pixels": {
+        "width": 1440,
+        "height": 2182
+      },
+      "viewportWidth": 1440,
+      "theme": "light",
+      "role": "operator",
+      "page": "connections",
+      "kind": "final application",
+      "sourceFile": "subscription-connections-operator-light-1440.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/before-connections-dark-390.png",
+      "sha256": "dfa3644b8ad93472d89c852a86c26b3c3fe1b6c3c05ae43e3ebf4c41e270a661",
+      "pixels": {
+        "width": 390,
+        "height": 3108
+      },
+      "viewportWidth": 390,
+      "theme": "dark",
+      "role": "operator",
+      "page": "connections",
+      "kind": "parent application",
+      "sourceFile": "before-connections-dark-390.png",
+      "parentCommit": "1d5c97e3278d99b9d59fcdede1f4dcf6d242c992"
+    },
+    {
+      "file": "images/after-connections-dark-390.png",
+      "sha256": "704804138b4308cd95af15c010e3a4bc764e62986c1f27dacbd7c3e6ca1e80ce",
+      "pixels": {
+        "width": 390,
+        "height": 4166
+      },
+      "viewportWidth": 390,
+      "theme": "dark",
+      "role": "operator",
+      "page": "connections",
+      "kind": "final application",
+      "sourceFile": "subscription-connections-operator-dark-390.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/before-models-dark-1440.png",
+      "sha256": "7108ef846e2e388c18d4154e66b76be4e3e2fef77a9142bc3361efc2b2dbf7ab",
+      "pixels": {
+        "width": 1440,
+        "height": 2304
+      },
+      "viewportWidth": 1440,
+      "theme": "dark",
+      "role": "operator",
+      "page": "models",
+      "kind": "parent application",
+      "sourceFile": "before-models-dark-1440.png",
+      "parentCommit": "1d5c97e3278d99b9d59fcdede1f4dcf6d242c992"
+    },
+    {
+      "file": "images/after-models-dark-1440.png",
+      "sha256": "5c391df02be2e95727486b3eb8e41bd80664a7ea078f5ce23e3a3e98b76c8d6e",
+      "pixels": {
+        "width": 1440,
+        "height": 2964
+      },
+      "viewportWidth": 1440,
+      "theme": "dark",
+      "role": "operator",
+      "page": "models",
+      "kind": "final application",
+      "sourceFile": "subscription-models-operator-dark-1440.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/before-models-light-390.png",
+      "sha256": "5efa3d9f972c0f585c6ded4d0801b97e46dd440c147cdda02ecf2dadc3e79b39",
+      "pixels": {
+        "width": 390,
+        "height": 5153
+      },
+      "viewportWidth": 390,
+      "theme": "light",
+      "role": "operator",
+      "page": "models",
+      "kind": "parent application",
+      "sourceFile": "before-models-light-390.png",
+      "parentCommit": "1d5c97e3278d99b9d59fcdede1f4dcf6d242c992"
+    },
+    {
+      "file": "images/after-models-light-390.png",
+      "sha256": "a25a475685ba737d1f433df6aff4e7da053170a4c411997ee654f5140b52d423",
+      "pixels": {
+        "width": 390,
+        "height": 6207
+      },
+      "viewportWidth": 390,
+      "theme": "light",
+      "role": "operator",
+      "page": "models",
+      "kind": "final application",
+      "sourceFile": "subscription-models-operator-light-390.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/reference-auth-light-390.png",
+      "sha256": "b4c238a486b6d085c87074274c356139831892e549132745a2c203a94b000a6e",
+      "pixels": {
+        "width": 358,
+        "height": 1042
+      },
+      "viewportWidth": 390,
+      "theme": "light",
+      "role": "operator",
+      "page": "connections",
+      "kind": "published-source reference",
+      "sourceFile": "reference-connections-card-light-390.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/actual-auth-light-390.png",
+      "sha256": "5496af10810c87a76fe65cca44acfe7a6479d2d06c10544e24caa0fe14e8819f",
+      "pixels": {
+        "width": 358,
+        "height": 1042
+      },
+      "viewportWidth": 390,
+      "theme": "light",
+      "role": "operator",
+      "page": "connections",
+      "kind": "final application card",
+      "sourceFile": "subscription-connections-card-light-390.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/reference-quota-dark-390.png",
+      "sha256": "a0212bcdfa9ba901d247faca73da98c7873f8d64f4f819b01e8f208ebc1e7376",
+      "pixels": {
+        "width": 358,
+        "height": 1038
+      },
+      "viewportWidth": 390,
+      "theme": "dark",
+      "role": "operator",
+      "page": "models",
+      "kind": "published-source reference",
+      "sourceFile": "reference-models-card-dark-390.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/actual-quota-dark-390.png",
+      "sha256": "7bd27263a7172c5700e59fb5dfdefdaefc64b2e63b80e580c096a9be32ab7858",
+      "pixels": {
+        "width": 358,
+        "height": 1038
+      },
+      "viewportWidth": 390,
+      "theme": "dark",
+      "role": "operator",
+      "page": "models",
+      "kind": "final application card",
+      "sourceFile": "subscription-models-card-dark-390.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/long-auth-dark-320.png",
+      "sha256": "433e2dca021a173c58238f81c73691e2955d38564b0ed40610ae474786435735",
+      "pixels": {
+        "width": 288,
+        "height": 1451
+      },
+      "viewportWidth": 320,
+      "theme": "dark",
+      "role": "operator",
+      "page": "connections",
+      "kind": "final application long identifiers",
+      "sourceFile": "subscription-long-connections-card-dark-320.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/focus-mandatory-week-dark-390.png",
+      "sha256": "77e8518044ac5d113e6d474be7b56f91dc2a5221f282817cc7d7d958352b0977",
+      "pixels": {
+        "width": 358,
+        "height": 1107
+      },
+      "viewportWidth": 390,
+      "theme": "dark",
+      "role": "operator",
+      "page": "models",
+      "kind": "final application excluded exhausted weekly window",
+      "sourceFile": "subscription-models-focus-mandatory-week-card-390.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/focus-five-hour-dark-390.png",
+      "sha256": "edc75c4fbe2bdefd94fd26d4d30979a66170590ded56fffd4d706a2a0fb80902",
+      "pixels": {
+        "width": 358,
+        "height": 959
+      },
+      "viewportWidth": 390,
+      "theme": "dark",
+      "role": "operator",
+      "page": "models",
+      "kind": "final application selected five-hour focus",
+      "sourceFile": "subscription-models-focus-five-hour-card-390.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    },
+    {
+      "file": "images/long-quota-light-375.png",
+      "sha256": "10118eac12a3fdcb34dcdd54e4b499ac4e1b0c976a9d6efb739f8edf57e7e010",
+      "pixels": {
+        "width": 343,
+        "height": 1188
+      },
+      "viewportWidth": 375,
+      "theme": "light",
+      "role": "operator",
+      "page": "models",
+      "kind": "final application long identifiers",
+      "sourceFile": "subscription-long-models-card-light-375.png",
+      "parentCommit": null,
+      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+    }
+  ],
+  "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e",
+  "finalCommitSourceLinkage": "All212 listed frozen frontend/design/harness source hashes matched git show <implementationCommit>:<path>. Publication images do not belong to the parent implementation tree.",
+  "referenceRuntimeAssets": {
+    "tokens.css": "4408e8fddf6812c7ff1a2df58b5a6c31018de917cafb21df6ee23a7a9d34e35a",
+    "bundle.css": "acd9426272c7960005ae17e7fdcbf636b8d7dd758f300b92841997ab9db10134"
+  }
+}

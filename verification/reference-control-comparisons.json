@@ -1,0 +1,1903 @@
+{
+  "source": "repository published-source cards + same-generator conditional variants, no direct remote comparison",
+  "actual": "production renderer HTML; actual styles/interactions separately verified under application CSP",
+  "staticPreviewButtons": true,
+  "comparisons": [
+    {
+      "variant": "models",
+      "theme": "light",
+      "width": 320,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models",
+      "theme": "light",
+      "width": 390,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models",
+      "theme": "light",
+      "width": 768,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models",
+      "theme": "light",
+      "width": 1440,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models",
+      "theme": "dark",
+      "width": 320,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models",
+      "theme": "dark",
+      "width": 390,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models",
+      "theme": "dark",
+      "width": 768,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models",
+      "theme": "dark",
+      "width": 1440,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "connections",
+      "theme": "light",
+      "width": 320,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Sign in or reauthenticate",
+            "command": "pi-dispatch auth login claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "login"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Disconnect this connection",
+            "command": "pi-dispatch auth logout claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "logout"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "connections",
+      "theme": "light",
+      "width": 390,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Sign in or reauthenticate",
+            "command": "pi-dispatch auth login claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "login"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Disconnect this connection",
+            "command": "pi-dispatch auth logout claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "logout"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "connections",
+      "theme": "light",
+      "width": 768,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Sign in or reauthenticate",
+            "command": "pi-dispatch auth login claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "login"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Disconnect this connection",
+            "command": "pi-dispatch auth logout claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "logout"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "connections",
+      "theme": "light",
+      "width": 1440,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Sign in or reauthenticate",
+            "command": "pi-dispatch auth login claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "login"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Disconnect this connection",
+            "command": "pi-dispatch auth logout claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "logout"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "connections",
+      "theme": "dark",
+      "width": 320,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Sign in or reauthenticate",
+            "command": "pi-dispatch auth login claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "login"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Disconnect this connection",
+            "command": "pi-dispatch auth logout claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "logout"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "connections",
+      "theme": "dark",
+      "width": 390,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Sign in or reauthenticate",
+            "command": "pi-dispatch auth login claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "login"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Disconnect this connection",
+            "command": "pi-dispatch auth logout claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "logout"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "connections",
+      "theme": "dark",
+      "width": 768,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Sign in or reauthenticate",
+            "command": "pi-dispatch auth login claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "login"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Disconnect this connection",
+            "command": "pi-dispatch auth logout claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "logout"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "connections",
+      "theme": "dark",
+      "width": 1440,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Sign in or reauthenticate",
+            "command": "pi-dispatch auth login claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "login"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Disconnect this connection",
+            "command": "pi-dispatch auth logout claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "logout"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models-trial",
+      "theme": "light",
+      "width": 390,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser. Trial authorizes one fresh, normally budgeted pickup check; it does not clear account exhaustion or start a job here.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Authorize one quota trial",
+            "command": "pi-dispatch auth trial claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "trial"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models-trial",
+      "theme": "light",
+      "width": 1440,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser. Trial authorizes one fresh, normally budgeted pickup check; it does not clear account exhaustion or start a job here.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Authorize one quota trial",
+            "command": "pi-dispatch auth trial claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "trial"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models-trial",
+      "theme": "dark",
+      "width": 390,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser. Trial authorizes one fresh, normally budgeted pickup check; it does not clear account exhaustion or start a job here.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Authorize one quota trial",
+            "command": "pi-dispatch auth trial claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "trial"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models-trial",
+      "theme": "dark",
+      "width": 1440,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser. Trial authorizes one fresh, normally budgeted pickup check; it does not clear account exhaustion or start a job here.",
+        "hierarchy": [
+          "P",
+          "DIV",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          },
+          {
+            "label": "Authorize one quota trial",
+            "command": "pi-dispatch auth trial claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "trial"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models-granted",
+      "theme": "light",
+      "width": 390,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser. One quota trial is already authorized. It does not clear account exhaustion or start a job here.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models-granted",
+      "theme": "light",
+      "width": 1440,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser. One quota trial is already authorized. It does not clear account exhaustion or start a job here.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models-granted",
+      "theme": "dark",
+      "width": 390,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser. One quota trial is already authorized. It does not clear account exhaustion or start a job here.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "variant": "models-granted",
+      "theme": "dark",
+      "width": 1440,
+      "controls": {
+        "note": "Run in a terminal on mini1. Sign-in and refresh never run in this browser. One quota trial is already authorized. It does not clear account exhaustion or start a job here.",
+        "hierarchy": [
+          "P",
+          "DIV"
+        ],
+        "groups": [
+          {
+            "label": "Refresh quota observations",
+            "command": "pi-dispatch auth usage claude-work",
+            "arguments": [
+              {
+                "tag": "SPAN",
+                "text": "pi-dispatch"
+              },
+              {
+                "tag": "SPAN",
+                "text": "auth"
+              },
+              {
+                "tag": "SPAN",
+                "text": "usage"
+              },
+              {
+                "tag": "SPAN",
+                "text": "claude-work"
+              }
+            ],
+            "hierarchy": [
+              "P",
+              "DIV"
+            ],
+            "commandHierarchy": [
+              "CODE",
+              "BUTTON"
+            ],
+            "button": {
+              "text": "Copy",
+              "type": "button",
+              "classes": "btn btn--sm"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

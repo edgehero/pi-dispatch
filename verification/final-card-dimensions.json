@@ -1,0 +1,226 @@
+[
+  {
+    "page": "connections",
+    "theme": "light",
+    "viewportWidth": 320,
+    "reference": {
+      "width": 288,
+      "height": 1080
+    },
+    "actual": {
+      "width": 288,
+      "height": 1080
+    },
+    "equal": true
+  },
+  {
+    "page": "connections",
+    "theme": "light",
+    "viewportWidth": 390,
+    "reference": {
+      "width": 358,
+      "height": 1042
+    },
+    "actual": {
+      "width": 358,
+      "height": 1042
+    },
+    "equal": true
+  },
+  {
+    "page": "connections",
+    "theme": "light",
+    "viewportWidth": 768,
+    "reference": {
+      "width": 720,
+      "height": 677
+    },
+    "actual": {
+      "width": 720,
+      "height": 677
+    },
+    "equal": true
+  },
+  {
+    "page": "connections",
+    "theme": "light",
+    "viewportWidth": 1440,
+    "reference": {
+      "width": 906,
+      "height": 677
+    },
+    "actual": {
+      "width": 917,
+      "height": 677
+    },
+    "equal": false
+  },
+  {
+    "page": "connections",
+    "theme": "dark",
+    "viewportWidth": 320,
+    "reference": {
+      "width": 288,
+      "height": 1080
+    },
+    "actual": {
+      "width": 288,
+      "height": 1080
+    },
+    "equal": true
+  },
+  {
+    "page": "connections",
+    "theme": "dark",
+    "viewportWidth": 390,
+    "reference": {
+      "width": 358,
+      "height": 1042
+    },
+    "actual": {
+      "width": 358,
+      "height": 1042
+    },
+    "equal": true
+  },
+  {
+    "page": "connections",
+    "theme": "dark",
+    "viewportWidth": 768,
+    "reference": {
+      "width": 720,
+      "height": 677
+    },
+    "actual": {
+      "width": 720,
+      "height": 677
+    },
+    "equal": true
+  },
+  {
+    "page": "connections",
+    "theme": "dark",
+    "viewportWidth": 1440,
+    "reference": {
+      "width": 906,
+      "height": 677
+    },
+    "actual": {
+      "width": 917,
+      "height": 677
+    },
+    "equal": false
+  },
+  {
+    "page": "models",
+    "theme": "light",
+    "viewportWidth": 320,
+    "reference": {
+      "width": 288,
+      "height": 1117
+    },
+    "actual": {
+      "width": 288,
+      "height": 1117
+    },
+    "equal": true
+  },
+  {
+    "page": "models",
+    "theme": "light",
+    "viewportWidth": 390,
+    "reference": {
+      "width": 358,
+      "height": 1038
+    },
+    "actual": {
+      "width": 358,
+      "height": 1038
+    },
+    "equal": true
+  },
+  {
+    "page": "models",
+    "theme": "light",
+    "viewportWidth": 768,
+    "reference": {
+      "width": 720,
+      "height": 663
+    },
+    "actual": {
+      "width": 720,
+      "height": 663
+    },
+    "equal": true
+  },
+  {
+    "page": "models",
+    "theme": "light",
+    "viewportWidth": 1440,
+    "reference": {
+      "width": 1392,
+      "height": 644
+    },
+    "actual": {
+      "width": 1392,
+      "height": 644
+    },
+    "equal": true
+  },
+  {
+    "page": "models",
+    "theme": "dark",
+    "viewportWidth": 320,
+    "reference": {
+      "width": 288,
+      "height": 1117
+    },
+    "actual": {
+      "width": 288,
+      "height": 1117
+    },
+    "equal": true
+  },
+  {
+    "page": "models",
+    "theme": "dark",
+    "viewportWidth": 390,
+    "reference": {
+      "width": 358,
+      "height": 1038
+    },
+    "actual": {
+      "width": 358,
+      "height": 1038
+    },
+    "equal": true
+  },
+  {
+    "page": "models",
+    "theme": "dark",
+    "viewportWidth": 768,
+    "reference": {
+      "width": 720,
+      "height": 663
+    },
+    "actual": {
+      "width": 720,
+      "height": 663
+    },
+    "equal": true
+  },
+  {
+    "page": "models",
+    "theme": "dark",
+    "viewportWidth": 1440,
+    "reference": {
+      "width": 1392,
+      "height": 644
+    },
+    "actual": {
+      "width": 1392,
+      "height": 644
+    },
+    "equal": true
+  }
+]

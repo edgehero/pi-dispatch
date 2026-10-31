@@ -1,0 +1,94 @@
+{
+  "connections": {
+    "commit": "1d5c97e3278d99b9d59fcdede1f4dcf6d242c992",
+    "source": "actual parent console HTTP/session/server/readConnections under its production CSP; isolated test-only fixture adapter outside worktree; no new-feature imports",
+    "hashes": {
+      "admin/src/connections-view.mjs": "468da1fd2c9b1e5766a7053e6b6400d571e6ec96f600e0c6656910765ef91cea",
+      "admin/src/console/pages.mjs": "0d47219ae0631d0d00d974ff4bc8c1b47422b042fddf278a99754fa4cf9ef7bf",
+      "admin/src/console/panels/connections.mjs": "df1e1cc63e106cd38af7484dfa8ebfce193d1154794e67db1b21156dfc1df4aa",
+      "admin/src/console/style.mjs": "387d112ee620f5564bc72358030aced734e25b26c8de7f7c95c543d0fef264ef"
+    },
+    "checks": [
+      {
+        "title": "Connections",
+        "width": 390,
+        "canvas": "#edeeec",
+        "fonts": "loaded",
+        "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "sharedCss": true,
+        "subscription": false,
+        "csp": [],
+        "theme": "light"
+      },
+      {
+        "title": "Connections",
+        "width": 1440,
+        "canvas": "#edeeec",
+        "fonts": "loaded",
+        "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "sharedCss": true,
+        "subscription": false,
+        "csp": [],
+        "theme": "light"
+      },
+      {
+        "title": "Connections",
+        "width": 390,
+        "canvas": "#000000",
+        "fonts": "loaded",
+        "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "sharedCss": true,
+        "subscription": false,
+        "csp": [],
+        "theme": "dark"
+      },
+      {
+        "title": "Connections",
+        "width": 1440,
+        "canvas": "#000000",
+        "fonts": "loaded",
+        "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "sharedCss": true,
+        "subscription": false,
+        "csp": [],
+        "theme": "dark"
+      }
+    ],
+    "worktreeTrackedChanges": "none"
+  },
+  "models": {
+    "commit": "1d5c97e3278d99b9d59fcdede1f4dcf6d242c992",
+    "source": "actual parent console HTTP/session/server/readModelsView under its production CSP; isolated test-only fixture adapter outside worktree; no new-feature imports",
+    "hashes": {
+      "admin/src/models-view.mjs": "092f23522ee6e412003b175ddd105fa09edc8af749e247ef2f2253e0165eec32",
+      "admin/src/console/pages.mjs": "0d47219ae0631d0d00d974ff4bc8c1b47422b042fddf278a99754fa4cf9ef7bf",
+      "admin/src/console/panels/models.mjs": "96ba455a078b93e2856d8e2c3776d0e3b2559f96ffe4254a5880eecec026854b",
+      "admin/src/console/models-css.mjs": "e87d5cca5d5822461acc5d588a694ad41543654d46db34b9e9d12bdb1a6f54ed",
+      "admin/src/console/style.mjs": "387d112ee620f5564bc72358030aced734e25b26c8de7f7c95c543d0fef264ef"
+    },
+    "checks": [
+      {
+        "title": "Models",
+        "width": 1440,
+        "canvas": "#000000",
+        "fonts": "loaded",
+        "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "sharedCss": true,
+        "subscription": false,
+        "csp": [],
+        "theme": "dark"
+      },
+      {
+        "title": "Models",
+        "width": 390,
+        "canvas": "#edeeec",
+        "fonts": "loaded",
+        "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "sharedCss": true,
+        "subscription": false,
+        "csp": [],
+        "theme": "light"
+      }
+    ]
+  }
+}

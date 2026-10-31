@@ -1,0 +1,4018 @@
+[
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": false,
+    "width": 320,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": false,
+    "width": 390,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": false,
+    "width": 768,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": false,
+    "width": 320,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": false,
+    "width": 390,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": false,
+    "width": 768,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": false,
+    "width": 320,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": false,
+    "width": 390,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": false,
+    "width": 768,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": false,
+    "width": 320,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": false,
+    "width": 390,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": false,
+    "width": 768,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 320,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 390,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 768,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 320,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 390,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 768,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 320,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 390,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 768,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 320,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 390,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 768,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "viewer",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "agent",
+    "readOnly": false,
+    "width": 320,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "agent",
+    "readOnly": false,
+    "width": 390,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "agent",
+    "readOnly": false,
+    "width": 768,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "agent",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "agent",
+    "readOnly": false,
+    "width": 320,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "agent",
+    "readOnly": false,
+    "width": 390,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "agent",
+    "readOnly": false,
+    "width": 768,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "agent",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "agent",
+    "readOnly": false,
+    "width": 320,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "agent",
+    "readOnly": false,
+    "width": 390,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "agent",
+    "readOnly": false,
+    "width": 768,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "agent",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "agent",
+    "readOnly": false,
+    "width": 320,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "agent",
+    "readOnly": false,
+    "width": 390,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "agent",
+    "readOnly": false,
+    "width": 768,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "agent",
+    "readOnly": false,
+    "width": 1440,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "light",
+    "width": 320,
+    "boxes": 23,
+    "renderedLines": 97,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "light",
+    "width": 375,
+    "boxes": 23,
+    "renderedLines": 85,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "light",
+    "width": 390,
+    "boxes": 23,
+    "renderedLines": 85,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "light",
+    "width": 768,
+    "boxes": 23,
+    "renderedLines": 62,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "light",
+    "width": 1440,
+    "boxes": 23,
+    "renderedLines": 61,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "dark",
+    "width": 320,
+    "boxes": 23,
+    "renderedLines": 97,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "dark",
+    "width": 375,
+    "boxes": 23,
+    "renderedLines": 85,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "dark",
+    "width": 390,
+    "boxes": 23,
+    "renderedLines": 85,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "dark",
+    "width": 768,
+    "boxes": 23,
+    "renderedLines": 62,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "connections",
+    "theme": "dark",
+    "width": 1440,
+    "boxes": 23,
+    "renderedLines": 61,
+    "completeCommands": [
+      "pi-dispatch auth login aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth logout aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "light",
+    "width": 320,
+    "boxes": 14,
+    "renderedLines": 50,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "light",
+    "width": 375,
+    "boxes": 14,
+    "renderedLines": 43,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "light",
+    "width": 390,
+    "boxes": 14,
+    "renderedLines": 43,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "light",
+    "width": 768,
+    "boxes": 14,
+    "renderedLines": 30,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "light",
+    "width": 1440,
+    "boxes": 14,
+    "renderedLines": 27,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "dark",
+    "width": 320,
+    "boxes": 14,
+    "renderedLines": 50,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "dark",
+    "width": 375,
+    "boxes": 14,
+    "renderedLines": 43,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "dark",
+    "width": 390,
+    "boxes": 14,
+    "renderedLines": 43,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "dark",
+    "width": 768,
+    "boxes": 14,
+    "renderedLines": 30,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "maximum-valid-names",
+    "page": "models",
+    "theme": "dark",
+    "width": 1440,
+    "boxes": 14,
+    "renderedLines": 27,
+    "completeCommands": [
+      "pi-dispatch auth usage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": true,
+    "width": 320,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": true,
+    "width": 390,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": true,
+    "width": 768,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": true,
+    "width": 1440,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": true,
+    "width": 320,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": true,
+    "width": 390,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": true,
+    "width": 768,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "connections",
+    "role": "operator",
+    "readOnly": true,
+    "width": 1440,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "anthropic, selected",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "pi-anthropic-oauth@0.3.6 (community)",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Pinned artifact verified; job checks remain",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 16:39:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "2026-10-08 15:38:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 575.5625,
+        "parent": 877.328125,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": true,
+    "width": 320,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": true,
+    "width": 390,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": true,
+    "width": 768,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": true,
+    "width": 1440,
+    "theme": "light",
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": true,
+    "width": 320,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 256,
+        "parent": 256,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": true,
+    "width": 390,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 326,
+        "parent": 326,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": true,
+    "width": 768,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 444,
+        "parent": 680,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  },
+  {
+    "page": "models",
+    "role": "operator",
+    "readOnly": true,
+    "width": 1440,
+    "theme": "dark",
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sharedStylesheet": true,
+    "fieldWidths": [
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "anthropic",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "mini1",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Five-hour and seven-day account windows",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Fresh, observed 2026-10-08 15:38:58 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Waiting until 2026-10-08 16:09:08 UTC",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Disabled",
+        "overflow": false
+      },
+      {
+        "width": 892,
+        "parent": 1352,
+        "text": "Not authorized for paid overage",
+        "overflow": false
+      }
+    ]
+  }
+]
