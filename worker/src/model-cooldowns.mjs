@@ -20,4 +20,3 @@ export async function readModelCooldowns(redis, refs, options = {}) {
 	const rows = await Promise.all([...new Set(refs)].map((ref) => readModelCooldown(redis, ref, options)));
 	return rows.filter(Boolean);
 }
-
