@@ -1,0 +1,112 @@
+{
+  "implementationCommit": "d63e5a0ca65970fde6d61b4389b2deeb215f2d41",
+  "sourceSetSha256": "e28cb43c4c4a8bf30094e90db5411c9bc3db973da0e9785e31fcc0b1e2e8f1c9",
+  "frozenSourceFilesChecked": 212,
+  "changedFrozenSourceFiles": [],
+  "node": {
+    "version": "v22.19.0",
+    "sha256": "0d005c18e095027ca8f9fe1cc1126f767ee4ad7b004f4d6fb781ec4228a7c5d1"
+  },
+  "chrome": {
+    "version": "Google Chrome for Testing 155.0.8059.39",
+    "sha256": "316795971c05d253320fcc574168aa8ae7782eae9beb540e0595ebbd654ab965"
+  },
+  "widthSweep": {
+    "startUtc": "2026-10-31T21:43:06.890785+00:00",
+    "endUtc": "2026-10-31T21:52:51.622675+00:00",
+    "elapsedSeconds": 584.7280093340669,
+    "exit": 0,
+    "summary": "3701 runs over 402 pages and 2161 shell runs over 109 pages, 0 failed, 0 other problems, in 584.6 s",
+    "calibrationPasses": 4,
+    "endingTreeClean": true
+  },
+  "applicationBrowser": {
+    "startUtc": "2026-10-31T21:52:59.946841+00:00",
+    "endUtc": "2026-10-31T21:53:26.431958+00:00",
+    "elapsedSeconds": 26.48440683307126,
+    "exit": 0,
+    "summary": "{\"ok\":true,\"paints\":144,\"subscription\":\"safe roles, complete phone fields, quota/staleness/trial counterexamples, real clipboard write, no-JavaScript facts\",\"csp\":\"production header and negative control\",\"writes\":\"preview, confirm, undo, stale, expired and role/read-only refusals\"}",
+    "endingTreeClean": true
+  },
+  "freshScreenshotCount": 202,
+  "byteIdenticalPreviousScreenshotCount": 202,
+  "publishedActualImages": [
+    {
+      "evidenceFile": "images/after-connections-light-1440.png",
+      "freshFile": "subscription-connections-operator-light-1440.png",
+      "equal": true,
+      "sha256": "056a64b19d810ed7d69cec49d600c74124f5bb2215cf41737215b702397fd6c4"
+    },
+    {
+      "evidenceFile": "images/after-connections-dark-390.png",
+      "freshFile": "subscription-connections-operator-dark-390.png",
+      "equal": true,
+      "sha256": "704804138b4308cd95af15c010e3a4bc764e62986c1f27dacbd7c3e6ca1e80ce"
+    },
+    {
+      "evidenceFile": "images/after-models-dark-1440.png",
+      "freshFile": "subscription-models-operator-dark-1440.png",
+      "equal": true,
+      "sha256": "5c391df02be2e95727486b3eb8e41bd80664a7ea078f5ce23e3a3e98b76c8d6e"
+    },
+    {
+      "evidenceFile": "images/after-models-light-390.png",
+      "freshFile": "subscription-models-operator-light-390.png",
+      "equal": true,
+      "sha256": "a25a475685ba737d1f433df6aff4e7da053170a4c411997ee654f5140b52d423"
+    },
+    {
+      "evidenceFile": "images/actual-auth-light-390.png",
+      "freshFile": "subscription-connections-card-light-390.png",
+      "equal": true,
+      "sha256": "5496af10810c87a76fe65cca44acfe7a6479d2d06c10544e24caa0fe14e8819f"
+    },
+    {
+      "evidenceFile": "images/actual-quota-dark-390.png",
+      "freshFile": "subscription-models-card-dark-390.png",
+      "equal": true,
+      "sha256": "7bd27263a7172c5700e59fb5dfdefdaefc64b2e63b80e580c096a9be32ab7858"
+    },
+    {
+      "evidenceFile": "images/long-auth-dark-320.png",
+      "freshFile": "subscription-long-connections-card-dark-320.png",
+      "equal": true,
+      "sha256": "433e2dca021a173c58238f81c73691e2955d38564b0ed40610ae474786435735"
+    },
+    {
+      "evidenceFile": "images/focus-mandatory-week-dark-390.png",
+      "freshFile": "subscription-models-focus-mandatory-week-card-390.png",
+      "equal": true,
+      "sha256": "77e8518044ac5d113e6d474be7b56f91dc2a5221f282817cc7d7d958352b0977"
+    },
+    {
+      "evidenceFile": "images/focus-five-hour-dark-390.png",
+      "freshFile": "subscription-models-focus-five-hour-card-390.png",
+      "equal": true,
+      "sha256": "edc75c4fbe2bdefd94fd26d4d30979a66170590ded56fffd4d706a2a0fb80902"
+    },
+    {
+      "evidenceFile": "images/long-quota-light-375.png",
+      "freshFile": "subscription-long-models-card-light-375.png",
+      "equal": true,
+      "sha256": "10118eac12a3fdcb34dcdd54e4b499ac4e1b0c976a9d6efb739f8edf57e7e010"
+    }
+  ],
+  "recordedSharedStyleAndFontChecks": 64,
+  "allRecordedNativeFontsLoaded": true,
+  "allRecordedSharedStylesheetsLoaded": true,
+  "separateCompleteLongIdentifierGeometryChecks": 20,
+  "directlyInspectedFreshImages": [
+    "subscription-connections-card-light-390.png",
+    "subscription-models-card-dark-390.png",
+    "subscription-long-connections-card-dark-320.png",
+    "subscription-models-focus-mandatory-week-card-390.png",
+    "subscription-connections-operator-light-1440.png",
+    "subscription-models-operator-dark-1440.png",
+    "subscription-long-models-card-light-375.png",
+    "subscription-models-focus-five-hour-card-390.png"
+  ],
+  "visualInspection": "Complete hierarchy, labelled command groups/Copy buttons, full long identifiers and owner-host notes, UTC times, readable model tables and quota windows, selected monitoring focus versus mandatory outside-focus weekly exhaustion remained coherent. No new visual finding.",
+  "provenance": "Controlled synthetic fixtures through the actual application HTTP/session/server under production CSP, not live provider sign-in or live quota evidence.",
+  "referenceLimitations": "Remote claude.ai artifact inaccessible; repository published-source comparisons remain valid because all frozen frontend/design source hashes and all202 fresh PNGs are unchanged. The existing desktop Connections source906px versus actual917px grid difference remains disclosed."
+}

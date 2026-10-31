@@ -1,7 +1,7 @@
 {
   "algorithm": "SHA-256",
   "parentCommit": "1d5c97e3278d99b9d59fcdede1f4dcf6d242c992",
-  "status": "Root independently reverified every captured source hash against the final PR commit; the host-only canary fix changes none of these files.",
+  "status": "Root independently reverified all212 captured source hashes against the final commit. The actual application capture run was repeated after this commit; all202 fresh PNGs match the preceding images byte for byte.",
   "sourceSetEncoding": "Sorted lines: <sha256><two spaces><repository-relative path><LF>",
   "sourceSetSha256": "e28cb43c4c4a8bf30094e90db5411c9bc3db973da0e9785e31fcc0b1e2e8f1c9",
   "files": {
@@ -218,6 +218,6 @@
     "package-lock.json": "07db4703bc53fb5d3b2f4d1b7de238331229dff0589f490eecd4171d72a5e67e",
     "package.json": "c284eeb46b1378b56c971645ebf08e92ca2bd9c8593cf6bcc2410fa8fb823540"
   },
-  "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
-  "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+  "implementationCommit": "d63e5a0ca65970fde6d61b4389b2deeb215f2d41",
+  "captureFrontendCommit": "d63e5a0ca65970fde6d61b4389b2deeb215f2d41"
 }
