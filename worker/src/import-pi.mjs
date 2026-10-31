@@ -1,4 +1,3 @@
-import { prepareCommunityAuthAdapter } from "./community-auth-adapters.mjs";
 /**
  * `pi-dispatch import-pi` — stage a CREDENTIAL-FREE copy of the host's `pi` setup into a global overlay
  * dir, so every job can reuse it (REQ-GLOBAL-PI-OVERLAY). Point `PI_GLOBAL_PI_DIR` at the result and the
@@ -641,6 +640,8 @@ async function prepareOne({ fs, exec, out, entry, staging, npmBin, platform, war
 	}
 
 	if (["pi-anthropic-oauth@0.3.6", "@gotgenes/pi-anthropic-auth@3.4.3"].includes(`${entry.name}@${entry.version}`)) {
+		// Read-only host-pi consumers, including the scratch canary, have no lifecycle dependencies installed.
+		const { prepareCommunityAuthAdapter } = await import("./community-auth-patches.mjs");
 		const receipt = prepareCommunityAuthAdapter({ adapter: `${entry.name}@${entry.version}`, root: source, fs });
 		out(`  reviewed subscription adapter ${receipt.adapter}: ${receipt.digest}\n`);
 	}
