@@ -12,6 +12,8 @@ import { panelWrite } from "../src/audited-write.mjs";
 import { stripAnsi } from "../src/style.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { fakeAllocRedis } from "./helpers/fake-alloc-redis.mjs";
+import { CONSOLE_AUDIT_FIELD_MAX } from "@edgehero/pi-dispatch/console-audit";
+import { escapeControls } from "@edgehero/pi-dispatch/projects";
 
 // Issue #642's review: EVERY panel write surface, driven through the real extension the way pi drives it, appends its
 // audit row (actor role `panel`) before its write lands, and a `failed` row after one that did not land. One table row
@@ -267,7 +269,8 @@ const NOT_REACHED = /could not reach the queue|FAILED at/;
 /**
  * THE TABLE. `site` is `<file>:<the kind literals of that call site, joined by |>` (`<opts>` for index.ts's dashboard
  * wiring, whose kinds come from dashboard.ts); `kind` the row this surface appends; `outcomes` the rows' outcomes;
- * `reason` what the failed row says; `state` what the write changes (compared before and after, and unchanged when the
+ * `reason` what the failed row says; optional `checkReason` verifies a bounded audit field against the full source
+ * refusal and that same semantic pattern; `state` what the write changes (compared before and after, and unchanged when the
  * audit cannot be appended); `prepare` runs before the rows are counted.
  */
 const CASES = [
@@ -387,6 +390,12 @@ const CASES = [
     kind: "fleet-resume",
     outcomes: ["ok", "failed"],
     reason: /^VALKEY_URL is redis:\/\/[^ ]+\/9 in this shell and redis:\/\/[^ ]+\/8 in .*\.env \(what the service uses\): resume/,
+    checkReason: (reason, pattern) => {
+      const { refused } = readModel.killSwitchPlan({ paused: false });
+      assert.match(refused, pattern, "the full refusal retains its resume semantics even beyond the audit field's cap");
+      assert.ok(refused.includes(ENV_FILE), "the refusal names this fixture's complete deployment path");
+      assert.equal(reason, [...escapeControls(refused)].slice(0, CONSOLE_AUDIT_FIELD_MAX).join(""), "the audit stores the exact escaped, code-point-bounded refusal, without losing or inventing bytes within its field");
+    },
     live: true,
     prepare: () => writeFileSync(ENV_FILE, `VALKEY_URL=${LIVE.replace(/\/9$/, "/8")}\n`),
     run: async () => {
@@ -473,7 +482,10 @@ for (const c of CASES) {
       const rows = rowsOf(fx.files.logs).slice(before);
       assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.action, r.actor.role, r.actor.session]), expected, JSON.stringify(rows));
       assert.equal(new Set(rows.map((r) => r.ticket)).size, rows.length ? 1 : 0, "one ticket ties an attempted write's rows");
-      if (c.reason) assert.match(rows.at(-1).reason, isTool ? /^action-refused$/ : c.reason);
+      if (c.reason) {
+        if (c.checkReason) c.checkReason(rows.at(-1).reason, c.reason);
+        else assert.match(rows.at(-1).reason, isTool ? /^action-refused$/ : c.reason);
+      }
       if (c.state) assert.notEqual(c.state(fx), state0, "the write landed");
     } finally {
       fx.restore();

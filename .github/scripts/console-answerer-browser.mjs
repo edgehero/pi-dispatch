@@ -248,7 +248,75 @@ export async function checkAnswererBrowser({ chrome, shots = null, sandbox = pro
     assert.ok(await evaluate("document.body.textContent.includes('docs/CONTRIBUTING.md')"));
     assert.equal(await evaluate("document.querySelectorAll('form[data-action]').length"), 0);
     await capture("answerer-readonly");
-    return { paints: paints.length, interactions: "real confirmed reply, edited provenance, separate standing adoption, live draft preservation, person-role refusals and native no-script reads" };
+    await fixture.close(); fixture = null;
+    mkdirSync(join(work, "long-app")); fixture = await startAnswererBrowserFixture(join(work, "long-app"), { longNames: true });
+    await login("operator");
+    const longPaints = [];
+    let longRulePaints = 0;
+    for (const theme of ["light", "dark"]) for (const width of widths) {
+      stage = `long label paint ${theme} ${width}`;
+      await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width <= 760 });
+      await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
+      await navigate("/parked"); await checkPaint({ role: "operator", width, theme });
+      const labels = await evaluate(`(()=>{const visible=e=>!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden',box=e=>{const r=typeof e.getBoundingClientRect==='function'?e.getBoundingClientRect():e;return{left:r.left,right:r.right,width:r.width,height:r.height}};return [...document.querySelectorAll('#answerer-drafted h2 a,#answerer-drafted .pa-src,#p-questions .pa-st__n b')].filter(visible).map(e=>{const target=e.querySelector('.link')||e,range=document.createRange();range.selectNodeContents(target);const card=e.closest('.pa-q,.card');return{text:target.textContent,href:target.getAttribute('href'),box:box(target),card:box(card),lines:[...range.getClientRects()].map(box),hidden:[...function*(node){for(;node&&node!==card;node=node.parentElement)yield node}(target)].some(n=>{const style=getComputedStyle(n);return ['hidden','clip'].includes(style.overflowX)||style.textOverflow==='ellipsis'})}})})()`);
+      assert.equal(labels[0].text, fixture.sourceRunId, "The entire allowed run id remains readable");
+      assert.equal(labels[0].href, `/run?${new URLSearchParams({ id: fixture.sourceRunId })}`, "Wrapping preserves the exact run destination");
+      for (const source of fixture.model.privateDraft.sources) assert.ok(labels.some(label => label.text.startsWith(source.name)), "Every source label retains its complete bytes");
+      if (width > 760) assert.ok(labels.some(label => label.text === fixture.model.standing[0].title), "The standing title remains complete in the desktop side card");
+      for (const label of labels) {
+        assert.equal(label.hidden, false, "Long labels are wrapped rather than clipped or ellipsized");
+        assert.ok(label.lines.length > 0 && label.lines.every(line => line.left >= label.card.left - 0.5 && line.right <= label.card.right + 0.5), "Every rendered text line stays inside its complete card");
+      }
+      if (width <= 760) assert.ok(labels[0].lines.length > 1, "The unbroken run id actually wraps on a phone");
+      longPaints.push({ width, theme });
+      if ([375, 800, 1440].includes(width)) await capture(`answerer-long-${theme}-${width}`);
+      if (shots && width === 375) {
+        await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 600, deviceScaleFactor: 1, mobile: true });
+        await evaluate("document.querySelector('#answerer-drafted').scrollIntoView({block:'start'})");
+        const shot = await tab.send("Page.captureScreenshot", { format: "png" });
+        writeFileSync(join(shots, `answerer-long-${theme}-375-drafted.png`), Buffer.from(shot.data, "base64"));
+        await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: true });
+      }
+      if ([375, 800, 1440].includes(width)) {
+        await evaluate("document.activeElement?.blur();window.scrollTo(0,0)");
+        for (let tabCount = 0; tabCount < 45 && !await evaluate("document.activeElement===document.querySelector('#answerer-drafted h2 a')"); tabCount++) {
+          for (const type of ["keyDown", "keyUp"]) await tab.send("Input.dispatchKeyEvent", { type, key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+        }
+        assert.equal(await evaluate("document.activeElement===document.querySelector('#answerer-drafted h2 a')"), true, "The wrapped run link stays reachable by Tab");
+        for (const type of ["keyDown", "keyUp"]) await tab.send("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, ...(type === "keyDown" ? { text: "\r", unmodifiedText: "\r" } : {}) });
+        await until(`location.pathname==='/run'&&new URLSearchParams(location.search).get('id')===${JSON.stringify(fixture.sourceRunId)}`);
+        await until("document.querySelector('#run-answer')");
+        assert.equal(await evaluate("document.querySelector('form[data-action=\"parked-answer\"] [name=jobId]').value"), fixture.sourceRunId);
+        assert.equal(await evaluate("document.querySelector('#run-answer').value"), fixture.model.privateDraft.draft, "Keyboard activation reaches this exact source's retained draft");
+        const sourceRun = await evaluate(`(()=>{const card=document.querySelector('#p-answer-draft .card'),link=[...card.querySelectorAll('p a')].find(e=>e.textContent===${JSON.stringify(fixture.sourceRunId)}),range=document.createRange();range.selectNodeContents(link);return{width:document.scrollingElement.scrollWidth,text:link.textContent,href:link.getAttribute('href'),card:{left:card.getBoundingClientRect().left,right:card.getBoundingClientRect().right},lines:[...range.getClientRects()].map(r=>({left:r.left,right:r.right})),whiteSpace:getComputedStyle(link).whiteSpace}})()`);
+        assert.ok(sourceRun.width <= width + 1, "The destination run page also fits its viewport");
+        assert.equal(sourceRun.text, fixture.sourceRunId); assert.equal(sourceRun.href, `/run?${new URLSearchParams({ id: fixture.sourceRunId })}`);
+        assert.ok(sourceRun.lines.every(line=>line.left>=sourceRun.card.left-0.5&&line.right<=sourceRun.card.right+0.5), "The private draft origin preserves every source-id line inside its card");
+        assert.equal(sourceRun.whiteSpace, "normal");
+        await capture(`answerer-long-run-${theme}-${width}`);
+        await navigate("/parked/rules");
+        const standingTitle = await evaluate(`(()=>{const title=[...document.querySelectorAll('.pa-st__n b')].find(e=>e.textContent===${JSON.stringify(fixture.model.standing[0].title)}),card=title.closest('.card'),range=document.createRange();range.selectNodeContents(title);return{width:document.scrollingElement.scrollWidth,text:title.textContent,card:{left:card.getBoundingClientRect().left,right:card.getBoundingClientRect().right},lines:[...range.getClientRects()].map(r=>({left:r.left,right:r.right})),hidden:[...function*(node){for(;node&&node!==card;node=node.parentElement)yield node}(title)].some(n=>{const style=getComputedStyle(n);return ['hidden','clip'].includes(style.overflowX)||style.textOverflow==='ellipsis'})}})()`);
+        assert.ok(standingTitle.width <= width + 1); assert.equal(standingTitle.text, fixture.model.standing[0].title);
+        assert.equal(standingTitle.hidden, false); assert.ok(standingTitle.lines.length > 0 && standingTitle.lines.every(line=>line.left>=standingTitle.card.left-0.5&&line.right<=standingTitle.card.right+0.5), "The rule page preserves every standing-title byte in visible wrapped lines at phone, intermediate and desktop widths");
+        if (width <= 800) assert.ok(standingTitle.lines.length > 1, "A standing title wider than the rule card actually wraps");
+        longRulePaints++; await capture(`answerer-long-rules-${theme}-${width}`);
+      }
+    }
+    for (const role of ["viewer", "agent"]) {
+      await login(role);
+      for (const theme of ["light", "dark"]) for (const width of [375, 800, 1440]) {
+        stage = `long public label ${role} ${theme} ${width}`;
+        await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width <= 760 });
+        await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
+        await navigate("/parked"); await checkPaint({ role, width, theme });
+        const publicLabel = await evaluate(`(()=>{const link=[...document.querySelectorAll('.pav-grid h2 a')].find(e=>e.textContent===${JSON.stringify(fixture.sourceRunId)}),card=link.closest('.card'),range=document.createRange();range.selectNodeContents(link);return{text:link.textContent,href:link.getAttribute('href'),card:{left:card.getBoundingClientRect().left,right:card.getBoundingClientRect().right},lines:[...range.getClientRects()].map(r=>({left:r.left,right:r.right})),textOverflow:getComputedStyle(link).textOverflow,body:document.body.textContent}})()`);
+        assert.equal(publicLabel.text, fixture.sourceRunId); assert.equal(publicLabel.href, `/run?${new URLSearchParams({ id: fixture.sourceRunId })}`);
+        assert.notEqual(publicLabel.textOverflow, "ellipsis"); assert.ok(publicLabel.lines.every(line=>line.left>=publicLabel.card.left-0.5&&line.right<=publicLabel.card.right+0.5), "Public long-id lines stay inside the no-sidebar role card");
+        for (const text of [fixture.model.privateDraft.question,fixture.model.privateDraft.draft,...fixture.model.privateDraft.sources.map(s=>s.name)]) assert.ok(!publicLabel.body.includes(text), "Public role never receives the private source or standing label");
+        longPaints.push({ role, width, theme }); await capture(`answerer-long-${role}-${theme}-${width}`);
+      }
+    }
+    return { paints: paints.length, longPaints: longPaints.length, longRulePaints, interactions: "real confirmed reply, edited provenance, separate standing adoption, live draft preservation, person-role refusals and native no-script reads" };
   } catch (error) { error.stack = `Answerer browser (${stage}): ${error.stack}`; throw error; }
   finally {
     if (tab) await tab.close().catch(() => {});
