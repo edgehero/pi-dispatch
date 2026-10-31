@@ -1946,7 +1946,7 @@ function forcedPath(doc, theme) {
  * page's scripts are off (`Emulation.setScriptExecutionDisabled`), which leaves DevTools' own evaluation working, and
  * it is settled by a wait instead (no frame callback of the page's runs). The caller closes `t`.
  */
-async function openPage({ browser, key, url, metrics, emulated, clockMs, noScript = false }) {
+export async function openPage({ browser, key, url, metrics, emulated, clockMs, noScript = false }) {
 	const t = await browser.openTarget();
 	try {
 		const evaluate = async (expression, awaitPromise = false) => {
@@ -1954,15 +1954,18 @@ async function openPage({ browser, key, url, metrics, emulated, clockMs, noScrip
 			if (r.exceptionDetails) throw new Refusal(`${key}: the page threw while measured (${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text})`);
 			return r.result.value;
 		};
-		await t.send("Page.enable");
-		await t.send("Page.bringToFront");
-		await t.send("Emulation.setDeviceMetricsOverride", metrics);
-		await t.send("Emulation.setTimezoneOverride", { timezoneId: "UTC" });
-		await t.send("Emulation.setLocaleOverride", { locale: "en-US" });
-		await t.send("Emulation.setEmulatedMedia", { media: "screen", features: [{ name: "prefers-color-scheme", value: emulated }] });
-		await t.send("Page.addScriptToEvaluateOnNewDocument", { source: frozenDateSource(clockMs) });
-		await t.send("Page.addScriptToEvaluateOnNewDocument", { source: PROBE });
-		if (noScript) await t.send("Emulation.setScriptExecutionDisabled", { value: true });
+		// CDP correlates replies by id. Independent settings can overlap, but every acknowledgement must precede
+		// navigation, and the frozen clock must be registered before the probe observes any page event.
+		await Promise.all([
+			t.send("Page.enable"),
+			t.send("Page.bringToFront"),
+			t.send("Emulation.setDeviceMetricsOverride", metrics),
+			t.send("Emulation.setTimezoneOverride", { timezoneId: "UTC" }),
+			t.send("Emulation.setLocaleOverride", { locale: "en-US" }),
+			t.send("Emulation.setEmulatedMedia", { media: "screen", features: [{ name: "prefers-color-scheme", value: emulated }] }),
+			t.send("Page.addScriptToEvaluateOnNewDocument", { source: frozenDateSource(clockMs) }).then(() => t.send("Page.addScriptToEvaluateOnNewDocument", { source: PROBE })),
+			...(noScript ? [t.send("Emulation.setScriptExecutionDisabled", { value: true })] : []),
+		]);
 		const loaded = browser.event((m) => m.method === "Page.loadEventFired" && m.sessionId === t.sessionId, `load event for ${key}`, NAV_MS);
 		loaded.catch(() => {}); // awaited below; a navigation that fails first must not leave it unhandled
 		const nav = await t.send("Page.navigate", { url }, NAV_MS);
