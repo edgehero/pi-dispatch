@@ -414,13 +414,18 @@ export function makeLiveHub({
     for (const [dk, { page, query, subs: group }] of byData) {
       let data;
       const minMs = Object.hasOwn(pageMinMs, page) ? pageMinMs[page] : 0;
+      const refresh = group.some((sub) => sub.refresh);
+      // A new Sandboxes document already holds its own HTTP read. Its first stream must read again,
+      // including after an older in-flight load; otherwise cached panels can undo that fresh document.
+      // Drop the cached data before trying so a failed refresh cannot revive the old value on a later tick.
+      if (refresh) loaded.delete(dk);
       const held = minMs > 0 ? loaded.get(dk) : undefined;
       const viewersOnly = !group.some((sub) => sub.session.role === "operator");
       try {
         if (held && t - held.at < minMs && (viewersOnly || !held.viewersOnly)) data = held.data;
         else {
           data = await loadPageData(page, query, viewersOnly ? { role: "viewer", readOnly, live: true } : { readOnly, live: true });
-          if (minMs > 0) loaded.set(dk, { at: t, data, viewersOnly });
+          if (minMs > 0 && !(refresh && data?.readFailed === true)) loaded.set(dk, { at: t, data, viewersOnly });
         }
       } catch (e) {
         failed(`data\n${dk}`, `console: live data for page ${page} failed (${codeOf(e)}); its streams keep their last panels`);
@@ -499,7 +504,7 @@ export function makeLiveHub({
           if (!subs.has(sub)) continue;
           if (sub.needsFull) sendFull(sub, view);
           else for (const id of changed) if (!send(sub, panelEvent(sub.page === "run" ? null : view.seq, id, view.panels.get(id).html))) break;
-          if (subs.has(sub)) sub.holds = true;
+          if (subs.has(sub)) { sub.holds = true; sub.refresh = false; }
         }
       }
     }
@@ -617,11 +622,16 @@ export function makeLiveHub({
       // `degraded`: what it was last drawn from a failed load, while it holds nothing (see the header).
       // `dquery`/`dkey`: the part of the query the page's data depends on and its canonical text (`dataQueryOf`,
       // `dataKeyOf`), which the load is shared by; `qkey` keys the view.
-      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), dquery: dataQueryOf(page, query), dkey: String(dataKeyOf(page, query)), needsFull: true, holds: typeof lastEventId === "string", said: null, degraded: null, cursor: page === "run" && typeof lastEventId === "string" && TRANSCRIPT_ID_RE.test(lastEventId) ? lastEventId : null, format: "html", jobId: null, transcriptDone: false, recordWord: null };
+      const refresh = page === "sandboxes" && typeof lastEventId !== "string";
+      const sub = { kind: "page", res, sessionId, session: { name: String(session?.name ?? ""), role: String(session?.role ?? "") }, page, query, qkey: String(queryKeyOf(page, query)), dquery: dataQueryOf(page, query), dkey: String(dataKeyOf(page, query)), needsFull: true, holds: refresh || typeof lastEventId === "string", refresh, said: null, degraded: null, cursor: page === "run" && typeof lastEventId === "string" && TRANSCRIPT_ID_RE.test(lastEventId) ? lastEventId : null, format: "html", jobId: null, transcriptDone: false, recordWord: null };
       subs.add(sub);
       startTimer();
       const view = views.get(viewKeyOf(sub));
-      if (view) {
+      if (refresh) {
+        // The HTTP response may be newer than a still-subscribed tab's view. Keep its panels until a
+        // successful fresh load, coalesced by data key with other new streams on the queued tick.
+        void tick();
+      } else if (view) {
         // A view is a good render (see the header): the newest this browser can be given, so it is sent, after the state
         // that says whether it is current (the data's and the render's to say, not the tokens file's: see the header).
         if (failingNow(sub)) markStale(sub, view.at, "data");

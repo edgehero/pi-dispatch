@@ -6720,6 +6720,10 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   - **Roles.** Given a viewer's session, no page, panel, event or `/api/state` body carries the tab, a command, an
     opener link or the list of open shells.
   - **Open shells.** Given an open shell whose process died, its entry is gone within its expiry.
+  - **Fresh live pages.** A new Sandboxes event stream must not replace a freshly rendered cleanup warning or
+    incomplete-registration state with an older cached empty state. The first live update comes from a fresh bounded
+    read. If that read fails, retain the rendered panels and mark live updates stale until a successful read; cursor
+    reconnects retain the existing replay rules.
 
 ## REQ-REPLICA-RUNS
 
@@ -8075,3 +8079,4 @@ instead of drifting.
 | 2026-10-30 (#771) | Built REQ-SANDBOX-FROM-THE-CONSOLE under #771; amended REQ-RESURRECTABLE-SANDBOX, REQ-CONSOLE-SECURITY, REQ-OPERATOR-CONSOLE-SCREENS and REQ-OPERATOR-CONSOLE-ACTIONS for operator-only terminal links, free preparation, pin, End and Fleet mappings. Durations come from the owning host; no nonexistent removal undo is promised. UNCHANGED, checked: paid job admission, trigger author gates, zero-touch causes, recovery/session/outbox behavior and browser-terminal exclusion. |
 | 2026-10-30 (#771, complete CI budget) | REQ-UPSTREAM-CONTRACT-TESTS verification retains every required suite, reporting oracle, shifted-clock run and browser assertion, with a sixty-minute whole-job deadline after the measured main baseline reached forty-two minutes before the added sandbox browser coverage. Per-file and per-step deadlines, required check names, unfiltered pull-request reporting, all functional requirements and every other contract UNCHANGED, checked. |
 | 2026-10-31 (#771, Linux browser startup) | REQ-UPSTREAM-CONTRACT-TESTS verification shares the existing console browser launch policy between the width and interaction checks after an exact-pin Linux reproduction confirmed the missing CI startup argument. Both checks retain their assertions; the interaction check also verifies the actual production CSP header and that an untrusted inline script is blocked. Application CSP, local browser sandboxing, job-container isolation, required contexts, deadlines and every functional/interface contract UNCHANGED, checked. |
+| 2026-10-31 (#771, initial live snapshot) | REQ-SANDBOX-FROM-THE-CONSOLE acceptance now explicitly prevents an older event-stream snapshot from erasing freshly rendered cleanup warnings or incomplete shell counts. Initial Sandboxes subscriptions await a fresh bounded read and retain their rendered panels on failure. Cursor reconnects, other pages, stream admission/authentication, paid work, container isolation and every other requirement UNCHANGED, checked. |

@@ -12,7 +12,7 @@ import { SECURITY_HEADERS } from "../../admin/src/console/headers.mjs";
 
 export async function checkSandboxBrowser({ chrome, shots = null, sandbox = process.env.GITHUB_ACTIONS !== "true" } = {}) {
   const work = mkdtempSync(join(tmpdir(), "pd-sandbox-browser-")), children = new Set();
-  let fixture, extraFixture, browser, tab, stage = "startup";
+  let fixture, extraFixture, browser, tab, keeperAbort, keeperReader, stage = "startup";
   try {
     fixture = await startSandboxBrowserFixture(work);
     mkdirSync(join(work, "browser"));
@@ -203,13 +203,42 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
     const state = await evaluate("fetch('/api/state').then(r=>r.text())"); assert.doesNotMatch(state, /sandboxHosts|sandbox:shell|\"nonce\"|ops@mini1-new/);
     assert.deepEqual(await evaluate("window.__sandboxCsp"), []);
     stage = "incomplete registrations and cleanup warnings";
+    // Keep a second authenticated stream subscribed to an old empty view. Freezing only periodic ticks
+    // makes the old replay deterministic; subscribe-triggered and explicitly requested ticks still run.
+    await fixture.pauseTicks();
+    const cookies = await tab.send("Network.getCookies", { urls: [fixture.origin] });
+    const cookie = cookies.cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+    keeperAbort = new AbortController();
+    const keeperSignal = AbortSignal.any([keeperAbort.signal, AbortSignal.timeout(15000)]);
+    const warm = await fetch(fixture.origin + "/api/events?page=sandboxes&as=ops.operator&" + path.split("?")[1], { headers: { cookie, accept: "text/event-stream" }, signal: keeperSignal });
+    assert.equal(warm.status, 200);
+    keeperReader = warm.body.getReader();
+    let warmText = "";
+    while (!warmText.includes('"id":"p-sb-open"')) {
+      const part = await keeperReader.read();
+      assert.equal(part.done, false, "the second real stream remains subscribed to the warm view");
+      warmText += new TextDecoder().decode(part.value);
+    }
+    assert.match(warmText, /No live sandbox shell was registered/);
     fixture.inventory.sessionsMore = 12; fixture.inventory.sessionsUnreadable = 2; fixture.inventory.noticesUnavailable = true;
     fixture.inventory.notices = [{ host: "mini1", id: "gh-9575", at: fixture.inventory.hosts[0].at, reason: "network-kept" }];
-    fixture.advance();
+    // Deliberately do not advance the clock: both the view and its five-second data cache are warm.
+    const freshDocument = await fetch(fixture.origin + path, { headers: { cookie } }).then((r) => r.text());
+    assert.match(freshDocument, /network was kept/);
+    const firstOpen = browser.event((m) => m.sessionId === tab.sessionId && m.method === "Network.eventSourceMessageReceived" && m.params.eventName === "panel" && JSON.parse(m.params.data).id === "p-sb-open", "first new Sandboxes shell panel");
+    const streamResponse = browser.event((m) => m.sessionId === tab.sessionId && m.method === "Network.responseReceived" && m.params.response.url.startsWith(fixture.origin + "/api/events?page=sandboxes"), "new primary Sandboxes subscription");
+    firstOpen.catch(() => {}); streamResponse.catch(() => {});
     await navigate(path);
+    const firstFrame = await firstOpen;
+    assert.equal(keeperSignal.aborted, false, "the old view is still held by the second stream when the first primary frame arrives");
+    assert.equal(firstFrame.params.requestId, (await streamResponse).params.requestId, "the first panel belongs to the new primary subscription");
+    assert.match(JSON.parse(firstFrame.params.data).html, /network was kept.*incomplete.*No readable shell/s, "the FIRST stream panel must preserve fresh HTTP facts; a later repair cannot excuse stale replay");
+    await evaluate("new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))");
     assert.match(await evaluate("document.querySelector('#p-sb-open').innerText"), /network was kept.*incomplete.*No readable shell/s);
     assert.equal(await evaluate("document.querySelectorAll('#p-sb-open [data-action=sandbox-end]').length"), 0);
     assert.deepEqual(await evaluate("window.__sandboxCsp"), []);
+    assert.equal(keeperSignal.aborted, false, "the keeper survived the complete stale-replay counterexample");
+    keeperAbort.abort(); await keeperReader.cancel().catch(() => {}); keeperReader = null; keeperAbort = null;
     await shot("sandboxes-cleanup-warning");
     // Native GET selectors and selectable commands survive with the application script disabled.
     stage = "no JavaScript";
@@ -231,6 +260,7 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
     assert.equal(fixture.effects.queued.length, 1);
     return { measurements, exceptionalRenders: exceptional.length * 8, queued: fixture.effects.queued.length, ended: fixture.effects.ended.length };
   } catch (error) { throw new Error(`Sandbox browser ${stage}: ${error.message}; effects ${JSON.stringify({queued:fixture?.effects.queued.length,ended:fixture?.effects.ended.length,requests:fixture?.effects.logs.slice(-10)})}`, { cause: error }); } finally {
+    keeperAbort?.abort(); await keeperReader?.cancel().catch(() => {});
     if (tab) await tab.close().catch(() => {}); if (browser) { await browser.close(); browser.removeSingleton(); }
     for (const child of children) child.kill("SIGKILL"); await fixture?.close(); if (extraFixture && extraFixture !== fixture) await extraFixture.close(); rmSync(work, { recursive: true, force: true });
   }

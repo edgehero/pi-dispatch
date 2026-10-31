@@ -17,6 +17,7 @@ import { FLEET_CARD_SNAPSHOT } from "./fleet-goldens.mjs";
 export const SANDBOX_BROWSER_TOKENS = Object.freeze({ operator: `pdc_${"o".repeat(43)}`, viewer: `pdc_${"v".repeat(43)}` });
 export async function startSandboxBrowserFixture(dir, { readOnly = false } = {}) {
   let clock = NOW;
+  let automaticTicks = true;
   const now = () => clock, logsDir = join(dir, "logs"); mkdirSync(logsDir, { recursive: true });
   const paths = { triggersPath: join(dir, "triggers.json"), projectsPath: join(dir, "projects.json"), scopedLimitsPath: join(dir, "limits.json"), logsDir };
   const json = (path, value) => writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
@@ -43,9 +44,10 @@ export async function startSandboxBrowserFixture(dir, { readOnly = false } = {})
   const config = { dir, allowedHosts: [], readOnly, maxMs: 43200000, idleMs: 3600000, maxStreams: 4, logsDir };
   const sessions = cookies.makeSessionStore({ now });
   const pageDeps = { now, fleet, sandboxes: service };
-  const hub = makeLiveHub({ loadPageData: (page, query, who) => pages.loadPageData(page, query, pageDeps, who), pagePanels: (page, ctx) => pages.pagePanels(page, ctx), queryKeyOf: pages.pageQueryString, dataQueryOf: pages.dataQueryOf, peekSession: (id, file) => sessions.peek(id, file), endedReason: (id, file) => sessions.verdict(id, file).ended ?? null, readTokens: () => ({ file }), readOnly, now });
+  const timers = { setInterval: (fn, ms) => setInterval(() => { if (automaticTicks) fn(); }, ms), clearInterval };
+  const hub = makeLiveHub({ timers, loadPageData: (page, query, who) => pages.loadPageData(page, query, pageDeps, who), pagePanels: (page, ctx) => pages.pagePanels(page, ctx), queryKeyOf: pages.pageQueryString, dataQueryOf: pages.dataQueryOf, peekSession: (id, file) => sessions.peek(id, file), endedReason: (id, file) => sessions.verdict(id, file).ended ?? null, readTokens: () => ({ file }), readOnly, now });
   const server = createConsoleServer({ config, now, sessions, cookies, tickets: makeConfirmTickets({ now }), limiter: makeLoginLimiter({ now }), audit: makeConsoleAudit({ logsDir, now }), readTokens: () => ({ file }), findToken,
     hub, pageDeps, actionDeps: { sandboxes: service }, log: (line) => effects.logs.push(line) });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, config, service, effects, inventory, requests, advance: () => { clock += 6000; }, liveSize: hub.size, refresh: async () => { clock += 6000; await hub.tick(); }, origin: `http://127.0.0.1:${server.address().port}`, async close() { hub.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } };
+  return { server, config, service, effects, inventory, requests, advance: () => { clock += 6000; }, liveSize: hub.size, refresh: async () => { clock += 6000; await hub.tick(); }, pauseTicks: async () => { automaticTicks = false; await hub.tick(); }, origin: `http://127.0.0.1:${server.address().port}`, async close() { hub.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } };
 }
