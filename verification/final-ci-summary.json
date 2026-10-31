@@ -1,0 +1,132 @@
+{
+  "implementationCommit": "d63e5a0ca65970fde6d61b4389b2deeb215f2d41",
+  "pullRequest": 782,
+  "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766576",
+  "allReportedChecks": 12,
+  "allSucceeded": true,
+  "requiredContexts": [
+    "pins are exact (CONST-PI-VERSION-PINNED)",
+    "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+    "pinned assumptions still hold (offline, no API key)",
+    "the job image holds its contract",
+    "the admin extension survives latest pi (canary)",
+    "the rootless podman venue holds its declarations"
+  ],
+  "checks": [
+    {
+      "name": "the terminal opener holds its handoff (ubuntu-24.04)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766607/job/124665784099"
+    },
+    {
+      "name": "the openshell venue holds its declarations",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766559/job/124665783936"
+    },
+    {
+      "name": "pins are exact (CONST-PI-VERSION-PINNED)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766576/job/124665843410"
+    },
+    {
+      "name": "the rootless podman venue holds its declarations",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766613/job/124665784107"
+    },
+    {
+      "name": "the terminal opener holds its handoff (macos-15)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766607/job/124665783965"
+    },
+    {
+      "name": "the terminal opener holds its handoff (windows-2025)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766607/job/124665784204"
+    },
+    {
+      "name": "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766576/job/124665843379"
+    },
+    {
+      "name": "pinned assumptions still hold (offline, no API key)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766576/job/124665843465"
+    },
+    {
+      "name": "the job image holds its contract",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766576/job/124665843263"
+    },
+    {
+      "name": "the admin extension survives latest pi (canary)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766576/job/124665843513"
+    },
+    {
+      "name": "the job's MCP survives latest pi (canary)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766576/job/124665843424"
+    },
+    {
+      "name": "host-pi mirrors survive latest pi (canary)",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41244766576/job/124665843523"
+    }
+  ],
+  "linuxCompleteSuites": {
+    "normal": {
+      "tests": 12304,
+      "passed": 12299,
+      "failed": 0,
+      "skipped": 5
+    },
+    "shifted399Days": {
+      "tests": 12304,
+      "passed": 12299,
+      "failed": 0,
+      "skipped": 5
+    }
+  },
+  "reportingOracle": {
+    "files": 591,
+    "allDeclaredReported": true
+  },
+  "measuredTemporaryResidue": 0,
+  "widthSweep": {
+    "pageRuns": 3701,
+    "pages": 402,
+    "shellRuns": 2161,
+    "shellPages": 109,
+    "failed": 0,
+    "otherProblems": 0,
+    "calibrationPasses": 4,
+    "seconds": 645.7
+  },
+  "actualModelsBrowser": {
+    "paints": 144,
+    "productionCsp": true,
+    "negativeControl": true,
+    "interactions": true
+  },
+  "linuxSkips": [
+    "zsh not installed",
+    "macOS console-login-code firmlink case",
+    "non-Linux Podman host refusal (Linux counterpart ran)",
+    "case-insensitive filesystem alias case",
+    "macOS private-auth boot-root firmlink case"
+  ],
+  "allLinuxSkippedCasesPassedLocally": true
+}
