@@ -42,7 +42,7 @@ export const AWAITING_APPROVAL = "awaiting-approval";
  * a `why` only when it is a member of its own copy, which a worker test pins to this list. A `cost-cap` stop the guard
  * did not refuse (a displaced compat entry, a child's spend or refusal, an unmetered child) writes no `why`.
  */
-export const COST_REFUSALS = Object.freeze(["unboundable", "external", "over-cap"]);
+export const COST_REFUSALS = Object.freeze(["unboundable", "external", "over-cap", "final-payload"]);
 
 /**
  * The exit line's `why` for a decided outcome: `{ why }` when the outcome is a `cost-cap` stop and `why` is one of

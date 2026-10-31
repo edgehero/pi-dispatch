@@ -1,3 +1,4 @@
+import { readSubscriptionAuthView, subscriptionAuthForAgent } from "./subscription-auth-view.mjs";
 /** Models is a read-only observation of reviewed policy and bounded retained evidence, never an admission decision. */
 import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
@@ -283,7 +284,8 @@ export async function readModelsView({ paths = {}, env = {}, deploymentDir = nul
   } catch { /* Unknown observations remain visible; a read never changes worker policy. */ }
   finally { if (owned) client?.disconnect?.(); }
   const windows = specs.map(spec => ({ ...spec, counterMicros: counters?.get(spec.key) ?? null }));
-  return modelsViewOf({ entries, modelRoles, projects, deployment, envList, overlay, overlayUnknown, configUnknown, cooldowns, records, sourceRecords, snapshot, windows, coverage: historyCoverage, now, ...(reads.status ? { status: reads.status } : {}) });
+  const subscriptionAuth = await readSubscriptionAuthView({ snapshot, read: reads.subscriptionAuth, now });
+  return { subscriptionAuth, ...modelsViewOf({ entries, modelRoles, projects, deployment, envList, overlay, overlayUnknown, configUnknown, cooldowns, records, sourceRecords, snapshot, windows, coverage: historyCoverage, now, ...(reads.status ? { status: reads.status } : {}) }) };
 }
 
 /** Explicit machine projection: no doctor prose, command, path, prompt, URL, arbitrary field or secret reaches a model. */
@@ -295,7 +297,7 @@ export function modelsForAgent(view) {
   const modelReason = reason => ["model-unknown", "model-not-allowed", "model-unpriced", "catalog-unavailable"].includes(reason) ? reason : null;
   const bannerReasons = { "role-conflict": ["model-role-unknown", "model-role-provider-conflict", "model-roles-invalid"], "radius-cost-cap": ["cost-cap"], "configuration-unavailable": ["model-roles-invalid"], "catalog-unavailable": ["model-unknown"], "cooldowns-unavailable": ["model-cooldown"] };
 
-  return { scopes: (view?.scopes ?? []).filter(scope => safeId(scope)), state: view?.state === "ready" ? "ready" : "unreadable", partial: view?.partial !== false, now: integer(view?.now),
+  return { subscriptionAuth: subscriptionAuthForAgent(view?.subscriptionAuth), scopes: (view?.scopes ?? []).filter(scope => safeId(scope)), state: view?.state === "ready" ? "ready" : "unreadable", partial: view?.partial !== false, now: integer(view?.now),
     roles: (view?.roles ?? []).map(row => ({ scope: safeId(row.scope), role: roleValid(row.role) ? row.role : null, model: model(row.model),
       fallbackModels: (row.fallbackModels ?? []).map(item => ({ ref: model(item.ref), priced: typeof item.priced === "boolean" ? item.priced : null, skipped: item.skipped === true })),
       triggers: (row.triggers ?? []).map(trigger),

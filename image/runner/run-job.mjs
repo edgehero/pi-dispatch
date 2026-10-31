@@ -1,3 +1,6 @@
+import { installSubscriptionCredentials } from "./src/subscription-credentials.mjs";
+// env-internal PI_SUBSCRIPTION_AUTH: host-approved access snapshot metadata, never an operator override.
+import { verifySubscriptionAuthEntries, installSubscriptionRegistrationGuard } from "./src/community-auth-adapter.mjs";
 import { readQuestionGrouping, executeQuestionGrouping } from "./src/question-grouping.mjs";
 import { readAnswerDraft, createAnswerDraftTools } from "./src/answerer.mjs";
 import { existsSync } from "node:fs";
@@ -165,6 +168,10 @@ async function main() {
 	// Issue #686: whether the key came as frame 1 of the stdin frame channel, the one fact that admits PI_STEER on the
 	// sandbox layout (PI_EXIT_AUTH itself has already left the environment).
 	const cfg = parseRunnerEnv(process.env, { steerFrames: exitKey.frames === true });
+	let subscriptionEntries = [];
+	try { subscriptionEntries = verifySubscriptionAuthEntries(JSON.parse(process.env.PI_SUBSCRIPTION_AUTH ?? "[]")); }
+	catch { throw configError("the subscription snapshot or adapter is unavailable; reconnect or re-stage on its owner host"); }
+	if (subscriptionEntries.length > 0 && !cfg.allowedModels?.length) throw configError("subscription authentication requires a finite model policy");
 
 	// FIRST, before the prompt is read and before any auth or model lookup: a staged package root
 	// that did not mount is a pre-spend config failure (exit 2, not retried) and this is the only
@@ -255,7 +262,9 @@ async function main() {
 	const GLOBAL_MODELS = `${GLOBAL_PI_DIR}/models.json`;
 	const modelsPath = existsSync(GLOBAL_MODELS) ? GLOBAL_MODELS : `${agentDir}/models.json`;
 	// The credentials are auth.json as it is NOW, held in memory (issue #587's review, src/model-runtime.mjs has the why).
-	const modelRuntime = await createJobModelRuntime({ ModelRuntime, AuthStorage: await loadPiAuthStorage(), agentDir, modelsPath });
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime, AuthStorage: await loadPiAuthStorage(), agentDir, modelsPath, subscriptionAuth: subscriptionEntries });
+	const subscriptionCredentials = subscriptionEntries.length ? installSubscriptionCredentials({ ModelRuntime, entries: subscriptionEntries }) : null;
+	const subscriptionRegistration = subscriptionEntries.length ? installSubscriptionRegistrationGuard({ ModelRuntime, entries: subscriptionEntries }) : null;
 
 	// Pin the model explicitly. With `model` omitted, pi picks from settings and provider defaults
 	// -- nondeterministic across images, and it silently changes cost per job. hasConfiguredAuth takes the
@@ -344,7 +353,7 @@ async function main() {
 	// Built before the guard, whose `external` is every child's spend and in-flight bound as of the last fold. From here
 	// on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no children.
 	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external() });
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null });
 	costRefusalWhy = () => policyGuard?.refusedWhy() ?? null;
 	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
 	// The price table the meter pinned from this runtime, before any extension loads, handed to pi children (issue #587's
@@ -383,7 +392,7 @@ async function main() {
 		// A deterministic classifier owns this container. No extension loader or agent session exists.
 		let result;
 		try { result = questionGroupingInput ? await executeQuestionGrouping({ input: questionGroupingInput, runtime: modelRuntime }) : await executeWatchDecision({ input: watchDecisionInput, runtime: modelRuntime }); }
-		finally { usageMeter.uninstall(); failureObserver.uninstall(); }
+		finally { usageMeter.uninstall(); failureObserver.uninstall(); subscriptionCredentials?.uninstall(); subscriptionRegistration?.uninstall(); }
 		const stop = meterStopAtExit();
 		const outcome = stop ?? (result.ok ? { code: 0, reason: "stop" } : { code: 2, reason: result.reason });
 		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false });
@@ -425,7 +434,7 @@ async function main() {
 	const watchTools = watchReadOnly ? createWatchTools({ config: watchToolsConfig, runtime: modelRuntime }) : null;
 	const answerTools = answerDraftInput ? createAnswerDraftTools({ input: answerDraftInput, runtime: modelRuntime }) : null;
 	if (answerTools && !await answerTools.initialize()) {
-		usageMeter.uninstall(); failureObserver.uninstall();
+		usageMeter.uninstall(); failureObserver.uninstall(); subscriptionCredentials?.uninstall(); subscriptionRegistration?.uninstall();
 		const outcome = meterStopAtExit() ?? { code: 0, reason: "stop" };
 		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false, answerDraftDigest: answerTools.state.receipt });
 		return outcome.code;
@@ -442,6 +451,7 @@ async function main() {
 
 	// Read ONCE, unconditionally: the flow check below needs the loaded set whether or not packages
 	// are staged, and the packages diagnostics block reuses the same bindings.
+	for (const entry of subscriptionEntries) if (entry.provider === "anthropic" && (!cfg.packages.includes(entry.root) || !resourceLoader.getExtensions().extensions.some((extension) => extension.path.startsWith(`${entry.root}/`)))) throw configError("the selected subscription adapter did not load");
 	const { skills, diagnostics } = resourceLoader.getSkills();
 
 	// REPORT a flow that resolved in NO tier (issue #189). The trigger's run.flow reaches the model
@@ -538,6 +548,8 @@ async function main() {
 		...(watchReadOnly && watchToolOptions(cfg.excludeTools, excludableToolNames(), watchTools?.names)),
 		...(answerTools && { tools: answerTools.names, excludeTools: [...excludableToolNames(), "codemode", "tool_search"] }),
 	}));
+	try { subscriptionRegistration?.seal(modelRuntime); }
+	catch { throw configError("the subscription provider registration conflicts with its approved adapter"); }
 	if (cfg.fork) recordForkSettings(sessionManager, model, session.thinkingLevel);
 
 	// Issue #645: a job armed with run.recover runs its tools one at a time. pi-agent-core's parallel executor (the
@@ -727,6 +739,8 @@ async function main() {
 		// the session it was metering is exactly the kind of thing that becomes one.
 		usageMeter.uninstall();
 		failureObserver.uninstall();
+		subscriptionCredentials?.uninstall();
+		subscriptionRegistration?.uninstall();
 		unsubscribeTerminal();
 		unsubscribeCommandErrors?.();
 		// Captured ABOVE dispose() rather than read at the exit line, and the reason is smaller than it

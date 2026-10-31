@@ -681,11 +681,13 @@ test("cost cap: session.compact() is a provider call like any other, and is refu
 /** A local OpenAI-shaped server. `plan` answers each request in turn: "429", "ok", "nousage" ("ok" with no usage chunk, a server that ignores stream_options), "lost" (no answer), "inband" (200, then an error before content) or "cut" (200, content deltas, then the socket dies). */
 async function loopbackOpenAI(plan) {
 	const seen = [];
+	const payloads = [];
 	const server = createServer((req, res) => {
 		let body = "";
 		req.on("data", (chunk) => (body += chunk));
 		req.on("end", () => {
 			const step = plan[Math.min(seen.length, plan.length - 1)];
+			payloads.push(JSON.parse(body));
 			seen.push(step);
 			if (step === "lost") {
 				// The request arrived whole; the connection dies before any answer.
@@ -732,7 +734,7 @@ async function loopbackOpenAI(plan) {
 	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir: root, modelsPath });
 	const model = modelRuntime.getModel("openai", "loopback-priced");
 	assert.ok(model, "the loopback model must resolve under the builtin openai provider");
-	return { seen, root, modelRuntime, model, close: () => new Promise((resolve) => server.close(resolve)) };
+	return { seen, payloads, root, modelRuntime, model, close: () => new Promise((resolve) => server.close(resolve)) };
 }
 
 test("cost cap: a 429 is charged its metered cost and counted, so pi's retry after it is admitted and the job completes", { skip }, async () => {
@@ -781,7 +783,7 @@ test("cost cap: a 200 cut after content is charged its bound, so a retry loop of
 		assert.equal(message.stopReason, "error", `the cut stream ended in error: ${message.errorMessage}`);
 		assert.equal(message.usage.cost.total, 0, "the premise: openai-completions reports usage only at the end");
 		assert.ok(message.content.length > 0, "the premise: content came back before the cut");
-		assert.equal(capped.guard.state.spent, callCostBound("streamSimple", lb.model, context, options), "it started, so it is charged its bound");
+		assert.equal(capped.guard.state.spent, callCostBound("streamSimple", lb.model, { ...context, finalPayload: lb.payloads[0] }, { ...options, maxTokens: lb.payloads[0].max_tokens }), "it started, so it is charged the final serialized payload bound");
 		assert.equal(capped.guard.snapshot().costUnanswered, 0);
 		assert.equal(capped.meter.snapshot().costUnreported, 1, "its usage never came: the metered cost is short (issue #571)");
 	} finally {
@@ -815,7 +817,7 @@ test("cost cap: an answer with no usage chunk is charged its bound and counted c
 		assert.deepEqual(lb.seen, ["ok", "nousage"]);
 		assert.equal(message.stopReason, "stop", `it succeeded: ${message.errorMessage}`);
 		assert.deepEqual([message.usage.input, message.usage.output, message.usage.cost.total], [0, 0, 0], "the premise: pi fills a missing usage block with zeros");
-		assert.equal(capped.guard.state.spent - spentBefore, callCostBound("streamSimple", lb.model, context, options), "charged its bound");
+		assert.equal(capped.guard.state.spent - spentBefore, callCostBound("streamSimple", lb.model, { ...context, finalPayload: lb.payloads[1] }, { ...options, maxTokens: lb.payloads[1].max_tokens }), "charged the final serialized payload bound");
 		assert.deepEqual([capped.meter.snapshot().costUnreported, capped.guard.snapshot().costUnanswered], [1, 0]);
 		// The exit line as run-job writes it, through the worker's own parse and settlement.
 		const after = line();
@@ -1311,7 +1313,7 @@ async function loadTimeCall({ api, modelOverrides = {}, path, maxCostMicros = nu
 		const served = (model, _context, options) => {
 			calls.push({ model: model.id, api: model.api });
 			const stream = compat.createAssistantMessageEventStream();
-			Promise.resolve(options?.onPayload?.({ model: model.id }, model)).then(() =>
+			Promise.resolve(options?.onPayload?.({ model: model.id, max_tokens: options?.maxTokens ?? model.maxTokens }, model)).then(() =>
 				stream.push({ type: "done", reason: "stop", message: { role: "assistant", content: [{ type: "text", text: "ok" }], api: model.api, provider: model.provider, model: model.id, usage: SENTINEL_USAGE, stopReason: "stop", timestamp: Date.now() } }),
 			);
 			return stream;

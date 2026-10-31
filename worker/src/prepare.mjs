@@ -65,9 +65,10 @@ export function makePrepareWorkspace({
 	// construction -- prepares exactly what it always did: no /session mount, nothing on disk.
 	resolveSession = () => null,
 	prepareLocal = prepareLocalWorkspace,
-	// Issue #504 part B: where a local job's resolved folder may lie. `{ jobPaths, envelopeFile }`: `jobPaths()` gives the
+	// Issue #504 part B: where a local job's resolved folder may lie. `{ jobPaths, envelopeFile, authStoreDir }`: `jobPaths()` gives the
 	// run roots and cron folders a folder named inside must stay inside, and `envelopeFile` the file whose folder no job
-	// may mount. Null (a bare dispatcher) passes neither, and prepareLocal then judges nothing but the folder itself.
+	// may mount. The host-only authStoreDir also protects the refresh store for every local job (#781).
+	// Null (a bare dispatcher) passes none, and prepareLocal then judges nothing but the folder itself.
 	localPlacement = null,
 	// Issue #505: `(job) => null | { body } | { outcome: "policy", reason }`, the portfolio snapshot builder
 	// (portfolio-snapshot.mjs `makePortfolioSnapshot`). Asked only for a local job the processor confirmed as a portfolio
@@ -183,7 +184,7 @@ export function makePrepareWorkspace({
 			// The snapshot only for a confirmed portfolio job, and never for a chained child or a manual run, whatever its data
 			// says (the processor's gate already holds both; this keeps a direct caller to the same rule).
 			const snapshot = portfolio === true && typeof portfolioSnapshot === "function" && event.source === "cron" ? { portfolio: () => portfolioSnapshot(job) } : {};
-			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(job.watch ? { watch: job.watch, watchDecisionModel: job.watchDecisionModel, watchSecrets } : {}), ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null, ...(typeof localPlacement.sandboxDir === "string" ? { sandboxDir: localPlacement.sandboxDir } : {}) } : {}), ...snapshot }), sandbox), jobDir));
+			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(job.watch ? { watch: job.watch, watchDecisionModel: job.watchDecisionModel, watchSecrets } : {}), ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null, authStoreDir: localPlacement.authStoreDir ?? null, ...(typeof localPlacement.sandboxDir === "string" ? { sandboxDir: localPlacement.sandboxDir } : {}) } : {}), ...snapshot }), sandbox), jobDir));
 		}
 		const prepare = preparers[job.kind];
 		if (prepare) {

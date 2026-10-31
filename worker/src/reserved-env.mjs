@@ -82,6 +82,7 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// bundle-env.json. A trigger setting it would make a runner refuse on a file nobody wrote, or read one it should not.
 	"PI_BUNDLE_ENV",
 	"PI_OFFLINE",
+	"PI_SUBSCRIPTION_AUTH",
 	"PLAYWRIGHT_BROWSERS_PATH",
 	"PLAYWRIGHT_MCP_BROWSER",
 	"PLAYWRIGHT_MCP_SANDBOX",

@@ -6,9 +6,10 @@ Models shows scoped model roles, ordered fallbacks, configured cooldowns, prices
 - **Edit a role.** An operator reviews modelRoles in the triggers file, the exact diff, affected trigger rows, a confirm and an inverse undo. Nothing runs now; recovery keeps its model. Removing an override reveals a default where one exists.
 - **Cooling down.** Configured models show kind and UTC end only. Roles with no fallback still start on their primary. The first candidate is ordered by price and cooldown only; credentials, egress, dollar windows and endpoint availability still decide pickup; waiters and recent fallback runs are linked.
 - **Models in use.** Primary, fallback and trigger models show provider, failover price status, applicable dollar windows, spend, cap and state, including a trigger-policy refusal. Unknown amounts are not zero.
+- **Subscription quota.** Safe account observations show freshness, chosen five-hour and seven-day monitoring focus, resets and extra usage separately from deployment dollar caps. Available and unknown account observations follow that focus; known exhausted windows always remain visible and still apply at pickup. Scoped and other provider window types remain visible because they have no selectable policy token. Unknown and stale quota never imply zero usage or a usable account. Only a writable operator gets host-terminal usage or explicit trial commands.
 - **Proposals and canaries.** Doctor labels per host and comparisons rebuilt from retained candidate and source records show cost per run, completion, turns and tokens with coverage. Adopt fills the form with explicit scope selection. Run more is a host command for one flow and at most ten runs, warning that its deployment lease holds every other start.
 
-**Panels.** `p-model-problems`, `p-roles`, `p-cooldowns`, `p-models`, `p-proposals`.
+**Panels.** `p-model-problems`, `p-roles`, `p-cooldowns`, `p-models`, `p-subscription-quota`, `p-proposals`.
 
 **The server provides.**
 - The triggers-file role map and effective trigger associations, with source availability.

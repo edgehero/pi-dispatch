@@ -1,4 +1,5 @@
 import { resolveModelRoles } from "./model-roles.mjs";
+import { SubscriptionWait } from "./subscription-wait.mjs";
 import { zeroRatedFor } from "./reserve-estimate.mjs";
 import { isTransientOverlayRead } from "./model-catalog.mjs";
 import { checkFailoverCandidate, markModelCooldown, selectFailoverJob, writeModelAttempt } from "./model-failover.mjs";
@@ -1088,6 +1089,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						redis, id: modelAttemptId, retry: Number(job.attemptsMade) > 0 || Number(job.stalledCounter) > 0,
 						recoveryModel, retryNeverStarted: priorAttemptRecord?.reason === "container-never-started" && priorAttemptRecord?.budgetReserved === false && priorAttemptRecord?.exitCode === null, models, limits, now, log: deps?.log,
 						reservationFor: (candidate) => zeroRatedFor(candidate, { modelEndpoints: failoverSnapshot, builtinModel: deps?.builtinModel }).zeroRated ? 0 : candidate.maxCostMicros,
+						subscriptionCheck: deps?.subscriptionRuntime ? (candidate) => deps.subscriptionRuntime.check(candidate) : null,
 						checkCandidate: (candidate) => deps?.checkFailoverCandidate ? deps.checkFailoverCandidate(candidate, { models, endpoints }) : checkFailoverCandidate(candidate, { models, endpoints, credential: deps?.checkProviderCredential, lookup: deps?.builtinModel }),
 						acquireEndpoints: async (candidate) => {
 							const set = [...new Map(endpointSetFor({ models, job: candidate, endpoints }).map((endpoint) => [endpoint.id, endpoint])).values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -1117,6 +1119,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					if (chosenModel) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy });
 					selectionRefused = selection.refused ?? null;
 					selectionWait = selection.wait ? selection : null;
+				}
+				if (selectedEffective && !selectionRefused && !selectionWait && deps?.subscriptionRuntime) {
+					const subscription = await deps.subscriptionRuntime.check(selectedEffective);
+					if (!subscription.ok) {
+						if (subscription.unavailable) throw new Error("subscription state unavailable");
+						if (subscription.wait) selectionWait = subscription;
+						else selectionRefused = subscription.reason;
+					}
 				}
 			} catch (error) {
 				if (error?.modelSelectionReason) selectionRefused = error.modelSelectionReason;
@@ -1258,6 +1268,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 
 		let startedAt;
 		let timer;
+		let subscriptionDeadlineAt = null;
 		let cancelPoll;
 		let cancelPolling = false;
 		// The poll tick in flight, KEPT (gate round 2 of PR #479), so the error handler can stop the poll and wait for it
@@ -1350,6 +1361,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (err?.code !== BACKEND_NOT_REGISTERED) throw err;
 				name = null;
 			}
+			subscriptionDeadlineAt = now() + timeoutMs;
 			timer = setTimeout(() => {
 				// BullMQ has no per-job kill timer; this is ours. cancelJob raises the AbortSignal.
 				Promise.resolve(cancelJob(job.id, "job-timeout-30m")).catch(() => {});
@@ -1554,6 +1566,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// runJob context is unchanged.
 				...(endpointSnapshot ? { modelEndpoints: endpointSnapshot } : {}),
 				...deps,
+				...(deps?.subscriptionRuntime ? {
+					prepareSubscriptionAuth: async (j) => {
+						try { return await deps.subscriptionRuntime.prepare(j, { deadlineAt: subscriptionDeadlineAt, signal, attemptId: `${modelAttemptId}:${job.attemptsMade ?? 0}:${job.stalledCounter ?? 0}` }); }
+						catch (cause) { throw new InfraRetry("subscription authentication could not be prepared", { cause, reason: "container-never-started", budgetReserved: false }); }
+					},
+					validateSubscriptionAuth: (snapshots) => deps.subscriptionRuntime.validate(snapshots),
+				} : {}),
 				// Issue #502: the skew check must see `models` as the job ARRIVED, not as `effectiveJobOf` filled it from
 				// PI_ALLOWED_MODELS, or a trigger list a stale receiver dropped would read as present and the job would run on
 				// the deployment's list. Only when the wiring supplies the check, so a bare processor keeps the default.
@@ -1612,6 +1631,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 							providerFailureRan = r.providerFailure ?? null;
 							try {
 								if (chosenModel) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy, safe: r.toolsStarted === false && r.replaySafe === true && !!r.providerFailure, failure: r.providerFailure });
+								if (deps?.subscriptionRuntime) await deps.subscriptionRuntime.observe(effectiveJob, r, ctx.subscriptionAuth ?? []);
 								if (r.providerFailure) await markModelCooldown(redis, `${effectiveJob.provider}/${effectiveJob.model}`, r.providerFailure, { now });
 							} catch (cause) {
 								throw new InfraRetry("the provider failure could not be recorded", { cause, reason: "container-infra-exit", exitCode: r.code, turns: r.turns, tokens: r.tokens, usage: r.usage, provider: effectiveJob.provider, model: effectiveJob.model });
@@ -1783,7 +1803,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// other recorded. A retryable error reads that request too, since the job would otherwise run again.
 			await stopCancelPoll();
 			const retryable = error instanceof InfraRetry;
-			if (await operatorCancelled({ readPending: retryable })) return await endCancelled({ retryable });
+			if (await operatorCancelled({ readPending: retryable || error instanceof SubscriptionWait })) return await endCancelled({ retryable });
+			if (error instanceof SubscriptionWait) {
+				await releaseAllHolds();
+				if (error.wait === "subscription-auth") await deferTo(job, token, error.until, "subscription-auth", { project });
+				if (error.wait === "subscription-quota") await deferTo(job, token, error.until, "subscription-quota", { project });
+				if (error.wait === "subscription-owner") await deferTo(job, token, error.until, "subscription-owner", { project });
+			}
 			if (error?.holdUntilRestart === true) {
 				const heldAt = now();
 				const last = job.data?.podmanRestartHoldLastMs;

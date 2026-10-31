@@ -21,6 +21,28 @@ test("canary requires explicit valid role, physical candidate, flow and aggregat
 	for (const update of [{ capUsd: undefined }, { capUsd: "0" }, { role: "inherit" }, { role: "../editor" }, { model: "role:editor" }, { count: "1.5" }, { count: "11" }, { flow: "../flow" }]) assert.throws(() => canaryOptions({ role: "editor", model: "anthropic/model", flow: "edit", capUsd: "1", ...update }));
 });
 
+test("a bound subscription canary refuses before reading an available API key or acquiring resources", async () => {
+	const root = tempDir("canary-subscription-");
+	const path = join(root, "connections.json");
+	writeFileSync(path, JSON.stringify({ version: 1, connections: [{ id: "chatgpt", provider: "openai", adapter: "openai-chatgpt", ownerHost: "owner" }], bindings: { openai: "chatgpt" } }));
+	let resources = 0, credentials = 0;
+	const env = { PI_AUTH_CONNECTIONS_FILE: path, PI_SETTINGS_FILE: join(root, "settings.json"), PI_AUTH_FROM_PI: "0" };
+	Object.defineProperty(env, "OPENAI_API_KEY", { get() { credentials++; return "an-api-key-that-must-not-be-used"; } });
+	await assert.rejects(createCanaryRuntime({ env, options: { ...options, model: "openai/gpt-4o" }, now, execCommand: async () => { resources++; }, redisFactory: () => { resources++; }, queueFactory: () => { resources++; }, containerFactory: () => { resources++; } }), /bound subscription connection/);
+	assert.equal(credentials, 0);
+	assert.equal(resources, 0);
+	writeFileSync(path, "invalid");
+	await assert.rejects(createCanaryRuntime({ env, options: { ...options, model: "openai/gpt-4o" }, now }), /cannot validate the subscription connection policy/);
+	assert.equal(credentials, 0, "a broken policy cannot restore an API-key fallback");
+});
+
+test("canary CLI reconciles the service's subscription-policy location before constructing a runtime", async () => {
+	const keysRead = [];
+	const result = await runCanary(["--role", "editor", "--model", "openai/gpt-4o", "--flow", "edit", "--cap-usd", "1"], { now, deploymentEnv: (env, keys) => { keysRead.push(keys); return { env }; }, runtimeFactory: async () => { throw new Error("stopped before provider"); }, errWrite() {} });
+	assert.equal(result, 1);
+	assert.ok(keysRead[0].includes("PI_AUTH_CONNECTIONS_FILE"));
+});
+
 test("source selection binds flow and main-session role, excludes canaries/future/expired/failures", () => {
 	const good = original("one");
 	assert.deepEqual(selectCanarySources([good, original("other-role", { modelRole: "planner" }), original("other-flow", { flow: "plan" }), original("canary", { canary: {} }), original("future", { endedAt: new Date(instant + 1).toISOString() }), original("old", { endedAt: new Date(instant - 8 * 86400_000).toISOString() }), original("failed", { outcome: "failed" })], options, { now: instant }), [good]);

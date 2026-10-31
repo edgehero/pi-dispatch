@@ -1,5 +1,11 @@
 # Secrets, and bringing your own manager
 
+Opt-in [subscription authentication](subscription-auth.md) uses a separate host-owned private credential
+store. Its refresh grants are never forwarded through `run.secrets`, secret bundles, the overlay or host auth
+mounts. A selected connection supplies an access-only snapshot after free admission checks; another provider
+variable cannot shadow that binding. The ordinary API-key and secret-manager paths below remain unchanged for
+unbound providers.
+
 You want the provider key and the forge token out of a file on the deployment host and into Vault,
 Infisical, Doppler, 1Password or whatever your organisation already runs. Nothing here stops you, and
 nothing here has to change to allow it. The reason is one line of code, and everything below follows

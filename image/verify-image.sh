@@ -277,6 +277,22 @@ AGENTS
 				[ "$roles_code" = 0 ] && echo "$roles_out" | grep -q '^model role capability holds$' \
 					|| fail "the image declares 'modelRoles' but its offline role tool proof failed (exit $roles_code: $roles_out)"
 				;;
+			subscriptionAuth)
+				# Exercise the baked receipt verifier and final-shaped-payload ticket under no network.
+				auth_job=$(mktemp -d)
+				mkdir "$auth_job/community"
+				printf '%s\n' '{"name":"@gotgenes/pi-anthropic-auth","version":"3.4.3"}' >"$auth_job/community/package.json"
+				printf '%s\n' '{"version":1,"adapter":"@gotgenes/pi-anthropic-auth@3.4.3","adapterRevision":"fabricated","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sources":{}}' >"$auth_job/community/.dispatch-auth-adapter.json"
+				chmod -R a+rX "$auth_job"
+				auth_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$auth_job:/job:ro" \
+					--entrypoint node "$IMAGE_REF" /app/image/runner/test/fixtures/subscription-auth-smoke.mjs 2>&1) && auth_code=0 || auth_code=$?
+				rm -rf "$auth_job"
+				[ "$auth_code" = 0 ] && echo "$auth_out" | grep -q '^subscription auth capability holds$' \
+					|| fail "the image declares 'subscriptionAuth' but receipt, lifetime or final-payload enforcement failed (exit $auth_code: $auth_out)"
+				# A helper alone cannot prove that the ordinary loader, registry seal and credential path agree.
+				node "$(dirname "$0")/../.github/scripts/subscription-auth-image.mjs" "$IMAGE_REF" \
+					|| fail "the image declares 'subscriptionAuth' but a normal-entrypoint subscription binding failed its offline cost/throttle proof"
+				;;
 			modelFailover)
 				# Issue #716. Run the actual SDK runner through its normal entrypoint, replacing only fetch with an
 				# offline 429 fixture. A grep for a classifier cannot prove the signed fields reach the worker.

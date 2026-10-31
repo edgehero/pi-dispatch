@@ -9452,6 +9452,7 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 			});
 		},
 		agentDirFrom: (e) => agentDirFrom(e),
+		workerNameFrom: (e) => cfg.workerName(e),
 		logsDirPath: (e) => (cfg.logsDirPath(e, "/h"), cfg.logsDirPath(e, null)),
 		settingsFilePath: (e) => (cfg.settingsFilePath(e, "/h"), cfg.settingsFilePath(e, null)),
 		globalExtensionsEnabled: (e) => cfg.globalExtensionsEnabled(e),

@@ -25,5 +25,8 @@
     "@earendil-works/pi-mcp": "1.4.0",
     "@earendil-works/pi-telemetry": "1.4.0",
     "@earendil-works/pi-tui": "1.4.0"
+  },
+  "devDependencies": {
+    "primary-anthropic-sdk": "npm:@anthropic-ai/sdk@0.124.0"
   }
 }

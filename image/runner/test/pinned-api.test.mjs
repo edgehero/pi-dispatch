@@ -200,7 +200,7 @@ test("the job's credentials are read ONCE at start: an auth.json the job writes 
 	assert.deepEqual((await control.getAuth("azure"))?.env, written.azure.env, "pi's file store no longer re-reads auth.json: re-check whether the snapshot is still needed");
 	// And run-job builds its runtime this way.
 	const runJob = readFileSync(fileURLToPath(new URL("../run-job.mjs", import.meta.url)), "utf8");
-	assert.match(runJob, /createJobModelRuntime\(\{ ModelRuntime, AuthStorage: await loadPiAuthStorage\(\), agentDir, modelsPath \}\)/, "run-job.mjs must build the job's runtime on the start-time credential snapshot");
+	assert.match(runJob, /createJobModelRuntime\(\{ ModelRuntime, AuthStorage: await loadPiAuthStorage\(\), agentDir, modelsPath, subscriptionAuth: subscriptionEntries \}\)/, "run-job.mjs must build the job's runtime on the start-time credential snapshot");
 });
 
 test("the job's settings mean what jobSettings says at the pin, each against pi's own default (issue #509)", { skip }, async () => {

@@ -1,3 +1,6 @@
+// env-internal PI_SUBSCRIPTION_AUTH: host-approved access snapshot metadata, never an operator override.
+import { validateSubscriptionRequest } from "./community-auth-adapter.mjs";
+import { subscriptionAccess, subscriptionRequestOverrides } from "./subscription-credentials.mjs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, writeSync } from "node:fs";
@@ -887,7 +890,7 @@ function externalStop(isStopped) {
  * not judge (a virtual model, whose physical re-entry is judged instead, or a compat call already judged by
  * the runtime half).
  */
-function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = null, priced }) {
+function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = null, priced, legacy = false }) {
 	if (!hardStop) return null;
 	if (meter.state.stopReason !== null) return meter.state.stopReason;
 	// A stop from OUTSIDE this process (issue #500: a child reads the parent's STOP file), asked before every
@@ -900,7 +903,7 @@ function judge({ meter, hardStop, guard, method, model, args, skip, isStopped = 
 		}
 	}
 	if (guard === null || skip) return null;
-	const refused = guard.admit(priced === undefined ? { method, model, args } : { method, model, args, priced });
+	const refused = guard.admit({ method, model, args, ...(priced === undefined ? {} : { priced }), ...(legacy ? { legacy: true } : {}) });
 	if (refused === null || refused === undefined) return ADMITTED;
 	meter.stop(refused);
 	return meter.state.stopReason;
@@ -1076,7 +1079,7 @@ export function wrapProviderStreams({ inner, fallbackModels, meter, hardStop, gu
 		// The runtime call's own re-entry is skipped; any other call, a forward to another pair included, is judged.
 		const reentry = claimReentry(dispatch?.getStore(), model, given);
 		// A legacy call is priced from the same pinned table as the runtime half (pinPriceTable).
-		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined });
+		const verdict = judge({ meter, hardStop, guard, method: kind, model, args: [context, given], skip: reentry, isStopped, legacy: true, priced: guard !== null && hardStop ? priceEntry(prices, model) : undefined });
 		if (verdict !== null && verdict !== ADMITTED) return hardStop(model, STOP_MESSAGES[verdict]);
 		const options = verdict === ADMITTED && typeof guard.prepare === "function" ? guard.prepare({ method: kind, model, args: [context, given], stop: (reason) => meter.stop(reason) })[1] : given;
 		const provider = fallbackModels?.getProvider?.(model.provider);
@@ -2070,7 +2073,7 @@ function imageAllowance(model, context) {
 			for (const item of value) walk(item);
 			return;
 		}
-		if (value.type === "image") {
+		if (["image", "image_url", "input_image"].includes(value.type) || value.image?.source || value.inlineData?.mimeType?.startsWith("image/")) {
 			extra += Math.max(0, ceiling - Buffer.byteLength(JSON.stringify(value) ?? "", "utf8"));
 			return;
 		}
@@ -2223,6 +2226,8 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 	}
 
 	function settle(ticket, message) {
+		if (ticket.settled) return;
+		ticket.settled = true;
 		const usage = message?.usage;
 		state.inflight -= ticket.bound;
 		const price = usage?.cost?.total;
@@ -2319,6 +2324,45 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		}
 	}
 
+	function prepare({ method, model, args, stop }) {
+		const ticket = pending;
+		if (!ticket) return args;
+		const [context, given = {}] = args ?? [];
+		const theirs = given.onPayload;
+		const onPayload = async function (payload, payloadModel) {
+			const next = typeof theirs === "function" ? await theirs.call(this, payload, payloadModel) : undefined;
+			let sent;
+			let finalBound = Infinity;
+			try {
+				// Clone once and send exactly this plain JSON. Original image allowances stay in the bound;
+				// the complete shaped body adds every byte introduced by a provider or caller hook.
+				sent = JSON.parse(JSON.stringify(next === undefined ? payload : next));
+				if (!isPlain(sent)) throw new Error("unboundable payload");
+				const caps = [sent.max_tokens, sent.max_completion_tokens, sent.max_output_tokens, sent.config?.maxOutputTokens, sent.inferenceConfig?.maxTokens].filter((value) => value !== undefined && value !== null);
+				if (caps.some((value) => typeof value !== "number" || !Number.isFinite(value))) throw new Error("unboundable output cap");
+				// A hook can remove or disable the cap it was given. The caller's options are no longer evidence of
+				// the wire limit. An operator's completions server has no known default, so its missing/zero/negative
+				// max_tokens refuses; a hosted adapter falls back to its catalog maximum through callCostBound.
+				if (completionsOwnServer(model) && !(typeof sent.max_tokens === "number" && sent.max_tokens > 0)) throw new Error("unboundable output cap");
+				const maxTokens = caps.length ? Math.max(...caps) : undefined;
+				const longCache = (value) => value && typeof value === "object" && (value.cache_control?.ttl === "1h" || value.cachePoint?.ttl === "1h" || Object.values(value).some(longCache));
+				const options = { ...given, maxTokens, ...(longCache(sent) ? { cacheRetention: "long" } : {}), ...(sent.n !== undefined ? { samplingParams: { ...given.samplingParams, n: sent.n } } : {}) };
+				finalBound = bound(method, model, { ...context, finalPayload: sent }, options, env);
+			} catch { /* A body we cannot bound must never reach the transport. */ }
+			const enlarged = Math.max(ticket.bound, finalBound);
+			const outside = externalMicros();
+			if (ticket.settled || !Number.isFinite(enlarged) || !Number.isFinite(outside) || state.spent + state.inflight - ticket.bound + outside + enlarged > capMicros) {
+				refuse({ why: "final-payload", bound: Number.isFinite(enlarged) ? enlarged : null });
+				stop(COST_CAP);
+				throw new Error(STOP_MESSAGES[COST_CAP]);
+			}
+			state.inflight += enlarged - ticket.bound;
+			ticket.bound = enlarged;
+			return sent;
+		};
+		return [context, { ...given, onPayload }, ...(args ?? []).slice(2)];
+	}
+
 	/** The exit line's cost fields, present only when a cap is set (run-job spreads them into `tokens`). */
 	function snapshot() {
 		flushPending();
@@ -2344,7 +2388,7 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		return state.why;
 	}
 
-	return { enforces: Object.freeze([COST_CAP]), admit, bind, snapshot, spend, unjudged, refusedWhy, state };
+	return { enforces: Object.freeze([COST_CAP]), admit, prepare, bind, snapshot, spend, unjudged, refusedWhy, state };
 }
 
 // ── Issue #502, part 4: the allowed-model list, checked before every provider call ────────────────────────
@@ -2593,7 +2637,7 @@ export function parseDeploymentNameMap(value) {
 	return map;
 }
 
-export function createModelGuard({ allowedModels, log = () => {}, env = process.env }) {
+export function createModelGuard({ allowedModels, log = () => {}, env = process.env, now = Date.now, subscriptionAdmission = null }) {
 	if (!Array.isArray(allowedModels) || allowedModels.length === 0) throw new Error("invalid PI_ALLOWED_MODELS: want a non-empty list");
 	// The operator's own deployment map, read ONCE, now (issue #587's review): the environment the worker gave the job
 	// (PI_FORWARD_ENV, which env-allowlist.mjs tells an Azure operator to use for it). A map that arrives later (a stored
@@ -2601,6 +2645,9 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 	// The map is pi-ai's own variable, reserved from run.secrets (provider-steering.mjs).
 	const startDeployments = parseDeploymentNameMap(env?.[AZURE_DEPLOYMENT_MAP]);
 	const allowed = new Set(allowedModels.map((entry) => pairKey(entry.provider, entry.model)));
+	let subscriptions;
+	try { subscriptions = JSON.parse(env.PI_SUBSCRIPTION_AUTH ?? "[]"); } catch { subscriptions = null; }
+	const subscriptionKeys = new Map((Array.isArray(subscriptions) ? subscriptions : []).map((row) => [row.provider, subscriptionAccess(row.provider, env)]));
 	const state = { refused: 0 };
 	let pending = null;
 
@@ -2612,6 +2659,13 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 
 	/** Why a call on this model with these options would be answered by a model the list does not name, or null. */
 	function offList(model, options) {
+		if (!Array.isArray(subscriptions) || (subscriptions.length > 0 && (!model || !validateSubscriptionRequest(model, subscriptions, { now })))) return "subscription";
+		if (subscriptionKeys.has(model?.provider)) {
+			// Separate pi processes have the access env but no attested extension/runtime. They refuse until a
+			// host-wired admission function establishes the same registration contract as this runner.
+			if (!subscriptionAdmission || !subscriptionAdmission(model.provider)) return "subscription";
+			if (subscriptionRequestOverrides(options, subscriptionKeys.get(model.provider)) || subscriptionRequestOverrides({ headers: model.headers }, subscriptionKeys.get(model.provider))) return "subscription";
+		}
 		const provider = model?.provider;
 		const id = model?.id;
 		if (typeof provider !== "string" || typeof id !== "string" || !allowed.has(pairKey(provider, id))) return "unlisted";
@@ -2629,8 +2683,10 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 		return null;
 	}
 
-	function admit({ method, model, args }) {
+	function admit({ method, model, args, legacy = false }) {
+		if (legacy && model?.provider === "anthropic" && subscriptionKeys.has("anthropic")) return refuse(method, "subscription");
 		pending = null;
+		if (method === "classify" && model?.provider === "openai" && subscriptionKeys.has("openai")) return refuse(method, "subscription");
 		const why = offList(model, args?.[1]);
 		if (why !== null) return refuse(method, why);
 		pending = model;
@@ -2681,7 +2737,7 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 			return sent;
 		};
 		const prepared = [...(args ?? [])];
-		prepared[1] = { ...(options ?? {}), onPayload };
+		prepared[1] = { ...(options ?? {}), onPayload, ...(subscriptionKeys.has(model?.provider) ? { apiKey: subscriptionKeys.get(model.provider) } : {}) };
 		return prepared;
 	}
 
@@ -2718,8 +2774,8 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
  * order, so with no list the exit line is byte-identical to before. `unjudged` reaches the cost guard only: it is
  * the cap's counter of displaced compat entries.
  */
-export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null }) {
-	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env });
+export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, now = Date.now, subscriptionAdmission = null }) {
+	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env, now, subscriptionAdmission });
 	// `external` (issue #500) reaches the cost guard only: it is spend, which only a cap judges.
 	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external });
 	const guards = [model, cost].filter((guard) => guard !== null);
@@ -2733,9 +2789,9 @@ export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, 
 			}
 			return null;
 		},
-		// Only the model guard prepares a call; the cost guard reads the options as given.
 		prepare(call) {
-			return model ? model.prepare(call) : call.args;
+			const args = model ? model.prepare(call) : call.args;
+			return cost ? cost.prepare({ ...call, args }) : args;
 		},
 		bind(result) {
 			for (const guard of guards) guard.bind?.(result);

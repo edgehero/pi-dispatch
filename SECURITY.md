@@ -281,6 +281,34 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   gate still runs, and every money gate still applies — but if that trade is not acceptable to you, do not
   enable the Azure arm. `OQ-015` records the full reasoning.
 
+## Subscription authentication (#781)
+
+An explicit connection policy can bind a provider to a host-owned subscription login. Unbound providers keep
+the existing environment/API-key path. Bound providers never silently fall back to an API key or another
+account. Supported community extensions are operator-selected exact compatibility profiles, not vendor
+endorsement and not isolated plugins: code loaded into the runner retains the runner's trust level.
+
+Refresh grants and OAuth registration state remain in an owned private host store outside every job,
+overlay and sandbox root. A serialized transaction persists uncertainty before rotating a refresh grant,
+then atomically persists and synchronizes its replacement. A job receives only an access snapshot valid
+past its deadline and safety margin; no host auth directory is mounted. Existing tool and transcript
+exposure of an admitted access credential remains, bounded by expiry and the usual model/spend controls.
+The configuration's owner is the sole refresh authority; copying refresh grants between independent hosts
+does not create safe multi-host renewal.
+
+The prepared community package binds exact source, audited adaptations and dependency-tree bytes. Model,
+endpoint, account, final payload, output, cache and cost checks still precede dispatch. Extra usage that is
+enabled or unknown requires explicit positive authorization and a compatible job dollar ceiling. Provider
+quota percentages and subscription flat prices do not replace conservative reservations or claim a
+provider-side monetary cap. Unknown-reset exhaustion persists; a person's single trial cannot bypass any
+other admission, replay or recovery rule.
+
+Only safe typed status reaches Connections, Models and machine readers. Refresh grants, access values,
+raw account/profile data and provider diagnostics are withheld. Stable local account groups provide
+connection continuity, not automatic identification of two independently linked vendor accounts. Browser
+pages do not authenticate or renew credentials. Unsupported subscription OpenShell and canary routes
+refuse; resurrected sandboxes remain credential-free. See [subscription-auth.md](docs/subscription-auth.md).
+
 ## The operator console
 
 The admin extension binds no port. The operator console does: `pi-dispatch-console serve` is a separate process

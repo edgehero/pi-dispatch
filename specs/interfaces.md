@@ -595,7 +595,7 @@ Evidence convention as in `constitution.md`.
 
 - **Roles (#717)**: invalid/missing role inputs and a shadowed role subagent tool are terminal exit 2 reasons `model-roles-invalid` and `model-roles-shadowed`. A local subagent refusal instead returns tool error output and bounded authenticated `modelRoles` telemetry, leaving the parent running.
 
-- **Signed failover evidence (#716)**: the runner's authenticated exit line may carry `providerFailure: { kind, resetAt? }`, with closed `kind` (`rate-limited`, `quota-exhausted`, `overloaded`, `context-overflow`) and optional nonnegative safe-integer epoch milliseconds `resetAt` no later than 253402300799999 (the last four-digit year); no body, header text or arbitrary error message crosses this channel. `toolsStarted` is the run-wide monotonic root-tool latch; `replaySafe` additionally requires a metered, observed root-only call history with no child/secondary uncertainty. The worker requires verified metadata matching exit 1, `toolsStarted: false` and `replaySafe: true` before permitting a cross-model retry. Missing fields are unsafe, not false. Existing exit codes and supervisor precedence are unchanged. Provider errors are read from SDK terminal events even when `session.prompt()` resolves; the runner does not infer success from CLI JSON exit status.
+- **Signed failover evidence (#716)**: the runner's authenticated exit line may carry `providerFailure: { kind, resetAt?, subscriptionCode?, subscriptionProvider? }`, with closed `kind` (`rate-limited`, `quota-exhausted`, `overloaded`, `context-overflow`) and optional nonnegative safe-integer epoch milliseconds `resetAt` no later than 253402300799999 (the last four-digit year); no body, header text or arbitrary error message crosses this channel. Optional `subscriptionCode` is one closed authoritative transport code (`usage_limit_reached`, `usage_not_included`, `rate_limit_exceeded`, `quota_exhausted`), never inferred from provider prose; it requires `subscriptionProvider` from the observed request, exactly `openai` or `anthropic`, so another listed provider cannot poison the main connection. Its validated reset can cover a full observed subscription week, with a 32-day observation bound. The separate physical model cooldown still caps its own TTL to six hours. `toolsStarted` is the run-wide monotonic root-tool latch; `replaySafe` additionally requires a metered, observed root-only call history with no child/secondary uncertainty. The worker requires verified metadata matching exit 1, `toolsStarted: false` and `replaySafe: true` before permitting a cross-model retry. Missing fields are unsafe, not false. A measured Claude 429 may carry only `subscriptionProvider`; that attribution requires a fresh typed usage read and is not itself a plan-exhaustion claim. Existing exit codes and supervisor precedence are unchanged. Provider errors are read from SDK terminal events even when `session.prompt()` resolves; the runner does not infer success from CLI JSON exit status.
 
 **Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
@@ -676,7 +676,7 @@ refactor apart.
   | Our turn budget or timeout aborts | `stopReason: "aborted"` | `2` |
   | Our per-job **token budget** aborts | `stopReason: "aborted"` | `2` — `decideExit` intercepts it as `reason: "token_budget"` BEFORE the generic `"aborted"`, exactly as the turn budget is intercepted (`REQ-TOKEN-ACCOUNTING-AND-CAPS`) |
   | The **process-wide** token budget breaches mid-fanout (a subagent session's call trips it) | `stopReason: "aborted"` on the root; every later call **by any session** is answered with a synthetic aborted stream | `2` / `token_budget`, the same row as above by design: neither meter gets its own exit code, so an operator never has to learn which one fired. Since issues #501/#502 the process-wide meter reports its stop by REASON (`meterStop`, the meter's first stop) and the fallback bus meter by flag (`tokenAborted`); `decideExit` ranks `turn_budget` > `meterStop` > `tokenAborted` > a rejected prompt > the terminal message |
-  | The per-job **cost cap** (issue #501, `PI_MAX_COST_MICROS`) stops a call before it is sent: the cost guard refuses any call whose bound would take `spent + in-flight bounds + bound` past the cap, any call it cannot bound (an api outside `PRICED_APIS`, `generateImages`, `streamDeferred`, a virtual model on any method but `streamSimple`, a classifier with an output rate, a context that does not serialise, a present `maxTokens` that is not a finite number, an output-cap `samplingParams` key that is not a positive finite number, or a `samplingParams` key outside the price-neutral safe list on the three apis that merge them last), and, fail closed, the rest of a job whose compat half was found displaced (a legacy call may have passed the cap unseen; logged `cost_guard_displaced` and counted as `costUnjudged` on the exit line) | `stopReason: "aborted"` on the root, the refused call answered with the hard stop `pi-dispatch: cost cap reached`; the refusal is logged `cost_refused` with numbers only (`bound`, `spent`, `inflight`, `cap`, or `why: "unboundable"` or `why: "external"`) | `2` / `cost-cap`. The exit line names the FIRST refusal's rule as `why` (issue #507): `unboundable`, `external` (the children's spend could not be read) or `over-cap`, a closed set (`COST_REFUSALS` in `outcome.mjs`); a `cost-cap` stop no refusal of the runner's own guard made (a displaced compat entry, a child's spend or refusal, an unmetered child) writes no `why`. The meter's stop is ONE reason, first wins: a later stop never overwrites it, so a job a cost refusal stopped stays `cost-cap` even when late settles then cross the token cap. Live from the image that declares `costCap`; the bound and the settle rules are `DES-DOLLAR-RESERVE-AND-SETTLE` |
+  | The per-job **cost cap** (issue #501, `PI_MAX_COST_MICROS`) stops a call before it is sent: the cost guard refuses any call whose bound would take `spent + in-flight bounds + bound` past the cap, any call it cannot bound (an api outside `PRICED_APIS`, `generateImages`, `streamDeferred`, a virtual model on any method but `streamSimple`, a classifier with an output rate, a context that does not serialise, a present `maxTokens` that is not a finite number, an output-cap `samplingParams` key that is not a positive finite number, or a `samplingParams` key outside the price-neutral safe list on the three apis that merge them last), and, fail closed, the rest of a job whose compat half was found displaced (a legacy call may have passed the cap unseen; logged `cost_guard_displaced` and counted as `costUnjudged` on the exit line) | `stopReason: "aborted"` on the root, the refused call answered with the hard stop `pi-dispatch: cost cap reached`; the refusal is logged `cost_refused` with numbers only (`bound`, `spent`, `inflight`, `cap`, or `why: "unboundable"` or `why: "external"`) | `2` / `cost-cap`. The exit line names the FIRST refusal's rule as `why` (issue #507): `unboundable`, `external` (the children's spend could not be read), `over-cap` or `final-payload` (the final shaped request exceeds its existing cost ticket), a closed set (`COST_REFUSALS` in `outcome.mjs`); a `cost-cap` stop no refusal of the runner's own guard made (a displaced compat entry, a child's spend or refusal, an unmetered child) writes no `why`. The meter's stop is ONE reason, first wins: a later stop never overwrites it, so a job a cost refusal stopped stays `cost-cap` even when late settles then cross the token cap. Live from the image that declares `costCap`; the bound and the settle rules are `DES-DOLLAR-RESERVE-AND-SETTLE` |
   | The **allowed-model list** (issue #502, `PI_ALLOWED_MODELS`) stops a call to a model not on it: the model guard refuses, before it is sent, any call whose REQUESTED `${model.provider}/${model.id}` is not a list entry, compared exactly and case-sensitively on both halves, on all five ModelRuntime methods and on a legacy compat call, judged and dispatched on one copy of the model. A listed call is refused too when its request would name another model (PR #538's review): samplingParams naming a routing key (`model`, `modelId`, `models`, `fallbacks`, `providerOptions`; any other key passes) on the three apis that merge them last, a caller's own `fetch` option, a per-call azure deployment (`azureDeploymentName` or an `options.env` deployment map), or an anthropic-messages `compat.allowedFallbackModels` entry whose pair (the model's provider and the fallback id) is not listed; and an admitted call whose payload hook (`options.onPayload`, which also carries the session's `before_provider_request` hooks, wrapped always) changes the payload anywhere outside the top-level keys a hook may edit (the messages, the system prompt, the top-level sampling knobs, and google's `config` sampling fields; a key set to `undefined` counts as absent: deny by default, at any depth, so a new model, a fallback list, google's `config.httpOptions` or a gateway's `providerOptions` all refuse), or returns something other than a plain object, or one with a `toJSON` or an accessor, fails before it is sent; pi is handed a fresh object, the editable keys from the hook and every other key from a snapshot taken before it ran. A virtual model's `streamSimple` is let through and the physical call it routes to is judged; on any other method a virtual model is judged as itself. The model check runs BEFORE the cost check, so an unlisted call under a cap is `model-not-allowed` whatever its price. Under a list alone, fail closed, the rest of a job whose compat half was found displaced (logged `model_guard_displaced`; under a cap as well the cost row above wins) | `stopReason: "aborted"` on the root, the refused call answered with the hard stop `pi-dispatch: model not allowed`; the refusal is logged `model_refused` with numbers and a fixed token only (`method`, `why`, `refused`); a payload refusal is an `error` stop on that call with the same message. A fallback that answers was listed (the rule above), and is logged `model_fallback` with the requested and answering ids when an anthropic-messages `responseModel` is one of the requested model's fallback ids. An openai-completions `responseModel`, an alias of the requested model, is never read | `2` / `model-not-allowed`. Same single first-wins stop. Live from the image that declares `modelPolicy`; `modelRefused` on the exit line counts the refused calls, so a `model-not-allowed` stop with `modelRefused: 0` is the displacement case. `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER` |
   | The job's **pi child processes** (issue #500 part E) pass a cap or a list: the parent folds every child's ledger on each 1 s tick and at teardown, and stops on parent plus children past `PI_MAX_TOKENS`, on its own settled spend plus the children's past `PI_MAX_COST_MICROS` or any child's cost refusal, or on any child's model refusal or child row off the PARENT's list; or a pi child reports through no ledger (the detector, Linux), under any policy | the parent's stop as for its own calls, and a `STOP` file every child reads before its next call, answered with that stop's hard stop; an unmetered child is logged `unmetered_child` once | `2` / `token_budget`, `cost-cap` or `model-not-allowed`, the rows above: no new reason. An unmetered child stops `cost-cap` under a dollar cap, else `token_budget` under a token cap, else `model-not-allowed` under a list; with no policy nothing stops and `unmeteredChildren` records the floor. `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` |
   | A cost cap (`PI_MAX_COST_MICROS`) or a model list (`PI_ALLOWED_MODELS`) is set, and the runner **cannot enforce it before a call**: the process-wide meter did not install (the fallback bus meter sees a call only after it was paid for), the meter has no hard-stop stream, or this runner has no pre-call guard for that policy (the installed guard lists the stops it can refuse for, so a cost guard cannot pass for a model guard) | **throws a tagged `configError`** after the meter installs and before `createAgentSession` | `2` / `model-policy-unenforceable` (checked first) or `cost-cap-unenforceable`. Nothing was sent. Live from the first image that reads either variable: an image without the model guard refuses EVERY job carrying a list, which is the fail-closed answer for a policy it cannot keep; a list passes on an image with the model guard (the one declaring `modelPolicy`) and a working meter, and a cost cap on an image with the cost guard and a working meter. The worker writes `PI_MAX_COST_MICROS` since issue #501 part 1, only to an image declaring `costCap`, and `PI_ALLOWED_MODELS` since #502, only to an image declaring `modelPolicy` (`INT-CONTAINER-RUNTIME-CONTRACT`) |
@@ -899,7 +899,7 @@ refactor apart.
   `reason: "<member>"` or, for the four policy reasons, as an exported literal (`export const COST_CAP = "cost-cap";`)
   that the meter and the policy check emit through.
   **A `cost-cap` line's `why` is read the same way** (issue #507). `parseExitWhy` returns it only when it is a member
-  of the worker's CLOSED `COST_CAP_WHYS` (`unboundable`, `external`, `over-cap`) AND the same, decisive exit line says
+  of the worker's CLOSED `COST_CAP_WHYS` (`unboundable`, `external`, `over-cap`, `final-payload`) AND the same, decisive exit line says
   `code: 2` and `reason: "cost-cap"`; anything else is `null`, so no container-written string reaches the record.
   The processor attaches it as the result's `why` only beside a `cost-cap` reason in its exit-`2` branch; it feeds
   no classification, and the worst a forged line can do is name the wrong rule of the three. A worker test reads
@@ -1314,14 +1314,18 @@ refactor apart.
   folder the job names, and that resolved path is what everything at prepare reads and what the bind mount names. It
   used to be the raw string, so a link below a job path swapped after the folder was checked (by the admin's
   `PI_DISPATCH_RUN_ROOTS` check at enqueue, or by nothing for a chained child) mounted whatever it then pointed to,
-  read-write. Three refusals are judged on the resolved folder, before the reserve: a folder NAMED inside a job path
+  read-write. Local placement refusals are judged on the resolved folder, before the reserve: a folder NAMED inside a job path
   (its text, or its text against the job path's real path, lies inside a run root or a cron `run.folder`, or an ancestor
   of its text has a job path's identity, so a case variant or a firmlink spelling counts) that resolves outside every
   such job path, by identity up the resolved path, is `local-folder-escaped`, a run root used as a symlink farm included
   (list the real folder as a run root or a cron folder instead); a folder that is the envelope file's folder or any
   folder above it (`envelopeProtectedIdentities`, `INT-ENVELOPE-FILE-CONTRACT`) is `local-folder-holds-envelope`; and a
   folder whose resolved path is a member of ANOTHER project than the one decided at pickup from the named spelling is
-  `local-folder-project-changed` (a resolved folder in no project keeps the named membership). A folder named outside
+  `local-folder-project-changed` (a resolved folder in no project keeps the named membership). When subscription
+  authentication is configured, a folder containing its private store (including a future store below existing or
+  dangling symlink parents) is `local-folder-holds-subscription-auth`, for every local job regardless of provider.
+  This store check also runs before token minting; preparation repeats it against the actual resolved mount source.
+  The host-only store path is never queued or passed to the container. A folder named outside
   every job path (the operator's own `pi-dispatch run`) is not held to them. `event.json`'s `folder` stays the basename
   of the folder as named, and a chained child is enqueued on the folder as its parent NAMED it (`INT-OUTBOX-CONTRACT`),
   so it matches the parent's rows, member and mutex and is resolved and judged again at its own prepare. Residual,
@@ -5626,7 +5630,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|operator-cancel|agent-cancel|answer-draft-refused|answer-draft-config-changed|answer-draft-unavailable|job-image-answer-draft-unsupported|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-is-sandbox|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize>" | null,
+    "reason":    "<fixed enum: worker-abort|operator-cancel|agent-cancel|answer-draft-refused|answer-draft-config-changed|answer-draft-unavailable|job-image-answer-draft-unsupported|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-holds-subscription-auth|local-folder-is-sandbox|local-folder-project-changed|unprotected-branch|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize|auth-policy-invalid|auth-adapter-unsupported|auth-adapter-unapproved|auth-owner-host|auth-adapter-unavailable|auth-adapter-conflicting|auth-capability-unsupported|auth-endpoint-unsupported|auth-reauth-required|auth-refresh-uncertain|auth-store-unavailable|auth-snapshot-too-short|auth-route-unbounded|auth-venue-unsupported|auth-adapter-disabled|auth-credit-cap-required|auth-binding-changed|auth-mixed-billing|subscription-extra-usage|auth-model-unverified|auth-usage-unavailable|job-image-subscription-auth-unsupported|subscription-quota|subscription-stale-binding|subscription-observation-required>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -6193,6 +6197,12 @@ validator rather than a second copy of it.
   `run.folder`) and now lies outside it; or it is the envelope file's folder or a folder above it; or it is a member
   of ANOTHER project than the one decided at pickup from the folder as named (`INT-CONTAINER-JOB-INPUTS`). Fixed
   tokens, no path. Never retried; they page nobody.
+
+  **`local-folder-holds-subscription-auth`** (#781) refuses any local job whose resolved mount would contain the
+  private subscription store, including a future store or symlinked parent. It is checked before token minting
+  and repeated at preparation before any reserve or container, even for an unbound API provider. The fixed
+  reason and action carry no host path or credential; `budgetReserved: false`. A transient boundary read is
+  infrastructure failure, never an assumed safe mount. Never retried as policy; it pages nobody.
 
   **`INT-ON-FAILURE-HOOK-CONTRACT` is unchanged**: every reason above is a pre-spend refusal and stays out of the
   hook's policy set (`HOOK_POLICY_REASONS`), which carries only paid terminals.
@@ -9037,9 +9047,10 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   pi-ai's rate table never states a subscription plan's price: at 0.80.7 `kimi-coding`, `zai` and
   `zai-coding-cn` shipped all-zero tables, so prepaid runs recorded cost 0 and read as free; at the 0.99.1
   pin most of their models carry an implied API-equivalent rate (issue #509), so the same prepaid runs
-  record a positive cost and read as metered. Either way the table is the wrong price — and the env boundary refuses
-  OAuth/subscription logins by design (`env-allowlist.mjs`), so an operator-side declaration is the only
-  place the real price can come from (`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`).
+  record a positive cost and read as metered. Either way the table is the wrong price. The legacy env/auth.json
+  fallback refuses stored OAuth; #781's separate explicit connection policy admits supported subscription
+  authentication but does not state a plan price. Operator declarations remain the price source
+  (`DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY`).
 - **Location**: `PI_SUBSCRIPTIONS_FILE` (the admin defaults to `./subscriptions.json` in its working
   directory, matching the `pi-dispatch init` scaffold — issue #80; unset/absent =
   `{ missing }`, a normal deployment). The committed `subscriptions.example.json` is the template;
@@ -11330,6 +11341,9 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   | `endpoint` | slot | every slot of a model endpoint; `endpoint` is its id |
   | `model-cooldown` | check | no candidate is available and the first transient blocker is a cooldown; asks again at `until` |
   | `model-window` | check | no candidate is available and the first transient blocker is a full model window; asks again at `until` |
+  | `subscription-quota` | check | a connection/application bucket is exhausted; waits for newer evidence, an observed reset or one person's trial, with `until` only a recheck time when reset is unknown |
+  | `subscription-owner` | ready | this host does not own the selected connection; waits for its owning host |
+  | `subscription-auth` | check | the credential cannot be renewed yet; waits until its measured earliest refresh instant without consuming an attempt |
   | `host-budget` | slot | the host budget; `budgetWhy` is its verdict |
   | `bundle-profile` | slot | a host that serves the job's secret bundle profile |
   | `recovery-wait` | run | a recovery whose run's attempt still runs; `holder` is that run |
@@ -11810,10 +11824,163 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   edited/as-drafted disposition. Losing this mark reports incomplete accounting, never requeues the answer. Standing
   adoption is a separate person-confirmed atomic file edit and audit event, never an automatic send side effect.
 
+## INT-AUTH-CONNECTIONS-FILE-CONTRACT
+
+**Operator to owning worker and terminal CLI (#781).** `PI_AUTH_CONNECTIONS_FILE` is opt-in. Its owned regular
+file is at most 65536 bytes and not group/other writable. Shape is version 1, `connections` (at most 32) and
+`bindings` (supported provider to a declared connection id). Each row has validated `id`, `provider`, `adapter`
+and `ownerHost`; community rows additionally name an absolute prepared `root` and lowercase SHA-256 `digest`.
+Optional `quotaWindows` selects the displayed five-hour/seven-day account-window monitoring focus, default both.
+Known exhausted windows remain visible and mandatory outside that focus; scoped and other windows remain
+visible because they are not independently selectable. Optional positive safe-integer `extraUsageCreditMicros` authorizes a per-job conservative dollar
+ceiling, and requires the job's normal dollar cap to fit. It is not a vendor credit balance. Supported adapters
+are `openai-chatgpt`, `pi-anthropic-oauth@0.3.6` and `@gotgenes/pi-anthropic-auth@3.4.3`; source/dependency hashes and
+audited transformations are held by `community-auth-pins.mjs` and `community-auth-patches.mjs`. Changing exact
+source, dependency tree, root, profile or binding invalidates the old capability rather than widening it.
+
+Competing reviewed Claude adapter packages visible in the staged manifest refuse as `auth-adapter-conflicting`
+before quota claims, renewal or token mint. Arbitrary trusted factory registration conflicts are checked inside
+the runner before provider dispatch. Final snapshot validation rechecks the stage root, digest and known
+conflicts. A racing stage change prevents container start and retries as infrastructure with the ordinary
+reservation refund.
+
+The file selects authentication independently of analytics-only `subscriptions.json`. Unbound providers retain
+legacy behavior. A bound provider never silently spends an environment key, another account or proxy after an
+authentication, quota or availability failure. The first implementation accepts direct official OpenAI Responses
+and Anthropic Messages endpoints, finite physical model lists and supported container-custody venues only;
+unsupported classifier, OpenShell and canary routes refuse before spend. Auth management is terminal-only on
+the owner, never a model-callable tool or browser credential form.
+
+Version 1 rejects a finite set of executable routes that mixes bound subscription and unbound API billing
+as `auth-mixed-billing`, including decision roles. A subscription primary cannot select an unbound API fallback.
+Cross-provider fallback may use another explicitly bound subscription provider after all ordinary checks;
+there is still one active connection per provider and no account rotation within an attempt. Claude's admitted
+root runtime and children sharing that runtime are supported. Independent legacy Anthropic compatibility calls
+and fresh runtimes without the admitted adapter refuse; only the root runtime's own internal reentry is allowed.
+Separate pi CLI and Node child processes do not inherit attested subscription admission; subscription dispatch
+from them refuses in the initial release, while child sessions sharing the root runtime retain its policy.
+
+The safe host-status key is `dispatch:subscription-status:<host>` with a 90-second lifetime. Its writer and
+reader share the connection and quota payload bounds: at most 32 connections, with 65,536 quota-record bytes
+plus 16,384 projection bytes per connection (2,621,440 bytes total). Every supported window is retained;
+excess or malformed publication is reported partial/unavailable rather than silently dropping exhaustion.
+Private binding digests and generations are removed before publication. Browser presentation may bound the
+combined host rows with an explicit partial/truncated indication.
+
+## INT-SUBSCRIPTION-CREDENTIAL-STORE
+
+**Owning host to access-only container (#781).** `PI_AUTH_STORE_DIR` defaults to `subscription-auth` beside the
+settings file. The directory is owned mode 0700; credential rows are owned regular mode-0600 files, never links,
+and the store is outside overlays, job roots and sandbox roots. Every local job also refuses a folder containing
+the store as `local-folder-holds-subscription-auth`, independently of its model provider or authentication mode.
+The worker checks before token minting and again at final local preparation against the resolved mount source;
+future store paths resolve through existing or dangling symlink parents. Directory identity catches alternate
+spellings. The private path is held only in host closures, never job data, environment or history. A connection row includes version, id, adapter,
+provider, generation, local opaque account group, state, private credential and registration, and refresh time.
+Refresh grants and access values are absent from queued data, history, telemetry, logs and command arguments.
+
+A per-connection lock serializes login, renewal and logout. Atomic replacement and file/directory synchronization
+persist a replacement before the transaction completes. A durable uncertain marker precedes token rotation;
+an ambiguous remote or persistence result must not repeat that rotation blindly. Authentication/refresh failure
+returns a closed actionable reason. Only named transient transport/store faults retry as infrastructure.
+
+Host policy, credential-store and adapter-validation reads use the shared determinate-filesystem-error
+allowlist. Missing or malformed policy/adapter metadata and determinate path faults return closed policy
+refusals; credential-store absence still reads as disconnected. Permission/ownership validation remains a
+policy refusal, while an unanswered read such as EACCES, EIO or an unknown errno is retryable infrastructure.
+Dependency existence checks must propagate unanswered stat errors rather than certify a missing package.
+The complete read boundary includes directory/file lstat, open, fstat, read and close; private paths and
+credential text are removed from its diagnostics. These refusals never fall through to another credential.
+If the default adapter's read-only validation fails after the durable refresh marker, its internal
+`beforeRefresh` proof restores the exact pre-marker row before returning that refusal. No provider request
+has begun in this branch. A provider error code alone supplies no such proof; terminal remote rejection and
+ambiguous network rotation keep their existing disconnect or uncertain-marker outcomes.
+
+An insufficient access lifetime with a known future earliest refresh instant defers as `subscription-auth`
+before the uncertain marker or refresh network request. It spends no queue attempt. A quota/owner change found
+during selected preparation uses the same closed free-delay path. The host releases all slot/endpoint holds
+before moving the job, and checks cancellation before handing it back; no terminal run is recorded for a wait.
+
+The prepared snapshot is host-private: provider, connection id, adapter, account group, generation, expiry,
+deadline and the access-only environment map. Expiry must exceed deadline plus six minutes. Its provider binding
+and generation are rechecked before use. The job's reserved `PI_SUBSCRIPTION_AUTH` contains profile/binding/expiry
+metadata and prepared package root/digest, never refresh grants; access values use only the selected provider's
+derived credential variables. Other credential sources cannot shadow that selection. A host-only
+`subscriptionAuthRequired` image gate requires the `subscriptionAuth` capability before access preparation,
+mint, clone or reservations; queued data cannot arm or disable it. An older image refuses as
+`job-image-subscription-auth-unsupported`. The image proof exercises real receipt rejection, deadline/endpoint
+checks and final shaped-body cost refusal under no network. Each supported profile also runs through the normal
+entrypoint with a valid binding: its initial cost refusal must precede dispatch, and an offline synthetic 429
+proves authoritative auth, final request shaping, bounded retry and signed subscription attribution. The runner validates
+metadata and the exact package before provider calls, then holds the credential snapshot immutable. No auth
+file or host credential directory is mounted. Ordinary subprocess, transcript and checkpoint redaction includes
+every admitted access credential. A sandbox receives none.
+
+Published host status is ephemeral, bounded and explicitly projected: configured connection id, provider,
+profile, owner, active/state, expiry, last refresh, compatibility and quota evidence. It excludes private account
+groups, credential generations, access/refresh values, raw profile/account data, headers and arbitrary diagnostics.
+Missing or expired host telemetry stays unknown. Connections and Models consume this projection, not private files.
+
+OpenAI and Claude access-token formats are validated at login, renewal and stored-row reads, before paid
+admission. An API-key-shaped or malformed Claude bearer cannot be deferred to an in-container refusal.
+Logout reports local disconnection and a separate `remoteRevocationConfirmed` boolean. Discarding a grant
+whose adapter no longer matches cannot confirm remote revocation. Lifecycle diagnostics stay precise on
+the terminal; job admission maps them to the closed actionable reason catalog.
+
+## INT-SUBSCRIPTION-QUOTA-KEY
+
+**Owning workers and terminal CLI to Valkey (#781).** `worker/src/subscription-quota.mjs` owns the parser and
+store. `dispatch:subscription-quota:<sha256([connectionId, accountDigest, bucket])>` holds a closed JSON state
+with monotonic version, owner/generation binding, source, observation time, normalized windows, extra-usage
+facts and an optional one-attempt trial. Access tokens, email, profile names and provider prose are never stored.
+The local account digest is an opaque account group, stable across renewal; no vendor-account deduplication of
+separate connections is inferred. Physical model cooldown keys and their six-hour cap are UNCHANGED, checked.
+
+- Observations have version 1, a closed source (`claude-community`, `openai`, `provider-error`), injected epoch-ms
+  observation time, a completeness flag, normalized windows and typed extra usage. Each window has an opaque
+  id, five-hour/seven-day/other kind, account/scoped scope, nullable measured percent and reset instant, and
+  unknown/available/exhausted state. Community model display names are not silently mapped to physical models.
+  Exhausted unmapped scoped limits conservatively block their application bucket. Null is unknown, never zero.
+- Claude parses legacy five-hour/seven-day fields, modern `limits`, scoped legacy windows and `extra_usage`.
+  OpenAI parses typed primary/secondary rate limits. Only closed authoritative transport codes establish an
+  error observation; authentication, arbitrary error prose and overload do not. Percent and reset values are
+  validated; resets beyond the 32-day evidence bound become unknown rather than an invented shorter reset.
+- A payload/state is bounded to 65536 bytes, a community limits array to 32 and retained normalized windows to
+  64. Reads use named keys, never keyspace scans. Observation freshness is five minutes; stale availability is
+  unknown. Exhaustion remains authoritative through its full known reset, including a week. Without a reset it
+  has no TTL and persists until newer sufficient evidence or a person's explicit trial. Missing/partial evidence
+  does not erase it. A complete newer snapshot may clear generic unknown-reset error exhaustion.
+- A measured Claude HTTP 429 invalidates cached availability and paid-overage facts before a bounded usage
+  refresh; it does not alone prove plan exhaustion. The persistent probe-required flag permits read-only
+  candidate inspection but refuses selected paid admission until new usage is recorded. The fetch binds its
+  pre-network state version, so another worker's invalidation cannot be cleared by its old in-flight response.
+  Known exhaustion survives invalidation. Missing/failed usage leaves the probe required without a guessed reset.
+- Exact-byte Lua CAS serializes changes and one-trial claims, with at most eight bounded retries. Older
+  observations, changed expected versions and stale owner/generation cannot overwrite newer evidence. Equal-time
+  ties may only strengthen exhaustion, never clear it. A higher
+  generation carries prior exhaustion forward. Candidate preview writes nothing; selected admission publishes
+  the newer binding atomically. Store corruption, capacity and unavailable state fail loudly as infrastructure.
+- Initial unknown quota permits ordinary admission only after the separate authentication and billing gates.
+  Monitoring selections never disregard an observed exhausted applicable window. With several resets, all must
+  clear. Enabled or unknown Claude paid extra usage requires explicit positive authorization and the compatible
+  job dollar ceiling; missing vendor currency/scale is not assumed USD. Provider counters and API-equivalent
+  conservative dollar accounting remain distinct.
+- A person may grant one trial only against the observed version of unknown-reset exhaustion. Known resets,
+  stale previews and model/agent requests cannot obtain it. Candidate checks do not consume it. Selected
+  admission atomically binds it to a hash of the durable attempt id; repeating that same attempt is idempotent,
+  another attempt refuses. Newer evidence revokes an outstanding trial. It starts no job and bypasses no other
+  gate. `subscription-quota`/`subscription-owner` extend `INT-DEFER-REASON-KEY` without changing its fields/buckets.
+
+The runner's signed provider-failure gains closed optional subscription-code and provider tokens; replay fields remain closed. The final shaped request may
+increase its existing cost ticket only before dispatch; a larger/unboundable payload writes the closed
+`final-payload` cost refusal. `INT-RUNNER-EXIT-CODE-PROTOCOL` and `INT-RUN-HISTORY-FILE-CONTRACT` add that one
+`why` token; provider text, account identity, credentials and quota snapshots never become public run facts.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#781) | NEW `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE` and `INT-SUBSCRIPTION-QUOTA-KEY`; `INT-SDK-SESSION-OPTIONS`, `INT-CONTAINER-JOB-INPUTS`, `INT-PI-PACKAGES-FILE-CONTRACT`, `INT-DEFER-REASON-KEY` and the runner/history cost-refusal vocabulary AMENDED through those explicit contracts. `INT-SUBSCRIPTIONS-FILE-CONTRACT` corrects its obsolete blanket OAuth rationale; analytics-only enforcement UNCHANGED, checked. Model cooldown storage, ordinary container mounts, queue data, recovery checkpoint model, sandbox credentials, session promotion, forged-output rejection, model ceilings and the ordinary reservation/settlement ledgers UNCHANGED, checked. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |
 | 2026-10-31 (#773) | INT-DOCTOR-RESULTS-KEY AMENDED with the explicitly typed/redacted proposal-detail exception, preserving unrelated successful-check privacy. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |
 | 2026-10-29 (#735, #743) | NEW `INT-WATCH-EVENT-CONTRACT`, `INT-WATCH-FINDINGS-FILE`, `INT-WATCH-TRACE-STREAM` and `INT-WATCH-BOARD-FILE`; `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-OUTBOX-CONTRACT`, `INT-CONSOLE-AUDIT-LOG` and optional public decision summary AMENDED by reference. Ordinary forge envelopes, credential custody, runtime exit signing, session resumption UNCHANGED, checked. Limits are owned by code constants and covered by contract tests, not trusted copies.  The run-record reason enum includes the watch catalog, pinned in both directions. Watch workspaces use existing paths with read-only workspace permissions; ordinary jobs keep their mount permissions. |
 | 2026-10-29 (#717) | AMENDED `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-OUTBOX-CONTRACT`: reviewed role maps, immutable base-agent inputs, capability refusal and bounded authenticated telemetry; `INT-SANDBOX-CONTRACT` gains optional base provenance and `INT-DEFER-REASON-KEY` gains exclusive canary admission. `INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked: weights never name models. |
@@ -12172,3 +12339,5 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 | 2026-10-30 (#771, dispatcher lifetime and startup refusal) | INT-SANDBOX-OPENER-CONTRACT's finite Windows dispatcher runs without process detachment and must return its fixed console-creation receipt; a zero exit without that receipt refuses. Native verification also requires the pending helper to survive the original URL handler's actual exit. Worker startup-refusal cleanup now waits for each queue's initialization and observes asynchronous disconnect failures while preserving its existing deadline and original refusal. URL grammar, enrollment, Enter boundary, control transport, shell leases, inventory, paid admission and every other interface UNCHANGED, checked. |
 | 2026-10-31 (#771, initial live snapshot) | INT-CONSOLE-EVENT-STREAM initial Sandboxes subscriptions retain server-rendered panels until a fresh coalesced read succeeds, preventing a cached empty view from hiding newer cleanup warnings; failures keep those panels with a stale indication. Cursor replay, other pages, event framing/fields, stream limits, authorization, public state, sandbox control/session/inventory wire contracts and every other interface UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | NEW `INT-ANSWER-DRAFT-STORE`; `INT-STEER-INBOX-CONTRACT`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API` and `INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED: answer rule/standing schemas, agent role, applied receipts, safe projections and digest-bound result. Ordinary exit numbers/MAC, trigger run payloads, parent transcript promotion, approval decisions, global overlay, deploy mirrors and dependency pins UNCHANGED, checked. |
+| 2026-10-31 (#781, local credential custody) | INT-CONTAINER-JOB-INPUTS, INT-RUN-HISTORY-FILE-CONTRACT and INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: every local job refuses a mount containing the private refresh store, including unbound API jobs, future paths, symlink parents and directory aliases, as the fixed path-free local-folder-holds-subscription-auth reason. The free pickup gate precedes token minting and final preparation repeats the check on the resolved mount source before reservation or container start; transient boundary reads remain infrastructure failures. The store path stays in host closures. Container environment and exit protocol, forge contracts, paid meter, hook reasons and other interfaces UNCHANGED, checked. |
+| 2026-10-31 (#781, host filesystem refusals) | INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: policy, private-store, OpenAI pinned-source and community-adapter validation classify all filesystem reads by the shared determinate errno allowlist, including outer path checks and descriptor close. Malformed metadata and known path faults refuse; credential-store absence still reads disconnected; EACCES, EIO and unknown faults remain retryable without changing the durable grant. Dependency existence uses strict stat rather than suppressing I/O errors. An explicitly marked read-only adapter preflight failure after the durable refresh marker restores the pre-marker row because no remote rotation began; an error code alone never proves this. Fixed diagnostics carry no path or token. Credential schemas, permission/owner checks, remote refresh rotation and uncertainty, snapshots, container/image transports, adapter source/output pins, public telemetry and all other interfaces UNCHANGED, checked. |

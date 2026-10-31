@@ -911,6 +911,33 @@ test("resolveDefaultBranchSha is threaded into prepareWorkspace (C2)", { skip },
 	assert.equal(typeof deps.prepareWorkspace, "function", "a prepareWorkspace dep must be wired");
 });
 
+test("subscription store custody reaches both live pickup and final local preparation through host-only wiring (#781)", { skip }, async () => {
+	const deployment = tempDir("pi-subscription-custody-boot-");
+	const folder = join(deployment, "home-repository");
+	const storeDir = join(folder, "private-auth");
+	mkdirSync(storeDir, { recursive: true, mode: 0o700 });
+	writeFileSync(join(storeDir, "connection.credential"), "REFRESH-CUSTODY-SENTINEL", { mode: 0o600 });
+	const policyFile = join(deployment, "connections.json");
+	writeFileSync(policyFile, JSON.stringify({ version: 1, connections: [{ id: "chatgpt", provider: "openai", adapter: "openai-chatgpt", ownerHost: "custody-worker" }], bindings: { openai: "chatgpt" } }), { mode: 0o600 });
+	const prepareCalls = [];
+	const { makePrepareWorkspace: realPrepare } = await import("../src/prepare.mjs");
+	await runStart({
+		env: { PI_WORKER_NAME: "custody-worker", PI_AUTH_CONNECTIONS_FILE: policyFile, PI_AUTH_STORE_DIR: storeDir, PI_SETTINGS_FILE: join(deployment, "settings.json"), PI_JOBS_DIR: join(deployment, "jobs"), PI_SWEEP_INTERVAL_HOURS: "0" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 5, source: "gh" }), makeHost: () => fakeHost(),
+		makePrepareWorkspace: options => { prepareCalls.push(options); return realPrepare(options); },
+		whileRunning: async ({ deps }) => {
+			const job = { kind: "local", folder, provider: "unmanaged", model: "test-model", task: "work", github: true, repo: "org/repo" };
+			assert.equal((await deps.subscriptionRuntime.check(job)).reason, "local-folder-holds-subscription-auth");
+			const prepared = await deps.prepareWorkspace(job, "tok");
+			assert.equal(prepared.reason, "local-folder-holds-subscription-auth", "the final preparer receives the private path without reading it from job data");
+			assert.equal(Object.hasOwn(job, "authStoreDir"), false);
+			assert.equal(JSON.stringify(prepared).includes(storeDir), false);
+		},
+	});
+	assert.equal(prepareCalls[0].localPlacement.authStoreDir, storeDir);
+	assert.equal(readFileSync(join(storeDir, "connection.credential"), "utf8"), "REFRESH-CUSTODY-SENTINEL");
+});
+
 test("the boot reaper runs BEFORE the worker starts draining (strays cleared first)", { skip }, async () => {
 	const order = [];
 	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });

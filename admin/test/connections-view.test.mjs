@@ -346,3 +346,17 @@ test("Only a writable operator can copy the package staging command; other roles
     assert.doesNotMatch(page.textContent, /pi-dispatch import-pi --with-packages/);
   }
 });
+
+test("private subscription locations expose presence only, including in the complete reader and model output", async () => {
+  const keys = ["PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR"];
+  for (const key of keys) {
+    assert.ok(PANEL_SERVICE_KEYS.includes(key));
+    assert.equal(CONNECTION_ENV_TYPES[key], "present");
+    assert.equal(connectionEnvValue(key, "/private/private-location-sentinel"), "set");
+    assert.equal(connectionEnvValue(key, ""), "not set");
+  }
+  const value = await readConnections({ now: AT, snapshot: snapshot(), reads: reads({ PI_AUTH_CONNECTIONS_FILE: "/private/private-location-sentinel", PI_AUTH_STORE_DIR: "C:\\Users\\private-store-sentinel" }) });
+  assert.doesNotMatch(JSON.stringify(value), /private-location-sentinel|private-store-sentinel/);
+  assert.doesNotMatch(JSON.stringify(modelConnections(value)), /private-location-sentinel|private-store-sentinel/);
+  for (const key of keys) assert.equal(value.environment.find(row => row.key === key).value, "set");
+});

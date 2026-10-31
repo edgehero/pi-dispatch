@@ -1,3 +1,4 @@
+import { consoleSubscriptionFixture } from "./subscription-auth-fixture.mjs";
 /** #751 exceptional states, over production read projections and the production page renderer. */
 import assert from "node:assert/strict";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
@@ -78,6 +79,11 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "secrets-missing-bundle.operator": () => secret({ change: (s, e) => { delete s.settings.overlay.secretBundles.shop; e.PI_SECRET_BUNDLES = ""; } }),
   "secrets-unserved.operator": () => secret({ change: (s) => { s.hosts = []; } }),
   "secrets-empty.viewer": () => secret({ change: (s, e) => { s.settings.overlay = {}; s.triggers = { triggers: [], secretBundles: [] }; s.runs = []; e.PI_SECRET_PROFILES = ""; e.PI_SECRET_BUNDLES = ""; } }, "viewer"),
+  "connections-subscription.operator": () => connection({ change: s => { s.subscriptionAuth = consoleSubscriptionFixture(NOW); } }),
+  "connections-subscription.viewer": () => connection({ change: s => { s.subscriptionAuth = consoleSubscriptionFixture(NOW); } }, "viewer"),
+  "connections-subscription-reauth.operator": () => connection({ change: s => { s.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].state = "reauth-required"; v.connections[0].expiresAt = NOW - 1; }); } }),
+  "connections-subscription-conflict.operator": () => connection({ change: s => { s.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].state = "adapter-unavailable"; v.connections[0].compatibility = "conflicting"; }); } }),
+  "connections-subscription-long.operator": () => connection({ change: s => { s.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].id = "a".repeat(64); v.connections[0].ownerHost = "h".repeat(64); v.connections[0].adapter = "@gotgenes/pi-anthropic-auth@3.4.3"; }); } }),
   "connections-proxy.operator": () => connection({ problem: "proxy" }),
   "connections-forge.operator": () => connection({ problem: "forge" }),
   "connections-receiver-missing-secret.operator": () => connection({ change: (_, r) => { r.environment = () => ({ env: { GITHUB_AUTH_SOURCE: "gh" } }); } }),

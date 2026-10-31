@@ -272,7 +272,7 @@ export function approvalRecordOf(value) {
  * `COST_REFUSALS` (`image/runner/src/outcome.mjs`), restated because the shipped worker cannot import the runner, and
  * pinned to it by a test that reads that source. CLOSED, because the value reaches the PII-free record.
  */
-export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap"]);
+export const COST_CAP_WHYS = Object.freeze(["unboundable", "external", "over-cap", "final-payload"]);
 
 /**
  * The `why` off the decisive exit line (`decisiveExitLine`), or `null`: a member of `COST_CAP_WHYS`, and only when that

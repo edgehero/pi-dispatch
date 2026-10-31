@@ -1,4 +1,4 @@
-<!-- @dsCard group="Spend" height=1890 width=1440 subtitle="Models: role map, fallbacks, cooldowns, canary proposals and the Radius flag" -->
+<!-- @dsCard group="Spend" height=2550 width=1440 subtitle="Models: role map, fallbacks, cooldowns, canary proposals and the Radius flag" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -6,6 +6,35 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Models</title>
 <style>
+.sa-accounts { display: grid; gap: var(--space-5); }
+.sa-account { min-width: 0; }
+.sa-account + .sa-account { padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.sa-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.sa-title h3 { margin: 0; font-size: 15px; }
+.sa-facts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 8px 14px; font-size: 13px; line-height: 20px; }
+.sa-facts dt { color: var(--ink-muted); }
+.sa-facts .badge { max-width: 100%; height: auto; min-height: 24px; padding-top: 3px; padding-bottom: 3px; white-space: normal; line-height: 18px; align-items: flex-start; }
+.sa-facts .badge .ic { margin-top: 2px; }
+.sa-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.sa-account .code, .sa-account code { white-space: normal; overflow-wrap: anywhere; }
+.sa-note { margin-top: 12px; color: var(--ink-muted); font-size: 13px; line-height: 19px; overflow-wrap: anywhere; }
+.sa-commands { margin-top: 16px; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.sa-commands > * { min-width: 0; max-width: 100%; }
+.sa-commands .cmd { min-width: 0; }
+.sa-commands .cmd code { overflow-wrap: anywhere; white-space: normal; }
+.sa-windows { list-style: none; padding: 0; display: grid; gap: 10px; margin-top: 12px; }
+.sa-window { padding: 12px; background: var(--surface-2); border-radius: var(--radius-md); min-width: 0; }
+.sa-window b { display: block; margin-bottom: 5px; }
+@media (max-width: 600px) {
+  .sa-facts { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .sa-facts dd { margin-bottom: 8px; }
+}
+
+#p-subscription-auth .sa-title h3 { font-size: 13px; margin-top: 20px; }
+.sa-commands .cmd { align-items: flex-start; }
+.sa-commands .cmd code { padding: 6px 0; }
+.sa-commands .cmd code > span { display: inline-block; max-width: 100%; }
+
 .md-edit { min-width: 0; display: block; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); }
 .md-edit > * { min-width: 0; max-width: 100%; margin-top: 12px; }
 .md-edit .input { width: 100%; min-width: 0; }
@@ -96,7 +125,14 @@
 </section><section class="card" id="p-models" data-panel>
   <div class="card__head"><h2>Models in use</h2><span class="card__sub">unpriced fallbacks are skipped</span></div>
   <ul class="md-ms"><li class="md-m"><span class="md-m__t"><span class="code">anthropic/claude-sonnet-5-5</span><small>anthropic, priced. $32.46 of $80.00 this week</small></span><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Cooling down</span></li><li class="md-m"><span class="md-m__t"><span class="code">openai/gpt-5</span><small>openai, priced. Deployment windows also apply</small></span><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Configured</span></li></ul>
-</section></div></div><section class="card" id="p-proposals" data-panel>
+</section></div></div><section class="card" id="p-subscription-quota" data-panel>
+  <div class="card__head"><h2>Subscription quota</h2><span class="card__sub">account windows, separate from dollar caps</span></div>
+  <div class="sa-accounts"><article class="sa-account"><div class="sa-title"><h3><span class="code">claude-work</span></h3><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Quota exhausted</span></div>
+      <dl class="sa-facts"><dt>Provider</dt><dd>anthropic</dd><dt>Owner host</dt><dd><a href="/fleet/host?name=mini1">mini1</a></dd><dt>Monitoring focus</dt><dd>Five-hour and seven-day account windows</dd><dt>Observation</dt><dd>Fresh, observed 2026-10-31 15:39:00 UTC</dd><dt>Pickup</dt><dd>Waiting until 2026-10-31 16:00:00 UTC</dd><dt>Extra usage</dt><dd>Disabled</dd><dt>Paid overage ceiling</dt><dd>Not authorized for paid overage</dd></dl>
+      <ul class="sa-windows"><li class="sa-window"><b>Five-hour account window</b><span>100% used. Resets 2026-10-31 16:00:00 UTC. Observed exhausted.</span></li><li class="sa-window"><b>Seven-day account window</b><span>42% used. Resets 2026-11-02 00:00:00 UTC. Observed available.</span></li></ul>
+      <p class="sa-note">Known exhausted windows remain visible and still apply at pickup, even outside the monitoring focus. Quota is shared by jobs using this connection and application bucket. Unknown or stale observations are not remaining capacity; deployment dollar windows still apply. A fallback is checked separately at pickup.</p>
+      <div class="sa-commands"><p class="sa-note">Run in a terminal on mini1. Sign-in and refresh never run in this browser.</p><div><p class="sa-note">Refresh quota observations</p><div class="cmd"><code><span>pi-dispatch</span> <span>auth</span> <span>usage</span> <span>claude-work</span></code><button class="btn btn--sm" type="button">Copy</button></div></div></div></article></div>
+</section><section class="card" id="p-proposals" data-panel>
   <div class="card__head"><h2>Proposals and canaries</h2><span class="card__sub">doctor checks per host, retained run comparisons</span></div>
   <div class="md-prop"><p class="md-prop__t">Doctor on <b>mini1</b>: a newer model is available for planner.</p><p class="card__sub">Retained canary for planner, fix flow. Partial history is labelled; these are observations, not a recommendation.</p>
       <div class="tbl-wrap"><table class="tbl tbl--stack md-can"><caption class="sr">Retained canary against source runs</caption><thead><tr><th>Observed metric</th><th>Source models</th><th>Candidate</th></tr></thead><tbody><tr><td data-l="Observed metric">Cost per run</td><td data-l="Source runs">$0.19</td><td data-l="Candidate">$0.06</td></tr><tr><td data-l="Observed metric">Completed</td><td data-l="Source runs">3 of 3</td><td data-l="Candidate">2 of 3</td></tr><tr><td data-l="Observed metric">Turns, average</td><td data-l="Source runs">9.4</td><td data-l="Candidate">11.2</td></tr><tr><td data-l="Observed metric">Tokens, average</td><td data-l="Source runs">118,400</td><td data-l="Candidate">131,900</td></tr></tbody></table></div>

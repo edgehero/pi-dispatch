@@ -1934,6 +1934,18 @@ A run with declared gates can end as `awaiting-approval`. It leaves no container
 
 Model-role runs show the reviewed role beside the physical provider/model in run detail and the run API. Agent refusal counts contain bounded hashes and fixed reasons; the requested name stays in tool output. The model-callable tools cannot edit the reviewed `modelRoles` block. See [model-roles.md](model-roles.md).
 
+Connections and Models also display explicitly configured [subscription authentication](subscription-auth.md).
+Connections names the selected profile, owning host, compatibility, credential state and expiry. Models shows
+the connection/application bucket's quota observations, their age, missing values, exhausted windows and paid
+extra-usage policy separately from deployment dollar caps. A missing observation is unknown. Known weekly
+resets are not shortened to the physical model cooldown's six-hour maximum; unknown-reset exhaustion remains
+until newer evidence or one person's normally budgeted trial.
+
+Operators see commands to run in the owning host's terminal. Sign-in, logout, usage renewal and trial authority
+do not run inside the browser, and viewers receive no management controls. Credentials, raw account/profile
+identity and extension diagnostic prose never enter browser or machine projections. Community adapter status
+describes tested exact package compatibility, not vendor endorsement. No read starts a paid run.
+
 
 ## Watch and rule boards
 
@@ -2075,6 +2087,7 @@ these extra file/lease reads.
   A real fleet zero still reads `0 of N`. Per-host counts are not published. Each host's failing endpoints-file doctor check keeps its own fix.
   Provider rows name the first candidate set in the `.env`, or say none is set there, with the configured
   source at the row's end. Actual per-host credentials remain unpublished.
+- **Subscription authentication:** selected adapter and exact version, owner host, compatibility, credential health, expiry and refresh time. Community adapters are labelled. A recognized package is not a verified installation, and connected means a credential record exists, not that a paid request succeeded. Credentials, profile details and private paths never reach this page. A writable operator may copy `pi-dispatch auth login CONNECTION_ID`, `logout`, `usage` or an offered `trial` command to the owning host's terminal. There is no browser sign-in or credential mutation. Viewers, agents and read-only operators see safe subscription facts only. Other deployment metadata is not published in the agent Connections view.
 - **Notifications:** fixed forge comments, triggers with status comments and the failure hook's last folder.
   Hook execution history is in the worker log, not collected by this page. Timing, arguments and exclusions
   are in the linked [hook reference](notifications.md).
@@ -2196,6 +2209,10 @@ The confirm names affected trigger rows and says that nothing runs now and recov
 Adopt prefills that same form from a server-checked canary sample and requires choosing the scope. Run more
 is a command to copy and review on the canary host; its deployment lease defers every other start. Viewers,
 agents and read-only consoles receive no Edit, Adopt or canary-command controls.
+
+The host policy's `quotaWindows` preference chooses the Models monitoring focus for five-hour and seven-day account windows. Available or unknown unselected account rows are omitted from that card; known exhausted rows remain visible with a mandatory evidence note and still affect pickup. Scoped and other provider window types remain visible because they are not independently selectable. This display preference cannot disable a provider cooldown.
+
+The Subscription quota card shows account and application-bucket observations separately from dollar caps: their freshness, five-hour and seven-day windows, utilization, reset times, extra usage and explicit paid-overage policy. Unknown utilization and resets remain unknown; stale observations do not promise remaining capacity. Retained exhaustion still matters after its observation becomes stale. A resetless exhaustion offers a host trial command only to a writable operator, and a trial does not clear exhaustion or bypass other pickup gates. Jobs using the same connection and application bucket share its quota. Quota observations cannot prove that separately linked connections belong to the same vendor account.
 
 The model tool `dispatch_models` shares the reader but receives only bounded machine facts, not doctor prose,
 commands, paths, diffs or repository-agent definitions. See [Model roles](model-roles.md),

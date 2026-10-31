@@ -560,7 +560,7 @@ async function prepareOne({ fs, exec, out, entry, staging, npmBin, platform, war
 	fs.mkdirSync(staging, { recursive: true });
 	// A private root package.json pins npm's idea of "the project" to the staging dir, so it cannot
 	// walk up and install into (or read config from) the operator's own checkout.
-	fs.writeFileSync(join(staging, "package.json"), `${JSON.stringify({ name: "pi-dispatch-staging", private: true }, null, 2)}\n`);
+	fs.writeFileSync(join(staging, "package.json"), `${JSON.stringify({ name: "pi-dispatch-staging", private: true, ...(entry.name === "pi-anthropic-oauth" && entry.version === "0.3.6" ? { overrides: { "@anthropic-ai/sdk": "0.124.0" } } : {}) }, null, 2)}\n`);
 
 	// ARRAY argv, never a shell string: the name and version come from a config file and must never be
 	// able to become shell syntax on the operator's host. The install target is the exec's `cwd`, NOT a
@@ -639,6 +639,12 @@ async function prepareOne({ fs, exec, out, entry, staging, npmBin, platform, war
 		warnings.push({ dir: entry.dir, reason: `${entry.name} declares ${declares} -- staged with --ignore-scripts, so it is INCOMPLETE and may fail at run time` });
 	}
 
+	if (["pi-anthropic-oauth@0.3.6", "@gotgenes/pi-anthropic-auth@3.4.3"].includes(`${entry.name}@${entry.version}`)) {
+		// Read-only host-pi consumers, including the scratch canary, have no lifecycle dependencies installed.
+		const { prepareCommunityAuthAdapter } = await import("./community-auth-patches.mjs");
+		const receipt = prepareCommunityAuthAdapter({ adapter: `${entry.name}@${entry.version}`, root: source, fs });
+		out(`  reviewed subscription adapter ${receipt.adapter}: ${receipt.digest}\n`);
+	}
 	return source;
 }
 

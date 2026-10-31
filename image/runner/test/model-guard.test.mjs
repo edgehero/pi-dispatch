@@ -876,9 +876,9 @@ test("a payload hook that changes the model fails the call before it is sent and
 	try {
 		const options = { maxTokens: 10 };
 		await new Spy().streamSimple(LISTED, {}, options).result();
-		// The caller's own keys and nothing else: no onPayload is added. The copy carries only the dispatch mark (issue
+		// A cost cap adds a final-payload hook. The copy also carries the dispatch mark (issue
 		// #543), a symbol, so it never reaches a payload.
-		assert.deepEqual([Object.keys(seen[0]), seen[0].maxTokens, Object.getOwnPropertySymbols(seen[0])], [["maxTokens"], 10, [DISPATCH_MARK]], "a cap alone adds no onPayload");
+		assert.deepEqual([Object.keys(seen[0]), seen[0].maxTokens, Object.getOwnPropertySymbols(seen[0])], [["maxTokens", "onPayload"], 10, [DISPATCH_MARK]], "a cap measures the final payload even without a model list");
 	} finally {
 		layer3.restore();
 	}
