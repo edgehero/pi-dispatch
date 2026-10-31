@@ -144,8 +144,8 @@ export const VIEWPORT = Object.freeze({ width: 375, height: 812, scale: 2 });
 /** The window the shell sweep's desktop widths are drawn in: its height and scale (its width is the sweep's). */
 export const DESKTOP = Object.freeze({ height: 900, scale: 1 });
 /** Full configuration-detail pages and exceptional states, rather than the empty-data shell alone (#751). */
-export const CONFIG_DETAIL_PAGES = Object.freeze(["secrets", "connections", "project"]);
-export const CONFIG_DETAIL_WIDTHS = Object.freeze([320, 375, 390, 759, 760, 761, 800, 899, 900, 901, 999, 1000, 1001, 1024, 1099, 1100, 1101, 1280, 1440]);
+export const CONFIG_DETAIL_PAGES = Object.freeze(["secrets", "connections", "project", "models"]);
+export const CONFIG_DETAIL_WIDTHS = Object.freeze([320, 375, 390, 759, 760, 761, 768, 800, 899, 900, 901, 999, 1000, 1001, 1024, 1099, 1100, 1101, 1280, 1440]);
 /**
  * The widths the shell is loaded at: the narrowest phone the console supports and the usual one (both emulated as a
  * phone), then the desktop range the reviews measured the top bar failing in, at the window sizes people use: from

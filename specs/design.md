@@ -2558,6 +2558,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-ADMIN-VIA-PI-EXTENSION
 
+- **Models (#773)**: `dispatch_models` shares the page's source reads but returns only an explicit machine projection. The role-edit action is declared `person`, absent from mutation tool registrations, and refused on tool/agent surfaces before private collaborators are read. Model selection, fallbacks and provider failures use fixed shared sentences on the Models and Run pages. Existing nested/near-miss model-map and trigger-fallback write refusals remain in force.
+
 - **AMENDED 2026-10-31 (#766)**: One action policy and exact transition evidence span console and tools.
   Agent reads have a closed typed projection, and agent mutations receive correlated applied audit receipts.
 
@@ -2842,7 +2844,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   three wires through the forge title, the five badges on their loops and the mention pair; with the title
   rule removed it reports the long name on the climbing mention wire; with the reading rule removed it
   reports labels beside other edges on five of its pages; after the fix, nothing. The
-  LLM-callable tools are the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_secrets`, `dispatch_connections`, `dispatch_allocations`, `dispatch_capacity`, `dispatch_failed`, `dispatch_waiting`, `dispatch_hosts`, `dispatch_setup`; and the **writes** `dispatch_pause`, `dispatch_resume`, `dispatch_run`, `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`, `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`, `dispatch_envelope_set`, `dispatch_priorities_set`, `dispatch_cancel`, `dispatch_retry_failed`, `dispatch_remove_failed`, `dispatch_rerun`, `dispatch_allocation_revert`.
+  LLM-callable tools are the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_secrets`, `dispatch_connections`, `dispatch_allocations`, `dispatch_capacity`, `dispatch_failed`, `dispatch_waiting`, `dispatch_hosts`, `dispatch_setup`, `dispatch_models`; and the **writes** `dispatch_pause`, `dispatch_resume`, `dispatch_run`, `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`, `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`, `dispatch_envelope_set`, `dispatch_priorities_set`, `dispatch_cancel`, `dispatch_retry_failed`, `dispatch_remove_failed`, `dispatch_rerun`, `dispatch_allocation_revert`.
   **This list is the pin**, compared both ways with registrations in `admin/test/wiring.test.mjs`.
   The shared `ACTIONS` table declares unattended, confirm or person for every action, with a reason and tool
   mapping. `action-policy.mjs` judges the normalized transition; HTTP and pi adapters use the same judgment.
@@ -11940,6 +11942,8 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **Models (#773)**: `/models` is an on-demand Pulse page, first in More before Audit; the current More state includes Models for every reading role. A shared bounded Models service feeds the page and its explicit agent projection, with declared per-page reads rather than a new fleet-wide polling cost. The ModelsScreen generator is corrected to the actual triggers-file/free-role/capped-Radius/failover/canary contracts before its published-source reference is compared. The page keeps the four named cards and leading diagnostics, truthful partial/unknown states, effective per-trigger fallback explanations and shared Run sentences. Role editing reuses the existing person-only ticket/audit/file-write funnel. Native disclosures prefill adoption without side effects. Reference and implementation comparisons verify loaded shared styles/tokens and native fonts; the remote artifact being inaccessible is disclosed rather than represented as direct comparison.
+
 - **Answer-label wrapping (#772)**: Run identifiers, source names and standing-answer titles within their accepted limits remain complete and wrap inside their cards at phone, intermediate and desktop widths, in both themes and every applicable role. A wrapped run link preserves its exact destination and keyboard activation, including the private draft's origin on the destination run page. The card uses a bounded grid track and overrides the shared code label's `nowrap`; clipping, ellipsis and hiding text are not substitutes. Real-CSP browser checks measure every rendered text line and follow the run link to the matching retained draft. Role/privacy boundaries, API/session contracts, source provenance, confirmation tickets and paid admission are UNCHANGED, checked.
 
 - **Sandbox paths (#771)**: Operators may see explicitly configured deployment and executable paths in Fleet sandbox mapping editors/exports and constructed terminal command boxes. This exception exists so the person can inspect exactly what Enter will run. It does not admit paths to viewer output, unrelated page regions, telemetry or audit rows.
@@ -13324,7 +13328,7 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     the read-only chip on a read-only console, whose bar carries `top--ro`; who is signed in, the longer of name and role
     cut first with an ellipsis where the bar is short of room, the block's `title` holding both ("ops, Operator"); Sign out.
     Then the title bar (the `h1`, and on the
-    run page a back link to Runs) and the page. Watch and Models stay out of the navigation until their issues build
+    run page a back link to Runs) and the page. Watch stays out of the main navigation; Models is available in More under #773. Other planned screens stay out until their issues build
     them. Every id and class the script relies on is kept (`#logout`, `#live-status`, `[data-theme-toggle]`,
     `details.more`, `#main`). The sign-in pages get the skip link, the sprite and a top bar holding only the brand pill
     and the theme button (nobody is signed in, so there is no navigation, live pill, name or Sign out), then the page
@@ -15528,6 +15532,8 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
 
 ## DES-DOCTOR-RESULTS-PUBLISHED
 
+- **Proposal detail exception (#773)**: explicitly typed model proposal checks may publish their bounded redacted labels even when successful, with allowlisted machine facts for Models and `dispatch_models`. This exception does not retain generic successful labels or trust a text prefix as authority. Existing detailed/check bounds, redaction, TTL, observation age and display-only behavior apply; old records lacking proposal evidence never establish that no proposals exist.
+
 - **Status**: issue #712, PR C (2026-10-21). New. The key's contract is `INT-DOCTOR-RESULTS-KEY`.
 - **Decision**: every `pi-dispatch doctor` run publishes what it judged to Valkey, one record per host
   (`doctor:h:<host>`, kept 7 days from the last publish), and the worker runs `pi-dispatch doctor --publish` itself, as
@@ -15535,10 +15541,10 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   168). The console's Fleet page draws a Doctor panel from the records, the console's "does not load" sentences quote
   the matching check, and the `/dispatch` panel's HOSTS view gives each host its doctor lines.
   - **What is published**: each check's stable `id` and its level (ok, warn, fail), counts over every check, and for a
-    warn or a fail only its label and fix, REDACTED: an absolute or home path becomes `<path>`, a URL keeps its scheme
+    warn or a fail (and an explicitly typed model proposal under #773) its label and fix, REDACTED: an absolute or home path becomes `<path>`, a URL keeps its scheme
     and host, every value of a secret-named variable doctor saw (this shell's and the deployment `.env`'s) and every
     known token shape becomes `[redacted]`, control characters become spaces, and each string is capped at 300
-    characters. An ok check publishes its id and level only.
+    characters. A generic ok check publishes its id and level only; validated model proposals additionally retain the bounded typed facts and redacted label.
   - **Ids**: a check doctor's console sentences match on carries a NAMED id at its site (`triggers.file`,
     `settings.overlay`, `<boot file>.file` and `.file-shell`, `NAMED_CHECK_IDS`); every other check is
     `<section>.<n>`, its place in one of 33 pinned sections on that run (`DOCTOR_SECTIONS`, marked in `collectChecks`).
@@ -16062,6 +16068,8 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
 
 ## DES-MODEL-ROLES
 
+- **Reviewed console map (#773)**: the Models page is an additional person's editor for the same `triggers.json.modelRoles`, not a second policy store. It validates known models and effective policy over every affected context before preview/confirm, preserves unrelated document fields through `writeTriggers({mutateDocument, expect})`, and restores exact prior role entries through a freshly checked inverse. Scope/role identity is fixed for an existing row. Default fallback after override removal is legitimate; dangling references and expanded-list overflow are not. Agent definitions are not fetched to populate usage. No read, adoption-prefill or edit enqueues work; recovery keeps its checkpoint model.
+
 - **Decision (#717)**: `triggers.json.modelRoles` is reviewed operator policy, keyed by `default` and optional project id. Each role maps to `provider/model` or `{model, fallbackModels}`. Project entries override default entries by role. Roles are lowercase identifiers of at most 32 characters; `inherit` is reserved for parent inheritance. There are at most 16 roles per row, 128 rows, 32 merged role aliases and 16 distinct effective model references. Unknown fields in a role object, malformed references and ambiguous case duplicates refuse. No model-callable tool writes this map.
 - **Pickup**: the worker reads a validated live snapshot, retaining and naming last-good policy on a broken save. It resolves `run.model: "role:<name>"` before failover, endpoint leasing and the processor's credential/model/spend gates. Explicit `run.provider` must agree. Mapped physical models and role fallbacks join the reviewed allowed ceiling; an existing list's unmapped main model is never implicitly added. Overflow refuses free. Role and trigger fallbacks cannot both be specified. Existing #716 failover then narrows execution to its selected singleton, including children; mappings never widen that singleton. Literal jobs without mappings retain existing behavior.
 - **Runner**: the same immutable map and executable list reach read-only job inputs, with a trusted agent snapshot. The first-party `subagent` tool resolves role names, `role:` names, literal listed references, omitted models and `inherit` before child spawn. It uses existing child metering, token and dollar guards. Single tasks, bounded parallel batches and chains preflight models before starting children. Invalid agent requests return local tool refusals; they do not stop an otherwise valid parent. Arbitrary tools and extension calls remain under the existing whole-job model guard.
@@ -16091,6 +16099,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#773) | DES-OPERATOR-CONSOLE, DES-MODEL-ROLES, DES-DOCTOR-RESULTS-PUBLISHED and DES-ADMIN-VIA-PI-EXTENSION AMENDED for bounded shared Models reads, actual source-card semantics, selective proposal publication and existing confirmed file writes. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |
 | 2026-10-29 (#735, #743) | NEW `DES-WATCH-DETERMINISTIC-PRODUCER` and `DES-DECISION-MODEL-BEFORE-THE-JOB`. `DES-OPERATOR-CONSOLE` AMENDED by reference for Watch/board pages and operator-only evidence; `DES-JOB-OUTBOX-CHAINING` UNCHANGED, checked: watch refuses child chains. Existing containers, metering, CSP and console audited writes are reused, and board adoption follows the repository design rather than automatic promotion. |
 | 2026-10-29 (#717) | NEW `DES-MODEL-ROLES`: reviewed maps resolve before admission; base-blob agent snapshots, child preflight and bounded refusal hashes preserve existing boundaries. `DES-MODEL-FAILOVER`, `DES-RECOVERY-TRUST-PATHS-FROM-BASE` and `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` UNCHANGED, checked: failover keeps its singleton, recovery keeps its physical model and proposals never adopt changes. |
 | 2026-10-28 | Issue #693: add `DES-CODEMODE-WORKERS`, memory-derived per-process concurrency with heap/RSS distinction; amend `DES-DOLLAR-RESERVE-AND-SETTLE` with full-limit summary acceptance and named Radius refusal; amend `DES-PER-TRIGGER-TOOL-EXCLUSIONS` with transcript loadouts on resume. `DES-HOST-BUDGET` admission and exact-size policy UNCHANGED, checked. Evidence: pinned npm 1.4.0 code, loader and usage-meter integration tests, codemode artifact tests, job-size/env/container/doctor tests. |

@@ -1990,7 +1990,9 @@ test("the run summary shows selected model and closed provider failure facts (#7
   const record = { jobId: "gh-model", kind: "github", target: "a/b#1", outcome: "failed", reason: "error", provider: "openai", model: "fallback", modelWhy: "fallback-cooldown", providerFailure: { kind: "quota-exhausted", resetAt: NOW + 60_000, message: "PRIVATE-ERROR-TEXT" } };
   const view = { role: "viewer", now: NOW, data: { run: { record } }, env: {} };
   const out = String(runSummary(view));
-  for (const fact of ["openai / fallback", "Model choice", "fallback-cooldown", "Provider failure", "quota-exhausted", "Provider reset"]) assert.ok(out.includes(fact), fact);
+  for (const fact of ["openai / fallback", "Model choice", "This run used fallback openai/fallback because the primary model was cooling down.", "Provider failure", "quota was exhausted.", "Provider reset"]) assert.ok(out.includes(fact), fact);
+  assert.equal(out.includes(">fallback-cooldown<"), false);
+  assert.equal(out.includes(">quota-exhausted<"), false);
   assert.equal(out.includes("PRIVATE-ERROR-TEXT"), false);
   record.modelWhy = "PRIVATE-ERROR-TEXT";
   record.providerFailure = { kind: "PRIVATE-ERROR-TEXT" };

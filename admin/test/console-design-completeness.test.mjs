@@ -21,7 +21,6 @@ const OUTSIDE_LEDGERS = Object.freeze({
   ForkRun: "Built separately by #648; managed forks belong to the run page.",
   WatchScreen: "Built separately by #735; its existing /watch route stays separate.",
   WatchBoard: "Built separately by #743; its existing /watch/board route stays separate.",
-  ModelsScreen: "Planned by #773; worker model support shipped in #716/#717/#693, outside #751.",
   DispatchersScreen: "Proposed by #776; grew from #735, outside #751.",
   DispatcherScreen: "Proposed by #776; grew from #735, outside #751.",
 });
@@ -37,6 +36,7 @@ function assertDispositionOwner(card, disposition, preview) {
 const COMPONENTS = new URL("../../design/system/components/", import.meta.url);
 const LEDGERS = new URL("./fixtures/console-ledger/", import.meta.url);
 const CARDS = Object.freeze({
+  ModelsScreen: { page: "models", path: "/models" },
   SandboxesScreen: { page: "sandboxes", path: "/runs/sandboxes", auth: "operator" },
   ZeroTouchScreen: { page: "zero-touch", path: "/runs/zero-touch" },
   ZeroTouchViewer: { page: "zero-touch", path: "/runs/zero-touch" },
@@ -61,7 +61,7 @@ test("every published design card has a checked ledger or an explicit issue/fami
 });
 
 test("a future-card owner cannot drift to a prerequisite or disappear while the card inventory stays the same", () => {
-  for (const [card, prerequisite] of [["ModelsScreen", "#716"], ["DispatcherScreen", "#735"]]) {
+  for (const [card, prerequisite] of [["DispatcherScreen", "#735"]]) {
     const preview = readFileSync(new URL(`${card}/preview.html`, COMPONENTS), "utf8");
     assertDispositionOwner(card, OUTSIDE_LEDGERS[card], preview);
     assert.ok(OUTSIDE_LEDGERS[card].includes(prerequisite), "the prerequisite is a real counterexample to a substring check");

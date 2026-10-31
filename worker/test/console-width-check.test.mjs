@@ -565,7 +565,7 @@ test("More: opened by a click, shown whole, inside the viewport, off its own but
 	const summary = part("More: Audit", box(700, 748, 116, 156), [], { tag: "summary" });
 	const open = (menu, extra = {}) => moreVerdict({ opened: true, summary, menu, width: 800, height: 900, ...extra });
 	const under = box(568, 748, 162, 214);
-	assert.deepEqual(moreVerdict(null), { ok: true, problems: [] }, "a viewer has no More");
+	assert.deepEqual(moreVerdict(null), { ok: true, problems: [] }, "a page without navigation has no More");
 	assert.deepEqual(open(part("Audit", under)), { ok: true, problems: [] }, "right edges aligned, 6 px below its button, inside the window");
 	assert.deepEqual(open(part("Audit", under), { opened: false }), { ok: false, problems: ["a click on More did not open its menu"] }, "a shut menu has nothing else to judge");
 	assert.deepEqual(open(null, { opened: false }).problems, ["a click on More did not open its menu"], "and its list, not drawn, is not also told as showing nothing");
@@ -1530,7 +1530,10 @@ test("the glue: every golden (the sign-in pages' and the panel goldens among the
 	assert.match(run.html, /Read-only console/);
 	assert.match(run.html, new RegExp(`<b\\b[^>]*>m{32}</b>`), "the top bar names the longest name");
 	assert.match(handed.shellDocs.find((d) => d.id === "shell.operator.overview").html, new RegExp(`id="p-nav-parked" data-panel><span class="count[^<]*(?:<span[^>]*>)?${PARKED_SHOWN}<`), "the Parked pill carries its count");
-	assert.doesNotMatch(handed.shellDocs.find((d) => d.id === "shell.viewer.overview").html, /details class="more"/, "a viewer has no More");
+	const viewerShell = handed.shellDocs.find((d) => d.id === "shell.viewer.overview").html;
+	assert.match(viewerShell, /details class="more"/, "a viewer's More holds Models");
+	assert.match(viewerShell, /href="\/models"/, "Models is a viewer read");
+	assert.doesNotMatch(viewerShell, /href="\/audit"/, "Audit stays operator-only");
 	assert.deepEqual(handed.liveStates.map((s) => s.word), ["Not live", "Live", "Reconnecting", "Signed out"], "each distinct live word, once");
 	assert.equal(handed.heads.dark.schemeMeta, '<meta name="color-scheme" content="dark">');
 	assert.equal(handed.chrome, "/opt/chrome");

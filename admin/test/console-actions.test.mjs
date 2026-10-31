@@ -31,6 +31,7 @@ import * as WP from "../src/write-plans.mjs";
 import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
+import { createModelRoleActions, MODEL_ROLE_EDIT_FIELDS } from "../src/model-role-plans.mjs";
 
 // The console's action table over HTTP (issue #642, REQ-OPERATOR-CONSOLE-ACTIONS): every action through its GENERATED
 // route, preview then confirm, against the read model's real funnels and the tools' real planners. File actions run on
@@ -315,6 +316,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "cancel-active": "cancel-active",
     "run-enqueue": "run-enqueue",
     "standing-answer-add": "standing-answer-add", "answer-draft-drop": "answer-draft-drop",
+    "model-role-edit": "model-role-edit",
     "cancel-held": "cancel-held",
     "cancel-all-held": "held-cancel-all",
     "cancel-queued": "cancel-queued",
@@ -368,6 +370,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
   const pause = ["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"];
   const FIELDS = {
     "run-enqueue": ["folder", "flow", "task"], "standing-answer-add": ["title", "text", "projects", "repo", "runId"], "answer-draft-drop": ["runId", "draftRunId", "digest"],
+    "model-role-edit": [...MODEL_ROLE_EDIT_FIELDS],
     "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
@@ -385,7 +388,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "zero-touch-group": ["runId"], "zero-touch-name": ["groupId", "name"], "zero-touch-instruction": ["runId", "groupId", "index", "sentence"], "zero-touch-undo": ["fixId"],
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
-  assert.equal(ACTIONS.length, 56);
+  assert.equal(ACTIONS.length, 57);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -442,6 +445,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   const windows = { scope: "*", from: "01:00", to: "02:00", tz: "UTC" };
   // [action, out, undo, inverse (or null), label, done, done's result for a bulk act]
   const rows = [
+    ["model-role-edit", { plan: { scope: "default", role: "editor", inverseBody: { scope: "default", role: "editor", entry: "openai/old", expectedEntry: "openai/new" } }, payload: { body: { scope: "default", role: "editor" } } }, twice("Restore the previous mapping for default/editor; another role edit is refused if this mapping has changed"), { action: "model-role-edit", body: { scope: "default", role: "editor", entry: "openai/old", expectedEntry: "openai/new" } }, "Save role mapping", "Changed model role default/editor; no run was started"],
     ["run-enqueue", { reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Start run for up to $2.00", "Queued the local run"],
     ["standing-answer-add", {}, twice("Remove the standing answer by hand from triggers.json after reviewing any draft that cited it."), null, "Adopt standing answer", "Adopted the standing answer"],
     ["answer-draft-drop", {}, twice("Write your own answer on the run page. Dropping a draft never changes the parked question."), null, "Drop draft", "Dropped the draft; the question still waits for you"],
@@ -581,7 +585,7 @@ test("every action's fields are exactly the body keys its preview reads, through
   for (const a of ACTIONS) {
     const reads = new Set();
     const body = new Proxy({}, { get: (_t, k) => (typeof k === "string" ? (reads.add(k), SAMPLE_BODY[k] ?? "x") : undefined) });
-    const ctx = { deps: anything(), a: anything(), session: { id: "s", name: "alice" }, now: () => T0, fs: anything(), config: anything(), log: () => {} };
+    const ctx = { deps: anything(), a: anything(), session: { id: "s", name: "alice", role: "operator" }, now: () => T0, fs: anything(), config: anything(), log: () => {} };
     try {
       await a.preview(body, ctx);
     } catch {
@@ -3230,6 +3234,47 @@ test("the local start and person-owned answer actions use the same HTTP ticket f
     assert.equal((await c.act(name, body, agent)).status, 403);
   }
   assert.deepEqual([adopted, dropped], [1, 1]);
+});
+
+test("a role edit uses the actual ticket/audit/CAS pipeline, exact Undo and person-only HTTP authority", async () => {
+  const { paths } = deployment();
+  const original = { modelRoles: { default: { editor: { model: "anthropic/claude-sonnet-5-5" } } }, triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "triage", model: "role:editor" } }] };
+  writeFileSync(paths.triggersPath, `${JSON.stringify(original, null, 2)}\n`);
+  let previews = 0;
+  const real = createModelRoleActions({ paths, env: {}, now: () => T0 });
+  const modelRoles = { preview: (...args) => { previews++; return real.preview(...args); }, apply: (...args) => real.apply(...args) };
+  const c = await start({ paths, a: { modelRoles } });
+  const params = { scope: "default", role: "editor", model: "openai/gpt-5.5" };
+  for (const token of [VIEW_TOKEN, AGENT_TOKEN]) {
+    const before = previews;
+    assert.equal((await c.act("model-role-edit", params, await c.cookieFor(token))).status, 403);
+    assert.equal(previews, before, "authority is refused before a private planner read");
+  }
+  const p = await c.act("model-role-edit", params);
+  assert.equal(p.status, 200, p.text);
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)), original);
+  assert.match(p.json().html, /Person only/);
+  assert.match(p.json().summary.join(" "), /Trigger row 1.*next delivery.*Nothing runs now.*Recovery keeps/);
+  c.audit.failNext = 1;
+  assert.equal((await c.confirm("model-role-edit", p.json().ticket)).status, 500);
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)), original);
+  const changed = await c.both("model-role-edit", params);
+  assert.equal(changed.confirm.status, 200, changed.confirm.text);
+  assert.equal(lastWrite(c).kind, "model-role-edit");
+  assert.equal((await c.confirm("model-role-edit", changed.preview.ticket)).status, 409);
+  assert.equal(JSON.parse(read(paths.triggersPath)).modelRoles.default.editor, params.model);
+  const inverse = changed.confirm.json().change.inverse;
+  const restored = await c.both(inverse.action, inverse.body);
+  assert.equal(restored.confirm.status, 200, restored.confirm.text);
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)), original);
+  const stale = await c.act("model-role-edit", params);
+  writeFileSync(paths.settingsFile, '{"maxTurns":29}');
+  assert.equal((await c.confirm("model-role-edit", stale.json().ticket)).status, 409);
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)), original);
+  const readOnly = await start({ paths, readOnly: true, a: { modelRoles } });
+  const before = previews;
+  assert.equal((await readOnly.act("model-role-edit", params)).status, 403);
+  assert.equal(previews, before);
 });
 
 test("every action's preview was held to the copy rules: no arrow, no empty item", live, () => {

@@ -50,6 +50,9 @@ an unattended pause never grants permission to resume a person's pause.
   not permission to execute a person-only step.
 - `dispatch_triggers`: indices, configured execution facts, cron stalls and one-shot disarmed state. Indices are
   zero-based inputs even where the console labels the same entry as row one.
+- `dispatch_models`: roles by scope, effective fallbacks, price eligibility, cooldowns, model windows, typed proposals
+  and retained canary comparisons. Missing evidence is unknown. A role edit or adoption belongs to a person on the
+  Models page; no model tool can change the map or launch a canary.
 - `dispatch_pauses`: pause windows and their indices.
 - `dispatch_limits`: scoped limits, indices and observed use.
 - `dispatch_waits`: held jobs and safe machine facts, distinct from delayed cron occurrences. Held work has not reserved

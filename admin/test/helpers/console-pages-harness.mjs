@@ -55,6 +55,7 @@ const run = promisify(execFile);
 
 /** The screens and the query each is rendered with. */
 export const SHOTS = Object.freeze([
+  ["models", "models", ""],
   ["overview", "overview", ""],
   // Issue #737: the timeline by host over its widest window, the overview's other grouping, through its query.
   ["overview-host", "overview", "rows=host&zoom=24h"],
@@ -439,6 +440,7 @@ async function renderInChild() {
         coverage: { complete: false },
       }),
       // The fixture serves GitHub webhooks. Presence is metadata, never a credential in rendered output.
+      modelsView: async (snapshot) => { const { readModelsView } = await import("../../src/models-view.mjs"); return readModelsView({ paths: fleetPaths, env, now: NOW, snapshot, fleet: reader }); },
       triggerEditor: () => RM.readTriggerEditor({ paths: fleetPaths, env: { ...env, WEBHOOK_SECRET: "fixture-webhook-configured" } }),
       // The transport endpoint comes from the test environment, not the fixture deployment. Keep its display
       // deterministic across local/CI ports; read-model tests separately assert the real urlShown projection.

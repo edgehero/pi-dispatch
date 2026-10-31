@@ -1,3 +1,4 @@
+import { MODELS_DRAW } from "./models-goldens.mjs";
 import { ANSWERER_DRAW, AGENT_OVERVIEW_DRAW } from "./answerer-goldens.mjs";
 import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
 import { ZERO_TOUCH_DRAW } from "./zero-touch-goldens.mjs";
@@ -800,6 +801,7 @@ const DRAW = {
   ...ANSWERER_DRAW,
   ...AGENT_OVERVIEW_DRAW,
   ...SANDBOX_DRAW,
+  ...MODELS_DRAW,
   ...ZERO_TOUCH_DRAW,
   ...CONFIGURATION_DRAW,
   ...TRIGGER_LIST_DRAW,

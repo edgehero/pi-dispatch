@@ -11172,6 +11172,8 @@ pull request when its container starts, edited as the run goes and a last time w
 
 ## INT-DOCTOR-RESULTS-KEY
 
+- **Model proposal exception (#773)**: a check explicitly identified as a model proposal may retain a redacted bounded label at level `ok` as well as warn/fail. Its optional typed proposal data is rebuilt from an allowlist of kind, scope/role and validated current/candidate model references. The builder and reader both validate this data; an arbitrary label prefix or unknown extra field grants no publication authority. Generic `ok` checks still carry no label. Existing version-1 records remain readable; absence of typed proposal evidence is not a claim that the host has no proposals. Count, detailed-text and redaction bounds remain authoritative.
+
 **`pi-dispatch doctor` → Valkey → the read model (the console's Fleet page and its configuration sentences, the
 `/dispatch` panel's HOSTS view).** One Valkey string per host holding that host's last doctor run, as one JSON record
 (issue #712, `DES-DOCTOR-RESULTS-PUBLISHED`). Doctor is its only writer (`publishResults` in `worker/src/doctor.mjs`,
@@ -11197,7 +11199,10 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
     "workerRun"?: { "uid": <int> | null, "at": <ms> },  // a run by hand under ANOTHER uid over the worker's: that run's uid and time
     "counts": { "ok": <int>, "warn": <int>, "fail": <int> },   // over EVERY check, listed or not
     "checks": [ { "id": "<id>", "level": "ok" | "warn" | "fail",
-                  "label"?: "<redacted>", "fix"?: "<redacted>" } ],  // label and fix on warn and fail only
+                  "label"?: "<redacted>", "fix"?: "<redacted>",
+                  "proposal"?: { "kind": "<closed kind>", "scope"?: "<scope>", "role"?: "<role>",
+                                 "model"?: "<provider/model>", "candidate"?: "<provider/model>",
+                                 "provider"?: "<provider>" } } ], // label/fix on warn/fail and typed proposals
     "more": <int> }                         // checks past DOCTOR_CHECKS_MAX, counted and not listed
   ```
 - **Ids** (`CHECK_ID_RE`, `<section>.<name>`): a NAMED id where the check carries one (`NAMED_CHECK_IDS`:
@@ -11236,7 +11241,7 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   word that holds a separator; whitespace is folded; each is cut to `DOCTOR_LABEL_MAX` (300) characters LAST, so a cut
   never leaves the prefix of something a rule would take. **What is guaranteed is these rules, not "no value"**: a
   secret under a name that does not look like one, with no known shape, written outside a URL, is not recognised, and
-  the last word of an unquoted path with a space and no separator after it (`/a/My Projects`) is kept. An ok check carries no label. At most `DOCTOR_CHECKS_MAX` (400)
+  the last word of an unquoted path with a space and no separator after it (`/a/My Projects`) is kept. An ok check carries no label unless it carries validated model proposal metadata (#773). At most `DOCTOR_CHECKS_MAX` (400)
   entries, of which at most `DOCTOR_DETAILED_MAX` (80) carry words.
 - **When it is written**: at the end of every `pi-dispatch doctor` run unless `--no-publish` (after `--fix`'s re-check
   and `--live`'s read-backs, before the closing line), every `pi-dispatch up`, and every run the worker starts (a minute
@@ -11809,6 +11814,7 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#773) | INT-DOCTOR-RESULTS-KEY AMENDED with the explicitly typed/redacted proposal-detail exception, preserving unrelated successful-check privacy. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |
 | 2026-10-29 (#735, #743) | NEW `INT-WATCH-EVENT-CONTRACT`, `INT-WATCH-FINDINGS-FILE`, `INT-WATCH-TRACE-STREAM` and `INT-WATCH-BOARD-FILE`; `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-OUTBOX-CONTRACT`, `INT-CONSOLE-AUDIT-LOG` and optional public decision summary AMENDED by reference. Ordinary forge envelopes, credential custody, runtime exit signing, session resumption UNCHANGED, checked. Limits are owned by code constants and covered by contract tests, not trusted copies.  The run-record reason enum includes the watch catalog, pinned in both directions. Watch workspaces use existing paths with read-only workspace permissions; ordinary jobs keep their mount permissions. |
 | 2026-10-29 (#717) | AMENDED `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-OUTBOX-CONTRACT`: reviewed role maps, immutable base-agent inputs, capability refusal and bounded authenticated telemetry; `INT-SANDBOX-CONTRACT` gains optional base provenance and `INT-DEFER-REASON-KEY` gains exclusive canary admission. `INT-PRIORITIES-PLAN-CONTRACT` UNCHANGED, checked: weights never name models. |
 | 2026-10-28 | Issue #693: `INT-MODEL-ENDPOINTS-FILE-CONTRACT` gains pi 1.4.0 imageInput enum and sendImageOptInHeader boolean, with differential coverage and four reverified hashes. `INT-CONTAINER-RUNTIME-CONTRACT` gains always worker-owned `PI_CODEMODE_MAX_WORKERS`, computed from resolved memory. `INT-RUNNER-EXIT-CODE-PROTOCOL`, `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-CONTAINER-JOB-INPUTS` UNCHANGED, checked: Radius uses existing cost-cap/unboundable; summary refusals use existing policy exits; no mount or record shape changes. |
