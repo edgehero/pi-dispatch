@@ -229,7 +229,9 @@ One command puts a live terminal view over the whole deployment:
   cannot grant this authority. Answers, draft decisions, standing-answer adoption and forge reruns remain
   person actions. Tool writes are audited as agents; human-confirmed intervention is tracked separately.
 - **Paid starts stay bounded.** `dispatch_run`, Fire now and local or cron reruns need explicit valid
-  `PI_DISPATCH_RUN_ROOTS` and `PI_DISPATCH_RUN_PER_HOUR` values in the pi process environment. They check the
+  `PI_DISPATCH_RUN_ROOTS` in the pi process environment. Fire now and reruns also require an explicit valid
+  `PI_DISPATCH_RUN_PER_HOUR`. `dispatch_run` keeps its default of three starts per hour when that value is
+  absent or invalid; a valid zero disables it. They check the
   current committed flow's `ai-trigger: allow`, a clean tree and the shared hourly allowance again before
   enqueue. They accept no spend settings, cannot run commands or portfolio flows, and still pass the
   worker's budget gates. A paid run edits its folder in place. Read
@@ -309,8 +311,10 @@ when that file is yours and nobody else can write it. A key your env sets differ
 warning, never with its value. The switches that grant a capability (`PI_BACKENDS`, `PI_EGRESS`,
 `DOCKER_HOST`, `PI_DISPATCH_RUN_ROOTS`) are never read from a file.
 
-Paid model starts do nothing until both `PI_DISPATCH_RUN_ROOTS` and `PI_DISPATCH_RUN_PER_HOUR` are set
-explicitly and valid in the actual pi process environment. Headless mutation additionally requires
+Paid model starts need explicit valid `PI_DISPATCH_RUN_ROOTS` in the actual pi process environment.
+Fire now and local or cron reruns also require explicit valid `PI_DISPATCH_RUN_PER_HOUR`; `dispatch_run`
+defaults to three starts per hour when that value is absent or invalid, and zero disables it.
+Headless mutation additionally requires
 `PI_DISPATCH_AGENT_WRITES=1`. None is loaded from the deployment pointer or its `.env`. A reviewed external
 skill may use private owner context to propose a permitted operation, but it cannot grant authority or
 send an answer. Upgrade the host runtime and console together before using an agent token.

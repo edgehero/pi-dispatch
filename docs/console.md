@@ -2008,13 +2008,15 @@ kind filters and native disclosures still work.
 ### Fire a cron trigger now
 
 Fire now previews the reserve for a cron trigger with a scheduler in this deployment's queue. The tool
-`dispatch_trigger_fire` takes its zero-based `index` from `dispatch_triggers` and requires a person's confirm.
+`dispatch_trigger_fire` takes its zero-based `index` from `dispatch_triggers`. Interactive calls require a
+person's confirm. A headless call may fire unattended with the process's `PI_DISPATCH_AGENT_WRITES=1` grant
+and explicit valid roots and hourly grants.
 Both paths refuse commands and portfolio triggers, require a clean repository under `PI_DISPATCH_RUN_ROOTS`,
 and require the flow's committed `SKILL.md` at current HEAD to set `ai-trigger: allow`. Grants come only
 from the console or pi process environment, never the deployment pointer or settings overlay.
 
 `PI_DISPATCH_RUN_PER_HOUR` bounds attempts with the same counter as `dispatch_run`. Preview does not
-consume an attempt. Confirm rechecks the trigger file, scheduler and admission gates, then counts the attempt.
+consume an attempt. Execution rechecks the trigger file, scheduler and admission gates, then counts the attempt.
 A second fire in the same minute is refused; it may still count as an attempt. A successful fire keeps the
 trigger's full model, image, secret and run configuration. Worker budget gates still run before spending.
 The result links the new job and offers cancellation while it has not started.

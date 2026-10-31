@@ -835,8 +835,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   cap guesses, limit scope/size/minimum changes, flags on and trigger flow changes remain confirmed.
   Retry is confirmed, including bulk retry with a reserve per job. Removal and cancellation are unattended;
   local/cron reruns require fresh paid admission, while forge reruns remain person actions. Paid starts require
-  explicitly valid process roots and hourly grants, a clean tree and current committed flow opt-in, with the
-  shared hourly gate checked again before enqueue. No tool takes a spend-knob argument for a new run.
+  explicitly valid process roots, a clean tree and current committed flow opt-in. Fire now and local/cron reruns
+  also require an explicitly valid process hourly grant; `dispatch_run` retains its existing default of three
+  starts per hour when that value is absent or invalid, with zero disabling the tool. The shared hourly gate
+  is checked again before enqueue. No tool takes a spend-knob argument for a new run.
   Tool audit actors are `agent` with a server-derived login even when a person confirms. Commands and panel
   keys remain `panel`. Every mutation requires its intent row first, a failure compensates that ticket, and
   an agent success appends a correlated `write-applied` receipt. Receipt failure reports incomplete tracking
@@ -8108,3 +8110,4 @@ instead of drifting.
 | 2026-10-31 (#771, Linux browser startup) | REQ-UPSTREAM-CONTRACT-TESTS verification shares the existing console browser launch policy between the width and interaction checks after an exact-pin Linux reproduction confirmed the missing CI startup argument. Both checks retain their assertions; the interaction check also verifies the actual production CSP header and that an untrusted inline script is blocked. Application CSP, local browser sandboxing, job-container isolation, required contexts, deadlines and every functional/interface contract UNCHANGED, checked. |
 | 2026-10-31 (#771, initial live snapshot) | REQ-SANDBOX-FROM-THE-CONSOLE acceptance now explicitly prevents an older event-stream snapshot from erasing freshly rendered cleanup warnings or incomplete shell counts. Initial Sandboxes subscriptions await a fresh bounded read and retain their rendered panels on failure. Cursor reconnects, other pages, stream admission/authentication, paid work, container isolation and every other requirement UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS` acceptance, `REQ-STEER-RUNNING-JOB`, `REQ-JOB-STATUS-COMMENTS` and `REQ-PARKED-ANSWERER` AMENDED/implemented: bounded agent role/actions, shared tools, safe reads, shell flags and person-sent cited drafts. `REQ-APPROVAL-GATES`, isolation, budget-before-spend, receiver author gating, ordinary session/resume and unrelated requirements UNCHANGED, checked. |
+| 2026-10-31 (#766, paid-start documentation) | `REQ-ADMIN-VIA-PI-EXTENSION` CORRECTED: the explicit hourly grant belongs to Fire now and local/cron reruns. `dispatch_run` preserves its existing default of three starts per hour when the process value is absent or invalid; zero disables it. The admin README and console tool documentation now distinguish that default and interactive confirmation from granted headless Fire. Runtime admission, process-owned roots, write grants, the shared hourly counter, budget-before-spend and every other contract UNCHANGED, checked. |
