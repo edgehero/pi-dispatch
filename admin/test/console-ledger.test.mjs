@@ -47,7 +47,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
-  ModelsScreen: 773,
+  ModelsScreen: 780,
   ParkedAnswerer: 779, ParkedDraftViewer: 779, ParkedDraftPhone: 779,
   SandboxesScreen: 771,
   ZeroTouchScreen: 777, ZeroTouchViewer: 777, ZeroTouchPhone: 777,

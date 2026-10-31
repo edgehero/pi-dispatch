@@ -44,7 +44,7 @@ STATUS = {
     **{n: (BUILT, "Built by #751, Secrets, Connections and project detail.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
     "ApprovalRequest": (BUILT, "Built by #649: budget raises are worker-enforced; external gates are advisory. Model text stays in the transcript."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),
-    "ModelsScreen": (BUILT, "#773. Scoped roles, fallbacks, cooldowns and retained canaries."),
+    "ModelsScreen": (BUILT, "#780. Scoped roles, fallbacks, cooldowns and retained canaries (#773)."),
     "WatchScreen": (BUILT, "Built by #735: compact retained source, rule and finding view."), "WatchBoard": (BUILT, "Built by #743: retained trace, classifier totals and operator-adopted inert board; live projections remain future work."),
     "DispatchersScreen": (PROPOSED, "#776, specs first; it grew out of #735."), "DispatcherScreen": (PROPOSED, "#776, specs first; it grew out of #735."),
     "SandboxesScreen": (BUILT, "Built by #771. The browser terminal remains proposed under #754."),
