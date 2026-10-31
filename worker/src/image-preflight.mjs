@@ -72,7 +72,8 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", cop
 	if (typeof brokered !== "boolean") throw new TypeError("makeImagePreflight: `brokered` must be a boolean");
 	// Issue #354: `bin` is the venue's CLI. Both probes go through it, because a `podman image inspect` answered by one
 	// store and an `info` answered by another daemon would tell "absent" from "unavailable" about two different hosts.
-	return async function imagePreflight(job) {
+	return async function imagePreflight(job, { subscriptionAuthRequired = false } = {}) {
+		if (typeof subscriptionAuthRequired !== "boolean") throw new TypeError("imagePreflight: subscriptionAuthRequired must be a boolean");
 		const wanted = resolveJobImage(job, image);
 		// --format keeps docker from serialising the whole image manifest to a pipe we ignore.
 		//
@@ -112,7 +113,7 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", cop
 			// the job actually carries the feature it guards. The gates, their order and why each exists are
 			// the CAPABILITY_GATES table; the first one this job needs and the image lacks refuses.
 			for (const gate of CAPABILITY_GATES) {
-				if (gate.needed(job, { copies, brokered }) && !(capabilities ?? []).includes(gate.token)) {
+				if (gate.needed(job, { copies, brokered, subscriptionAuthRequired }) && !(capabilities ?? []).includes(gate.token)) {
 					return { [gate.result]: wanted, declared: capabilities ?? [] };
 				}
 			}
@@ -321,6 +322,8 @@ export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image bu
 	Object.freeze({ token: "watch", needed: (job) => Boolean(job?.watch), result: "watchUnsupported", reason: "job-image-watch-unsupported", event: "refused_image_watch_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare watch isolation (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot enforce read-only investigations. Rebuild the image from a version that has this feature. Not run.` }),
 	Object.freeze({ token: "questionGrouping", needed: (job) => Boolean(job?.questionGrouping), result: "questionGroupingUnsupported", reason: "job-image-question-grouping-unsupported", event: "refused_image_question_grouping_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare isolated question grouping (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot run a classifier without loading an agent. Rebuild the image from a version that has this feature. Not run.` }),
 	Object.freeze({ token: "answerDraft", needed: (job) => Boolean(job?.answerDraft), result: "answerDraftUnsupported", reason: "job-image-answer-draft-unsupported", event: "refused_image_answer_draft_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare restricted answer drafts (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot enforce source-only drafting without posting tools. Rebuild the image from a version that has this feature. Not run.` }),
+	// Only trusted host connection policy arms this gate. Queued input cannot claim or suppress authentication.
+	Object.freeze({ token: "subscriptionAuth", needed: (_job, { subscriptionAuthRequired = false } = {}) => subscriptionAuthRequired === true, result: "subscriptionAuthUnsupported", reason: "job-image-subscription-auth-unsupported", event: "refused_image_subscription_auth_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare subscription authentication (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot verify the admitted access snapshot, community adapter or final request cost. Rebuild the image from a version that has this feature. Not run.` }),
 ]);
 
 /**

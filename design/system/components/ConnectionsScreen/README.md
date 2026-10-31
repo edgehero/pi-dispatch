@@ -13,7 +13,9 @@ Where jobs come from and what they may reach: forges and their webhooks, egress 
 
 Viewers see the same page; nothing on it writes.
 
-**Panels.** `p-connection-problems`, `p-forges`, `p-egress`, `p-endpoints`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
+**Subscription authentication.** Safe connection facts show the selected exact adapter, owner host, compatibility, credential health and expiry. Only a writable operator gets host-terminal sign-in, logout, usage and explicit trial commands. No browser authentication or credential value is exposed. Viewers and agents read the same safe subscription facts. Other deployment metadata is not published in the agent view.
+
+**Panels.** `p-connection-problems`, `p-forges`, `p-egress`, `p-endpoints`, `p-subscription-auth`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
 
 **The server provides.**
 - Per forge: the triggers naming it, the auth source, whether verification secrets are set (names only), the webhook mode and path, and the polling settings.

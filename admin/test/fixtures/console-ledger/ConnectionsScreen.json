@@ -6,6 +6,7 @@
     "p-forges",
     "p-egress",
     "p-endpoints",
+    "p-subscription-auth",
     "p-notify",
     "p-mcp",
     "p-env",
@@ -178,6 +179,15 @@
       "kind": "sample",
       "status": "illustrative",
       "reason": "The published card uses illustrative data; the production fixture and behavioral counterexamples verify actual source semantics, not these sample values."
+    },
+    {
+      "el": "p-subscription-auth",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/subscription-auth.mjs#connectionsSubscriptionAuth",
+      "golden": [
+        "panels/connections-subscription.operator"
+      ]
     }
   ]
 }

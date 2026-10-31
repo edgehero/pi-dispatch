@@ -9,8 +9,8 @@ const data = (view) => view.data?.connections ?? null;
 const operator = (view) => view.role === "operator" && !view.readOnly;
 const triggerLink = (i) => html`<a href="${`/config/trigger?index=${i}`}">trigger ${i + 1}</a>`;
 const triggers = (rows) => rows.length ? html`${rows.map((i, n) => html`${n ? ", " : null}${triggerLink(i)}`)}` : "no trigger";
-const unknown = () => html`<p>${state("connection facts unavailable", "attention", "info")} Reload to try again.</p>`;
-const card = (view, title, body, sub = null) => ui.card({ title, sub, body: data(view) ? body(data(view)) : unknown() });
+const unknown = (view) => view.role === "agent" ? html`<p>${state("not published in this agent view", "idle", "info")}</p>` : html`<p>${state("connection facts unavailable", "attention", "info")} Reload to try again.</p>`;
+const card = (view, title, body, sub = null) => ui.card({ title, sub, body: data(view) ? body(data(view)) : unknown(view) });
 const hostLink = (name) => html`<a href="${`/fleet/host?name=${encodeURIComponent(name)}`}">${name}</a>`;
 const state = (word, tone = "idle", glyph = tone === "ok" ? "done" : tone === "failed" ? "failed" : tone === "attention" ? "attention" : "minus") => html`<span class="cn-state tone-${tone}">${ui.icon(glyph, { size: "sm" })}<span>${word}</span></span>`;
 const cell = (first, second = null) => html`<span class="cn-cell"><span>${first}</span>${second === null ? null : html`<small>${second}</small>`}</span>`;
@@ -63,6 +63,7 @@ export function connectionsDescription() {
 
 export function connectionsProblems(view) {
   const v = data(view);
+  if (!v && view.role === "agent") return ui.banner({ status: "idle", icon: "info", title: "Limited Connections view", body: "This agent view publishes typed subscription facts. Other deployment details are not published in this view." });
   if (!v) return ui.banner({ status: "attention", title: "Connection facts unavailable", body: "The console could not read this page's sources. Reload to try again." });
   const hit = v.problems[0];
   return html`${hit ? ui.banner({ status: "refused", title: hit.title, body: html`${hit.text} ${hit.fix}`, actions: hit.host || hit.run ? html`${hit.host ? ui.btn({ href: `/fleet/host?name=${encodeURIComponent(hit.host)}`, label: `Open ${hit.host}` }) : null}${hit.run ? ui.btn({ href: `/run?id=${encodeURIComponent(hit.run)}`, label: `Open ${hit.run}` }) : null}` : null }) : null}${v.environmentUnknown ? ui.banner({ status: "attention", title: "Deployment metadata could not be read completely", body: "Some settings are unknown. Check the deployment's .env and its permissions; no values from an unreadable declaration are shown." }) : null}${v.snapshotUnreadable ? ui.banner({ status: "attention", title: "Fleet facts unavailable", body: "The console could not read the host registry, doctor records or trigger facts. File sections remain readable." }) : null}`;

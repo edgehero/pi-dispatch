@@ -3,8 +3,38 @@ export const FAILURE_KINDS = Object.freeze(["rate-limited", "quota-exhausted", "
 export const MAX_RESET_MS = 6 * 60 * 60 * 1000;
 // These pinned HTTP adapters accept a per-call fetch. Google and Bedrock explicitly do not.
 const FETCH_APIS = new Set(["anthropic-messages", "openai-completions", "openai-responses", "azure-openai-responses"]);
+const SUBSCRIPTION_CODES = new Set(["usage_limit_reached", "usage_not_included", "rate_limit_exceeded", "quota_exhausted"]);
 
-export function resetFromHeaders(headers, now) {
+/** Inspect only bounded structured error fields. Provider prose cannot create a persistent subscription pause. */
+export async function subscriptionFailureFromResponse(response, { now = Date.now } = {}) {
+	if (response.status !== 429 || typeof response.clone !== "function") return null;
+	let reader;
+	let timer;
+	try {
+		reader = response.clone().body?.getReader();
+		if (!reader) return null;
+		const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("bounded error read")), 2000); timer.unref?.(); });
+		const chunks = [];
+		let length = 0;
+		while (true) {
+			const chunk = await Promise.race([reader.read(), timeout]);
+			if (chunk.done) break;
+			length += chunk.value.byteLength;
+			if (length > 65_536) return null;
+			chunks.push(chunk.value);
+		}
+		const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+		const error = body?.error;
+		const code = error?.code ?? error?.type;
+		if (!SUBSCRIPTION_CODES.has(code)) return null;
+		const rawReset = error?.resets_at ?? error?.reset_at;
+		const resetAt = typeof rawReset === "number" ? (rawReset < 10_000_000_000 ? rawReset * 1000 : rawReset) : typeof rawReset === "string" ? Date.parse(rawReset) : NaN;
+		return { subscriptionCode: code, ...(Number.isSafeInteger(resetAt) && resetAt > now() && resetAt <= now() + 32 * 86_400_000 ? { resetAt } : {}) };
+	} catch { return null; }
+	finally { clearTimeout(timer); try { void reader?.cancel().catch(() => {}); } catch {} }
+}
+
+export function resetFromHeaders(headers, now, maxResetMs = MAX_RESET_MS) {
 	const read = (name) => typeof headers?.get === "function" ? headers.get(name) : headers?.[name];
 	const candidates = [];
 	const retry = read("retry-after");
@@ -18,7 +48,7 @@ export function resetFromHeaders(headers, now) {
 		const value = typeof raw === "string" ? Date.parse(raw) : NaN;
 		if (Number.isFinite(value) && value > now) candidates.push(value);
 	}
-	return candidates.length ? Math.min(Math.ceil(Math.max(...candidates)), now + MAX_RESET_MS) : null;
+	return candidates.length ? Math.min(Math.ceil(Math.max(...candidates)), now + maxResetMs) : null;
 }
 
 export function classifyProviderFailure(terminal, measured = null) {
@@ -31,6 +61,7 @@ export function classifyProviderFailure(terminal, measured = null) {
 	// Explicit parameter/auth errors win over any incidental quota wording in a request's diagnostics.
 	if (/invalid_api_key|authentication_error|unauthorized|invalid[_ ]parameter|unsupported[_ ]parameter/.test(text.toLowerCase())) return null;
 	if (status === 401 || status === 403) return null;
+	if (measured?.subscriptionCode && SUBSCRIPTION_CODES.has(measured.subscriptionCode)) return { kind: "quota-exhausted", subscriptionCode: measured.subscriptionCode, subscriptionProvider: measured.subscriptionProvider, ...(Number.isSafeInteger(measured.resetAt) ? { resetAt: measured.resetAt } : {}) };
 	let kind;
 	if (/context_length_exceeded|maximum context length|prompt is too long|input is too long|context (?:window|length).{0,48}(?:exceed|overflow)|exceed(?:s|ed)?.{0,48}context (?:window|length)|input token count.{0,64}exceeds/i.test(text)) kind = "context-overflow";
 	else if (/insufficient_quota|enforced_spend_limit_reached|quota.?exceeded|quota.?exhausted|ServiceQuotaExceededException|RESOURCE_EXHAUSTED|specified API usage limits|out of budget|billing|spend limit/i.test(text)) kind = "quota-exhausted";
@@ -39,7 +70,7 @@ export function classifyProviderFailure(terminal, measured = null) {
 	else if (status === 429 || /rate.?limit|too many requests|TooManyRequestsException|ThrottlingException|throttling error|\b429\b/i.test(text)) kind = measured?.resetAt ? "rate-limited" : "quota-exhausted";
 	else if ((status >= 500 && status <= 599) || /overloaded|server_busy|server.?error|service.?(?:is.?)?(?:temporarily.?)?unavailable|model is at capacity|\b529\b|\b50[0234]\b/i.test(text)) kind = "overloaded";
 	else return null;
-	return { kind, ...(Number.isSafeInteger(measured?.resetAt) ? { resetAt: measured.resetAt } : {}) };
+	return { kind, ...(Number.isSafeInteger(measured?.resetAt) ? { resetAt: measured.resetAt } : {}), ...(measured?.status === 429 && measured?.subscriptionProvider === "anthropic" ? { subscriptionProvider: "anthropic" } : {}) };
 }
 
 /** Observe the same memoised result as pi without consuming its event iterator or changing stream identity. */
@@ -63,7 +94,8 @@ export function installProviderFailureObserver({ ModelRuntime, now = Date.now, f
 					measured = null;
 					const response = await theirs(...args);
 					const resetAt = resetFromHeaders(response.headers, now());
-					measured = { status: response.status, ...(resetAt === null ? {} : { resetAt }) };
+					const subscription = model.provider === "openai" || model.provider === "anthropic" ? await subscriptionFailureFromResponse(response, { now }) : null;
+					measured = { status: response.status, ...(resetAt === null ? {} : { resetAt }), ...(model.provider === "anthropic" && response.status === 429 ? { subscriptionProvider: "anthropic" } : {}), ...(subscription ? { ...subscription, subscriptionProvider: model.provider } : {}), ...(subscription && !subscription.resetAt && resetFromHeaders(response.headers, now(), 32 * 86_400_000) ? { resetAt: resetFromHeaders(response.headers, now(), 32 * 86_400_000) } : {}) };
 					return response;
 				} };
 			}

@@ -1,3 +1,4 @@
+// env-internal PI_SUBSCRIPTION_AUTH: host-approved access snapshot metadata, never an operator override.
 /**
  * Build the EXACT environment a job container receives. Never a pass-through.
  *
@@ -375,16 +376,18 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null }) {
+export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [] }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
 	// (issue #310); the same call is made by its free credential gate, before anything is reserved at all.
 	// `modelEndpoints` is the pickup's snapshot (issue #503): the keyless branch answers `PI_DISPATCH_KEYLESS` in this
 	// map, so the variable is set exactly when the gate passed keyless and is absent on every other job.
-	const credEnv = resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
+	const selectedAuth = subscriptionAuth.find((entry) => entry.provider === provider);
+	const credEnv = selectedAuth ? selectedAuth.env : resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
 	// A reviewed watch classifier may use another provider. Resolve only that provider, never a blanket key copy.
-	const secondaryCredEnv = secondaryProvider && secondaryProvider !== provider ? resolveProviderCredential({ provider: secondaryProvider, hostEnv, authFromPi, agentDir, readFile, forwardEnv: [], modelEndpoints }) : {};
+	const secondaryAuth = subscriptionAuth.find((entry) => entry.provider === secondaryProvider);
+	const secondaryCredEnv = secondaryAuth ? secondaryAuth.env : secondaryProvider && secondaryProvider !== provider ? resolveProviderCredential({ provider: secondaryProvider, hostEnv, authFromPi, agentDir, readFile, forwardEnv: [], modelEndpoints }) : {};
 
 	const env = {
 		PI_PROVIDER: provider,
@@ -533,6 +536,16 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 	for (const [name, value] of Object.entries(secrets ?? {})) {
 		if (secondaryProvider && providerKeyCandidates(secondaryProvider).includes(name)) throw configError(`watch classifier credential variable ${name} is reserved`);
 		if (typeof value === "string" && value !== "") env[name] = value;
+	}
+
+	// An explicit subscription binding is authoritative, including against host API keys and trigger secrets.
+	// Only access snapshots cross this boundary; the runner receives closed metadata to check before loading code.
+	if (subscriptionAuth.length > 0) {
+		for (const snapshot of subscriptionAuth) {
+			for (const name of providerKeyCandidates(snapshot.provider)) delete env[name];
+			Object.assign(env, snapshot.env);
+		}
+		env.PI_SUBSCRIPTION_AUTH = JSON.stringify(subscriptionAuth.map(({ provider, connectionId, adapter, generation, expiresAt, deadlineAt, root, digest }) => ({ provider, connectionId, adapter, generation, expiresAt, deadlineAt, ...(root ? { root, digest } : {}) })));
 	}
 
 	// The shipped egress policy's variables (REQ-EGRESS-ALLOWLIST), AFTER the PI_FORWARD_ENV loop so a

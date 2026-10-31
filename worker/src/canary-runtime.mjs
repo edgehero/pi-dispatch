@@ -21,6 +21,7 @@ import { acquireCanaryLease, canaryQueueNames } from "./canary-lock.mjs";
 import { MODEL_ROLE_RE } from "./model-roles.mjs";
 import { parseTriggersDocument } from "./triggers.mjs";
 import { CONTAINER_HOME } from "./container-spec.mjs";
+import { readAuthPolicy } from "./subscription-config.mjs";
 
 // env-internal PATH: host git executable lookup in a clean subprocess environment.
 const exec = promisify(execFile);
@@ -82,6 +83,12 @@ function sourceFor(record, config, now) {
 
 export async function createCanaryRuntime({ env, options, now = Date.now, execCommand = exec, redisFactory = makeRedisClient, queueFactory = makeQueue, imagePreflightFactory = makeImagePreflight, containerFactory = makeRunContainer, runJobFn = runJob }) {
 	const config = loadConfig(env);
+	if (config.authConnectionsFile) {
+		let policy;
+		try { policy = readAuthPolicy(config.authConnectionsFile); }
+		catch { fail("canary cannot validate the subscription connection policy; fix the reviewed file before retrying"); }
+		if (policy.bindings[splitModelEntry(options.model)?.provider]) fail("canary does not support a bound subscription connection; it cannot substitute an environment API key");
+	}
 	const settings = resolveSettings(config, readOverlay(config.settingsFile));
 	if (settings.invalid) fail("canary settings overlay is invalid; run doctor");
 	if (config.backends.length !== 1 || config.defaultBackend !== "local") fail("canary currently requires the local Docker venue");

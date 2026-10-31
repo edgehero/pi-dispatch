@@ -1006,6 +1006,13 @@ passing, on the record — issue #80.)
   container still resolves it for real where it always did, and the gate is a probe that discards what
   it resolves: threading a live credential through the processor would put it in scope for every log
   line and record between the two.
+  **Explicit subscription connections (#781)** retain that free gate and add a host-owned renewal step.
+  A reviewed connection binds a provider before admission; its missing credential, wrong owner, unsupported
+  route, exhausted quota or unapproved paid-overage policy refuses or defers before mint, clone and every
+  reservation. Renewal is bounded network work on the owning host, not a paid model call. Only an access
+  snapshot valid past the admitted job deadline and safety margin reaches the container; refresh credentials
+  never do. A renewal or persistence fault cannot silently select an environment API key. Ordinary count,
+  token, dollar and per-call worst-cost guards apply to subscription requests too.
   **Dollars join the ordering, not replace it** (issue #501). Both ledgers may span several windows
   (day/week/month, `REQ-SPEND-CAPS-MULTI-WINDOW`), and the job-count ledger alone carries a soft-hold band. The
   dollar reserve runs after both job-count reserves and before the container, so every free gate and every
@@ -1158,6 +1165,12 @@ passing, on the record — issue #80.)
   joins the list only with a row in the pinned loopback table that drives that family's own `stream()`
   into the status, and (since issue #451) only once it was measured against the real endpoint with a
   real bogus credential.
+  **Subscription renewal (#781)** distinguishes an expired access snapshot from a revoked grant. The
+  owning host may renew before admission. A known rejected grant requires reauthentication and is policy;
+  a transient transport/store failure is infrastructure; an ambiguous refresh-token rotation is persisted
+  as uncertain and cannot be blindly repeated. Quota exhaustion is a free account-bucket deferral, not a
+  licence to replay tool side effects or increase queue attempts. An unknown reset is not assigned an
+  invented expiry; a person's single trial remains under all ordinary admission and replay rules.
   **A durable run is continued, not retried, and only through an explicit, capped job (issue #645).** A forge
   trigger that sets `run.recover` (`REQ-RUN-RECOVERY`) has its jobs checkpointed: at quiet points the worker freezes
   the container and stores the transcript and the workspace on its own host (`DES-RUN-CHECKPOINT-PAIRED`). When such
@@ -1302,6 +1315,14 @@ passing, on the record — issue #80.)
   excluded. The provider API key is the acknowledged exception: it cannot be scoped because the agent
   cannot function without it, so it is bounded by a provider-side spend limit instead of by scope. That
   asymmetry is deliberate and documented rather than pretended away.
+  **Opt-in subscription access tokens (#781)** are another explicit provider-credential case, not forge
+  credentials. They are access-only, expire after a bounded job, and never carry the reusable refresh grant
+  into a container. The host private store is outside every overlay, workspace and sandbox; no auth file is
+  mounted. An access token is still readable by trusted in-process extensions and, on container-custody
+  venues, the job's tools. Job count, token and conservative dollar bounds remain mandatory where configured;
+  account quota observations supplement them and cannot promise a provider-side monetary cap. Paid extra
+  usage requires an explicit positive credit ceiling and a compatible per-job dollar cap. Supported community
+  compatibility profiles describe tested exact code, not vendor endorsement or a sandbox around that code.
   **A workspace checkpoint is a durable medium this project writes on purpose** (issue #645,
   `INT-WORKSPACE-CHECKPOINT-STORE`), beside the two the paragraphs below admit (a session transcript, the engine's
   log). An agent that wrote its token into a file would otherwise have it copied to host disk for up to seven days and
@@ -1418,6 +1439,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#781) | `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY` and the provider exception in `CONST-TOKEN-SCOPED-PER-JOB` AMENDED for explicit host-owned subscription renewal, access-only deadline snapshots, account quota deferral and bounded paid-overage authorization. `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-EGRESS-POLICY-IN-THE-ARGV`, `CONST-VENUE-EGRESS-LAYER`, `CONST-PI-VERSION-PINNED`, `CONST-ISSUE-TEXT-IS-DATA`, forge-token scope and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: no host auth mount, no refresh grant in a job, no unreviewed endpoint or account rotation, and no relaxation of spend, model or replay boundaries. |
 | 2026-10-29 (#735, #743) | `CONST-TRIGGER-AUTHOR-GATE`, `CONST-HMAC-OVER-RAW-BODY`, `CONST-ISSUE-TEXT-IS-DATA` and `CONST-NO-CONTEXT-FILES-MANDATORY` AMENDED for signed collector findings without authors and stricter watch executable loading. `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: decisions run inside fresh metered containers, deterministic gates precede spend, no direct code fix or chain is admitted, and evidence never widens reviewed authority. |
 | 2026-10-29 (#717) | `CONST-PI-VERSION-PINNED`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-EGRESS-POLICY-IN-THE-ARGV`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked. Roles resolve before admission; children retain metering, policy and caps; proposals never adopt changes; canaries reserve before calls and carry no forge write authority; the bump compares data without executing candidate code. |
 | 2026-10-28 | Issue #693: `CONST-PI-VERSION-PINNED` evidence corrected against npm 1.4.0: sibling dependencies are now exact; resolved-package overrides retained, dead chord removed. Statement and Acceptance UNCHANGED, checked. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB` and `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked: capped calls still refuse before dispatch, policy outcomes are terminal, and the container remains the resource boundary. |

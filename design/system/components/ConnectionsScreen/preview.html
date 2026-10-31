@@ -1,4 +1,4 @@
-<!-- @dsCard group="Configuration" height=1840 width=1440 subtitle="Forges, egress per host, model endpoints, MCP servers, notifications, the deployment environment and staged packages" -->
+<!-- @dsCard group="Configuration" height=2540 width=1440 subtitle="Forges, egress per host, model endpoints, MCP servers, notifications, the deployment environment and staged packages" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -88,6 +88,35 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
 [data-page="config"] .tbl td:first-child{min-width:40px}
 [data-page="trigger"] pre{white-space:pre-wrap;overflow-wrap:anywhere}
 @media(min-width:1000px){[data-page="trigger-add"] .config-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}[data-page="trigger-add"] .config-form h3,[data-page="trigger-add"] .config-form fieldset,[data-page="trigger-add"] .config-form>p{grid-column:1/-1}}
+
+.sa-accounts { display: grid; gap: var(--space-5); }
+.sa-account { min-width: 0; }
+.sa-account + .sa-account { padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.sa-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.sa-title h3 { margin: 0; font-size: 15px; }
+.sa-facts { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 8px 14px; font-size: 13px; line-height: 20px; }
+.sa-facts dt { color: var(--ink-muted); }
+.sa-facts .badge { max-width: 100%; height: auto; min-height: 24px; padding-top: 3px; padding-bottom: 3px; white-space: normal; line-height: 18px; align-items: flex-start; }
+.sa-facts .badge .ic { margin-top: 2px; }
+.sa-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.sa-account .code, .sa-account code { white-space: normal; overflow-wrap: anywhere; }
+.sa-note { margin-top: 12px; color: var(--ink-muted); font-size: 13px; line-height: 19px; overflow-wrap: anywhere; }
+.sa-commands { margin-top: 16px; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.sa-commands > * { min-width: 0; max-width: 100%; }
+.sa-commands .cmd { min-width: 0; }
+.sa-commands .cmd code { overflow-wrap: anywhere; white-space: normal; }
+.sa-windows { list-style: none; padding: 0; display: grid; gap: 10px; margin-top: 12px; }
+.sa-window { padding: 12px; background: var(--surface-2); border-radius: var(--radius-md); min-width: 0; }
+.sa-window b { display: block; margin-bottom: 5px; }
+@media (max-width: 600px) {
+  .sa-facts { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .sa-facts dd { margin-bottom: 8px; }
+}
+
+#p-subscription-auth .sa-title h3 { font-size: 13px; margin-top: 20px; }
+.sa-commands .cmd { align-items: flex-start; }
+.sa-commands .cmd code { padding: 6px 0; }
+.sa-commands .cmd code > span { display: inline-block; max-width: 100%; }
 
 @media (max-width: 1000px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 .c2-pad2 { padding: var(--space-4) var(--space-5) var(--space-5); border-top: 1px solid var(--line); display: grid; gap: var(--space-3); }
@@ -179,6 +208,12 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
     <li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-key"/></svg><b>kimi-coding</b><span>from the pi login on each host</span></li>
   </ul>
 </div>
+</section><section class="card" id="p-subscription-auth" data-panel>
+  <div class="card__head"><h2>Subscription authentication</h2><span class="card__sub">host-owned credentials, safe status only</span></div>
+  <div class="sa-accounts"><article class="sa-account"><div class="sa-title"><h3><span class="code">claude-work</span></h3><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Connected</span></div>
+      <dl class="sa-facts"><dt>Provider</dt><dd>anthropic, selected</dd><dt>Adapter</dt><dd><span class="code">pi-anthropic-oauth@0.3.6</span> (community)</dd><dt>Owner host</dt><dd><a href="/fleet/host?name=mini1">mini1</a></dd><dt>Compatibility</dt><dd><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Pinned artifact verified; job checks remain</span></dd><dt>Access token expiry</dt><dd>2026-10-31 16:00:00 UTC</dd><dt>Last refresh</dt><dd>2026-10-31 15:00:00 UTC</dd><dt>Extra usage</dt><dd>Disabled</dd><dt>Paid overage ceiling</dt><dd>Not authorized for paid overage</dd></dl>
+      <p class="sa-note">Credentials stay on the owning host. Connected describes the credential record, not a successful paid request.</p>
+      <div class="sa-commands"><p class="sa-note">Run in a terminal on mini1. Sign-in and refresh never run in this browser.</p><div><p class="sa-note">Sign in or reauthenticate</p><div class="cmd"><code><span>pi-dispatch</span> <span>auth</span> <span>login</span> <span>claude-work</span></code><button class="btn btn--sm" type="button">Copy</button></div></div><div><p class="sa-note">Disconnect this connection</p><div class="cmd"><code><span>pi-dispatch</span> <span>auth</span> <span>logout</span> <span>claude-work</span></code><button class="btn btn--sm" type="button">Copy</button></div></div><div><p class="sa-note">Refresh quota observations</p><div class="cmd"><code><span>pi-dispatch</span> <span>auth</span> <span>usage</span> <span>claude-work</span></code><button class="btn btn--sm" type="button">Copy</button></div></div></div></article></div>
 </section></div><div class="stack"><section class="card" id="p-notify" data-panel>
   <div class="card__head"><h2>Notifications</h2></div>
   <ul class="c2-list">

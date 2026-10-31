@@ -1,3 +1,5 @@
+import { subscriptionAuthForAgent } from "../subscription-auth-view.mjs";
+import { connectionsSubscriptionAuth } from "./panels/subscription-auth.mjs";
 import { MODELS_PANELS } from "./panels/models.mjs";
 import { modelsForAgent } from "../models-view.mjs";
 import { SANDBOX_PANELS } from "./panels/sandboxes.mjs";
@@ -168,7 +170,7 @@ const PAGE_PANELS = Object.freeze({
   sandboxes: SANDBOX_PANELS,
   "zero-touch": ZERO_TOUCH_PANELS,
   secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
-  connections: [["p-connection-problems", connectionsProblems], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
+  connections: [["p-connection-problems", connectionsProblems], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-subscription-auth", connectionsSubscriptionAuth], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
   project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
   triggers: [["p-tr-tabs", triggersNavigation], ["p-tr-viewer", triggersViewer], ["p-tr-count", triggersCount], ["p-tr-next", triggersNext], ["p-tr-spend", triggersSpend], ["p-tr-filters", triggersFilters], ["p-tr-week", triggersWeek], ["p-tr-schedule", triggersSchedules], ["p-tr-github", triggersGithub], ["p-tr-gitlab", triggersGitlab], ["p-tr-forgejo", triggersForgejo], ["p-tr-azure", triggersAzure], ["p-tr-unknown", triggersUnknown], ["p-tr-check", triggersCheck]],
   "trigger-check": [["p-tr-check", triggerCheckPage]],
@@ -225,10 +227,10 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
-  models: [{ cls: "stack", items: ["p-model-problems"] }, { cls: "cols models-layout", items: [{ cls: "stack", items: ["p-roles"] }, { cls: "stack", items: ["p-cooldowns", "p-models"] }] }, { cls: "stack", items: ["p-proposals"] }],
+  models: [{ cls: "stack", items: ["p-model-problems"] }, { cls: "cols models-layout", items: [{ cls: "stack", items: ["p-roles"] }, { cls: "stack", items: ["p-cooldowns", "p-models"] }] }, { cls: "stack", items: ["p-subscription-quota", "p-proposals"] }],
   sandboxes: [{ cls: "cols", items: [{ cls: "stack", items: ["p-sb-run", "p-sb-new"] }, { cls: "stack", items: ["p-sb-open", "p-sb-kept", "p-sb-browser"] }] }],
   "zero-touch": [{ cls: "cards-4 zt-kpis", items: ["p-zt-rate", "p-zt-streak", "p-zt-wait", "p-zt-handled"] }, { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions"] }, { cls: "stack zt-side", items: ["p-zt-causes", "p-zt-fixes"] }] }],
-  connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-forges", "p-egress", "p-endpoints"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
+  connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-forges", "p-egress", "p-endpoints", "p-subscription-auth"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
   project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
   triggers: [{ cls: "stack", items: ["p-tr-tabs", "p-tr-viewer"] }, { cls: "cards-3 triggers-kpis", items: ["p-tr-count", "p-tr-next", "p-tr-spend"] }, { cls: "cols triggers-layout", items: [{ cls: "stack triggers-rules", items: ["p-tr-filters", "p-tr-week", "p-tr-schedule", "p-tr-github", "p-tr-gitlab", "p-tr-forgejo", "p-tr-azure", "p-tr-unknown"] }, { cls: "stack triggers-check-side", items: ["p-tr-check"] }] }],
   ...SPEND_LAYOUTS,
@@ -989,7 +991,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     data.parkedChecks = Object.fromEntries(rows.map((p, i) => [p.jobId, got[i]]));
   }
   if (reads.includes("parkedCount")) data.parkedCount = await parkedCountOf(deps);
-  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}) } : data;
+  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
 }
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------

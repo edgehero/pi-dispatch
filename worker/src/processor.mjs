@@ -1,4 +1,5 @@
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
+import { SubscriptionWait } from "./subscription-wait.mjs";
 import { readQuestionContext } from "./question-context.mjs";
 import { stageModelRoleInputs } from "./agent-snapshot.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
@@ -457,6 +458,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// this job names is on this host (image-preflight.mjs). Default admits everything, so a wiring that
 		// omits it behaves exactly as before -- the container's own failure stays the backstop.
 		imagePreflight = async () => ({ ok: true }),
+		subscriptionAuthRequired = async () => false,
 		// (job) => { ok } | { refused, at, jobId }. The one-shot pre-spend check (issue #231,
 		// DES-ONE-SHOT-DISARM-IN-THE-FILE). Default admits everything -- an unwired processor behaves
 		// exactly as before, and the gate below only calls it for a job whose matched rule was a
@@ -472,6 +474,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// the real read happens where it always did, because threading a live credential through the processor
 		// would put it in scope for every log line and record between here and the container.
 		checkProviderCredential = () => ({ ok: true }),
+		prepareSubscriptionAuth = null,
+		validateSubscriptionAuth = null,
 		// (refs) => { ok } | { unknown: { provider, id }, why } | { unavailable: code } (issue #502). Is each of this
 		// job's models, its main one and every listed one, a model pi knows (model-catalog.mjs `checkModelsKnown`,
 		// the builtin catalog plus the overlay models.json)? Admit-everything by default, like the credential probe
@@ -996,7 +1000,14 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// image refuses without minting a credential it will not use, cloning a repo it will not read, or
 		// burning a cap slot. Jobs run with --pull=never (docker-run.mjs), so an absent image is never
 		// fetched -- this refusal IS the whole diagnosis, not a race with a background pull.
-		const img = await imagePreflight(job);
+		const needsSubscriptionAuth = await subscriptionAuthRequired(job);
+		if (typeof needsSubscriptionAuth !== "boolean") throw new Error("the subscription image requirement is unavailable");
+		const checkedImage = await imagePreflight(job, { subscriptionAuthRequired: needsSubscriptionAuth });
+		// Enforce the same host-only requirement at the DI seam too: a preflight returning capabilities
+		// cannot accidentally admit an older image before access preparation, mint or reservations.
+		const img = checkedImage.ok && needsSubscriptionAuth && !(checkedImage.capabilities ?? []).includes("subscriptionAuth")
+			? { subscriptionAuthUnsupported: checkedImage.image ?? job.image ?? "configured job image", declared: checkedImage.capabilities ?? [] }
+			: checkedImage;
 		// The image's declared pi version, read on the inspect the preflight already ran. Needed BEFORE the
 		// container starts, because a transcript written by a different pi may hold tool-call arguments the
 		// current schema no longer accepts -- so the resume has to be refused, not repaired mid-run. Null
@@ -1245,6 +1256,18 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			}
 		}
 
+
+		// Access-only handoff is prepared after local determinate gates and before any paid work.
+		let subscriptionAuth = [];
+		if (prepareSubscriptionAuth) {
+			const preparedAuth = await prepareSubscriptionAuth(job);
+			if (!preparedAuth.ok) {
+				if (preparedAuth.wait) throw new SubscriptionWait(preparedAuth);
+				if (preparedAuth.unavailable) throw new InfraRetry("subscription authentication unavailable", { reason: "container-never-started", budgetReserved: false });
+				return { outcome: "policy", reason: preparedAuth.reason ?? "subscription-quota", exitCode: null, budgetReserved: false };
+			}
+			subscriptionAuth = preparedAuth.snapshots;
+		}
 
 		// REQ-EGRESS-ALLOWLIST. The egress policy this deployment claims must be able to serve this job
 		// BEFORE the job costs anything. It is one `docker inspect` when the policy is armed and ZERO spawns
@@ -2316,7 +2339,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } };
 		}
 		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		if (subscriptionAuth.length > 0 && !(await validateSubscriptionAuth(subscriptionAuth))) throw new InfraRetry("subscription binding changed before container start", { reason: "container-never-started", budgetReserved: true });
+		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.

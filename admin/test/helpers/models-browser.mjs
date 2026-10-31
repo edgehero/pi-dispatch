@@ -1,3 +1,5 @@
+import { consoleSubscriptionFixture } from "./subscription-auth-fixture.mjs";
+import { readConnections } from "../../src/connections-view.mjs";
 /** Real Models file/read/write/session integration. Only bounded fixture observations are synthetic (#773). */
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -69,10 +71,10 @@ export async function startModelsBrowserFixture(dir, { url = process.env.VALKEY_
       const doctor = buildDoctorRecord({ checks: [{ ok: true, label: "A newer reviewed candidate is available.", proposal: { kind: "newer-sibling", scope: "default", role: "editor", model: MODEL_REFS.primary, candidate: MODEL_REFS.candidate } }], ids: ["models.1"], at: NOW, version: "4.3.1" });
       await publishDoctorRecord(redis, "models-host", doctor);
     }
-    const state = { unavailable: false, partial: false };
+    const state = { unavailable: false, partial: false, subscriptionAuth: consoleSubscriptionFixture(NOW) };
     const fleet = {
       async snapshot() {
-        return { at: clock, queue: { counts: { active: 0, waiting: 0, delayed: empty ? 0 : 1 }, pausedState: false }, queueCounts: [], hostBudgets: [], failed: { rows: [], more: 0 }, parked: [],
+        return { at: clock, subscriptionAuth: state.subscriptionAuth, queue: { counts: { active: 0, waiting: 0, delayed: empty ? 0 : 1 }, pausedState: false }, queueCounts: [], hostBudgets: [], failed: { rows: [], more: 0 }, parked: [],
           settings: { overlay: JSON.parse(readFileSync(paths.settingsFile, "utf8")) },
           triggers: rm.readTriggers({ triggersPath: paths.triggersPath }),
           recordDetails: new Map(records),
@@ -95,7 +97,8 @@ export async function startModelsBrowserFixture(dir, { url = process.env.VALKEY_
     const config = { dir, allowedHosts: [], readOnly, maxMs: 43200000, idleMs: 3600000, maxStreams: 4, logsDir: paths.logsDir };
     const sessions = cookies.makeSessionStore({ now });
     const audit = makeConsoleAudit({ logsDir: paths.logsDir, now });
-    const pageDeps = { now, fleet, modelsView, env };
+    const connections = async snapshot => readConnections({ paths, env, deploymentDir: dir, now: now(), snapshot, redis, reads: { environment: () => ({ env: {} }), allowlist: () => [], endpoints: () => [] } });
+    const pageDeps = { now, fleet, modelsView, connections, env };
     server = createConsoleServer({ config, now, sessions, cookies, tickets: makeConfirmTickets({ now }), limiter: makeLoginLimiter({ now }), audit, readTokens: () => ({ file: tokens }), findToken, pageDeps, actionDeps: { modelRoles, rm, paths, fleet, env }, log: () => {} });
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
     return { origin: `http://127.0.0.1:${server.address().port}`, paths, redis, state, records, tokens, modelsView,

@@ -73,6 +73,11 @@ plan's share of the month, and verdicts do not read SAVING just because the depl
 
 ## Declaring subscriptions
 
+Explicit [subscription authentication](subscription-auth.md) is configured separately. Its connection policy
+and quota observations do not change this accounting file or its hypothetical plans. Subscription requests
+retain conservative model-cost reservations and normal dollar caps. A vendor quota percentage or prepaid plan
+is not an exact per-request cash charge, and missing provider credit units are not assumed USD.
+
 The rate tables pi ships never state a subscription plan's price. Some subscription providers ship
 all-zero tables (the `qwen-token-plan` and `xiaomi-token-plan` families), so their runs record `cost: 0`:
 prepaid, not free, and undeclared they read `$0 (unrated)`. Others (`kimi-coding`, `zai` and `zai-coding-cn`
@@ -137,6 +142,12 @@ labeled `unmeasured (OQ-002)`.
 | `PI_LOG_RETENTION_DAYS` | `30` | bounds the analyzable history (`0` = keep forever; scan still caps at 92 days) |
 
 ## Dollar caps
+
+For supported subscription transports, the guard checks the final shaped request before dispatch as well as
+its original call. Added messages, system or tool data may enlarge the existing reservation ticket within
+the job's remaining cap; a final request that cannot fit or be bounded refuses as `cost-cap` with
+`why: "final-payload"`. It sends no provider request. Authentication shaping never grants extra tokens,
+unlisted models or a different account.
 
 The rest of this page reports spend after the fact. The dollar caps act on it before the fact (issue #501). This
 section follows one dollar from the setting to the run record.

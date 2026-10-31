@@ -1,3 +1,4 @@
+import { readSubscriptionStatus } from "@edgehero/pi-dispatch/subscription-status";
 import { readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
 import { readSandboxSessions, requestSandboxEnd } from "@edgehero/pi-dispatch/sandbox-sessions";
 /**
@@ -206,7 +207,7 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 // The console's address (the insights move to the console): `/dispatch insights` and the `i` key print the spend
 // screen's URL from the PI_CONSOLE_LISTEN the console itself reads from this `.env` (`console/link.mjs`).
 // The session store (issue #647, part 2): `/dispatch chat` forks a finished run from the PI_SESSIONS_DIR the worker
@@ -4758,6 +4759,7 @@ export function createFleetReader(
         // Issue #712: each host's last published doctor run, `{ hosts, more }` or `{ unreachable }`, through the worker's
         // own allowlist (`readDoctorResults`). Labels are another host's redacted text: every surface escapes them.
         doctor: await doctorResults(),
+        subscriptionAuth: await readSubscriptionStatus(redis, lastHosts.map((h) => h.name)).catch(() => ({ state: "unavailable", partial: true, connections: [] })),
         // This console's or panel's own host, by the worker's name rule over the deployment's env, so a "does not load"
         // sentence quotes this host's doctor before another's (each host has its own copy of the files). Null when the
         // declared name is one the worker refuses.

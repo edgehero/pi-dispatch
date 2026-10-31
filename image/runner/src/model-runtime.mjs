@@ -28,6 +28,7 @@
  */
 import { readFileSync } from "node:fs";
 import { configError } from "./outcome.mjs";
+import { subscriptionAccess } from "./subscription-credentials.mjs";
 export const DISCARDING_MODELS_STORE = Object.freeze({
 	async read() {
 		return undefined;
@@ -80,8 +81,12 @@ export async function loadPiAuthStorage({ resolve = (spec) => import.meta.resolv
  * list, or set PI_CACHE_RETENTION past the cost bound. A refresh or login pi makes writes to memory only. Without
  * `AuthStorage` (tests that build pi's model layer on its own) pi's file store is used as before.
  */
-export function createJobModelRuntime({ ModelRuntime, AuthStorage = null, agentDir, modelsPath, readFile }) {
+export function createJobModelRuntime({ ModelRuntime, AuthStorage = null, agentDir, modelsPath, readFile, subscriptionAuth = [], env = process.env }) {
 	const options = jobModelRuntimeOptions({ agentDir, modelsPath });
-	if (AuthStorage !== null) options.credentials = AuthStorage.inMemory(readAuthSnapshot(options.authPath, readFile ? { readFile } : {}));
+	if (AuthStorage !== null) {
+		const credentials = readAuthSnapshot(options.authPath, readFile ? { readFile } : {});
+		for (const row of subscriptionAuth) credentials[row.provider] = { type: "api_key", key: subscriptionAccess(row.provider, env) };
+		options.credentials = AuthStorage.inMemory(credentials);
+	}
 	return ModelRuntime.create(options);
 }

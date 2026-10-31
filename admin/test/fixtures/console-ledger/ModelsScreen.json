@@ -6,6 +6,7 @@
     "p-roles",
     "p-cooldowns",
     "p-models",
+    "p-subscription-quota",
     "p-proposals"
   ],
   "elements": [
@@ -255,6 +256,15 @@
       "kind": "sample",
       "status": "illustrative",
       "reason": "The source card uses sample deployment values; production reads the reviewed configuration and retained records, and the golden fixture holds those separately."
+    },
+    {
+      "el": "p-subscription-quota",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/subscription-auth.mjs#modelsSubscriptionQuota",
+      "golden": [
+        "panels/models-subscription.operator"
+      ]
     }
   ]
 }

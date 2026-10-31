@@ -36,7 +36,15 @@ If every otherwise usable candidate is cooling down, has a full model window or 
 
 The run record carries the actual `provider` and `model`, plus `modelWhy`: `primary`, `fallback-cooldown`, `fallback-window`, `fallback-unavailable` or `fallback-context`. A classified terminal error adds only the closed `providerFailure` detail. `pi-dispatch doctor` shows configured models cooling down, their cause and reset time. The console's Doctor panel shows the same published warnings and how old the observation is.
 
-Jobs without `fallbackModels` keep their existing behavior. Subscription logins remain refused, and portfolio weights do not choose models.
+Jobs without `fallbackModels` keep their existing model-selection behavior. An explicit subscription binding
+adds its separate authentication and account-quota admission even without fallbacks. Unbound providers retain
+the existing API-key path; portfolio weights do not choose models. See [subscription authentication](subscription-auth.md).
+
+Subscription account windows are separate from the physical model cooldown above. A known weekly reset is
+preserved for the full week. Exhaustion with no reset persists until newer evidence or a person's one-attempt
+trial; it is not cleared by the six-hour model timeout. The reviewed fallback order still applies, and each
+candidate must have authorized authentication and pass all ordinary admission gates. Candidate checks do not
+consume a trial or rotate accounts. Nothing switches credentials inside a running attempt.
 
 ## Models in the console
 

@@ -298,7 +298,7 @@ test("run-job refuses an unenforceable cost cap or model list after the meter in
 	assert.doesNotMatch(src, /reason === TOKEN_BUDGET/, "no second, untested copy of the token-only rule");
 	// The policy guard (issues #501, #502): built from both policies (null when neither is set, its order and its
 	// snapshot driven in model-guard.test.mjs), handed to the install, and its fields spread only when it exists.
-	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log, external: \(\) => childWatch\.external\(\) \}\);/);
+	assert.match(src, /const policyGuard = createPolicyGuard\(\{ maxCostMicros: cfg\.maxCostMicros, allowedModels: cfg\.allowedModels, log, external: \(\) => childWatch\.external\(\), subscriptionAdmission: subscriptionRegistration \? \(provider\) => subscriptionRegistration\.admitted\(provider\) : null \}\);/);
 	assert.ok(src.indexOf("const policyGuard =") < install, "the guard exists before the install that hands it to both halves");
 	assert.match(src, /installProcessUsageMeter\(\{ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch \}\)/);
 	assert.match(src, /\{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\) \}/, "the policy fields ride the exit line only when a policy is set, the children's counters added");

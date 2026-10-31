@@ -15,7 +15,7 @@ test("Models is a static viewer read with no caller-selected data query or live 
   for (const query of ["scope=web", "role=planner", "model=openai%2Fgpt-5", "canary=secret", "limit=1000000"]) assert.ok(parsePageQuery("models", query).refusal);
   const doc = await render(consoleModelsFixture(AT));
   assert.match(doc, /href="\/models">.*?Reload/s); assert.doesNotMatch(doc, /data-live="models"/);
-  assert.deepEqual(panelIds("models").filter(p => p !== "p-nav-parked" && p !== "p-headline"), ["p-model-problems", "p-roles", "p-cooldowns", "p-models", "p-proposals"]);
+  assert.deepEqual(panelIds("models").filter(p => p !== "p-nav-parked" && p !== "p-headline"), ["p-model-problems", "p-roles", "p-cooldowns", "p-models", "p-subscription-quota", "p-proposals"]);
 });
 
 test("only Models pays its reader; its one snapshot includes real model waiters and an agent retains the safe view", async () => {

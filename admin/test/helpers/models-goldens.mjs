@@ -1,3 +1,4 @@
+import { consoleSubscriptionFixture } from "./subscription-auth-fixture.mjs";
 /** #773 exceptional states use production page renderers, with an injected clock and operational facts. */
 import { renderPage } from "../../src/console/pages.mjs";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
@@ -25,6 +26,11 @@ async function draw({ change = () => {}, role = "operator", readOnly = false } =
   return (await renderPage("models", { session: { name: role === "operator" ? "ops" : "watcher", role }, data: { now: NOW, models: m }, query: {}, readOnly })).html;
 }
 export const MODELS_DRAW = Object.freeze({
+  "models-subscription.operator": () => draw({ change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW); } }),
+  "models-subscription.viewer": () => draw({ role: "viewer", change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW); } }),
+  "models-subscription-stale.operator": () => draw({ change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].quota.observedAt = NOW - 600_000; }); } }),
+  "models-subscription-unknown-reset.operator": () => draw({ change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { const q = v.connections[0].quota; q.blockedUnknownReset = true; q.until = null; q.trialAvailable = true; q.windows[0].resetAt = null; }); } }),
+  "models-subscription-unknown.viewer": () => draw({ role: "viewer", change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].quota = null; }); } }),
   "models-populated.operator": () => draw(),
   "models-populated.viewer": () => draw({ role: "viewer" }),
   "models-readonly.operator": () => draw({ readOnly: true }),

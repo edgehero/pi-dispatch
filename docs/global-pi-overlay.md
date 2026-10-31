@@ -66,6 +66,12 @@ refines but never removes the one above:
 
 ## What is copied — and what never is
 
+An explicit [subscription connection](subscription-auth.md) may select a content-verified community OAuth
+adapter from the overlay's staged packages. This is a separate compatibility receipt, not permission to copy
+host credentials. `auth.json` and refresh grants remain outside the overlay. The selected adapter must remain
+enabled for that job; `run.packages: false` cannot silently fall back to an environment API key. Restaging a
+prepared adapter changes its tree digest and requires the reviewed connection's identity to match again.
+
 | Copied into the overlay | Never copied |
 |---|---|
 | `models.json` (definitions; **refused if it embeds a literal key**) | `auth.json` — your credential stays in env/auth.json |

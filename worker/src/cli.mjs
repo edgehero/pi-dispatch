@@ -28,6 +28,8 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here
                            (--webhook-url <URL> | --no-webhook) [--org <org>] [--name <appName>]
+  pi-dispatch auth <status|login CONNECTION|logout CONNECTION|usage CONNECTION|trial CONNECTION>
+                           manage host-owned subscription authentication, see docs/subscription-auth.md
   pi-dispatch import-pi    stage your host pi setup (models/skills/persona) into a global overlay
                            [--no-extensions] [--with-packages] [--no-host-packages]
                            [--packages-file <path>] [--from <agentDir>] [--to <overlayDir>]
@@ -99,6 +101,12 @@ with a consent per action:  pi install npm:@edgehero/pi-dispatch-admin`;
 	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
 export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), writeErr = (chunk) => process.stderr.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date() } = {}) {
 	const cmd = argv[0];
+	if (cmd === "auth") {
+		const { runAuth } = await import("./auth-cli.mjs");
+		const deployment = cliDeploymentEnv(env, ["PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_WORKER_NAME", "PI_SETTINGS_FILE", "PI_GLOBAL_PI_DIR", "VALKEY_URL"]);
+		if (deployment.problem) { writeErr(`${deployment.problem}\n`); return 2; }
+		return runAuth(argv.slice(1), { env: deployment.env, write, writeErr, now: () => Number(now()) });
+	}
 
 	if (cmd === "init") {
 		const { runInit } = await import("./init.mjs");

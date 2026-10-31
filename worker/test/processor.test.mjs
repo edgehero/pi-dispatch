@@ -51,6 +51,35 @@ function deps(overrides = {}) {
 
 const ghJob = { kind: "github", repo: "org/repo", provider: "anthropic", model: "m", maxTurns: 20 };
 
+test("host subscription policy rejects an older image before access preparation, mint, clone or reservation", async () => {
+	let prepared = 0;
+	const { deps: d, calls } = deps({
+		subscriptionAuthRequired: async () => true,
+		imagePreflight: async () => ({ ok: true, image: "job:old", capabilities: ["modelPolicy", "costCap"] }),
+		prepareSubscriptionAuth: async () => { prepared++; throw new Error("must refuse before credential renewal"); },
+	});
+	const result = await runJob({ ...ghJob, models: ["anthropic/m"] }, d);
+	assert.equal(result.reason, "job-image-subscription-auth-unsupported");
+	assert.equal(result.budgetReserved, false);
+	assert.equal(d.redis.incrCalls, 0);
+	assert.equal(prepared, 0);
+	assert.equal(calls.some(value => value.startsWith("mint:")), false);
+	assert.equal(calls.includes("prepare"), false);
+	assert.equal(calls.includes("run-container"), false);
+});
+
+test("subscription image requirement is host-owned and leaves legacy jobs and capable images usable", async () => {
+	for (const managed of [false, true]) {
+		const { deps: d, calls } = deps({ subscriptionAuthRequired: async () => managed, imagePreflight: async (_job, trusted) => {
+			assert.equal(trusted.subscriptionAuthRequired, managed);
+			return { ok: true, capabilities: managed ? ["subscriptionAuth"] : [] };
+		} });
+		const result = await runJob({ ...ghJob, subscriptionAuthRequired: !managed }, d);
+		assert.equal(result.outcome, "completed");
+		assert.equal(calls.includes("run-container"), true);
+	}
+});
+
 test("happy path: mint -> branch-check -> prepare -> budget -> container, in that order", async () => {
 	const { deps: d, calls } = deps();
 	const r = await runJob(ghJob, d);
@@ -2734,4 +2763,34 @@ test("watch classifier credential bindings refuse before invoking a secret resol
 	const result = await runJob({ kind: "local", folder: "/srv/shop", provider: "anthropic", model: "m", maxTurns: 5, watch: {}, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" }, secrets: { OPENROUTER_API_KEY: "opaque-secret-reference" } }, d);
 	assert.equal(result.reason, "secret-name-reserved"); assert.equal(result.budgetReserved, false);
 	assert.equal(d.redis.incrCalls, 0); assert.equal(calls.includes("prepare"), false); assert.equal(calls.includes("run-container"), false);
+});
+
+test("subscription preparation refuses before mint, workspace and either budget reservation", async () => {
+	const { deps: d, calls } = deps({ prepareSubscriptionAuth: async () => ({ ok: false, reason: "auth-reauth-required" }) });
+	const result = await runJob(ghJob, d);
+	assert.equal(result.reason, "auth-reauth-required");
+	assert.equal(result.budgetReserved, false);
+	assert.equal(d.redis.incrCalls, 0);
+	assert.deepEqual(calls, []);
+});
+
+test("only a private access snapshot reaches the container, and final binding validation precedes spawn", async () => {
+	const snapshot = { provider: "anthropic", env: { ANTHROPIC_OAUTH_TOKEN: "private-access" } };
+	const { deps: d, calls } = deps({ prepareSubscriptionAuth: async () => ({ ok: true, snapshots: [snapshot] }), validateSubscriptionAuth: async (entries) => (calls.push("auth-validate"), entries[0] === snapshot), runContainer: async (bag) => {
+		assert.equal(bag.subscriptionAuth[0], snapshot);
+		assert.equal(JSON.stringify(bag.job).includes("private-access"), false);
+		calls.push("run-container");
+		return { code: 0, aborted: false };
+	} });
+	const result = await runJob(ghJob, d);
+	assert.equal(result.outcome, "completed");
+	assert.ok(calls.indexOf("auth-validate") < calls.indexOf("run-container"));
+	assert.equal(JSON.stringify(result).includes("private-access"), false);
+});
+
+test("subscription refresh infrastructure failures retry without a paid container", async () => {
+	const { deps: d, calls } = deps({ prepareSubscriptionAuth: async () => ({ ok: false, reason: "auth-network-unavailable", unavailable: true }) });
+	await assert.rejects(() => runJob(ghJob, d), InfraRetry);
+	assert.equal(d.redis.incrCalls, 0);
+	assert.deepEqual(calls, []);
 });

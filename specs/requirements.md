@@ -7814,10 +7814,66 @@ instead of drifting.
 - **Trace and board:** Every trusted query/decision writes bounded operator-only trace data. The worker validates board proposals after job completion; only a person's audited adoption changes retained board structure. Freeze, unfreeze, revert and clear use the existing preview/confirm pipeline and version comparison. Viewer responses contain only allowed summaries and structural board counts, never agent-authored board values, private notes, state, queries or samples. Tests cover trace limits, unavailable data, permissions, malicious blocks, byte caps, CAS races and audit-before-mutation.
 - **Traces:** `INT-WATCH-TRACE-STREAM`, `INT-WATCH-BOARD-FILE`, `DES-DECISION-MODEL-BEFORE-THE-JOB`, `INT-CONSOLE-AUDIT-LOG`.
 
+## REQ-SUBSCRIPTION-AUTHENTICATION
+
+- **Statement (#781)**: an operator may explicitly bind `openai` or `anthropic` to a host-owned subscription
+  connection. Unbound providers retain the existing environment/API-key behavior. A binding owns its provider
+  even when disconnected, expired, exhausted or unavailable; it never silently falls back to an API key,
+  another account, proxy or billing route. Supported profiles are pi 1.4.0's direct OpenAI ChatGPT Responses
+  route and the audited adaptations of `pi-anthropic-oauth@0.3.6` and
+  `@gotgenes/pi-anthropic-auth@3.4.3`. Community compatibility is explicit opt-in, not vendor endorsement.
+- **Host lifecycle**: login, logout and renewal run on the connection's declared host. Durable credentials are
+  private, owned regular files outside every job/overlay/sandbox root. Renewal is serialized with a durable
+  uncertain marker, replacement persistence and bounded cancellation handling. Only an access credential
+  valid beyond the admitted job deadline plus safety margin enters a job. Refresh grants, registration
+  secrets and raw account/profile data never enter job inputs or public telemetry.
+- **Execution**: a subscription job requires a finite reviewed `models` list. The host and image reject an
+  unsupported endpoint, API, classifier role, venue or missing/disabled required extension before spending.
+  Community artifacts and their runtime dependency tree are content-bound; final shaped requests retain the
+  reviewed model, endpoint, account, tool/data authority and enforceable cost bound. Compaction and child
+  sessions sharing the admitted root runtime keep the same policy. Separate pi CLI and Node child processes
+  refuse subscription dispatch in this initial release without attested admission. No account rotation occurs
+  inside a request or running attempt. OpenShell and canary
+  subscription paths refuse until their custody and egress contracts support them explicitly.
+  Version 1 refuses finite route sets mixing subscription-bound and unbound API providers, including decision
+  roles (`auth-mixed-billing`); a subscription primary skips an unbound API fallback. Reviewed cross-provider
+  subscription fallback remains possible under both providers' explicit bindings and ordinary admission.
+  Claude supports the admitted root runtime and children sharing it, but not independent legacy compatibility
+  dispatch or a fresh runtime without the admitted adapter. The root runtime's own internal reentry is allowed.
+  Competing reviewed Claude packages visible in the staged manifest refuse as `auth-adapter-conflicting`
+  before quota claims, renewal or token mint. Arbitrary trusted factory conflicts are checked inside the
+  runner before provider dispatch. Final snapshot validation rechecks the stage root, digest and known conflicts.
+- **Quota**: observations belong to the stable connection, private account group and application bucket,
+  independently of physical model cooldowns. Missing percentages/resets and incomplete or stale telemetry are
+  unknown, never zero or healthy. Known weekly exhaustion lasts to its full observed reset; an unknown reset
+  persists until newer authoritative evidence or a person's one-attempt trial. Monitoring preferences select
+  the five-hour/seven-day display focus, but cannot hide or suppress any known applicable exhaustion. Scoped
+  and other provider windows remain visible because they are not independently selectable. Candidate inspection
+  consumes no trial. A selected trial is claimed atomically by a durable attempt identity and remains subject
+  to all count, token, dollar, model, replay and recovery rules. Independently linked connections are not
+  claimed to be deduplicated vendor accounts.
+- **Billing and visibility**: Claude extra usage that is enabled or unknown refuses unless the operator
+  explicitly authorizes a positive credit ceiling and the job has a compatible per-job dollar cap. API-equivalent
+  cost, flat plan prices, provider credit counters and quota percentages remain distinct. Connections and Models
+  display safe typed status, observation age, missing evidence, owner and compatibility. Browser and model
+  context never receive credentials or raw diagnostics; authentication controls stay in the owning terminal.
+- **Acceptance**: synthetic credentials and controlled transports exercise real pinned authentication/runtime
+  behavior, final payloads, cancellation, internal retries, cache accounting and error/reset observation.
+  Tests cover conflicting extensions, dependency drift, missing packages, immutable auth, renewal races and
+  uncertain persistence, expiry, disconnection, owner/generation changes, alias/bucket isolation, full-week
+  resets, persistent unknown exhaustion, stale/out-of-order evidence, concurrent one-trial claims and paid
+  overage refusal. Actual pickup proves every refusal is free and fallback never bypasses the effective
+  ceiling. Recovery retains its checkpoint model; sandbox remains credential-free. Real Valkey checks the
+  atomic store; browser checks use actual CSP, roles, both themes, widths and keyboard interactions.
+- **Traces**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`,
+  `DES-HOST-OWNED-SUBSCRIPTION-AUTH`, `INT-AUTH-CONNECTIONS-FILE-CONTRACT`,
+  `INT-SUBSCRIPTION-CREDENTIAL-STORE`, `INT-SUBSCRIPTION-QUOTA-KEY`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#781) | NEW `REQ-SUBSCRIPTION-AUTHENTICATION`; `REQ-MODEL-POLICY`, `REQ-GLOBAL-PI-OVERLAY`, `REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-TOKEN-ACCOUNTING-AND-CAPS` gain the explicit subscription path through that requirement. `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-MODEL-PROPOSALS-AND-CANARY`, `REQ-RUN-RECOVERY`, `REQ-RESURRECTABLE-SANDBOX` and the existing forge author gates UNCHANGED, checked: no browser authentication write, no model-callable credential control, no paid canary exemption, no account rotation or cross-model replay permission, and no sandbox credentials. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |
 | 2026-10-31 (#773) | REQ-OPERATOR-CONSOLE-SCREENS, REQ-OPERATOR-CONSOLE-ACTIONS, REQ-MODEL-POLICY, REQ-MODEL-PROPOSALS-AND-CANARY and REQ-ADMIN-VIA-PI-EXTENSION AMENDED for the Models page, person-only role editor, typed read and retained comparison evidence. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |
 | 2026-10-29 (#735, #743) | NEW `REQ-WATCH-TRIGGER` and `REQ-WATCH-DECISION-STEP`; `REQ-OPERATOR-CONSOLE-ACTIONS` destructive list AMENDED for board freeze, clear and revert. `REQ-JOB-TIMEOUT-30M`, `REQ-AI-TRIGGERED-RUNS`, `REQ-RESUMABLE-SESSION` and existing forge author gates UNCHANGED, checked: watch cannot chain or resume, and a person still authorizes code changes. |
 | 2026-10-29 (#717) | NEW `REQ-MODEL-PROPOSALS-AND-CANARY`; AMENDED `REQ-MODEL-POLICY`, `REQ-ADMIN-VIA-PI-EXTENSION` and `REQ-COST-ANALYTICS` for reviewed roles, immutable inputs, pre-spawn refusals, proposal-only reports and capped replay comparisons. Existing literal selection, #716 singleton enforcement and counterfactual estimates UNCHANGED, checked. |

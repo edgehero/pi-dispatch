@@ -136,7 +136,7 @@ for (const [provider, api] of [["anthropic", "anthropic-messages"], ["openai", "
 			const terminal = await runtime.streamSimple(model, { messages: [{ role: "user", content: "test", timestamp: 0 }], tools: [] }, { apiKey: "fake-key", fetch, onResponse: () => { responseHooks += 1; } }).result();
 			assert.equal(terminal.stopReason, "error");
 			assert.ok(calls > 0);
-			assert.deepEqual(observer.failure(terminal), { kind: "rate-limited", resetAt: NOW + 2000 });
+			assert.deepEqual(observer.failure(terminal), { kind: "rate-limited", resetAt: NOW + 2000, ...(provider === "anthropic" ? { subscriptionProvider: "anthropic" } : {}) });
 			if (api === "anthropic-messages") assert.equal(responseHooks, 0, "failure headers cannot rely on Anthropic onResponse");
 		} finally { observer.uninstall(); }
 	});
@@ -179,7 +179,7 @@ test("pinned SDK prompt resolves on 429 yet terminal events retain reset evidenc
 		await session.prompt("test");
 		const outcome = decideExit({ terminal, meterStop: meter.state.stopReason });
 		assert.equal(outcome.code, 1, `a fulfilled prompt is still a terminal provider failure: ${JSON.stringify(outcome)} terminal=${JSON.stringify(terminal)} guard=${JSON.stringify(guardNotes)}`);
-		assert.deepEqual(observer.failure(terminal), { kind: "rate-limited", resetAt: NOW + 2000 });
+		assert.deepEqual(observer.failure(terminal), { kind: "rate-limited", resetAt: NOW + 2000, ...(model.provider === "anthropic" ? { subscriptionProvider: "anthropic" } : {}) });
 		assert.equal(observer.nonRootCalls, false);
 		assert.equal(observer.rootCalls, 1);
 		assert.equal(tools.toolsStarted, false);

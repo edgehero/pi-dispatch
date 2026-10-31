@@ -115,6 +115,7 @@ import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
 import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
+import { WORKER_NAME_RE } from "./worker-name.mjs";
 import { parseTriggersDocument } from "./triggers.mjs";
 import { secretBundleChecks } from "./doctor-bundles.mjs";
 import { doctorModelProposalChecks } from "./doctor-model-proposals.mjs";
@@ -235,6 +236,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// without uninstalling a dependency. Threaded like every other seam: a seam collectChecks honours
 		// and runDoctor silently drops is a seam that cannot pin an EXIT CODE, only a check object.
 		providerOracle = defaultProviderOracle,
+		subscriptionFactory,
 		// Issues #501 and #502: the worker's model catalog and pi's own model loader, both imported lazily. Seams, so a test
 		// can drive the not-installed arm and a disagreement without editing pi. Undefined means the defaults.
 		modelCatalog,
@@ -435,7 +437,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -711,7 +713,7 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -3050,6 +3052,7 @@ export async function collectChecks(shellVars, seams) {
 	}
 
 	section("provider");
+	const subscriptionCredentials = await doctorSubscriptionCredentials(env, { cwd, home, now: seams.wallClock ?? Date.now, configure: seams.subscriptionFactory });
 	// Which variable holds a provider's key is PI'S fact, asked of pi rather than copied (issue #286).
 	// The copy this replaced had anthropic's two variables in the WRONG precedence order, invented
 	// GOOGLE_API_KEY, and invented a `gemini` provider pi has never had -- three ways for doctor to bless
@@ -3103,7 +3106,8 @@ export async function collectChecks(shellVars, seams) {
 			hintUnread = true;
 		}
 	}
-	const keyCheck = providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir: keyAgentDir, oracle, nodeOk: checks[0]?.ok, keyless: { endpoints: keylessEndpoints, models: keylessModels, unreadable: keylessUnreadable, hintModels, hintUnread } });
+	const subscriptionDefault = await subscriptionCredentials.check(provider);
+	const keyCheck = subscriptionDefault.managed ? subscriptionCredentialCheck(provider, subscriptionDefault) : providerKeyCheck({ provider, env: { ...env, ...keyFromFile }, agentDir: keyAgentDir, oracle, nodeOk: checks[0]?.ok, keyless: { endpoints: keylessEndpoints, models: keylessModels, unreadable: keylessUnreadable, hintModels, hintUnread } });
 	const keyNamed = Object.keys(keyFromFile).filter((name) => keyCheck.label?.includes(`: ${name})`));
 	// Issue #481 (PR #485 review round 2): a key found nowhere doctor can look is one an env-setup script may export, which
 	// is the documented home for a provider key fetched from a secrets manager (docs/secrets.md).
@@ -3681,6 +3685,12 @@ export async function collectChecks(shellVars, seams) {
 				// A malformed PI_ALLOWED_MODELS is its own line above (the worker refuses to boot on it).
 			}
 			const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList, modelRoles: triggerModelRoles, projects: modelRoleProjects });
+			const subscriptionChecks = new Map();
+			for (const subjectProvider of new Set(subjects.flatMap((subject) => [subject.main.provider, ...subject.list.map((ref) => ref.provider)]))) {
+				const result = await subscriptionCredentials.check(subjectProvider);
+				subscriptionChecks.set(subjectProvider, result);
+				if (subjectProvider !== provider && result.managed) checks.push(subscriptionCredentialCheck(subjectProvider, result));
+			}
 
 			// The deployment default's catalog row prints PI_PROVIDER/PI_MODEL: not for a malformed one, whose shape row is
 			// the one line (issue #673, review round 1).
@@ -3693,6 +3703,7 @@ export async function collectChecks(shellVars, seams) {
 					forwarded: (env.PI_FORWARD_ENV ?? "").split(",").map((name) => name.trim()).filter((name) => name !== ""),
 					env,
 					overlay: overlayDoc,
+					subscriptionChecks,
 				}),
 			);
 		}
@@ -6102,7 +6113,7 @@ export function unknownModelChecks(subjects, checkModelsKnown, readOverlay) {
  * Said nothing about a provider it cannot judge: no names at all (Bedrock reads the AWS chain), the keyless marker
  * (#503), or an `apiKey` that is not a variable reference.
  */
-export function listedProviderCredentialChecks(subjects, { candidatesOf, forwarded = [], env = {}, overlay = null }) {
+export function listedProviderCredentialChecks(subjects, { candidatesOf, forwarded = [], env = {}, overlay = null, subscriptionChecks = new Map() }) {
 	const providers = overlay?.providers;
 	const namesFor = (provider) => {
 		const entry = providers !== null && typeof providers === "object" && !Array.isArray(providers) && Object.hasOwn(providers, provider) ? providers[provider] : null;
@@ -6118,6 +6129,7 @@ export function listedProviderCredentialChecks(subjects, { candidatesOf, forward
 	for (const s of subjects) {
 		for (const provider of new Set(s.list.map((ref) => ref.provider))) {
 			if (provider === s.main.provider) continue;
+			if (subscriptionChecks.get(provider)?.managed) continue;
 			const names = namesFor(provider);
 			if (names.length === 0) continue;
 			if (names.some((n) => s.secretNames.includes(n) || (forwarded.includes(n) && typeof env[n] === "string" && env[n] !== ""))) continue;
@@ -6158,6 +6170,43 @@ export function deploymentSettingsOf(env, settingsFile, fileExists) {
 	const resolved = resolveSettings(fromEnv, read);
 	if (resolved.invalid) return fromEnv;
 	return Object.fromEntries(Object.keys(fromEnv).map((key) => [key, resolved[key] ?? null]));
+}
+
+/** Subscription diagnostics use only local credential metadata, independently of forge validity or Valkey. */
+export async function doctorSubscriptionCredentials(env, { cwd = process.cwd(), home = safeHomeDir(), now = Date.now, configure } = {}) {
+	if (!env.PI_AUTH_CONNECTIONS_FILE) return { check: async () => ({ ok: true, managed: false }) };
+	let auth;
+	try {
+		configure ??= (await import("./subscription-config.mjs")).configuredSubscriptions;
+		const config = { authConnectionsFile: resolve(cwd, env.PI_AUTH_CONNECTIONS_FILE), authStoreDir: env.PI_AUTH_STORE_DIR ? resolve(cwd, env.PI_AUTH_STORE_DIR) : null, settingsFile: settingsFilePath(env, home), workerName: workerNameFrom(env), globalPiDir: env.PI_GLOBAL_PI_DIR || null, jobsDir: jobsDirPath(env), sandboxDir: env.PI_SANDBOX_DIR || defaultSandboxDir(env) };
+		auth = configure({ config, redis: null, now })?.auth;
+		if (typeof auth?.check !== "function") throw new Error();
+	} catch { return { check: async () => ({ ok: false, managed: true, reason: "auth-policy-invalid" }) }; }
+	const cache = new Map();
+	return { check(provider) {
+		if (!cache.has(provider)) cache.set(provider, Promise.resolve().then(() => auth.check(provider, { readOnly: true })).catch(() => ({ ok: false, managed: true, reason: "auth-state-unavailable" })));
+		return cache.get(provider);
+	} };
+}
+
+export function subscriptionCredentialCheck(provider, row) {
+	const name = printable(provider);
+	const owner = typeof row.ownerHost === "string" && WORKER_NAME_RE.test(row.ownerHost) ? ` on owner ${row.ownerHost}` : "";
+	const id = typeof (row.connectionId ?? row.id) === "string" && WORKER_NAME_RE.test(row.connectionId ?? row.id) ? ` ${row.connectionId ?? row.id}` : " CONNECTION";
+	if (row.ok === true) return { ok: true, label: `Subscription credential selected (${name})${owner}; the host renews access before admitted jobs` };
+	const words = {
+		"auth-owner-host": "belongs to another owner host; this worker defers its subscription jobs",
+		"auth-reauth-required": "requires sign-in on its owner host",
+		"auth-refresh-uncertain": "requires reconnect after an uncertain token refresh",
+		"auth-adapter-unpinned": "requires reviewed adapter staging",
+		"auth-adapter-source-mismatch": "requires reviewed adapter staging",
+		"auth-adapter-version-mismatch": "has an incompatible adapter version",
+		"auth-adapter-unavailable": "has no usable staged adapter",
+		"auth-store-permissions": "has unsafe private credential-store permissions",
+		"auth-credential-invalid": "has an invalid stored subscription credential",
+		"auth-policy-invalid": "has an unavailable or invalid connection policy",
+	};
+	return { ok: false, ...(row.reason === "auth-owner-host" ? { warn: true } : {}), label: `Subscription credential selected (${name}) ${words[row.reason] ?? "has unavailable credential metadata"}`, fix: row.reason === "auth-reauth-required" || row.reason === "auth-refresh-uncertain" ? `run \`pi-dispatch auth login${id}\` on the connection owner host` : "run `pi-dispatch auth status` on the connection owner host and correct its reviewed policy, adapter or private store" };
 }
 
 /** The worker's model catalog (model-catalog.mjs), imported lazily for `defaultProviderOracle`'s reason, or null. */

@@ -724,6 +724,16 @@ The folder is the budget envelope's folder, or a folder above it. A job there co
 
 What to do: keep the envelope file outside every job's folder. See [allocation.md](allocation.md).
 
+### local-folder-holds-subscription-auth
+
+The resolved local folder contains the private subscription credential store. Mounting that original folder
+would expose refresh credentials, including untracked files. This protection applies to every local job when
+subscription authentication is configured, even a job using an unbound API provider. A store that will be
+created by a later login is protected too.
+
+What to do: keep `PI_AUTH_STORE_DIR` outside every local job's folder, including any home or dotfiles repository.
+See [subscription-auth.md](subscription-auth.md).
+
 ### local-folder-project-changed
 
 The folder now leads, through a link, into another project's folder than the one the job was billed to.
@@ -1605,3 +1615,157 @@ The selected image does not declare the restricted, authenticated `answerDraft` 
 starts and nothing is spent.
 
 What to do: rebuild and verify the job image before enabling answer rules. See [job-image.md](job-image.md).
+
+## Subscription connections and quota
+
+See [subscription authentication](subscription-auth.md) for the owning-host commands, audited profiles and quota rules.
+
+### auth-policy-invalid
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-policy-invalid). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-adapter-unsupported
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-adapter-unsupported). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-adapter-unapproved
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-adapter-unapproved). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-owner-host
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-owner-host). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-adapter-unavailable
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-adapter-unavailable). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-capability-unsupported
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-capability-unsupported). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-endpoint-unsupported
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-endpoint-unsupported). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-reauth-required
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-reauth-required). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-refresh-uncertain
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-refresh-uncertain). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-store-unavailable
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-store-unavailable). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-snapshot-too-short
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-snapshot-too-short). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-route-unbounded
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-route-unbounded). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-venue-unsupported
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-venue-unsupported). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-adapter-disabled
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-adapter-disabled). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-credit-cap-required
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-credit-cap-required). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-binding-changed
+
+Stopped before starting: the configured subscription connection cannot authorize this job (auth-binding-changed). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### auth-model-unverified
+
+Stopped before starting: this subscription connection has no verified physical model and endpoint for the requested route. No container was started and nothing was spent.
+
+What to do: Use a supported pinned model on the connection's direct provider endpoint and check the reviewed model list.
+
+### auth-usage-unavailable
+
+Stopped before starting: the subscription usage and paid-overage state could not be established. No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth usage` for this connection on its owner host; check authentication and the bounded usage endpoint before retrying.
+
+### subscription-quota
+
+Stopped before starting: the configured subscription connection cannot authorize this job (subscription-quota). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### subscription-extra-usage
+
+Stopped before starting: the configured subscription connection cannot authorize this job (subscription-extra-usage). No container was started and nothing was spent.
+
+What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+
+### job-image-subscription-auth-unsupported
+
+Refused: the job image does not declare subscription authentication, so it cannot verify the admitted access snapshot, community adapter or final request cost. Rebuild the image from a version that has this feature. Not run.
+
+What to do: Rebuild the job image from a release that declares the feature, or set the trigger's `run.image` to one that does.
+
+### subscription-stale-binding
+
+Stopped before starting: this subscription admission used an obsolete connection owner or credential generation. No container was started and nothing was spent.
+
+What to do: Reload connection status on its owner host and retry through the current reviewed binding; do not copy an old credential snapshot.
+
+### subscription-observation-required
+
+Stopped before starting: a measured provider throttle invalidated this subscription connection's cached quota and paid-overage observations. No new container was started and nothing was spent on this admission.
+
+What to do: Refresh usage on the connection's owning host before retrying. A provider throttle alone does not prove that the subscription plan is exhausted.
+
+### auth-mixed-billing
+
+Stopped before starting: this job's finite model routes mix a bound subscription connection with an unbound API billing route. No container was started and nothing was spent.
+
+What to do: Use only reviewed subscription-bound routes for this job, or use a separate job with only unbound API routes. A subscription fallback cannot spend an API key.
+
+### auth-adapter-conflicting
+
+Stopped before starting: the staged packages contain competing reviewed Claude subscription adapters. No container was started and nothing was spent.
+
+What to do: Keep exactly one reviewed Claude adapter in pi-packages.json, restage with `pi-dispatch import-pi --with-packages`, and check the selected connection's root and digest before retrying.

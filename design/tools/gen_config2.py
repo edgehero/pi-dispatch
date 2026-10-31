@@ -1,4 +1,5 @@
 from config_controls import CONFIG_CONTROLS_CSS
+from subscription_auth import SUBSCRIPTION_AUTH_CSS, SUBSCRIPTION_REFERENCE_CSS, subscription_auth_card
 """Configuration, package D: TriggerDetail, TriggerEditor, SecretsScreen, ConnectionsScreen, ProjectDetail on the Pulse kit.
 gen_fleet.py writes its screens at import, so its helpers are copied here, not imported."""
 from pulse import *
@@ -481,10 +482,10 @@ def connections():
 <p class="c2-gap2 card__sub">They load into every job except triggers that set {code('"packages": false')} (1 does). Staged with {code('pi-dispatch import-pi --with-packages')}.</p>"""
     p_pkgs = card("Staged pi packages", pkgs, id_="p-packages", sub="2")
 
-    inner = '<section id="p-connection-problems" data-panel>' + top + '</section>' + f'<div class="cols"><div class="stack">{p_forges}{p_egress}{p_ep}</div><div class="stack">{p_notify}{p_mcp}{p_env}{p_pkgs}</div></div>'
+    inner = '<section id="p-connection-problems" data-panel>' + top + '</section>' + f'<div class="cols"><div class="stack">{p_forges}{p_egress}{p_ep}{subscription_auth_card()}</div><div class="stack">{p_notify}{p_mcp}{p_env}{p_pkgs}</div></div>'
     return shell("Configuration", inner, "Connections", sub="Where jobs come from, what they may reach, and who hears about failures. Names and hosts only.", back="Configuration")
 
-CO_CSS = COMMON_CSS + """
+CO_CSS = COMMON_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_REFERENCE_CSS + """
 @media (max-width: 1000px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 .c2-pad2 { padding: var(--space-4) var(--space-5) var(--space-5); border-top: 1px solid var(--line); display: grid; gap: var(--space-3); }
 .c2-pad2 .c2-sub { margin: var(--space-2) 0 0; }
@@ -773,7 +774,9 @@ A viewer sees the tables, with no Remove or forms.
 
 Viewers see the same page; nothing on it writes.
 
-**Panels.** `p-connection-problems`, `p-forges`, `p-egress`, `p-endpoints`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
+**Subscription authentication.** Safe connection facts show the selected exact adapter, owner host, compatibility, credential health and expiry. Only a writable operator gets host-terminal sign-in, logout, usage and explicit trial commands. No browser authentication or credential value is exposed. Viewers and agents read the same safe subscription facts. Other deployment metadata is not published in the agent view.
+
+**Panels.** `p-connection-problems`, `p-forges`, `p-egress`, `p-endpoints`, `p-subscription-auth`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
 
 **The server provides.**
 - Per forge: the triggers naming it, the auth source, whether verification secrets are set (names only), the webhook mode and path, and the polling settings.

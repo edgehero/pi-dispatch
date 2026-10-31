@@ -67,6 +67,17 @@ test("an image that inspects clean is ok, and costs exactly ONE spawn", async ()
 	]);
 });
 
+test("subscription capability uses trusted connection policy rather than a queued flag", async () => {
+	for (const supported of [false, true]) {
+		const caps = supported ? "subscriptionAuth" : "<no value>";
+		const preflight = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0 }, `sha256:abc${FIELD_SEP}1.4.0${FIELD_SEP}<no value>${FIELD_SEP}${caps}`) });
+		const legacy = await preflight({ subscriptionAuthRequired: true });
+		assert.equal(legacy.ok, true, "queued data does not arm a host credential binding");
+		const managed = await preflight({ subscriptionAuthRequired: false }, { subscriptionAuthRequired: true });
+		assert.equal(supported ? managed.ok : managed.subscriptionAuthUnsupported, supported ? true : "i");
+	}
+});
+
 test("an image that declares no pi version reports null, which downstream means never resume", async () => {
 	// Go's text/template renders a missing map key as the literal "<no value>". An operator-built image
 	// (OQ-012) that omits the label must run cold rather than resume into a pi whose tool schemas may have
@@ -320,7 +331,7 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
 test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp, awaitInput (#625), reportProgress (#644), recover (#645), steer (#646), sandboxLayout (#683) and observableRunner (#730), each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout", "observableRunner", "fork", "approvalGates", "modelFailover", "modelRoles", "watch", "questionGrouping", "answerDraft"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout", "observableRunner", "fork", "approvalGates", "modelFailover", "modelRoles", "watch", "questionGrouping", "answerDraft", "subscriptionAuth"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
@@ -335,7 +346,7 @@ test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502
 		// `copies` and `brokered`, so the venue-armed rows (#683, #730) are reached as every trigger-armed one is.
 		const preflight = makeImagePreflight({ image: "i", copies: true, brokered: true, spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
 		const next = CAPABILITY_GATES[i + 1];
-		assert.deepEqual(await preflight(all), next ? { [next.result]: "i", declared } : { ok: true, image: "i", piVersion: "0.99.1", imageDigest: "sha256:abc", capabilities: declared });
+		assert.deepEqual(await preflight(all, { subscriptionAuthRequired: true }), next ? { [next.result]: "i", declared } : { ok: true, image: "i", piVersion: "0.99.1", imageDigest: "sha256:abc", capabilities: declared });
 	}
 	for (const gate of CAPABILITY_GATES) {
 		assert.equal(gate.needed({ kind: "github" }), false, `${gate.token}: an unflagged job pays nothing`);

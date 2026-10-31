@@ -182,7 +182,7 @@ export function makeRunContainer({
 	// `bundleKeys` (issue #704 part 3) is the processor's `{ endpoints, plain }` split of a project secret bundle's received
 	// variables: handed on in the build options for a venue whose own layer holds credentials (openshell), which binds the
 	// first kind to their hosts and passes the second as values. Every other venue ignores it: the values are in `secrets`.
-	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false }) {
+	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [] }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -385,6 +385,7 @@ export function makeRunContainer({
 			// Issue #502: the effective allowed-model list, off `job` like excludeTools. index.mjs `effectiveJobOf` folds
 			// the deployment's PI_ALLOWED_MODELS in under the trigger's own, so `job.models` is already the one list.
 			allowedModels: Array.isArray(job.models) && job.models.length > 0 ? job.models : null,
+			subscriptionAuth,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 			// REQ-TRIGGER-SECRETS: this trigger's resolved secrets, fetched by the processor BEFORE anything
 			// spent. Off the call bag rather than off `job` or the closure: it is neither a per-job fact the

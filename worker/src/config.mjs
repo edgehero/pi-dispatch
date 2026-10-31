@@ -545,6 +545,8 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		egressProxy: egressProxyName(env), // one derivation, shared with the panel's sandbox (#277)
 		forwardEnv: forwardEnvList(env.PI_FORWARD_ENV, egressEnabled(env)), // extra host var NAMES to forward (e.g. a custom provider's key); explicit allowlist, GitHub token names refused
 		authFromPi: env.PI_AUTH_FROM_PI !== "0", // ON by default: use the key in ~/.pi/agent/auth.json when the env has none (api-key only). PI_AUTH_FROM_PI=0 forces env-only.
+		authConnectionsFile: env.PI_AUTH_CONNECTIONS_FILE ? resolve(env.PI_AUTH_CONNECTIONS_FILE) : null,
+		authStoreDir: env.PI_AUTH_STORE_DIR ? resolve(env.PI_AUTH_STORE_DIR) : null,
 		jobsDir: jobsDirPath(env),
 		// REQ-RESURRECTABLE-SANDBOX. `||` (not `??`) so an empty string falls back, matching logsDir.
 		sandboxDir: env.PI_SANDBOX_DIR || defaultSandboxDir(env),

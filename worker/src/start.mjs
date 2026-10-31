@@ -1,3 +1,6 @@
+import { subscriptionRoutes } from "./subscription-runtime.mjs";
+import { configuredSubscriptions } from "./subscription-config.mjs";
+import { publishSubscriptionStatus } from "./subscription-status.mjs";
 import { readBusy as canaryBusy } from "./canary-lock.mjs";
 import { makeReadModelRoles } from "./model-roles-file.mjs";
 import { makeWatchStore } from "./watch-store.mjs";
@@ -1453,6 +1456,7 @@ export async function startWorker(
 	// One raw Redis client, shared by the budget (via the worker) and the scheduler stall guard, so it is
 	// hoisted out of the createWorkerFn arg object.
 	const redis = makeRedisClient(valkey.url, { servername: valkey.servername, context: valkeyContext });
+	const subscriptions = configuredSubscriptions({ config, redis, now: () => Number(now()) });
 	// Its errors as one message-only line (PR #475's review, round 2), like every Queue and Worker's: without a listener
 	// ioredis printed a stack per reconnect attempt.
 	onValkeyError(redis, "shared client");
@@ -2512,6 +2516,13 @@ export async function startWorker(
 	// a spread, a freeze, a snapshot inside `createWorker` -- un-registers the watchers in SILENCE and puts
 	// issue #295 back. Append only: two tests pin `[0]` as the runtime queue and `[1]` as the registry.
 	const extraClosers = [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])];
+	if (subscriptions) {
+		const publish = () => publishSubscriptionStatus(redis, config.workerName, subscriptions.runtime).catch(() => log("subscription_status_unavailable", {}));
+		await publish();
+		const tick = setInterval(publish, 15_000);
+		tick.unref?.();
+		extraClosers.push({ close: () => clearInterval(tick) });
+	}
 	// A first source can arrive through live configuration after boot. Recovery and quiet-close
 	// draining must already exist then, even when the initial source registry was empty.
 	extraClosers.push(makeWatchDrainer({ runtime: watchRuntime, log }));
@@ -2858,19 +2869,28 @@ export async function startWorker(
 			// A PROBE: whatever it resolves is dropped on the floor. The credential itself is read where it always
 			// was, inside buildContainerEnv, so no live key is ever in scope in the processor.
 			// Issue #503: `modelEndpoints` is the pickup's snapshot, the same one runContainer hands buildContainerEnv.
+			subscriptionRuntime: subscriptions?.runtime ?? null,
+			subscriptionAuthRequired: async (job) => {
+				if (!subscriptions) return false;
+				for (const ref of subscriptionRoutes(job)) if ((await subscriptions.auth.check(ref.provider)).managed) return true;
+				return false;
+			},
 			checkProviderCredential: (job, { modelEndpoints = null } = {}) => {
-				try {
-					resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: job.answerDraft || job.watch || job.questionGrouping ? [] : config.forwardEnv, modelEndpoints });
-					return { ok: true };
-				} catch (error) {
-					// Only OUR determinate refusal. Anything else (a bug here, an fs fault the module does not model)
-					// must not become a policy refusal on the operator's issue: it rethrows into runJob's catch, which
-					// classifies it the way it always did.
-					// Issue #503: a transient overlay read at this pickup is no verdict; the processor retries it as infra.
-					if (error?.piDispatchTransient === true) return { ok: false, unavailable: error.code ?? "unreadable" };
-					if (error?.piDispatchConfig !== true) throw error;
-					return { ok: false, message: error.message };
-				}
+				const legacy = () => {
+					try {
+						resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: job.answerDraft || job.watch || job.questionGrouping ? [] : config.forwardEnv, modelEndpoints });
+						return { ok: true };
+					} catch (error) {
+						// Only OUR determinate refusal. Anything else (a bug here, an fs fault the module does not model)
+						// must not become a policy refusal on the operator's issue: it rethrows into runJob's catch, which
+						// classifies it the way it always did.
+						// Issue #503: a transient overlay read at this pickup is no verdict; the processor retries it as infra.
+						if (error?.piDispatchTransient === true) return { ok: false, unavailable: error.code ?? "unreadable" };
+						if (error?.piDispatchConfig !== true) throw error;
+						return { ok: false, message: error.message };
+					}
+				};
+				return subscriptions ? subscriptions.auth.check(job.provider).then((checked) => checked.managed ? checked : legacy()) : legacy();
 			},
 			// Issue #502. The model-exists gate: pi's builtin catalog, then the overlay models.json, read at most once per
 			// job and only when a model is not builtin, so the operator's edits apply without a restart. The SAME file
@@ -2880,7 +2900,11 @@ export async function startWorker(
 				const egress = failoverEgressRequired(job, { egress: config.egress, defaultBackend: config.backends[0] });
 				return checkFailoverCandidate(job, {
 					models, endpoints, egress, allowlist: egress ? readEgressAllowlist() : [],
-					credential: (candidate, { modelEndpoints }) => {
+					credential: async (candidate, { modelEndpoints }) => {
+						if (subscriptions) {
+							const checked = await subscriptions.auth.check(candidate.provider);
+							if (checked.managed) return checked;
+						}
 						try {
 							resolveProviderCredential({ provider: candidate.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: config.forwardEnv, modelEndpoints });
 							return { ok: true };
@@ -3051,7 +3075,7 @@ export async function startWorker(
 				defaultBackend: config.defaultBackend,
 				// Issue #504 part B: a local job's folder is resolved at prepare and mounted resolved; one named inside a run
 				// root or a cron folder must still resolve inside it, and none may be the envelope's folder or above it.
-				localPlacement: { jobPaths: envelopeJobPathsNow, envelopeFile: config.envelopeFile ?? null, sandboxDir: config.sandboxDir },
+				localPlacement: { jobPaths: envelopeJobPathsNow, envelopeFile: config.envelopeFile ?? null, sandboxDir: config.sandboxDir, authStoreDir: subscriptions?.storeDir ?? null },
 				// Issue #505: /job/portfolio.json for a confirmed portfolio job.
 				portfolioSnapshot,
 				preparers: makeForgePreparers({ gitlabApiUrl: config.gitlab?.apiUrl ?? null, forgejoApiUrl: config.forgejo?.apiUrl ?? null, azureOrgUrl: config.azure?.orgUrl ?? null }),

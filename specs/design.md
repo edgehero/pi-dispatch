@@ -3463,26 +3463,25 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     metered spend, and a zero rate is no longer even a hint that a plan exists (the qwen-token-plan family
     is all-zero, and so are free models of metered providers). Either way the declaration is what turns
     the recorded number back into "prepaid at a price somebody is actually paying".
-  - **The env boundary refuses subscription logins by design.** `env-allowlist.mjs` rejects an
-    OAuth/subscription credential deliberately (it expires; an unattended service cannot refresh it), so
-    no credential that could name the plan ever reaches the worker — the operator declaration is the
-    **only honest price source**, not merely the most convenient one.
+  - **Authentication does not state a plan price.** The legacy `auth.json` fallback still refuses stored
+    OAuth; #781 adds a separate explicit host-owned connection and renewal path. Neither an access token
+    nor a quota percentage states what the operator pays for a plan. This file remains the price source,
+    independently of which authentication route actually served a run.
   - **Declaring a plan must never become a way to route to it.** A file the admin reads for arithmetic is
     harmless; the same file consulted at job time would be a second model-selection channel that bypasses
     the overlay's precedence and the env boundary's refusal. Keeping the worker out of the file entirely
     makes that misuse unrepresentable rather than merely discouraged.
 - **Rejected**:
-  - *Vendor usage-API polling* — a new network surface, credentials, and failure modes for numbers
-    vendors barely publish; the file's `null`-means-undisclosed unit/limit is the honest version of the
-    same ignorance.
+  - *Using quota observations as a price declaration* — #781 permits bounded opt-in community usage
+    observations for admission, not replacement subscription pricing. Missing quota remains unknown and
+    cannot fill this file's undisclosed unit, limit or plan price.
   - *Auto-detecting plans from zero-rate tables* — a rate card is not a purchase; a provider whose table
     is zeros says nothing about whether this operator pays for it, at what price, or shared with what.
   - *Overlay keys instead of a file* — the overlay is runtime tuning with fail-closed job-start semantics
     (`DES-RUNTIME-SETTINGS-FILE-OVERLAY`); prices are bookkeeping that no job start should ever refuse
     on, and a versioned, diffable operator file is the right trust class for a declaration.
-  - *Routing/auth integration* — reopens the env-allowlist decision this design exists to respect: the
-    refusal of subscription logins is the reason the file exists, so the file must never become the
-    workaround for it.
+  - *Routing/auth integration through this file* — hypothetical plan arithmetic is not execution authority.
+    #781's reviewed connection policy is separate, and this file never bypasses its credential gates.
 - **Traces to**: `DES-ADMIN-VIA-PI-EXTENSION`, `INT-SUBSCRIPTIONS-FILE-CONTRACT`,
   `REQ-TOKEN-ACCOUNTING-AND-CAPS`
 
@@ -4659,10 +4658,19 @@ free local model, or using a few successful live probes as proof of every routin
      `spent + in-flight bounds + bound > cap`, or when the bound is `Infinity`. A refusal counts `costRefused`,
      logs `cost_refused` with numbers only, stops the job with `cost-cap` (the meter's one first-wins stop, which
      aborts the root session) and answers this call with the hard stop. The first refusal's rule (`unboundable`,
-     `external` or `over-cap`) rides the exit line as `why` and reaches the run record (issue #507), because a stop at
+     `external`, `over-cap` or `final-payload`) rides the exit line as `why` and reaches the run record (issue #507), because a stop at
      $0 read as a cap set too low when the fix was one models.json field. A closed enum, never the model id: the
      record is PII-free and the line is container-written. An admitted call's bound is held in
      flight until it settles.
+     **Final shaped payload (#781):** the prepared `onPayload` hook runs after provider shaping and the
+     caller/model hook. It clones the complete JSON to send and recomputes a conservative bound from that
+     body plus the original context/image allowances. Wire output caps, output multiplicity and one-hour
+     cache writes are judged from the final body; removing or disabling a local server's output cap is
+     unboundable. The same ticket grows to the larger bound, with spent, other in-flight tickets and external
+     child spend included before dispatch. It is never reserved or settled twice. A denial throws before the
+     guarded transport sends and records `final-payload`. Reviewed subscription adapters must demonstrate
+     that their actual SDK sends this checked body and performs no unadmitted internal retry. Trusted code
+     that does not participate in the payload protocol remains subject to the named extension trust boundary.
   When the call settles, its bound leaves the in-flight sum and `ceil(cost x 1e6)`, never below zero (pi's
   short-write term can go negative), joins `spent`. A charge above the bound counts `boundExceeded`. A call
   whose cost is unknown (no finite `cost.total`, or a rejected result) stays charged at its bound, and the meter
@@ -16062,7 +16070,7 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
 - **Retry safety**: a queue attempt is pessimistically marked unsafe before container spawn. Only verified matching exit-1 metadata may replace it with a safe marker. Root tool execution, secondary/child calls, unknown meter coverage, a missing exit line or a crash keep cross-model replay disabled. The failure can still cool its model for other jobs. A safe retry excludes its previous failed model even if the global cooldown expired during backoff. The unsafe marker never expires while a queued retry can still exist. Existing queue attempts/backoff are not increased. Recovery restores its checkpoint provider/model before model gates and leases; it never chooses a fallback.
 - **Classification**: classify only the terminal failure after pi's own retries. Known quota/spend codes win over retry hints; a 429 with a usable reset is rate limited; one without it is quota exhausted. Overload/5xx and context overflow have distinct closed kinds. Parameter and authentication errors do not authorize switching. Request-scoped transport observation preserves existing fetch/hooks; a provider path without verified reset visibility uses the documented no-reset policy. No global fetch interception is installed for this feature.
 - **Cooldown**: shared per exact provider/model; reset-derived TTL bounded to six hours, default six hours for quota and 60 seconds for rate limit/overload without a usable reset. Context overflow is job-specific and sets no global cooldown; only a known larger context candidate qualifies. Atomic updates cannot shorten another observation's later reset. All temporarily blocked candidates defer free for a bounded recheck; permanently invalid candidates return an actionable refusal. A window-room read is advisory: the later atomic reservation remains authoritative and can refuse after a concurrent pickup takes the room.
-- **Rejected**: mid-run switching (context/cache and side-effect ambiguity); narrowing every existing job (breaks reviewed multi-model flows); reserving only the selected model while retaining a broader executable list (leaves calls uncovered); trusting transcripts for replay safety (agent-writable); consumer subscription routing (unchanged refusal).
+- **Rejected**: mid-run switching (context/cache and side-effect ambiguity); narrowing every existing job (breaks reviewed multi-model flows); reserving only the selected model while retaining a broader executable list (leaves calls uncovered); trusting transcripts for replay safety (agent-writable); implicit consumer subscription routing. Explicit host-owned connections are separately admitted by `DES-HOST-OWNED-SUBSCRIPTION-AUTH` (#781), without changing replay safety.
 - **Code evidence**: `worker/src/model-failover.mjs`, `worker/src/model-failover-protocol.mjs`, `worker/src/index.mjs`, `image/runner/src/provider-failure.mjs`, `image/runner/run-job.mjs`; `worker/test/model-failover.test.mjs`, `image/runner/test/provider-failure.test.mjs` and `image/verify-image.sh`.
 - **Traces to**: `REQ-MODEL-POLICY`, `INT-MODEL-COOLDOWN-KEY`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`.
 
@@ -16095,10 +16103,65 @@ Board structure follows the WatchBoard design: jobs propose, a person adopts. Au
 
 Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.mjs`; `image/runner/src/watch-decision.mjs`, `watch-tools.mjs`; `admin/src/console/watch.mjs`. Pinned evidence: pi-ai 1.4.0 `dist/api/system-one-shared.js` returns choice, probabilities and confidence; public bool questions map to wire noul. Rejected: hardcoding an endpoint from an issue, an additional unverified decision package, recording queries at an egress proxy, or serving agent-authored markup.
 
+## DES-HOST-OWNED-SUBSCRIPTION-AUTH
+
+- **Decision (#781)**: `PI_AUTH_CONNECTIONS_FILE` enables a separate reviewed connection policy, with one
+  explicit binding per supported provider and a declared owner host. It does not repurpose `subscriptions.json`
+  or import host OAuth credentials implicitly. The host owns login, refresh and logout; jobs receive only
+  deadline-bound access snapshots and content-verified transport/profile metadata. A configured binding owns
+  its provider on failure too. A freshly prepared snapshot is checked again before use.
+- **Community profiles**: exact published package sources are audited and adapted by declared transformations.
+  Primary 0.3.6 gains final payload/fetch observation, conservative cache accounting and bounded refresh behavior;
+  secondary 3.4.3 delegates pi's builtin OAuth while retaining its request shaping under final guards. Source,
+  dependency and prepared-tree digests are evidence, not package-name allowlisting. Conflicting registrations,
+  altered endpoints, arbitrary aliases, hidden account rotation and unverified transforms refuse. Trusted
+  operator extension code remains inside the process trust boundary; capability metadata is not isolation.
+  Competing reviewed Claude packages are knowable from the staged manifest and refuse as
+  `auth-adapter-conflicting` before quota claims, renewal or token mint. Arbitrary trusted factory conflicts
+  remain the runner's registration check before provider dispatch. Final snapshot validation rechecks the
+  stage root, digest and known conflicts; a racing stage change prevents container start and retries with
+  ordinary reservation refunds.
+- **Renewal**: one owner serializes a connection's transactions. Before a rotating refresh it persists an
+  uncertain marker; successful replacement is atomically written and synchronized before admission. A caller
+  cannot cancel and discard an already rotated refresh grant. An ambiguous result requires explicit recovery,
+  not automatic fallback to another credential. A snapshot must outlive the job deadline by the safety margin;
+  there is no refresh grant or host auth-file mount inside the container.
+- **Quota**: the separate subscription store keeps closed, bounded observations and permanent unknown-reset
+  exhaustion. Missing values stay null. A complete newer usage observation may retire generic error exhaustion;
+  partial or older evidence cannot. CAS guards evidence, connection generation and one-person trial claims.
+  Monitoring selections choose the displayed ordinary account windows; known exhausted windows remain visible
+  and mandatory even outside that focus, and scoped/other provider windows remain visible. Local account groups preserve continuity
+  through refresh/reconnect; they do not assert vendor-account identity across independently linked connections.
+- **Boundaries**: ordinary free gates and conservative reservations precede provider dispatch. Explicit paid
+  extra usage requires a positive ceiling with an adequate per-job dollar cap. Final requests cannot widen a
+  model list, change account/endpoint, inflate output or cache cost past their bound, or bypass child metering.
+  Authentication errors remain policy where determinate; store/transport uncertainty remains named. No new
+  paid attempts, mid-run switching, recovery model changes, sandbox credentials or implicit API-key fallback.
+  Version 1 rejects a finite route set mixing bound subscription and unbound API billing as `auth-mixed-billing`.
+  Candidate selection skips an unbound API fallback for a subscription primary; reviewed fallback across two
+  explicitly bound subscription providers remains subject to the same gates, with one active connection per
+  provider. The admitted Claude runtime and its shared children are supported; independent legacy Anthropic
+  compatibility dispatch and fresh unadapted runtimes refuse. Only the admitted runtime's own internal
+  compatibility reentry bypasses that independent-call refusal. Separate pi CLI and Node child processes do
+  not inherit attested subscription admission and refuse subscription dispatch in the initial release; child
+  sessions sharing the admitted root runtime retain its guards.
+- **Rejected**: mounting host credentials, forwarding refresh grants, token hashes as stable account identity,
+  scraping slash-command diagnostics, trusting extension-supplied healthy prose, treating missing scope usage
+  as zero, capping weekly resets to six hours, expiring unknown exhaustion, and burning a trial during candidate
+  inspection. `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` remains the accounting-file contract.
+- **Code evidence**: `worker/src/auth-connections.mjs`, `auth-store.mjs`, `oauth-openai.mjs`,
+  `community-auth-adapters.mjs`, `community-auth-patches.mjs`, `community-auth-pins.mjs`,
+  `subscription-config.mjs`, `subscription-runtime.mjs`, `subscription-quota.mjs`; the runner's subscription
+  adapter and final-request guard; `admin/src/subscription-auth-view.mjs` and console subscription panels.
+- **Traces**: `REQ-SUBSCRIPTION-AUTHENTICATION`, `INT-AUTH-CONNECTIONS-FILE-CONTRACT`,
+  `INT-SUBSCRIPTION-CREDENTIAL-STORE`, `INT-SUBSCRIPTION-QUOTA-KEY`, `DES-MODEL-FAILOVER`,
+  `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`, `DES-OPERATOR-GLOBAL-OVERLAY`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#781) | NEW `DES-HOST-OWNED-SUBSCRIPTION-AUTH`; `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` corrects the old blanket OAuth rationale while preserving analytics-only enforcement. `DES-MODEL-FAILOVER`, `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`, `DES-OPERATOR-GLOBAL-OVERLAY` and `DES-OPERATOR-CONSOLE` AMENDED through the explicit subscription contract. `DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED for the same-ticket final-payload recheck; reservation and settlement ledgers, `DES-MODEL-ROLES`, recovery physical-model selection, staged-package opt-out precedence, forge-token authority, automatic-merge prohibition and the pasted visual-system tokens/stylesheets UNCHANGED, checked. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |
 | 2026-10-31 (#773) | DES-OPERATOR-CONSOLE, DES-MODEL-ROLES, DES-DOCTOR-RESULTS-PUBLISHED and DES-ADMIN-VIA-PI-EXTENSION AMENDED for bounded shared Models reads, actual source-card semantics, selective proposal publication and existing confirmed file writes. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |
 | 2026-10-29 (#735, #743) | NEW `DES-WATCH-DETERMINISTIC-PRODUCER` and `DES-DECISION-MODEL-BEFORE-THE-JOB`. `DES-OPERATOR-CONSOLE` AMENDED by reference for Watch/board pages and operator-only evidence; `DES-JOB-OUTBOX-CHAINING` UNCHANGED, checked: watch refuses child chains. Existing containers, metering, CSP and console audited writes are reused, and board adoption follows the repository design rather than automatic promotion. |
 | 2026-10-29 (#717) | NEW `DES-MODEL-ROLES`: reviewed maps resolve before admission; base-blob agent snapshots, child preflight and bounded refusal hashes preserve existing boundaries. `DES-MODEL-FAILOVER`, `DES-RECOVERY-TRUST-PATHS-FROM-BASE` and `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` UNCHANGED, checked: failover keeps its singleton, recovery keeps its physical model and proposals never adopt changes. |

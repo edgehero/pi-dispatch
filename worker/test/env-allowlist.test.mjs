@@ -1526,3 +1526,14 @@ test("secondary reviewed watch provider resolves only its own credential and ref
 test("secondary classifier credential cannot be overwritten through the final secrets assignment", { skip }, () => {
 	assert.throws(() => buildContainerEnv({ provider: "anthropic", secondaryProvider: "openrouter", model: "m", maxTurns: 1, hostEnv: { ANTHROPIC_API_KEY: "primary", OPENROUTER_API_KEY: "classifier" }, secrets: { OPENROUTER_API_KEY: "override" } }), (error) => error.piDispatchConfig === true && !error.message.includes("override"));
 });
+
+test("selected subscription snapshot owns its provider despite API keys, forward vars and secret values", { skip }, () => {
+	const snapshot = { provider: "anthropic", connectionId: "claude", adapter: "pi-anthropic-oauth@0.3.6", generation: 1, expiresAt: 1_900_010_000_000, deadlineAt: 1_900_000_000_000, root: "/opt/pi-global/packages/claude", digest: "a".repeat(64), env: { ANTHROPIC_OAUTH_TOKEN: "access-only" } };
+	const env = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 2, hostEnv: { ...HOST, ANTHROPIC_AUTH_TOKEN: "host-bearer", ANTHROPIC_OAUTH_TOKEN: "host-oauth" }, forwardEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"], secrets: { ANTHROPIC_API_KEY: "secret-key" }, subscriptionAuth: [snapshot] });
+	assert.equal(env.ANTHROPIC_OAUTH_TOKEN, "access-only");
+	assert.equal(env.ANTHROPIC_API_KEY, undefined);
+	assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
+	assert.equal(JSON.stringify(JSON.parse(env.PI_SUBSCRIPTION_AUTH)).includes("access-only"), false);
+	assert.equal(env.OPENAI_API_KEY, undefined);
+	assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+});

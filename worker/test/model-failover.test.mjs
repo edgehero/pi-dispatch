@@ -116,6 +116,96 @@ test("all cooling defers without spending; a busy endpoint skips to the next can
 	assert.equal((await select(fakeRedis(), { acquireEndpoints: async () => false })).wait, "endpoint");
 });
 
+test("a quota-blocked subscription primary cannot fall back to an unbound API billing route", async () => {
+	const redis = fakeRedis();
+	const logs = [], checked = [];
+	let reads = 0;
+	redis.get = async () => { reads++; return null; };
+	const result = await select(redis, {
+		subscriptionCheck: async candidate => candidate.provider === "openai"
+			? { ok: false, managed: true, wait: "subscription-quota", until: NOW + 7 * 86_400_000 }
+			: { ok: true, managed: [] },
+		checkCandidate: async candidate => { checked.push(candidate); return null; },
+		reservationFor: () => assert.fail("no reservation calculation for an inadmissible subscription route"),
+		acquireEndpoints: async () => assert.fail("no endpoint holds for an inadmissible subscription route"),
+		log: (event, fields) => logs.push({ event, fields }),
+	});
+	assert.deepEqual(result, { wait: "subscription-quota", until: NOW + 60_000 });
+	assert.deepEqual([checked, reads, redis.writes], [[], 0, []]);
+	assert.deepEqual(logs, [
+		{ event: "model_candidate_skipped", fields: { model: primary, reason: "subscription-quota" } },
+		{ event: "model_candidate_skipped", fields: { model: fallback, reason: "auth-mixed-billing" } },
+	]);
+});
+
+test("a successful managed-array primary also fences API fallback when its ordinary candidate gate refuses", async () => {
+	const seen = [], logs = [];
+	const result = await select(fakeRedis(), {
+		subscriptionCheck: async candidate => ({ ok: true, managed: candidate.provider === "openai" ? [{ id: "chatgpt" }] : [] }),
+		checkCandidate: async candidate => { seen.push(candidate.provider); return "model-unpriced"; },
+		acquireEndpoints: async () => assert.fail("neither candidate may acquire endpoint holds"),
+		log: (_event, fields) => logs.push(fields),
+	});
+	assert.deepEqual(result, { refused: "model-failover-no-candidate" });
+	assert.deepEqual(seen, ["openai"]);
+	assert.equal(logs[1].reason, "auth-mixed-billing");
+});
+
+test("reviewed cross-provider subscription fallback passes ordinary gates with a singleton executable policy", async () => {
+	const admitted = [], endpoints = [];
+	const result = await select(fakeRedis(), {
+		subscriptionCheck: async candidate => candidate.provider === "openai"
+			? { ok: false, managed: true, wait: "subscription-quota" }
+			: { ok: true, managed: [{ id: "claude", provider: "anthropic" }] },
+		checkCandidate: async candidate => { admitted.push(candidate); return null; },
+		acquireEndpoints: async candidate => { endpoints.push(candidate.models); return true; },
+	});
+	assert.equal(result.ref, fallback);
+	assert.equal(result.job.modelWhy, "fallback-unavailable");
+	assert.deepEqual(result.job.models, [fallback]);
+	assert.deepEqual(admitted.map(candidate => [candidate.provider, candidate.models]), [["anthropic", [fallback]]]);
+	assert.deepEqual(endpoints, [[fallback]]);
+	assert.deepEqual(job().models, [primary, fallback], "the reviewed ceiling remains intact");
+});
+
+test("two quota-blocked subscription connections wait without credential checks, ledger reads or endpoint holds", async () => {
+	const redis = fakeRedis();
+	let reads = 0;
+	redis.get = async () => { reads++; return null; };
+	const result = await select(redis, {
+		subscriptionCheck: async () => ({ ok: false, managed: true, wait: "subscription-quota" }),
+		checkCandidate: async () => assert.fail("no candidate credential or pricing read for blocked quota"),
+		reservationFor: () => assert.fail("no reservation calculation for blocked quota"),
+		acquireEndpoints: async () => assert.fail("no endpoint holds for blocked quota"),
+	});
+	assert.deepEqual(result, { wait: "subscription-quota", until: NOW + 60_000 });
+	assert.deepEqual([reads, redis.writes], [0, []]);
+});
+
+test("an unmanaged primary retains ordinary API fallback for both unbound result shapes", async () => {
+	for (const managed of [false, []]) {
+		const seen = [];
+		const result = await select(fakeRedis(), {
+			subscriptionCheck: async () => ({ ok: true, managed }),
+			checkCandidate: async candidate => { seen.push(candidate.models); return candidate.provider === "openai" ? "provider-unconfigured" : null; },
+		});
+		assert.equal(result.ref, fallback);
+		assert.deepEqual(seen, [[primary], [fallback]]);
+	}
+});
+
+test("transient subscription availability throws while permanently inadmissible candidates return a refusal", async () => {
+	for (const transient of [true, false]) {
+		const action = () => select(fakeRedis(), {
+			subscriptionCheck: async () => ({ ok: false, managed: true, reason: "auth-adapter-unavailable", ...(transient ? { unavailable: true } : {}) }),
+			checkCandidate: async () => assert.fail("no provider credential read after subscription refusal"),
+			acquireEndpoints: async () => assert.fail("no endpoint hold after subscription refusal"),
+		});
+		if (transient) await assert.rejects(action, /subscription state unavailable/);
+		else assert.deepEqual(await action(), { refused: "model-failover-no-candidate" });
+	}
+});
+
 test("per-model dollar windows select only a model that can cover the entire reservation", async () => {
 	const redis = fakeRedis();
 	const limits = parseScopedLimits(JSON.stringify({ version: 2, limits: [{ scope: `model:${primary}`, dayUsd: "0.0001" }] }), "limits.json");
@@ -370,4 +460,32 @@ test("a selected parent gives its outbox child the original reviewed ceiling, ke
 	const childChoice = await selectFailoverJob({ ...children[0], maxCostMicros: 100 }, { redis: fixture.redis, id: "queue:child", now: () => NOW, checkCandidate: async () => null });
 	assert.equal(childChoice.ref, fallback, "the inherited fallback remains eligible under its inherited reviewed list");
 	assert.deepEqual(childChoice.job.models, [fallback]);
+});
+
+test("subscription preparation uses the armed deadline and a distinct trial claim for each queue attempt", async () => {
+	const preparations = [];
+	let attempt = 0;
+	const fixture = pickupFixture({ data: { fallbackModels: undefined }, extraDeps: { subscriptionRuntime: { check: async () => ({ ok: true }), prepare: async (_job, options) => { preparations.push(options); return { ok: true, snapshots: [] }; }, validate: async () => true, observe: async () => {} } }, container: async () => ({ code: ++attempt === 1 ? 1 : 0, aborted: false }) });
+	await assert.rejects(fixture.run, (error) => { assert.equal(error.name, "InfraRetry", error.stack); return true; });
+	fixture.queueJob.attemptsMade = 1;
+	assert.equal((await fixture.run()).outcome, "completed");
+	assert.equal(preparations.length, 2);
+	assert.equal(preparations[0].deadlineAt, NOW + 30 * 60_000);
+	assert.equal(preparations[0].signal.aborted, false);
+	assert.notEqual(preparations[0].attemptId, preparations[1].attemptId);
+});
+
+
+test("a subscription store or transport failure after preview retries before mint or clone", async () => {
+	const fixture = pickupFixture({ data: { fallbackModels: undefined }, extraDeps: { subscriptionRuntime: { check: async () => ({ ok: true }), prepare: async () => { throw Object.assign(new Error("private infrastructure diagnostic"), { code: "ECONNRESET" }); }, validate: async () => true } } });
+	await assert.rejects(fixture.run, (error) => error.name === "InfraRetry" && error.reason === "container-never-started" && !error.message.includes("private infrastructure diagnostic"));
+	assert.deepEqual(fixture.seen, []);
+});
+
+test("a subscription activated during primary selection strengthens the API billing fence", async () => {
+	let primaryReads = 0;
+	const result = await selectFailoverJob(job(), { redis: fakeRedis(), id: "activation-race", now: () => NOW, checkCandidate: async () => null, subscriptionCheck: async candidate => candidate.provider === "openai" ? ++primaryReads === 1 ? { ok: true, managed: [] } : { ok: false, managed: true, wait: "subscription-quota", until: NOW + 60_000 } : { ok: true, managed: [] } });
+	assert.equal(primaryReads, 2);
+	assert.equal(result.job, undefined);
+	assert.equal(result.wait, "subscription-quota");
 });
