@@ -120,7 +120,7 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 			// for `{ metadata: "read" }`, so the token it holds for that one question cannot write anything
 			// even if leaked. Job mints never pass this and keep the installation's full grant -- narrowing
 			// is the caller's statement of intent, not a default this mint could guess.
-			const permissions = job?.permissions;
+			const permissions = job?.purpose === "answer-draft" ? { contents: "read", issues: "read", pull_requests: "read", metadata: "read" } : job?.permissions;
 			let minted;
 			try {
 				const appAuth = createAppAuth({ ...auth, request: mintRequest });

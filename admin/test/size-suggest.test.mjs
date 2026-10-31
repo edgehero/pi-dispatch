@@ -1,3 +1,4 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
@@ -253,7 +254,7 @@ function registeredTools() {
   indexMod.default(pi);
   return tools;
 }
-const toolByName = (name) => registeredTools().find((t) => t.name === name);
+const toolByName = (name) => withOperatorDiagnosis(registeredTools().find((t) => t.name === name));
 function toolCtx() {
   const shown = [];
   return { ctx: { hasUI: true, ui: { confirm: async (title, message) => (shown.push({ title, message }), false) } }, shown };
@@ -277,7 +278,7 @@ test("dispatch_limit_edit's confirm shows the project's peaks when a size field 
   const edit = toolByName("dispatch_limit_edit");
   const sized = toolCtx();
   await edit.execute("id", { index: 0, memory: "3g" }, undefined, undefined, sized.ctx);
-  assert.match(sized.shown[0].message, /\nProject shop's runs \(the last 30 days, measured inside the jobs, so advisory\): size now 4g, 2 CPUs; p95 peak 2000m over 12 runs, p95 0\.5 cores used over 12 runs\. They suggest memory 2560m \(oversized: p95 peak 2000m, largest 2000m, over 12 runs\), CPUs 0\.75 \(underused: p95 0\.5 cores used, largest 0\.5 cores, over 12 runs\)\.$/);
+  assert.match(sized.shown[0].message, /\nProject shop's runs \(the last 30 days, measured inside the jobs, so advisory\): size now 4g, 2 CPUs; p95 peak 2000m over 12 runs, p95 0\.5 cores used over 12 runs\. They suggest memory 2560m \(oversized: p95 peak 2000m, largest 2000m, over 12 runs\), CPUs 0\.75 \(underused: p95 0\.5 cores used, largest 0\.5 cores, over 12 runs\)\.\nUndo: .+$/);
   const counted = toolCtx();
   await edit.execute("id", { index: 0, day: 4 }, undefined, undefined, counted.ctx);
   assert.doesNotMatch(counted.shown[0].message, /runs \(the last/, "a count edit shows no peaks");

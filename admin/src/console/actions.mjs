@@ -64,6 +64,7 @@
 import { createHash } from "node:crypto";
 import { DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_WHY_RE, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
+import { hostQueueName } from "@edgehero/pi-dispatch/queue";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 import { auditedWrite } from "../audited-write.mjs";
 import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
@@ -77,6 +78,11 @@ import { cmd } from "./kit.mjs";
 import { WATCH_ID_RE, WATCH_RULE_ID_RE } from "./watch.mjs";
 import { timeHtml, utcText } from "./panels/common.mjs";
 import { FLASH_MAX_BYTES } from "./sessions.mjs";
+import { actionAgentPolicy, authorizeTransition, evaluateActionPolicy } from "../action-policy.mjs";
+export { evaluateActionPolicy } from "../action-policy.mjs";
+import { checkAgentRerun, paidStartEnvironment } from "../agent-starts.mjs";
+import { ANSWERER_ACTIONS, ANSWERER_WRITE_RULES } from "./answerer-actions.mjs";
+import { agentReadProjection } from "../agent-read.mjs";
 
 /** The diff moved to the confirm view with the rest of the bar's markup (issue #737); re-exported where it always was. */
 export { DIFF_LINES_MAX, diffHtmlOf, lineDiff, textHtml } from "./confirm-view.mjs";
@@ -114,6 +120,8 @@ const PAUSE_WINDOW_KEYS = Object.freeze(["scope", "from", "to", "tz", "days", "d
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 const digestOf = (text) => (text === null || text === undefined ? null : sha256(text));
 const codeOf = (e) => (typeof e?.code === "string" && /^[A-Z0-9_]{1,40}$/.test(e.code) ? e.code : "error");
+const AGENT_POLICY_TITLES = Object.freeze({ unattended: "Agent may act alone", confirm: "Person confirms for an agent", person: "Person only" });
+const rerunAuthorityDigest = p => sha256(JSON.stringify({ kind: p.kind, jobId: p.jobId ?? null, queue: p.queue, job: p.job ?? null, schedule: p.schedule ?? null, reserve: p.reserve ?? null }));
 
 /** The count rule every sentence here follows (`confirm-view.mjs` `plural`), re-exported where it always was. */
 export { plural };
@@ -378,11 +386,17 @@ async function fileChange(ctx, { target, expect, summary, run, payload = {}, pla
   if (beforeDigest === afterDigest) return { unchanged: UNCHANGED, ...(typeof unchanged === "function" && plan ? unchanged(plan) : {}) };
   // `beforeText` and `plan` stay on the server: the Undo and the confirm label read them (the trigger count before an
   // add, a setting's old value), and the ticket keeps only what those decide.
-  return { target, expect, summary, ...(barLines ? { barLines } : {}), diff: diffHtmlOf(now.text, after, { file: target }), payload: { ...payload, run }, beforeDigest, afterDigest, beforeText: now.text, plan };
+  return { target, expect, summary, ...(barLines ? { barLines } : {}), diff: diffHtmlOf(now.text, after, { file: target }), payload: { ...payload, run }, beforeDigest, afterDigest, beforeText: now.text, policyEvidence: { before: jsonOf(now.text), after: jsonOf(after) }, plan };
 }
 
 /** Apply a `fileChange`: the same write, on the real fs, with the preview's `expect`. */
 async function applyFile(entry, ctx) {
+  if (ctx.session?.role === "agent") {
+    const current = readNow(ctx.fs, entry.target);
+    if (current.refusal || digestOf(current.text) !== entry.beforeDigest) return { invalid: "The file changed; preview the action again." };
+    const judged = authorizeTransition({ actor: ctx.session, action: entry.action, transition: entry.meta?.policyTransition ?? { ...entry.policyEvidence, plan: entry.plan, payload: entry.payload } });
+    if (!judged.ok) return { invalid: judged.refusal };
+  }
   const res = await entry.payload.run(ctx.fs, entry.expect);
   if (res?.invalid) return { invalid: String(res.invalid) };
   return { ok: true, ...(res?.pending ? { pending: String(res.pending) } : {}), ...(res?.warning ? { warning: String(res.warning) } : {}) };
@@ -521,7 +535,7 @@ function fileAction({ name, kind, build, target, write, bar = null, unchanged = 
       return result.refusal ? { ...result, refusal: shown(result.refusal) } : result;
     },
     async apply(entry, ctx) {
-      const result = await applyFile(entry, ctx);
+      const result = await applyFile({ ...entry, action: name }, ctx);
       return privateResolvers && result.invalid ? { ...result, invalid: resolverTextShown(result.invalid, [...(entry.payload.resolverPaths ?? []), ...resolverPathsOf(ctx)]) } : result;
     },
   };
@@ -691,7 +705,7 @@ const configActions = [
   fileAction({
     name: "trigger-edit",
     kind: "trigger-edit",
-    build: (body, ctx) => ctx.a.plans.planTriggerEdit({ params: { index: index(body), flow: str(body, "flow", { required: true }), backend: str(body, "backend"), provider: str(body, "provider"), model: str(body, "model"), ...(body.maxTurns !== undefined && body.maxTurns !== "" ? { maxTurns: typeof body.maxTurns === "string" && /^\d+$/.test(body.maxTurns) ? Number(body.maxTurns) : body.maxTurns } : {}), ...Object.fromEntries(["progress", "statusComment", "recover", "steer"].filter((k) => body[k] !== undefined).map((k) => [k, body[k]])) }, paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
+    build: (body, ctx) => ctx.a.plans.planTriggerEdit({ params: { index: index(body), flow: str(body, "flow"), backend: str(body, "backend"), provider: str(body, "provider"), model: str(body, "model"), ...(body.maxTurns !== undefined && body.maxTurns !== "" ? { maxTurns: typeof body.maxTurns === "string" && /^\d+$/.test(body.maxTurns) ? Number(body.maxTurns) : body.maxTurns } : {}), ...Object.fromEntries(["progress", "statusComment", "recover", "steer"].filter((k) => body[k] !== undefined).map((k) => [k, body[k]])) }, paths: ctx.a.paths, env: ctx.a.env, surface: "console", fs: ctx.fs }),
     target: (ctx) => ctx.a.paths.triggersPath,
     write: writeTriggersOf,
     bar: (p) => [html`${p.row} (${p.type}) ${changesHtml(p.changes)}`, ...(Array.isArray(p.summary) ? p.summary.slice(1) : []), "New deliveries use the edited fields. Jobs already in line retain their queued fields; a job missing a narrowing this trigger now sets is refused before spend and must be re-run."],
@@ -877,10 +891,10 @@ const configActions = [
       if (env.refusal) return { invalid: env.refusal };
       if (env.read.digest !== entry.expect.envelopeDigest) return { invalid: "the allocation envelope changed since the preview; nothing was applied. Preview again" };
       const res = await ctx.a.rm.applyPriorities({ url: ctx.a.paths.valkeyUrl, envelope: env.read.envelope, digest: env.read.digest, projects: env.read.projects, plan: entry.payload.plan, keepOther: true, host: allocHost(ctx), logsDir: ctx.a.paths.logsDir, now: new Date(ctx.now()), fs: ctx.fs });
-      if (res?.outcome === "applied" || res?.outcome === "duplicate") return { ok: true, outcome: res.outcome, planId: res.planId ?? null };
+      if (res?.outcome === "applied" || res?.outcome === "duplicate") return { ...allocationFacts(res), ok: true };
       // The worker's field and rule, as the TUI's `prioritiesOutcome` shows them (index.ts), so a refusal names what to fix.
       const field = res?.field ? ` (${String(res.field)}: ${String(res.rule ?? "-")})` : "";
-      return { invalid: `${String(res?.outcome ?? "refused")}: ${String(res?.reason ?? "unknown")}${field}` };
+      return { ...allocationFacts(res), invalid: `${String(res?.outcome ?? "refused")}: ${String(res?.reason ?? "unknown")}${field}` };
     },
   },
   {
@@ -911,13 +925,34 @@ const configActions = [
       if (env.refusal) return { invalid: env.refusal };
       if (env.read.digest !== entry.expect.envelopeDigest) return { invalid: "the allocation envelope changed since the preview; nothing was reverted. Preview again" };
       const res = await ctx.a.rm.revertAllocation({ url: ctx.a.paths.valkeyUrl, envelope: env.read.envelope, digest: env.read.digest, target: entry.payload.row, host: allocHost(ctx), logsDir: ctx.a.paths.logsDir, now: new Date(ctx.now()), fs: ctx.fs });
-      if (res?.outcome === "reverted") return { ok: true, outcome: "reverted", planId: res.planId ?? null };
-      return { invalid: `${String(res?.outcome ?? "refused")}: ${String(res?.reason ?? "unknown")}` };
+      if (res?.outcome === "reverted") return { ...allocationFacts(res), ok: true };
+      return { ...allocationFacts(res), invalid: `${String(res?.outcome ?? "refused")}: ${String(res?.reason ?? "unknown")}` };
     },
   },
 ];
 
 /** A run field's value as one line of text: a list joined, an object by its keys, anything else as a string. */
+// Allocation writes return closed ladder facts beside the browser's explanatory refusal. Rationale
+// text belongs to the reviewed plan and never enters an agent's write result.
+function allocationFacts(res) {
+  const out = {};
+  for (const key of ["outcome", "reason", "field", "rule", "planId", "basis"]) {
+    if (res?.[key] === null || typeof res?.[key] === "string" && /^[A-Za-z0-9_.:@/-]{1,200}$/.test(res[key])) out[key] = res[key];
+  }
+  if (typeof res?.clamped === "boolean") out.clamped = res.clamped;
+  if (Array.isArray(res?.kept)) out.kept = res.kept.filter((v) => typeof v === "string" && /^[a-z_][a-z0-9_-]{0,31}$/.test(v));
+  for (const key of ["before", "after"]) {
+    const value = res?.[key];
+    if (value === null) out[key] = null;
+    else if (value && typeof value === "object") out[key] = Object.fromEntries(Object.entries(value).flatMap(([field, entry]) => {
+      if (["unallocated", "total"].includes(field) && Number.isSafeInteger(entry) && entry >= 0) return [[field, entry]];
+      if (["allocations", "repos"].includes(field) && entry && typeof entry === "object") return [[field, Object.fromEntries(Object.entries(entry).filter(([id, amount]) => /^[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,299}$/.test(id) && Number.isSafeInteger(amount) && amount >= 0))]];
+      return [];
+    }));
+  }
+  return out;
+}
+
 function fieldText(v) {
   if (Array.isArray(v)) return v.map((x) => (x !== null && typeof x === "object" ? JSON.stringify(x) : String(x))).join(", ");
   if (v !== null && typeof v === "object") return Object.keys(v).join(", ");
@@ -1109,6 +1144,25 @@ function resultRow(r) {
 
 const jobActions = [
   {
+    name: "run-enqueue", kind: "run-enqueue", paid: true, bulk: false, needs: JOB_NEEDS,
+    async preview(body, ctx) {
+      const folder = str(body, "folder", { required: true, max: 4096 });
+      const flow = str(body, "flow", { required: true, max: 128 });
+      const task = str(body, "task", { required: true, max: 32768 });
+      const env = { ...ctx.a.env, PI_DISPATCH_RUN_ROOTS: ctx.a.grantsEnv?.PI_DISPATCH_RUN_ROOTS ?? "", PI_DISPATCH_RUN_PER_HOUR: ctx.a.grantsEnv?.PI_DISPATCH_RUN_PER_HOUR ?? "3" };
+      const result = await ctx.a.rm.checkDispatchRun({ folder, flow, env, aiInvoked: true, consumeRate: false, now: ctx.now });
+      if (result.refused || result.unreachable) return { refusal: result.refused ?? "The paid-start allowance could not be read." };
+      const job = { folder, flow, task };
+      return { target: folder, payload: { job }, afterDigest: sha256(JSON.stringify(job)), reserve: ctx.a.rm.estimateReserve?.(job, reserveInputs(ctx)) ?? null, summary: [`Start local flow ${flow}`, "The folder, committed flow permission, clean tree and hourly limit are checked again before enqueue."] };
+    },
+    async apply(entry, ctx) {
+      const env = { ...ctx.a.env, PI_DISPATCH_RUN_ROOTS: ctx.a.grantsEnv?.PI_DISPATCH_RUN_ROOTS ?? "", PI_DISPATCH_RUN_PER_HOUR: ctx.a.grantsEnv?.PI_DISPATCH_RUN_PER_HOUR ?? "3" };
+      const res = await ctx.a.rm.enqueueDispatchRun({ ...entry.payload.job, aiInvoked: true, env, now: ctx.now });
+      if (res?.deduplicated) return { invalid: "An equivalent run is already queued; nothing new was queued." };
+      return funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? (env.PI_WORKER_NAME ? hostQueueName(env.PI_WORKER_NAME) : "pi-jobs") });
+    },
+  },
+  {
     name: "cancel-active",
     kind: "cancel-active",
     paid: false,
@@ -1248,6 +1302,10 @@ const jobActions = [
     bulk: false,
     needs: JOB_NEEDS,
     async preview(body, ctx) {
+      if (ctx.session?.role === "agent" || ctx.surface === "tool") {
+        const grants = paidStartEnvironment(ctx.a.env, ctx.a.grantsEnv);
+        if (grants.refusal) return grants;
+      }
       const result = await ctx.a.rm.planTriggerFire({ index: index(body), triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now });
       if (result.unreachable) return { refusal: "The deployment's queue could not be read, so Fire now could not be previewed. Nothing was changed." };
       const got = planned(result);
@@ -1256,6 +1314,10 @@ const jobActions = [
       return { target: p.schedulerId, payload: { plan: p }, reserve: p.reserve, beforeDigest: p.fileDigest, summary: p.summary };
     },
     async apply(entry, ctx) {
+      if (ctx.session?.role === "agent" || ctx.surface === "tool") {
+        const grants = paidStartEnvironment(ctx.a.env, ctx.a.grantsEnv);
+        if (grants.refusal) return { invalid: grants.refusal };
+      }
       const res = await ctx.a.rm.enqueueTriggerFire(entry.payload.plan, { triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now });
       return funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? null });
     },
@@ -1269,18 +1331,39 @@ const jobActions = [
     async preview(body, ctx) {
       const jobId = jobIdOf(body);
       const { rm, paths } = ctx.a;
-      const got = planned(await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs }));
+      const got = planned(await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now }));
       if (!got.plan) return got;
       const p = got.plan;
+      if (ctx.session?.role === "agent" || ctx.surface === "tool") {
+        const checked = await checkAgentRerun(p, { rm, env: ctx.a.env, grantsEnv: ctx.a.grantsEnv, now: ctx.now });
+        if (checked.refusal) return checked;
+        p.agentAdmitted = true;
+      }
       const what = p.kind === "forge" ? `${p.forge} run, rebuilt from its retained job data with a new delivery id` : p.kind === "cron" ? "cron run, fired once by hand from its trigger as the triggers file says now" : "local run, its folder, flow and task queued again";
       return {
         target: jobId,
+        expect: { rerunAuthority: rerunAuthorityDigest(p) },
         payload: { plan: p },
         reserve: p.reserve ?? null,
         summary: [`Re-run ${jobId}: a ${what}`, `On queue ${p.queue}${typeof p.job?.flow === "string" ? `, flow ${p.job.flow}` : ""}`, ...runFieldsLines(p.runFields, "It runs as its trigger says now")],
       };
     },
     async apply(entry, ctx) {
+      const { rm, paths } = ctx.a;
+      let replay = {};
+      if (entry.payload.plan.kind === "forge") {
+        const id = /^console-([a-f0-9]{16})$/.exec(entry.payload.plan.deliveryId ?? "");
+        if (!id) return { invalid: "The re-run identity is no longer valid; preview it again." };
+        // Routing hashes this prospective ID. Replaying the host-minted identity makes the fresh
+        // read compare the same route; actual host/queue or execution changes must still refuse.
+        replay = { random: n => { if (n !== 8) throw new Error("unexpected re-run identity size"); return Buffer.from(id[1], "hex"); } };
+      }
+      const fresh = await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId: entry.target, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), ...replay, fs: ctx.fs, now: ctx.now });
+      if (!fresh?.plan || rerunAuthorityDigest(fresh.plan) !== entry.expect?.rerunAuthority) return { invalid: "The re-run source or current trigger changed; preview the run again before enqueueing." };
+      if (ctx.session?.role === "agent" || ctx.surface === "tool") {
+        const checked = await checkAgentRerun(fresh.plan, { rm: ctx.a.rm, env: ctx.a.env, grantsEnv: ctx.a.grantsEnv, now: ctx.now, consumeRate: true });
+        if (checked.refusal) return { invalid: checked.refusal };
+      }
       const res = await ctx.a.rm.enqueueRerun(entry.payload.plan, { url: ctx.a.paths.valkeyUrl, now: ctx.now });
       return funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? null });
     },
@@ -1298,7 +1381,7 @@ const jobActions = [
       const text = body.decision === "approve" ? "/approve" : body.decision === "decline" ? `/decline${answerText.trim() ? ` ${answerText.trim()}` : ""}` : answerText;
       const { rm, paths } = ctx.a;
       // `by` is the session's token name, never anything the body says: the trail comment names who answered.
-      const got = planned(await rm.planParkedAnswer({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, text, by: ctx.session.name, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now }));
+      const got = planned(await rm.planParkedAnswer({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, text, by: ctx.session.name, triggersPath: paths.triggersPath ?? null, ...(body.draftRunId !== undefined ? { draftRunId: str(body, "draftRunId", { required: true, max: 200 }), draftDigest: str(body, "draftDigest", { required: true, max: 64 }) } : {}), ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now }));
       if (!got.plan) return got;
       const p = got.plan;
       const answer = String(p.job?.trigger?.comment?.body ?? "");
@@ -1313,8 +1396,21 @@ const jobActions = [
       };
     },
     async apply(entry, ctx) {
+      const source = entry.payload.plan.job?.console;
+      if (source?.draftRunId) {
+        const current = await ctx.a.answerer?.privateDraft(entry.payload.plan.jobId);
+        if (!current || current.digest !== source.draftDigest || current.meta?.draftRunId !== source.draftRunId) return { invalid: "The draft changed or expired; reload the run and preview the answer again." };
+      }
       const res = await ctx.a.rm.enqueueParkedAnswer(entry.payload.plan, { url: ctx.a.paths.valkeyUrl });
-      return funnelResult(res, { jobIds: Array.isArray(res?.jobIds) ? res.jobIds.map(String) : [], queue: res?.queue ?? null });
+      const out = funnelResult(res, { jobIds: Array.isArray(res?.jobIds) ? res.jobIds.map(String) : [], queue: res?.queue ?? null });
+      const p = entry.payload.plan;
+      if (out.ok && p.job?.console?.draftRunId) {
+        try {
+          const tracked = await ctx.a.answerer?.sent({ runId: p.jobId, draftRunId: p.job.console.draftRunId, digest: p.job.console.draftDigest, text: p.job.trigger.comment.body, by: ctx.session.name });
+          if (!tracked) out.warning = "draft-tracking-incomplete";
+        } catch { out.warning = "draft-tracking-incomplete"; }
+      }
+      return out;
     },
   },
   {
@@ -1829,6 +1925,13 @@ const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === coun
  */
 const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
 const WRITE_RULES = {
+  ...ANSWERER_WRITE_RULES,
+  "run-enqueue": {
+    fields: ["folder", "flow", "task"], danger: false, atConfirm: true,
+    undo: (out, body, result) => result === undefined ? UNDO_SENTENCES.rerunBefore : rerunCancel(result) ? `Cancel ${result.jobId} before it starts` : UNDO_SENTENCES.rerunUnnamed,
+    inverse: (out, body, result) => rerunCancel(result) ? { action: "cancel-queued", body: { jobId: result.jobId, queue: result.queue } } : null,
+    confirmLabel: (out) => paidLabel("Start run", out.reserve), done: () => "Queued the local run",
+  },
   "sandbox-prepare": { fields: ["repo", "index", "ref", "host", "pin"], danger: false, undo: () => "The host sweeps the prepared clone when its retention window ends. No shell starts until you open it.", inverse: () => null, confirmLabel: () => "Prepare sandbox", done: (out) => `Requested sandbox preparation on ${out.payload.params.host}` },
   "sandbox-pin": { fields: ["host", "id"], danger: false, undo: () => "The workspace is swept after its host's pin window. Restore an earlier deadline only from that host.", inverse: () => null, confirmLabel: () => "Pin workspace", done: (out) => `Requested a pin for ${out.payload.params.id}` },
   "sandbox-end": { fields: ["host", "id", "nonce", "containerId"], danger: true, undo: () => "Open a new shell from the kept workspace; the ended shell's processes cannot be restored.", inverse: () => null, confirmLabel: () => "End this shell", done: (out) => `Ended the shell for ${out.payload.params.id}` },
@@ -1875,7 +1978,7 @@ const WRITE_RULES = {
     confirmLabel: (out) => paidLabel("Re-run", out.reserve),
     done: (out) => `Queued a re-run of ${out.target}`,
   },
-  "parked-answer": { fields: ["jobId", "text", "decision"], danger: false, undo: say(UNDO_SENTENCES.answer), inverse: none, confirmLabel: (out) => paidLabel("Answer", out.reserve), done: (out) => `Answered parked run ${out.target}` },
+  "parked-answer": { fields: ["jobId", "text", "decision", "draftRunId", "draftDigest"], danger: false, undo: say(UNDO_SENTENCES.answer), inverse: none, confirmLabel: (out) => paidLabel("Answer", out.reserve), done: (out) => `Answered parked run ${out.target}` },
   steer: {
     fields: ["jobId", "mode", "text"],
     danger: false,
@@ -1947,7 +2050,7 @@ function withRules(a) {
   // bulk act (a bulk confirm asks no rule for its Undo again, `confirmBulk`, so one would keep its preview's in silence).
   const linked = configActions.includes(a);
   const tracked = ["cancel-held", "cancel-all-held", "cancel-queued", "retry-failed", "retry-all-failed", "rerun"].includes(a.name);
-  return Object.freeze({ ...a, fields: Object.freeze([...r.fields, ...(linked ? ["becauseRun"] : [])]), danger: r.danger, atConfirm: r.atConfirm ?? false, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done,
+  const wrapped = { ...a, agent: actionAgentPolicy(a.name), fields: Object.freeze([...r.fields, ...(linked ? ["becauseRun"] : [])]), danger: r.danger, atConfirm: r.atConfirm ?? false, undo: r.undo, inverse: r.inverse, confirmLabel: r.confirmLabel, done: r.done,
     ...(linked ? {
       async preview(body, ctx) {
         const context = body.becauseRun ? await ctx.a.zeroTouch?.configurationContext(jobIdOf({ jobId: body.becauseRun })) : null;
@@ -1957,11 +2060,11 @@ function withRules(a) {
         return out;
       },
       apply(entry, ctx) {
-        return entry.payload.touchContext ? ctx.a.zeroTouch.trackConfiguration(entry, () => a.apply(entry, ctx)) : a.apply(entry, ctx);
+        return entry.payload.touchContext && ctx.session?.role !== "agent" ? ctx.a.zeroTouch.trackConfiguration(entry, () => a.apply(entry, ctx)) : a.apply(entry, ctx);
       },
     } : tracked ? {
       apply(entry, ctx) {
-        if (!ctx.a.zeroTouch?.withWriters) return a.apply(entry, ctx);
+        if (ctx.session?.role === "agent" || !ctx.a.zeroTouch?.withWriters) return a.apply(entry, ctx);
         return ctx.a.zeroTouch.withWriters((writers) => {
           const rm = { ...ctx.a.rm };
           for (const key of ["cancelHeldJob", "cancelQueuedJob", "retryFailedJob", "retryFailedJobs"]) if (typeof ctx.a.rm[key] === "function") rm[key] = (args) => ctx.a.rm[key]({ ...args, ...writers });
@@ -1970,7 +2073,15 @@ function withRules(a) {
         });
       },
     } : {}),
-  });
+  };
+  return Object.freeze({ ...wrapped, apply(entry, ctx) {
+    const interventionOrigin = ctx.interventionOrigin === "agent" || ctx.session?.role === "agent" ? "agent" : "human";
+    const rm = { ...ctx.a.rm };
+    for (const key of ["cancelHeldJob", "cancelQueuedJob", "retryFailedJob", "retryFailedJobs"]) if (typeof rm[key] === "function") rm[key] = (args) => ctx.a.rm[key]({ ...args, interventionOrigin });
+    if (typeof rm.enqueueRerun === "function") rm.enqueueRerun = (plan, opts) => ctx.a.rm.enqueueRerun(plan, { ...opts, interventionOrigin });
+    const fleet = ctx.a.fleet && { ...ctx.a.fleet, ...(typeof ctx.a.fleet.cancelActive === "function" ? { cancelActive: (args) => ctx.a.fleet.cancelActive({ ...args, interventionOrigin }) } : {}) };
+    return wrapped.apply(entry, { ...ctx, interventionOrigin, a: { ...ctx.a, rm, ...(fleet ? { fleet } : {}) } });
+  } });
 }
 
 /** These writes are console-only: no model tool can add instructions or create a model-owned group name. */
@@ -2035,7 +2146,7 @@ const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((ope
 
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
 export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions].map(withRules));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...ANSWERER_ACTIONS].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {
@@ -2068,7 +2179,11 @@ const clockOf = (deps) => (typeof deps.now === "function" ? deps.now() : Date.no
  * of its work). `state` names the bar's state when the status alone cannot; `sentenceHtml` is the bar's own markup of
  * the same words, for a sentence that names code (an action, a field).
  */
-function refuse(ctx, where, status, error, state = null, sentenceHtml = null) {
+function refuse(ctx, where, status, error, state = null, sentenceHtml = null, policyRefusal = false) {
+  if (ctx.session?.role === "agent" && !policyRefusal) {
+    error = `${ctx.agentAction ?? "action"} ${where} refused (${state ?? (status >= 500 ? "unavailable" : "invalid")}); an operator can inspect the deployment and preview it for the detailed diagnosis`;
+    sentenceHtml = null;
+  }
   // Loader and tool diagnostics name machine indexes; the browser names the row its table displays.
   error = String(error).replace(/\b(trigger|pause window|scoped limit) at index (\d+)\b/g, (_m, what, n) => `${what} row ${Number(n) + 1}`);
   return ctx.json(status, { error, html: String(refusalHtml({ where, sentence: error, status, state, sentenceHtml })) });
@@ -2133,6 +2248,8 @@ function metaOf(action, out, body) {
  */
 export async function previewAction(ctx, action) {
   const { deps, session } = ctx;
+  ctx.agentAction = action.name;
+  if (session.role === "agent" && (action.agent.mode === "person" || action.agent.mode === "confirm" && !["setting-set", "limit-add", "limit-edit", "trigger-edit", "rerun"].includes(action.name))) return refuse(ctx, "preview", 403, `${action.name} is ${action.agent.mode}: ${action.agent.reason}`, null, null, true);
   const body = ctx.body ?? {};
   const actx = actionCtx(ctx);
   const missing = (action.needs ?? []).filter((k) => actx.a[k] === null || actx.a[k] === undefined);
@@ -2154,9 +2271,20 @@ export async function previewAction(ctx, action) {
   // and only one of the slot's own states: a planner's answer may carry a field of that name for something else.
   if (out?.refusal) return refuse(ctx, "preview", out.status ?? 400, out.refusal, typeof out.state === "string" && Object.hasOwn(REFUSAL_STATES, out.state) ? out.state : null, out.refusalHtml ?? null);
   if (out?.unchanged) {
-    const summary = [String(out.unchanged)];
-    return ctx.json(200, { unchanged: true, action: action.name, summary, ...(out.extra ?? {}), html: String(unchangedBarHtml({ summary, sentenceHtml: out.unchangedHtml ?? null })) });
+    const summary = [session.role === "agent" ? `${action.name}: no change needed` : String(out.unchanged)];
+    return ctx.json(200, { unchanged: true, action: action.name, summary, ...(session.role === "agent" ? {} : out.extra ?? {}), html: String(unchangedBarHtml({ summary, sentenceHtml: session.role === "agent" ? null : out.unchangedHtml ?? null })) });
   }
+  const transition = { ...out.policyEvidence, plan: out.plan, payload: out.payload };
+  const judged = authorizeTransition({ actor: session, action, transition });
+  if (!judged.ok) return refuse(ctx, "preview", 403, judged.refusal, null, null, true);
+  if (session.role === "agent") {
+    // A permitted mutation does not grant a read of the planner's job labels, file prose or private diagnostics.
+    meta.title = `${action.name}: unattended change`;
+    meta.done = `${action.name} applied`;
+    if (meta.inverse) meta.undo = meta.undoAfter = `Preview ${meta.inverse.action} to undo this change; its own authority checks still apply.`;
+  }
+  meta.policyTransition = transition;
+  meta.issuedRole = session.role;
   const issued = deps.tickets.issue({
     sessionId: session.id,
     action: action.name,
@@ -2171,28 +2299,29 @@ export async function previewAction(ctx, action) {
     meta,
   });
   const expiresAt = Number.isSafeInteger(issued?.expiresAt) ? issued.expiresAt : null;
-  const summary = out.summary ?? [];
+  const summary = session.role === "agent" ? [meta.title, judged.policy.reason] : out.summary ?? [];
   const confirmLabel = String(action.confirmLabel(out));
   // The bar's lines: the action's own markup of them where it has one (`barLines`: a change's values in bold), else the
   // summary's. A blank line is a paragraph break in the TUI's dialog, which a list has no use for, so none is drawn.
-  const lines = (Array.isArray(out.barLines) ? out.barLines : summary.slice(1)).filter((l) => !(typeof l === "string" && l.trim() === ""));
+  const lines = (session.role !== "agent" && Array.isArray(out.barLines) ? out.barLines : summary.slice(1)).filter((l) => !(typeof l === "string" && l.trim() === ""));
   return ctx.json(200, {
     ticket: issued.ticket,
     action: action.name,
     kind: action.kind,
+    agent: judged.policy,
     paid: Boolean(action.paid),
     summary,
     reserve: out.reserve ?? null,
-    targets: out.targets ?? null,
+    targets: session.role === "agent" ? agentReadProjection(out.targets ?? null) : out.targets ?? null,
     ...(Number.isSafeInteger(out.count) ? { count: out.count } : {}),
     beforeDigest: out.beforeDigest ?? null,
     afterDigest: out.afterDigest ?? null,
-    ...(out.extra ?? {}),
+    ...(session.role === "agent" ? {} : out.extra ?? {}),
     expiresAt,
     danger: meta.danger,
     confirmLabel,
     undo: meta.undo,
-    html: String(previewBarHtml({ title: meta.title, lines, reserve: reserveText(out.reserve), diff: out.diff ?? null, undo: meta.undo, undoable: meta.undoable, confirmLabel, paid: Boolean(action.paid), danger: meta.danger, expiresAt, now: clockOf(deps) })),
+    html: String(html`<p class="agent-policy"><b>${AGENT_POLICY_TITLES[judged.policy.mode]}</b>: ${judged.policy.reason}</p>${previewBarHtml({ title: meta.title, lines, reserve: reserveText(out.reserve), diff: session.role === "agent" ? null : out.diff ?? null, undo: meta.undo, undoable: meta.undoable, confirmLabel, paid: Boolean(action.paid), danger: meta.danger, expiresAt, now: clockOf(deps) })}`),
   });
 }
 
@@ -2248,7 +2377,21 @@ function changeOf(ctx, entry, action, { auditSeq, auditLast = null, count, done 
       inverse = null;
     }
   }
-  const change = { summary: summary ?? String(meta.done ?? meta.title ?? action.name), by: String(ctx.session?.name ?? ""), auditSeq, auditLast, count, done, undo, inverse, kind: action.kind, at: clockOf(ctx.deps) };
+  if (ctx.session?.role === "agent" && action.name === "limit-edit" && inverse !== null) {
+    const transition = meta.policyTransition;
+    const index = transition?.plan?.index;
+    const before = transition?.before?.limits?.[index], after = transition?.after?.limits?.[index];
+    if (before && after) {
+      // The certified transition changed only explicit caps. Its inverse needs just those caps:
+      // replaying the entire old row would disclose a private folder scope and reset unrelated fields.
+      const limit = Object.fromEntries(Object.entries(before).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(after[key])));
+      inverse = Object.keys(limit).length ? { action: "limit-edit", body: { index, limit } } : null;
+    } else {
+      inverse = null;
+      undo = "Ask an operator to review and restore the previous limit from their configuration history.";
+    }
+  }
+  const change = { summary: ctx.session?.role === "agent" ? `${action.name} applied to ${done} of ${count}` : summary ?? String(meta.done ?? meta.title ?? action.name), by: String(ctx.session?.name ?? ""), auditSeq, auditLast, count, done, undo, inverse, kind: action.kind, at: clockOf(ctx.deps) };
   if (result?.touchWarning || result?.warning || result?.results?.some((row) => row.touchWarning)) change.summary += " Zero touch accounting is incomplete and pending repair. The action succeeded; do not repeat it for its metric.";
   if (Buffer.byteLength(JSON.stringify(change), "utf8") > FLASH_MAX_BYTES) {
     change.inverse = null;
@@ -2271,6 +2414,7 @@ function changeOf(ctx, entry, action, { auditSeq, auditLast = null, count, done 
  */
 export async function confirmAction(ctx, action) {
   const { deps, body, session } = ctx;
+  ctx.agentAction = action.name;
   const actx = actionCtx(ctx);
   const actor = ctx.actor();
   const ticket = typeof body.ticket === "string" ? body.ticket : "";
@@ -2282,6 +2426,8 @@ export async function confirmAction(ctx, action) {
     return refuse(ctx, "confirm", 409, String(redeemed.refusal ?? `this confirmation is not valid. ${PREVIEW_AGAIN}`), "ticket");
   }
   const entry = redeemed.entry;
+  const judged = authorizeTransition({ actor: session, action, transition: entry.meta?.policyTransition });
+  if (!judged.ok || entry.meta?.issuedRole && entry.meta.issuedRole !== session.role) return refuse(ctx, "confirm", 403, judged.refusal ?? "The role changed; preview the change again.");
   const tag = sha256(ticket).slice(0, 12);
   entry.ticketDigest = sha256(ticket);
   const log = (line) => deps.log(String(line).replace(/^panel: /, "console: "));
@@ -2291,7 +2437,7 @@ export async function confirmAction(ctx, action) {
   let result;
   try {
     result = await auditedWrite(
-      { audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: failureOf, refusal: () => ({ [AUDIT]: true }), log },
+      { audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: r => { const why = failureOf(r); return session.role === "agent" && why ? "action-refused" : why; }, refusal: () => ({ [AUDIT]: true }), log },
       () => action.apply(entry, actx),
     );
   } catch (e) {
@@ -2305,7 +2451,7 @@ export async function confirmAction(ctx, action) {
   if (result?.unreachable || !result?.ok) return refuse(ctx, "confirm", 503, VALKEY_UNREACHABLE, "valkey");
   const change = changeOf(ctx, entry, action, { auditSeq: audit.first(), count: 1, result });
   tickHub(deps);
-  return ctx.json(200, { ...result, ok: true, action: action.name, kind: action.kind, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, change });
+  return ctx.json(200, { ...(session.role === "agent" ? agentReadProjection(result) : result), ...(result.warning ? { warning: "tracking-incomplete" } : {}), ok: true, action: action.name, kind: action.kind, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, change });
 }
 
 /**
@@ -2328,7 +2474,7 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx }) {
   const rowOf = (jobId) => ({ actor, action: "write", kind: action.kind, target: jobId, count, reserve: reserveBy.get(jobId) ?? null, ticket: tag });
   const compensate = (jobId, reason) => {
     try {
-      audit.append({ ...rowOf(jobId), outcome: "failed", reason: String(reason) });
+      audit.append({ ...rowOf(jobId), outcome: "failed", reason: actor.role === "agent" ? "action-refused" : String(reason) });
     } catch (e) {
       deps.log(`console: audit append failed (${codeOf(e)}) after a ${action.kind} job did not land; the log's last row for ticket ${tag} says ok and is wrong`);
     }
@@ -2363,13 +2509,23 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx }) {
   }
   const results = Array.isArray(result.results) ? result.results : [];
   for (const r of results) if (!r.ok) compensate(r.jobId ?? "-", r.reason ?? "refused");
+  let trackingIncomplete = false;
+  if (actor.role === "agent") for (const r of results) if (r.ok) {
+    try {
+      audit.append({ ...rowOf(r.jobId), action: "write-applied", outcome: "ok" });
+    } catch {
+      trackingIncomplete = true;
+      deps.log("console: agent bulk write succeeded but an audit receipt could not be written; accounting is incomplete, do not repeat the action");
+    }
+  }
   const done = results.filter((r) => r.ok).length;
   let change = null;
   if (done > 0) {
     change = changeOf(ctx, entry, action, { auditSeq, auditLast, count, done, summary: String(action.done(entry, null, { done, count })) });
     tickHub(deps);
   }
-  return ctx.json(200, { ok: true, action: action.name, kind: action.kind, count, done, results, change, html: String(bulkResultsHtml({ kind: action.kind, results, count, done, auditSeq })) });
+  const shown = actor.role === "agent" ? results.map(r => ({ jobId: r.jobId, ok: r.ok, ...(r.queue ? { queue: r.queue } : {}), ...(r.partial ? { partial: true } : {}), ...(!r.ok ? { reason: "action-refused" } : {}) })) : results;
+  return ctx.json(200, { ok: true, action: action.name, kind: action.kind, count, done, results: shown, change, ...(trackingIncomplete ? { warning: "tracking-incomplete" } : {}), html: String(bulkResultsHtml({ kind: action.kind, results: shown, count, done, auditSeq })) });
 }
 
 /** Ask the live hub for a tick now, so open tabs show the change; a hub that fails is the hub's own business. */

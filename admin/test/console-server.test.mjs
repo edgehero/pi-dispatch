@@ -1914,7 +1914,7 @@ test("ERROR_SENTENCES: one per kind, frozen, each tile a STATUS_KINDS status and
   // The host sentence never claims 127.0.0.1 alone, since PI_CONSOLE_ALLOWED_HOSTS may add names.
   assert.ok(!/127\.0\.0\.1 only/.test(ERROR_SENTENCES.host.sentence));
   // Every operator-only screen uses the generic role refusal; pin the protected set so new pages need review.
-  assert.deepEqual(Object.entries(realPages.PAGES).filter(([, p]) => p.auth === "operator").map(([n]) => n), ["sandboxes", "trigger-add", "audit"]);
+  assert.deepEqual(Object.entries(realPages.PAGES).filter(([, p]) => p.auth === "operator").map(([n]) => n), ["sandboxes", "answer-rules", "trigger-add", "audit"]);
 });
 
 const SOMEONE = Object.freeze({ name: "alice-nav-mark", role: "operator" });

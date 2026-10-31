@@ -158,7 +158,7 @@ test("registered dispatch_secrets, dispatch_connections and dispatch_projects ex
       const response = await tools[0].execute("call", {}, null, null, { hasUI: false, ui: { confirm() { throw Error("read tools must not ask for a confirmation"); } } });
       const parsed = JSON.parse(response.content.find((c) => c.type === "text").text);
       noSecrets(parsed);
-      assert.ok(name === "dispatch_secrets" ? parsed.profiles.some((p) => p.name === "prod") : name === "dispatch_connections" ? parsed.mcp.servers.some((s) => s.name === "tracker" && s.referenceCount === 1) : parsed.projects[0].suggestion.call.includes("dispatch_limit_edit"));
+      assert.ok(name === "dispatch_secrets" ? parsed.profiles.some((p) => p.name === "prod") : name === "dispatch_connections" ? parsed.mcp.servers.some((s) => s.name === "tracker" && s.referenceCount === 1) : parsed.projects[0].suggestion.action.action === "limit-edit" && parsed.projects[0].suggestion.action.index === 2);
     }
     assert.equal(events.filter(([key]) => key === "dispose").length, 3);
   } finally {

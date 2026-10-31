@@ -251,6 +251,9 @@ export async function runUp(argv = [], deps = {}) {
 	} = deps;
 	let { runInitFn, runDoctorFn } = deps;
 	const yes = argv.includes("--yes");
+	const adoptVolume = argv.includes("--adopt-volume");
+	const restartProxy = argv.includes("--restart-proxy");
+	const refreshProxyRules = argv.includes("--refresh-proxy-rules");
 	const summary = [];
 	// env-internal USER: the login running `up`, only ever read on the podman path (see the `user` seam above).
 	const userName = () => user ?? (env.USER || userInfoFn().username);
@@ -632,7 +635,7 @@ export async function runUp(argv = [], deps = {}) {
 		}
 		if (v.unlabelled && !servedByOurs) {
 			out("\n");
-			if (!/^y(es)?$/i.test(String((await prompt(adoptVolumeQuestion(deployment))) ?? "").trim())) return refuse(unadoptedVolumeRefusal());
+			if (!adoptVolume && !/^y(es)?$/i.test(String((await prompt(`${adoptVolumeQuestion(deployment)} (or pass --adopt-volume)`)) ?? "").trim())) return refuse(unadoptedVolumeRefusal());
 			// Whose queue it holds, read BEFORE any Valkey on it is published (round-cap re-review: a wrong `y` ran this
 			// deployment's Valkey on another's data for a second): a Valkey with no network loads it, and its marker is read
 			// through `docker exec`.
@@ -877,7 +880,7 @@ export async function runUp(argv = [], deps = {}) {
 		},
 		handled: false,
 	};
-	const confRefreshed = dockerUsed && egressArmedFn(venueEnv) && proxyName === DEFAULT_EGRESS_PROXY ? await proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackagedConf, now, yes, coupled }) : false;
+	const confRefreshed = dockerUsed && egressArmedFn(venueEnv) && proxyName === DEFAULT_EGRESS_PROXY ? await proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackagedConf, now, yes, refreshProxyRules, restartProxy, coupled }) : false;
 	if (dockerUsed && egressArmedFn(venueEnv) && proxyName !== DEFAULT_EGRESS_PROXY) {
 		// PI_EGRESS_PROXY names the operator's own proxy (issue #430). This step used to look for, and offer to start, the
 		// shipped name whatever that key said, so it could report a proxy present that no job attaches to, or start one
@@ -971,9 +974,9 @@ export async function runUp(argv = [], deps = {}) {
 				if (yes && attached.length > 0) out("--yes does not cover restarting a proxy that jobs are using: answer below, or stop the worker and re-run\n");
 				if (
 					await consent(
-						`up would ${paused ? "unpause and then restart" : "restart"} it so squid reads the refreshed deploy/egress-proxy.conf${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: those jobs lose their egress while it restarts` : ""}:`,
+						`up would ${paused ? "unpause and then restart" : "restart"} it (or pass --restart-proxy) so squid reads the refreshed deploy/egress-proxy.conf${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: those jobs lose their egress while it restarts` : ""}:`,
 						shown,
-						{ yes: yes && attached.length === 0, out, prompt },
+						{ yes: restartProxy || yes && attached.length === 0, out, prompt },
 					)
 				) {
 					let failed = null;
@@ -1015,11 +1018,11 @@ export async function runUp(argv = [], deps = {}) {
 				summary.push(["egress", `stale proxy left as it is: ${noFile} to recreate it from; its policy is not this deployment's`]);
 			} else if (
 				await consent(
-					`up would replace it with the shipped proxy (the same semantics as deploy/docker-compose.yml --profile egress)${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: removing it cuts those jobs off from their egress mid-run, so stop the worker first (and let running jobs finish)` : ""}:`,
+					`up would replace it (or pass --restart-proxy) with the shipped proxy (the same semantics as deploy/docker-compose.yml --profile egress)${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: removing it cuts those jobs off from their egress mid-run, so stop the worker first (and let running jobs finish)` : ""}:`,
 					[`docker ${EGRESS_RM_ARGS.join(" ")}`, ...(await egressNetworkLines(spawn, network)), `docker ${quoteArgs(EGRESS_RUN_ARGS)}`],
 					// `--yes` does not cover cutting live jobs off (gate round 3): with a job network attached to a RUNNING
 					// proxy the lines are printed and a person must answer, so an unattended `up --yes` never does it.
-					{ yes: yes && !(attached.length > 0 && state.status === "running"), out, prompt },
+					{ yes: restartProxy || yes && !(attached.length > 0 && state.status === "running"), out, prompt },
 				)
 			) {
 				await runStreamed(spawn, "docker", EGRESS_RM_ARGS, out);
@@ -1866,7 +1869,7 @@ export function valkeyContainerPublishes(line, port) {
  * bytes are kept beside it either way (`replaceProxyConfCopy`), since an edit lost to a wrong "y" is still the
  * operator's.
  */
-async function proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackagedConf, now, yes, coupled = null }) {
+async function proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackagedConf, now, yes, refreshProxyRules = false, restartProxy = false, coupled = null }) {
 	const rel = "deploy/egress-proxy.conf";
 	const path = join(cwd, rel);
 	// A directory there is the proxy step's to say (it starts nothing on one), so it is not read as a copy here.
@@ -1886,13 +1889,13 @@ async function proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackage
 	if (coupled && rulesIncludeEndpoints(judged.packaged) && !rulesFileIncludes(path, fs)) {
 		const state = await coupled.inspect();
 		if (state && !state.mounts.some((m) => m.type === "bind" && m.destination === MODEL_ENDPOINTS_TARGET)) {
-			return coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, prompt, summary, now });
+			return coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, prompt, summary, now, refreshProxyRules, restartProxy });
 		}
 	}
 	const accepted = await consent(
-		`up would replace it with ${packageCopyName()}, keeping yours beside it:`,
+		`up would replace it with ${packageCopyName()}, keeping yours beside it (or pass --refresh-proxy-rules):`,
 		[`cp ${rel} ${rel}.bak-<timestamp>`, `write ${PACKAGED_EGRESS_PROXY_CONF}'s content beside ${rel}, then rename it over ${rel}`],
-		{ yes: false, out, prompt },
+		{ yes: refreshProxyRules, out, prompt },
 	);
 	if (!accepted) {
 		out(`skipped: ${rel} is left as it is; \`pi-dispatch up\` offers this again\n`);
@@ -1921,7 +1924,7 @@ async function proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackage
  * rules are in place and the proxy step below judges the proxy as it always does (start a stopped one, unpause a
  * paused one, offer a stale one's replace, name declared endpoints the old rules cannot reach).
  */
-async function coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, prompt, summary, now }) {
+async function coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, prompt, summary, now, refreshProxyRules = false, restartProxy = false }) {
 	const why = "the new rules include model-endpoints.conf, which this proxy does not mount, so they go in only together with a proxy that mounts it";
 	const blocked = coupled.blocked(state);
 	if (blocked) {
@@ -1933,9 +1936,9 @@ async function coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, 
 	const network = { missing: false };
 	const lines = [`cp ${rel} ${rel}.bak-<timestamp>`, `write ${PACKAGED_EGRESS_PROXY_CONF}'s content beside ${rel}, then rename it over ${rel}`, ...(await coupled.lines(network))];
 	const accepted = await consent(
-		`up would replace ${rel} with ${packageCopyName()}, keeping yours beside it, and replace the proxy (${state.status}) with the shipped one in the same step: ${why}${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: removing it cuts those jobs off from their egress mid-run, so stop the worker first (and let running jobs finish)` : ""}:`,
+		`up would replace ${rel} with ${packageCopyName()} (--refresh-proxy-rules${attached.length > 0 ? " and --restart-proxy" : ""}), keeping yours beside it, and replace the proxy (${state.status}) with the shipped one in the same step: ${why}${attached.length > 0 ? `. It is attached to ${attached.join(", ")}: removing it cuts those jobs off from their egress mid-run, so stop the worker first (and let running jobs finish)` : ""}:`,
 		lines,
-		{ yes: false, out, prompt },
+		{ yes: refreshProxyRules && (attached.length === 0 || restartProxy), out, prompt },
 	);
 	if (!accepted) {
 		out(`skipped: ${rel} and the proxy are left as they are; \`pi-dispatch up\` offers this again\n`);

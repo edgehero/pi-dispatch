@@ -19,7 +19,7 @@
  * such a row says.
  */
 import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_OUTCOMES } from "@edgehero/pi-dispatch/console-audit";
-import { AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_Q_MAX, auditFiltered, auditQueryString, isAuditRow } from "../audit-view.mjs";
+import { AUDIT_ACTOR_ROLES, AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_Q_MAX, auditFiltered, auditQueryString, isAuditRow } from "../audit-view.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { msOf, timeHtml, usdText } from "./common.mjs";
@@ -325,7 +325,7 @@ export function auditFilter(view) {
   const names = Array.isArray(view.data?.audit?.who) ? view.data.audit.who : [];
   const pick = (id, name, label, values, value) => html`<label class="sr" for="${id}">${label}</label>${ui.select({ id, name, value: value ?? "", options: [{ value: "", label: `${label}: all` }, ...values.map((v) => ({ value: v, label: `${label}: ${v}` }))] })}`;
   const reset = auditFiltered(q) || (typeof q.before === "string" && q.before !== "") || Number.isSafeInteger(q.seq) ? ui.btn({ kind: "ghost", label: "Clear", href: "/audit" }) : null;
-  return html`<form class="filterbar" method="get" action="/audit" role="search" aria-label="Filter the audit log"><label class="search">${ui.icon("search")}<input type="search" name="q" value="${q.q ?? ""}" maxlength="${AUDIT_Q_MAX}" placeholder="Search targets and reasons" aria-label="Search targets and reasons" autocomplete="off" spellcheck="false"></label>${pick("au-who", "who", "Who", names, q.who)}${pick("au-action", "action", "Action", CONSOLE_AUDIT_ACTIONS, q.action)}${pick("au-outcome", "outcome", "Outcome", CONSOLE_AUDIT_OUTCOMES, q.outcome)}${ui.btn({ label: "Filter", type: "submit" })}${reset}</form>`;
+  return html`<form class="filterbar" method="get" action="/audit" role="search" aria-label="Filter the audit log"><label class="search">${ui.icon("search")}<input type="search" name="q" value="${q.q ?? ""}" maxlength="${AUDIT_Q_MAX}" placeholder="Search targets and reasons" aria-label="Search targets and reasons" autocomplete="off" spellcheck="false"></label>${pick("au-who", "who", "Who", names, q.who)}${pick("au-role", "role", "Role", AUDIT_ACTOR_ROLES, q.role)}${pick("au-action", "action", "Action", CONSOLE_AUDIT_ACTIONS, q.action)}${pick("au-outcome", "outcome", "Outcome", CONSOLE_AUDIT_OUTCOMES, q.outcome)}${ui.btn({ label: "Filter", type: "submit" })}${reset}</form>`;
 }
 
 /** What the log is (the AuditScreen card's side card): the verified range, the damage, the last check, who sees it. */

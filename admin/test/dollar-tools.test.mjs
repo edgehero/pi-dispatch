@@ -1,3 +1,4 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync } from "node:fs";
@@ -17,6 +18,7 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const indexMod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
+indexMod.setToolReadDepsForTest({ held: async () => ({ heldMicros: 0, heldJobs: 0, unknownHosts: [] }) });
 const { buildTriggerEntry } = indexMod;
 // Issue #642: every write these drive is audited as the panel into PI_LOGS_DIR's console-audit chain, so the file's
 // writes land in a directory of its own rather than the account's default logs directory.
@@ -29,7 +31,7 @@ function registeredTools() {
   indexMod.default(pi);
   return tools;
 }
-const toolByName = (name) => registeredTools().find((t) => t.name === name);
+const toolByName = (name) => withOperatorDiagnosis(registeredTools().find((t) => t.name === name));
 function toolCtx({ hasUI = true, answer = true } = {}) {
   const shown = [];
   const ui = { confirm: async (title, message) => { shown.push({ title, message }); return answer; } };
@@ -177,12 +179,14 @@ test("dispatch_limit_edit replaces a sent dollar field, carries the others, and 
   assert.match(shown[0].message, /"dayUsd":"5\.00".*\nto .*"dayUsd":"4\.25"/s);
 });
 
-test("dispatch_limits gives each row its summary and, for a dollar row, its windows with the counter", async () => {
+test("dispatch_limits gives each row its typed limits and, for a dollar row, its windows with the counter", async () => {
   tmpFile("scoped-limits.json", { version: 2, limits: [{ scope: "acme/web", day: 3, dayUsd: "5" }, { scope: "model:openai/gpt-x", weekUsd: "25" }, { scope: "acme/ops", concurrent: 1 }] }, "PI_SCOPED_LIMITS_FILE");
   process.env.VALKEY_URL = "not-a-url"; // degrade synchronously
   try {
     const rows = textOf(await toolByName("dispatch_limits").execute("id", {}, undefined, undefined, undefined));
-    assert.equal(rows[0].summary, "day 3 · day $5.00");
+    assert.equal(rows[0].day, 3);
+    assert.equal(rows[0].dayUsd, "5.00");
+    assert.equal(rows[0].summary, undefined, "generated display prose stays outside the model read contract");
     assert.deepEqual(rows[0].dollars, [{ window: "day", cap: "5.00", capMicros: 5_000_000, counterMicros: null }], "null on an unreachable queue, never an invented 0");
     assert.deepEqual(rows[1].dollars, [{ window: "week", cap: "25.00", capMicros: 25_000_000, counterMicros: null }]);
     assert.deepEqual(rows[2], { index: 2, scope: "acme/ops", day: null, week: null, month: null, concurrent: 1, dayUsd: null, weekUsd: null, monthUsd: null, used: null }, "a row with no dollar window reads exactly as before");
@@ -280,7 +284,7 @@ test("the near-miss refusal leaves the ordinary model fields alone", async () =>
   assert.deepEqual(read(path).triggers[0].run, { kind: "github", flow: "fix", model: "gpt-x", provider: "openai", maxTurns: 4, secretBundle: false });
 });
 
-test("with no dollar setting, dispatch_costs and dispatch_limits return exactly main's shapes", async () => {
+test("with no dollar setting, dispatch_costs still reports held money and dispatch_limits keeps count rows", async () => {
   const logsDir = tempDir("pd-501-p7-logs-");
   process.env.PI_LOGS_DIR = logsDir;
   const now = Date.now();
@@ -292,7 +296,10 @@ test("with no dollar setting, dispatch_costs and dispatch_limits return exactly 
   process.env.VALKEY_URL = "not-a-url";
   try {
     const costs = textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined));
-    assert.deepEqual(Object.keys(costs), ["window", "fold"], "no dollars key at all");
+    assert.deepEqual(Object.keys(costs), ["window", "fold", "dollars", "held"]);
+    assert.deepEqual(costs.dollars.windows, []);
+    assert.deepEqual(costs.dollars.runs, []);
+    assert.deepEqual(costs.held, { heldMicros: 0, heldJobs: 0, unknownHosts: [] });
     const rows = textOf(await toolByName("dispatch_limits").execute("id", {}, undefined, undefined, undefined));
     assert.deepEqual(rows, [{ index: 0, scope: "acme/web", day: 3, week: null, month: null, concurrent: null, used: null }], "no summary, no dollars");
   } finally {

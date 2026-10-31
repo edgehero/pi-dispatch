@@ -1,56 +1,571 @@
 {
   "card": "OverviewScreen",
   "pr": 3,
-  "panels": ["p-needs", "p-waiting", "p-active", "p-spend", "p-timeline", "p-waitlists", "p-caps", "p-hosts"],
+  "panels": [
+    "p-needs",
+    "p-waiting",
+    "p-active",
+    "p-spend",
+    "p-timeline",
+    "p-waitlists",
+    "p-caps",
+    "p-hosts",
+    "p-agent-writes"
+  ],
   "elements": [
-    {"el":"p-needs","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewNeeds","golden":["overview.operator","overview.viewer"]},
-    {"el":"p-waiting","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaiting","golden":["overview.operator","overview.viewer"]},
-    {"el":"p-active","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewActive","golden":["overview.operator","overview.viewer"],"reason":"the id is the old Active jobs panel's; its table with each job's progress stays on Fleet, and the overview's is the card's Running"},
-    {"el":"p-spend","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewSpend","golden":["overview.operator","overview.viewer"]},
-    {"el":"p-timeline","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewTimeline","golden":["overview.operator","overview.viewer"]},
-    {"el":"p-waitlists","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"]},
-    {"el":"p-caps","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewCaps","golden":["overview.operator","overview.viewer"]},
-    {"el":"p-hosts","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"]},
-    {"el":"Needs you: 1 question, 3 to fix, each with its project and one action","kind":"readme","status":"new","panel":"p-needs","source":"admin/src/console/panels/overview.mjs#overviewNeeds","golden":["overview.operator"],"shows":"to fix"},
-    {"el":"The definition under Needs you's numbers","kind":"readme","status":"new","source":"admin/src/console/panels/overview.mjs#overviewNeeds","sentence":"admin/src/console/panels/overview.mjs#NEEDS_DEFINITION","golden":["overview.operator","overview.viewer"]},
-    {"el":"The refused row's Open","kind":"readme","status":"new","source":"admin/src/console/panels/overview.mjs#overviewNeeds","golden":["panels/waitlist-retry.operator"],"shows":"1 refused</a>","reason":"Needs you counts questions, failed jobs and failing doctors; the day's refusals are its foot line, linking Runs, rather than a row"},
-    {"el":"The day's failures and refusals, with the floor","kind":"readme","status":"real","source":"admin/src/read-model.mjs#refusalsIn"},
-    {"el":"In line: 5 jobs waiting to start, by reason","kind":"readme","status":"new","panel":"p-waiting","source":"admin/src/read-model.mjs#readWaiting","golden":["overview.operator"],"shows":"jobs waiting to start"},
-    {"el":"longest 2h 14m","kind":"readme","status":"new","panel":"p-waiting","source":"admin/src/console/panels/overview.mjs#overviewWaiting","golden":["overview.operator","overview.viewer"],"shows":"longest 2h 14m"},
-    {"el":"Running: 4 in 5 of 9 slots, slot dots per host, the held slot called out","kind":"readme","status":"new","panel":"p-active","source":"admin/src/console/kit.mjs#slots","golden":["overview.operator","overview.viewer"],"shows":"class=\"sls\""},
-    {"el":"Spend today: $15.04 of $25.00 with metered spend per hour","kind":"readme","status":"new","panel":"p-spend","source":"admin/src/read-model.mjs#createFleetReader","holds":"spendByHour","golden":["overview.operator","overview.viewer"],"shows":"class=\"sd\"","reason":"the number is the day window's spent-and-held counter (with no day window read, the dots' sum); the dots are each UTC hour's settled spend from the run records; the line under them says both"},
-    {"el":"Runs by project: left of now what ran, right of now what is in line","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineModel","golden":["overview.operator","overview.viewer"],"shows":"tl-wrap"},
-    {"el":"An arrow means after this run, or needs this slot","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","holds":"marker-end","golden":["overview.operator","overview.viewer"],"shows":"marker-end"},
-    {"el":"A dotted gap means a delay","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","holds":"gapline","golden":["overview.operator","overview.viewer"],"shows":"gapline"},
-    {"el":"Project chips in the title bar","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/panels/overview.mjs#overviewTimeline","golden":["overview.operator","overview.viewer"],"shows":"class=\"projseg\"","reason":"the chips carry live counts and the title bar is not a panel, so they lead the timeline's card, which they filter"},
-    {"el":"The Window pill","kind":"readme","status":"illustrative","reason":"the timeline's zoom (1h, 3h, 24h) is the window"},
-    {"el":"The Host pill","kind":"readme","status":"illustrative","reason":"the timeline's Host grouping (?rows=host) is the host view"},
-    {"el":"Waitlists: the waiting jobs grouped by reason, each with one action","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"],"shows":"class=\"wbar\""},
-    {"el":"Due, and no worker has taken it","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#waitingSentence","holds":"DEFER_DUE_SENTENCE","sentence":"worker/src/defer-reasons.mjs#DEFER_BUCKET_WORDS.due.title","golden":["panels/waitlist-due.operator"],"shows":"; no worker has taken it","reason":"a kind of wait the card does not draw, the reader's own: a delayed job past its due by more than the grace that no worker has taken, whatever it recorded; Cancel for a job that never started, and for a cron trigger's next run its trigger's Edit, since the queue will not remove that run"},
-    {"el":"A reason this console does not know","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#waitingSentence","holds":"Recorded reason: ","sentence":"worker/src/defer-reasons.mjs#DEFER_BUCKET_WORDS.unknown.title","golden":["panels/waitlist-unknown.operator"],"shows":"Recorded reason: <span class=\"code\">brand-new-why</span>","reason":"a kind of wait the card does not draw, the reader's own: a recorded reason this console has no words for (a newer worker's), said by its token for every role, never as no reason recorded"},
-    {"el":"Every queue's count","kind":"readme","status":"real","panel":"p-waitlists","source":"admin/src/read-model.mjs#createFleetReader","holds":"queueCounts","golden":["overview.operator","overview.viewer"],"shows":"Queues"},
-    {"el":"What is scheduled next","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"],"shows":"Scheduled","reason":"the cron triggers' next fires (the schedulers' next), each by its trigger's id (the scheduler's key, never BullMQ's job name); a pause window's next start is the configuration page's"},
-    {"el":"Free slot","kind":"readme","status":"absent","sentence":"admin/src/console/panels/overview.mjs#FREE_SLOT_TEXT","roles":["operator"],"golden":["overview.operator","panels/waitlist-slot.operator"],"reason":"the registry publishes no venue or container name for a job, so no command can free another host's slot without a guess; the row links to the host (Fleet until the host page exists) and says how the slot frees"},
-    {"el":"Edit","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","panels/waitlist-check.operator","panels/waitlist-due.operator"],"shows":">Edit<","reason":"it links the trigger by name, falling back to Configuration until the trigger page exists"},
-    {"el":"Chain","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","panels/waitlist-run.operator"],"shows":">Chain<"},
-    {"el":"Cancel","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["panels/waitlist-pause.operator","panels/waitlist-none.operator"],"shows":"data-action=\"cancel-queued\"","reason":"the card draws none; a job that never started gets cancel-queued, the only action that removes a waiting job"},
-    {"el":"attempt 2 of 3 in 4m","kind":"readme","status":"new","panel":"p-waitlists","source":"worker/src/defer-reasons.mjs#DEFER_WHYS","holds":"attempts","golden":["overview.operator","overview.viewer"],"shows":"Attempt 2 of 3","reason":"the worker's own sentence for its retry, with the instant it is due as a time rather than a count down"},
-    {"el":"The soft hold's refusals today","kind":"readme","status":"absent","sentence":"admin/src/console/panels/overview.mjs#SOFT_HOLD_REFUSED_TEXT","roles":["operator","viewer"],"golden":["overview.operator","overview.viewer"],"reason":"the soft hold refuses a new start rather than holding it, so none of its jobs waits in line; Waitlists counts today's refusals instead"},
-    {"el":"Caps: capsules with the 80% soft hold","kind":"readme","status":"new","panel":"p-caps","source":"admin/src/console/kit.mjs#capsule","golden":["overview.operator","overview.viewer"],"shows":"class=\"cap\"","reason":"the hold line is drawn on the count windows alone, at the overlay's softHoldPct: dollar windows have no soft hold"},
-    {"el":"Soft hold: new jobs wait","kind":"readme","status":"absent","sentence":"admin/src/console/panels/overview.mjs#SOFT_HOLD_TEXT","roles":["operator","viewer"],"golden":["overview.operator","overview.viewer"],"reason":"from the soft hold the worker refuses new starts (budget.mjs); nothing waits for it"},
-    {"el":"Hosts: heartbeat, doctor, queue counts and a pause per host","kind":"readme","status":"new","panel":"p-hosts","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"],"shows":"class=\"hostrow\""},
-    {"el":"Pause fleet","kind":"readme","status":"new","panel":"p-hosts","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator"],"shows":"data-action=\"fleet-pause\""},
-    {"el":"A host's clock out of step with the console's","kind":"readme","status":"new","panel":"p-hosts","source":"admin/src/console/panels/overview.mjs#hostSkewText","golden":["panels/overview-host-skew.operator"],"shows":"clock is about 1m 48s behind this console"},
-    {"el":"A host's registry row with no expiry","kind":"readme","status":"new","panel":"p-hosts","source":"admin/src/console/panels/overview.mjs#overviewHosts","sentence":"admin/src/console/panels/overview.mjs#HOST_NO_EXPIRY_TEXT","golden":["panels/overview-host-no-expiry.operator"]},
-    {"el":"Doctor: Docker daemon unreachable, 3 days old","kind":"readme","status":"real","panel":"p-hosts","source":"admin/src/doctor-view.mjs#doctorProblems","golden":["overview.operator","overview.viewer"],"shows":"Doctor: Docker daemon unreachable"},
-    {"el":"No doctor result yet","kind":"readme","status":"new","panel":"p-hosts","source":"admin/src/console/panels/overview.mjs#overviewHosts","sentence":"admin/src/console/panels/overview.mjs#NO_DOCTOR_TEXT","golden":["overview.operator","overview.viewer"]},
-    {"el":"Per run: project, target, host, start, end and outcome","kind":"provides","status":"new","source":"admin/src/read-model.mjs#createFleetReader","holds":"runsDay"},
-    {"el":"Per waiting job: project, reason, and the blocker or due time","kind":"provides","status":"new","source":"admin/src/read-model.mjs#readWaiting"},
-    {"el":"Queue counts, cap windows, host heartbeats and doctor summaries","kind":"provides","status":"real","source":"admin/src/read-model.mjs#createFleetReader","holds":"hostBudgets"},
-    {"el":"gh-c9e1, gh-d4f0, gh-71b2 and gh-38aa, sample waiting jobs","kind":"sample","status":"illustrative","reason":"the pages harness puts its own in line through BullMQ and the worker's deferral, by the card's ids"},
-    {"el":"Clip durations of completed runs","kind":"sample","status":"illustrative","reason":"estimated by the card; the timeline draws the fixture's records"},
-    {"el":"The projects of gh-e802 and local-9e20","kind":"sample","status":"illustrative","reason":"assumed by the card; the timeline takes a running job's project from the registry"},
-    {"el":"The nav's Watch and More: Models","kind":"sample","status":"illustrative","reason":"not built (the Shell ledger)"},
-    {"el":"Now at 68.57%","kind":"sample","status":"illustrative","reason":"the console's zooms put now at two thirds of the window"}
+    {
+      "el": "p-needs",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewNeeds",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "p-waiting",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaiting",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "p-active",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/overview.mjs#overviewActive",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "reason": "the id is the old Active jobs panel's; its table with each job's progress stays on Fleet, and the overview's is the card's Running"
+    },
+    {
+      "el": "p-spend",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/overview.mjs#overviewSpend",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "p-timeline",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewTimeline",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "p-waitlists",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaitlists",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "p-caps",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewCaps",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "p-hosts",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/overview.mjs#overviewHosts",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "Needs you: 1 question, 3 to fix, each with its project and one action",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-needs",
+      "source": "admin/src/console/panels/overview.mjs#overviewNeeds",
+      "golden": [
+        "overview.operator"
+      ],
+      "shows": "to fix"
+    },
+    {
+      "el": "The definition under Needs you's numbers",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewNeeds",
+      "sentence": "admin/src/console/panels/overview.mjs#NEEDS_DEFINITION",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "The refused row's Open",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewNeeds",
+      "golden": [
+        "panels/waitlist-retry.operator"
+      ],
+      "shows": "1 refused</a>",
+      "reason": "Needs you counts questions, failed jobs and failing doctors; the day's refusals are its foot line, linking Runs, rather than a row"
+    },
+    {
+      "el": "The day's failures and refusals, with the floor",
+      "kind": "readme",
+      "status": "real",
+      "source": "admin/src/read-model.mjs#refusalsIn"
+    },
+    {
+      "el": "In line: 5 jobs waiting to start, by reason",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waiting",
+      "source": "admin/src/read-model.mjs#readWaiting",
+      "golden": [
+        "overview.operator"
+      ],
+      "shows": "jobs waiting to start"
+    },
+    {
+      "el": "longest 2h 14m",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waiting",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaiting",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "longest 2h 14m"
+    },
+    {
+      "el": "Running: 4 in 5 of 9 slots, slot dots per host, the held slot called out",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-active",
+      "source": "admin/src/console/kit.mjs#slots",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "class=\"sls\""
+    },
+    {
+      "el": "Spend today: $15.04 of $25.00 with metered spend per hour",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-spend",
+      "source": "admin/src/read-model.mjs#createFleetReader",
+      "holds": "spendByHour",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "class=\"sd\"",
+      "reason": "the number is the day window's spent-and-held counter (with no day window read, the dots' sum); the dots are each UTC hour's settled spend from the run records; the line under them says both"
+    },
+    {
+      "el": "Runs by project: left of now what ran, right of now what is in line",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-timeline",
+      "source": "admin/src/console/timeline.mjs#timelineModel",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "tl-wrap"
+    },
+    {
+      "el": "An arrow means after this run, or needs this slot",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-timeline",
+      "source": "admin/src/console/timeline.mjs#timelineHtml",
+      "holds": "marker-end",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "marker-end"
+    },
+    {
+      "el": "A dotted gap means a delay",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-timeline",
+      "source": "admin/src/console/timeline.mjs#timelineHtml",
+      "holds": "gapline",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "gapline"
+    },
+    {
+      "el": "Project chips in the title bar",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-timeline",
+      "source": "admin/src/console/panels/overview.mjs#overviewTimeline",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "class=\"projseg\"",
+      "reason": "the chips carry live counts and the title bar is not a panel, so they lead the timeline's card, which they filter"
+    },
+    {
+      "el": "The Window pill",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "the timeline's zoom (1h, 3h, 24h) is the window"
+    },
+    {
+      "el": "The Host pill",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "the timeline's Host grouping (?rows=host) is the host view"
+    },
+    {
+      "el": "Waitlists: the waiting jobs grouped by reason, each with one action",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaitlists",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "class=\"wbar\""
+    },
+    {
+      "el": "Due, and no worker has taken it",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "admin/src/console/panels/overview.mjs#waitingSentence",
+      "holds": "DEFER_DUE_SENTENCE",
+      "sentence": "worker/src/defer-reasons.mjs#DEFER_BUCKET_WORDS.due.title",
+      "golden": [
+        "panels/waitlist-due.operator"
+      ],
+      "shows": "; no worker has taken it",
+      "reason": "a kind of wait the card does not draw, the reader's own: a delayed job past its due by more than the grace that no worker has taken, whatever it recorded; Cancel for a job that never started, and for a cron trigger's next run its trigger's Edit, since the queue will not remove that run"
+    },
+    {
+      "el": "A reason this console does not know",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "admin/src/console/panels/overview.mjs#waitingSentence",
+      "holds": "Recorded reason: ",
+      "sentence": "worker/src/defer-reasons.mjs#DEFER_BUCKET_WORDS.unknown.title",
+      "golden": [
+        "panels/waitlist-unknown.operator"
+      ],
+      "shows": "Recorded reason: <span class=\"code\">brand-new-why</span>",
+      "reason": "a kind of wait the card does not draw, the reader's own: a recorded reason this console has no words for (a newer worker's), said by its token for every role, never as no reason recorded"
+    },
+    {
+      "el": "Every queue's count",
+      "kind": "readme",
+      "status": "real",
+      "panel": "p-waitlists",
+      "source": "admin/src/read-model.mjs#createFleetReader",
+      "holds": "queueCounts",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "Queues"
+    },
+    {
+      "el": "What is scheduled next",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaitlists",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "Scheduled",
+      "reason": "the cron triggers' next fires (the schedulers' next), each by its trigger's id (the scheduler's key, never BullMQ's job name); a pause window's next start is the configuration page's"
+    },
+    {
+      "el": "Free slot",
+      "kind": "readme",
+      "status": "absent",
+      "sentence": "admin/src/console/panels/overview.mjs#FREE_SLOT_TEXT",
+      "roles": [
+        "operator"
+      ],
+      "golden": [
+        "overview.operator",
+        "panels/waitlist-slot.operator"
+      ],
+      "reason": "the registry publishes no venue or container name for a job, so no command can free another host's slot without a guess; the row links to the host (Fleet until the host page exists) and says how the slot frees"
+    },
+    {
+      "el": "Edit",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaitlists",
+      "golden": [
+        "overview.operator",
+        "panels/waitlist-check.operator",
+        "panels/waitlist-due.operator"
+      ],
+      "shows": ">Edit<",
+      "reason": "it links the trigger by name, falling back to Configuration until the trigger page exists"
+    },
+    {
+      "el": "Chain",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaitlists",
+      "golden": [
+        "overview.operator",
+        "panels/waitlist-run.operator"
+      ],
+      "shows": ">Chain<"
+    },
+    {
+      "el": "Cancel",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "admin/src/console/panels/overview.mjs#overviewWaitlists",
+      "golden": [
+        "panels/waitlist-pause.operator",
+        "panels/waitlist-none.operator"
+      ],
+      "shows": "data-action=\"cancel-queued\"",
+      "reason": "the card draws none; a job that never started gets cancel-queued, the only action that removes a waiting job"
+    },
+    {
+      "el": "attempt 2 of 3 in 4m",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-waitlists",
+      "source": "worker/src/defer-reasons.mjs#DEFER_WHYS",
+      "holds": "attempts",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "Attempt 2 of 3",
+      "reason": "the worker's own sentence for its retry, with the instant it is due as a time rather than a count down"
+    },
+    {
+      "el": "The soft hold's refusals today",
+      "kind": "readme",
+      "status": "absent",
+      "sentence": "admin/src/console/panels/overview.mjs#SOFT_HOLD_REFUSED_TEXT",
+      "roles": [
+        "operator",
+        "viewer"
+      ],
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "reason": "the soft hold refuses a new start rather than holding it, so none of its jobs waits in line; Waitlists counts today's refusals instead"
+    },
+    {
+      "el": "Caps: capsules with the 80% soft hold",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-caps",
+      "source": "admin/src/console/kit.mjs#capsule",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "class=\"cap\"",
+      "reason": "the hold line is drawn on the count windows alone, at the overlay's softHoldPct: dollar windows have no soft hold"
+    },
+    {
+      "el": "Soft hold: new jobs wait",
+      "kind": "readme",
+      "status": "absent",
+      "sentence": "admin/src/console/panels/overview.mjs#SOFT_HOLD_TEXT",
+      "roles": [
+        "operator",
+        "viewer"
+      ],
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "reason": "from the soft hold the worker refuses new starts (budget.mjs); nothing waits for it"
+    },
+    {
+      "el": "Hosts: heartbeat, doctor, queue counts and a pause per host",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-hosts",
+      "source": "admin/src/console/panels/overview.mjs#overviewHosts",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "class=\"hostrow\""
+    },
+    {
+      "el": "Pause fleet",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-hosts",
+      "source": "admin/src/console/panels/overview.mjs#overviewHosts",
+      "golden": [
+        "overview.operator"
+      ],
+      "shows": "data-action=\"fleet-pause\""
+    },
+    {
+      "el": "A host's clock out of step with the console's",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-hosts",
+      "source": "admin/src/console/panels/overview.mjs#hostSkewText",
+      "golden": [
+        "panels/overview-host-skew.operator"
+      ],
+      "shows": "clock is about 1m 48s behind this console"
+    },
+    {
+      "el": "A host's registry row with no expiry",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-hosts",
+      "source": "admin/src/console/panels/overview.mjs#overviewHosts",
+      "sentence": "admin/src/console/panels/overview.mjs#HOST_NO_EXPIRY_TEXT",
+      "golden": [
+        "panels/overview-host-no-expiry.operator"
+      ]
+    },
+    {
+      "el": "Doctor: Docker daemon unreachable, 3 days old",
+      "kind": "readme",
+      "status": "real",
+      "panel": "p-hosts",
+      "source": "admin/src/doctor-view.mjs#doctorProblems",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ],
+      "shows": "Doctor: Docker daemon unreachable"
+    },
+    {
+      "el": "No doctor result yet",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-hosts",
+      "source": "admin/src/console/panels/overview.mjs#overviewHosts",
+      "sentence": "admin/src/console/panels/overview.mjs#NO_DOCTOR_TEXT",
+      "golden": [
+        "overview.operator",
+        "overview.viewer"
+      ]
+    },
+    {
+      "el": "Per run: project, target, host, start, end and outcome",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/read-model.mjs#createFleetReader",
+      "holds": "runsDay"
+    },
+    {
+      "el": "Per waiting job: project, reason, and the blocker or due time",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/read-model.mjs#readWaiting"
+    },
+    {
+      "el": "Queue counts, cap windows, host heartbeats and doctor summaries",
+      "kind": "provides",
+      "status": "real",
+      "source": "admin/src/read-model.mjs#createFleetReader",
+      "holds": "hostBudgets"
+    },
+    {
+      "el": "gh-c9e1, gh-d4f0, gh-71b2 and gh-38aa, sample waiting jobs",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "the pages harness puts its own in line through BullMQ and the worker's deferral, by the card's ids"
+    },
+    {
+      "el": "Clip durations of completed runs",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "estimated by the card; the timeline draws the fixture's records"
+    },
+    {
+      "el": "The projects of gh-e802 and local-9e20",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "assumed by the card; the timeline takes a running job's project from the registry"
+    },
+    {
+      "el": "The nav's Watch and More: Models",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "not built (the Shell ledger)"
+    },
+    {
+      "el": "Now at 68.57%",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "the console's zooms put now at two thirds of the window"
+    },
+    {
+      "el": "p-agent-writes",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/agent-writes.mjs#overviewAgentWrites",
+      "golden": [
+        "panels/agent-writes-populated.operator"
+      ],
+      "shows": [
+        "Agent writes today",
+        "mini1, UTC today; local audit only",
+        "confirmed applied writes"
+      ]
+    },
+    {
+      "el": "Agent count is unavailable or a partial lower bound when evidence cannot prove an exact total",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-agent-writes",
+      "source": "admin/src/console/panels/agent-writes.mjs#overviewAgentWrites",
+      "golden": [
+        "panels/agent-writes-partial.operator"
+      ],
+      "shows": [
+        "read is partial"
+      ]
+    }
   ]
 }

@@ -24,9 +24,6 @@ const OUTSIDE_LEDGERS = Object.freeze({
   ModelsScreen: "Planned by #773; worker model support shipped in #716/#717/#693, outside #751.",
   DispatchersScreen: "Proposed by #776; grew from #735, outside #751.",
   DispatcherScreen: "Proposed by #776; grew from #735, outside #751.",
-  ParkedAnswerer: "Proposed by #772 under #753; unattended answers need OQ-051's decision, outside #751.",
-  ParkedDraftViewer: "The proposed #772 draft's viewer variant, outside #751.",
-  ParkedDraftPhone: "The proposed #772 draft's phone variant, outside #751.",
 });
 
 function assertDispositionOwner(card, disposition, preview) {
@@ -64,7 +61,7 @@ test("every published design card has a checked ledger or an explicit issue/fami
 });
 
 test("a future-card owner cannot drift to a prerequisite or disappear while the card inventory stays the same", () => {
-  for (const [card, prerequisite] of [["ModelsScreen", "#716"], ["ParkedAnswerer", "#753"]]) {
+  for (const [card, prerequisite] of [["ModelsScreen", "#716"], ["DispatcherScreen", "#735"]]) {
     const preview = readFileSync(new URL(`${card}/preview.html`, COMPONENTS), "utf8");
     assertDispositionOwner(card, OUTSIDE_LEDGERS[card], preview);
     assert.ok(OUTSIDE_LEDGERS[card].includes(prerequisite), "the prerequisite is a real counterexample to a substring check");

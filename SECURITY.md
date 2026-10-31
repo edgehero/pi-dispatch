@@ -917,23 +917,20 @@ Stated openly rather than discovered later:
   overwrites a variable you exported yourself.
   Do not read `dispatch_run` as money-safe or reversible — it is neither.
 
-- **The model can also reach a set of confirm-gated WRITE tools, and some of them move spend limits.**
-  Named here because this page previously described the model-callable surface as reads plus
-  `pause`/`resume` plus `dispatch_run`, which stopped being true when the trigger, pause-window and
-  scoped-limit CRUD shipped (issue #280). The full inventory lives in `REQ-ADMIN-VIA-PI-EXTENSION` and is
-  scanned against the code by `admin/test/wiring.test.mjs`, so it is not re-listed here: a second copy on
-  this page is exactly how the first claim went stale. What matters for a threat model is the shape. These
-  tools can raise a spend cap, add a paid trigger, open or move a pause window, set a per-scope limit, or
-  cancel a held job, so **"money-safe" does not describe them either** — only `pause`/`resume` earns that
-  word. What bounds them is not reversibility and not structure but a **human keypress**: each routes
-  through one `confirmedWrite` funnel that refuses unless an interactive operator is present (`ctx.hasUI`)
-  **and** approves a dialog showing the concrete before/after. A prompt-injected session emits the *call*;
-  it cannot forge the *approval*, and in a print or headless session the write is refused rather than
-  silently applied. The residual is therefore an operator who approves a dialog without reading it, which
-  is a real residual and is named rather than argued away.
+- **Model writes share the console’s explicit action policies.** The inventory is pinned in
+  `REQ-ADMIN-VIA-PI-EXTENSION`, not copied here. Every proposal in an interactive pi session requires a
+  person’s confirmation of its concrete change. Headless tools require the explicit process grant and an
+  unattended transition. These transitions only narrow explicit caps/flags, pause, cancel or remove failed
+  jobs; paid starts have fresh process-granted admission and priorities keep their arithmetic bounds.
+  Raising/inheriting/unsetting a limit, adding triggers, changing scope/size/minima, resuming or retrying
+  saved fields requires a person. Secret declarations and messages/answers stay person-only. The residual
+  is either an operator approving a misleading proposal or an injected delegated session using its permitted
+  disruptive/paid-start authority; both are audited. A detailed planner diagnosis is local operator UI only,
+  while the model receives a closed refusal. Arbitrary source text cannot label itself safe.
 
-- **One model-callable write needs no keypress, and it moves money between projects.** The priorities write
-  (`dispatch_priorities_set`, issue #504) applies a plan of weights with no confirm, also headless, and a
+- **Delegated priorities can move money between projects.** The priorities write
+  (`dispatch_priorities_set`, issue #504) can run headless with the explicit process grant; an interactive
+  proposal always confirms. A
   portfolio job's plan (issue #505) does the same with no session at all. It cannot change the envelope, a floor,
   a cap, a trigger or a setting, so it raises no ceiling. What it can do is shift spend between projects, and that
   is bounded by arithmetic, not by a keypress: no project below its floor, no total above the envelope's, and no
@@ -944,10 +941,9 @@ Stated openly rather than discovered later:
   envelope: the worker refuses to boot when the envelope lies inside any path a job container can see, re-checks that
   at every reload (keeping the last good envelope when it fails), and re-judges a local job's folder at prepare, so a
   link a job planted cannot mount the envelope's folder (`local-folder-holds-envelope`) or carry a folder out of its
-  job path (`local-folder-escaped`). The session
-  tool is for your own instructions. A model that reads issue text in your session breaks the premise that the
-  operator's session processes no adversarial input; that judgement belongs in a portfolio job (issue #505), whose
-  plan meets the same rules. Reasons in a plan are agent text: they show in the panel only, escaped, and never reach
+  job path (`local-folder-escaped`). A delegated session may reason from external guidance, which grants no
+  extra authority; prompt injection remains bounded by these arithmetic rules and the action policy. A portfolio
+  job (issue #505) meets the same allocation rules inside its ordinary container. Reasons in a plan are agent text: they show in the panel only, escaped, and never reach
   a tool result, a record or a log line. Every attempt, applied or refused, is in the audit log, and the panel
   reverts to any of the newest 20 rows of that history (`REQ-DELEGATED-ALLOCATION`,
   `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`).
@@ -1254,3 +1250,28 @@ Stated openly rather than discovered later:
   default `<PI_SESSIONS_DIR>/.checkpoints`) holds whole workspaces as well as transcripts, for up to 7 days. Give it
   the same disk and mode as `PI_SESSIONS_DIR`, leave room for it (its cap is 20 GiB), and on a fleet name every worker
   (`PI_WORKER_NAME`) so a lost run's recovery goes to the machine holding its checkpoint.
+
+
+## Delegated tools and answer drafts (#766, #772)
+
+The `agent` console role is a separate capability. Its allowlisted reads remove operator/job prose and bundle
+variable names. Its writes may narrow explicit file limits, pause, cancel, remove failed jobs, turn existing
+execution flags off, and move priorities within the operator’s envelope. It cannot raise or unset a cap, change
+scope/size/reserved minimums, resume a person’s pause, retry saved job fields or write an answer/standing guidance.
+The same action policy bounds the pi tools; unattended tools additionally need the explicit process grant.
+
+An agent misled by other text it read can still disrupt service through those permitted actions and can start paid
+local/cron jobs up to the operator’s shared hourly count, including a cron run outside its schedule with that
+trigger’s model, maxTurns, secrets and forge token. Every write is audited as role agent. A pi process’s own bash,
+write and edit tools are outside this policy, so an unattended delegated pi process must run with them disabled.
+Private persona/project guidance can live in an external skill; it carries no authority and the platform stores
+no personal profile or private integration to interpret it.
+
+An answer rule is reviewed configuration, never model-writable. Its draft job has no Valkey/console reach and
+cannot post: it gets only trusted data readers, a classifier and structured submit, with builtin/executable context
+withheld. Its workspace is read only; the host binds output to an authenticated receipt and rechecks citations and
+current scope/configuration. App credentials are narrowed for read access. A PAT cannot be attenuated at mint,
+so its existing scope is a residual and the restricted tool profile is the boundary. Prompt injection can still
+produce an inaccurate cited proposal; a person must inspect it and alone confirms sending or adopting guidance.
+Approval, product, security, money, scope, uncovered and insufficient-confidence classifications never draft.
+Private question/draft inputs have bounded retention; logs and ordinary run records hold no such text.

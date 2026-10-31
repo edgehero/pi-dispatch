@@ -37,6 +37,14 @@ export function consoleAnswerBy(meta) {
 	return typeof by === "string" && TOKEN_NAME_RE.test(by) ? by : null;
 }
 
+/** The provenance is all-or-none. A model's free-text source label never reaches the trail or touch index. */
+export function consoleDraftOf(meta) {
+	const fields = ["draftRunId", "draftDigest", "draftSourceRunId"];
+	if (!fields.some(k => meta && Object.hasOwn(meta, k))) return null;
+	if (!/^[A-Za-z0-9._:-]{1,200}$/.test(meta?.draftRunId ?? "") || !/^[a-f0-9]{64}$/.test(meta?.draftDigest ?? "") || !/^[A-Za-z0-9._:-]{1,200}$/.test(meta?.draftSourceRunId ?? "")) return { invalid: true };
+	return { draftRunId: meta.draftRunId, draftDigest: meta.draftDigest, draftSourceRunId: meta.draftSourceRunId };
+}
+
 /**
  * The answer text as a job may carry it. Never throws; a non-string is "". Newlines are kept: a reply can be several
  * lines.
@@ -90,7 +98,7 @@ export function boundAnswerText(raw) {
  * control one, and the scrub above has already removed every control the text had. The name needs no neutralising:
  * its charset holds no `@`. The panel's reserved name (`PANEL_ANSWER_BY`) gets its own head line.
  */
-export function answerTrailComment(by, text) {
+export function answerTrailComment(by, text, draftRunId = null) {
 	const quoted = scrubAnswerText(text)
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
@@ -100,5 +108,6 @@ export function answerTrailComment(by, text) {
 		.map((line) => `> ${line}`)
 		.join("\n");
 	const head = by === PANEL_ANSWER_BY ? "Answered from an operator's /dispatch panel" : `Answered from the operator console by ${by}`;
-	return `${head}:\n\n${quoted}`;
+	const draft = typeof draftRunId === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(draftRunId) ? `\n\nDrafted in run ${draftRunId}.` : "";
+	return `${head}:\n\n${quoted}${draft}`;
 }

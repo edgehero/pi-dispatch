@@ -24,15 +24,26 @@ comp("Status", 520, "Status", f"""
 {card('Chips, counts, dots, slots, tiles', '<div class="cmp-row">' + chip('60% of cap', 'ok') + chip('longest 2h 14m') + chip('live', 'running', 'running') + '<span class="count tone-parked">1</span><span class="count tone-attention">4</span><span class="dot tone-ok"></span><span class="dot tone-attention"></span><span class="dot tone-failed"></span><span class="sls">' + slots('rhf') + '</span>' + ''.join(f'<span class="tile tone-{t}">{ic(i)}</span>' for t, i in [('parked', 'parked'), ('failed', 'failed'), ('refused', 'refused'), ('attention', 'fleet'), ('ok', 'spend'), ('idle', 'clock')]) + '</div>')}
 """, subtitle="Badges, project and venue tags, chips, counts, dots, slots and icon tiles")
 
+# Capability marks keep the action's own paid/destructive meaning and name the boundary in words.
+AGENT_POLICY_CSS = """
+.agent-policy { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px 10px; padding: 10px 14px; border-radius: var(--radius-md); background: var(--surface-2); color: var(--ink-muted); font-size: 13px; line-height: 19px; overflow-wrap: anywhere; }
+.agent-policy b { color: var(--ink); }
+.agent-policy .ic { flex: none; }
+"""
+
 # 3 Actions and confirm
 comp("Actions", 820, "Actions and confirm", f"""
 {card('Buttons', '<div class="cmp-row">' + btn('Open Fleet', 'primary', sm=False) + btn('Spend', sm=False) + btn('Answer', 'answer', 'parked', sm=False) + btn('Re-run', 'paid', 'rerun', sm=False) + btn('Pause fleet', 'danger', 'pause', sm=False) + btn('See why', 'ghost', sm=False) + '<button class="btn" type="button" disabled>Re-run</button></div>', sub='one solid pill per card; paid and destructive are outlined until confirm')}
-<div class="cards-3">
+<div class="stack">
+<p class="agent-policy">{ic("shield", "ic ic--sm")}<b>Agent may act alone</b><span>Pausing narrows execution. Its Undo resumes and needs a person.</span></p>
+<p class="agent-policy">{ic("shield", "ic ic--sm")}<b>Person confirms for an agent</b><span>Raising a cap can widen spend.</span></p>
+<p class="agent-policy">{ic("shield", "ic ic--sm")}<b>Person only</b><span>Answering a parked question always needs the person who sends it.</span></p>
+</div><div class="cards-3">
 {confirm('safe', 'Set maxTurns to 40', ['maxTurns: <b>30</b> to <b>40</b>', 'Applies to jobs that start after you confirm'], 'Set maxTurns back to 30', 'Confirm')}
 {confirm('paid', 'Re-run gh-f0c2', ['Starts a new run of acme/web#491, flow fix, on mini1', 'Reserves up to <b>$2.00</b> before it spends'], 'Cancel the new run', 'Re-run for up to $2.00')}
 {confirm('danger', 'Pause the fleet', ['Pauses every queue: nothing new starts', 'Running jobs finish', 'Valkey <span class="code">redis://127.0.0.1:6399/0</span>'], 'Resume the fleet', 'Pause the fleet')}
 </div>
-""", subtitle="Buttons by kind of act, and the confirm bar in its safe, paid and destructive forms")
+""", style=AGENT_POLICY_CSS, subtitle="Buttons, agent capability reasons, and confirm bars in safe, paid and destructive forms")
 
 # 4 Cards, banners, empty
 comp("CardsAndBanners", 1060, "Cards, banners and empty states", f"""
@@ -99,7 +110,7 @@ comp("FieldsDiffCommand", 640, "Fields, diff and command", f"""
 READMES = {
  "Shell": "The shell every page shares: a top bar with the pi-dispatch pill, pill navigation, the live state and the signed-in person, then a title bar with the page's filters.\n\nUse `shell(active, inner, title, sub, end)` from the kit. Navigation order is Overview, Runs, Parked, Triggers, Fleet, Spend, Configuration, then More (Models, and Audit for operators). The delivered compact Watch screen is linked from Configuration; this planned Triggers screen will give it a tab. The Parked count is violet and counts questions and approvals together. The live pill says Live, Reconnecting or Not live. A viewer sees no Audit and no action buttons. At 390 the nav becomes a pill row that scrolls inside itself.",
  "Status": "The status vocabulary: one glyph, one word and one tone for every state, plus project tags, venue tags, chips, counts, slot dots and icon tiles.\n\nUse `badge(kind)` for outcomes and states, never colour alone. Project tags are the project's name on a neutral pill; venue tags are outlined. Slot dots: filled blue for running, yellow ring for held, empty ring for free.",
- "Actions": "Buttons by kind of act, and the two-step confirm bar.\n\nOne solid pill per card for the step forward. Answer is violet and only for parked runs. Paid acts (re-run, retry, adopt a model) are outlined in yellow, destructive acts (pause, cancel, remove, decline) in red, until the confirm bar, where the confirm button fills. Every confirm bar lists what will happen, an Undo line and the preview ticket's expiry, and opens below the card that asked, never inside a table cell.",
+ "Actions": "Buttons by kind of act, and the two-step confirm bar.\n\nOne solid pill per card for the step forward. Answer is violet and only for parked runs. Paid acts (re-run, retry, adopt a model) are outlined in yellow, destructive acts (pause, cancel, remove, decline) in red, until the confirm bar, where the confirm button fills. Every action carries an agent capability and reason: an agent may act alone, needs a person to confirm, or only a person may act. Evaluated transitions and Undo keep the same boundary. Every confirm bar lists what will happen, an Undo line and the preview ticket's expiry, and opens below the card that asked, never inside a table cell.",
  "CardsAndBanners": "Cards are the one container; banners and empty states say what happened and what to do.\n\nKPI cards lead with one big number. The outcome banner leads every run page that has ended, with the outcome word, the reason sentence and the next step. Notice banners cover after-write success (with Undo), reconnecting, and no worker online. Sections with nothing to show collapse to one line.",
  "DataTable": "Tables sit in a flush card, scroll inside their own box, and become stacked rows on a phone.\n\nIds never break. The outcome cell is a badge plus its reason sentence. Numbers are right-aligned with separators. Every run row carries its project tag. Mark cells `wide` to span the full row and give each a `data-l` label for the phone layout.",
  "FactsAndLevels": "Facts and levels: the fact grid, meters with the soft-hold tick, phases with item ticks, capsules, rings and the spend dots.\n\nA meter turns yellow at the 80% soft hold (new jobs wait) and red at the cap (new jobs are refused). Phases show done phases filled, the current phase outlined with one tick per item, and later phases empty. A striped bar means the worker reports no progress.",

@@ -1,4 +1,4 @@
-<!-- @dsCard group="Access and audit" height=1160 width=1440 subtitle="Audit log: the hash chain&#x27;s state first, then every write and sign-in, with a damaged row flagged" -->
+<!-- @dsCard group="Access and audit" height=1260 width=1440 subtitle="Audit log: the hash chain&#x27;s state first, then every write and sign-in, with a damaged row flagged" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -51,6 +51,7 @@
 </div><div class="filterbar">
   <label class="search"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input type="search" placeholder="Search targets and reasons"></label>
   <button class="fpill" type="button">Who: <b>All</b><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev"/></svg></button>
+  <label class="sr" for="audit-role">Actor role</label><select id="audit-role" class="select"><option>Role: all</option><option>Role: agent</option><option>Role: operator</option><option>Role: panel</option><option>Role: shell</option></select>
   <button class="fpill" type="button">Action: <b>All</b><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev"/></svg></button>
   <button class="fpill" type="button">Outcome: <b>All</b><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev"/></svg></button>
 </div><div class="cols"><div class="stack"><section class="card card--flush" id="p-audit" data-panel>

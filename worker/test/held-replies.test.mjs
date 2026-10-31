@@ -242,7 +242,7 @@ test("THE SETTLE (backstop): after a take it acts on nothing; NOT PARKED drops e
 	const after = settleEnv({ entries: [entryFor("d-1"), entryFor("d-2")], first: false });
 	assert.deepEqual(await after.settle({ job: runJob(), result: PARKED }), { resumed: 0, answered: 0, dropped: 0, taken: null });
 	assert.deepEqual([after.calls.adds.length, after.calls.comments.length, after.logs.length], [0, 0, 0], "the take closed it: first is false");
-	const outcomes = [{ result: { outcome: "completed" } }, { result: { outcome: "policy", reason: "operator-cancel" } }, { result: { outcome: "completed", reason: "awaiting-input-x" } }, { error: new Error("for good") }, { error: { reason: "recovery-host-lost" } }];
+	const outcomes = [{ result: { outcome: "completed" } }, { result: { outcome: "policy", reason: "operator-cancel" } }, { result: { outcome: "policy", reason: "agent-cancel" } }, { result: { outcome: "completed", reason: "awaiting-input-x" } }, { error: new Error("for good") }, { error: { reason: "recovery-host-lost" } }];
 	for (const o of outcomes) {
 		const env = settleEnv({ entries: [entryFor("d-1"), entryFor("d-2")] });
 		assert.deepEqual(await env.settle({ job: runJob(), ...o }), { resumed: 0, answered: 0, dropped: 2, taken: null }, JSON.stringify(o));

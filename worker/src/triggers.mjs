@@ -1,3 +1,4 @@
+import { validateAnswerRules, validateStandingAnswers } from "./answerer.mjs";
 import { validateZeroTouchConfig } from "./question-groups.mjs";
 /**
  * Shared trigger-file schema + validator (issue #20). One `triggers.json` of `{ on, run }` entries is
@@ -344,12 +345,18 @@ export function parseTriggersDocument(text, path) {
 			throw configError(`triggers file: top-level ${JSON.stringify(key)} is not a key -- did you mean "secretBundles"? A bundle block the loader ignores grants nothing while the file reads as granting it, so a near miss is refused rather than dropped: ${path}`);
 		}
 	}
+	for (const key of Object.keys(parsed)) {
+		const shape = key.toLowerCase().replace(/[_ .-]/g, "");
+		if ((shape.startsWith("answerrule") && key !== "answerRules") || (shape.startsWith("standinganswer") && key !== "standingAnswers")) throw configError("triggers file: use answerRules and standingAnswers exactly");
+	}
+	let answerRules, standingAnswers;
+	try { answerRules = validateAnswerRules(parsed.answerRules); standingAnswers = validateStandingAnswers(parsed.standingAnswers); } catch (error) { throw configError(error.message); }
 	const secretBundles = validateSecretBundles(parsed.secretBundles, path);
 	const modelRoles = validateModelRoles(parsed.modelRoles);
 	for (const key of Object.keys(parsed)) if (key !== "modelRoles" && isModelRolesField(key)) throw configError("triggers file: use modelRoles");
 	let zeroTouch;
 	try { zeroTouch = validateZeroTouchConfig(parsed.zeroTouch); } catch (error) { throw configError(error.message); }
-	return { triggers, secretBundles, modelRoles, ...(parsed.zeroTouch !== undefined ? { zeroTouch } : {}), ...(parsed.watchSources !== undefined ? { watchSources } : {}) };
+	return { triggers, secretBundles, modelRoles, ...(parsed.answerRules !== undefined ? { answerRules } : {}), ...(parsed.standingAnswers !== undefined ? { standingAnswers } : {}), ...(parsed.zeroTouch !== undefined ? { zeroTouch } : {}), ...(parsed.watchSources !== undefined ? { watchSources } : {}) };
 }
 
 function normalizeTrigger(entry, index, path, state) {

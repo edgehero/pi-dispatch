@@ -164,6 +164,8 @@
     "./watch-decision": "./src/watch-decision.mjs",
     "./watch-board": "./src/watch-board.mjs",
     "./watch-trace": "./src/watch-trace.mjs",
+    "./answerer": "./src/answerer.mjs",
+    "./answerer-runtime": "./src/answerer-runtime.mjs",
     "./question-groups": "./src/question-groups.mjs",
     "./question-group-runtime": "./src/question-group-runtime.mjs",
     "./zero-touch-fixes": "./src/zero-touch-fixes.mjs"

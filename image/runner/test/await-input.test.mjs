@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -67,11 +68,25 @@ test("the tool ends pi's loop: it marks the run and returns terminate", async ()
 	factories[0].factory(api);
 	assert.equal(api.tools.length, 1);
 	assert.equal(api.tools[0].name, AWAIT_INPUT_TOOL);
-	assert.deepEqual(api.tools[0].parameters, { type: "object", properties: {} }, "no arguments: the question is posted by the agent, never carried here");
+	assert.deepEqual(Object.keys(api.tools[0].parameters.properties), ["questionCommentId"], "only the posted question's id is accepted, never its text or a URL");
+	assert.equal(api.tools[0].parameters.additionalProperties, false);
 	assert.equal(state.called, false);
 	const result = await api.tools[0].execute("t1", {});
 	assert.equal(result.terminate, true);
 	assert.equal(state.called, true);
+});
+
+test("the posted question reference is optional, text-free and bound to trusted terminal state", async () => {
+	const writes = [], api = fakeApi();
+	const { factories, state } = createAwaitInput({ sessionFile: "/session/current.jsonl", writeFile: (...args) => writes.push(args) }); factories[0].factory(api);
+	const tool = api.tools[0];
+	for (const args of [{ questionCommentId: "https://evil.invalid/123" }, { question: "PRIVATE" }, { questionCommentId: "0" }]) { assert.equal((await tool.execute("bad", args)).isError, true); assert.equal(state.called, false); }
+	assert.equal(writes.length, 0);
+	assert.equal((await tool.execute("good", { questionCommentId: "123" })).terminate, true);
+	assert.equal(writes[0][0], "/session/question-ref.json"); assert.deepEqual(JSON.parse(writes[0][1]), { version: 1, commentId: "123" });
+	const digest = state.questionRefDigest; assert.equal(digest, createHash("sha256").update(writes[0][1]).digest("hex"));
+	writes[0][1] = JSON.stringify({ version: 1, commentId: "456" }); assert.equal(state.questionRefDigest, digest, "rewriting the mutable file cannot rewrite the receipt the runner signs");
+	await tool.execute("without", {}); assert.equal(state.questionRefDigest, null, "a later legacy call cannot inherit a previous reference");
 });
 
 test("the tool_call hook refuses the name when another extension answers for it, and leaves every other call alone", () => {

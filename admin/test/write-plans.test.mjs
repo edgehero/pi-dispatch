@@ -1,3 +1,4 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
@@ -50,7 +51,7 @@ function tools() {
   const list = [];
   const pi = new Proxy({}, { get: (_t, k) => (k === "registerTool" ? (t) => list.push(t) : () => {}) });
   indexMod.default(pi);
-  return Object.fromEntries(list.map((t) => [t.name, t]));
+  return Object.fromEntries(list.map((t) => [t.name, withOperatorDiagnosis(t)]));
 }
 /** A ctx whose confirm records what it was shown and declines, so a tool shows its confirm and writes nothing. */
 function recordingCtx() {
@@ -65,7 +66,11 @@ async function toolSays(tool, params) {
   } catch (e) {
     return { refusal: e.message };
   }
-  return shown[0] ?? {};
+  if (shown[0]) {
+    assert.match(shown[0].message, /\nUndo: .+$/, "the shared action adds its concrete Undo sentence");
+    return { ...shown[0], message: shown[0].message.replace(/\nUndo: [\s\S]*$/, "") };
+  }
+  return {};
 }
 /** What a plan says, in the same shape. */
 function planSays(res) {
@@ -580,10 +585,12 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
     // [what, the sentence the planner returned, the sentence it must be (a string is exact; { prefix } where the rest
     // is another module's words, already pinned there)].
     const rows = [
+      ["operator answer fields", plans.wideningFieldRefusal({ answerRules: [] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set answerRules: answer rules are hand-written and standing answers are adopted only by a person in the console"],
       ["reviewed role map", plans.wideningFieldRefusal({ modelRoles: {} }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set modelRoles: the role map is a reviewed operator file edit, never a tool write"],
       ["unknown trigger kind", plans.planTriggerAdd({ params: { kind: "telepathy", flow: "fix" }, paths, env }).refusal, "unknown trigger kind: kind must be one of cron, label, comment, pull_request, issue"],
       ["unknown trigger field", plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["bug"], colour: "red" }, paths, env }).refusal, "dispatch_trigger_add does not take colour for a label trigger; it takes kind, flow, forge, repository, labels, any, backend, model, provider, maxTurns, progress, statusComment, recover, steer. Nothing was changed"],
       ["trigger edit index", plans.planTriggerEdit({ params: { index: 3, flow: "x" }, paths, env }).refusal, "no trigger at index 3 (have 1)"],
+      ["no trigger field", plans.planTriggerEdit({ params: { index: 0 }, paths, env }).refusal, "send at least one trigger field to edit"],
       ["blank flow", plans.planTriggerEdit({ params: { index: 0, flow: "  " }, paths, env }).refusal, "flow must be non-empty"],
       ["trigger delete index", plans.planTriggerDelete({ index: 9, paths }).refusal, "no trigger at index 9 (have 1)"],
       ["tool unknown key", plans.planSettingChange({ key: "nope", value: "1", paths, env }).refusal, `unknown key 'nope'. valid keys: ${keys}`],

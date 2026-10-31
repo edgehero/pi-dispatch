@@ -65,7 +65,8 @@ export const AUDIT_Q_MAX = 64;
 export const AUDIT_SEQ_RE = /^[1-9]\d{0,15}$/;
 
 /** The parameters the audit page takes, in the order `auditQueryString` writes them. */
-export const AUDIT_PARAMS = Object.freeze(["before", "who", "action", "outcome", "q", "seq"]);
+export const AUDIT_ACTOR_ROLES = Object.freeze(["agent", "operator", "viewer", "panel", "shell", "anonymous"]);
+export const AUDIT_PARAMS = Object.freeze(["before", "who", "role", "action", "outcome", "q", "seq"]);
 
 /** The rows a page shows when the caller names no other count (`pages.mjs` `AUDIT_PER_PAGE` is the same 50). */
 const PER_PAGE_DEFAULT = 50;
@@ -145,6 +146,8 @@ export function parseAuditQuery(params) {
   }
   const who = one("who");
   if (who !== null && !AUDIT_WHO_RE.test(who)) return { refusal: "who must be a token name (letters, digits and . _ @ -, at most 64 characters)" };
+  const role = one("role");
+  if (role !== null && !AUDIT_ACTOR_ROLES.includes(role)) return { refusal: `role must be one of ${AUDIT_ACTOR_ROLES.join(", ")}` };
   const action = one("action");
   if (action !== null && !CONSOLE_AUDIT_ACTIONS.includes(action)) return { refusal: `action must be one of ${CONSOLE_AUDIT_ACTIONS.join(", ")}` };
   const outcome = one("outcome");
@@ -158,10 +161,10 @@ export function parseAuditQuery(params) {
     if (before !== null) return { refusal: "seq and before do not go together: each says where the page starts" };
     // A seq page is the row's own chunk, unfiltered (the banner after a write links it); refused with a filter rather
     // than drawn unfiltered under selects that say otherwise. The filter form drops seq for the same reason.
-    if (who !== null || action !== null || outcome !== null || q !== null) return { refusal: "seq must not be combined with who, action, outcome or q: it opens its row's own page, unfiltered" };
+    if (who !== null || role !== null || action !== null || outcome !== null || q !== null) return { refusal: "seq must not be combined with who, role, action, outcome or q: it opens its row's own page, unfiltered" };
     seq = Number(rawSeq);
   }
-  return { query: Object.freeze({ before, who, action, outcome, q, seq }) };
+  return { query: Object.freeze({ before, who, ...(role !== null ? { role } : {}), action, outcome, q, seq }) };
 }
 
 /**
@@ -178,7 +181,7 @@ export function auditQueryString(query, over = {}) {
 
 /** Whether the query filters rows (a search, or who, action or outcome): the reads then look further than one page. */
 export function auditFiltered(query) {
-  return Boolean(query?.who || query?.action || query?.outcome || query?.q);
+  return Boolean(query?.who || query?.role || query?.action || query?.outcome || query?.q);
 }
 
 /** Whether an entry is an audit row (a parsed object with a seq), as `readConsoleAudit` hands them back. */
@@ -290,6 +293,7 @@ function indexEnd(chain) {
 function matches(entry, q) {
   if (!isAuditRow(entry)) return false;
   if (q.who && entry.actor?.name !== q.who) return false;
+  if (q.role && entry.actor?.role !== q.role) return false;
   if (q.action && entry.action !== q.action) return false;
   if (q.outcome && entry.outcome !== q.outcome) return false;
   if (q.q) {

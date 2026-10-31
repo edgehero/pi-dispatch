@@ -67,7 +67,7 @@ const targetNumber = (t) => (typeof t?.number === "number" ? t.number : typeof t
  *
  * THEN, the forge-source late entries in inbox order, split by hop. A message with `hop >= 1` was carried once already,
  * so it is only ever answered: that is what ends a chain of runs. Of the rest (hop 0), the FIRST decides:
- *   (A) the outcome is not `operator-cancel` (the operator stopped this work; starting it again behind their back is
+ *   (A) the outcome is not `operator-cancel` or `agent-cancel` (the caller stopped this work; starting it again is
  *       the one thing the cancel promised not to do), its stored fallback job (the job the receiver would have enqueued,
  *       `readFallbacks`) has `resume === true`, and that job names this run's forge, repo, target type and number: the job is enqueued on the
  *       queue that ran this run (`job.queueName`: a host queue stays on its host, anything else goes to the shared one;
@@ -89,7 +89,7 @@ const targetNumber = (t) => (typeof t?.number === "number" ? t.number : typeof t
  * Logs `steer_late_resumed { jobId, runId, n }` (n: the messages the new job carries, its own first one included) and
  * `steer_late_replied { runId, n }`; ids and counts, never text. Never throws.
  */
-export function makeLateForge({ redis, queues, comment = async () => {}, log = () => {}, now = Date.now, inbox = inboxModule, enqueue = enqueueLateForgeJob, release = releaseSemanticWindow } = {}) {
+export function makeLateForge({ redis, queues, comment = async () => {}, log = () => {}, now = Date.now, inbox = inboxModule, enqueue = enqueueLateForgeJob, release = releaseSemanticWindow, canPublish = async () => true } = {}) {
 	const queueFor = (name) => {
 		if (typeof name === "string" && name.startsWith(`${QUEUE}@`) && typeof queues?.host === "function") return { queue: queues.host(name), name };
 		return { queue: queues?.shared?.(), name: QUEUE };
@@ -125,9 +125,12 @@ export function makeLateForge({ redis, queues, comment = async () => {}, log = (
 			await release(job, log);
 			const late = Array.isArray(entries) ? entries.filter((e) => e?.source === "forge") : [];
 			if (late.length === 0) return;
+			// Closing the old inbox must not carry its private fallback to a newly configured forge.
+			// The trusted worker checks the original draft's source again, including terminal retries.
+			if (await canPublish(job.data) !== true) { log("steer_late_source_unavailable", { runId: sanitizeJobId(runId), count: late.length }); return; }
 			const fresh = late.filter((e) => hopOf(e) === 0);
 			const answer = late.filter((e) => hopOf(e) >= 1);
-			const cancelled = result?.reason === "operator-cancel" || error?.reason === "operator-cancel";
+			const cancelled = ["operator-cancel", "agent-cancel"].includes(result?.reason) || ["operator-cancel", "agent-cancel"].includes(error?.reason);
 			// Issue #638: a held reply already became this parked run's resumed job, so a late message is answered, never
 			// a second resumed job for the same run.
 			const started = fresh.length > 0 && !cancelled && heldResumed !== true ? await resume({ job, runId, first: fresh[0], queueName }) : null;

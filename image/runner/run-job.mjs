@@ -1,4 +1,5 @@
 import { readQuestionGrouping, executeQuestionGrouping } from "./src/question-grouping.mjs";
+import { readAnswerDraft, createAnswerDraftTools } from "./src/answerer.mjs";
 import { existsSync } from "node:fs";
 import { readWatchDecision, executeWatchDecision } from "./src/watch-decision.mjs";
 import { readWatchTools, createWatchTools } from "./src/watch-tools.mjs";
@@ -192,6 +193,9 @@ async function main() {
 	assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR, WORKSPACE]);
 	// Diagnose the shared mount boundary before inspecting optional watch or role files.
 	const watchReadOnly = readWatchMode();
+	const answerDraftInput = readAnswerDraft();
+	if (answerDraftInput && (watchReadOnly || cfg.maxCostMicros === null)) throw configError("answer drafts require their own restricted mode and cost cap", "answer-draft-refused");
+	if (answerDraftInput) assertWatchCompatible(cfg);
 	const watchDecisionInput = readWatchDecision();
 	const questionGroupingInput = readQuestionGrouping();
 	if (questionGroupingInput && (watchReadOnly || watchDecisionInput || cfg.maxCostMicros === null)) throw configError("question grouping requires its own mode and a cost cap", "question-group-refused");
@@ -199,7 +203,7 @@ async function main() {
 	if (watchDecisionInput && (!watchReadOnly || cfg.maxCostMicros === null)) throw configError("watch decisions require a read-only marker and a cost cap", "watch-config-invalid");
 	const watchToolsConfig = watchReadOnly && !watchDecisionInput ? readWatchTools() : null;
 	const roleInputs = readRoleInputs();
-	if (watchReadOnly || questionGroupingInput) assertWatchCompatible(cfg, { roles: roleInputs });
+	if (watchReadOnly || questionGroupingInput || answerDraftInput) assertWatchCompatible(cfg, { roles: roleInputs });
 	// Issue #704 part 3: a project secret bundle's plain variables on a gateway venue, from the job's own directory into
 	// this process's environment (pi's), before any runtime or request exists. Same moment, same exit code: a flag
 	// without a usable file refuses before spend rather than running the job without a variable it was given.
@@ -225,7 +229,7 @@ async function main() {
 	// (src/mcp.mjs `readJobMcp`). Null for a job whose trigger names none, which then builds exactly what it always has.
 	// Read first, since the job's MCP adds the names an exclusion may carry (codemode, a server's tools).
 	const mcpDocument = readJobMcp();
-	if (watchReadOnly || questionGroupingInput) assertWatchCompatible(cfg, { roles: roleInputs, mcp: mcpDocument });
+	if (watchReadOnly || questionGroupingInput || answerDraftInput) assertWatchCompatible(cfg, { roles: roleInputs, mcp: mcpDocument });
 	if (cfg.excludeTools.length > 0) assertExcludeToolsKnown(cfg.excludeTools, [...excludableToolNames(), ...mcpExcludableNames(mcpDocument)]);
 
 	// A command job's prompt is rebuilt from PI_COMMAND rather than read from disk: one in-container
@@ -274,7 +278,7 @@ async function main() {
 	const { sessionManager, resumed: sessionResumed, reason: sessionReason } = cfg.fork
 		? openForkSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, fork: cfg.fork })
 		: openSessionManager({ sessionFile: cfg.sessionFile, cwd: WORKSPACE, log });
-	if ((watchReadOnly || questionGroupingInput) && sessionResumed) throw configError("watch jobs require a fresh session", "watch-config-invalid");
+	if ((watchReadOnly || questionGroupingInput || answerDraftInput) && sessionResumed) throw configError("restricted jobs require a fresh session", "watch-config-invalid");
 	applyApprovalDecision(sessionManager, approvalDecisionFromEvent(cfg.approvalDecision, { jobDir: JOB_DIR }));
 	const rootSessionId = sessionManager.getSessionId();
 	// Issue #645: a recovery attempt resumes the checkpoint the worker staged, or it does not run. An empty or quarantined
@@ -397,7 +401,7 @@ async function main() {
 	if (jobMcp) stopMcp = () => jobMcp.lifecycle.stop();
 	// The tool a job armed with run.awaitInput may end on (issue #625). Null otherwise, so an unarmed job's loader
 	// options are byte-identical to before the feature.
-	const awaitInput = cfg.awaitInput ? createAwaitInput() : null;
+	const awaitInput = cfg.awaitInput ? createAwaitInput({ sessionFile: cfg.sessionFile }) : null;
 	const requestApproval = cfg.approvalGates.length ? createRequestApproval(cfg.approvalGates) : null;
 	// The tool a job armed with run.progress reports its phases with (issue #644), on the same terms.
 	const reportProgress = cfg.reportProgress ? createReportProgress() : null;
@@ -419,9 +423,16 @@ async function main() {
 	inbox?.listen();
 	const extensionFactories = [...(jobMcp?.factories ?? []), ...(awaitInput?.factories ?? []), ...(requestApproval?.factories ?? []), ...(reportProgress?.factories ?? []), ...(roleSubagents?.factories ?? []), ...(inbox ? [inbox.factory] : [])];
 	const watchTools = watchReadOnly ? createWatchTools({ config: watchToolsConfig, runtime: modelRuntime }) : null;
+	const answerTools = answerDraftInput ? createAnswerDraftTools({ input: answerDraftInput, runtime: modelRuntime }) : null;
+	if (answerTools && !await answerTools.initialize()) {
+		usageMeter.uninstall(); failureObserver.uninstall();
+		const outcome = meterStopAtExit() ?? { code: 0, reason: "stop" };
+		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false, answerDraftDigest: answerTools.state.receipt });
+		return outcome.code;
+	}
 	const resourceLoader = await buildLoadedResourceLoader({
-		...(watchTools && { watchExtensionFactories: watchTools.factories }),
-		watchReadOnly,
+		...(answerTools ? { watchExtensionFactories: answerTools.factories } : watchTools ? { watchExtensionFactories: watchTools.factories } : {}),
+		watchReadOnly: watchReadOnly || Boolean(answerDraftInput),
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
 		packagePaths: cfg.packages,
@@ -525,6 +536,7 @@ async function main() {
 		// behave the same, but it stores an empty Set on the session, and a future pi may distinguish.
 		...(cfg.excludeTools.length > 0 && { excludeTools: cfg.excludeTools }),
 		...(watchReadOnly && watchToolOptions(cfg.excludeTools, excludableToolNames(), watchTools?.names)),
+		...(answerTools && { tools: answerTools.names, excludeTools: [...excludableToolNames(), "codemode", "tool_search"] }),
 	}));
 	if (cfg.fork) recordForkSettings(sessionManager, model, session.thinkingLevel);
 
@@ -709,6 +721,7 @@ async function main() {
 		inbox?.close();
 		budget.unsubscribe();
 		tokenBudget?.unsubscribe();
+		answerTools?.finish();
 		// Stops the meter's re-arm interval. It is unref'd, so this is hygiene rather than a hang fix
 		// -- but REQ-JOB-TIMEOUT-30M is a backstop, not a teardown plan, and a timer left running past
 		// the session it was metering is exactly the kind of thing that becomes one.
@@ -792,7 +805,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, ...roleExitFields(), tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...recoveryField(), ...steerField() });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, ...roleExitFields(), tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), ...(outcome.reason === "awaiting-input" && awaitInput?.state.questionRefDigest ? { questionRefDigest: awaitInput.state.questionRefDigest } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...(answerTools?.state.receipt ? { answerDraftDigest: answerTools.state.receipt } : {}), ...recoveryField(), ...steerField() });
 	return outcome.code;
 }
 

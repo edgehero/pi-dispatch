@@ -198,7 +198,8 @@ const ghProbeArgs = (image, bin) => ["run", "--rm", "-i", "--pull=never", ...(bi
 export async function runDoctor(shellVars = process.env, deps = {}) {
 	const {
 		cwd = process.cwd(),
-		out = (s) => process.stdout.write(s),
+		out: output = (s) => process.stdout.write(s),
+		json = false,
 		spawn = nodeSpawn,
 		// The bounds every `runCmd` goes through (issue #397). A seam so a test can drive the timeout path
 		// in milliseconds; nothing else passes it.
@@ -357,6 +358,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 	// against), and the text handed to the first `.env` read the checks below make, so a run still reads the file once.
 	// A file that is there and cannot be read is said, as `up` says it (gate round 2): the venue then comes from this
 	// shell alone. An absent one (ENOENT) is simply absent.
+	// JSON owns stdout; the same diagnostics and fixes remain visible on stderr.
+	const out = json === true ? writeErr : output;
 	const envPath = join(cwd, ".env");
 	// BYTES (issue #447): what systemd refuses to load is judged before decoding. Through ONE descriptor since gate round
 	// 2 (`readDeploymentEnv`, the panel's reader too): judged by `stat` and read by path, a folder another account could
@@ -493,8 +496,10 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 	// re-collect and the `--live` read-backs included) and before the closing line. Best effort BY CONTRACT: whatever
 	// happens here leaves `failed`, and so the exit code, as it was, and a fault is one line on stderr, never on stdout,
 	// where a script reads doctor's verdict.
+	const record = doctorResultsRecord({ checks: [...checks, ...liveRendered], liveRendered, seams, env, at: publishNow(), by: publishBy });
+	if (json === true) output(`${JSON.stringify(record)}\n`);
 	if (publish === true) {
-		await publishResults({ checks: [...checks, ...liveRendered], liveRendered, seams, env, publishDoctor, writeErr, at: publishNow(), by: publishBy });
+		await publishResults({ seams, publishDoctor, writeErr, record });
 	}
 
 	// Issue #477: whether anything doctor judged came from the deployment's `.env`, which a hand-started worker never reads.
@@ -518,26 +523,29 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
  * not take (a provider key resolved later, a value this shell disagrees with), so a value the file holds is as absent
  * as one this shell exports.
  */
-async function publishResults({ checks, liveRendered, seams, env, publishDoctor, writeErr, at, by = null }) {
+export function doctorResultsRecord({ checks, liveRendered = [], seams, env, at, by = null }) {
+	const live = new Set(liveRendered);
+	const ids = assignCheckIds(checks, (c) => (live.has(c) ? "live" : (seams.checkSection?.(c) ?? "env")));
+	const service = seams.serviceEnv ?? {};
+	const fileSide = Object.fromEntries((service.disagreements ?? []).map((d) => [d.key, d.file]));
+	const secrets = secretValuesIn(env, service.fromFile, service.extraFromFile, fileSide);
+	const worker = by?.worker === true;
+	const every = worker && Number.isSafeInteger(by.every) ? by.every : seams.publishTo?.every;
+	return buildDoctorRecord({ checks, ids, at, version: PACKAGE_VERSION, openshell: seams.openshellJudged === true, every, secrets, by: { uid: process.geteuid?.() ?? null, worker } });
+}
+
+async function publishResults({ seams, publishDoctor, writeErr, record }) {
 	const say = (why) => {
 		try {
 			writeErr(`${DOCTOR_PUBLISH_SKIPPED_PREFIX} (${why}); the console and the panel keep the last published results\n`);
 		} catch {
-			// a closed stderr cannot change the verdict either
+			// A closed stderr cannot change the verdict either.
 		}
 	};
 	const target = seams.publishTo;
 	if (!target) return say("doctor talked to no Valkey on this run");
 	if (target.refused) return say(target.refused);
 	try {
-		const live = new Set(liveRendered);
-		const ids = assignCheckIds(checks, (c) => (live.has(c) ? "live" : (seams.checkSection?.(c) ?? "env")));
-		const service = seams.serviceEnv ?? {};
-		const fileSide = Object.fromEntries((service.disagreements ?? []).map((d) => [d.key, d.file]));
-		const secrets = secretValuesIn(env, service.fromFile, service.extraFromFile, fileSide);
-		const worker = by?.worker === true;
-		const every = worker && Number.isSafeInteger(by.every) ? by.every : target.every;
-		const record = buildDoctorRecord({ checks, ids, at, version: PACKAGE_VERSION, openshell: seams.openshellJudged === true, every, secrets, by: { uid: process.geteuid?.() ?? null, worker } });
 		await publishDoctor(target.url, target.name, record);
 	} catch {
 		say("Valkey did not take them");

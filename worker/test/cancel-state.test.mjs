@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ReplyError } from "ioredis";
-import { CANCEL_ACK_TTL_MS, CANCEL_REQ_TTL_MS, QUEUED_STATES, cancelAckKey, cancelReqKey, removeHeldJob, removeQueuedJob, requestCancel } from "../src/cancel-state.mjs";
+import { CANCEL_ACK_TTL_MS, CANCEL_REQ_TTL_MS, QUEUED_STATES, agentCancelAckKey, agentCancelReqKey, cancelAckKey, cancelReqKey, removeHeldJob, removeQueuedJob, requestCancel } from "../src/cancel-state.mjs";
 
 test("the cancel keyspace is exactly cancel:req:/cancel:ack: -- the CLI, the panel and the worker meet on these strings", () => {
 	assert.equal(cancelReqKey("j1"), "cancel:req:j1");
@@ -53,6 +53,18 @@ test("requestCancel times out by deleting its own request -- a cancel the operat
 	assert.deepEqual(res, { timeout: true });
 	const dels = redis.ops.filter((op) => op[0] === "del");
 	assert.deepEqual(dels, [["del", "cancel:req:j2"]], "the timeout's DEL is the whole honesty of 'nothing was changed'");
+});
+
+test("an agent cancellation uses a distinct request and acknowledgement, so older workers cannot record a person's touch", async () => {
+	assert.equal(agentCancelReqKey("j1"), "cancel:agent:req:j1");
+	assert.equal(agentCancelAckKey("j1"), "cancel:agent:ack:j1");
+	const redis = fakeRedis({ acks: ["worker-one"] });
+	assert.deepEqual(await requestCancel({ redis, jobId: "j1", interventionOrigin: "agent" }), { ack: "worker-one" });
+	assert.deepEqual(redis.ops, [["set", "cancel:agent:req:j1", "agent-cancel", "PX", CANCEL_REQ_TTL_MS], ["get", "cancel:agent:ack:j1"]]);
+	const old = fakeRedis();
+	assert.deepEqual(await requestCancel({ redis: old, jobId: "j1", interventionOrigin: "agent", ackTimeoutMs: 0 }), { timeout: true });
+	assert.deepEqual(old.ops.at(-1), ["del", "cancel:agent:req:j1"]);
+	assert.ok(old.ops.every((op) => op[1] !== cancelReqKey("j1") && op[1] !== cancelAckKey("j1")));
 });
 
 /** The held-removal fakes share ONE ops array so the hold-keys-before-remove ORDER is observable. */

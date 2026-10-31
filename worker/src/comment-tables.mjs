@@ -42,6 +42,8 @@ export const TERMINAL_COMMENTS = {
 	"model-roles-shadowed": "Stopped: another extension registered the reserved subagent tool, so reviewed model role resolution cannot be guaranteed. Remove the conflicting extension. Not retried.",
 	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
+	"agent-cancel": "Stopped by a delegated agent. Partial work may exist. Not retried.",
+	"answer-draft-refused": "Stopped: the restricted draft job refused its configuration or inputs. No answer was sent. Not retried.",
 	"runner-policy": "Stopped: the run ended inside the container before finishing (a turn or token budget, or an in-container configuration refusal). Partial work may exist. Not retried.",
 	// Issue #437. Names the cause but never the provider's own message, which may echo a key fragment. "Or
 	// access" because a 403 is as often a key that works but may not use this model or route as a bad key.

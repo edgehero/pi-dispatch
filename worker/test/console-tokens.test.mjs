@@ -52,7 +52,7 @@ test("newToken is the prefix plus 32 random bytes as base64url, and hashToken is
 	assert.equal(token.length, 4 + 43);
 	assert.match(newToken(), /^pdc_[A-Za-z0-9_-]{43}$/);
 	assert.equal(hashToken("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-	assert.deepEqual([...TOKEN_ROLES], ["operator", "viewer"]);
+	assert.deepEqual([...TOKEN_ROLES], ["operator", "viewer", "agent"]);
 	assert.ok(TOKEN_NAME_RE.test("ops.rob-1") && !TOKEN_NAME_RE.test("-x") && !TOKEN_NAME_RE.test("A") && !TOKEN_NAME_RE.test("a".repeat(33)));
 });
 

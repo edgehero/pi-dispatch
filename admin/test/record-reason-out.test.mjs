@@ -44,7 +44,7 @@ test("dispatch_runs, by id and as a list, returns no record reason that is no to
   const saved = Object.fromEntries(["PI_LOGS_DIR", "VALKEY_URL"].map((k) => [k, process.env[k]]));
   const logsDir = tempDir("pd-737-reason-tool-");
   FREE.forEach((reason, i) => writeFileSync(join(logsDir, `gh-f${i}.json`), JSON.stringify(record(`gh-f${i}`, reason))));
-  writeFileSync(join(logsDir, "gh-ok.json"), JSON.stringify(record("gh-ok", "container-lost")));
+  writeFileSync(join(logsDir, "gh-ok.json"), JSON.stringify(record("gh-ok", "cost-cap")));
   // A Valkey URL the client refuses at once, so the list is this host's files alone, never a timeout.
   Object.assign(process.env, { PI_LOGS_DIR: logsDir, VALKEY_URL: "not-a-url" });
   try {
@@ -56,7 +56,7 @@ test("dispatch_runs, by id and as a list, returns no record reason that is no to
     assert.deepEqual(leaks(list), [], "the list");
     const parsed = JSON.parse(list);
     assert.equal(parsed.runs.length, FREE.length + 1);
-    assert.equal(parsed.runs.find((r) => r.jobId === "gh-ok").reason, "container-lost", "a token is handed out as it is");
+    assert.equal(parsed.runs.find((r) => r.jobId === "gh-ok").reason, "cost-cap", "a catalogued reason is handed out as it is");
     for (let i = 0; i < FREE.length; i += 1) {
       const one = await textOf({ jobId: `gh-f${i}` });
       assert.deepEqual(leaks(one), [], `by id: ${JSON.stringify(FREE[i])}`);

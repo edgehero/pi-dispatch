@@ -1,4 +1,4 @@
-The Parked page as a viewer sees it, with an answer rule drafting (proposed). A viewer learns that runs wait for a person and for how long, never what they asked or what was drafted.
+The Parked page as a viewer sees it, with an answer rule drafting (answer rules). A viewer learns that runs wait for a person and for how long, never what they asked or what was drafted.
 
 **How a person uses it.**
 - **Waiting for a person, 2.** One card per question: the run, its project and target, what ran where, when it parked and how long it has waited, and where the question can be read (its issue). gh-2f6a waits for an answer; gh-6e1d has a draft ready, which an operator reads and sends.

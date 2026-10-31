@@ -76,6 +76,7 @@ const ROWS = [
 	["question-group-unanswered", TERMINAL_COMMENTS["question-group-unanswered"], "Check the Zero touch grouping status and reviewed configuration before trying again."],
 	["question-group-output-invalid", "The grouping result did not satisfy the closed result contract.", "Check the Zero touch grouping status and reviewed configuration before trying again."],
 	["job-image-question-grouping-unsupported", "The job image does not declare isolated question grouping.", "Check the Zero touch grouping status and reviewed configuration before trying again."],
+	["job-image-answer-draft-unsupported", "The job image does not declare restricted, authenticated answer drafting. No draft job started.", "Rebuild the image before enabling answer rules."],
 	["decide-unanswered", "The decision did not produce a usable answer; its reviewed human fallback applies.", "Inspect the decision trace and the fallback issue."],
 	["watch-reference-invalid", "The queued watch reference does not identify the reviewed finding. No investigation started.", "Check the producer and worker versions and submit a new authenticated finding."],
 	["watch-config-changed", "The reviewed watch rule changed or disappeared before pickup. No investigation started.", "Review the current configuration and submit the finding again if still wanted."],
@@ -106,6 +107,10 @@ const ROWS = [
 	// ── Stopped while running ───────────────────────────────────────────────────────────────────────────────────────
 	["worker-abort", TERMINAL_COMMENTS["worker-abort"], "Check the worker log for the 30-minute limit or a shutdown, then run the job again if its work is still wanted."],
 	["operator-cancel", "Stopped: the operator cancelled this run. If it had started, partial work may exist; if it was cancelled before it started, nothing was spent. Not retried.", "Nothing to fix. Run the job again if its work is still wanted."],
+	["agent-cancel", TERMINAL_COMMENTS["agent-cancel"], "Ask an operator to review the agent's audit record before starting replacement work."],
+	["answer-draft-refused", TERMINAL_COMMENTS["answer-draft-refused"], "Check the hand-written answer rule and the source run; no answer was sent."],
+	["answer-draft-config-changed", "The reviewed answer configuration or source identity changed before its draft could be used.", "Review the current rule. The parked question still waits for a person."],
+	["answer-draft-unavailable", "Draft state could not be read or published.", "Check the deployment's store and retained run sources. Do not repeat a paid job for its metric."],
 	["runner-policy", TERMINAL_COMMENTS["runner-policy"], "Read the job log for the turn or token budget it reached, or the refusal inside the container, and adjust the trigger."],
 	["provider-auth-refused", TERMINAL_COMMENTS["provider-auth-refused"], "Check the provider key on the worker and what it may use, then run the job again."],
 	["cost-cap", TERMINAL_COMMENTS["cost-cap"], "Raise the trigger's `run.maxCostUsd` or the deployment's `PI_MAX_COST_USD` if the work needs more, then run the job again."],

@@ -1445,7 +1445,7 @@ test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in
 	assert.match(runJob, /const extensionFactories = \[\.\.\.\(jobMcp\?\.factories \?\? \[\]\), \.\.\.\(awaitInput\?\.factories \?\? \[\]\), \.\.\.\(requestApproval\?\.factories \?\? \[\]\), \.\.\.\(reportProgress\?\.factories \?\? \[\]\), \.\.\.\(roleSubagents\?\.factories \?\? \[\]\), \.\.\.\(inbox \? \[inbox\.factory\] : \[\]\)\];/, "run-job.mjs passes extensionFactories other than from the job's document, run.awaitInput, run.gates, run.progress, immutable role inputs and run.steer");
 	assert.equal(runJob.split("extensionFactories").length - 1, 3, "extensionFactories is built once and passed once");
 	assert.match(runJob, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
-	assert.match(runJob, /const awaitInput = cfg\.awaitInput \? createAwaitInput\(\) : null;/);
+	assert.match(runJob, /const awaitInput = cfg\.awaitInput \? createAwaitInput\(\{ sessionFile: cfg\.sessionFile \}\) : null;/);
 	assert.match(runJob, /const reportProgress = cfg\.reportProgress \? createReportProgress\(\) : null;/);
 	assert.match(runJob, /const roleSubagents = roleInputs \? createRoleSubagents\(roleInputs\) : null;/);
 	assert.match(runJob, /const inbox = cfg\.steer \? createInbox\(\{ [^\n]*\}\) : null;/);
@@ -1759,5 +1759,30 @@ test("watch read-only loader never imports workspace, overlay, staged or ordinar
 		assert.deepEqual(session.getActiveToolNames(), ["read", "grep", "find", "ls", "board_write"]);
 		for (const name of ["bash", "powershell", "edit", "write", "codemode"]) assert.equal(session.getToolDefinition(name), undefined, name);
 		assert.ok(session.getToolDefinition("read"));
+	} finally { session.dispose(); }
+});
+
+test("answer draft profile at the pin imports no executable resources and registry widening cannot obtain a posting tool", { skip }, async () => {
+	const pi = await import("@earendil-works/pi-coding-agent");
+	const { createAnswerDraftTools } = await import("../src/answerer.mjs");
+	const { excludableToolNames } = await import("../src/tools.mjs");
+	const f = fixture(), root = tempDir("pi-answer-profile-"), sentinel = join(root, "executed");
+	const malicious = `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(sentinel)}, "executed"); export default function(api) { api.registerTool({ name: "post", execute() { throw new Error("posting reachable"); } }); }`;
+	writeFileSync(join(f.workspace, ".pi", "extensions", "index.js"), malicious);
+	const overlay = join(root, "overlay"), staged = join(root, "staged"), agentDir = join(root, "agent");
+	mkdirSync(join(overlay, "extensions"), { recursive: true }); mkdirSync(staged); mkdirSync(agentDir);
+	writeFileSync(join(overlay, "extensions", "index.js"), malicious); writeFileSync(join(staged, "package.json"), JSON.stringify({ pi: { extensions: ["index.js"] } })); writeFileSync(join(staged, "index.js"), malicious);
+	const settingsManager = pi.SettingsManager.inMemory({ packages: [staged], extensions: [join(overlay, "extensions", "index.js")] });
+	const answer = createAnswerDraftTools({ input: { version: 1, rule: { id: "help", categories: ["how-to"], confidence: 0.9, mode: "draft", decisionModel: { provider: "test", id: "classifier" } }, source: { kind: "github", repo: "acme/web", target: { type: "issue", number: 7 }, selfId: 99, apiUrl: "https://api.github.com", questionCommentId: "123", startedAt: 0, parkedAt: 100 }, standing: [], baseSha: "a".repeat(40), flow: { name: "answer", revision: "a".repeat(40), text: "Cite the documented command." } }, runtime: {}, reader: { sources: new Map() } });
+	const resourceLoader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, watchReadOnly: true, watchExtensionFactories: answer.factories, globalPiDir: overlay, packagePaths: [staged], settingsManager, extensionFactories: [{ name: "unsafe", factory() { assert.fail("ordinary factories are disabled"); } }] });
+	assert.throws(() => readFileSync(sentinel), { code: "ENOENT" });
+	assert.equal(resourceLoader.getExtensions().extensions.length, 1);
+	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
+	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager, resourceLoader, tools: answer.names, excludeTools: [...excludableToolNames(), "codemode", "tool_search"] });
+	try {
+		assert.deepEqual(session.getActiveToolNames(), answer.names);
+		for (const name of ["bash", "powershell", "write", "edit", "read", "grep", "find", "ls", "codemode", "post", "request_approval", "await_human_input"]) assert.equal(session.getToolDefinition(name), undefined, name);
+		session.setActiveToolsByName(["bash", "write", "codemode", "post", ...answer.names]);
+		assert.deepEqual(session.getActiveToolNames(), answer.names, "a broad active list cannot recreate absent tools");
 	} finally { session.dispose(); }
 });

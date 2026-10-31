@@ -30,11 +30,13 @@ import { consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
 import { makeLoginLimiter } from "./guards.mjs";
 import { listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
+import { makeAnswererService } from "../answerer-data.mjs";
+import { readAgentWritesToday } from "../agent-write-count.mjs";
 
 export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
 
   serve                                    run the console on PI_CONSOLE_LISTEN (default 127.0.0.1:4790)
-  token add --name <name> --role <role>    add a token (operator or viewer); prints it once
+  token add --name <name> --role <role>    add a token (operator, viewer or agent); prints it once
   token list                               names and roles, never a token
   token revoke --name <name>               remove a token; its sessions end at their next request
   token rotate --name <name>               a new secret for a name; prints it once
@@ -103,7 +105,7 @@ export function cachedPerWindow(fn, { now = () => Date.now(), ttlMs = INSIGHTS_C
   const held = new Map();
   return (window, opts) => {
     const fullPaths = opts?.fullPaths === true;
-    const key = JSON.stringify([String(window), opts?.view ?? "spend", opts?.project ?? null, opts?.role === "operator" ? "operator" : "viewer", fullPaths]);
+    const key = JSON.stringify([String(window), opts?.view ?? "spend", opts?.project ?? null, opts?.role === "operator" ? "operator" : opts?.role === "agent" ? "agent" : "viewer", fullPaths]);
     const t = now();
     const hit = held.get(key);
     if (hit && t >= hit.at && t - hit.at < ttlMs) return hit.promise;
@@ -462,11 +464,14 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: () => log("console: Zero touch accounting needs repair") });
     const sandboxes = m.sandboxData?.makeSandboxService({ paths: side.paths, env: { ...side.env, ...(config.sandboxHostsFile ? { PI_SANDBOX_HOSTS_FILE: config.sandboxHostsFile } : {}) }, deploymentDir: config.dir, fleet, fs, now });
+    const answerer = makeAnswererService({ paths: side.paths, env: side.env, fs, now });
     const pricing = pricingOf(m.pricing);
     const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
     const pageDeps = {
       fleet,
       sandboxes,
+      answerer,
+      agentWrites: () => readAgentWritesToday({ read: (opts) => m.audit.readConsoleAudit({ logsDir: config.logsDir, ...opts, positions: true, fs }), verify: () => m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs, withLast: true }), now, host: side.env.PI_WORKER_NAME ?? "console" }),
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
       secretsView: (snapshot) => m.secretsView.secretsView({ snapshot, env: side.env, fs }),
@@ -559,6 +564,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
         watch: fleet.watch,
         zeroTouch,
         sandboxes,
+        answerer,
         rm: m.readModel,
         plans: m.writePlans ?? null,
         paths: side.paths,

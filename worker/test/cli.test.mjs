@@ -25,8 +25,8 @@ test("`doctor --live` reaches runDoctor as live: true, and the usage names the f
 	// deps bag, where runDoctor reads it strictly as `=== true`.
 	const { readFileSync } = await import("node:fs");
 	const src = readFileSync(new URL("../src/cli.mjs", import.meta.url), "utf8");
-	assert.match(src, /runDoctor\(env, \{ fix: flags\.includes\("--fix"\), live: flags\.includes\("--live"\), openshell: flags\.includes\("--openshell"\), secrets: flags\.includes\("--secrets"\), publish: !flags\.includes\("--no-publish"\), publishBy \}\)/);
-	assert.match(src, /pi-dispatch doctor \[--fix\] \[--live\] \[--openshell\] \[--secrets\]/, "issue #683 adds --openshell, issue #704 --secrets");
+	assert.match(src, /runDoctor\(env, \{ json: flags\.includes\("--json"\), fix: flags\.includes\("--fix"\), live: flags\.includes\("--live"\), openshell: flags\.includes\("--openshell"\), secrets: flags\.includes\("--secrets"\), publish: !flags\.includes\("--no-publish"\), publishBy \}\)/);
+	assert.match(src, /pi-dispatch doctor \[--json\] \[--fix\] \[--live\] \[--openshell\] \[--secrets\]/, "issue #683 adds --openshell, issue #704 --secrets");
 });
 
 test("doctor publishes unless --no-publish, and --publish beside --no-publish is refused before doctor runs (#712)", async () => {
@@ -36,7 +36,7 @@ test("doctor publishes unless --no-publish, and --publish beside --no-publish is
 	const { readFileSync } = await import("node:fs");
 	const src = readFileSync(new URL("../src/cli.mjs", import.meta.url), "utf8");
 	assert.match(src, /const flags = argv\.slice\(1\);/);
-	assert.match(src, /pi-dispatch doctor \[--fix\] \[--live\] \[--openshell\] \[--secrets\] \[--no-publish\]/);
+	assert.match(src, /pi-dispatch doctor \[--json\] \[--fix\] \[--live\] \[--openshell\] \[--secrets\] \[--no-publish\]/);
 });
 
 test("--by-worker takes the worker's interval, 1 to 168 hours, and anything else is refused before doctor runs (#712)", async () => {
@@ -613,4 +613,18 @@ test("TRIGGER_LOADER_ENV_KEYS covers every config value loadSchedules reads, so 
 	const ENV_OF = { triggersFile: "PI_TRIGGERS_FILE", maxCostUsd: "PI_MAX_COST_USD" };
 	assert.deepEqual(read, Object.keys(ENV_OF).sort(), "loadSchedules reads a config value this bolt does not map");
 	assert.deepEqual([...TRIGGER_LOADER_ENV_KEYS].sort(), [...Object.values(ENV_OF), "PI_WORKER_NAME"].sort());
+});
+
+test("the actual doctor CLI emits one JSON record on stdout without Valkey or publishing (#766)", async () => {
+	const { spawnSync } = await import("node:child_process");
+	const { fileURLToPath } = await import("node:url");
+	const cwd = tempDir("pd-766-doctor-json-cli-");
+	// No executable lookup can reach Docker or the network. The real CLI and real doctor still judge and report failures.
+	const result = spawnSync(process.execPath, [fileURLToPath(new URL("../src/cli.mjs", import.meta.url)), "doctor", "--json", "--no-publish"], { cwd, env: { PATH: "/nonexistent", VALKEY_URL: "not-a-url", PI_BACKENDS: "local" }, encoding: "utf8", timeout: 15000 });
+	assert.equal(result.status, 1, result.stderr);
+	const record = JSON.parse(result.stdout.trim());
+	assert.ok(Array.isArray(record.checks) && record.checks.some((row) => row.level === "fail"));
+	assert.equal(result.stdout.trim().split("\n").length, 1, "human diagnostics never share the machine stream");
+	assert.match(result.stderr, /doctor: some checks failed/);
+	assert.doesNotMatch(result.stderr, /publishing skipped/);
 });

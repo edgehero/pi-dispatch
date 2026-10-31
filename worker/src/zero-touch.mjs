@@ -29,7 +29,7 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 	const reasons = [...new Set(Array.isArray(coverage.reasons) ? coverage.reasons : [])];
 	const byId = new Map();
 	for (const r of records) {
-		if (!r || !ID.test(r.jobId ?? "") || !validTime(time(r.endedAt)) || time(r.endedAt) > nowMs || r.purpose === "zero-touch-grouping") continue;
+		if (!r || !ID.test(r.jobId ?? "") || !validTime(time(r.endedAt)) || time(r.endedAt) > nowMs || ["zero-touch-grouping", "answer-draft"].includes(r.purpose)) continue;
 		const prior = byId.get(r.jobId);
 		if (!prior || time(prior.endedAt) < time(r.endedAt)) byId.set(r.jobId, r);
 	}

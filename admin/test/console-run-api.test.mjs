@@ -212,6 +212,7 @@ async function runConsole(fleet, { env = ENV } = {}) {
     tokens: [
       { name: "alice", role: "operator", sha256: sha256(OP_TOKEN), createdAt: "2026-10-01T00:00:00.000Z" },
       { name: "vic", role: "viewer", sha256: sha256(VIEW_TOKEN), createdAt: "2026-10-01T00:00:00.000Z" },
+      { name: "automation", role: "agent", sha256: sha256(`pdc_${"a".repeat(43)}`), createdAt: "2026-10-01T00:00:00.000Z" },
     ],
   };
   const readTokens = () => ({ file });
@@ -249,11 +250,26 @@ async function runConsole(fleet, { env = ENV } = {}) {
   };
   const op = await login(OP_TOKEN);
   const viewer = await login(VIEW_TOKEN);
+  const agent = await login(`pdc_${"a".repeat(43)}`);
   const get = (path, cookie = op) => send({ path, headers: { cookie } });
-  return { send, get, op, viewer };
+  return { send, get, op, viewer, agent };
 }
 
 const TOP_KEYS = ["activeJobId", "forgeLink", "mode", "newerRunOnTarget", "pendingRunOnTarget", "progress", "run", "says", "state", "steer", "transcript", "version"];
+
+test("/api/run gives agents only closed reasons and safe numeric transcript/progress metadata", async () => {
+  const r = record("gh-agent-private", { reason: "private_decision", note: CANARY });
+  const fleet = fakeFleet({ records: { [r.jobId]: r } });
+  const c = await runConsole(fleet);
+  const unknown = await c.get(`/api/run?id=${r.jobId}`, c.agent);
+  assert.equal(unknown.status, 200, unknown.text);
+  assert.equal(unknown.json().run.reason, null);
+  assert.ok(!unknown.text.includes("private_decision") && !unknown.text.includes(CANARY));
+  assert.equal(unknown.json().transcript.exists, false);
+  assert.equal(typeof unknown.json().progress, "object");
+  r.reason = "cost-cap";
+  assert.equal((await c.get(`/api/run?id=${r.jobId}`, c.agent)).json().run.reason, "cost-cap");
+});
 const RUN_KEYS = ["attempt", "backend", "exitCode", "finishedAt", "flow", "host", "id", "jobId", "kind", "maxTurns", "model", "outcome", "parentJobId", "project", "provider", "reason", "recoveryOf", "repo", "session", "startedAt", "target", "triggerIndex", "triggerType", "turns"];
 
 test("/api/run: the keys, a finished run's fork, and no free text, job data or session key for either role", { timeout: 20_000 }, async () => {
@@ -389,11 +405,12 @@ test("/api/run: a parked run whose history cannot be searched is unknown with a 
 test("/api/run?url=: the newest run on the target, an Azure work item in two repositories is 409 with candidates, 400 and 404", { timeout: 20_000 }, async () => {
   const older = record("gh-old", { endedAt: iso(T0 - 900_000), startedAt: iso(T0 - 950_000) });
   const newer = record("gh-new");
+  const draft = record("gh-draft", { purpose: "answer-draft", endedAt: iso(T0 - 10_000), startedAt: iso(T0 - 20_000) });
   const other = record("gh-70", { target: "acme/web#120" });
   const azA = record("az-a", { kind: "azure", target: "proj/repo-a#31" });
   const azB = record("az-b", { kind: "azure", target: "proj/repo-b#31", endedAt: iso(T0 - 100_000) });
   const azOnly = record("az-c", { kind: "azure", target: "proj/repo-a#32" });
-  const runs = [azB, newer, other, azA, azOnly, older];
+  const runs = [draft, azB, newer, other, azA, azOnly, older];
   const fleet = fakeFleet({ records: Object.fromEntries(runs.map((r) => [r.jobId, r])), runs });
   const c = await runConsole(fleet);
   const url = (u) => `/api/run?url=${encodeURIComponent(u)}`;
@@ -401,6 +418,7 @@ test("/api/run?url=: the newest run on the target, an Azure work item in two rep
   const gh = await c.get(url("https://github.com/acme/web/pull/12"));
   assert.equal(gh.status, 200, gh.text);
   assert.equal(gh.json().run.id, "gh-new", "the newest run on exactly that target (#12, never #120)");
+  assert.notEqual(gh.json().run.id, "gh-draft", "a draft helper shares the target without becoming an answer or its newest workload");
   assert.equal(gh.json().newerRunOnTarget, null);
   assert.equal((await c.get("/api/run?id=gh-old")).json().newerRunOnTarget, "gh-new");
 

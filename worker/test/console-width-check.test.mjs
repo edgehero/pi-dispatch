@@ -1750,6 +1750,19 @@ test("the workflow: the width step is in the required contract-tests job, after 
 	assert.equal(cmds.length, 6, `nothing else runs in the step: ${JSON.stringify(cmds)}`);
 });
 
+test("the actual agent-controls and answer-draft browser runs after verified Chrome under the required context", () => {
+	const job = jobLines(WORKFLOW, "contract-tests");
+	const width = step(job, line => line === `      - name: ${STEP_NAME}`);
+	const sandbox = step(job, line => line.includes('Sandbox controls work in the real browser'));
+	const answerer = step(job, line => line.includes('Agent controls and answer drafts work under the real console CSP'));
+	assert.ok(answerer.index > sandbox.index && sandbox.index > width.index, "the actual HTTP/session browser uses the pinned artifact verified by the width lane");
+	assert.equal(answerer.key("if"), "(success() || failure()) && steps.install.outcome == 'success'");
+	assert.equal(answerer.key("timeout-minutes"), "5");
+	assert.equal(answerer.key("run"), 'CHROME="$RUNNER_TEMP/cft/chrome-linux64/chrome" node .github/scripts/console-answerer-browser.mjs --require');
+	assert.ok(job.slice(answerer.index).includes('          VALKEY_TEST_URL: "redis://127.0.0.1:6379"'));
+	assert.ok(!answerer.keys.includes("continue-on-error"));
+});
+
 test("what the workflow's comment, the docs and the specs say the check does is what it does: its widths and each control's count", async () => {
 	const { states, retry } = await shellLive();
 	const [desk, phone] = [controlDoc(states, retry).expected.length, phoneControlDoc(states).expected.length];

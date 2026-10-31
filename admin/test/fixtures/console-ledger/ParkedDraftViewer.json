@@ -1,0 +1,57 @@
+{
+  "card": "ParkedDraftViewer",
+  "pr": 772,
+  "panels": [
+    "p-answered"
+  ],
+  "elements": [
+    {
+      "el": "p-answered",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.viewer"
+      ],
+      "shows": [
+        "Answered today",
+        "answered by ops"
+      ]
+    },
+    {
+      "el": "Waiting questions, draft existence and answered-by only",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.viewer"
+      ],
+      "shows": [
+        "Waiting for a person",
+        "A draft is ready",
+        "answered by ops"
+      ]
+    },
+    {
+      "el": "Private sources and rules are explicitly operator-only",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.viewer"
+      ],
+      "shows": [
+        "Answers, drafts, their sources and the answer rule are for operators."
+      ]
+    },
+    {
+      "el": "The two question cards use the shared synthetic deployment",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Fixture wait times and run names illustrate state, not production telemetry."
+    }
+  ]
+}

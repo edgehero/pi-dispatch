@@ -428,7 +428,7 @@ CONFIRM_CSS = """
 .cs-cr { gap: 8px; }
 .cmp .field { background: var(--surface); padding: var(--space-4); border-radius: var(--radius-lg); align-content: start; align-self: start; }
 """
-comp("ConfirmStates", 1810, "Confirm states", CONFIRM_BODY, CONFIRM_CSS,
+comp("ConfirmStates", 1810, "Confirm states", CONFIRM_BODY + '<p class="collapsed">' + ic("shield", "ic ic--sm") + '<b>Agent capability</b> Every action names whether an agent may act alone, needs a person to confirm, or only a person may act. An inverse follows its current permission too.</p>', CONFIRM_CSS,
      subtitle="The write flow in every state: previewing, no change, paid reserves, bulk, refusals before and at confirm, done")
 
 # =====================================================================================
@@ -506,6 +506,7 @@ comp("LiveStates", 1330, "Live states", LIVE_BODY, LIVE_CSS,
 READMES = {
  "ConfirmStates": """Every state of the two-step write, from asking for a preview to the audit row.
 
+- **Agent capability.** Every preview names whether an agent may act alone, needs a person to confirm, or only a person may act, with the evaluated reason. Undo uses its inverse action under current permissions.
 - **Previewing.** The confirm bar opens at once with its title and grey lines; Confirm stays disabled until the preview arrives.
 - **No change.** When the change would write what is already there, the bar says so and offers only Close.
 - **Paid.** Under the list, the preview says what the job will hold, in one of the repo's sentences: a per-job cap, zero-rated, no per-job cap, unknown, or a dollar setting that does not parse. Bulk previews list each job with its own reserve, say how many more match but are not in this action (at most 100), and total what they hold.

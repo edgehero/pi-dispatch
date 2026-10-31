@@ -26,7 +26,7 @@ function setup(start = T0) {
 
 test("the vocabularies are frozen and match the contract", () => {
 	assert.ok(Object.isFrozen(CONSOLE_AUDIT_ACTIONS) && Object.isFrozen(CONSOLE_AUDIT_OUTCOMES));
-	assert.deepEqual([...CONSOLE_AUDIT_ACTIONS], ["login", "login-failed", "login-code", "logout", "refused", "write", "token-added", "token-revoked", "token-rotated", "sessions-ended", "serve-started"]);
+	assert.deepEqual([...CONSOLE_AUDIT_ACTIONS], ["login", "login-failed", "login-code", "logout", "refused", "write", "write-applied", "token-added", "token-revoked", "token-rotated", "sessions-ended", "serve-started"]);
 	assert.deepEqual([...CONSOLE_AUDIT_OUTCOMES], ["ok", "refused", "failed"]);
 });
 

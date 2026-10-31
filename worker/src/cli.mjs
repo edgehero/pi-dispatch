@@ -16,14 +16,15 @@ const FLEET_READ_TIMEOUT_MS = 2_000;
 const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
 
   pi-dispatch init         scaffold .env + triggers.json + pause-windows.json + pi-packages.json + subscriptions.json here
-  pi-dispatch doctor [--fix] [--live] [--openshell] [--secrets] [--no-publish]
+  pi-dispatch doctor [--json] [--fix] [--live] [--openshell] [--secrets] [--no-publish]
                            preflight Docker, Valkey, the job image, and your provider key; --fix offers to run each fix (y/N per action);
                            --live reads the backend declarations back off short-lived real containers (shown in docker ps while they run);
                            --openshell says whether this host is ready for the openshell venue (run anyway once PI_BACKENDS names it);
                            --secrets resolves each project secret bundle here and prints its variable names, never values;
                            every run publishes its checks to Valkey for the console and the panel (labels with paths
                            and secret values redacted, kept 7 days), and --no-publish skips that
-  pi-dispatch up [--yes]   one consented pass: pull+tag the job image, start Valkey, init, doctor
+  pi-dispatch up [--yes] [--adopt-volume] [--restart-proxy] [--refresh-proxy-rules]
+                           one consented pass: pull+tag the job image, start Valkey, init, doctor
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here
                            (--webhook-url <URL> | --no-webhook) [--org <org>] [--name <appName>]
@@ -135,7 +136,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			}
 			publishBy = { worker: true, every: hours };
 		}
-		return runDoctor(env, { fix: flags.includes("--fix"), live: flags.includes("--live"), openshell: flags.includes("--openshell"), secrets: flags.includes("--secrets"), publish: !flags.includes("--no-publish"), publishBy });
+		return runDoctor(env, { json: flags.includes("--json"), fix: flags.includes("--fix"), live: flags.includes("--live"), openshell: flags.includes("--openshell"), secrets: flags.includes("--secrets"), publish: !flags.includes("--no-publish"), publishBy });
 	}
 
 	if (cmd === "up") {

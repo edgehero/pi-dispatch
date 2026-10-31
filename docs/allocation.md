@@ -204,8 +204,9 @@ A plan is weights, an integer from 0 to 1000 per project. From the console:
 /dispatch priorities set shop=3 platform=1
 ```
 
-or from a model, `dispatch_priorities_set`. Neither asks for a confirm, and both work with no operator present (a
-headless `pi -p` included): a plan can only move money inside the envelope. The writer is `operator-session`, so
+or from a model, `dispatch_priorities_set`. The typed command is the person’s instruction. An interactive model
+proposal always confirms; a headless model tool additionally needs `PI_DISPATCH_AGENT_WRITES=1` in its own process
+and an unattended policy transition. A plan can only move money inside the envelope. The writer is `operator-session`, so
 `delegation.writers` must list it. The plan's `basis` is filled in from the applied plan. A plan that leaves `_other`
 out keeps `_other`'s current weight; any other project left out is refused as `plan-incomplete`.
 
@@ -320,7 +321,7 @@ planted by `bash` in the same message as the write. An envelope edit made that w
 | Plan reasons (run record `plan`) | `plan-absent`, `plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`, `plan-parse-error`, `plan-collect-error`, `plan-invalid`, and the apply ladder |
 | Job files | `/job/portfolio.json` (in), `/outbox/priorities.json` (out) |
 | Valkey | `alloc:plan`, `alloc:lock`, `alloc:log`, `alloc:envelope:expected` |
-| Tools | `dispatch_allocations` (read), `dispatch_priorities_set` (no confirm), `dispatch_envelope_set` (confirm) |
+| Tools | `dispatch_allocations` (read), `dispatch_priorities_set` (interactive Confirm, headless process grant), `dispatch_envelope_set` (confirm) |
 | Commands | `/dispatch priorities`, `/dispatch priorities set <id>=<weight> ...` |
 | Panel | `b` in the list; `r` on a history row reverts |
 | Audit file | `PI_LOGS_DIR/allocations/YYYY-MM.jsonl` |

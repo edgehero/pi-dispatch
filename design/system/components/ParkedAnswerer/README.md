@@ -1,4 +1,4 @@
-The Parked page with an answer rule (proposed): when a run of a listed project parks, the worker starts a draft job that classifies the question and drafts an answer from cited sources. A person sends it, edits it, or answers otherwise. Product decisions, security, money, scope and every approval are never drafted.
+The Parked page with an answer rule (answer rules): when a run of a listed project parks, the worker starts a draft job that classifies the question and drafts an answer from cited sources. A person sends it, edits it, or answers otherwise. Product decisions, security, money, scope and every approval are never drafted.
 
 **How a person uses it.**
 - **No question or draft text on this page.** Each card says where to read the question and links to the runs.
@@ -38,7 +38,7 @@ The Parked page with an answer rule (proposed): when a run of a listed project p
 - **No rule edits here.** The rule is written by hand in triggers.json, and no tool may set it.
 - **Jev gives no reasons.** The cited sources are the why.
 
-**Fixture note.** gh-2f6a, acme/api#131, triage on mini1 and parked 26 minutes come from the fixture. Everything else is sample, because answer rules are proposed (issue #753, REQ-PARKED-ANSWERER):
+**Fixture note.** gh-2f6a, acme/api#131, triage on mini1 and parked 26 minutes come from the fixture. Everything else is sample, because answer rules are implemented under issue #772 (REQ-PARKED-ANSWERER):
 - the rule and its numbers;
 - gh-6e1d, gh-5a02, the draft runs gh-91d4 and gh-a07c, and their sources;
 - the standing answers;

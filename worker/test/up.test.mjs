@@ -2348,7 +2348,7 @@ test("up on docker uses pi-dispatch-valkey-data only when it is this folder's: a
 	assert.equal(await no.run(), 1);
 	assert.deepEqual(acts(no), []);
 	assert.equal(no.promptCalls.length, 1, "--yes did not answer it");
-	assert.match(no.promptCalls[0], /pi-dispatch-valkey-data exists without an owner label: this volume holds a queue pi-dispatch cannot attribute to a folder\. .*Adopt it for \/deploy\? \(asked even under --yes\) \[y\/N\] $/);
+	assert.match(no.promptCalls[0], /pi-dispatch-valkey-data exists without an owner label: this volume holds a queue pi-dispatch cannot attribute to a folder\. .*Adopt it for \/deploy\? \(asked even under --yes\) \[y\/N\]  \(or pass --adopt-volume\)$/);
 	assert.match(no.text(), /✗ pi-dispatch-valkey-data has no owner label and was not adopted/);
 	// Adopted: no create (it exists), run, and the ownership recorded in the queue.
 	const adoptClaims = [];
@@ -2538,7 +2538,7 @@ test("up offers to refresh a deploy/egress-proxy.conf that differs from the pack
 	// Shown: which file, a summary of how it differs, the diff that shows the rest, and the two steps a yes takes.
 	assert.match(text, /⚠ deploy\/egress-proxy\.conf differs from the package's copy[^:]*: 1 line of it not in the package's copy, 2 lines of the package's not in it\. An upgrade does not rewrite it/);
 	assert.match(text, /`diff deploy\/egress-proxy\.conf \S+egress-proxy\.conf` shows which/);
-	assert.match(text, /up would replace it with the package's copy[^:]*, keeping yours beside it:\n\s+cp deploy\/egress-proxy\.conf deploy\/egress-proxy\.conf\.bak-<timestamp>\n\s+write \S+ content beside deploy\/egress-proxy\.conf, then rename it over deploy\/egress-proxy\.conf\n/);
+	assert.match(text, /up would replace it with the package's copy[^:]*, keeping yours beside it \(or pass --refresh-proxy-rules\):\n\s+cp deploy\/egress-proxy\.conf deploy\/egress-proxy\.conf\.bak-<timestamp>\n\s+write \S+ content beside deploy\/egress-proxy\.conf, then rename it over deploy\/egress-proxy\.conf\n/);
 	// Asked of a person even under --yes: the file may hold the operator's own edit.
 	assert.match(text, /--yes does not cover replacing a file that may hold your own edits: answer below\n/);
 	assert.equal(h.promptCalls.length, 1, "the one question is the refresh; --yes answered the rest");
@@ -2570,7 +2570,7 @@ test("up's accepted refresh replaces the copy through a temp file, keeps the old
 	assert.deepEqual([...h.store.keys()].filter((k) => k.includes(".tmp-")), []);
 	assert.match(text, /✓ replaced deploy\/egress-proxy\.conf with the package's copy[^;]*; yours is kept as deploy\/egress-proxy\.conf\.bak-20260929T101500Z\. squid reads it only at start/);
 	// The running proxy still holds the old file, so it is restarted, shown and (no job network on it) accepted by --yes.
-	assert.match(text, /up would restart it so squid reads the refreshed deploy\/egress-proxy\.conf:\n\s+docker restart pi-dispatch-egress-proxy\n--yes: accepted\n/);
+	assert.match(text, /up would restart it \(or pass --restart-proxy\) so squid reads the refreshed deploy\/egress-proxy\.conf:\n\s+docker restart pi-dispatch-egress-proxy\n--yes: accepted\n/);
 	assert.deepEqual(restarts(h), [RESTART]);
 	assert.deepEqual(dockerMutations(h), [], "restarted, never removed or recreated");
 	assert.match(text, /egress rules\s+deploy\/egress-proxy\.conf replaced with the package's copy/);
@@ -2641,7 +2641,7 @@ test("a refreshed copy under a PAUSED proxy is unpaused and then restarted, neve
 	const text = h.text();
 	assert.equal(h.store.get(CONF), NEW_RULES);
 	assert.match(text, /a proxy already running or paused is offered a restart below/);
-	assert.match(text, /up would unpause and then restart it so squid reads the refreshed deploy\/egress-proxy\.conf:\n\s+docker unpause pi-dispatch-egress-proxy\n\s+docker restart pi-dispatch-egress-proxy\n--yes: accepted\n/);
+	assert.match(text, /up would unpause and then restart it \(or pass --restart-proxy\) so squid reads the refreshed deploy\/egress-proxy\.conf:\n\s+docker unpause pi-dispatch-egress-proxy\n\s+docker restart pi-dispatch-egress-proxy\n--yes: accepted\n/);
 	const acted = h.calls.filter((c) => c.cmd === "docker" && ["unpause", "restart", "start", "rm", "run"].includes(c.args[0])).map((c) => c.args[0]);
 	assert.deepEqual(acted, ["unpause", "restart"]);
 	assert.match(text, /egress\s+unpaused and restarted pi-dispatch-egress-proxy on the refreshed rules/);
@@ -3103,4 +3103,35 @@ test("up's default console read: the deployment folder's tokens file, judged as 
 	assert.equal(await run({ PI_PROVIDER: "anthropic", PI_CONSOLE_TOKENS_FILE: join(dir, "elsewhere.json") }), true, "this shell's PI_CONSOLE_TOKENS_FILE is not what the service reads");
 	writeFileSync(join(dir, ".env"), "PI_CONSOLE_TOKENS_FILE=elsewhere.json\n", { mode: 0o600 });
 	assert.equal(await run(), false, "the deployment .env's PI_CONSOLE_TOKENS_FILE names the file the service reads");
+});
+
+test("explicit setup grants adopt a volume and refresh/restart busy proxy without answering a terminal (#766)", async () => {
+	const files = { ...PROXY_FILES, "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
+	const adoption = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker volume inspect": volumeRecord(null), "docker run": 0, "docker stop": 0, "docker rm": 0 }, listening: false, argv: ["--yes", "--adopt-volume"], files });
+	assert.equal(await adoption.run(), 0);
+	assert.equal(adoption.promptCalls.length, 0);
+	assert.ok(adoption.calls.some((c) => c.args[0] === "run" && c.args.includes("-p")), "the actual Valkey starts after the ownership check");
+	const foreign = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker volume inspect": volumeRecord("/other") }, listening: false, argv: ["--yes", "--adopt-volume"], files });
+	assert.equal(await foreign.run(), 1);
+	assert.ok(!foreign.calls.some((c) => c.args[0] === "run" && c.args.includes("-p")), "an explicit grant cannot override another deployment's owner");
+	for (const [flags, restarted] of [[[], false], [["--refresh-proxy-rules"], false], [["--restart-proxy"], false], [["--refresh-proxy-rules", "--restart-proxy"], true]]) {
+		const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { networks: ["pi-dispatch-egress-out", "pi-job-abc-net"] }), "docker restart": 0 }, files: PROXY_FILES, argv: ["--yes", ...flags], packagedConf: NEW_RULES });
+		await h.run();
+		assert.equal(restarts(h).length > 0, restarted, flags.join(" "));
+		assert.equal(h.store.get(CONF) === NEW_RULES, flags.includes("--refresh-proxy-rules"));
+		if (restarted) assert.equal(h.promptCalls.length, 0);
+	}
+});
+
+test("up's attached-job coupled refresh needs both explicit proxy grants; either alone leaves the rules and proxy intact (#766)", async () => {
+	const busy = proxyState("running", { networks: ["pi-dispatch-egress-out", "pi-job-abc-net"] });
+	for (const flags of [["--refresh-proxy-rules"], ["--restart-proxy"], ["--refresh-proxy-rules", "--restart-proxy"]]) {
+		const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: busy, ...RUN_OK }, listening: true, files: PROXY_FILES, argv: ["--yes", ...flags], answers: ["n"], packagedConf: INCLUDE_RULES });
+		assert.equal(await h.run(), 0);
+		const combined = flags.length === 2;
+		assert.equal(h.promptCalls.length, combined ? 0 : 1, "one grant cannot answer the combined consent");
+		assert.equal(h.store.get(CONF), combined ? INCLUDE_RULES : "conf\n");
+		assert.deepEqual(dockerMutations(h), combined ? [EGRESS_RM, EGRESS_RUN] : []);
+		assert.deepEqual(restarts(h), [], "a missing mount is replaced rather than restarted");
+	}
 });

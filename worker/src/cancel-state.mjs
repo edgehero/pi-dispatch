@@ -2,7 +2,7 @@ import { makeTouchStore, touchScopeOf } from "./touch-state.mjs";
 import { trackTouchAction } from "./touch-outbox.mjs";
 import { isProjectId } from "./project-id.mjs";
 
-const isWorkload = (job) => job.data?.kind !== "question-grouping" && !(job.data?.purpose === "zero-touch-grouping" && job.data?.questionGrouping);
+const isWorkload = (job) => job.data?.kind !== "question-grouping" && !["zero-touch-grouping", "answer-draft"].includes(job.data?.purpose);
 
 function stopTouch(job, queue, jobId, now) {
 	const data = job.data ?? {};
@@ -60,6 +60,9 @@ export const CANCEL_ACK_TTL_MS = 5 * 60_000;
 
 export const cancelReqKey = (jobId) => `cancel:req:${jobId}`;
 export const cancelAckKey = (jobId) => `cancel:ack:${jobId}`;
+// Separate keys make an older worker fail closed: it cannot mistake an agent request for a human's.
+export const agentCancelReqKey = (jobId) => `cancel:agent:req:${jobId}`;
+export const agentCancelAckKey = (jobId) => `cancel:agent:ack:${jobId}`;
 
 /**
  * Ask whichever worker holds `jobId` to cancel it, and wait briefly for the answer.
@@ -72,17 +75,19 @@ export const cancelAckKey = (jobId) => `cancel:ack:${jobId}`;
  *
  * `pollMs`/`sleep` are injectable so tests never wait on a wall clock.
  */
-export async function requestCancel({ redis, jobId, ackTimeoutMs = 10_000, pollMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
-	await redis.set(cancelReqKey(jobId), "operator-cancel", "PX", CANCEL_REQ_TTL_MS);
+export async function requestCancel({ redis, jobId, interventionOrigin = "human", ackTimeoutMs = 10_000, pollMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+	const requestKey = interventionOrigin === "agent" ? agentCancelReqKey(jobId) : cancelReqKey(jobId);
+	const ackKey = interventionOrigin === "agent" ? agentCancelAckKey(jobId) : cancelAckKey(jobId);
+	await redis.set(requestKey, interventionOrigin === "agent" ? "agent-cancel" : "operator-cancel", "PX", CANCEL_REQ_TTL_MS);
 	for (let waited = 0; ; waited += pollMs) {
-		const host = await redis.get(cancelAckKey(jobId));
+		const host = await redis.get(ackKey);
 		if (host !== null && host !== undefined) return { ack: host };
 		if (waited + pollMs > ackTimeoutMs) break;
 		await sleep(pollMs);
 	}
 	// Best-effort: losing this DEL to a blip leaves the 60s TTL as the backstop, and the worker-side GET
 	// racing it by one tick is a named residual (the operator is told to re-check `status`).
-	await redis.del(cancelReqKey(jobId)).catch(() => {});
+	await redis.del(requestKey).catch(() => {});
 	return { timeout: true };
 }
 
@@ -134,7 +139,7 @@ async function holdInPlace(redis, jobId) {
  * is none); `attemptsMade` is what the job had done before, for the caller's sentence (`ranBefore`, issue #477): a job
  * held again on a retry has made attempts, and whatever they recorded stays.
  */
-export async function removeHeldJob({ redis, queue, jobId, touchStore = undefined, touchOutbox = null, now = Date.now }) {
+export async function removeHeldJob({ redis, queue, jobId, touchStore = undefined, touchOutbox = null, now = Date.now, interventionOrigin = "human" }) {
 	// Set as the first hold key's delete is sent, before it is answered: a delete lost in transit may still have landed.
 	let cleared = false;
 	try {
@@ -171,7 +176,7 @@ export async function removeHeldJob({ redis, queue, jobId, touchStore = undefine
 			if (holder === jobId) await redis.del(leaseKey(hash.dedupId));
 		}
 		const store = touchStore === undefined ? (typeof redis?.eval === "function" ? makeTouchStore({ redis, now }) : null) : touchStore;
-		const removal = await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
+		const removal = interventionOrigin === "agent" ? (await job.remove(), { ok: true }) : await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
 		// Issue #477: what the job had done, for the caller's sentence (`ranBefore`); read off the job just removed.
 		return { ok: true, jobId, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };
 	} catch (err) {
@@ -223,14 +228,14 @@ export const QUEUED_STATES = Object.freeze(["delayed", "waiting", "prioritized",
  *                                                            run, which BullMQ refuses to remove); `state` is read again.
  * `attemptsMade` is the job's own count for the caller's sentence (`ranBefore`), 0 when it is not a positive whole number.
  */
-export async function removeQueuedJob({ redis, queue, job, jobId, state = null, timeoutMs = 2_000, guard = null, touchStore = undefined, touchOutbox = null, now = Date.now }) {
+export async function removeQueuedJob({ redis, queue, job, jobId, state = null, timeoutMs = 2_000, guard = null, touchStore = undefined, touchOutbox = null, now = Date.now, interventionOrigin = "human" }) {
 	const hash = await Promise.resolve()
 		.then(() => redis.hgetall(jobKey(jobId)))
 		.catch(() => null);
 	if (hash?.since) {
 		const stop = await guarded(guard, job);
 		if (stop !== null) return stop;
-		const res = await removeHeldJob({ redis, queue, jobId, touchStore, touchOutbox, now });
+		const res = await removeHeldJob({ redis, queue, jobId, touchStore, touchOutbox, now, interventionOrigin });
 		if (!res.ok) return res.cleared === true ? { invalid: res.invalid, cleared: true } : { invalid: res.invalid };
 		await dropDeferRecord(redis, jobId, timeoutMs);
 		return { ok: true, held: true, jobId: res.jobId, attemptsMade: res.attemptsMade, ...(res.touchWarning ? { touchWarning: res.touchWarning } : {}) };
@@ -243,7 +248,7 @@ export async function removeQueuedJob({ redis, queue, job, jobId, state = null, 
 	let removal;
 	try {
 		const store = touchStore === undefined ? (typeof redis?.eval === "function" ? makeTouchStore({ redis, now }) : null) : touchStore;
-		removal = await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
+		removal = interventionOrigin === "agent" ? (await job.remove(), { ok: true }) : await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
 	} catch (error) {
 		return { raced: true, state: await stateOf(job), error };
 	}

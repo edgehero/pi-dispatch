@@ -1023,12 +1023,14 @@ export const ANSWER_MAX = ANSWER_TEXT_MAX_BYTES;
  * Then Preview the answer, in the answer act's fill, and an Open run link where `runHref` is given. `id` is the field's,
  * a kit id unique on the page. Nothing is posted until the preview's Confirm (`confirm-view.mjs`).
  */
-export function answerForm({ jobId, id, hint, runHref = null }) {
+export function answerForm({ jobId, id, hint, runHref = null, value = "", draft = null, keepStanding = false, guarded = false }) {
   const fid = idOf(id, "answerForm");
-  const field = html`<label class="sr" for="${fid}">Your answer, as the reply on the issue</label>${textarea({ id: fid, name: "text", rows: 3, maxlength: ANSWER_MAX, placeholder: "Write your answer", required: true, describedBy: given(hint) ? `${fid}-hint` : null })}`;
+  const field = html`<label class="sr" for="${fid}">Your answer, as the reply on the issue</label>${textarea({ id: fid, name: "text", value, rows: 3, maxlength: ANSWER_MAX, placeholder: "Write your answer", required: true, describedBy: given(hint) ? `${fid}-hint` : null })}`;
   const open = runHref === null ? null : btn({ kind: "ghost", label: "Open run", href: runHref });
   const said = given(hint) ? html`<p class="field__hint" id="${idOf(`${fid}-hint`, "answerForm")}">${hint}</p>` : null;
-  return html`<form class="act qform" data-action="parked-answer" autocomplete="off">${hiddenOf(["jobId", plainOf(jobId, "a job id", "answerForm")])}${field}<div class="qform__act">${btn({ type: "submit", kind: "answer", icon: "comment", label: "Preview the answer" })}${open}</div>${said}</form>`;
+  const start = guarded ? html`<fieldset data-answerer-control disabled>` : null;
+  const end = guarded ? html`</fieldset><noscript><p>Reading and navigation work without JavaScript; sending an answer requires it.</p></noscript>` : null;
+  return html`<form class="act qform" data-action="parked-answer" autocomplete="off">${start}${hiddenOf(["jobId", plainOf(jobId, "a job id", "answerForm")])}${draft ? html`${hiddenOf(["draftRunId", draft.draftRunId])}${hiddenOf(["draftDigest", draft.digest])}` : null}${field}${keepStanding ? html`<label class="pa-check"><input type="checkbox" data-keep-standing><span>Review this as a standing answer after sending, through a separate preview and Confirm</span></label>` : null}<div class="qform__act">${btn({ type: "submit", kind: "answer", icon: "comment", label: "Preview the answer" })}${open}</div>${said}${end}</form>`;
 }
 
 /** Typed approval decisions use the existing preview, confirmation and audited answer funnel. */

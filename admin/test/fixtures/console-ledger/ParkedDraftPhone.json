@@ -1,0 +1,126 @@
+{
+  "card": "ParkedDraftPhone",
+  "pr": 772,
+  "panels": [
+    "p-yours",
+    "p-drafted",
+    "p-answered",
+    "p-answerer"
+  ],
+  "elements": [
+    {
+      "el": "p-yours",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Yours to answer"
+      ]
+    },
+    {
+      "el": "p-drafted",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Drafted for you"
+      ]
+    },
+    {
+      "el": "p-answered",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Sent from a draft today"
+      ]
+    },
+    {
+      "el": "p-answerer",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Open rules and standing answers"
+      ]
+    },
+    {
+      "el": "One primary action per question on a phone",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "Open the draft",
+        "Preview the answer"
+      ]
+    },
+    {
+      "el": "Sources and confidence keep a text equivalent",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererProbabilities",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "0.86",
+        "0.91"
+      ]
+    },
+    {
+      "el": "Rules and standing answers are reachable on their own operator page",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-populated.operator"
+      ],
+      "shows": [
+        "/parked/rules",
+        "Open rules and standing answers"
+      ]
+    },
+    {
+      "el": "Actual narrower category proposal for hand review",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-questions",
+      "source": "admin/src/console/panels/answerer.mjs#answererParked",
+      "golden": [
+        "panels/answerer-rules.operator"
+      ],
+      "shows": [
+        "Remove convention",
+        "write by hand"
+      ]
+    },
+    {
+      "el": "Synthetic sample values follow the desktop fixture",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "The same synthetic draft source and projects draw both responsive layouts."
+    }
+  ]
+}

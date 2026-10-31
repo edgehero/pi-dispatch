@@ -770,6 +770,23 @@ BEPROBE
 				echo "$be_out" | grep -q '^bundle-env-probe plain=plain-value pem=line1|line2 flag=gone$' \
 					|| fail "the image declares 'bundleEnvFile' but a job with PI_BUNDLE_ENV=1 did not see the bundle's variables from /job/bundle-env.json in its environment ($(echo "$be_out" | grep '^bundle-env-probe' | tail -1))"
 				;;
+			answerDraft)
+				# Invalid profile input must refuse before extension discovery or a provider request.
+				ad_dir=$(mktemp -d)
+				mkdir -p "$ad_dir/job" "$ad_dir/ws/.pi/extensions"
+				printf '' >"$ad_dir/job/prompt.md"
+				printf '{"version":1,"source":{"questionCommentId":"https://attacker.invalid/"}}' >"$ad_dir/job/answer-draft.json"
+				echo 'console.log("ANSWER-DRAFT-EXTENSION-EXECUTED"); export default function () {}' >"$ad_dir/ws/.pi/extensions/index.js"
+				chmod -R a+rX "$ad_dir"
+				ad_out=$(docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+					-v "$ad_dir/job:/job:ro" -v "$ad_dir/ws:/workspace:ro" --workdir /workspace \
+					-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 "$IMAGE_REF" 2>&1) && ad_code=0 || ad_code=$?
+				rm -rf "$ad_dir"
+				[ "$ad_code" = 2 ] && echo "$ad_out" | grep -q '"reason":"answer-draft-refused"' \
+					&& ! echo "$ad_out" | grep -q 'ANSWER-DRAFT-EXTENSION-EXECUTED' \
+					|| fail "the image declares answerDraft but invalid inputs did not refuse before executable discovery"
+				;;
 			questionGrouping)
 				# The dedicated classifier mode must reach the cost guard before any executable discovery.
 				# A zero cap and no network make this a real runner proof that cannot spend provider tokens.

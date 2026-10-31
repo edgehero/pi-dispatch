@@ -1,3 +1,4 @@
+import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, lstatSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -20,6 +21,7 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const indexMod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
+indexMod.setToolReadDepsForTest({ held: async () => ({ heldMicros: 0, heldJobs: 0, unknownHosts: [] }) });
 // Issue #642: every write these drive is audited as the panel into PI_LOGS_DIR's console-audit chain, so the file's
 // writes land in a directory of its own rather than the account's default logs directory.
 process.env.PI_LOGS_DIR = tempDir("pd-642-panel-audit-");
@@ -30,7 +32,7 @@ function registeredTools() {
   indexMod.default(pi);
   return tools;
 }
-const toolByName = (name) => registeredTools().find((t) => t.name === name);
+const toolByName = (name) => withOperatorDiagnosis(registeredTools().find((t) => t.name === name));
 function toolCtx({ hasUI = true, answer = true } = {}) {
   const shown = [];
   const ui = { confirm: async (title, message) => { shown.push({ title, message }); return answer; } };
@@ -200,7 +202,7 @@ test("the project tools refuse with no interactive operator and write nothing", 
   const before = readFileSync(d.p, "utf8");
   const { ctx } = toolCtx({ hasUI: false });
   for (const [name, params] of [["dispatch_project_add", { id: "ops", members: ["/srv/ops"] }], ["dispatch_project_edit", { id: "shop", name: "x" }], ["dispatch_project_delete", { id: "shop" }]]) {
-    await assert.rejects(() => toolByName(name).execute("id", params, undefined, undefined, ctx), /interactive operator/, name);
+    await assert.rejects(() => toolByName(name).execute("id", params, undefined, undefined, ctx), /PI_DISPATCH_AGENT_WRITES=1/, name);
   }
   assert.equal(readFileSync(d.p, "utf8"), before);
 });
@@ -246,7 +248,7 @@ test("dispatch_project_delete is refused BEFORE the confirm while a scoped-limit
   assert.equal(shown.length, 0);
   assert.deepEqual(d.read().projects.map((p) => p.id), ["shop", "ops"]);
   const out = textOf(await toolByName("dispatch_project_delete").execute("id", { id: "ops" }, undefined, undefined, ctx));
-  assert.deepEqual(out, { applied: true, deleted: "ops" });
+  assert.deepEqual(out, { applied: true, action: "project-delete" });
   assert.deepEqual(d.read().projects.map((p) => p.id), ["shop"]);
 });
 
@@ -277,21 +279,22 @@ test("the project tools refuse while PI_PROJECTS_FILE is unset, saying why", asy
   assert.deepEqual(textOf(await toolByName("dispatch_projects").execute("id", {}, undefined, undefined, undefined)), { unset: true });
 });
 
-test("dispatch_projects lists each project with its escaped name, members and the rows that cap it", async () => {
+test("dispatch_projects lists each project with safe member identities, limits and blocker facts", async () => {
   deployment({ projects: [{ id: "shop", name: "Web‮shop", members: ["github:acme/web"] }, { id: "ops", members: ["/srv/ops"] }], limits: [{ scope: "acme/api", day: 1 }, { scope: "project:shop", day: 2 }] });
   await withProjectToolReads(async ({ stats }) => {
     const out = textOf(await toolByName("dispatch_projects").execute("id", {}, undefined, undefined, undefined));
-    assert.deepEqual(out.projects.map(({ id, name, members, limitRows }) => ({ id, name, members, limitRows })), [
-      { id: "shop", name: "Web\\u{202E}shop", members: ["github:acme/web"], limitRows: [1] },
-      { id: "ops", name: null, members: ["/srv/ops"], limitRows: [] },
+    assert.deepEqual(out.projects.map(({ id, members, limitRows }) => ({ id, members, limitRows })), [
+      { id: "shop", members: ["github:acme/web"], limitRows: [1] },
+      { id: "ops", members: ["ops"], limitRows: [] },
     ]);
     const [shop, ops] = out.projects;
     assert.deepEqual(shop.spend, { window: "week", usedMicros: 250_000, settledMicros: 250_000, heldMicros: 0, shareMicros: null, incomplete: false });
     assert.equal(ops.spend.settledMicros, 0, "a project's spend is selected by the record's project, not its current members");
-    assert.deepEqual(shop.size, { memMiB: 4096, cpuCenti: 200, source: "default", memorySource: "default (a host's worker environment may override it)", cpuSource: "default (a host's worker environment may override it)" });
+    assert.deepEqual(shop.size, { memMiB: 4096, cpuCenti: 200, source: "default" });
     assert.equal(shop.suggestion, null, "no fabricated suggestion without measurements");
-    assert.match(shop.deleteRefusal, /project:shop/, "the actual planner explains the row that stops a delete");
-    assert.equal(ops.deleteRefusal, null);
+    assert.equal(shop.deleteRefused, true, "the actual planner blocked deletion");
+    assert.deepEqual(shop.limitRows, [1], "the declared blocker row remains available without display prose");
+    assert.equal(ops.deleteRefused, false);
     assert.deepEqual(stats(), { disposed: 1, snapshots: 1, readIds: ["shop", "ops"] }, "one shared fleet read, always disposed");
   });
 });
@@ -315,7 +318,7 @@ test("dispatch_costs: byProject in the fold, and the project filter scopes every
   process.env.VALKEY_URL = "not-a-url";
   try {
     const all = textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined));
-    assert.deepEqual(all.fold.byProject.map((r) => [r.key, r.label, r.runs, r.cost.usd]), [["shop", "shop", 1, 0.5], [null, "(no project)", 2, 0.375]]);
+    assert.deepEqual(all.fold.byProject.map((r) => [r.key, r.runs, r.cost.usd]), [["shop", 1, 0.5], [null, 2, 0.375]]);
     const shop = textOf(await toolByName("dispatch_costs").execute("id", { project: "shop" }, undefined, undefined, undefined));
     assert.deepEqual(shop.fold.byProject.map((r) => [r.key, r.runs]), [["shop", 1]]);
     assert.equal(shop.fold.provenance.runsTotal, 1, "every arm is scoped, not one table");
@@ -490,7 +493,7 @@ test("the re-check covers the confirm dialog: an edit while another session's di
     b = await edit.execute("b", { id: "shop", members: ["/srv/a", "/srv/b"] }, undefined, undefined, { hasUI: true, ui: { confirm: async () => true } });
     return true;
   } } };
-  await assert.rejects(() => edit.execute("a", { id: "shop", name: "Webshop" }, undefined, undefined, ctxA), /changed after this change was built from it/);
+  await assert.rejects(() => edit.execute("a", { id: "shop", name: "Webshop" }, undefined, undefined, ctxA), /changed since its preview/);
   assert.equal(textOf(b).applied, true);
   assert.deepEqual(d.read().projects[0], { id: "shop", name: "Shop", members: ["/srv/a", "/srv/b"] }, "B's change stands, A wrote nothing");
 });
@@ -504,7 +507,7 @@ test("the scoped-limit writers re-check against the pre-confirm read too", async
       writeFileSync(sl, LIMITS([{ scope: "acme/web", day: 1 }, { scope: "acme/other", day: 9 }])); // another session, mid-dialog
       return true;
     } } };
-    await assert.rejects(() => toolByName(name).execute("id", params, undefined, undefined, ctx), /changed after this change was built from it/, name);
+    await assert.rejects(() => toolByName(name).execute("id", params, undefined, undefined, ctx), /changed since its preview/, name);
     assert.deepEqual(parseScopedLimits(readFileSync(sl, "utf8"), sl).map((l) => l.scope), ["acme/web", "acme/other"], `${name} wrote nothing`);
   }
 });
@@ -531,11 +534,34 @@ test("members and refusals are escaped in tool results, dispatch_projects and er
   const res = await toolByName("dispatch_project_add").execute("id", { id: "shop", members: [evil] }, undefined, undefined, ctx);
   const text = res.content[0].text;
   for (const ch of ["\u202e", "\u009b"]) assert.ok(!text.includes(ch) && !shown[0].message.includes(ch), `U+${ch.codePointAt(0).toString(16)} escaped`);
-  assert.ok(text.includes("\\\\u{202E}"), "shown as visible text");
+  assert.ok(shown[0].message.includes("\\u{202E}"), "the human confirm shows visible escape text");
+  assert.deepEqual(JSON.parse(text), { applied: true, action: "project-add" }, "model result contains no member prose");
   const list = await withProjectToolReads(async () => (await toolByName("dispatch_projects").execute("id", {}, undefined, undefined, undefined)).content[0].text);
   assert.ok(!list.includes("\u202e") && !list.includes("\u009b"));
   await assert.rejects(
     () => toolByName("dispatch_project_add").execute("id", { id: "ops", members: [evil] }, undefined, undefined, ctx),
     (e) => /claimed by both/.test(e.message) && !e.message.includes("\u202e") && !e.message.includes("\u009b") && e.message.includes("\\u{202E}"),
   );
+});
+
+test("a real registered tool keeps stored member paths and one-token project prose out of model errors (#766)", async () => {
+  const secretPath = "/private/operator-only-member";
+  deployment({ projects: [{ id: "shop", name: "privatepersona", members: [secretPath] }] });
+  const raw = registeredTools().find((tool) => tool.name === "dispatch_project_add");
+  const notes = [];
+  const ctx = { hasUI: true, ui: { confirm: async () => { throw Error("a refused plan must not ask for confirmation"); }, notify: (message) => notes.push(String(message)) } };
+  await assert.rejects(raw.execute("call", { id: "ops", members: [secretPath] }, null, null, ctx), (error) => {
+    assert.equal(error.message, "The dispatch action did not report success. An operator can inspect its current state and local diagnosis before trying again.");
+    assert.ok(!error.message.includes(secretPath) && !error.message.includes("privatepersona"));
+    return true;
+  });
+  assert.equal(notes.length, 1);
+  assert.ok(notes[0].includes(secretPath), "the person's local UI retains the exact actionable member diagnosis");
+});
+
+test("a stale UI getter cannot replace the registered tool's model-safe refusal with a private exception (#766)", async () => {
+  deployment({ projects: [] });
+  const raw = registeredTools().find((tool) => tool.name === "dispatch_project_add");
+  const ctx = { hasUI: true, get ui() { throw new Error("/private/secondary-diagnosis"); } };
+  await assert.rejects(raw.execute("call", { id: "ops", members: ["github:acme/ops"] }, null, null, ctx), { message: "The dispatch action did not report success. An operator can inspect its current state and local diagnosis before trying again." });
 });

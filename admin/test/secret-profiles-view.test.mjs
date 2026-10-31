@@ -296,7 +296,7 @@ test("round 1: dispatch_runs' list carries an openshell run's host count only; a
   assert.deepEqual(modelRunRecord(r, { list: true }).openshell, { mode: "copy", ruleHostCount: 2, providers: 1, placeholders: 3 });
   assert.deepEqual(modelRunRecord(r).openshell, OPENSHELL);
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-  assert.match(src, /merged\.runs\.map\(\(r: any\) => modelRunRecord\(r, \{ list: true \}\)\)/);
+  assert.match(src, /merged\.runs\.map\(\(r: any\) => modelRunRecord\(runShown\(r\), \{ list: true \}\)\)/);
 });
 
 test("final review: a registry read that failed says so, never 'no live host'; the snapshot passes no rows then", async () => {

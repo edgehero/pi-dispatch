@@ -78,7 +78,7 @@ test("every page, both roles: the pills in order, aria-current on the screen sho
       assert.equal(nav.includes('<details class="more">'), role === "operator", `${name}.${role}: More is the operator's`);
       if (role === "viewer") assert.ok(!html.includes('href="/audit"'), `${name}: a viewer is never offered the audit log`);
       const current = [...nav.matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]);
-      const here = ["secrets", "connections", "project"].includes(name) ? "config" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
+      const here = ["secrets", "connections", "project"].includes(name) ? "config" : name === "answer-rules" ? "parked" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
       if (PAGES[name].auth === "operator" && role !== "operator") assert.deepEqual(current, [], `${name}.${role}: the refused page has no pill to mark`);
       else assert.deepEqual(current, [PAGES[here].path], `${name}.${role}: the one current pill`);
     }

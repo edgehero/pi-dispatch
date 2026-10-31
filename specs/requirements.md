@@ -488,6 +488,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-JOB-STATUS-COMMENTS
 
+- **AMENDED 2026-10-31 (#772)**: Jobs with purpose `answer-draft` never post status, terminal, policy-refusal, failure, recovery, progress or chain comments. Their verdict/failure is reported on the console. This exception does not suppress the source workload’s own question or its later person-confirmed answer trail.
+
 - **Statement**: Each **forge-backed** job shall comment on its triggering issue, pull request or merge
   request at start, and on completion or failure.
 - **Scope**: Forge-backed jobs (github, gitlab). A local-folder job has no issue to comment on; its
@@ -741,6 +743,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-ADMIN-VIA-PI-EXTENSION
 
+- **AMENDED 2026-10-31 (#766)**: Shared exact-transition agent policy, session-captured headless grants,
+  safe operational reads and agent audit receipts supersede the earlier confirmation exceptions.
+
 - **AMENDED 2026-10-30 (#750)**: `dispatch_trigger_fire(index)` previews and confirms a paid manual fire of a cron
   trigger served by a scheduler in this deployment's queue. It shares the console's planner, reserve and refusals,
   rechecks the trigger and scheduler at confirm, refuses commands and portfolio runs, and applies `dispatch_run`'s
@@ -773,21 +778,17 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   settings editing (`set`/`unset`, writing the `settings.json` overlay), plus **operator-typed trigger CRUD**
   from the overlay (add / edit-flow / delete, writing `triggers.json` — validated by the shared
   `parseTriggers`, atomic — and reloaded **live** by both services, `OQ-008`). The model-callable tools are
-  the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`,
-  `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_secrets`,
-  `dispatch_connections`, `dispatch_allocations`, `dispatch_capacity` (issue #599: the capacity report, read-only); the **queue controls** `dispatch_pause` and `dispatch_resume`; the **gated enqueue** `dispatch_run`; the **confirm-gated writes**
-  `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`, `dispatch_trigger_delete`, `dispatch_pause_add`,
-  `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`,
-  `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`,
-  `dispatch_project_delete`, `dispatch_envelope_set`; and the **delegated allocation write**
-  `dispatch_priorities_set`. **This list is the pin**: `admin/test/wiring.test.mjs`
-  reads this paragraph and fails the build if a registered tool is missing from it, or if a name here is
-  registered nowhere — so every name is spelled in full, and a tool discussed as rejected belongs in
-  **Why**, which the scan does not read. There is deliberately **no count word** beside the list: a number
-  is a second claim the pin does not check, and this entry said "eleven" while twenty-one shipped.
-  The delegated allocation write (issue #504) sets a priorities plan with no confirm, works with no interactive
-  operator, and can change nothing but the split inside the envelope (`REQ-DELEGATED-ALLOCATION`). It is the one
-  exception to the confirm rule below. The allocation read returns no reason text a plan carried. The envelope write
+  the **reads** `dispatch_status`, `dispatch_runs`, `dispatch_costs`, `dispatch_triggers`, `dispatch_pauses`, `dispatch_limits`, `dispatch_waits`, `dispatch_projects`, `dispatch_secrets`, `dispatch_connections`, `dispatch_allocations`, `dispatch_capacity`, `dispatch_failed`, `dispatch_waiting`, `dispatch_hosts`, `dispatch_setup`; and the **writes** `dispatch_pause`, `dispatch_resume`, `dispatch_run`, `dispatch_set`, `dispatch_trigger_add`, `dispatch_trigger_edit`, `dispatch_trigger_fire`, `dispatch_trigger_delete`, `dispatch_pause_add`, `dispatch_pause_edit`, `dispatch_pause_delete`, `dispatch_limit_add`, `dispatch_limit_edit`, `dispatch_limit_delete`, `dispatch_wait_cancel`, `dispatch_project_add`, `dispatch_project_edit`, `dispatch_project_delete`, `dispatch_envelope_set`, `dispatch_priorities_set`, `dispatch_cancel`, `dispatch_retry_failed`, `dispatch_remove_failed`, `dispatch_rerun`, `dispatch_allocation_revert`.
+  **This list is the pin**: `admin/test/wiring.test.mjs` compares it with the registrations both ways.
+  No count is maintained separately. All model writes use the console action table and its normalized
+  transition policy. Every interactive write asks a human to confirm, including pauses, paid starts and
+  priorities. A headless session may write only when its own process supplied `PI_DISPATCH_AGENT_WRITES=1`
+  before registration and the exact action is marked unattended. The deployment file, pointer and model
+  arguments cannot grant it. Confirm actions require the interactive person; person actions have no model
+  tool, including answers, draft decisions and standing-answer adoption. Unknown actions default to refusal.
+  Narrowing is checked on the validated before and after states, before preview and again at apply; a mixed
+  narrowing and widening request is refused as a whole. Undo is judged by the same rule.
+  The allocation read returns no reason text a plan carried. The envelope write
   is judged by the worker's `parseEnvelope` before its confirm and stores the new digest as `alloc:envelope:expected`
   before it writes the file, so the fleet re-bases onto it rather than refusing it as a hand edit. The project, limit
   and per-job cap writes refuse a change that would leave the live envelope invalid, naming the conflict.
@@ -827,18 +828,32 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   a `powershell` command naming one) whose target is the envelope, `projects.json`, `scoped-limits.json`,
   `triggers.json`, the settings overlay, the deployment's `.env` or the deployment pointer, decided by file identity,
   with a set that never shrinks within a session; `bash` is a named residual (`DES-ADMIN-VIA-PI-EXTENSION`).
-  A write tool applies
-  its change **only after a human operator approves a `ctx.ui.confirm` dialog showing the concrete
-  before→after**, and **refuses — writing nothing — when no interactive operator is present** (`ctx.hasUI`
-  false; print/headless). The operator console's equivalent of that dialog is the single-use ticket bound to the
-  diff it previewed (`REQ-CONSOLE-SECURITY` (g)): the console's confirm IS the ticket, and since issue #642 it reaches
-  the same planners (`admin/src/write-plans.mjs`, the checks moved out of the extension with their sentences
-  unchanged) and the same funnels. Since issue #642 every write this extension makes (a tool's, a command's, a
-  dialog's, the panel's keys, `/dispatch secrets`) appends a row with actor role `panel` to the console audit log
-  (`INT-CONSOLE-AUDIT-LOG`) BEFORE it writes, and is refused, writing nothing, when that row cannot be appended; the
-  setup wizard alone is not audited (`DES-ADMIN-VIA-PI-EXTENSION` says why). The operator-typed overlay CRUD and the confirm-gated tools reach the **same**
-  validated, atomic `writeTriggers`/`writeSettings`. `dispatch_run` still takes **no spend-knob argument**
-  (`model`/`maxTurns`/`dailyCap`/`concurrency`).
+  A model write reaches the same validated atomic writer as the console action. Its confirm shows the
+  concrete change and Undo. A changed file or target needs a fresh preview; a prior approval cannot authorize
+  the new state. Headless narrowing only decreases explicit file caps, adds ordinary restrictive limit rows,
+  turns existing execution flags off, adds pauses, or performs another declared unattended action; inherited
+  cap guesses, limit scope/size/minimum changes, flags on and trigger flow changes remain confirmed.
+  Retry is confirmed, including bulk retry with a reserve per job. Removal and cancellation are unattended;
+  local/cron reruns require fresh paid admission, while forge reruns remain person actions. Paid starts require
+  explicitly valid process roots and hourly grants, a clean tree and current committed flow opt-in, with the
+  shared hourly gate checked again before enqueue. No tool takes a spend-knob argument for a new run.
+  Tool audit actors are `agent` with a server-derived login even when a person confirms. Commands and panel
+  keys remain `panel`. Every mutation requires its intent row first, a failure compensates that ticket, and
+  an agent success appends a correlated `write-applied` receipt. Receipt failure reports incomplete tracking
+  and never repeats a completed action. Bulk writes record each job separately and report partial outcomes.
+  Trusted interaction origin is separate from actor role: confirmed UI work is human intervention; unattended
+  work is agent intervention and never increments a human-touch counter. The setup wizard remains unaudited.
+  Model write errors carry fixed public refusals unless the producing path proves its text comes only from
+  fixed policy or the model's own request. Detailed file/job planner diagnostics stay in the gated local
+  operator notice, never in the tool error, audit reason or model transcript. Every read tool also wraps its
+  execution, response extraction and projection: private configuration and infrastructure exceptions become
+  fixed model-unavailable errors, with their full diagnosis only in a guarded local operator notice.
+  Agent reads return safe typed facts, not operator names, private paths, variable names, job prose, question
+  text, classifications, draft bodies or source text. Runs include local retention deadlines when known;
+  hosts include heartbeat age/skew, runtime version, slots, budgets/holds, CPU reserve, orphan jobs, kept
+  sandboxes, doctor counts and qualified venue declarations. Costs include running holds and a bounded
+  same-record what-if for 24 hours or a week. Configuration readers retain structural IDs and typed sizing
+  actions and blockers. Setup reads use the source-built command catalogue, never arbitrary doctor fix text.
   The panel's job-count meters take their caps from the settings overlay only; with none set there a meter reads
   `N / ? (worker env cap)` (issue #507), and `/dispatch budget` and the insights page `cap unknown (worker
   env/default)`, so the words say where the cap lives. Not read from the env: without a deployment pointer the env
@@ -941,9 +956,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   operator, then it refuses and writes nothing; given `dispatch_project_delete` for a project a scoped-limits row
   names, then it refuses before any confirm and the file is untouched; given an approved project write, then the
   file is written by tmp and rename and parses with the worker's loader; given a project name holding a bidi
-  override, then the panel, the insights page, a confirm and a tool result show it escaped; given a model-invoked
-  settings, trigger, limit or envelope write tool, when no interactive operator is present (`ctx.hasUI` false),
-  then it refuses and writes nothing; when an operator is present but declines the confirm, then it writes nothing and
+  override, then human panel/insights/confirm views show it escaped and the model project read omits the display name; given a model-invoked
+  write tool, when no interactive operator is present (`ctx.hasUI` false) and its process grant was absent at
+  registration, then it refuses and writes nothing; with the grant, only an exact unattended transition applies,
+  and inherited/raised/unset caps, scope/size/minimum changes, mixed widenings and person actions refuse;
+  when an operator is present but declines the confirm, then it writes nothing and
   reports `applied:false`; when the operator approves, then it writes exactly the change the confirm showed; given an
   operator trigger edit through the overlay OR an approved write tool, when it is written, then it validates
   through the shared `parseTriggers` (a bad edit is rejected, the file untouched) and both services apply it
@@ -964,15 +981,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   panel opens with the unreachable banner and never the wizard; given a second pi startup after the
   nudge fired once, then no nudge renders; given a deployment whose installed runtime is older than
   the console's pin, then bare `/dispatch` surfaces one skew notice pointing at `/dispatch setup`;
+  given an existing private project member path that makes a write refuse, then the model error carries no
+  path or stored prose while the gated local operator notice retains the exact diagnosis; given an error that
+  forges a public-looking property, then it cannot mark itself public (`tool-refusals.mjs` uses source-owned identity);
+  given actual Fire/rerun tools and agent-token HTTP requests, then outside roots, denied committed HEAD,
+  dirty tree, full hourly counter and missing/invalid explicit grants refuse without enqueue, and a ticket
+  issued before a dirty/HEAD change cannot authorize it (`admin/test/tool-paid-starts.test.mjs`);
   given a trigger write tool call carrying `maxCostUsd` or `models`, then it is refused before any confirm and
   nothing is written, and given an approved edit of a trigger that has them, then they are written back
   unchanged; given a malformed dollar amount for `dispatch_set` or a scoped-limit writer, then it is refused before
-  the confirm, naming the key and not the value; given a scoped-limit write whose rows carry no dollar field and
+  the confirm, with the local operator diagnosis naming the key and not the value and the model receiving a fixed refusal; given a scoped-limit write whose rows carry no dollar field and
   no model row, then the file is written as version 1; given a dollar window, then the panel and
   `dispatch_costs` show its counter as spent and held, never the records' sum, and a window whose counter cannot
-  be read shows no number rather than 0; given `dispatch_priorities_set` with or without an interactive operator,
-  then it applies or refuses under `REQ-DELEGATED-ALLOCATION` and never shows a confirm (issue #504 part C);
-  given a headless session and an envelope of $100 a week with floors of $10, when `dispatch_priorities_set` sends
+  be read shows no number rather than 0; given `dispatch_priorities_set` in UI, then it confirms before applying
+  under `REQ-DELEGATED-ALLOCATION`; given a headless session with its explicit process write grant and an envelope of $100 a week with floors of $10, when `dispatch_priorities_set` sends
   weights 3:1 (with `_other` at 0), then it applies $70 and $30 with no dialog; given `dispatch_envelope_set` with no
   interactive operator, then it refuses and writes nothing, and when the operator declines its confirm the file and
   `alloc:envelope:expected` are untouched; given `dispatch_allocations`, `/dispatch priorities` or a
@@ -1063,6 +1085,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-CONSOLE-SECURITY
 
+- **AMENDED 2026-10-31 (#766, #772)**: `agent` is a distinct role, never an operator rank. It reads the viewer projection with operator/job prose removed, bundle names replaced by counts, and failed reasons restricted to catalog tokens. Its API writes require a single-use session/action ticket and an `unattended` transition. Host, Origin, fetch-site, JSON, read-only, session-person and revocation guards still apply. `confirm` and `person` actions refuse by name and policy reason before private dependencies are read. Operator-only reads include classifications, rule/standing-answer text, citations and drafts; only the operator run pages receive question/draft bodies, including live refreshes. Agent caches and event groups are separate from operator/viewer caches.
+
 - **Extension (#771)**: The sole additional outbound scheme is a canonical `pi-dispatch-open://` link built from a checked `open` or `attach` verb, sandbox ID and host. No credential, command or path is carried. Only operators receive these links, sandbox commands, preparation results or shell observations, including direct pages, APIs and event streams. Existing CSP and every write guard are UNCHANGED, checked.
 
 - **AMENDED 2026-10-30 (#750, trigger list)**: the hypothetical event checker is a viewer read carried by
@@ -1074,7 +1098,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
   process that listens only on loopback or on a 0600 unix socket unless the operator opts into a public bind; shall
   answer every request but `/healthz`, `/favicon.ico` (an empty 204, issue #737), the console's script and stylesheet
   (`/static/console.js`, `/static/console.css`), sign-in and sign-out only within a session obtained from a named token
-  or a one-time login code; shall accept a write only when it is same-origin, JSON, by the operator role, on a console
+  or a one-time login code; shall accept a write only when it is same-origin, JSON, by the operator role or an explicitly permitted agent transition, on a console
   that is not read-only, and confirmed by a single-use ticket bound to the diff the operator saw; shall make every write
   through the read model's existing funnels; shall send the same security headers on every response and escape every
   value it renders; shall record every write, every write a guard refuses and every sign-in in a hash-chained audit log
@@ -2977,6 +3001,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
 
+- **AMENDED 2026-10-31 (#766, #772)**: Every action declares one explicit `agent` mark (`unattended`, `confirm`, `person`) with a reason. Both tools and HTTP use its planner and apply path. Conditional unattended authority is derived from validated before/after file bytes, never request claims: explicit cap decreases only; same-scope limit decreases; restrictive limit adds without size/minJobs; true-to-false execution flags; pause, cancel, failed removal and envelope-bounded priorities. Inherited/unset/raised caps, scope/size/minimum changes, retries and resumes require a person. Undo passes the same checks and cannot raise a lowered cap. Tools always ask with a UI; headless tools additionally require `PI_DISPATCH_AGENT_WRITES=1` captured from their own process. Tool actors remain `agent` even when a person confirms; intervention origin separately counts that human confirmation. Agent-only cancellation uses separate request/ack keys and never records a human touch. New person-only actions adopt standing answers or drop a draft; the parked-answer ticket binds optional draft run/digest and revalidates it before sending. Standing adoption has its own preview/Confirm and can fail independently after an answer was queued.
+
 - **Extension (#770)**: Issue #770 adds the Zero touch console-only grouping, human-name, instruction-append and safe-Undo actions, plus explicitly source-linked ordinary configuration writes; all use the existing guards and preview/Confirm funnel. See `REQ-ZERO-TOUCH-RATE` and `INT-ZERO-TOUCH-FIXES`.
 
 - **AMENDED 2026-10-30 (#750)**: paid `trigger-fire` shares `dispatch_trigger_fire`'s planner and bounds. Page load
@@ -4326,11 +4352,10 @@ writes retain their existing interactive confirmation. This adds no unattended p
   matters this week, while the operator sets the outer limits once. Models reason poorly about a shared budget,
   so the agent writes priorities and pi-dispatch does the arithmetic, where every invariant (the sum, the floors,
   the step) is checkable. The bound is arithmetic, not presence: a prompt-injected writer can at worst move
-  `maxStepPct` of the total per `minIntervalHours`, never below a floor and never above the total. So a keypress
-  would buy nothing, and it would make the unattended portfolio job (issue #505) impossible.
+  `maxStepPct` of the total per `minIntervalHours`, never below a floor and never above the total. These arithmetic bounds also permit an unattended portfolio job (issue #505). Interactive model tool proposals
+  still confirm, and headless operator-session tools require the explicit process grant under #766.
   `CONST-BUDGET-BEFORE-TOKENS` is untouched: the ordering is the same, and only the values the dollar reserve
-  compares against change. `REQ-ADMIN-VIA-PI-EXTENSION` records the one model-callable write that needs no
-  keypress.
+  compares against change. `REQ-ADMIN-VIA-PI-EXTENSION` records the bounded unattended tool path and its process grant.
 - **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
   `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-SCOPED-LIMITS`, `REQ-SPEND-CAPS-MULTI-WINDOW`,
   `DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`, `DES-DOLLAR-RESERVE-AND-SETTLE`, `INT-ENVELOPE-FILE-CONTRACT`,
@@ -4898,8 +4923,9 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 - **Acceptance**: Given a window covering now for a job's scope, when the job is picked, then it is moved to
   delayed until the window end and reserves no budget slot; given the same job out of the window, it runs;
   given a malformed pause-windows edit at runtime, the worker logs `pause_windows_reload_invalid` and keeps
-  the last-good windows; given `dispatch_pause_add` with no interactive operator, it refuses and writes
-  nothing; given an approved confirm, it writes exactly the shown window. Given a window `github:acme/web`
+  the last-good windows; given `dispatch_pause_add` headless without its process grant, it refuses and writes
+  nothing; with the grant its unattended add writes the validated window, while edits/deletes still require
+  a person; given an approved interactive confirm, it writes exactly the shown window. Given a window `github:acme/web`
   covering now (issue #498), then the GitHub job for `acme/web` is deferred and the Forgejo job for it is not;
   given a bare `acme/web` window, then both are deferred, as before; given `gitub:acme/web`, then the file is
   refused naming the forge kinds.
@@ -5960,10 +5986,11 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-PARKED-ANSWERER
 
-- **Status**: **PROPOSED, spec only** (2026-10-27, issue #753). Nothing of it ships and no test holds it yet. The
+- **Bounds and evidence (#772)**: A park captures the exact authenticated question comment reference, not a transcript tail; a legacy or unavailable reference passes loudly without buying a draft. Approvals never enqueue one. Rules require explicit generation and decision models, a flow, cap, project scope, closed categories and confidence above 0.5. Category probabilities must be normalized; a separate source-answerability classification must pass before submission. Product, security, money, scope, approval and uncovered choices never draft. Standing answers additionally match a forge-qualified repository; repository citations name the prepared default-branch SHA; earlier reply citations are admitted-author, pre-park and digest-bound. Output without a real read citation or authenticated result digest is refused. Config, project membership, source identity and draft digest are checked again before offering/sending. All private inputs, drafts and indexes have bounded retention, at most 90 days; oversized inputs fail explicitly. Draft helper runs do not answer/supersede a workload in pending, parked or same-target folds and are excluded from zero-touch denominators. No model/provider knowledge is itself a citation.
+
+- **Status**: **IMPLEMENTED** (2026-10-31, issue #772), bounded answer drafting with person-confirmed sending. The
   design is `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN`; the cards are
-  `design/system/components/ParkedAnswerer`, with `ParkedDraftViewer` and `ParkedDraftPhone` beside it. Only
-  the **draft** mode below is proposed. A send that no person confirms is not admitted by `CONST-TRIGGER-AUTHOR-GATE`
+  `design/system/components/ParkedAnswerer`, with `ParkedDraftViewer` and `ParkedDraftPhone` beside it. Both `classify` and `draft` modes below are supported. A send that no person confirms is not admitted by `CONST-TRIGGER-AUTHOR-GATE`
   as it stands, and is recorded as a question, `OQ-051`, not as a requirement.
 - **Statement**: An operator may write an **answer rule** in the triggers file. When a run of one of its projects parks
   (`REQ-AWAIT-INPUT`), the worker then starts a **draft job**: an ordinary job, through every gate and reserve a job
@@ -5982,7 +6009,7 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   - the draft job's flow, model and per-job dollar cap, as any trigger names them;
   - the mode, `classify` (shadow: verdicts only, no draft) or `draft`.
 
-  Its kind and fields are written into `INT-TRIGGERS-FILE-CONTRACT` by the build. It rests on no dispatcher: the
+  Its closed schema is defined in `INT-TRIGGERS-FILE-CONTRACT`. It rests on no dispatcher: the
   dispatchers discussed with #735 and #743 are not specified, and this rule needs none of them.
 - **Never drafted**: product decisions, security, money, scope, an approval (#649), a question none of its sources
   cover, and a run outside its projects. A pass says why, in a closed word, and drafts nothing.
@@ -5997,24 +6024,22 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
     scoped token (`CONST-TOKEN-SCOPED-PER-JOB`).
 
   It holds no Valkey reach and no other credential, like every job (`CONST-ISOLATION-CONTAINER-PER-JOB`). A
-  classification through a decision model is one of its tool calls (a `decide` tool, proposed in #743) and is paid
+  classification through a decision model is one of its tool calls (a restricted tool calling the pinned pi classifier API) and is paid
   for inside its reserve.
 - **What it returns.** A verdict in a closed word, the decision model's probabilities, the draft, and the sources it
   cited. A draft that cites no source is not offered to send.
 - **Sending is a person's act.**
   - The parked run's page offers the draft in its answer form. The person sends it with the existing `parked-answer`
     preview and confirm, edits it first, answers otherwise, or drops it.
-  - The trail is the console's own, "Answered from the operator console by <token name>", and may name the draft
-    job's run id, which is in the run-id charset, as where the words came from.
-  - *Never for questions like this* proposes a narrower allow list for review.
+  - The trail is the console's own, "Answered from the operator console by <token name>", and names the draft
+    job's run id when the person uses that draft, which is in the run-id charset, as where the words came from.
+  - *Don’t draft these* links to the rule’s category-removal proposal for a reviewed hand edit; removing the last category proposes `classify` mode. It never changes the rule silently.
 - **Spend.** The draft job reserves and settles like any job (`CONST-BUDGET-BEFORE-TOKENS`), against its own per-job
   cap and the deployment's windows. A pass costs its classification. Nothing waits in a container while the person
   decides.
 - **Where it shows.**
   - The Parked page shows the verdict, the sources by name, and links to the draft job's run.
-  - The question and the draft are transcript text. The draft job's transcript is on its own run page, and the
-    prefilled answer form is on the parked run's page, for an operator only. `REQ-CONSOLE-SECURITY` (l) is amended by
-    the build to admit that form.
+  - The bounded private question/draft store supplies the operator run pages; the draft job writes no captured text log or canonical parent transcript. The prefilled answer form is on the parked run’s page, for an operator only. `REQ-CONSOLE-SECURITY` (l) admits that form.
   - A viewer sees that a question waits, that a draft exists, and who answered.
 - **Why**: Many parked questions were already answered somewhere: a convention in the repository, an earlier reply,
   a decision written down. A draft with its sources turns each of them into a check that takes seconds, without moving
@@ -6035,6 +6060,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   - **No text off the run pages.** No list, no hub panel and no `/api/state` body carries the question or the draft.
 
 ## REQ-STEER-RUNNING-JOB
+
+- **AMENDED 2026-10-31 (#766, #772)**: Delegated cancellation stops late continuation just as a human cancellation does, without manufacturing a human touch. A rejected draft answer with changed/unread source identity still settles held/inbox state but must not carry private text through a late fallback onto another forge. The refusal is recorded with its pickup project and named fixed diagnosis; ordinary delivery receipts are UNCHANGED, checked.
 
 - **Statement**: A trigger may set `run.steer: true`. While one of its jobs runs, a message sent to that run shall
   reach the running agent: by default as a **steer**, after the current turn's tool calls and before its next model
@@ -8080,3 +8107,4 @@ instead of drifting.
 | 2026-10-30 (#771, complete CI budget) | REQ-UPSTREAM-CONTRACT-TESTS verification retains every required suite, reporting oracle, shifted-clock run and browser assertion, with a sixty-minute whole-job deadline after the measured main baseline reached forty-two minutes before the added sandbox browser coverage. Per-file and per-step deadlines, required check names, unfiltered pull-request reporting, all functional requirements and every other contract UNCHANGED, checked. |
 | 2026-10-31 (#771, Linux browser startup) | REQ-UPSTREAM-CONTRACT-TESTS verification shares the existing console browser launch policy between the width and interaction checks after an exact-pin Linux reproduction confirmed the missing CI startup argument. Both checks retain their assertions; the interaction check also verifies the actual production CSP header and that an untrusted inline script is blocked. Application CSP, local browser sandboxing, job-container isolation, required contexts, deadlines and every functional/interface contract UNCHANGED, checked. |
 | 2026-10-31 (#771, initial live snapshot) | REQ-SANDBOX-FROM-THE-CONSOLE acceptance now explicitly prevents an older event-stream snapshot from erasing freshly rendered cleanup warnings or incomplete shell counts. Initial Sandboxes subscriptions await a fresh bounded read and retain their rendered panels on failure. Cursor reconnects, other pages, stream admission/authentication, paid work, container isolation and every other requirement UNCHANGED, checked. |
+| 2026-10-31 (#766, #772) | `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS` acceptance, `REQ-STEER-RUNNING-JOB`, `REQ-JOB-STATUS-COMMENTS` and `REQ-PARKED-ANSWERER` AMENDED/implemented: bounded agent role/actions, shared tools, safe reads, shell flags and person-sent cited drafts. `REQ-APPROVAL-GATES`, isolation, budget-before-spend, receiver author gating, ordinary session/resume and unrelated requirements UNCHANGED, checked. |

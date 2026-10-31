@@ -31,7 +31,7 @@ const pointed = tempDir("pd-504c-pointed-");
 writeFileSync(join(pointed, ".env"), `PI_PROJECTS_FILE=${join(pointed, "projects.json")}\n`);
 writeFileSync(join(pointed, "pointer.json"), JSON.stringify({ version: 1, deploymentDir: pointed, env: {} }));
 process.env.PI_DISPATCH_DEPLOYMENT_FILE = join(pointed, "pointer.json");
-const ENV_KEYS = ["PI_PROJECTS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_ENVELOPE_FILE", "PI_SETTINGS_FILE", "PI_LOGS_DIR", "PI_MAX_COST_USD", "VALKEY_URL", "PI_WORKER_NAME", "PI_TRIGGERS_FILE"];
+const ENV_KEYS = ["PI_DISPATCH_AGENT_WRITES", "PI_PROJECTS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_ENVELOPE_FILE", "PI_SETTINGS_FILE", "PI_LOGS_DIR", "PI_MAX_COST_USD", "VALKEY_URL", "PI_WORKER_NAME", "PI_TRIGGERS_FILE"];
 
 const ENVELOPE = {
   version: 1,
@@ -204,6 +204,7 @@ test("a NESTED ctx.executeTool write and a codemode script's write reach the gua
 
 test("headless (no UI, as pi -p): the model's dispatch_priorities_set applies 3:1 with no dialog, and the confirm-gated envelope write refuses", async () => {
   await withDeployment(async ({ dir, files, redis }) => {
+    process.env.PI_DISPATCH_AGENT_WRITES = "1";
     const envBefore = readFileSync(files.envelope, "utf8");
     const { messages, seen } = await runSession({
       dir,
@@ -225,8 +226,21 @@ test("headless (no UI, as pi -p): the model's dispatch_priorities_set applies 3:
     assert.ok(!priorities.text.includes("launch"), "no reason text in the result the model reads");
     assert.equal(JSON.parse(redis.store.get("alloc:plan")).writer, "operator-session");
     assert.equal(envelope.isError, true);
-    assert.match(envelope.text, /needs an interactive operator to confirm it/);
+    assert.match(envelope.text, /envelope-set is confirm:/);
     assert.equal(readFileSync(files.envelope, "utf8"), envBefore, "the refused envelope write wrote nothing");
     assert.ok(existsSync(join(files.logs, "allocations", "2026-10.jsonl")), "the apply was audited on this host");
+  });
+});
+
+test("the actual pinned headless session refuses priorities without its real process write grant (#766)", async () => {
+  await withDeployment(async ({ dir, files, redis }) => {
+    delete process.env.PI_DISPATCH_AGENT_WRITES;
+    const before = readFileSync(files.envelope, "utf8");
+    const { messages } = await runSession({ dir, tools: ["dispatch_priorities_set"], responses: [call("dispatch_priorities_set", { projects: [{ id: "shop", weight: 3 }, { id: "platform", weight: 1 }] }), ai.fauxAssistantMessage("done")] });
+    const [result] = results(messages);
+    assert.equal(result.isError, true);
+    assert.match(result.text, /PI_DISPATCH_AGENT_WRITES=1/);
+    assert.equal(redis.store.has("alloc:plan"), false);
+    assert.equal(readFileSync(files.envelope, "utf8"), before);
   });
 });

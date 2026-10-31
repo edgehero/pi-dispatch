@@ -35,6 +35,7 @@ import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/ch
 import { repoOfTarget } from "../costs.mjs";
 import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
 import { recordReason } from "../words.mjs";
+import { agentReadProjection } from "../agent-read.mjs";
 import { RUN_MODEL_RE, RUN_PROVIDER_RE } from "../run-filter.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 
@@ -198,7 +199,7 @@ export function progressFactsOf(progress, record, { continues = false } = {}) {
  */
 async function runsOnTarget(fleet, kind, match) {
   if (typeof fleet?.runsPage !== "function") return { unreadable: true };
-  const pred = (r) => Boolean(r) && r.kind === kind && typeof r.target === "string" && match(r.target);
+  const pred = (r) => Boolean(r) && r.purpose !== "answer-draft" && r.kind === kind && typeof r.target === "string" && match(r.target);
   let page;
   try {
     page = await fleet.runsPage({ before: null, limit: TARGET_RUNS_MAX, filter: { kind }, match: pred });
@@ -239,7 +240,7 @@ async function newerRunOf(fleet, record) {
   const got = await runsOnTarget(fleet, record.kind, sameTarget(record.kind, record.target));
   if (got.unreadable) return { known: false, jobId: null };
   const at = runAt(record);
-  const newer = got.runs.filter((r) => runAt(r) > at && r.jobId !== record.jobId).sort((a, b) => runAt(b) - runAt(a))[0] ?? null;
+  const newer = got.runs.filter((r) => r.purpose !== "answer-draft" && runAt(r) > at && r.jobId !== record.jobId).sort((a, b) => runAt(b) - runAt(a))[0] ?? null;
   // A truncated scan that never reached the record's own instant has not seen every run after it.
   if (!newer && got.truncated && !(at > got.floor)) return { known: false, jobId: null };
   return { known: true, jobId: newer ? str(newer.jobId, RUN_ID_RE) : null };
@@ -482,7 +483,16 @@ export async function getRun(ctx) {
   const parsed = parseRunQuery(ctx.searchParams);
   if (parsed.refusal) return ctx.json(400, { error: parsed.refusal });
   const got = await resolveRunChat(fleet, parsed, deps.pageDeps?.env ?? {});
-  if (!got.doc) return ctx.json(got.status, got.body);
+  if (!got.doc) return ctx.json(got.status, ctx.session?.role === "agent" ? { error: got.status === 404 ? "run-not-found" : "run-unavailable", ...(got.body?.candidates ? { candidates: agentReadProjection(got.body.candidates) } : {}) } : got.body);
+  if (ctx.session?.role === "agent") {
+    // This API's transcript/progress objects are already text-free metadata. Preserve those useful
+    // facts while applying the same closed reason and identifier projection as pages and state.
+    const projected = agentReadProjection({ ...got.doc, transcriptMeta: got.doc.transcript, runProgress: got.doc.progress });
+    projected.transcript = projected.transcriptMeta;
+    projected.progress = projected.runProgress;
+    delete projected.transcriptMeta; delete projected.runProgress;
+    return ctx.json(200, projected);
+  }
   return ctx.json(200, got.doc);
 }
 

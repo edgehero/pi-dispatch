@@ -12835,3 +12835,34 @@ test("doctor collection resolves project roles before catalog and real deploymen
 	assert.ok(checks.some((check) => check.label.includes("openai/new") && /cap/.test(check.label)));
 	assert.equal(checks.some((check) => /reviewed model roles refuse/.test(check.label)), false);
 });
+
+test("doctor --json owns stdout and emits the identical sanitized record that is published (#766)", async () => {
+	const stdout = [], stderr = [], published = [];
+	const at = Date.UTC(2026, 9, 31);
+	const code = await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-secret-json-value", PI_WORKER_NAME: "test-host" }, {
+		json: true, out: (s) => stdout.push(s), writeErr: (s) => stderr.push(s), publish: true, publishNow: () => at,
+		publishDoctor: async (_url, _name, record) => published.push(record), spawn: fakeSpawn(green), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0",
+	});
+	assert.equal(code, 0);
+	assert.equal(stdout.length, 1, "one complete JSON document, without human progress lines");
+	const record = JSON.parse(stdout[0]);
+	assert.equal(record.at, at);
+	assert.deepEqual(record, published[0]);
+	assert.match(stderr.join(""), /Docker daemon reachable/);
+	assert.doesNotMatch(stdout.join(""), /sk-secret-json-value/);
+});
+
+test("doctor --json needs neither publication nor reachable Valkey, and retains its failing exit verdict (#766)", async () => {
+	const stdout = [], stderr = [];
+	const at = Date.UTC(2026, 9, 31);
+	const code = await runDoctor({ PI_PROVIDER: "anthropic" }, {
+		json: true, out: (s) => stdout.push(s), writeErr: (s) => stderr.push(s), publish: false, publishNow: () => at,
+		publishDoctor: async () => assert.fail("no publication was requested"), spawn: fakeSpawn({ "docker info": 1 }), probeValkey: async () => false, fileExists: () => true, nodeVersion: "22.19.0", agentDir: NO_AGENT_DIR,
+	});
+	assert.equal(code, 1);
+	assert.equal(stdout.length, 1);
+	const record = JSON.parse(stdout[0]);
+	assert.equal(record.at, at);
+	assert.ok(record.checks.some((c) => c.level === "fail"));
+	assert.match(stderr.join(""), /doctor: some checks failed/);
+});

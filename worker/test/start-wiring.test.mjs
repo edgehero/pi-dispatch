@@ -2262,7 +2262,7 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
 		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
 		// 7 since issue #499's projects watch, registered by the same rule; 8 since issue #712's doctor runs.
-		assert.equal(captured.extraClosers.length, 9 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + one closer per armed watch + the retention sweep + the doctor runs");
+		assert.equal(captured.extraClosers.length, 10 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + one closer per armed watch + the retention sweep + the doctor runs");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
@@ -2690,7 +2690,7 @@ test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it coul
 	assert.equal(constructions.length, 0, "the factory is never called at all");
 	// No watch files in this env, so the list is just the runtime queue and the registry. The point is
 	// the DELTA against the twin test below: the sweep contributes exactly one closer, or none at 0.
-	assert.equal(captured.extraClosers.length, 4 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + the doctor runs (issue #712), and nothing from the sweep");
+	assert.equal(captured.extraClosers.length, 5 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the doctor runs (issue #712), and nothing from the sweep");
 	assert.equal(logs.filter((l) => l.event === "retention_sweep").length, 0);
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.equal(started.sweepIntervalHours, 0, "the boot line still SAYS the sweep is off, which is the one visible difference");
@@ -2714,7 +2714,7 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// same closure in the same place.
 	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
 	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "session", "recovery_host_lost"], "boot's own order");
-	assert.equal(captured.extraClosers.length, 5 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + the sweep + the doctor runs (no watch files in this env)");
+	assert.equal(captured.extraClosers.length, 6 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
 
@@ -2741,7 +2741,7 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	const off = [];
 	const second = await runStart({ env: { PI_DOCTOR_INTERVAL_HOURS: "0" }, makeDoctorSpawner: (args) => (off.push(args), { start() {}, close: async () => {} }) });
 	assert.equal(off.length, 0, "at 0 the factory is never called: no timer, no closer, no child");
-	assert.equal(second.captured.extraClosers.length, 4 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + watch recovery drainer + the sweep");
+	assert.equal(second.captured.extraClosers.length, 5 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the sweep");
 	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
 });
 
@@ -2922,6 +2922,7 @@ test("PI_ON_FAILURE fires for the paid terminals only: terminal-failed and polic
 	assert.equal((await fired(() => handlers.completed({ id: "j4" }, { outcome: "completed" }))).length, 0, "a completion pages nobody");
 	assert.equal((await fired(() => handlers.completed({ id: "j5" }, { outcome: "policy", reason: "over-budget" }))).length, 0, "a free pre-spend refusal already comments; a delivery storm must not page");
 	assert.equal((await fired(() => handlers.completed({ id: "j6" }, { outcome: "policy", reason: "operator-cancel" }))).length, 0, "the operator initiated it; a push saying what they just did is noise");
+	assert.equal((await fired(() => handlers.completed({ id: "j6-agent" }, { outcome: "policy", reason: "agent-cancel" }))).length, 0, "a delegated cancel uses the same no-pager stop policy");
 	assert.equal((await fired(() => handlers.failed({ id: "j7", data: { kind: "github", repo: "o/r" }, attemptsMade: 1 }, new Error("x")))).length, 0, "a retried attempt pages nobody");
 	// Issue #502: `model-not-allowed` is also the worker's FREE pre-spend refusal, and only the paid one pages.
 	assert.equal((await fired(() => handlers.completed({ id: "j8" }, { outcome: "policy", reason: "model-not-allowed", budgetReserved: false }))).length, 0, "the free refusal of a main model off the list pages nobody");
@@ -5504,6 +5505,29 @@ test("the opener gets both switches and a commenter factory over never-throwing 
 	assert.equal(openers[0].transcripts, false);
 	assert.equal(openers[0].progress, false);
 	assert.equal(openers[0].steer, true);
+});
+
+test("completed draft provenance also guards late status, comment and label callbacks after source identity changed", { skip }, async () => {
+	const calls = [], openers = [], commenters = [], digest = "a".repeat(64);
+	const host = fakeHost({ postStatusComment: async () => (calls.push("post"), { id: "77" }), editStatusComment: async () => calls.push("edit"), setParkedLabel: async () => calls.push("label") });
+	const { deps, recordRun } = await runStartWithRecords({
+		makeAuth: async () => ({ mintToken: async () => (calls.push("mint"), "tok"), selfId: 1, source: "gh" }), makeHost: () => host,
+		makeLiveTranscriptOpener: args => (openers.push(args), () => ({ start() {}, finish: async () => {} })),
+		makeStatusCommenter: args => (commenters.push(args), { start() {}, update() {}, finish: async () => {}, commentId: () => null }),
+		readProgressKey: async () => ({ commentId: "77", snapshot: { turn: 1, steps: 1 } }),
+	});
+	const job = { kind: "github", repo: "o/n", target: { type: "issue", number: 3 }, parkedReply: true, statusComment: true, console: { by: "rob", draftRunId: "draft", draftDigest: digest, draftSourceRunId: "source" } };
+	deps.answerDraftStore.readMeta = async () => ({ status: "sent", draftRunId: "draft", draftDigest: digest });
+	deps.answerDraftStore.privateInput = async () => ({ source: { kind: "github", repo: "o/n", target: job.target, apiUrl: "https://api.github.com", selfId: 1 } });
+	let current = true; deps.answerDraftRuntime.checkSource = async () => current;
+	openers[0].makeCommenter({ job, jobId: "status-tap", commentId: null, onId() {} });
+	const adapter = commenters.at(-1); assert.deepEqual(await adapter.post("safe status"), { id: "77" }); assert.deepEqual(calls, ["mint", "post"], "positive control reaches the actual injected forge adapter");
+	calls.length = 0; current = false;
+	assert.equal(await adapter.post("must not post"), null); assert.deepEqual(await adapter.edit("77", "must not edit"), { stop: "answer-source-changed" });
+	await deps.comment(job, "must not post an answer/refusal"); await deps.parkedLabel(job, true);
+	recordRun({ job: { id: "reply-after-restart", name: "github", data: job }, result: { outcome: "policy", reason: "answer-draft-config-changed", budgetReserved: false }, startedAt: "a", endedAt: "b" });
+	for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+	assert.deepEqual(calls, [], "an unregistered previous-attempt status edit, label and every comment callback refuses before mint");
 });
 
 // Issue #644: the comment's final edit comes from the run record, not the exit code: an OOM kill exits 137 (the exit's

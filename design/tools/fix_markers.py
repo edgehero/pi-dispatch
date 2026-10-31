@@ -9,7 +9,7 @@ from paths import COMPONENTS as ROOT
 GROUPS = {
     "Start here": ["ConceptMap", "Glossary", "SampleStory", "JourneyAnswer", "JourneyFailure", "JourneySetup"],
     "Overview": ["OverviewScreen", "OverviewAllClear", "SetupScreen"],
-    "Runs": ["SandboxesScreen", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer"],
+    "Runs": ["SandboxesScreen", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
     "Fleet": ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail", "FleetViewer"],
     "Spend": ["SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen"],
     "Triggers": ["TriggersScreen", "TriggerDetail", "TriggerEditor", "TriggersViewer", "WatchScreen", "WatchBoard"],
@@ -17,8 +17,7 @@ GROUPS = {
     "Access and audit": ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"],
     "Phone": ["OverviewPhone", "RunsPhone", "ParkedPhone", "SpendPhone", "RunLivePhone", "FleetPhone", "TriggersPhone",
               "ParkedDraftPhone", "ZeroTouchPhone"],
-    "Planned and proposed": ["ApprovalRequest", "ModelsScreen", "DispatchersScreen", "DispatcherScreen",
-                             "ParkedAnswerer", "ParkedDraftViewer"],
+    "Planned and proposed": ["ApprovalRequest", "ModelsScreen", "DispatchersScreen", "DispatcherScreen"],
     "Components": ["Shell", "Status", "Actions", "CardsAndBanners", "DataTable", "FactsAndLevels", "TimelineAndWaitlists",
                    "Transcript", "FieldsDiffCommand", "ConfirmStates", "LiveStates"],
 }
@@ -51,11 +50,11 @@ STATUS = {
     "SandboxesScreen": (BUILT, "Built by #771. The browser terminal remains proposed under #754."),
     "ZeroTouchScreen": (BUILT, "Built by #777, fleet-wide touch accounting and cause-linked fixes."), "ZeroTouchViewer": (BUILT, "Built by #777, as a viewer sees it."),
     "ZeroTouchPhone": (BUILT, "Built by #777, on a phone."),
-    "ParkedDraftViewer": (PROPOSED, "#772. As a viewer sees it."), "ParkedDraftPhone": (PROPOSED, "#772. On a phone."),
+    "ParkedDraftViewer": (BUILT, "Built by #772. Viewers see wait, draft existence and the sender only."), "ParkedDraftPhone": (BUILT, "Built by #772. On a phone, the full rules remain one tap away."),
     "RunLivePhone": (BUILT, "Built by #747, the run page on a phone."),
     "TriggersPhone": (BUILT, "Built by #767 (#750), on a phone."), "TriggersViewer": (BUILT, "Built by #767 (#750), as a viewer sees it."),
     "FleetPhone": (BUILT, "Built by #748, on a phone."), "FleetViewer": (BUILT, "Built by #748. As a viewer sees it."),
-    "ParkedAnswerer": (PROPOSED, "#772, part of #753. Sending with no person's confirm is not proposed: OQ-051."),
+    "ParkedAnswerer": (BUILT, "Built by #772. Only the person’s preview and Confirm can send an answer; sending without them stays forbidden: OQ-051."),
 }
 RIBBON_RE = re.compile(r'<div class="ds-status[^"]*" role="note"[^>]*>.*?</div>\n', re.S)
 # The ribbon is a note on the card, not console styling, so its rules live here and are added to each card that

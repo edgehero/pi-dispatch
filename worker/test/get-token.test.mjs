@@ -235,6 +235,14 @@ test("app mint passes a caller's permissions narrowing through to the installati
 	assert.deepEqual(calls[0].repositoryNames, ["widgets"], "narrowing never loosens the repo scope");
 });
 
+test("an answer draft's App token is scoped to one repository with read permissions, despite a supplied wider grant (#772)", async () => {
+	const calls = [];
+	const auth = await makeGitHubAuth({ source: "app", appId: "123", installationId: "456", privateKeyPath: "/keys/app.pem" }, { Octokit: FakeOctokit(APP_ROUTES), createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls }), readFile: async () => "PEM" });
+	await auth.mintToken({ kind: "github", purpose: "answer-draft", repo: "acme-corp/widgets", permissions: { contents: "write", issues: "write" } });
+	assert.deepEqual(calls[0].repositoryNames, ["widgets"]);
+	assert.deepEqual(calls[0].permissions, { contents: "read", issues: "read", pull_requests: "read", metadata: "read" });
+});
+
 test("app mintToken with no repo (local run.github job) is a config error steering to gh/pat", async () => {
 	const calls = [];
 	const auth = await makeGitHubAuth(
