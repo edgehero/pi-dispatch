@@ -1089,6 +1089,18 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-CONSOLE-SECURITY
 
+- **AMENDED 2026-10-31 (#774, decided, not implemented)**: the setup exceptions are strictly those in
+  `REQ-BROWSER-FIRST-RUN-SETUP` and `INT-CONSOLE-SETUP-HOST`. Clause (g)'s shared funnels gain bounded host setup
+  plan/apply operations under an explicit process grant; the console gains no arbitrary command path. Clause
+  (f)'s no-code-on-a-page rule has one future exception: a newly created viewer's one-time link in its initiating
+  operator's confirmation response and private result DOM, never SSR, shared flash, live/cache/state data or logs.
+  Durable tokens stay absent from every browser response. A write-only provider key is admitted only to private,
+  short-lived session/action state and the create-only host writer, never a diff, audit value or echoed response.
+  This amendment qualifies the blanket transport statements below without relaxing Host, Origin, JSON, body-size,
+  session-person, revocation, read-only or role guards. Every new mutation is `person`, refused to viewers/agents
+  before private dependencies. CSP and exclusion of deployment secrets from the console environment are
+  UNCHANGED, checked. No future acceptance is claimed satisfied by this prerequisite specs PR.
+
 - **AMENDED 2026-10-31 (#766, #772)**: `agent` is a distinct role, never an operator rank. It reads the viewer projection with operator/job prose removed, bundle names replaced by counts, and failed reasons restricted to catalog tokens. Its API writes require a single-use session/action ticket and an `unattended` transition. Host, Origin, fetch-site, JSON, read-only, session-person and revocation guards still apply. `confirm` and `person` actions refuse by name and policy reason before private dependencies are read. Operator-only reads include classifications, rule/standing-answer text, citations and drafts; only the operator run pages receive question/draft bodies, including live refreshes. Agent caches and event groups are separate from operator/viewer caches.
 
 - **Extension (#771)**: The sole additional outbound scheme is a canonical `pi-dispatch-open://` link built from a checked `open` or `attach` verb, sandbox ID and host. No credential, command or path is carried. Only operators receive these links, sandbox commands, preparation results or shell observations, including direct pages, APIs and event streams. Existing CSP and every write guard are UNCHANGED, checked.
@@ -1104,10 +1116,13 @@ writes retain their existing interactive confirmation. This adds no unattended p
   (`/static/console.js`, `/static/console.css`), sign-in and sign-out only within a session obtained from a named token
   or a one-time login code; shall accept a write only when it is same-origin, JSON, by the operator role or an explicitly permitted agent transition, on a console
   that is not read-only, and confirmed by a single-use ticket bound to the diff the operator saw; shall make every write
-  through the read model's existing funnels; shall send the same security headers on every response and escape every
+  through shared validated funnels (existing read-model writes or the explicitly granted setup funnels);
+  shall send the same security headers on every response and escape every
   value it renders; shall record every write, every write a guard refuses and every sign-in in a hash-chained audit log
   (refusals of requests that carry no session one row each up to a rate, and counted past it); shall
-  never put a token, a login code, a cookie value or a request body in a log line, an audit row or a page; and,
+  never put a token, a login code, a cookie value or a request body in a log line or an audit row; shall render
+  none of them on a page except the one-time code in the initiating operator's private viewer invitation
+  explicitly specified above; and,
   since #641, shall end every event stream when its session ends without a stream ever extending one, and shall show
   free run text (BullMQ `failedReason`) and the audit log to the operator role alone; and, since #643, shall show a
   run's live transcript to the operator role alone, escaped, and only on the run page; and, since 2026-10-18 (insights
@@ -1213,8 +1228,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
     reused, expired, issued to another session or for another action, a file that changed after the preview, or a job
     whose state changed after it, the confirm is refused and the file or job is as it was. Given a confirm, its `ok`
     audit row is appended before the funnel runs and an append failure refuses it; a refusal or throw from the funnel
-    appends a `failed` row under the same ticket digest. The console has no write path that is not a read-model
-    funnel. The tests loop over the action table (`REQ-OPERATOR-CONSOLE-ACTIONS` (a)). Tests:
+    appends a `failed` row under the same ticket digest. The console has no write path outside these shared
+    funnels; #774 adds only the explicitly granted setup funnels above. The tests loop over the action table
+    (`REQ-OPERATOR-CONSOLE-ACTIONS` (a)). Tests:
     `admin/test/console-confirm.test.mjs`, `admin/test/console-pause-windows-expect.test.mjs`,
     `admin/test/console-server.test.mjs`, and `admin/test/console-actions.test.mjs`.
   - (h) **The audit chain, refusals included.** Given rows appended across a month boundary, each row's `prev` is
@@ -1524,6 +1540,11 @@ writes retain their existing interactive confirmation. This adds no unattended p
   `admin/test/helpers/script-dom.mjs`. This supersedes the older run-markup exception in clause (l).
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
+
+- **Decided, not implemented (#774)**: add the live `/setup` destination and overview link specified by
+  `REQ-BROWSER-FIRST-RUN-SETUP`, using the existing role-separated panel/event machinery. Its observer views,
+  terminal alternatives, themes, responsive layouts, no-script reads and exceptional-state acceptance are
+  required before it is called built. Existing shipped screens and their test matrices remain unchanged here.
 
 - **Models (#773)** (`/models`, viewer, not live). The page reads only its declared sources, shows its drawn time and Reload, and puts actionable Radius/capped-model and role-resolution warnings before Model roles, Cooling down, Models in use and Proposals. Roles retain their default/project scope, ordered fallbacks, linked trigger row numbers and flows; repository-agent usage is explicitly unavailable. Effective trigger-owned fallbacks remain distinct from role-owned fallbacks. Forecasts name their observed pricing/cooldown basis and the admission gates still to come; a job with no effective fallback starts on its primary. Configured cooldown keys only are read, with a worded cause and UTC end; no provider text, start time or progress fraction is inferred. Model windows retain unknown spend. Published proposals retain host/age/coverage; canary comparisons show retained source/candidate execution results and denominators, never a reconstructed experiment or quality claim. Operators may preview a role edit, prefill one from a canary, or copy a host canary command. Viewers, agents and read-only consoles receive no edit/adopt/command controls. Both themes, phone/intermediate/desktop layouts, native read navigation, keyboard interaction, production CSP, exceptional states and the complete ModelsScreen component ledger are verified behaviorally and in rendered captures.
 
@@ -3006,6 +3027,14 @@ writes retain their existing interactive confirmation. This adds no unattended p
   `.github/scripts/console-width-check.mjs --require`.
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
+
+- **Decided, not implemented (#774)**: bounded setup operations in `INT-CONSOLE-SETUP-HOST` will be added as
+  explicit `person` entries with reasons, using the same preview/Confirm/audit guards. They are not yet members
+  of the current action inventory or destructive-action enumeration below; the implementation must add each
+  registration and its exhaustive policy/coverage checks together. Host starts show current queued/cron exposure
+  and reserve estimates, never reserve budget themselves. Stop/restart confirmations explicitly allow the
+  described interruption, including work admitted after preview, and do not claim to undo spending. Each setup
+  action has an actionable Undo line; irreversible or unsafe inverses are terminal guidance rather than buttons.
 
 - **Role edit (#773)**: `model-role-edit` is a free, person-only console action, with no model mutation tool. Preview validates the full triggers document plus known physical models and all affected effective role/trigger contexts, including literal-model triggers and the sixteen-model union in an unused scope. Unknown roles/models, provider disagreement, duplicate fallback ownership, overflow and removal leaving a referenced role unavailable refuse. Removing an override may restore the default. Existing-row scope and role identify the edit; an unrelated trigger payload or secret declaration never becomes diff context. Confirm names the affected trigger rows, next-delivery behavior, no immediate run and recovery's retained physical model. The existing lock, expected-input snapshots, atomic writer, single-use session/action ticket and audit funnel apply. Undo restores the exact previous mapping only after a fresh valid preview. Adoption supplies an identity and comparison digest, never trusted metric claims; the server binds and rechecks the retained sample before repeating its numbers.
 
@@ -6995,7 +7024,88 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   model-callable tool returns a resolver path. Tests: `worker/test/run-record-openshell.test.mjs`,
   `admin/test/secret-profiles-view.test.mjs`, `admin/test/crud.test.mjs`.
 
+## REQ-BROWSER-FIRST-RUN-SETUP
+
+- **Status**: **DECIDED, NOT IMPLEMENTED** (issue #774). The authority changes must land in a specs-only PR before
+  implementation. Existing tests establish the current implementation, not satisfaction of this new requirement.
+- **Statement**: a person shall bootstrap a durable console from a terminal and finish supported first-run steps
+  at `/setup`, each mutation previewed, individually confirmed and audited, with the valid terminal alternative
+  available. Readiness shall be derived from actual deployment/queue/heartbeat/doctor evidence and never from a
+  sample, a successful process spawn or an audit intent. The page shall explain unsupported or unsafe steps.
+- **Traces to**: `DES-BROWSER-FIRST-RUN-SETUP`, `INT-CONSOLE-SETUP-HOST`, `REQ-DEPLOYMENT-BOOTSTRAP`,
+  `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `OQ-054`.
+- **Acceptance, required of the implementation PR**:
+  - **Bootstrap**: missing admin, absent built entry, cache-backed service path, unsupported platform/manager,
+    unsafe token file or foreign service refuses before any host/config/token mutation. A fresh packed install
+    discovers both exact packages and the exact pi peer without workspace resolution. Repeated bootstrap keeps
+    existing tokens/services; zero/one/multiple operator cases, declines, failed service start and health timeout
+    have explicit outcomes. The console extension starts/stops no worker or receiver; ordinary `up` infrastructure
+    behavior and pre-existing service states are unchanged by that extension. Link loss has exact host recovery.
+  - **Host grant**: `serve --host-setup` and console service installation explicitly bind local authority as in
+    the interface. Existing consoles grant none. Reinstall without the flag plus restart revokes it. A forged
+    pointer, fleet row, `.env` key, request path/command/environment or remote host cannot grant/redirect it.
+  - **Live steps**: deployment, queue, token, worker, egress, provider, trigger and forge keep their canonical
+    order and progress count. Actual execution supplies Starting; service success waits for heartbeat/doctor
+    readiness, failure or bounded timeout. Missing/stale/unreadable/partial observations are never Ready by
+    inference. Full setup remains accessible after overview applicability ends. The agent token step recognizes
+    its actual role without inheriting operator controls. Initial and live projections retain the same privacy.
+  - **Host actions**: tests prove preview performs no mutation, Confirm executes the exact revalidated operation
+    once, audit failure prevents apply, and expired/replayed/foreign/stale tickets refuse. Verify missing-unit
+    installation, receiver-package absence, multi-unit dependencies, concurrent confirms, work arriving after
+    preview, malformed/oversized process output, timeout, cancellation and partial/uncertain readback. Current
+    queued/manual/cron exposure is timestamped and complete or the start refuses; no setup reservation is made.
+    Worker stop/restart states the possible interruption, including future arrivals. Unsafe proxy mutation and
+    unprovable ownership remain terminal-only. OpenShell never offers the Docker/native-Podman proxy action.
+  - **Provider key**: meaningful tests show the confirmed key reaches only the intended create-only `.env` slot
+    and that a stale file, duplicate/nonblank assignment, bad mode/owner/symlink, unsupported key, shadowing
+    source, control/command reference or oversized value changes nothing. A selected managed subscription cannot
+    silently fall back to that key. Verify actual credential-source precedence and the running worker's separate
+    reload need. Leak canaries cover values and secret-derived digests in logs, audit, HTML, previews, errors,
+    child argv and public/live responses. Proactive expiry, guarded Cancel, wrong-session redemption, revocation,
+    role change and shutdown dispose private state even without a later request; clocks are injected. The browser
+    clears the key field/transient request and cannot replay it through Preview again; retry requires re-entry.
+  - **Viewer invitation**: browser input cannot select another role. Real concurrent consumption admits the link
+    once within 60 seconds; expiry/replay/revocation fail. Codes bind the exact created token incarnation, viewer
+    role and file generation at redemption; rotation, role change, same-name recreation and generation changes
+    invalidate them rather than signing in as a replacement. Mint-after-token-write failure reports the retained
+    viewer and recovery. Other operator sessions, viewers, agents, role caches and reconnects receive no code.
+    Undo revalidates the exact created entry and refuses a same-name replacement. Tunnel reachability and session
+    limits are stated. Neither invitation nor bootstrap exposes a durable plaintext token.
+  - **Recipes**: a closed `recipe` enum selects label fix, nightly tidy or comment answer; unknown, repeated and
+    oversized values refuse before reads. Verify exact editable prefills, submitted fields and saved narrowing
+    through the existing trigger planner, diff, Confirm and audit. GET, Cancel and stale-file refusal write
+    nothing. Missing folder/skill/forge prerequisites are actionable rather than invented defaults.
+  - **Wizard and GitHub**: the wizard retains runtime prechecks, pinned install validation, per-child terminal
+    consent, pointer authority and the separate repository opt-in. Its private operator link opens `/setup`,
+    never exposing code to model context or opener argv. Webhook/no-webhook answers produce the corresponding
+    actual CLI flags. GitHub stays optional and terminal-based under `OQ-054`; no disabled placeholder claims
+    App creation, token pasting or a host-login mutation works in the browser.
+  - **Role/security boundaries**: exercise direct pages, API and events as operator/viewer/agent/read-only,
+    including denied requests, changed sign-in and live reconnect. Every setup mutation carries a `person`
+    reason and passes the existing guards; there is no model mutation tool. `dispatch_setup` stays a safe read.
+    No Valkey address or personal name enters shared setup panels. The server response's actual CSP remains
+    unchanged; same-origin interaction works and hostile inline/cross-origin routes remain blocked.
+  - **Visual and accessible behavior**: compare complete SetupScreen sections against correctly styled source
+    cards at 375 and 1440 px plus intermediate widths, both themes, every applicable role and read-only mode.
+    Prove reference tokens/styles/system fonts loaded first; report inaccessible remote artifact access without
+    claiming direct comparison. Inspect colours, hierarchy, segmented progress, labels, controls, ready rows,
+    recipes and command blocks. Test keyboard/focus behavior through live swaps, labels/status announcements,
+    errors, no-JavaScript navigation/details and explicit unavailability of script-dependent writes. Capture and
+    independently inspect final screenshots after the last relevant change. The ledger records privacy and
+    deferred/unsupported differences; generator/cards, Built status, JourneySetup and shipped docs agree.
+  - **Regression and release evidence**: new behavior has meaningful counterexamples, not only goldens or element
+    presence. Run the full root suite with live Valkey and required integration flags, clock/reporting/temp-dir
+    oracles, bundle/pin checks, design build, production-CSP browser interactions and the pinned-browser width
+    sweep. Required final-commit CI passes and advisory failures are investigated. This prerequisite adds no
+    implementation or visual evidence claim.
+
 ## REQ-DEPLOYMENT-BOOTSTRAP
+
+- **Decided, not implemented (#774)**: the `up --console` extension in `DES-BROWSER-FIRST-RUN-SETUP` adds
+  early admin/durable-entry preflight, host-only operator bootstrap, the explicitly granted console user service
+  and a one-time `/setup` link. Existing create-only scaffolds, per-action consent, empty/unset treatment,
+  adoption/proxy flags and zero-provider-token bootstrap behavior below are UNCHANGED, checked. The operator
+  finishes supported host steps only after separate browser previews; bootstrap does not start the worker.
 
 - **Statement**: The CLI shall take a fresh machine to a preflighted deployment through **create-only
   scaffolds and per-action consented host mutations** — `pi-dispatch init` (scaffold), `pi-dispatch
@@ -7873,6 +7983,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#774, prerequisite specs) | NEW `REQ-BROWSER-FIRST-RUN-SETUP`, DECIDED, NOT IMPLEMENTED; `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-DEPLOYMENT-BOOTSTRAP` AMENDED with bounded setup authority and future behavior/counterexample acceptance. Private key and viewer-code exceptions do not relax role, origin, ticket, audit or CSP guards. Full role/theme/width/accessibility/no-script/real-CSP verification is required before Built. Existing action/tool inventories, destructive-action enumeration, bootstrap unset semantics and ordinary job admission UNCHANGED, checked; implementation follows only after this specs PR lands. |
 | 2026-10-31 (#781) | NEW `REQ-SUBSCRIPTION-AUTHENTICATION`; `REQ-MODEL-POLICY`, `REQ-GLOBAL-PI-OVERLAY`, `REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-TOKEN-ACCOUNTING-AND-CAPS` gain the explicit subscription path through that requirement. `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-MODEL-PROPOSALS-AND-CANARY`, `REQ-RUN-RECOVERY`, `REQ-RESURRECTABLE-SANDBOX` and the existing forge author gates UNCHANGED, checked: no browser authentication write, no model-callable credential control, no paid canary exemption, no account rotation or cross-model replay permission, and no sandbox credentials. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |
 | 2026-10-31 (#773) | REQ-OPERATOR-CONSOLE-SCREENS, REQ-OPERATOR-CONSOLE-ACTIONS, REQ-MODEL-POLICY, REQ-MODEL-PROPOSALS-AND-CANARY and REQ-ADMIN-VIA-PI-EXTENSION AMENDED for the Models page, person-only role editor, typed read and retained comparison evidence. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |
 | 2026-10-29 (#735, #743) | NEW `REQ-WATCH-TRIGGER` and `REQ-WATCH-DECISION-STEP`; `REQ-OPERATOR-CONSOLE-ACTIONS` destructive list AMENDED for board freeze, clear and revert. `REQ-JOB-TIMEOUT-30M`, `REQ-AI-TRIGGERED-RUNS`, `REQ-RESUMABLE-SESSION` and existing forge author gates UNCHANGED, checked: watch cannot chain or resume, and a person still authorizes code changes. |

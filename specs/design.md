@@ -2313,6 +2313,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-FIRST-RUN-SETUP-WIZARD
 
+- **AMENDED 2026-10-31 (#774, decided, not implemented)**: `DES-BROWSER-FIRST-RUN-SETUP` authorizes a
+  console handoff after the existing consented host bootstrap. The wizard will offer the console service and
+  an operator-only one-time link to `/setup`, using the private opener transport, while keeping the terminal
+  route. Its GitHub handoff must ask for a webhook URL or no webhook and pass `--webhook-url` or `--no-webhook`;
+  the bare `setup github` invocation below describes the old implementation, not a valid future command.
+  The provider-key notice and the rejection of credential-entry dialogs remain true of **pi dialogs**: the
+  extension never reads a key or sends one into model context. The new, explicitly granted browser surface may
+  accept a key under `INT-CONSOLE-SETUP-HOST`. Deployment-pointer authority, per-child consent, version checks,
+  runtime prechecks and the repository's separate `ai-trigger: allow` consent are UNCHANGED, checked.
+
 - **Decision**: `/dispatch setup` is **the default setup route** (issue #96): when bare `/dispatch`
   detects no deployment anywhere, it lands **directly in the wizard's opening choice** — the select
   (Guided setup / Open the panel anyway / Cancel) *is* the consent, replacing the earlier yes/no
@@ -2408,6 +2418,110 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `INT-DEPLOYMENT-POINTER-CONTRACT`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-CLI-SURFACE`,
   `DES-GH-APP-MANIFEST-SETUP`, `DES-TRIGGER-OUTSIDE-PI` (the wizard bootstraps host processes; it
   never hosts them)
+
+## DES-BROWSER-FIRST-RUN-SETUP
+
+- **Status**: **DECIDED, NOT IMPLEMENTED** (issue #774). This prerequisite settles authority before any code.
+  It must land before the implementation PR. Current action/tool inventories and design status describe shipped
+  code until that PR updates them and their tests; this entry does not claim a new route, flag or action exists.
+- **Decision**: after a consented terminal bootstrap, `/setup` is the live place to finish a deployment. It uses
+  `firstRunState`'s eight steps and the SetupScreen panels `p-setup`, `p-setup-ready`, `p-setup-start`, with the
+  ready summary, segmented progress, actual action progress and a terminal alternative for every unfinished step.
+  The overview links to it. Its direct route remains useful after the overview's first-run condition ends.
+  Viewers see states; agents receive the existing safe machine projection. A read-only operator sees commands
+  without mutations. Shared panels name the deployment's last folder and the session's role, never Valkey's
+  address or one person's name. A private action preview may name the local account whose service it changes.
+- **A host grant, not a fleet inference**: `pi-dispatch-console serve --host-setup` explicitly enables bounded
+  setup on this process's host. `pi-dispatch service install --console --host-setup` persists that argument in
+  the account's service; `up --console` requests this shown grant during console bootstrap. Existing and manually
+  started consoles without the argument remain disabled. The grant binds the real deployment directory, current
+  uid, user manager and verified durable worker entry. Neither `.env`, a pointer, a trigger, a request nor a host
+  registry row can grant it or redirect it to another account/host. Service reinstall does not implicitly preserve
+  it: reinstall without `--host-setup` and restart revokes it. A missing grant, read-only mode, unavailable local
+  runtime, foreign unit or unsupported manager is a named refusal with terminal recovery. Linux user systemd and
+  macOS LaunchAgents are the initial managers; Windows and Linux system services retain the terminal route.
+- **The bounded host executor**: the console uses shared setup plan/apply funnels and the worker's known CLI
+  entry as a bounded child with `shell:false`, fixed arguments, a closed operation set and typed input/output
+  (`INT-CONSOLE-SETUP-HOST`). It never invokes the whole `up` pass from a browser and never accepts a command,
+  executable, environment override or path chosen by a request. The child loads its own deployment service
+  environment; provider/forge secrets are not added to the console's `process.env`, service environment or bundle.
+  The console does not import doctor, provider SDKs or the full host-execution graph to draw a page. Preview may
+  make bounded, non-mutating local observations only under this grant; a GET or live render never runs doctor or
+  mutates the host. Every apply is a person-only preview, Confirm and audit intent through the existing guards.
+- **Service effects and money**: install-and-start, start, stop and restart apply only to this deployment's
+  worker/receiver user units. An absent receiver package refuses before any unit write. The preview uses the
+  actual service plan: on native Podman that can include Valkey, proxy, password and keeper units; on OpenShell
+  it includes the existing gateway dependencies. It never describes a multi-unit plan as one worker unit.
+  Foreign/shared stacks, volume adoption and unpreviewable disruptive dependency changes remain terminal-only.
+  Starting a worker permits ongoing consumption, including manually queued jobs and armed cron triggers.
+  Preview names current queue/trigger counts, their observation time and reserve estimates; incomplete scans or
+  unknown current exposure refuse. The estimate makes no reservation. Later arrivals still pass the worker's
+  normal admission and per-job budget gates, which are UNCHANGED, checked. Confirm rechecks the plan and identity;
+  it cannot freeze future arrivals. Stop/restart and a start's Undo require a fresh preview explicitly saying
+  SIGTERM can interrupt work, including a job admitted after preview, and cannot undo money already spent.
+  An empty active-job observation is never proof of interruption-free stopping.
+- **Egress is start-only here**: start a missing/stopped, deployment-owned Docker proxy or native-Podman proxy
+  stack only when its actual plan is safe and complete and the existing endpoint-locality judgment confirms
+  the runtime is on this host: a local CLI can target a remote daemon through its context or `DOCKER_HOST`.
+  Proxy replacement, restart, removal, rules refresh, adoption and uncertain/shared ownership remain terminal-only. OpenShell has gateway policy rather than this
+  proxy, so the page links to Connections and its applicable host instructions. Allowlist counts come from the
+  Connections read, never a sample constant. A proxy's Undo line names the terminal stop prerequisites; it must
+  not offer a destructive button on the strength of an active-zero read that a running worker can invalidate.
+- **Doctor is an explicit action**: a person may preview and confirm one ordinary, non-live, non-fixing doctor
+  child under the same grant. Published sanitized checks feed the steps; raw stdout/stderr never does. The page
+  makes no claim that this validates a provider by paid inference. No live-probe containers or automatic fixes
+  are authorized by this action.
+- **An API key through the browser**: the precisely scoped reversal of "printed, never written" is a write-only,
+  create-only API-key field, not a pi dialog. The permitted key name comes from the canonical API-key mapping
+  verified against pinned pi, not every bearer/OAuth candidate the provider might accept. A private secret ticket
+  binds session, action and expected `.env` identity/content, expires proactively, and disposes its payload on
+  cancellation, redemption, session end or shutdown. The preview and audit contain only safe metadata, not the
+  key, request body or a digest derived from its value. The host writer refuses nonblank existing assignments,
+  unsafe owners/modes/symlinks, changed input, command references, controls, oversize input and a shadowing key
+  source. No automatic service restart follows a write: an existing worker's need to reload is explicit and
+  restart has its own exposure preview. Cleanup drops references and clears buffers where possible; it does not
+  promise erasure of every JavaScript string copy. Existing API-key auth and explicitly bound managed subscriptions
+  use doctor's `provider.key` result without a fake "Use" mutation. Plain pi OAuth is not offered as unattended
+  service auth. A managed binding cannot silently be replaced by writing an ineffective environment key.
+- **Tokens and invitations**: host bootstrap may create an operator hash through the existing hardened writer,
+  discard the durable plaintext and print only a 60-second setup link after the console answers. It names the
+  created/reused operator and exact host `link`/`rotate` recovery, so losing a link is actionable. Existing tokens
+  are preserved on retry, and multiple operator choices are explicit. Only `token add` and `token rotate` print
+  durable tokens. The granted browser can create **viewer** entries only and return a one-use 60-second fragment
+  link in the initiating operator's confirmation response. It never appears in server HTML, shared flash,
+  role caches, live panels, state APIs or audit. The script may show/copy that private result under the existing
+  CSP; it uses a relative same-origin destination and builds any absolute copy from validated console-origin
+  facts. The code binds the created token incarnation, viewer role and file generation at redemption, so rotation,
+  role changes and same-name recreation invalidate it. Loopback/tunnel reachability, expiry and session limits
+  are explained. If token creation succeeds but
+  code minting fails, report the retained viewer and recovery rather than hiding the mutation. A separately
+  confirmed revoke is Undo only for the exact entry created, never a rotated/replaced entry with the same name.
+- **Durable bootstrap**: `up --console` resolves and validates the admin package before **any** host/config/token
+  mutation. The runtime does not silently install that optional package. A worker-only `npx` invocation therefore
+  refuses when it is missing. The documented terminal line installs exact worker/admin versions durably in the
+  deployment and then invokes the installed command; any automatically installed pi peer must resolve to the
+  repository's exact pin too. Cache-backed entries cannot become service targets. Packed-artifact verification
+  must prove package discovery, dependency resolution and executable service paths without workspace symlinks.
+  Existing `up` consent/adoption/proxy flags retain their meanings. Bootstrap starts the console, not the worker;
+  it checks supported platform, manager, address, token file and deployment identity before changes, preserves
+  existing usable state and gives bounded health/failure output without printing secrets.
+- **Recipes and GitHub**: the closed `recipe` query on `/config/trigger-add` offers label fix, nightly local tidy
+  and comment answer. It prefills editable ordinary fields and grants nothing: the existing trigger planner,
+  narrowing, diff, confirmation and audit perform the save. No GET writes or arms a trigger. Missing folder/skill,
+  invalid/repeated recipe and missing forge prerequisites remain visible. GitHub stays optional, showing published
+  status, Connections and the complete terminal setup command. Browser App creation remains OPEN in `OQ-054`;
+  forge credential forms or host-login changes are not authorized by the API-key field's exception.
+- **Audit and outcomes**: an audit append must succeed before apply; a failed/partial result has its compensating
+  row. An intent is not a transaction across the audit, service manager and files. A crash after intent may leave
+  an uncertain effect; typed readback, not an `ok` intent or child exit alone, decides what the page says. Never
+  retry an uncertain host mutation automatically. Serialize per deployment and bound all process/memory lifetimes.
+  Each action has an honest Undo line, with no inverse where none exists, notably doctor and already spent work.
+- **Rejected**: a generic terminal or arbitrary shell runner; host authority inferred from the fleet/pointer;
+  broad `up` from a page; forwarding raw child diagnostics; stale doctor interpreted as readiness; invitation
+  links in shared panels; keys in ordinary diff/flash state; a stopped-job check presented as an admission fence;
+  service paths into a disposable npm cache; changes to the CSP to get the App manifest through unnoticed.
+- **Traces to**: `REQ-BROWSER-FIRST-RUN-SETUP`, `INT-CONSOLE-SETUP-HOST`, `DES-OPERATOR-CONSOLE`,
+  `DES-FIRST-RUN-SETUP-WIZARD`, `REQ-CONSOLE-SECURITY`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, `OQ-054`.
 
 ## DES-WORKER-ON-HOST
 
@@ -11950,6 +12064,15 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **AMENDED 2026-10-31 (#774, decided, not implemented)**: `DES-BROWSER-FIRST-RUN-SETUP` is the bounded
+  exception to the existing read-model-only action surface and rejection of local runtime checks from the
+  console. It requires a process-owned local host grant, shared setup plan/apply funnels and a fixed worker
+  child; it grants no remote-host execution or general command path. Its write-only key and session-private
+  viewer invitation are the only new secret/code transport exceptions. "No `.env` in the console's environment",
+  CSP, zero side-effecting GETs, all request guards, ordinary action tickets and role-separated live caches are
+  UNCHANGED, checked. The older first-run rejection of a separate route is superseded for the explicit `/setup`
+  destination, while the overview still gives way to its ordinary panels through its existing applicability rule.
+
 - **Models (#773)**: `/models` is an on-demand Pulse page, first in More before Audit; the current More state includes Models for every reading role. A shared bounded Models service feeds the page and its explicit agent projection, with declared per-page reads rather than a new fleet-wide polling cost. The ModelsScreen generator is corrected to the actual triggers-file/free-role/capped-Radius/failover/canary contracts before its published-source reference is compared. The page keeps the four named cards and leading diagnostics, truthful partial/unknown states, effective per-trigger fallback explanations and shared Run sentences. Role editing reuses the existing person-only ticket/audit/file-write funnel. Native disclosures prefill adoption without side effects. Reference and implementation comparisons verify loaded shared styles/tokens and native fonts; the remote artifact being inaccessible is disclosed rather than represented as direct comparison.
 
 - **Answer-label wrapping (#772)**: Run identifiers, source names and standing-answer titles within their accepted limits remain complete and wrap inside their cards at phone, intermediate and desktop widths, in both themes and every applicable role. A wrapped run link preserves its exact destination and keyboard activation, including the private draft's origin on the destination run page. The card uses a bounded grid track and overrides the shared code label's `nowrap`; clipping, ellipsis and hiding text are not substitutes. Real-CSP browser checks measure every rendered text line and follow the run link to the matching retained draft. Role/privacy boundaries, API/session contracts, source provenance, confirmation tickets and paid admission are UNCHANGED, checked.
@@ -16167,6 +16290,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-10-31 (#774, prerequisite specs) | NEW `DES-BROWSER-FIRST-RUN-SETUP`, DECIDED, NOT IMPLEMENTED; `DES-FIRST-RUN-SETUP-WIZARD` and `DES-OPERATOR-CONSOLE` AMENDED for an explicit local user-service grant, bounded host child, create-only API-key channel, private viewer invitations and link-only operator bootstrap. Durable package paths, ongoing queue consumption, interruption-aware Stop/Restart, start-only proxy scope, typed partial/unknown outcomes and honest Undo are explicit. GitHub browser App setup remains OPEN under `OQ-054`. CSP, no deployment secrets in console environment, pointer/repository consent, existing tools, pins, visual status and unrelated decisions UNCHANGED, checked. |
 | 2026-10-31 (#781, verification) | `DES-OPERATOR-CONSOLE` AMENDED for two isolated Chrome/server lanes after the enlarged complete corpus exceeded the existing CI time limit. Each case still runs exactly once in a fresh tab, both negative controls are required independently in each lane, and missing/rejected lanes fail the check. No-JavaScript and interactive checks, request attribution, complete document maps and cleanup remain explicit. Widths, roles, themes, CSP, fonts, frozen clocks, verdict assertions and all deadlines UNCHANGED, checked. Product behavior, authentication, quota, cost and container contracts UNCHANGED, checked. |
 | 2026-10-31 (#781) | NEW `DES-HOST-OWNED-SUBSCRIPTION-AUTH`; `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` corrects the old blanket OAuth rationale while preserving analytics-only enforcement. `DES-MODEL-FAILOVER`, `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`, `DES-OPERATOR-GLOBAL-OVERLAY` and `DES-OPERATOR-CONSOLE` AMENDED through the explicit subscription contract. `DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED for the same-ticket final-payload recheck; reservation and settlement ledgers, `DES-MODEL-ROLES`, recovery physical-model selection, staged-package opt-out precedence, forge-token authority, automatic-merge prohibition and the pasted visual-system tokens/stylesheets UNCHANGED, checked. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |
 | 2026-10-31 (#773) | DES-OPERATOR-CONSOLE, DES-MODEL-ROLES, DES-DOCTOR-RESULTS-PUBLISHED and DES-ADMIN-VIA-PI-EXTENSION AMENDED for bounded shared Models reads, actual source-card semantics, selective proposal publication and existing confirmed file writes. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |
