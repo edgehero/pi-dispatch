@@ -1,6 +1,6 @@
 # Subscription authentication visual evidence (#781)
 
-Publication assets for the implementation pull request. The before views are rendered from the clean exact parent `1d5c97e3278d99b9d59fcdede1f4dcf6d242c992`. The after views use the final frozen frontend source identified in [the source hash manifest](verification/frontend-source-sha256.json). All 212 listed source file hashes were verified against the final implementation commit `e6ae968a03f1548366b570cedf8220f99c9d336e` before this evidence commit.
+Publication assets for the implementation pull request. The before views are rendered from the clean exact parent `1d5c97e3278d99b9d59fcdede1f4dcf6d242c992`. The after views use the final frozen frontend source identified in [the source hash manifest](verification/frontend-source-sha256.json). All 212 listed source file hashes were verified against the final implementation commit `6f0958acc2701d1a92ba438b9159bff582a788ee` before this evidence commit.
 
 All application captures use controlled synthetic fixtures through the actual HTTP console, session and renderer under its production CSP, with an isolated live Valkey. They do not demonstrate a live provider login or live account quota. The parent captures import only the unchanged parent checkout. The final browser run passed 144 paints covering both themes, roles, read-only mode, keyboard and Copy interaction, no-JavaScript facts, quota exceptions and long identifiers.
 
@@ -43,4 +43,4 @@ The source and application phone cards have matching dimensions and complete con
 - [Reference control comparisons](verification/reference-control-comparisons.json): 24 comparisons against production-rendered command structure.
 - [Final card dimensions](verification/final-card-dimensions.json): dimensions read from the final reference/application PNGs.
 
-This orphan evidence branch contains publication images and sanitized provenance only. It changes no application, credential, quota or admission contract. Remote image rendering must be verified after publication. Local final implementation commit linkage is verified in the source hash manifest.
+This orphan evidence branch contains publication images and sanitized provenance only. It changes no application, credential, quota or admission contract. Root independently verified all16 published PNG hashes and dimensions, and all16 embedded images loaded and decoded in the actual [GitHub PR page](https://github.com/edgehero/pi-dispatch/pull/782). See [browser rendering evidence](verification/pr-image-rendering.json). The host-only canary follow-up changes none of the212 frozen frontend sources; every hash was independently rechecked against final commit `6f0958acc2701d1a92ba438b9159bff582a788ee`.

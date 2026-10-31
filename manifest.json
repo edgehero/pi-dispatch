@@ -52,7 +52,8 @@
       "kind": "final application",
       "sourceFile": "subscription-connections-operator-light-1440.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/before-connections-dark-390.png",
@@ -83,7 +84,8 @@
       "kind": "final application",
       "sourceFile": "subscription-connections-operator-dark-390.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/before-models-dark-1440.png",
@@ -114,7 +116,8 @@
       "kind": "final application",
       "sourceFile": "subscription-models-operator-dark-1440.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/before-models-light-390.png",
@@ -145,7 +148,8 @@
       "kind": "final application",
       "sourceFile": "subscription-models-operator-light-390.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/reference-auth-light-390.png",
@@ -161,7 +165,8 @@
       "kind": "published-source reference",
       "sourceFile": "reference-connections-card-light-390.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/actual-auth-light-390.png",
@@ -177,7 +182,8 @@
       "kind": "final application card",
       "sourceFile": "subscription-connections-card-light-390.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/reference-quota-dark-390.png",
@@ -193,7 +199,8 @@
       "kind": "published-source reference",
       "sourceFile": "reference-models-card-dark-390.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/actual-quota-dark-390.png",
@@ -209,7 +216,8 @@
       "kind": "final application card",
       "sourceFile": "subscription-models-card-dark-390.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/long-auth-dark-320.png",
@@ -225,7 +233,8 @@
       "kind": "final application long identifiers",
       "sourceFile": "subscription-long-connections-card-dark-320.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/focus-mandatory-week-dark-390.png",
@@ -241,7 +250,8 @@
       "kind": "final application excluded exhausted weekly window",
       "sourceFile": "subscription-models-focus-mandatory-week-card-390.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/focus-five-hour-dark-390.png",
@@ -257,7 +267,8 @@
       "kind": "final application selected five-hour focus",
       "sourceFile": "subscription-models-focus-five-hour-card-390.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     },
     {
       "file": "images/long-quota-light-375.png",
@@ -273,13 +284,20 @@
       "kind": "final application long identifiers",
       "sourceFile": "subscription-long-models-card-light-375.png",
       "parentCommit": null,
-      "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
+      "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+      "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e"
     }
   ],
-  "implementationCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e",
-  "finalCommitSourceLinkage": "All212 listed frozen frontend/design/harness source hashes matched git show <implementationCommit>:<path>. Publication images do not belong to the parent implementation tree.",
+  "implementationCommit": "6f0958acc2701d1a92ba438b9159bff582a788ee",
+  "finalCommitSourceLinkage": "Root independently checked all212 frozen frontend/design/harness source hashes with git show at final PR commit 6f0958acc2701d1a92ba438b9159bff582a788ee. The host-only canary fix changes none of the captured sources.",
   "referenceRuntimeAssets": {
     "tokens.css": "4408e8fddf6812c7ff1a2df58b5a6c31018de917cafb21df6ee23a7a9d34e35a",
     "bundle.css": "acd9426272c7960005ae17e7fdcbf636b8d7dd758f300b92841997ab9db10134"
+  },
+  "captureFrontendCommit": "e6ae968a03f1548366b570cedf8220f99c9d336e",
+  "publicationVerification": {
+    "pullRequest": 782,
+    "actualGitHubPageImagesDecoded": 16,
+    "remotePngHashesAndDimensionsChecked": 16
   }
 }
