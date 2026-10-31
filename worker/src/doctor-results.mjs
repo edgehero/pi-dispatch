@@ -23,18 +23,19 @@
  * that host, and they name paths and print configured values; a published record is read by every console viewer, on
  * another machine. So what is published is:
  *   - each check's `id` (a stable name, `assignCheckIds`) and `level` (ok, warn or fail);
- *   - for a warn or a fail only, its label and its fix sentence, each REDACTED (`redactText`): an absolute path becomes
+ *   - for a warn, a fail, or a validated typed model proposal, its label and its fix sentence, each REDACTED (`redactText`): an absolute path becomes
  *     `<path>`, a URL keeps its scheme and host only (never userinfo, path or query), every value of a secret-named
  *     variable in doctor's environment and every known token shape becomes `[redacted]`, control characters become
  *     spaces, and the result is capped at `DOCTOR_LABEL_MAX`;
  *   - integers, booleans, the worker version and the host name.
- * An ok check publishes its id and level and nothing else: the console shows what is wrong, and an ok line's label is
+ * An ok check publishes its id and level only, except a validated typed model proposal (#773), whose redacted label/fix and closed metadata are retained under the same detail cap: the console shows what is wrong, and an ok line's label is
  * where doctor prints the most configuration ("Secret resolver profiles declared: a -> ..."), for nobody's benefit.
  *
  * NOT DEFENDED, and said: a secret held under a variable whose NAME does not look like one, and that has no known
  * token shape, is not recognised as a secret. Doctor's own lines do not print such values (it prints set or unset for
  * the secret service keys, and URLs through `urlShown`), so this is the second line of defence, not the first.
  */
+import { modelProposalOf } from "./model-proposal-protocol.mjs";
 import { DOCTOR_INTERVAL_HOURS, DOCTOR_INTERVAL_MAX_HOURS } from "./doctor-spawner.mjs";
 import { makeRedactor } from "./redact-secrets.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
@@ -57,7 +58,7 @@ export const DOCTOR_LABEL_MAX = 300;
 /** At most this many checks are listed; the rest are counted in `more`. A doctor run prints well under two hundred. */
 export const DOCTOR_CHECKS_MAX = 400;
 
-/** At most this many of them carry a label and a fix (warn and fail checks, in doctor's order). */
+/** At most this many carry words (warn/fail checks and typed model proposals, in doctor's order). */
 export const DOCTOR_DETAILED_MAX = 80;
 
 /** At most this many hosts are read back, so a polluted index cannot make one panel tick an unbounded MGET. */
@@ -399,7 +400,9 @@ export function buildDoctorRecord({ checks, ids, at, version, openshell = false,
 		counts[level] += 1;
 		if (listed.length >= DOCTOR_CHECKS_MAX) return;
 		const entry = { id: ids[i], level };
-		if (level !== "ok" && detailed < DOCTOR_DETAILED_MAX) {
+		const proposal = modelProposalOf(check?.proposal);
+		if (proposal) entry.proposal = proposal;
+		if ((level !== "ok" || proposal) && detailed < DOCTOR_DETAILED_MAX) {
 			detailed += 1;
 			entry.label = redactText(String(check?.label ?? ""), { redact });
 			const fix = typeof check?.fix === "string" ? redactText(check.fix, { redact }) : "";
@@ -511,7 +514,9 @@ export function parseDoctorRecord(text) {
 	for (const c of Array.isArray(doc.checks) ? doc.checks.slice(0, DOCTOR_CHECKS_MAX) : []) {
 		if (!c || typeof c.id !== "string" || !CHECK_ID_RE.test(c.id) || !DOCTOR_LEVELS.includes(c.level)) continue;
 		const entry = { id: c.id, level: c.level };
-		if (c.level !== "ok") {
+		const proposal = modelProposalOf(c.proposal);
+		if (proposal) entry.proposal = proposal;
+		if (c.level !== "ok" || proposal) {
 			const label = textBack(c.label);
 			const fix = textBack(c.fix);
 			if (label) entry.label = label;

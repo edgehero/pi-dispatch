@@ -9437,6 +9437,9 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 	const rootfulEndpoint = { local: true, endpoint: "unix:///run/podman/podman.sock" };
 	const rootfulDaemon = { answered: true, facts: { shape: "podman", podman: true, rootless: false, remoteSocketPath: "unix:///run/podman/podman.sock" } };
 	const probes = {
+		// The shallow call scanner attributes deploymentSettingsOf(env, ...) to its new outer helper too.
+		// cooldownModelRefs receives parsed deployment facts, never env; this is deliberately not a service-key relation.
+		cooldownModelRefs: async () => (await import("../src/model-observation.mjs")).cooldownModelRefs([], {}),
 		// #717: exercise every branch of proposal config so the computed provider-key reads and the
 		// overlay/endpoint path reads are covered even when the feature is normally dormant.
 		doctorModelProposalChecks: async (e) => {

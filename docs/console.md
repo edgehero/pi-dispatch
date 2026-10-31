@@ -554,7 +554,7 @@ round **Search** button, which opens the runs page with its search field ready t
 theme button ([Look and theme](#look-and-theme)), a "Read-only console" chip when `PI_CONSOLE_READ_ONLY=1` is set, who
 is signed in, and Sign out. Spend opens `/insights`, with five linked views. Parked shows how many parked runs are waiting for an answer,
 kept current on the pages that update themselves; it shows no number when none is waiting or the count could not be
-read. An operator also gets **More**, which holds the audit log; a viewer has no More. The first thing the keyboard
+read. **More** holds Models first, followed by the audit log for operators. Viewers and agents see Models alone. The first thing the keyboard
 reaches is a "Skip to content" link, which jumps past the bar. A read-only console also says so in a banner under every
 screen's title ("This console is read-only"): every change is refused. The event checker remains available because it only reads.
 
@@ -596,6 +596,7 @@ readers ([Live updates](#live-updates)).
 | `/fleet/host?name=build3` | One host's heartbeat, running and waiting jobs, orphan cleanup guidance, retained workspaces, slots and budgets, seven-day capacity, registry and doctor. The host facts update live; capacity is read when the page opens. |
 | `/fleet/venue?name=podman` | One venue's capabilities, all fourteen isolation declarations and asserters, every published applicable floor, host observations, credential custody and four-venue comparison. Read once, with no runtime probes. |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
+| `/models` | Scoped model roles and ordered fallbacks, actionable policy banners, observed cooldowns and model windows, published proposals and retained canary comparisons. Not live; Reload reads again. Operators review role-map changes through preview, diff and confirm. No page action starts a run. |
 | `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. How far its hash chain is verified, which rows it does not vouch for, filters and a search ([The audit log](#the-audit-log)). A line that is not a valid row is shown as damaged in its place, never skipped. |
 
 ### Fleet, host and venue detail
@@ -2181,3 +2182,21 @@ Viewers and agents see that a question waits, that a draft exists and who answer
 sources, probabilities, rule or standing answers. Operators can read `/parked/rules`; only a person may adopt a
 standing answer. The adoption checkbox prepares a separate preview after sending; it does not silently save text.
 A successful send followed by a refused adoption remains a successful send with an unsaved standing proposal.
+
+
+## Models
+
+Open **More → Models** for roles, fallbacks, configured cooldowns, model-window spend, doctor proposals and
+retained canary comparisons. The page is not live and says when it was drawn; Reload refreshes its evidence.
+Its candidate forecasts are conditional, not reservations. Unreadable, expired or partial evidence stays
+unknown. A no-fallback job starts on its primary; trigger-owned fallbacks are shown separately.
+
+An operator can edit a role in its scope through the existing preview/diff/confirm flow and preview an Undo.
+The confirm names affected trigger rows and says that nothing runs now and recovery keeps its physical model.
+Adopt prefills that same form from a server-checked canary sample and requires choosing the scope. Run more
+is a command to copy and review on the canary host; its deployment lease defers every other start. Viewers,
+agents and read-only consoles receive no Edit, Adopt or canary-command controls.
+
+The model tool `dispatch_models` shares the reader but receives only bounded machine facts, not doctor prose,
+commands, paths, diffs or repository-agent definitions. See [Model roles](model-roles.md),
+[Model failover](model-failover.md), [Proposals](model-proposals.md) and [Canaries](canary.md).

@@ -120,3 +120,20 @@ the reviewed role map. Proposals never adopt a model or change endpoints automat
 The complete JSON-encoded agent snapshot is bounded at 16 MiB before reserves, including the expansion caused by escaped prompt characters.
 
 Project scope keys use the same lowercase, 1 to 32 character letter/digit/dash identifiers as projects.json. Scope lookup uses own keys, so a project named `constructor` remains an ordinary project identifier.
+
+## Editing in the console
+
+Open **More → Models** to inspect the role map by default and project scope. The page links each consuming
+trigger by its displayed row number and flow. Repository-agent declarations are not readable here, so their
+role use is not counted. Existing scopes without a current project remain visible.
+
+An operator opens Edit, chooses a physical model and ordered fallbacks, then reviews the `modelRoles` diff
+and confirms. Nothing runs now; the next delivery reads the new map, while recovery keeps its checkpoint's
+physical model. The preview checks the pinned catalog and overlay, effective provider/fallback conflicts and
+the combined sixteen-model ceiling, including literal-model triggers. Removing an override may reveal the
+default mapping. Removing a role that would leave a trigger unresolved refuses.
+
+A stale input file, changed comparison or reused confirmation refuses and asks for a fresh preview. Undo
+previews restoration of the previous entry and refuses if intervening edits made it stale. Other trigger
+content and document policy are preserved. Viewers, agents and read-only consoles can inspect the page but
+cannot edit or adopt. The `dispatch_models` tool reads machine facts; no tool writes the map.

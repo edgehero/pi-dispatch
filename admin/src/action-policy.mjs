@@ -40,6 +40,7 @@ export const ACTION_AGENT_POLICIES = Object.freeze({
   // dispatch_run has no separate console form; it still declares the policy of its tool entry point.
   "run-enqueue": rule("unattended", "Every local start passes the current process's six admission limits.", "dispatch_run"),
   "pause-windows": rule("person", "Replacing the whole list can release a person's pauses."),
+  "model-role-edit": rule("person", "A person reviews role mappings and fallback changes; tools cannot adopt a model."),
   "secret-profile-add": rule("person", "Resolver declarations grant host execution."),
   "secret-profile-remove": rule("person", "Resolver declarations belong to the operator."),
   "secret-bundle-add": rule("person", "Bundle declarations grant credentials and host execution."),

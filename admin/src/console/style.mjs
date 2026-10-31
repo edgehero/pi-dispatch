@@ -1,3 +1,4 @@
+import { MODELS_CSS } from "./models-css.mjs";
 import { AGENT_POLICY_CSS } from "./agent-policy-css.mjs";
 /**
  * The console stylesheet (#750): shared tokens and the pinned Pulse bundle, then shell and page rules.
@@ -12,4 +13,4 @@ import { SHELL_CSS, pageCss } from "./page-css.mjs";
 import { PULSE_CSS } from "./pulse-css.mjs";
 import { tokenCss } from "./pulse-tokens.mjs";
 
-export const CONSOLE_CSS = [tokenCss(), PULSE_CSS, SHELL_CSS, AGENT_POLICY_CSS, pageCss(), CONFIG_CSS, TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, PROJECT_CSS].join("\n");
+export const CONSOLE_CSS = [tokenCss(), PULSE_CSS, SHELL_CSS, AGENT_POLICY_CSS, pageCss(), CONFIG_CSS, TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, PROJECT_CSS, MODELS_CSS].join("\n");

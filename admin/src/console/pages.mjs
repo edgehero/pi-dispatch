@@ -1,3 +1,5 @@
+import { MODELS_PANELS } from "./panels/models.mjs";
+import { modelsForAgent } from "../models-view.mjs";
 import { SANDBOX_PANELS } from "./panels/sandboxes.mjs";
 import { ZERO_TOUCH_PANELS, zeroTouchTabs, zeroTouchControls } from "./panels/zero-touch.mjs";
 import { zeroTouchView } from "../zero-touch-view.mjs";
@@ -131,6 +133,7 @@ import { overviewAgentWrites } from "./panels/agent-writes.mjs";
  * searches for its children.
  */
 export const PAGES = Object.freeze({
+  models: Object.freeze({ path: "/models", auth: "viewer", live: false, title: "Models", nav: "Models", icon: "spend" }),
   overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview", icon: "home" }),
   runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs", icon: "runs" }),
   sandboxes: Object.freeze({ path: "/runs/sandboxes", auth: "operator", live: true, title: "Sandboxes", nav: null, icon: "box" }),
@@ -161,6 +164,7 @@ export const PAGES = Object.freeze({
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
+  models: MODELS_PANELS,
   sandboxes: SANDBOX_PANELS,
   "zero-touch": ZERO_TOUCH_PANELS,
   secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
@@ -221,6 +225,7 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  models: [{ cls: "stack", items: ["p-model-problems"] }, { cls: "cols models-layout", items: [{ cls: "stack", items: ["p-roles"] }, { cls: "stack", items: ["p-cooldowns", "p-models"] }] }, { cls: "stack", items: ["p-proposals"] }],
   sandboxes: [{ cls: "cols", items: [{ cls: "stack", items: ["p-sb-run", "p-sb-new"] }, { cls: "stack", items: ["p-sb-open", "p-sb-kept", "p-sb-browser"] }] }],
   "zero-touch": [{ cls: "cards-4 zt-kpis", items: ["p-zt-rate", "p-zt-streak", "p-zt-wait", "p-zt-handled"] }, { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions"] }, { cls: "stack zt-side", items: ["p-zt-causes", "p-zt-fixes"] }] }],
   connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-forges", "p-egress", "p-endpoints"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
@@ -274,6 +279,7 @@ const PAGE_PARAMS = Object.freeze({
   runs: [...RUN_FILTER_FIELDS, "before", "touched", "days", "scope"],
   "zero-touch": ["days", "project", "scope"],
   run: ["id"],
+  models: [],
   parked: [],
   "answer-rules": [],
   insights: ["range", "project", "whatif", "flow", "runs", "paths"],
@@ -574,6 +580,7 @@ export function returnPathOf(raw) {
  * `/api/state`, and a reader built to read them would make every other screen pay for a read it never draws.
  */
 const PAGE_READS = Object.freeze({
+  models: ["snapshot", "waiting", "models"],
   sandboxes: ["parkedCount"],
   "zero-touch": ["parkedCount"],
   overview: ["snapshot", "waiting"],
@@ -756,6 +763,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
       data.readFailed = true;
     }
+  }
+  if (reads.includes("models")) {
+    try { data.models = typeof deps.modelsView === "function" ? await deps.modelsView(data.snapshot) : null; }
+    catch { data.models = null; }
   }
   if (reads.includes("secrets")) {
     try { data.secrets = typeof deps.secretsView === "function" ? await deps.secretsView(data.snapshot) : secretsView({ snapshot: data.snapshot, env: deps.env ?? {} }); }
@@ -978,7 +989,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     data.parkedChecks = Object.fromEntries(rows.map((p, i) => [p.jobId, got[i]]));
   }
   if (reads.includes("parkedCount")) data.parkedCount = await parkedCountOf(deps);
-  return who?.role === "agent" ? agentReadProjection(data) : data;
+  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}) } : data;
 }
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------
@@ -1084,7 +1095,7 @@ export async function renderPage(name, ctx) {
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
   const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
-  const titleOptions = configOptions ?? triggerListOptions ?? (name === "sandboxes" ? { description: "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
+  const titleOptions = configOptions ?? triggerListOptions ?? (name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   const body = shellHtml(name, ctx, html`${["runs", "zero-touch", "sandboxes"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = name === "project" && ctx?.data?.projectView?.state !== "ready" || places !== null && !runPlaces(places).shown ? 503 : 200;

@@ -54,28 +54,28 @@ function boxSpans(html) {
 const count = (text, needle) => text.split(needle).length - 1;
 const navOf = (page) => /<nav class="pillnav"[^>]*>([^]*?)<\/nav>/.exec(page)?.[1] ?? null;
 
-test("the navigation is Overview, Runs, Parked, Fleet, Spend, Triggers, Configuration, then More with Audit, and names every page that has a label", () => {
+test("the navigation is Overview, Runs, Parked, Fleet, Spend, Triggers, Configuration, then More with Models and Audit, and names every page that has a label", () => {
   assert.deepEqual(NAV, ["overview", "runs", "parked", "fleet", "insights", "triggers", "config"]);
-  assert.deepEqual(NAV_MORE, ["audit"]);
+  assert.deepEqual(NAV_MORE, ["models", "audit"]);
   assert.ok(Object.isFrozen(NAV) && Object.isFrozen(NAV_MORE));
   const labelled = Object.keys(PAGES).filter((n) => PAGES[n].nav !== null).sort();
   assert.deepEqual([...NAV, ...NAV_MORE].sort(), labelled, "NAV and NAV_MORE are exactly the pages with a nav label");
   assert.equal(new Set([...NAV, ...NAV_MORE]).size, NAV.length + NAV_MORE.length, "each once");
   assert.ok(NAV.every((n) => PAGES[n].auth === "viewer"), "the pills are every role's");
-  assert.ok(NAV_MORE.every((n) => PAGES[n].auth === "operator"), "More holds what only an operator may open");
+  assert.deepEqual(NAV_MORE.map((n) => PAGES[n].auth), ["viewer", "operator"], "More offers Models to viewers and Audit to operators");
   for (const [name, p] of Object.entries(PAGES)) assert.ok(ICON_NAMES.includes(p.icon), `${name}'s icon ${p.icon} is in the sprite`);
 });
 
-test("every page, both roles: the pills in order, aria-current on the screen shown, More for an operator alone", async () => {
+test("every page, both roles: the pills in order, aria-current on the screen shown, More holds only pages the role may read", async () => {
   for (const name of Object.keys(PAGES)) {
     for (const role of ROLES) {
       const { html } = await draw(name, { role });
       const nav = navOf(html);
       assert.ok(nav !== null, `${name}.${role} has the pill nav`);
       const hrefs = [...nav.matchAll(/<a href="([^"]*)"/g)].map((m) => m[1]);
-      const want = [...NAV, ...(role === "operator" ? NAV_MORE : [])].map((n) => PAGES[n].path);
+      const want = [...NAV, ...NAV_MORE.filter((n) => PAGES[n].auth !== "operator" || role === "operator")].map((n) => PAGES[n].path);
       assert.deepEqual(hrefs, want, `${name}.${role}: the links, in order`);
-      assert.equal(nav.includes('<details class="more">'), role === "operator", `${name}.${role}: More is the operator's`);
+      assert.ok(nav.includes('<details class="more">'), `${name}.${role}: More includes Models for every role`);
       if (role === "viewer") assert.ok(!html.includes('href="/audit"'), `${name}: a viewer is never offered the audit log`);
       const current = [...nav.matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]);
       const here = ["secrets", "connections", "project"].includes(name) ? "config" : name === "answer-rules" ? "parked" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
@@ -83,7 +83,8 @@ test("every page, both roles: the pills in order, aria-current on the screen sho
       else assert.deepEqual(current, [PAGES[here].path], `${name}.${role}: the one current pill`);
     }
   }
-  assert.match(navOf((await draw("audit")).html), /<details class="more"><summary aria-label="More: Audit" title="More"><svg class="ic" aria-hidden="true"><use href="#i-more"><\/use><\/svg><\/summary><div><a href="\/audit" aria-current="page">/);
+  assert.match(navOf((await draw("models")).html), /<summary aria-current="page" aria-label="More: Models, Audit"/);
+  assert.match(navOf((await draw("models", { role: "viewer" })).html), /<summary aria-current="page" aria-label="More: Models"/);
 });
 
 test("every page, both roles: one h1, one sprite, a skip link to the focusable main, unique ids, and every icon resolves", async () => {
@@ -423,7 +424,7 @@ test("frameHtml: a page that is not a screen, with the sign-in bar, or the signe
   for (const role of ROLES) {
     const signed = String(frameHtml({ name: "error", title: "Page not found", nav: true, session: { name: "ops", role }, readOnly: true, theme: "dark" }, inner));
     const nav = navOf(signed);
-    assert.deepEqual([...nav.matchAll(/<a href="([^"]*)"/g)].map((m) => m[1]), [...NAV, ...(role === "operator" ? NAV_MORE : [])].map((n) => PAGES[n].path), role);
+    assert.deepEqual([...nav.matchAll(/<a href="([^"]*)"/g)].map((m) => m[1]), [...NAV, ...NAV_MORE.filter((n) => PAGES[n].auth !== "operator" || role === "operator")].map((n) => PAGES[n].path), role);
     assert.ok(!nav.includes("aria-current"), `${role}: this page is no screen, so no pill is current`);
     assert.ok(signed.includes('<header class="top top--ro">') && signed.includes("Read-only console") && signed.includes('id="logout"'));
     assert.ok(!signed.includes('id="live-status"') && !signed.includes('id="p-nav-parked"'), "no stream, no live pill, no count panel");

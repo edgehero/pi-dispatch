@@ -220,6 +220,8 @@ import { actionAgentPolicy } from "./action-policy.mjs";
 import { TOOL_ACTIONS, executeToolAction } from "./tool-actions.mjs";
 import { readOperationalTool, waitingForAgent, runForAgent, readHeldForAgent } from "./tool-reads.mjs";
 export { setToolReadDepsForTest } from "./tool-reads.mjs";
+import { readModelsTool } from "./models-tools.mjs";
+export { setModelsToolReadsForTest } from "./models-tools.mjs";
 import { agentReadProjection } from "./agent-read.mjs";
 
 // The single source of truth for the ExtensionAPI surface this extension
@@ -550,7 +552,7 @@ function registerTools(pi: ExtensionAPI): void {
         const result = await definition.execute(...args);
         // These typed readers rebuild their own records and the setup command catalogue. They still
         // share this exception boundary; their source failures are no more public than file diagnostics.
-        if (["dispatch_failed", "dispatch_waiting", "dispatch_setup", "dispatch_hosts"].includes(definition.name)) return result;
+        if (["dispatch_failed", "dispatch_waiting", "dispatch_setup", "dispatch_hosts", "dispatch_models"].includes(definition.name)) return result;
         return { ...result, content: (result.content ?? []).map((part: any) => {
           if (part.type !== "text") return part;
           const value = JSON.parse(part.text);
@@ -1267,6 +1269,16 @@ function registerTools(pi: ExtensionAPI): void {
       async execute() { const env = deploymentEnv(); return toolText(JSON.stringify(await readOperationalTool(kind, { paths: resolvePaths(env), env }))); },
     });
   }
+  registerTool({
+    name: "dispatch_models",
+    label: "pi-dispatch models",
+    description: "Read-only. Model roles and effective fallbacks, price eligibility, observed cooldowns/windows, typed proposals and retained canary comparisons. Missing evidence stays unknown. Role edits require a person on the Models page; this tool changes nothing and starts no run.",
+    parameters: Type.Object({}),
+    async execute() {
+      const env = deploymentEnv();
+      return toolText(JSON.stringify(await readModelsTool({ paths: resolvePaths(env), env, deploymentDir: pointerState().deploymentDir ?? process.cwd() })));
+    },
+  });
   registerTool({ name: "dispatch_cancel", label: "pi-dispatch cancel", description: "Cancel an active, queued or held job, or all held jobs. UI confirms; headless requires the process grant.", executionMode: "sequential", parameters: Type.Object({ jobId: Type.Optional(Type.String()), queue: Type.Optional(Type.String()), allHeld: Type.Optional(Type.Boolean()) }) });
   for (const name of ["dispatch_retry_failed", "dispatch_remove_failed"]) registerTool({ name, label: name, description: "Retry (person confirmed) or remove failed jobs. Set all for a bounded bulk operation by queue or repository; retry previews per-job reserves.", executionMode: "sequential", parameters: Type.Object({ jobId: Type.Optional(Type.String()), queue: Type.Optional(Type.String()), repo: Type.Optional(Type.String()), all: Type.Optional(Type.Boolean()) }) });
   registerTool({ name: "dispatch_rerun", label: "pi-dispatch re-run", description: "Re-run a local or cron run through the current folder, committed flow opt-in, clean tree and hourly bounds. Forge, command and portfolio runs are refused.", executionMode: "sequential", parameters: Type.Object({ jobId: Type.String() }) });

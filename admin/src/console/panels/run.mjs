@@ -1,13 +1,14 @@
 import { answererRun, standingAnswerEditor, offeredAnswerDraft } from "./answerer.mjs";
 import { sandboxLinks } from "../sandbox-links.mjs";
 import { modelRolesTelemetryOf } from "@edgehero/pi-dispatch/run-history";
+import { modelChoiceSentence, providerFailureSentence } from "../../model-words.mjs";
 /**
  * The run page's panels (the outcome banner, progress, inbox, chat and the record's panels), split out of
  * `../panels.mjs` (issue #737), which re-exports what this module exports. The rules every panel keeps (one pure,
  * deterministic renderer per region, every value through `html`, the role and run-text rule, the action controls and
  * the PATHS rule) are stated once, in `../panels.mjs`'s header.
  */
-import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
+import { providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import { refusedBeforeSpend } from "../../costs.mjs";
 import { FORK_THINKING_LEVELS } from "../../run-fork.mjs";
 import { forkArchiveFact } from "@edgehero/pi-dispatch/fork-job";
@@ -683,8 +684,8 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Provider and model", [r.provider, r.model].filter(Boolean).join(" / ") || "-"],
     ["Model role", typeof r.modelRole === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(r.modelRole) ? r.modelRole : null],
     ["Agent refusals", modelRolesTelemetryOf(r.modelRoles)?.refusals.length || null],
-    ["Model choice", MODEL_WHY.includes(r.modelWhy) ? r.modelWhy : null],
-    ["Provider failure", providerFailureOf(r.providerFailure)?.kind],
+    ["Model choice", modelChoiceSentence(r)],
+    ["Provider failure", providerFailureSentence(r.providerFailure)],
     ["Provider reset", providerFailureOf(r.providerFailure)?.resetAt !== undefined ? timeHtml(r.providerFailure.resetAt) : null],
     ["Turns", `${cell(r.turns)}${Number.isSafeInteger(r.maxTurns) ? ` of ${r.maxTurns}` : ""}`],
     ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? html`<a href="/config">row ${r.triggerIndex + 1}</a> (${cell(r.triggerType)})${view.data?.trigger ? `: ${[view.data.trigger.phrase, view.data.trigger.label, view.data.trigger.pattern].filter(Boolean).join(", ")} (as the triggers file says now)` : ""}` : "-"],

@@ -815,6 +815,17 @@ export const CONSOLE_SCRIPT = `"use strict";
   // address reads /runs?outcome=failed rather than every field of the bar with no value. A tick later, once the browser
   // has read the form, each is enabled again, so a page brought back by Back works as it was left. Without this script
   // the empty fields are sent too, and the page reads an empty field as no filter.
+  var modelEdits = typeof document.querySelectorAll === "function" ? document.querySelectorAll("[data-model-edit]") : [];
+  for (var mi = 0; mi < modelEdits.length; mi++) (function (link) {
+    link.addEventListener("click", function (ev) {
+      var target = document.getElementById(link.getAttribute("data-model-edit"));
+      if (!target || target.tagName.toLowerCase() !== "details") return;
+      ev.preventDefault(); target.open = true;
+      target.scrollIntoView({ block: "nearest" });
+      var control = target.querySelector("input:not([type=hidden])");
+      if (control) control.focus();
+    });
+  })(modelEdits[mi]);
   document.addEventListener("submit", function (ev) {
     var form = ev.target;
     if (ev.defaultPrevented || !form || typeof form.matches !== "function" || !form.matches("form.filterbar")) return;

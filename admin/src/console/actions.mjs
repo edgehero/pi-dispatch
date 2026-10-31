@@ -83,6 +83,7 @@ export { evaluateActionPolicy } from "../action-policy.mjs";
 import { checkAgentRerun, paidStartEnvironment } from "../agent-starts.mjs";
 import { ANSWERER_ACTIONS, ANSWERER_WRITE_RULES } from "./answerer-actions.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
+import { MODEL_ROLE_EDIT_FIELDS } from "../model-role-plans.mjs";
 
 /** The diff moved to the confirm view with the rest of the bar's markup (issue #737); re-exported where it always was. */
 export { DIFF_LINES_MAX, diffHtmlOf, lineDiff, textHtml } from "./confirm-view.mjs";
@@ -1926,6 +1927,13 @@ const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === coun
 const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
 const WRITE_RULES = {
   ...ANSWERER_WRITE_RULES,
+  "model-role-edit": {
+    fields: MODEL_ROLE_EDIT_FIELDS, danger: false,
+    undo: out => `Restore the previous mapping for ${out.plan.scope}/${out.plan.role}; another role edit is refused if this mapping has changed`,
+    inverse: out => ({ action: "model-role-edit", body: out.plan.inverseBody }),
+    confirmLabel: out => out.plan.remove ? "Remove role mapping" : "Save role mapping",
+    done: out => `${out.payload.body.remove ? "Removed" : "Changed"} model role ${out.payload.body.scope}/${out.payload.body.role}; no run was started`,
+  },
   "run-enqueue": {
     fields: ["folder", "flow", "task"], danger: false, atConfirm: true,
     undo: (out, body, result) => result === undefined ? UNDO_SENTENCES.rerunBefore : rerunCancel(result) ? `Cancel ${result.jobId} before it starts` : UNDO_SENTENCES.rerunUnnamed,
@@ -2103,6 +2111,20 @@ const zeroTouchActions = ["group", "name", "instruction", "undo"].map((operation
   apply(entry, ctx) { return ctx.a.zeroTouch.apply(this.name, entry); },
 }));
 
+/** The map is reviewed policy. Its only write surface is a person's confirmed console action. */
+const modelRoleActions = [{
+  name: "model-role-edit", kind: "model-role-edit", paid: false, bulk: false, needs: ["modelRoles"],
+  async preview(body, ctx) {
+    if (ctx.session?.role !== "operator") return { refusal: "Only a person in the operator console can edit model roles.", status: 403 };
+    const params = { ...body, ...Object.fromEntries(MODEL_ROLE_EDIT_FIELDS.map(key => [key, body[key]]).filter(([, value]) => value !== undefined)) };
+    const out = await ctx.a.modelRoles.preview(params, { surface: "console", role: ctx.session.role });
+    return out.plan ? { ...out, diff: diffHtmlOf(out.beforeText, out.afterText, { file: "triggers.json (modelRoles)" }) } : out;
+  },
+  apply(entry, ctx) {
+    return ctx.a.modelRoles.apply(entry, { surface: "console", role: ctx.session?.role });
+  },
+}];
+
 const sandboxActions = ["prepare", "pin", "end", "host-set"].map((operation) => ({
   name: `sandbox-${operation}`, kind: `sandbox-${operation}`, paid: false, bulk: false, needs: ["sandboxes"],
   async preview(body, ctx) {
@@ -2146,7 +2168,7 @@ const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((ope
 
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
 export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...ANSWERER_ACTIONS].map(withRules));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...modelRoleActions, ...ANSWERER_ACTIONS].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {

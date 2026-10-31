@@ -61,3 +61,20 @@ flow is refused before the first paid replay. Other roles retain their original 
 candidate replaces only the role whose main-session runs were selected.
 
 Upgrade every queue consumer before running a canary, and keep legacy worker builds stopped throughout the experiment. The exclusive admission lease is honored by this implementation; older workers do not check it. The command takes the lease before checking all discovered active lists, and ordinary upgraded workers defer before paid work. It stops candidate runs on lost lease ownership. The usual lease residual remains: a control process frozen beyond its lease lifetime cannot stop its container until it resumes.
+
+## Retained comparisons in Models
+
+**More → Models** rebuilds comparisons from retained candidate/source records. The read is bounded to
+1,000 recent records over 30 days and at most 64 named source lookups. It names missing or truncated
+evidence. Results are grouped by role, candidate and flow; they are retained samples, not a reconstruction
+of the original experiment. The records carry no experiment ID, original experiment cap or adoption scope.
+
+The comparison links each candidate and source, shows recorded execution completion and cost per metered
+run, and averages turns and tokens with their known-value counts. Missing metrics are unknown, never zero.
+Incomplete, lower-bound or unmetered costs do not enter exact averages; the known-value counts say what was measured. Completion is not a quality score. The what-if link remains a separate estimate.
+
+Operators can open Adopt to choose a scope and review a role-map edit. Its confirm repeats the bound
+comparison; stale evidence requires reloading. **Run more** is a copyable `pi-dispatch canary` command,
+with an explicit cap placeholder to replace and a bounded count. Run it on the host with retained sources,
+under the supported local-Docker/first-party-provider restrictions above. Its deployment lease holds every
+other start until the canary ends. The console never executes this command.

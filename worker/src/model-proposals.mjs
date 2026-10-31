@@ -64,9 +64,12 @@ export function roleProposalChecks({ roles, catalogs = {}, replacements = {}, no
 		const model = rows.find((m) => m.id === id);
 		if (!model) continue;
 		const retirement = model.retiresAt === null ? null : Date.parse(model.retiresAt);
-		if (model.deprecated || retirement !== null && retirement - now <= noticeDays * 86400000) checks.push({ ok: false, warn: true, label: `Model role ${scope}/${role}: ${ref} is ${model.retired ? "retired" : "deprecated"}${model.retiresAt ? `; retirement ${model.retiresAt}` : ""}`, fix: replacements[ref] ? `review provider replacement ${replacements[ref]} with a capped canary, then edit modelRoles` : "review the provider's deprecation notice and run a capped canary before editing modelRoles" });
+		if (model.deprecated || retirement !== null && retirement - now <= noticeDays * 86400000) checks.push({ proposal: { kind: "retirement", scope, role, model: ref, ...(replacements[ref] ? { candidate: replacements[ref] } : {}) }, ok: false, warn: true, label: `Model role ${scope}/${role}: ${ref} is ${model.retired ? "retired" : "deprecated"}${model.retiresAt ? `; retirement ${model.retiresAt}` : ""}`, fix: replacements[ref] ? `review provider replacement ${replacements[ref]} with a capped canary, then edit modelRoles` : "review the provider's deprecation notice and run a capped canary before editing modelRoles" });
 		const siblings = model.line ? rows.filter((m) => m.line === model.line && !m.deprecated && Number.isFinite(Date.parse(m.createdAt)) && Date.parse(m.createdAt) > Date.parse(model.createdAt)) : [];
-		if (siblings.length) checks.push({ ok: true, label: `Model role ${scope}/${role}: newer provider-declared sibling ${siblings.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0].id}; review with a capped canary` });
+		if (siblings.length) {
+			const sibling = siblings.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0].id;
+			checks.push({ proposal: { kind: "newer-sibling", scope, role, model: ref, candidate: `${provider}/${sibling}` }, ok: true, label: `Model role ${scope}/${role}: newer provider-declared sibling ${sibling}; review with a capped canary` });
+		}
 	}
 	return checks;
 }

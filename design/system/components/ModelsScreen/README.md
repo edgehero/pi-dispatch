@@ -1,24 +1,23 @@
-Models maps each role to a model once, lists the fallbacks used on a rate limit, shows what is cooling down, and proposes new models with a canary, never adopting them by itself.
+Models shows scoped model roles, ordered fallbacks, configured cooldowns, prices, dollar windows, doctor proposals and retained canaries. A person reviews every role edit; the page starts no run.
 
 **How a person uses it.**
-- **Radius banner.** The page opens with an attention banner when a Radius gateway is configured: Radius bills, so there is no local cap.
-- **Model roles.** A table of planner, editor, explorer, reviewer and tidier, with each role's model, its fallbacks in order and the flows that use it. Editing a row opens the form, a diff of the settings file and a safe confirm bar with an undo line.
-- **Cooling down.** Which model is rate limited and until when, as a ring of the time left. It also says where each role's next attempt goes and which jobs wait because their role has no fallback. A run that fell back says so: "gh-c41f ran on fallback kimi-for-coding because the primary was rate limited".
-- **New model available.** A proposal with a canary run beside the current model, comparing cost per run, completed runs, turns and tokens. Adopt is a paid act and is confirmed first. Dismiss and more canary runs are always offered.
-- **Models in use.** Each model's provider, whether it has a price, which dollar windows count it, and its state.
+- **Banners first.** Doctor's capped Radius warning and pickup conflicts name their fix before the role map.
+- **Model roles.** Default roles, then project overrides, with the primary, ordered fallbacks, skipped unpriced fallbacks, linked trigger row numbers and flows. Role names are free, with at most sixteen per scope. Phone tables stack each field across the full card width with its label on a separate line. Repository-agent declarations are not readable here.
+- **Edit a role.** An operator reviews modelRoles in the triggers file, the exact diff, affected trigger rows, a confirm and an inverse undo. Nothing runs now; recovery keeps its model. Removing an override reveals a default where one exists.
+- **Cooling down.** Configured models show kind and UTC end only. Roles with no fallback still start on their primary. The first candidate is ordered by price and cooldown only; credentials, egress, dollar windows and endpoint availability still decide pickup; waiters and recent fallback runs are linked.
+- **Models in use.** Primary, fallback and trigger models show provider, failover price status, applicable dollar windows, spend, cap and state, including a trigger-policy refusal. Unknown amounts are not zero.
+- **Proposals and canaries.** Doctor labels per host and comparisons rebuilt from retained candidate and source records show cost per run, completion, turns and tokens with coverage. Adopt fills the form with explicit scope selection. Run more is a host command for one flow and at most ten runs, warning that its deployment lease holds every other start.
 
-**Panels.** `p-roles`, `p-proposals`, `p-cooldowns`, `p-models`.
+**Panels.** `p-model-problems`, `p-roles`, `p-cooldowns`, `p-models`, `p-proposals`.
 
 **The server provides.**
-- The role map and the fallback lists from settings.
-- Cooldowns with their reason and end time.
-- Canary results.
-- Price status per model, and whether a gateway bills outside the local caps.
+- The triggers-file role map and effective trigger associations, with source availability.
+- Configured cooldowns, current waiters and retained fallback records, never provider text or a start time.
+- Per-model failover price status and applicable dollar window counters.
+- Doctor proposal labels per host and bounded retained canary/source metrics, including partial coverage and the exclusion of incomplete or unmetered costs from exact averages.
 
-**Why it works this way.**
-- Models change only by a reviewed edit: the role map is written to the settings file through a preview and a confirm, never by a job or a model.
-- A proposal is never adopted until a person confirms it, and adopting starts no run by itself.
-- A run that fell back says so on its own run page too, so a cheaper or slower result is never a surprise.
-- A model without a price is skipped as a fallback, so a fallback can never spend outside the dollar windows unseen.
+**Who sees what.** Viewers and agents read every factual panel. Only an operator on a writable console sees Edit, role forms, Adopt or a command. The page is drawn once; Reload refreshes it. JavaScript is required for preview and confirm, never for facts and navigation.
 
-**Fixture note.** This is a planned screen (#716, #717, #693). All of it is sample, except the model names (claude-sonnet-5-5, kimi-for-coding, claude-haiku-5-5) and the $80.00 weekly window for claude-sonnet-5-5.
+**Why it works this way.** Models change only after a person reviews the triggers-file diff. A read tool exposes the same facts and cannot mutate roles. Canary observations are not adoption or a new run, and missing history is not a zero-cost success.
+
+**Fixture note.** Models, counts and money are sample data. This card preserves the Pulse components while using the contracts implemented by #773; it does not claim a Radius gateway or a subscription bypass.

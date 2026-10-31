@@ -351,7 +351,7 @@ const WRITE_TOOLS = ["dispatch_trigger_fire", "dispatch_set", "dispatch_trigger_
 test("registers exactly the read/control/enqueue/write tools, and never a raw-log tool", async () => {
   const { calls } = await loadRegistered();
   const names = calls.registerTool.map((t) => t.name).sort();
-  assert.equal(calls.registerTool.length, 41, "all forty-one documented tools");
+  assert.equal(calls.registerTool.length, 42, "all forty-two documented tools");
   assert.deepEqual(names, [
     "dispatch_allocation_revert",
     "dispatch_allocations",
@@ -366,6 +366,7 @@ test("registers exactly the read/control/enqueue/write tools, and never a raw-lo
     "dispatch_limit_delete",
     "dispatch_limit_edit",
     "dispatch_limits",
+    "dispatch_models",
     "dispatch_pause",
     "dispatch_pause_add",
     "dispatch_pause_delete",
@@ -1628,7 +1629,7 @@ test("the gated context follows pi when it swaps or invalidates its ui (#404)", 
 test("index.ts resolves paths and the worker name only through deploymentEnv (#471)", () => {
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");
   const calls = [...src.matchAll(/\bresolvePaths\(/g)].map((m) => src.slice(m.index, m.index + 30));
-  assert.deepEqual(calls.filter((c) => !c.startsWith("resolvePaths(deploymentEnv())")), ["resolvePaths(env);\n        ret", "resolvePaths(env), env }))); }"], "only the two shared tool adapters use the captured deployment environment");
+  assert.deepEqual(calls.filter((c) => !c.startsWith("resolvePaths(deploymentEnv())")), ["resolvePaths(env);\n        ret", "resolvePaths(env), env }))); }", "resolvePaths(env), env, deploy"], "only the three shared tool adapters use the captured deployment environment");
   assert.match(src, /const env = deploymentEnv\(\);\n\s*const paths = resolvePaths\(env\);/);
   assert.match(src, /const env = deploymentEnv\(\); return toolText/);
   // Two fewer since the rebase over issue #468: the pause and resume tools resolve their Valkeys through `killSwitchSet`
