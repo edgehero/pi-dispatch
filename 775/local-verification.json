@@ -1,8 +1,8 @@
 {
   "slices": {
     "receiver": {
-      "sourceCommit": "0b3c239ba09f4238e54a15fc2f93c4001e76cdc9",
-      "renderedCommit": "f5574c8187767f12f1b75d2df5f13d59d1ba54a8",
+      "sourceCommit": "c9962d2a6ed67bcb1ac8e19e42a131fc72f3b177",
+      "renderedCommit": "57390f856d4c1f92e7b84c9749f76052b38b371d",
       "node": "22.19.0",
       "valkey": "8.0.2",
       "requiredIntegrationFlags": [
@@ -11,8 +11,8 @@
         "RECEIVER"
       ],
       "localRootSuite": {
-        "tests": 12563,
-        "pass": 12557,
+        "tests": 12565,
+        "pass": 12559,
         "fail": 0,
         "cancelled": 0,
         "skipped": 6,
@@ -20,7 +20,7 @@
       },
       "platform": "macOS arm64",
       "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
-      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41312971569"
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41317942851"
     },
     "hooks": {
       "sourceCommit": "06732c0f13d161bf681c063e28efed8195db7864",
@@ -45,7 +45,7 @@
       "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685"
     },
     "endpoints": {
-      "sourceCommit": "b8493be55c4f019a609cb1c0cd3a3adbc9582250",
+      "sourceCommit": "a6d861edfb1f14dece63ba6af1eaf7cd496780ff",
       "renderedCommit": "0065c8ae206508de6054f554ed9b914cbdade158",
       "node": "22.19.0",
       "valkey": "8.0.2",
@@ -64,7 +64,7 @@
       },
       "platform": "macOS arm64",
       "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
-      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41312993586"
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506"
     }
   },
   "sandboxBrowser": {
@@ -84,6 +84,23 @@
   },
   "counterexamples": {
     "isolatedValkey": "Dirty ordinary database is refused; foreign key survives isolated production fixture and cleanup.",
-    "temporaryCleanup": "Original untracked control reproduces late directory; actual helper regression fails when only tracker call is removed."
+    "temporaryCleanup": "Original untracked control reproduces late directory; actual helper regression fails when only tracker call is removed.",
+    "receiverIdentity": "Removing only the scoped identity rule produces page width 868 and 39 clipped characters; restoration yields width 390 and zero clipped characters."
+  },
+  "receiverMatrices": {
+    "normal": 38,
+    "aged": 2,
+    "maximumIdentity": 32,
+    "unreadableMaximumIdentity": 2,
+    "scopedIdentityRuleNegativeControl": true,
+    "styledReferences": 12
+  },
+  "answererBrowser": {
+    "normalRenders": 48,
+    "longIdRenders": 28,
+    "longRuleRenders": 6,
+    "modelsSiblingRenders": 144,
+    "result": "passed",
+    "initialPanelCounterexample": "Controlled initial replacement between pointer press/release loses the native click; waiting for actual applied initial panel preserves click, preview POST and all stale/exact-drop assertions."
   }
 }

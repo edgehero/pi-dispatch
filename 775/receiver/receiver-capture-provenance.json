@@ -1,111 +1,177 @@
 {
-  "sourceCommit": "f5574c8187767f12f1b75d2df5f13d59d1ba54a8",
-  "sourceTree": "69525ecf82a6cc82b0283b325314f1bc5118cfd1",
-  "workingTreeClean": true,
-  "normalPaints": 38,
-  "agedPaints": 2,
+  "sourceCommit": "57390f856d4c1f92e7b84c9749f76052b38b371d",
+  "sourceTree": "90aab535844a9e76212725ca9a1c70ffafc1c175",
+  "finalCommit": "c9962d2a6ed67bcb1ac8e19e42a131fc72f3b177",
+  "workingTreeCleanAtCapture": true,
+  "verification": {
+    "ok": true,
+    "slice": "receiver",
+    "paints": 38,
+    "agedPaints": 2,
+    "maxIdentityPaints": 32,
+    "unreadableIdentityPaints": 2,
+    "identityNegativeControl": true,
+    "interactions": [
+      "keyboard-disclosure",
+      "keyboard-host-navigation",
+      "hourly-disclosure-and-sums",
+      "actual-delivery-and-reload",
+      "complete-receiver-identities",
+      "receiver-identity-negative-control",
+      "theme",
+      "no-script",
+      "CSP-negative-control",
+      "styling-negative-control",
+      "deletion"
+    ]
+  },
   "referencePaints": 12,
-  "selection": "Selected final review images and measurements; remaining matrix renders were verified but are not all published here.",
+  "selection": "Selected final review captures and proof files; complete measured matrices are verified and summarized here.",
   "published": [
     {
       "file": "receiver-aged-refusal-operator-dark-1440.png",
-      "sha256": "5601d80b1823bb3451d10b6232d5e56bf5fbd3073bacd4be85883167ec51a4a1",
-      "modifiedAt": "2026-11-01T13:11:51.202899+00:00"
+      "sha256": "0b35f5ae147b90b94bfa01ef418ffbe732dfdaa61c80fd2a726b260ca5e81254",
+      "modifiedAt": "2026-11-01T14:27:39.342716+00:00"
     },
     {
       "file": "receiver-aged-refusal-viewer-light-390.png",
-      "sha256": "4ff5850d75880e6b5d28671e0846ecd52e3050c6fca3b9a2de716cd8bd32ac51",
-      "modifiedAt": "2026-11-01T13:11:50.964483+00:00"
+      "sha256": "df90e2c0cfe19a569387f1629407c93cd15a1512a2e2e63bb30c5b34306c4f2a",
+      "modifiedAt": "2026-11-01T14:27:39.101405+00:00"
     },
     {
       "file": "receiver-hours-operator-light-1440.png",
-      "sha256": "fe26e84042a19da216d2c8a66bce53b32b16f1ba3a01509941f3890421a3b7d7",
-      "modifiedAt": "2026-11-01T13:11:42.286103+00:00"
+      "sha256": "9199625f935ec40b67cc02a67987d7304a2927fed30d5a68a71b233cf769d488",
+      "modifiedAt": "2026-11-01T14:27:30.013662+00:00"
     },
     {
       "file": "receiver-hours-viewer-dark-390.png",
-      "sha256": "4a2837566e4303ea98e0e67e1006220797c5c55aee76f2f01fa0aa8112bcc2db",
-      "modifiedAt": "2026-11-01T13:11:47.392347+00:00"
+      "sha256": "f7203a16c2d0b1d7e4e1ead43bcd656033c3d94e1189e868d72f02ea2f2f4829",
+      "modifiedAt": "2026-11-01T14:27:35.377059+00:00"
+    },
+    {
+      "file": "receiver-max-name-operator-dark-1440.png",
+      "sha256": "8d770ee4702f84e57e1be23672f4cf36615fd0267b0e147a9b9cce9f0bffb6c9",
+      "modifiedAt": "2026-11-01T14:27:41.768296+00:00"
+    },
+    {
+      "file": "receiver-max-name-operator-light-390.png",
+      "sha256": "eeaa041f64182e80c88a9034ff59c2a3997a2b0e8c0e9f5837637b5098e7452f",
+      "modifiedAt": "2026-11-01T14:27:39.949023+00:00"
+    },
+    {
+      "file": "receiver-max-name-unreadable-operator-dark-390.png",
+      "sha256": "e21ab3b4c7f5ff979ed306f1b451f7c367cec748df1c3e93980e35fbd2176dce",
+      "modifiedAt": "2026-11-01T14:27:45.062586+00:00"
+    },
+    {
+      "file": "receiver-max-name-unreadable-viewer-light-320.png",
+      "sha256": "d2dc49abe4b1bd2bae03502d59408a794ec32be8afcc88b15135178f31fb926e",
+      "modifiedAt": "2026-11-01T14:27:44.779891+00:00"
+    },
+    {
+      "file": "receiver-max-name-viewer-dark-800.png",
+      "sha256": "aad08bc360379e123cd4554a83049b3285ca2ab1473bc26013b99be8fe45cb01",
+      "modifiedAt": "2026-11-01T14:27:43.851165+00:00"
+    },
+    {
+      "file": "receiver-max-name-viewer-light-320.png",
+      "sha256": "98a72ed3b7bff69f130511e76ec6f759fe9ea5220920d4808398b2329d855911",
+      "modifiedAt": "2026-11-01T14:27:42.082521+00:00"
     },
     {
       "file": "receiver-not-reported-light-1440.png",
       "sha256": "fba8846834006e3cf328edd77d869e8b244fecb61f583e54a6bcdd91a7adf5bf",
-      "modifiedAt": "2026-11-01T13:11:50.681256+00:00"
+      "modifiedAt": "2026-11-01T14:27:38.786049+00:00"
     },
     {
       "file": "receiver-operator-dark-800.png",
-      "sha256": "79669a4e15417dd644c4be350985b0e0788620ef7177918ba4813372dfd1c5cd",
-      "modifiedAt": "2026-11-01T13:11:43.362361+00:00"
+      "sha256": "1fbd129f50b9ff0336a7c084dfb767a6a23e1804e29c4631431ab06c6cce475a",
+      "modifiedAt": "2026-11-01T14:27:31.185203+00:00"
     },
     {
       "file": "receiver-readonly-operator-no-script-light-1440.png",
-      "sha256": "b871f976c5c95d2e80fd5f5b482f1faf2e198a078ded78ae5d329735148ea5dc",
-      "modifiedAt": "2026-11-01T13:11:50.385515+00:00"
+      "sha256": "351df2cb20fb9593b6a921cb77529c3c0d6757541745cb9f7de1d1ca248e6d5e",
+      "modifiedAt": "2026-11-01T14:27:38.494867+00:00"
     },
     {
       "file": "receiver-section-operator-light-1440.png",
-      "sha256": "ad17f984cd1e18731c0ac530cbab6c26f879d62bbe35d4569e7b410bc2af6aab",
-      "modifiedAt": "2026-11-01T13:11:41.914222+00:00"
+      "sha256": "dfd61a5db1658054539a814fa55164fadd0ecf26323ad62f67e2c68d58470645",
+      "modifiedAt": "2026-11-01T14:27:29.600661+00:00"
     },
     {
       "file": "receiver-section-operator-light-390.png",
-      "sha256": "866de4f64508e76e18e7b1acbf472a3fe778585bcf5434f577294c0134ac7086",
-      "modifiedAt": "2026-11-01T13:11:40.528826+00:00"
+      "sha256": "03e7b867c9233ac18e69faadb67bde072af41054cd8376108e9c3370d98fa3f4",
+      "modifiedAt": "2026-11-01T14:27:28.065028+00:00"
     },
     {
       "file": "receiver-section-viewer-dark-1440.png",
-      "sha256": "af450665e7a3acd056c33dc5b5d94b865417961e45e1ef65d9b7a7ef70db57b8",
-      "modifiedAt": "2026-11-01T13:11:48.363837+00:00"
+      "sha256": "1b9e0b7b7560c10b61141cfcbf366d57db41b20796995fb58f98906b01625745",
+      "modifiedAt": "2026-11-01T14:27:36.384461+00:00"
     },
     {
       "file": "receiver-section-viewer-dark-390.png",
-      "sha256": "ff3ebaac19c20bf1f7611fa024d100bc47e39cf4418b65dbb416df17afc8fe75",
-      "modifiedAt": "2026-11-01T13:11:47.028344+00:00"
-    },
-    {
-      "file": "receiver-measurements.json",
-      "sha256": "6d5a0fbe411d8026b97cd37f5c66ed4e36a8106dc46b8782cb9e44ab6bb7addd",
-      "modifiedAt": "2026-11-01T13:11:51.204052+00:00"
-    },
-    {
-      "file": "receiver-aged-refusal-measurements.json",
-      "sha256": "884e392c2f741cc75bba220ea99c0e97c3b9cec3479f1d33d20c47b5fc546521",
-      "modifiedAt": "2026-11-01T13:11:51.203469+00:00"
-    },
-    {
-      "file": "reference/reference-proof.json",
-      "sha256": "976ef01c76014d5bebc3d5fe4b78c8a6fc07bea62c7d71af11964515ed4a7eda",
-      "modifiedAt": "2026-11-01T13:12:40.499959+00:00"
+      "sha256": "829256172eaefa86f61fcc57138ab8428a50f6581c1f83a9e7c0ff68a05277b8",
+      "modifiedAt": "2026-11-01T14:27:34.982349+00:00"
     },
     {
       "file": "reference/reference-receiver-dark-1440.png",
       "sha256": "643a00f0837134b920a3e988939ef74b678a5b94e3ff1413adff7fe37e0558f9",
-      "modifiedAt": "2026-11-01T13:12:40.246048+00:00"
+      "modifiedAt": "2026-11-01T14:27:32.290826+00:00"
     },
     {
       "file": "reference/reference-receiver-dark-390.png",
       "sha256": "c5a4c345a1aad56ccf00d636b4ec6d52e08063b579e9dbfa3fd2f7d2535c75c6",
-      "modifiedAt": "2026-11-01T13:12:38.811954+00:00"
+      "modifiedAt": "2026-11-01T14:27:30.724696+00:00"
     },
     {
       "file": "reference/reference-receiver-dark-800.png",
       "sha256": "d231ac244160f6df31f9b18d66db1e4b0fc28366ef10fe2d7fb93924de059af8",
-      "modifiedAt": "2026-11-01T13:12:39.412530+00:00"
+      "modifiedAt": "2026-11-01T14:27:31.389413+00:00"
     },
     {
       "file": "reference/reference-receiver-light-1440.png",
       "sha256": "bad25e85d5d366be31811f4827c9a251c3572ca979627e77e44b56a12a12b8b2",
-      "modifiedAt": "2026-11-01T13:12:37.774960+00:00"
+      "modifiedAt": "2026-11-01T14:27:29.634671+00:00"
     },
     {
       "file": "reference/reference-receiver-light-390.png",
       "sha256": "e1dcc901d79440abc9114f5170426c407175274e5fe59f6045bac774070a9580",
-      "modifiedAt": "2026-11-01T13:12:36.297950+00:00"
+      "modifiedAt": "2026-11-01T14:27:28.111709+00:00"
     },
     {
       "file": "reference/reference-receiver-light-800.png",
       "sha256": "878c43d054d18f5b9157794da253e8b1c46e0d193ed098a3b3141fed9525f180",
-      "modifiedAt": "2026-11-01T13:12:36.905656+00:00"
+      "modifiedAt": "2026-11-01T14:27:28.763229+00:00"
+    },
+    {
+      "file": "receiver-measurements.json",
+      "sha256": "af353f756d7b97751bbc5cd89e4e67b42fe7cda0ba36ca1a7dc3cc1f21503a49",
+      "modifiedAt": "2026-11-01T14:27:45.064425+00:00"
+    },
+    {
+      "file": "receiver-aged-refusal-measurements.json",
+      "sha256": "884e392c2f741cc75bba220ea99c0e97c3b9cec3479f1d33d20c47b5fc546521",
+      "modifiedAt": "2026-11-01T14:27:39.342920+00:00"
+    },
+    {
+      "file": "receiver-max-name-measurements.json",
+      "sha256": "4ebdd7ccb68101f62c6ff7b27fbf5f363a9bfd10fa3c51d4b02ce620a7021c69",
+      "modifiedAt": "2026-11-01T14:27:45.063676+00:00"
+    },
+    {
+      "file": "receiver-max-name-unreadable-measurements.json",
+      "sha256": "f0d9ec6495792d15fe964466d41ff4e55442bbc4b44bf3941eba580b772700ec",
+      "modifiedAt": "2026-11-01T14:27:45.063861+00:00"
+    },
+    {
+      "file": "receiver-max-name-negative-control.json",
+      "sha256": "bdac0ba919d3ea40791ba809aa71ffc0a49c046acb6c01b52b0cc4cde8ccd518",
+      "modifiedAt": "2026-11-01T14:27:44.482414+00:00"
+    },
+    {
+      "file": "reference/reference-proof.json",
+      "sha256": "90773cf8db3971ee3c8bb2fa9f66fc3b6624298a6f8be7e12d2d165e2d15a924",
+      "modifiedAt": "2026-11-01T14:27:32.532394+00:00"
     }
   ]
 }
