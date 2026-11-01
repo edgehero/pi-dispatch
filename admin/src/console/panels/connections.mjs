@@ -4,6 +4,7 @@ import * as ui from "../kit.mjs";
 import { table } from "./config-ui.mjs";
 import { ageText, timeHtml } from "./common.mjs";
 import { docsHref } from "../../words.mjs";
+import { hookRunsView } from "@edgehero/pi-dispatch/hook-runs";
 
 const data = (view) => view.data?.connections ?? null;
 const operator = (view) => view.role === "operator" && !view.readOnly;
@@ -75,7 +76,15 @@ export function connectionsEndpoints(view) {
 }
 
 export function connectionsNotify(view) {
-  return card(view, "Notifications", (v) => html`<ul class="cn-icon-list"><li>${ui.icon("comment")}<span><b>Forge comments:</b> on${v.notify.triggers.length ? html`; ${triggers(v.notify.triggers)} also ${v.notify.triggers.length === 1 ? "keeps" : "keep"} a status comment up to date` : "; paid failures and requests for input"}.</span></li><li>${ui.icon("bell")}<span><b>Failure hook:</b> ${v.notify.unknown ? state("configuration unknown", "attention", "info") : v.notify.hook ? html`<span class="code">PI_ON_FAILURE</span> → <span class="code">${v.notify.hook}</span>, once per paid failure.` : state("not set in the .env")} </span></li></ul><p class="cn-note">${ui.icon("info", { size: "sm" })}<span>The hook's runs are in the worker's log; hook history is not published. ${docs("docs/notifications.md", "Hook rules")}</span></p>`);
+  return card(view, "Notifications", (v) => {
+    const history = hookRunsView(v.notify.history);
+    const rows = history.hosts.map((host) => {
+      const last = host.runs[0];
+      const bad = last && (last.code !== null && last.code !== 0 || ["timeout", "unresolvable", "spawn", "argv-unusable"].includes(last.detail) || last.detail.startsWith("signal-"));
+      return [hostLink(host.name), { html: host.unreadable ? state("hook history unavailable", "attention", "info") : !last ? "no hook run published" : html`${timeHtml(last.at)}<br>${last.jobId === null ? "run id unavailable" : html`<a class="code" href="${`/run?id=${encodeURIComponent(last.jobId)}`}">${last.jobId}</a>`}<br>${state(`${last.detail}${last.code === null ? "" : ` (exit ${last.code})`}`, bad ? "attention" : "idle")}<br><span class="muted">Run: ${last.outcome ?? "unknown"} · ${last.reason}</span>`, wide: true }, { html: host.counts === null ? "unknown" : Object.keys(host.counts).length ? Object.entries(host.counts).map(([detail, count], index) => html`${index ? html`<br>` : null}${detail}: ${count}`) : "none", wide: true }];
+    });
+    return html`<ul class="cn-icon-list"><li>${ui.icon("comment")}<span><b>Forge comments:</b> on${v.notify.triggers.length ? html`; ${triggers(v.notify.triggers)} also ${v.notify.triggers.length === 1 ? "keeps" : "keep"} a status comment up to date` : "; paid failures and requests for input"}.</span></li><li>${ui.icon("bell")}<span><b>Failure hook:</b> ${v.notify.unknown ? state("configuration unknown", "attention", "info") : v.notify.hook ? html`<span class="code">PI_ON_FAILURE</span> → <span class="code">${v.notify.hook}</span>, once per paid failure.` : state("not set in the .env")} </span></li></ul>${history.partial ? html`<p class="cn-note">${state("Hook history is incomplete or unavailable", "attention", "info")}</p>` : null}${detailTable("Failure hook runs", ["Host", "Last hook run", "Retained runs by detail"], rows, history.partial ? "hook history unavailable" : "no hook run published")}${history.more ? html`<p class="muted">${history.moreUnknown ? "At least " : null}${history.more} more indexed hosts were not read.</p>` : null}<p class="cn-note">${ui.icon("info", { size: "sm" })}<span>Up to 20 runs per host, kept until seven days after the last append. An exit code describes the hook, not notification delivery. ${docs("docs/notifications.md", "Hook rules")}</span></p>`;
+  });
 }
 
 export function connectionsMcp(view) {

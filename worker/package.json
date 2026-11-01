@@ -126,6 +126,7 @@
     "./wait-state": "./src/wait-state.mjs",
     "./cancel-state": "./src/cancel-state.mjs",
     "./host-registry": "./src/host-registry.mjs",
+    "./hook-runs": "./src/hook-runs.mjs",
     "./doctor-results": "./src/doctor-results.mjs",
     "./identity": "./src/identity.mjs",
     "./gitlab-identity": "./src/gitlab-identity.mjs",

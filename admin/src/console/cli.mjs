@@ -555,7 +555,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
         // Connections owns the allowlist reader; setup copies only its count, never a sample or secret.
         if (typeof m.connectionsView?.readConnections === "function") {
           try {
-            const connection = await m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid });
+            const connection = await m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid, publications: false });
             if (Array.isArray(connection?.egress?.allowlist)) state.allowlistCount = connection.egress.allowlist.length + connection.egress.more;
             if (connection?.providerKeys) state.providerKeys = connection.providerKeys;
           } catch { /* unknown remains unknown */ }

@@ -9537,6 +9537,7 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   `budgetReserved: false` guard. Rejected: one generic "an MCP server stopped the run" token, which would hide
   again which of six different fixes applies; and reading the server's name off the exit line into the comment,
   which would put a container-written string in a public comment.
+- **Display history (#775)**: the one post-log callback publishes `INT-HOOK-RUNS-KEY` through a bounded memory drain, never awaited by a hook or job. This records completed hook attempts, not pending notifications; nothing reads it to decide. The log keys, firing rules and at-most-once best-effort delivery remain unchanged.
 - **Rejected**, each with its why: an in-project transport (webhook/ntfy/Slack/mail: a dependency, a
   queue and a retry policy this layer has no business growing -- the argv IS the feature);
   comment-on-every-attempt (a flaky daemon posts three comments for one recovery); the hook receiving
@@ -12079,6 +12080,13 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   worker/src/run-container.mjs, worker/src/processor.mjs (`peakReachedLimit`), image/verify-image.sh.
 
 ## DES-OPERATOR-CONSOLE
+
+**AMENDED 2026-11-01 (#775, hooks)**: Connections reads `INT-HOOK-RUNS-KEY` only in its page-specific reader,
+with Setup's shared metadata call opting out. Its Notifications table shows the last run and retained-detail counts
+per host, visible tinted error words, explicit absence and unknown, and no delivery-success claim. Both human roles
+read the safe records; `dispatch_connections` projects them through the strict allowlist. The agent HTML restriction
+and `/api/state` are unchanged.
+
 
 - **AMENDED 2026-11-01 (#774)**: `DES-BROWSER-FIRST-RUN-SETUP` is the bounded
   exception to the existing read-model-only action surface and rejection of local runtime checks from the
@@ -16717,3 +16725,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-31 (#771, initial live snapshot) | DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL and DES-OPERATOR-CONSOLE keep a fresh Sandboxes page's cleanup warnings until a fresh live read replaces them. Rejected replaying an old cached empty view and waiting for a later timer tick to repair it. Failed fresh reads retain the rendered panels with stale status. Other-page cache/replay policy, cursor reconnects, shared visual tokens/styles, role guards, actions and all worker/container contracts UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AI-TRIGGER-FLOW-GATE`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` and `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN` AMENDED: explicit transition authority, private no-post classifier jobs, evidence-bound drafts and generic external-guidance extension seams. `DES-OPERATOR-CONSOLE` uses the existing ticket/guard/visual system; parent session ownership, approval authority, ordinary queue contracts and all unrelated decisions UNCHANGED, checked. |
 | 2026-10-31 (#772, long-label review) | `DES-OPERATOR-CONSOLE` CORRECTED after the complete browser sweep found a valid long run identifier expanding a phone card: bounded grid tracks and normal code-label whitespace preserve full run/source/standing labels, including the private draft origin on the run page. Generator styles, three rebuilt cards and the console's hashed paste agree. Browser counterexamples verify complete text lines, exact links and keyboard navigation in both themes across phone/intermediate/desktop widths and applicable roles. Shared visual tokens, fonts, privacy/role boundaries, API/session/provenance/ticket contracts and all worker paid gates UNCHANGED, checked. |
+| 2026-11-01 (#775, hooks) | `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` and `DES-OPERATOR-CONSOLE` AMENDED: completed hook attempts gain safe bounded display history, retained-detail counts, explicit absence/unknown and a typed `dispatch_connections` projection. Rejected pending-notification persistence remains rejected. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION`, `DES-DOCTOR-RESULTS-PUBLISHED`, `DES-HOST-REGISTRY`, `CONST-HMAC-OVER-RAW-BODY`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, run outcomes and `/api/state`. |

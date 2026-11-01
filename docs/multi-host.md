@@ -511,3 +511,7 @@ The additional registry facts are display telemetry: orphan venue/time, a one-mi
 budget provenance and CPU-reserve state. They contain identifiers and fixed words, never workspace paths or issue
 text. Removing them changes reporting, never admission. Cleanup commands must be run on the affected host; the
 console cannot operate another host's runtime. A host-queue pause still leaves shared jobs available to that host.
+
+## Failure hook history
+
+Each firing worker publishes safe results under `hook:h:<name>`, indexed by `hook:hosts`, using the worker's resolved name even without a declared fleet. Connections and `dispatch_connections` read this display history across hosts: up to 20 entries per host, with seven days of inactivity expiry. Counts describe retained hook details, not delivered notifications. Publication is background best effort; missing or unreadable records never mean healthy. Deleting this keyspace changes no hook, job, routing or admission decision.

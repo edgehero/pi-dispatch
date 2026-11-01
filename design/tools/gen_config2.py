@@ -462,7 +462,13 @@ def connections():
   <li>{ic('comment')}<span><b>Forge comments:</b> on. Trigger 3 also keeps a <b>status comment</b> up to date while it runs.</span></li>
   <li>{ic('bell')}<span><b>Failure hook:</b> {code('PI_ON_FAILURE')} → {code('…/ntfy-page')}, once per paid failure.</span></li>
 </ul>
-  <p class="c2-gap2 c2-st c2-quiet tone-ok">{ic('done', 'ic ic--sm')}<span>The hook's runs are in the worker's log; hook history is not published.</span></p>"""
+  {table([("Host", ""), ("Last hook run", ""), ("Retained runs by detail", "")], [
+      [('<a href="#host-mini1">mini1</a>', "id c2-first"),
+       (f'<time datetime="2026-10-08T15:11:00Z">2026-10-08 15:11 UTC</time><br>{runlink("gh-f0c2")}<br><span class="c2-st tone-attention">{ic("attention", "ic ic--sm")}<span>timeout</span></span><br><span class="muted">Run: failed · infra</span>', "wide c2-span"),
+       ("exit: 2<br>timeout: 1", "wide c2-span")],
+      [('<a href="#host-build3">build3</a>', "id c2-first"), ("no hook run published", "wide c2-span"), ("none", "wide c2-span")]
+  ], caption="Failure hook runs", stack=True)}
+  <p class="c2-gap2 card__sub">Up to 20 runs per host, kept until seven days after the last append. An exit code describes the hook, not notification delivery.</p>"""
     p_notify = card("Notifications", notify, id_="p-notify")
 
     env = facts([
@@ -767,7 +773,7 @@ A viewer sees the tables, with no Remove or forms.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
 - **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
 - **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
-- **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Its runs are in the worker's log; their history is not published.
+- **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Each host's last hook run links its time and run, with the hook exit detail and counts over its retained entries. Timeout, an unresolvable script and nonzero exits are tinted; no history says "no hook run published", never healthy.
 - **MCP servers, Deployment environment, Staged pi packages.** All read-only, each with the command or file that changes it. Caps set only in the .env read "unknown (worker env or default)".
 
 Viewers read status and provider guides without mutation controls. A read-only operator keeps the guides and terminal recovery. No-JavaScript users can read native disclosures and external links, while mutation controls stay disabled.
@@ -781,7 +787,7 @@ Viewers read status and provider guides without mutation controls. A read-only o
 - Per host: the egress proxy state and the newest egress doctor lines.
 - The model endpoints file, declared slots and whether fleet leases count that endpoint, and the provider key sources.
 - The overlay MCP servers with their refusals, and the staged packages receipt.
-- The `PI_ON_FAILURE` hook by its last folder, its timeout and the fact that its runs are in the worker's log.
+- The `PI_ON_FAILURE` hook by its last folder, its timeout, and up to 20 safe runs per host from the versioned seven-day-expiring display list. Incomplete reads are unknown; the exit code cannot prove notification delivery.
 - The .env keys the console reads, and any shell-versus-.env disagreement.
 
 **Why it works this way.**
@@ -793,7 +799,7 @@ Viewers read status and provider guides without mutation controls. A read-only o
 
 **Fixture note.**
 - **From the fixture:** build3's missing proxy, gh-e9a0, the linear MCP server, and the forges named by triggers 1 to 7.
-- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. Receiver location and hook history are not published, so the card says where to look rather than inventing them.
+- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. The hook history is sample display evidence; receiver location is not yet published in this slice.
 - **Known repo gaps:** webhook health is not published, and there is no notification setting beyond the hook.""",
 
 "ProjectDetail": """One project on its own page: what it spent against its share, its members, its job size against what its runs use, and the rows that govern it.

@@ -10197,6 +10197,50 @@ worker/src/steer-framing.mjs (`encodeFrame`, `keyFrame`, `frameMac`, `steerFrame
 (`readKeyFrame`, `createFrameDecoder`, `isolateStdin`, `openFrameReader`, `FRAME_FD`); image/runner/src/supervise.mjs
 (the fd 3 forwarding).
 
+## INT-HOOK-RUNS-KEY
+
+**Producer**: the firing worker, after each existing `on_failure` log line (#775). **Consumer**: `readConnections`
+and its explicit `dispatch_connections` projection only. A display, never a notification store or a decision:
+deleting `hook:*` changes no response, hook firing, job outcome, retry or admission rule.
+
+- `hook:h:<name>` is a LIST, newest append first; `hook:hosts` is its SET index. The name is the worker's resolved
+  `PI_WORKER_NAME`, else its sanitized hostname (`WORKER_NAME_RE`). Unset `PI_ON_FAILURE` constructs nothing and
+  writes no key. The callback is after the guarded original log, including unresolvable, spawn and argv refusals.
+- One `MULTI` appends with `LPUSH`, trims with `LTRIM 0 19`, refreshes `PEXPIRE` to 604800000 ms (seven days after the
+  latest append), and `SADD`s the host. This is inactivity expiry, not a promise that every retained entry is less
+  than seven days old. Each entry is at most 1024 bytes and has exactly these projected fields:
+  ```json
+  {"v":1,"at":1793534400000,"jobId":"gh-1","outcome":"failed","reason":"infra","detail":"exit","code":3}
+  ```
+  `at` is epoch milliseconds from the injected worker clock. `jobId` follows `publishedJobId`'s registry rule:
+  `[A-Za-z0-9._:-]{1,128}`, else `sha256:<16 hex>`, or null when absent. `outcome` is `failed`, `policy` or null;
+  `reason` is the normalized argv token (`RECORD_REASON_RE`, else `infra`); `detail` is `exit`, `timeout`, `spawn`,
+  `unresolvable`, `argv-unusable`, `signal-unknown` or `signal-<signal>` from the portable closed `HOOK_SIGNALS`
+  vocabulary in `worker/src/hook-runs.mjs`; `code` is an integer from 0 through 4294967295 or null (the portable unsigned process status, including Windows NTSTATUS). No executable, address,
+  delivery id, payload, header, repository, login or command output is published. A safe job id remains an id.
+- The memory drain retains at most 64 entries including its active append. Simultaneous completions are serialized;
+  an operation retains the drain until its actual promise settles even after the two-second diagnostic bound.
+  Rejections, command-level transaction errors and timeouts emit one fixed `hook_runs_publish_failed` line; overflow
+  is named `full`. No failure retries, blocks a hook, or flows into a job result. Shutdown drops pending telemetry.
+  The publisher prunes at most 64 stale index entries from one `SSCAN` page at most once per 15 seconds; existence
+  checking and index removal are atomic, so a concurrent fresh append cannot lose its index entry.
+- The read is bounded to 64 hosts, known live names first (recovering records when the index was deleted), then at
+  most four `SSCAN COUNT 64` pages and `SCARD`. Names are checked before row commands; overflow is `more` and partial,
+  never absence. A partial index walk reports only the known union remainder, marked `moreUnknown` as a lower bound;
+  omitted live names are never counted twice with index names. Each row reads `LRANGE 0 20` and `PTTL`; one two-second bound covers the whole discovery and row read, and late commands start no follow-up reads. Twenty-one entries, oversized or
+  malformed entries, unknown versions, missing expiry and failed commands are unknown, never zero. A missing key
+  is absence; an unreadable index is partial even when some live names read. The reader writes nothing.
+- Connections shows each host's last hook time, linked safe run id, originating run outcome/reason, hook detail/code
+  and counts over retained entries by detail. Nonzero exits, timeout and unresolvable are tinted with visible words;
+  no entry says "no hook run published", never healthy. An exit code is no delivery guarantee. Operator and viewer
+  see the same safe history; the agent HTML view stays restricted, while `dispatch_connections` receives the typed
+  records/counts. Setup's metadata read opts out; `/api/state` is unchanged.
+
+**Code evidence**: `worker/src/hook-runs.mjs`; `worker/src/on-failure.mjs`; `worker/src/start.mjs`;
+`admin/src/connections-view.mjs`; `admin/src/console/panels/connections.mjs`; `worker/test/hook-runs.test.mjs`;
+`worker/test/hook-runs.integration.test.mjs`; `worker/test/on-failure.test.mjs`; `worker/test/start-wiring.test.mjs`;
+`admin/test/connections-hooks.test.mjs`.
+
 ## INT-ON-FAILURE-HOOK-CONTRACT
 
 **Producer**: the worker's two terminal listeners (start.mjs). **Consumer**: ONE operator-named command
@@ -10250,7 +10294,7 @@ this project never grows one.
 - **At most once per job, best effort, and NOTHING flows back**: the hook cannot change an outcome
   (fired from listeners outside every deciding try, and `fire` never throws); its exit code and signal
   land in one `on_failure` log line -- pinned key set `{ jobId, code, detail }`, detail one of
-  `exit|timeout|signal-*|spawn|unresolvable|argv-unusable` -- and are otherwise unread (`OQ-034`).
+  `exit|timeout|signal-*|spawn|unresolvable|argv-unusable` -- and are published for display through `INT-HOOK-RUNS-KEY`; nothing decides on them (`OQ-034`).
   Timeout `PI_ON_FAILURE_TIMEOUT_MS` (default 10s), then SIGTERM and SIGKILL after a 2s grace, every
   timer unref'd. The executable is resolved at FIRE time (realpath + the executable bit), so a script
   installed mid-day works and one deleted mid-day logs `unresolvable` rather than pretending.
@@ -12477,3 +12521,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-10-31 (#766, #772) | NEW `INT-ANSWER-DRAFT-STORE`; `INT-STEER-INBOX-CONTRACT`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API` and `INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED: answer rule/standing schemas, agent role, applied receipts, safe projections and digest-bound result. Ordinary exit numbers/MAC, trigger run payloads, parent transcript promotion, approval decisions, global overlay, deploy mirrors and dependency pins UNCHANGED, checked. |
 | 2026-10-31 (#781, local credential custody) | INT-CONTAINER-JOB-INPUTS, INT-RUN-HISTORY-FILE-CONTRACT and INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: every local job refuses a mount containing the private refresh store, including unbound API jobs, future paths, symlink parents and directory aliases, as the fixed path-free local-folder-holds-subscription-auth reason. The free pickup gate precedes token minting and final preparation repeats the check on the resolved mount source before reservation or container start; transient boundary reads remain infrastructure failures. The store path stays in host closures. Container environment and exit protocol, forge contracts, paid meter, hook reasons and other interfaces UNCHANGED, checked. |
 | 2026-10-31 (#781, host filesystem refusals) | INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: policy, private-store, OpenAI pinned-source and community-adapter validation classify all filesystem reads by the shared determinate errno allowlist, including outer path checks and descriptor close. Malformed metadata and known path faults refuse; credential-store absence still reads disconnected; EACCES, EIO and unknown faults remain retryable without changing the durable grant. Dependency existence uses strict stat rather than suppressing I/O errors. An explicitly marked read-only adapter preflight failure after the durable refresh marker restores the pre-marker row because no remote rotation began; an error code alone never proves this. Fixed diagnostics carry no path or token. Credential schemas, permission/owner checks, remote refresh rotation and uncertainty, snapshots, container/image transports, adapter source/output pins, public telemetry and all other interfaces UNCHANGED, checked. |
+| 2026-11-01 (#775, hooks) | NEW `INT-HOOK-RUNS-KEY`: bounded versioned per-host display history, best-effort post-log publication and read-only Connections/model projection. `INT-ON-FAILURE-HOOK-CONTRACT` AMENDED: exit codes are logged and published for display; no decision reads them. UNCHANGED, checked: firing rules, argv, log keys, timeout/kill ladder, unset absence, `INT-HOST-REGISTRY-CONTRACT`, `INT-MODEL-ENDPOINTS-FILE-CONTRACT` and `/api/state`. |

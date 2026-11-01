@@ -18,6 +18,7 @@ import { FORGES } from "@edgehero/pi-dispatch/forges";
 import { doctorHostsOf, doctorStale } from "./doctor-view.mjs";
 import { PANEL_SERVICE_KEYS } from "./read-model.mjs";
 import { DOLLAR_ENV_NAMES } from "@edgehero/pi-dispatch/money";
+import { readHookRuns, hookRunsView } from "@edgehero/pi-dispatch/hook-runs";
 
 /** A closed display vocabulary: arbitrary strings, even numeric-looking secrets, are never printed. */
 export const CONNECTION_ENV_TYPES = Object.freeze({
@@ -144,7 +145,7 @@ export function connectionsProblems(hosts, runs = [], forges = []) {
 }
 
 /** Injected sources make every exceptional state independent; no metadata read changes a capability or worker env. */
-export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, platform = process.platform, uid = process.geteuid?.() } = {}) {
+export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, platform = process.platform, uid = process.geteuid?.(), publications = true } = {}) {
   let file = {};
   let metadata = null;
   try {
@@ -179,14 +180,22 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   // absent fleet keys in those cases would invent zero usage while the in-process slots may all be held.
   const fleetEndpoints = Array.isArray(endpoints) ? endpoints.filter((ep) => endpointCounting(ep.host, endpointFleetDeclared) === "fleet") : [];
   const slots = new Map();
-  if (fleetEndpoints.length) {
+  if (publications && fleetEndpoints.length) {
     try {
       const client = redis ?? (owned = redisFn(paths.valkeyUrl));
       const counted = await (reads.slots ?? readEndpointSlots)(client, fleetEndpoints);
       for (const [index, endpoint] of fleetEndpoints.entries()) slots.set(endpoint.id, Number.isInteger(counted?.[index]) ? counted[index] : null);
     } catch { /* Fleet occupancy is unknown; the declared slots and counting scope remain readable. */ }
-    finally { try { owned?.disconnect(); } catch {} }
   }
+  let hookHistory = hookRunsView(null);
+  if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.hookRuns)) {
+    try {
+      const client = redis ?? owned ?? (owned = redisFn(paths.valkeyUrl));
+      const names = (snapshot?.hostBudgets ?? []).map((host) => host.name);
+      hookHistory = hookRunsView(await (reads.hookRuns ?? readHookRuns)(client, { names }));
+    } catch { /* Missing evidence stays unknown; a hook's configuration is independent of its past runs. */ }
+  }
+  try { owned?.disconnect(); } catch {}
   const hosts = doctorFacts(snapshot);
   let egressOn = null;
   let egressProblem = null;
@@ -214,7 +223,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
       const selectedVariable = providerUnknown ? null : fromEnv[0] ?? null;
       return { name, unknown: providerUnknown, variables, fromEnv, selectedVariable, credentialSource: selectedVariable ? "deployment-env" : providerUnknown || loginFallback === null ? "unknown" : loginFallback ? "pi-login" : "worker-env", loginFallback, fallback: environmentUnknown ? "the deployment’s provider credential fallback is unknown" : loginFallback ? "pi login on each host is the configured fallback; actual credentials are not published here" : "pi login disabled by PI_AUTH_FROM_PI=0; each worker needs its environment key" };
     }),
-    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown },
+    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory },
     mcp, packages, packageOptOuts: Array.isArray(triggers) ? triggers.filter((t) => t.packages === false).length : null,
     problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges), snapshotUnreadable: snapshot === null,
   };
@@ -241,6 +250,7 @@ export function modelConnections(view) {
     return NPM_NAME_RE.test(at > 0 ? p.slice(0, at) : p) && (at <= 0 || EXACT_VERSION_RE.test(p.slice(at + 1)));
   });
   return {
+    hookRuns: hookRunsView(view?.notify?.history),
     subscriptionAuth: subscriptionAuthForAgent(view?.subscriptionAuth),
     forges: (view?.forges ?? []).filter((f) => Object.hasOwn(FORGES, f.name)).map((f) => ({ name: f.name, configured: typeof f.enabled === "boolean" ? f.enabled : null, path: ROUTES[f.name], authSource: ["app", "gh", "pat", "gh (default)", "invalid", "shared token"].includes(f.source) ? f.source : "unknown", activationKeys: (f.activationKeys ?? []).filter((k) => FORGE_ACTIVATION_KEYS[f.name].includes(k)), secret: { key: f.name === "github" ? "WEBHOOK_SECRET" : `${f.name.toUpperCase()}_WEBHOOK_SECRET`, set: typeof f.secret?.set === "boolean" ? f.secret.set : null }, triggerCount: (f.triggers ?? []).filter((i) => Number.isSafeInteger(i) && i >= 0).length })),
     egress: { on: typeof view?.egress?.on === "boolean" ? view.egress.on : null, hosts: (view?.egress?.hosts ?? []).filter((h) => name(h.name)).map((h) => ({ name: h.name, state: h.unreadable ? "unknown" : ["ok", "warn", "fail"].includes(h.proxy?.level) ? h.proxy.level : "not-published", stale: h.stale === true })) },

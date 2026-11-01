@@ -17,8 +17,7 @@ reason below has its own entry there.
 The Notifications section of `/config/connections` names forge comments, the trigger rows using status comments,
 and `PI_ON_FAILURE` by its last folder. Compact comment and hook rows give the current facts; the configured
 timeout (10 seconds by default), arguments, paid-failure rule and exclusions are documented below.
-Hook runs remain in the worker's log; the receiver publishes neither delivery health
-nor its host placement. The console does not invent a last hook run or notification setting. Viewers get the same
+Each host publishes its last 20 hook results, with the last time, linked run, originating outcome/reason, hook exit detail/code and counts by detail. Nonzero exits, timeout and unresolvable are tinted. Missing history says "no hook run published"; unreadable history is unknown, never healthy. The list expires seven days after its last append, and an exit code cannot prove notification delivery. Viewers get the same
 facts with no command to copy. See [Connections](console.md#connections).
 
 ## The worker's own terminal comments
@@ -127,11 +126,12 @@ exec curl -fsS -X POST -H 'Content-type: application/json' \
 - **Exec'd, never a shell.** An argv array with `shell: false`; nothing interpolates.
 - **Fire and forget.** The job's outcome is decided before the hook runs, and a hook fault cannot change
   it. A hook that cannot spawn, times out (`PI_ON_FAILURE_TIMEOUT_MS`, default 10s, then SIGTERM and
-  SIGKILL 2s later), or exits nonzero produces one `on_failure` log line and nothing else.
+  SIGKILL 2s later), or exits nonzero produces one unchanged `on_failure` log line and a best-effort display record.
 - **All three stdio streams are ignored.** Nothing is entitled to read a notification's output.
 - **At most once per job, best effort.** Delivery is not guaranteed: a whole-deployment death in the
   instant between the terminal transition and the listener loses the notification (a single crashed
-  worker does not; the stall path covers it). Your exit code is logged and unread; a broken script loses
-  notifications silently except for that line. Both residuals are recorded in the spec register.
+  worker does not; the stall path covers it). Your exit code is logged and published for display; no worker decision reads it. A broken script can lose notifications, with its log and history as evidence. Both residuals are recorded in the spec register.
 - **Runs as the worker, with the worker's environment.** The same blast radius as a wait profile or a
   secret resolver, bounded the same way: only someone who can already edit `.env` can name the script.
+
+Display publication cannot delay a hook or job. It uses at most 64 pending records in memory, never retries a failed append, and logs fixed `hook_runs_publish_failed` diagnostics (`unavailable`, `full`, `invalid-host` or `invalid-time`). Deleting `hook:*` loses the display evidence and changes no firing rule. `dispatch_connections` returns the same safe records and counts; `/api/state` is unchanged.

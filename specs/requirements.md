@@ -549,7 +549,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   otherwise) which the worker executes with id-only argv -- `<jobId> <outcome> <reason> <host>` -- when a
   paid job reaches a terminal failure: the final infrastructure failure, a worker abort, or an
   in-container policy stop. Fire and forget: at most once per job, fault-isolated so a hook failure can
-  never change a job's outcome, all stdio ignored, exit code logged and unread. Unset, the deployment is
+  never change a job's outcome, all stdio ignored, exit code logged and published for display only (`INT-HOOK-RUNS-KEY`). Unset, the deployment is
   byte-identical to one where the feature does not exist. This project ships NO transport, ever; the
   operator wires ntfy, Slack or mail themselves in one line.
 - **Why**: the cheap failures announce themselves (every pre-spend refusal comments) while the expensive
@@ -2514,7 +2514,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     remain unknown. Those longer explanations keep adjacent endpoint labels readable on phones. A verified fleet zero remains 0 of N. No per-host count is invented; unread file doctor checks retain their fix. Compact provider rows name the first candidate
     set in the .env, or none there, and its configured source. Actual per-host credentials are unpublished, stated once.
     Notifications use compact icon rows for forge comments, status-comment triggers and hook basename, with hook
-    history in the worker log. Timing, arguments and exclusions live in linked documentation. MCP retains its facts
+    history per host: last hook time, linked run id, originating outcome/reason, hook detail/code and retained counts by detail. Nonzero exits, timeout and unresolvable carry visible tinted states. Missing history reads "no hook run published", never healthy; unavailable reads are unknown. Both human roles see safe facts, and `dispatch_connections` includes typed counts and times. Timing, arguments and exclusions live in linked documentation. MCP retains its facts
     and refusal reason in compact per-server rows,
     adds the image-owned forge server without inventing its version and explains import-pi. Environment values
     are shown only through closed numeric/switch/vocabulary rules; URLs/tokens/secrets read set, paths by basename,
@@ -8313,3 +8313,4 @@ instead of drifting.
 | 2026-10-31 (#771, initial live snapshot) | REQ-SANDBOX-FROM-THE-CONSOLE acceptance now explicitly prevents an older event-stream snapshot from erasing freshly rendered cleanup warnings or incomplete shell counts. Initial Sandboxes subscriptions await a fresh bounded read and retain their rendered panels on failure. Cursor reconnects, other pages, stream admission/authentication, paid work, container isolation and every other requirement UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS` acceptance, `REQ-STEER-RUNNING-JOB`, `REQ-JOB-STATUS-COMMENTS` and `REQ-PARKED-ANSWERER` AMENDED/implemented: bounded agent role/actions, shared tools, safe reads, shell flags and person-sent cited drafts. `REQ-APPROVAL-GATES`, isolation, budget-before-spend, receiver author gating, ordinary session/resume and unrelated requirements UNCHANGED, checked. |
 | 2026-10-31 (#766, paid-start documentation) | `REQ-ADMIN-VIA-PI-EXTENSION` CORRECTED: the explicit hourly grant belongs to Fire now and local/cron reruns. `dispatch_run` preserves its existing default of three starts per hour when the process value is absent or invalid; zero disables it. The admin README and console tool documentation now distinguish that default and interactive confirmation from granted headless Fire. Runtime admission, process-owned roots, write grants, the shared hourly counter, budget-before-spend and every other contract UNCHANGED, checked. |
+| 2026-11-01 (#775, hooks) | `REQ-OPERATOR-FAILURE-NOTIFICATION` and `REQ-OPERATOR-CONSOLE-SCREENS` (g6) AMENDED: failure hook results gain bounded per-host display history and typed model projection, with explicit absence/unknown and no delivery claim. UNCHANGED, checked: firing/exclusion rules, `REQ-CONSOLE-SECURITY`, raw-body verification, admission, spend, retry, `/api/state` and unrelated screens. |

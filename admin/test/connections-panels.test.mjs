@@ -106,7 +106,8 @@ test("Notifications uses two icon rows and short hook configuration, with timing
   assert.match(cardText(doc.within(items[0])), /Forge comments: on; trigger 3 also keeps a status comment up to date\./);
   assert.match(doc.within(items[1]), /href="#i-bell"/);
   assert.equal(cardText(doc.within(items[1])), "Failure hook: PI_ON_FAILURE → .../notify , once per paid failure.");
-  assert.match(cardText(result), /The hook's runs are in the worker's log; hook history is not published/);
+  assert.match(cardText(result), /no hook run published/);
+  assert.match(cardText(result), /An exit code describes the hook, not notification delivery/);
   assert.doesNotMatch(result, /\/srv\/hooks|does not run for completions|Two things reach people|10 s|timeout|job, outcome, reason, host/);
   const unknown = { ...facts, notify: { ...facts.notify, unknown: true } };
   marked(draw("connectionsNotify", unknown), "configuration unknown", "info", "attention");
