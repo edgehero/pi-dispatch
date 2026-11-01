@@ -1103,12 +1103,23 @@ when no setup operation remains. The console never guesses that a stale lock is 
 and container-based forge authentication probes; the published warning says which probes were withheld. It makes
 no paid provider call. Ordinary terminal doctor keeps its existing behavior.
 
-The **provider API key** field is write-only and create-only, limited to 4 KiB. Its canonical API-key slot follows
-the effective provider configuration. Existing or shadowed credentials, managed-subscription bindings, unsafe files
-and changed inputs refuse. Preview clears the browser field; Cancel, expiry, session end and shutdown discard the
-private 60-second ticket. Re-entry is required after failure or expiry. Neither the value nor a secret-derived
-comparison hash appears in previews, audit or live state. Saving does not reload a running worker; restart is a
-separate confirmed interruption.
+The permanent **Provider API keys** card on Connections lists configured keys, including providers not currently
+used, the default and referenced providers. Select a provider explicitly, then **Add key** to an empty slot or
+**Replace key** to overwrite its existing deployment key through a separate danger confirmation. Shared slots name
+every affected provider. Saving preserves the default provider, models, roles, routing and egress. Presence means
+the slot is set, not that the key works or a running worker has loaded it. Incomplete sources remain unknown.
+
+The field is write-only and limited to 4 KiB. Shadowed credentials, managed-subscription bindings, unsafe files and
+changed inputs refuse. Preview clears the browser field; changing provider or mode, Cancel, expiry, session end
+and shutdown discard the private 60-second ticket. Re-entry is required after failure or expiry. Neither the value
+nor a secret-derived comparison hash appears in previews, audit or live state. No previous key is retained for
+Undo. Saving does not reload a running worker; restart is a separate confirmed interruption. Keep the previous
+provider-side key valid until reload is verified, then revoke it at the provider if appropriate.
+
+Provider-specific **Get API key** links and short guides include OpenAI, Anthropic, Gemini, OpenRouter and DeepSeek.
+See [Provider keys](provider-keys.md) for creation and replacement, and [Subscription authentication](subscription-auth.md)
+for host sign-in. Subscription credentials use a separate managed connection; this form does not import raw
+subscription tokens or perform browser OAuth. Setup keeps a management link after its provider step is ready.
 
 **Add a viewer** creates only a viewer entry and shows its one-use 60-second link solely in the initiating
 operator's confirmation slot. Copy it privately; the recipient needs a route or their own tunnel. It grants a

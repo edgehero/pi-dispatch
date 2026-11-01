@@ -1,6 +1,7 @@
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { SUBSCRIPTION_ADAPTERS, subscriptionAuthView } from "../../subscription-auth-view.mjs";
+import { PROVIDER_AUTH_GUIDES } from "../../provider-help.mjs";
 
 const STATES = Object.freeze({
   connected: ["ok", "Connected"], disconnected: ["idle", "Disconnected"],
@@ -37,9 +38,13 @@ function empty(view) {
   return html`<p>${ui.badge("idle", "Subscription status not published")}</p><p class="sa-note">No credential or quota inference can be made from missing host observations.</p>`;
 }
 
+export function subscriptionGuides(view) {
+  return html`<div class="pk-help">${Object.entries(PROVIDER_AUTH_GUIDES).map(([provider, guide]) => html`<details class="pk-guide" data-subscription-help="${provider}"><summary>${guide.label}</summary><div class="pk-links">${ui.outLink({ href: guide.docsUrl, label: "Host connection guide", btn: "sm" })}${ui.outLink({ href: guide.officialUrl, label: "Official provider guidance" })}</div><ol>${guide.steps.map(step => html`<li>${step}</li>`)}</ol><p class="pk-note pk-notice">${guide.notice}</p>${allowed(view) && guide.command ? html`<p class="pk-note pk-notice">Replace &lt;connection-id&gt; with the configured connection name before running on its owning host.</p>${ui.cmd(guide.command.split(" "))}` : null}</details>`)}</div>`;
+}
+
 export function connectionsSubscriptionAuth(view) {
   const data = source(view, "connections");
-  return ui.card({ title: "Subscription authentication", sub: "host-owned credentials, safe status only", body: html`${partial(data)}<div class="sa-accounts">${data.connections.map(row => {
+  return ui.card({ title: "Subscription authentication", sub: "host-owned credentials, safe status only", body: html`<p class="pk-intro">Subscription credentials stay on the owning host. Use its supported sign-in flow, separately from API keys.</p>${subscriptionGuides(view)}${partial(data)}<div class="sa-accounts">${data.connections.map(row => {
     const metadata = row.adapter ? SUBSCRIPTION_ADAPTERS[row.adapter] : null;
     return html`<article class="sa-account">${title(row, STATES[row.state])}${facts([
       ["Provider", `${row.provider ?? "Unknown"}, ${selected(row.active)}`],

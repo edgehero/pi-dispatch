@@ -903,7 +903,7 @@ export function fakeEventSource() {
  * Every name the script may reach beyond the language: each is a parameter of the function it runs in, so none is
  * ever Node's own.
  */
-export const GLOBALS = Object.freeze(["document", "location", "history", "fetch", "EventSource", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame", "navigator", "isSecureContext", "Date", "URL", "URLSearchParams", "getComputedStyle", "ResizeObserver", "MouseEvent", "window", "innerHeight"]);
+export const GLOBALS = Object.freeze(["document", "location", "history", "fetch", "EventSource", "AbortController", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame", "navigator", "isSecureContext", "Date", "URL", "URLSearchParams", "getComputedStyle", "ResizeObserver", "MouseEvent", "window", "innerHeight"]);
 
 /**
  * Run `script` (the console's `CONSOLE_SCRIPT`) over `markup` (a whole page) at `url` (its path, query and fragment).
@@ -959,6 +959,7 @@ export function runConsoleScript(script, markup, { url = "/", fetch = fakeFetch(
     history,
     fetch,
     EventSource,
+    AbortController,
     setTimeout: timers.setTimeout,
     clearTimeout: timers.clearTimeout,
     setInterval: timers.setInterval,
@@ -994,6 +995,8 @@ export function runConsoleScript(script, markup, { url = "/", fetch = fakeFetch(
       field.value = value;
     },
     tick: (ms) => timers.tick(ms),
+    /** Browser lifecycle events use the same registered callbacks as a real window. */
+    windowEvent(type, fields = {}) { for (const fn of windowListeners.get(type) ?? []) fn({ type, ...fields }); },
     /** A new fragment in the address bar of the same page (a link pasted in): no page loads, `hashchange` fires. */
     hash(fragment) {
       location.hash = fragment;

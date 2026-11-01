@@ -28,7 +28,7 @@ test("subscription calls reject Decisions, alternate hosts and expired snapshots
 });
 
 test("worker and runner source pins and deterministic adaptations remain byte identical", () => {
-	for (const file of ["community-auth-patches.mjs", "community-auth-pins.mjs", "community-auth-output-pins.mjs"]) assert.equal(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"), readFileSync(new URL(`../../../worker/src/${file}`, import.meta.url), "utf8"));
+	for (const file of ["community-auth-patches.mjs", "community-auth-metadata.mjs", "community-auth-pins.mjs", "community-auth-output-pins.mjs"]) assert.equal(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"), readFileSync(new URL(`../../../worker/src/${file}`, import.meta.url), "utf8"));
 });
 
 const marker = Symbol.for("pi-dispatch.subscription-adapter");

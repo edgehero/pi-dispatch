@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // Static, unlike env-allowlist below: provider-key.mjs imports nothing at all, so its own rules are
 // testable on a box where pi-ai will not load and the oracle round-trips skip.
-import { BEARER_KEY_RE, OAUTH_KEY_RE, apiKeyVariable, nonApiKeyKind } from "../src/provider-key.mjs";
+import { BEARER_KEY_RE, HOST_AUTH_PROVIDERS, OAUTH_KEY_RE, apiKeyVariable, needsHostAuthentication, nonApiKeyKind } from "../src/provider-key.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai (for findEnvKeys). That needs node >=22.19.0 and installed
 // deps, so the round-trips skip on a below-floor dev box and run in CI, where
@@ -100,4 +100,15 @@ test("every provider pi reads a key for resolves to a non-OAuth variable pi actu
 		assert.ok(candidates.includes(picked), `${id}: ${picked} is one of pi's own names`);
 		assert.ok(!OAUTH_KEY_RE.test(picked), `${id}: ${picked} is not a subscription login`);
 	}
+});
+
+test("the browser's host-auth guidance policy names actual pinned providers without changing their runtime key mapping", { skip: skipNoPi }, () => {
+	assert.equal(new Set(HOST_AUTH_PROVIDERS).size, HOST_AUTH_PROVIDERS.length);
+	for (const provider of HOST_AUTH_PROVIDERS) {
+		assert.ok(piProviders().includes(provider));
+		assert.equal(needsHostAuthentication(provider), true);
+	}
+	assert.equal(apiKeyVariable(providerKeyCandidates("github-copilot")), "COPILOT_GITHUB_TOKEN");
+	assert.equal(apiKeyVariable(providerKeyCandidates("huggingface")), "HF_TOKEN");
+	assert.equal(needsHostAuthentication("huggingface"), false);
 });

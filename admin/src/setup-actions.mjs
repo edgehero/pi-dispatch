@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { SETUP_OPERATIONS, SETUP_REASONS, SETUP_LIMITS } from "@edgehero/pi-dispatch/setup-contract";
 import { addToken, revokeToken, readTokensSnapshot, TOKEN_NAME_RE } from "@edgehero/pi-dispatch/console-tokens";
 import { loginCodesDir, mintLoginCode } from "./console/login-codes.mjs";
-import { apiKeyVariable, nonApiKeyKind } from "@edgehero/pi-dispatch/provider-key";
+import { apiKeyVariable, nonApiKeyKind, needsHostAuthentication } from "@edgehero/pi-dispatch/provider-key";
 import { acquireSetupLock, setupDeploymentIdentity } from "@edgehero/pi-dispatch/setup-lock";
 import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
 
@@ -12,14 +12,18 @@ export const SETUP_ACTION_NAMES = Object.freeze([...SETUP_OPERATIONS, "setup-vie
 export const SETUP_PRIVATE_TTL_MS = 60_000;
 export const SETUP_PRIVATE_MAX = 32;
 const STARTS_WORKER = new Set(["setup-worker-install", "setup-worker-start", "setup-worker-restart"]);
+export const isSetupKeyAction = action => action === "setup-provider-key" || action === "setup-provider-key-replace";
 const KEY_SLOT = name => typeof name === "string" && /^[A-Z][A-Z0-9_]*$/.test(name) && nonApiKeyKind(name) === null;
-const canonicalKey = provider => apiKeyVariable(typeof provider === "string" && Object.hasOwn(PROVIDER_KEY_NAMES, provider) ? PROVIDER_KEY_NAMES[provider] : []);
+const canonicalKey = provider => needsHostAuthentication(provider) ? null : apiKeyVariable(typeof provider === "string" && Object.hasOwn(PROVIDER_KEY_NAMES, provider) ? PROVIDER_KEY_NAMES[provider] : []);
+const aliasesFor = key => Object.keys(PROVIDER_KEY_NAMES).filter(provider => canonicalKey(provider) === key).sort();
 const EFFECT_WORDS = Object.freeze({ "write-worker-unit": "Write the worker user service", "write-receiver-unit": "Write the receiver user service", "start-worker": "Start the worker", "start-receiver": "Start the receiver", "stop-worker": "Stop the worker", "stop-receiver": "Stop the receiver", "restart-worker": "Restart the worker", "restart-receiver": "Restart the receiver", "write-stack-files": "Write the deployment's runtime stack files", "start-valkey": "Start the deployment's Valkey", "start-proxy": "Start the deployment's egress proxy", "start-keeper": "Start the rootless network keeper", "write-provider-key": "Write the provider API key once", "publish-doctor": "Run non-live doctor and publish its sanitized checks" });
 export const SETUP_REASON_WORDS = Object.freeze(Object.fromEntries(SETUP_REASONS.map(reason => [reason, {
   "setup-busy": "Another setup operation holds the deployment lock. Wait for it. After a crash, inspect its PID and external effects on the host; remove .pi-dispatch-setup.lock only when no setup operation remains.",
   "provider-shadowed": "Another credential source takes precedence; use the host's terminal to review it.",
   "provider-managed": "This provider uses a managed subscription. Review its connection on Connections.",
-  "key-present": "The provider key is already set; setup does not replace an existing credential.",
+  "provider-host-auth": "This provider requires its supported host authentication flow. Follow its setup guide; do not paste a general token here.",
+  "key-present": "This provider key is already set. Choose Replace key and preview its separate confirmation.",
+  "key-missing": "This provider key is not set. Choose Add key and preview it again.",
   "remote-runtime": "The runtime is not proven local to this console; use the worker host's terminal.",
   "proxy-refresh-required": "The proxy needs a replacement or rules refresh; use pi-dispatch up in the terminal.",
   "missing-receiver": "Install the receiver package on this host before starting its service.",
@@ -29,7 +33,7 @@ export const SETUP_REASON_WORDS = Object.freeze(Object.fromEntries(SETUP_REASONS
 const problem = (refusal, status = 409) => ({ refusal, status });
 const invalid = (text, partial = false) => ({ invalid: text, ...(partial ? { partial: true } : {}) });
 const configurationDrift = exposure => exposure?.reason === "configuration-drift" ? "The deployment configuration changed or conflicts with this console environment. Review the shell/deployment overrides and restart the console before previewing again. Nothing was started." : null;
-const stepOf = action => action.startsWith("setup-worker-") ? "worker" : action.startsWith("setup-receiver-") ? "forge" : action === "setup-egress-start" ? "egress" : action === "setup-provider-key" ? "provider" : action === "setup-doctor" ? "doctor" : "token";
+const stepOf = action => action.startsWith("setup-worker-") ? "worker" : action.startsWith("setup-receiver-") ? "forge" : action === "setup-egress-start" ? "egress" : isSetupKeyAction(action) ? "provider" : action === "setup-doctor" ? "doctor" : "token";
 const safeId = value => typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
 
 /** All dependencies are explicit; production supplies the fixed worker child and the real session/token readers. */
@@ -44,10 +48,13 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
     const current = setupDeploymentIdentity(deployment, { fs });
     return initialDeployment !== null && current !== null && JSON.stringify(current) === JSON.stringify(initialDeployment);
   };
-  function currentProviderKey() {
+  function currentProvider() {
     let selected;
     try { selected = typeof provider === "function" ? provider() : provider; } catch { return null; }
-    const key = canonicalKey(selected);
+    return typeof selected === "string" && Object.hasOwn(PROVIDER_KEY_NAMES, selected) ? selected : null;
+  }
+  function currentProviderKey() {
+    const key = canonicalKey(currentProvider());
     return KEY_SLOT(key) ? key : null;
   }
   const granted = () => enabled === true && !closed && sameDeployment();
@@ -72,6 +79,8 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
     entry.value?.fill(0);
     entry.value = null;
     held.delete(ref);
+    entry.stopListening?.();
+    entry.controller?.abort();
   }
   function endSession(id) {
     for (const [ref, entry] of held) if (entry.session.id === id) discard(ref);
@@ -87,7 +96,7 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
   timer?.unref?.();
   function hold(action, session, data, value) {
     sweep();
-    if (action === "setup-provider-key" && [...held.values()].some(e => e.action === action && e.session.id === session.id)) return problem("A private key preview is already pending. Cancel it before entering another key.");
+    if (isSetupKeyAction(action) && [...held.values()].some(e => isSetupKeyAction(e.action) && e.session.id === session.id)) return problem("A private key preview is already pending. Cancel it before entering another key.");
     if (held.size >= maxPrivate) return problem("Setup has reached its private preview limit. Confirm or cancel an existing preview before retrying.", 429);
     const ref = random(16).toString("hex");
     const expiresAt = now() + Math.min(ttlMs, SETUP_PRIVATE_TTL_MS);
@@ -98,10 +107,11 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
     const got = readTokensSnapshot({ path: tokensPath, fs });
     return got.file ? got : null;
   }
-  async function preview(action, body, { session } = {}) {
+  async function preview(action, body, { session, signal } = {}) {
     if (!authorized(session)) return problem(reason ?? "Local host setup is unavailable for this sign-in. Use the terminal commands.", 403);
     if (!SETUP_ACTION_NAMES.includes(action)) return problem("Unknown setup action.", 400);
     if (!operations.includes(action)) return problem("This operation is unavailable for the local deployment. Use its applicable terminal instructions.", 403);
+    if (signal?.aborted) return problem("The setup preview was disconnected. Enter its inputs again.");
     if (action === "setup-viewer-add" || action === "setup-viewer-revoke") {
       const name = body.name;
       if (typeof name !== "string" || !TOKEN_NAME_RE.test(name)) return problem("A viewer name uses 1 to 32 lowercase letters, digits, dots, underscores or hyphens.", 400);
@@ -116,29 +126,64 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
       }
       return { ...hold(action, session, { name, before, identity }), summary: [action === "setup-viewer-add" ? `Add viewer ${name}` : `Revoke viewer ${name}`, action === "setup-viewer-add" ? "Create a viewer entry and a one-use link valid for 60 seconds. It grants a session, not a retained token; another person needs a tunnel to this console. The host can issue another link later." : "End this viewer's sessions on their next request. A replaced entry will never be revoked by this Undo."] };
     }
-    let value;
-    if (action === "setup-provider-key") {
+    let value, selectedProvider, keyHold = null, keepKey = false;
+    if (isSetupKeyAction(action)) {
+      selectedProvider = body.provider;
+      if (!KEY_SLOT(canonicalKey(selectedProvider))) return problem("Select a provider with a supported canonical API key slot.", 400);
       value = body.value;
+      body.value = undefined;
       if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > SETUP_LIMITS.keyBytes || /[\u0000-\u0020\u007f]|\$|`/.test(value)) return problem("Enter an API key of at most 4 KiB without whitespace, controls or command references. Nothing was saved.", 400);
+      // Count, expire and cancel private input while its metadata-only host planner is still in flight.
+      keyHold = hold(action, session, { plan: null, exposure: null, controller: new AbortController() }, value);
+      value = undefined;
+      if (keyHold.refusal) return keyHold;
+      const ref = keyHold.payload.setupRef, abort = () => discard(ref);
+      signal?.addEventListener("abort", abort, { once: true });
+      held.get(ref).stopListening = () => signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) abort();
     }
-    let exposure = null;
-    if (STARTS_WORKER.has(action)) {
-      try { exposure = await readExposure(); } catch { exposure = null; }
-      if (exposure?.complete !== true || !Number.isSafeInteger(exposure.at) || !Array.isArray(exposure.lines)) return problem(configurationDrift(exposure) ?? "Current queue and cron exposure could not be read completely. Nothing was started; check Valkey and preview again.");
+    try {
+      if (keyHold && !held.has(keyHold.payload.setupRef)) return problem("The private setup preview was disconnected. Enter its inputs again.");
+      let exposure = null;
+      if (STARTS_WORKER.has(action)) {
+        try { exposure = await readExposure(); } catch { exposure = null; }
+        if (exposure?.complete !== true || !Number.isSafeInteger(exposure.at) || !Array.isArray(exposure.lines)) return problem(configurationDrift(exposure) ?? "Current queue and cron exposure could not be read completely. Nothing was started; check Valkey and preview again.");
+      }
+      let got;
+      try { got = await broker?.preview(action, isSetupKeyAction(action) ? { provider: selectedProvider } : {}, keyHold ? { signal: held.get(keyHold.payload.setupRef).controller.signal, isAuthorized: () => authorized(session) } : {}); }
+      catch {
+        if (keyHold && !held.has(keyHold.payload.setupRef)) return problem("The private key input expired or its sign-in ended while planning. Enter it again.");
+        return problem("The local setup planner could not be reached. Use its terminal command.", 503);
+      }
+      if (!authorized(session)) return problem("The setup sign-in ended while planning. Nothing was changed.", 403);
+      if (keyHold && (!held.has(keyHold.payload.setupRef) || keyHold.expiresAt <= now())) return problem("The private key input expired or was cancelled while planning. Enter it again.");
+      if (!got || got.state === "refused" || !got.plan && got.state !== "unchanged") return problem(SETUP_REASON_WORDS[got?.reason] ?? "The local setup planner could not return a valid plan.");
+      if (got.state === "unchanged") return { unchanged: SETUP_REASON_WORDS[got.reason] ?? "No host change is needed." };
+      if (isSetupKeyAction(action)) {
+        const canonical = canonicalKey(got.plan.provider);
+        const aliases = aliasesFor(canonical);
+        if (got.plan.provider !== selectedProvider || !KEY_SLOT(got.plan.key) || got.plan.key !== canonical || got.plan.mode !== (action === "setup-provider-key-replace" ? "replace" : "add") || (got.plan.mode === "replace") !== (got.plan.source === "deployment-env") || !Array.isArray(got.plan.aliases) || JSON.stringify([...got.plan.aliases].sort()) !== JSON.stringify(aliases) || !["deployment-env", "pi-api-key", "none"].includes(got.plan.source)) return problem("The selected provider, key slot or operation could not be verified. Nothing was saved.");
+      }
+      const stored = keyHold ?? hold(action, session, { plan: got.plan, exposure }, value);
+      if (stored.refusal) return stored;
+      if (keyHold) Object.assign(held.get(keyHold.payload.setupRef), { plan: got.plan, exposure });
+      const effects = got.plan.effects.map(effect => EFFECT_WORDS[effect]).filter(Boolean);
+      const keySummary = isSetupKeyAction(action) ? [
+        `${got.plan.mode === "replace" ? "Replace" : "Add"} ${got.plan.key} for ${got.plan.provider}; the value is never shown.`,
+        ...(got.plan.aliases.length > 1 ? [`Shared slot: ${got.plan.aliases.join(", ")}. Every listed provider uses this same deployment key.`] : []),
+        ...(got.plan.mode === "replace" ? ["The previous deployment key is overwritten and is not retained for Undo. Provider-side revocation remains a separate action."] : []),
+        ...(got.plan.source === "pi-api-key" ? ["Use the deployment key for future jobs instead of the current pi API-key fallback. The pi credential file is not changed."] : []),
+        "Default provider, models, roles, routing, allowlists and budgets stay unchanged. Saving makes no paid validation call.",
+        "A running worker needs a separately confirmed restart to load it. Keep the previous provider-side key valid until reload is verified, then revoke it at the provider if appropriate.",
+      ] : [];
+      const summary = [isSetupKeyAction(action) ? keySummary[0] : effects[0] ?? "Confirm host setup", `On ${got.plan.host}, as account ${got.plan.account}, through ${got.plan.manager}.`, ...effects.slice(1), ...(exposure?.lines ?? []), ...(action.endsWith("-stop") || action.endsWith("-restart") ? ["SIGTERM can interrupt in-flight work, including a job admitted after this preview. Stopping cannot undo money already spent."] : []), ...keySummary.slice(1)];
+      const ttlMs = stored.expiresAt - now();
+      if (ttlMs <= 0) return problem("The private setup preview expired while planning. Enter its inputs again.");
+      keepKey = true;
+      return { ...stored, ttlMs, summary };
+    } finally {
+      if (keyHold && !keepKey) keyHold.onDiscard();
     }
-    let got;
-    try { got = await broker?.preview(action, {}, {}); } catch { return problem("The local setup planner could not be reached. Use its terminal command.", 503); }
-    if (!got || got.state === "refused" || !got.plan && got.state !== "unchanged") return problem(SETUP_REASON_WORDS[got?.reason] ?? "The local setup planner could not return a valid plan.");
-    if (got.state === "unchanged") return { unchanged: SETUP_REASON_WORDS[got.reason] ?? "No host change is needed." };
-    if (action === "setup-provider-key") {
-      const canonical = canonicalKey(got.plan.provider);
-      if (!KEY_SLOT(got.plan.key) || got.plan.key !== canonical) return problem("This provider has no supported create-only API key slot.");
-    }
-    const stored = hold(action, session, { plan: got.plan, exposure }, value);
-    if (stored.refusal) return stored;
-    const effects = got.plan.effects.map(effect => EFFECT_WORDS[effect]).filter(Boolean);
-    const summary = [effects[0] ?? "Confirm host setup", `On ${got.plan.host}, as account ${got.plan.account}, through ${got.plan.manager}.`, ...effects.slice(1), ...(exposure?.lines ?? []), ...(action.endsWith("-stop") || action.endsWith("-restart") ? ["SIGTERM can interrupt in-flight work, including a job admitted after this preview. Stopping cannot undo money already spent."] : []), ...(action === "setup-provider-key" ? [`Write ${got.plan.key} once; the value is never shown. A running worker needs a separately confirmed restart to load it.`] : [])];
-    return { ...stored, summary };
   }
   async function apply(action, entry, { session } = {}) {
     const ref = entry.payload?.setupRef;
@@ -146,6 +191,7 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
     // Redemption burns private input even when the caller/action is wrong.
     held.delete(ref);
     if (!privateEntry) return invalid("The private setup preview expired or was cancelled. Enter its inputs and preview again.");
+    privateEntry.stopListening?.();
     const controller = new AbortController();
     let viewerLock;
     try {
@@ -178,14 +224,24 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
         if (privateEntry.exposure?.identity && exposure.identity !== privateEntry.exposure.identity) return invalid("Queue or cron exposure changed after preview. Nothing was started; preview it again.");
       }
       if (!authorized(session)) return invalid("The setup sign-in ended before dispatch. Nothing was started.");
-      const input = action === "setup-provider-key" ? { provider: privateEntry.plan.provider, key: privateEntry.plan.key, value: privateEntry.value.toString("utf8") } : {};
+      const input = isSetupKeyAction(action) ? { provider: privateEntry.plan.provider, key: privateEntry.plan.key, value: privateEntry.value.toString("utf8") } : {};
       const step = stepOf(action);
       const update = (state, stage, reason = null) => progress.set(step, { id: ref, step, state, stage, atMs: now(), ...(reason ? { reason } : {}), host: privateEntry.plan.workerName ?? privateEntry.plan.host });
       update("starting", "dispatched");
       let result;
-      try { result = await broker.apply(action, { expected: privateEntry.plan.digest, input }, { signal: controller.signal, isAuthorized: () => authorized(session) }); }
+      try {
+        let dispatched;
+        try { dispatched = broker.apply(action, { expected: privateEntry.plan.digest, input }, { signal: controller.signal, isAuthorized: () => authorized(session) }); }
+        finally {
+          // The fixed broker serializes stdin before yielding. Parent private input ends at dispatch,
+          // even when the child needs its whole bounded lifetime to finish the operation.
+          input.value = undefined;
+          privateEntry.value?.fill(0);
+          privateEntry.value = null;
+        }
+        result = await dispatched;
+      }
       catch { result = { state: "unknown", reason: "readback-unavailable" }; }
-      input.value = undefined;
       const state = result?.state;
       const why = SETUP_REASON_WORDS[result?.reason] ?? "The host operation has an unknown outcome. Inspect the host before retrying.";
       if (state === "applied" || state === "unchanged") {
@@ -214,7 +270,7 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
       else if (now() - entry.atMs >= SETUP_LIMITS.readinessMs) progress.set(step, { ...entry, state: "timeout", stage: "complete", reason: "readback-unavailable" });
     }
     const providerKey = currentProviderKey();
-    return { enabled: granted(), reason: granted() ? null : reason ?? "Host setup is not enabled on this console; use the terminal commands.", actions: granted() && role === "operator" ? SETUP_ACTION_NAMES.filter(name => operations.includes(name) && (name !== "setup-provider-key" || providerKey !== null)) : [], providerKey: role === "operator" ? providerKey : null, progress: [...progress.values()].map(({ host, ...safe }) => safe), allowlistCount: null };
+    return { enabled: granted(), reason: granted() ? null : reason ?? "Host setup is not enabled on this console; use the terminal commands.", actions: granted() && role === "operator" ? SETUP_ACTION_NAMES.filter(name => operations.includes(name)) : [], providerKey: role === "operator" ? providerKey : null, progress: [...progress.values()].map(({ host, ...safe }) => safe), allowlistCount: null };
   }
   return { preview, apply, state, discard, endSession,
     cancel({ sessionId, ref }) { const entry = held.get(ref); if (entry?.session.id === sessionId) discard(ref); },

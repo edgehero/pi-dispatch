@@ -10504,7 +10504,7 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   Windows, Linux system scope, ambiguous entries and foreign units refuse with the supported terminal path.
 - **Operation set**: version 1 permits install-and-start/start/stop/restart for the deployment's own worker or
   installed receiver user service, start-only of its missing/stopped egress proxy after runtime endpoint-locality
-  verification, explicit non-live/non-fixing `setupReadOnly` doctor without probe containers, create-only provider API-key assignment, and viewer add/revoke
+  verification, explicit non-live/non-fixing `setupReadOnly` doctor without probe containers, selected-provider API-key Add and separate Replace, and viewer add/revoke
   through the hardened token writer.
   The implementation's registration/protocol/policy enumerations must be checked both ways. No arbitrary command,
   executable, argument vector, path, environment, forge credential or operator-token mutation comes from HTTP.
@@ -10527,6 +10527,7 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   provider-only `input` (`provider`, `key`, `value`). Apply requires `expected`; only apply may carry a value.
   Results carry matching version/id/operation, closed `state`/`reason`, optional closed effects and a private plan:
   digest, component, user manager, local host/account, effects and optional canonical provider/key/workerName.
+  Key plans also bind Add/Replace mode, derived shared-slot aliases and safe credential-source metadata.
   The worker name is the validated effective `PI_WORKER_NAME`, so readiness binds the real heartbeat identity.
   Plan hashes can include secret-bearing source files and never enter HTTP, audit or shared state. CLI exit 2
   with a matching validated refused result remains a determinate refusal; other broken/nonzero replies are
@@ -10561,11 +10562,21 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 - **Private key state**: only canonical API-key names selected by the server are writable; reject bearer/OAuth
   slots and providers without a supported key slot. Limit UTF-8 values to 4 KiB and private entries to 32 per
   process, at most one per session, with at most 60 seconds lifetime. Reject at capacity rather than silently
-  evicting a preview the person is confirming. Keep value/expected inputs outside ordinary diff/flash/live/cache
+  evicting a preview the person is confirming. Reserve and start that lifetime at input receipt, including time
+  awaiting the metadata-only host planner; concurrency/capacity checks run before dispatch. A delayed plan cannot
+  renew the lifetime or recreate expired/disconnected/session-ended state. HTTP response abort disposes the
+  reservation, and an undelivered ticket is cancelled. Browser pagehide/sign-out/session end invalidates in-flight
+  replies; a restored cached document reloads before accepting new private actions. Keep value/expected inputs outside ordinary diff/flash/live/cache
   metadata. Private input comparison hashes never enter audit or public output. Expiry runs without new traffic;
   guarded Cancel, any redeem attempt, logout/revocation/role change and shutdown release the state. Best-effort
   buffer clearing is not a guarantee about JavaScript string copies. Reject controls/command references,
-  duplicate/nonblank assignments, shadowed sources and managed-binding conflicts. The writer rechecks owner,
+  duplicate assignments, wrong Add/Replace preconditions, shadowed sources and managed-binding conflicts. Add
+  requires an absent or decoded-empty canonical slot; Replace requires a decoded nonempty slot (including
+  whitespace), a separate operation/ticket and
+  danger confirmation. Provider selection is explicit and never retargeted when the default changes. Changing
+  selection/mode disposes pending browser/server input; late preview replies are cancelled. Both operations share
+  the one-key-per-session limit. Only the entered value is written; no previous value is retained for Undo.
+  Shared canonical slots are derived from the pinned mapping and named before confirmation. The writer rechecks owner,
   mode, real target and bytes before exclusive temporary-file creation, then repeats the expected-input check
   immediately before atomic rename; unsafe or intervening inputs change nothing. Browser submission clears the
   field/transient value references and bypasses ordinary retained request bodies and Preview again replay; a
@@ -12101,6 +12112,8 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-01 (#774, shared auth metadata) | Subscription adapter descriptors move to an SDK-free metadata leaf, mirrored byte-identically into the runner and added to its mirror guard. Policy parsing moves without changing validation or schemas. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, adapter transformation/output/source pins and container credential capabilities UNCHANGED, checked. Private setup lifetime now starts at input receipt, including a pending planner; abort, navigation and sign-in changes cannot restart it or mint a late usable ticket. |
+| 2026-11-01 (#774, provider management) | `INT-CONSOLE-SETUP-HOST` AMENDED: separate selected-provider Add/Replace operations and private mode/alias/source metadata; one pending key across both operations, unchanged private lifetime and descriptor-bound expected-input rename. Add requires absent/blank, Replace requires nonblank, and default changes never retarget a selected key. Public state/SSE/audit schemas, token files, subscription policy/store schemas, refresh ownership, job credential forwarding, trigger/pointer/run-record/container contracts and deploy mirrors UNCHANGED, checked. |
 | 2026-11-01 (#774, implementation) | `INT-CONSOLE-SETUP-HOST`, `INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` IMPLEMENTED after #783. Closed v1 requests/results, bounded fixed child, trusted-entry recheck, effective worker identity, expected-input key writer, exact-incarnation viewer code and private lifecycle are wired through existing guards. Typed exit-2 refusals retain their reason; uncertain effects are never retried. Operator key-slot metadata follows the same verified source precedence as the child, correcting stale-startup and shell-only labels. Hash-only token format, generation, audit-chain schema, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, trigger/pointer/run-record/container/auth-store contracts and deploy mirrors UNCHANGED, checked. |
 | 2026-10-31 (#774, prerequisite specs) | NEW `INT-CONSOLE-SETUP-HOST`, DECIDED, NOT IMPLEMENTED: local process grant, fixed versioned child protocol, bounded lifecycle, revalidated effect/exposure plans, private key cancellation/expiry, session-only viewer link and typed applied/partial/unknown outcomes. `INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` AMENDED narrowly for setup writers and safe intent/result reporting. Hash-only token shape, modes, roles, revocation, audit-chain format, public `INT-CONSOLE-STATE-API`, ordinary `INT-CONSOLE-EVENT-STREAM` framing, trigger/pointer/run-record/container contracts, auth stores and deploy mirrors UNCHANGED, checked. |
 | 2026-10-31 (#781) | NEW `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE` and `INT-SUBSCRIPTION-QUOTA-KEY`; `INT-SDK-SESSION-OPTIONS`, `INT-CONTAINER-JOB-INPUTS`, `INT-PI-PACKAGES-FILE-CONTRACT`, `INT-DEFER-REASON-KEY` and the runner/history cost-refusal vocabulary AMENDED through those explicit contracts. `INT-SUBSCRIPTIONS-FILE-CONTRACT` corrects its obsolete blanket OAuth rationale; analytics-only enforcement UNCHANGED, checked. Model cooldown storage, ordinary container mounts, queue data, recovery checkpoint model, sandbox credentials, session promotion, forged-output rejection, model ceilings and the ordinary reservation/settlement ledgers UNCHANGED, checked. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |

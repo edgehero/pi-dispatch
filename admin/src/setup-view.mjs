@@ -1,3 +1,4 @@
+import { providerInventoryView } from "./provider-inventory.mjs";
 /** #774: safe setup facts and evidence-derived progress. No host execution belongs in this reader. */
 import { firstRunState, FIRST_RUN_STATES, doctorHostsOf, doctorStale } from "./doctor-view.mjs";
 import { SETUP_OPERATIONS, SETUP_REASONS } from "@edgehero/pi-dispatch/setup-contract";
@@ -41,7 +42,7 @@ export function setupFacts(raw, { role = "viewer" } = {}) {
     enabled, reasonCode, reason: enabled ? null : reasonCode === null ? SETUP_UNAVAILABLE : SETUP_REASON_TEXT[reasonCode], actions,
     providerKey: role === "operator" && /^[A-Z][A-Z0-9_]{0,79}$/.test(raw?.providerKey ?? "") ? raw.providerKey : null,
     allowlistCount: Number.isSafeInteger(raw?.allowlistCount) && raw.allowlistCount >= 0 ? raw.allowlistCount : null,
-    progress,
+    progress, providerKeys: providerInventoryView(raw?.providerKeys),
   };
 }
 

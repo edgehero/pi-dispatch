@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { deploymentServiceEnv } from "./service-env.mjs";
 import { ENV_WRITER_FS, planEnvEdit, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
 import { planServiceSetup, runService } from "./service.mjs";
-import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
+import { apiKeyVariable, needsHostAuthentication, nonApiKeyKind } from "./provider-key.mjs";
 import { resolveSetupWorkerEntry } from "./setup-host-entry.mjs";
 import { SETUP_LIMITS, SETUP_VERSION, validSetupRequest } from "./setup-contract.mjs";
 import { acquireSetupLock } from "./setup-lock.mjs";
@@ -58,7 +58,7 @@ function privateEnv(dir, { fs, uid }) {
 }
 
 async function providerPlan(request, ctx, envRead) {
-	const keys = ["PI_PROVIDER", "PI_AUTH_CONNECTIONS_FILE", "PI_SETTINGS_FILE", "PI_AUTH_FROM_PI"];
+	const keys = ["PI_PROVIDER", "PI_AUTH_CONNECTIONS_FILE", "PI_SETTINGS_FILE", "PI_AUTH_FROM_PI", "PI_CODING_AGENT_DIR"];
 	const declared = deploymentServiceEnv({ env: {}, dir: ctx.dir, keys, fs: ctx.fs, uid: ctx.uid, platform: ctx.platform });
 	if (declared.untrusted || declared.unreadable || declared.hazardSkipped?.length || declared.unread?.length) return failure("env-unsafe");
 	const configured = { ...Object.fromEntries(keys.filter((key) => typeof ctx.env[key] === "string").map((key) => [key, ctx.env[key]])), ...declared.env };
@@ -68,11 +68,20 @@ async function providerPlan(request, ctx, envRead) {
 	const loaded = readOverlay(settingsPath, { fs: { readFileSync: () => { if (settings.bytes === null) throw Object.assign(new Error(), { code: "ENOENT" }); return String(settings.bytes); } } });
 	if (loaded.invalid) return failure("env-unsafe");
 	let provider;
-	try { provider = loaded.overlay.provider ?? providerFrom(configured); } catch { return failure("provider-unsupported"); }
-	if (request.input?.provider !== undefined && request.input.provider !== provider) return failure("provider-unsupported");
+	try { provider = request.input?.provider ?? loaded.overlay.provider ?? providerFrom(configured); } catch { return failure("provider-unsupported"); }
+	const providers = await ctx.providerNames();
+	if (!providers.includes(provider)) return failure("provider-unsupported");
+	if (needsHostAuthentication(provider)) return failure("provider-host-auth");
 	const candidates = await ctx.providerCandidates(provider);
 	const key = apiKeyVariable(candidates);
 	if (!key || nonApiKeyKind(key) !== null || (request.input?.key !== undefined && request.input.key !== key)) return failure("provider-unsupported");
+	const aliases = [];
+	for (const name of providers) {
+		const candidate = apiKeyVariable(await ctx.providerCandidates(name));
+		if (candidate === key && nonApiKeyKind(candidate) === null) aliases.push(name);
+	}
+	aliases.sort();
+	const mode = request.operation === "setup-provider-key-replace" ? "replace" : "add";
 	// A managed policy is deliberately not changed here. Its precedence belongs to the reviewed auth path.
 	const sources = [settings];
 	if (configured.PI_AUTH_CONNECTIONS_FILE) {
@@ -87,19 +96,40 @@ async function providerPlan(request, ctx, envRead) {
 	}
 	if (candidates.some((name) => typeof ctx.env[name] === "string" && ctx.env[name] !== "")) return failure("provider-shadowed");
 	const present = deploymentServiceEnv({ env: {}, dir: ctx.dir, keys: candidates, fs: ctx.fs, uid: ctx.uid, platform: ctx.platform });
-	if (present.untrusted || present.hazardSkipped?.length || present.unread?.length) return failure("env-unsafe");
+	if (present.untrusted || present.unreadable || present.hazardSkipped?.length || present.unread?.length) return failure("env-unsafe");
 	if (candidates.some((name) => name !== key && Boolean(present.env[name]))) return failure("provider-shadowed");
-	if (typeof present.env[key] === "string" && present.env[key].trim() !== "") return failure("key-present");
 	if (String(envRead.bytes).split("\n").filter((line) => new RegExp(`^[ \\t]*(?:export[ \\t]+)?${key}[ \\t]*=`).test(line)).length > 1) return failure("env-unsafe");
-	const plan = planEnvEdit(envRead.bytes, envRead.path, key, "setup-preview-placeholder", { platform: ctx.platform });
-	if (plan.error || !plan.changed) return failure("env-unsafe");
-	return { component: "provider", provider, key, effects: ["write-provider-key"], inputs: { env: envRead.digest, identity: envRead.identity, config: configured, sources: sources.map(({ path, digest }) => ({ path, digest })) }, sources, envRead };
+	const assigned = typeof present.env[key] === "string" && present.env[key] !== "";
+	if (mode === "add" && assigned) return failure("key-present");
+	if (mode === "replace" && !assigned) return failure("key-missing");
+	let source = assigned ? "deployment-env" : "none";
+	if (!assigned && configured.PI_AUTH_FROM_PI !== "0") {
+		// Only identify the declaration being superseded. Its value never leaves this child,
+		// and this does not claim the provider has accepted or can spend with that credential.
+		const agentDir = resolve(ctx.dir, configured.PI_CODING_AGENT_DIR || join(ctx.serviceDeps.home, ".pi", "agent"));
+		const login = sourceSnapshot(join(agentDir, "auth.json"), ctx);
+		if (login.refusal) return login;
+		if (login.bytes !== null) {
+			let auth;
+			try { auth = JSON.parse(String(login.bytes)); } catch { return failure("env-unsafe"); }
+			if (!auth || typeof auth !== "object" || Array.isArray(auth)) return failure("env-unsafe");
+			const entry = Object.hasOwn(auth, provider) ? auth[provider] : null;
+			if (entry?.type === "api_key" && typeof entry.key === "string" && entry.key.trim() !== "") source = "pi-api-key";
+		}
+		sources.push(login);
+	}
+	// A single loader-proven empty quoted assignment needs the overwrite transform too:
+	// the generic never-clobber transform deliberately preserves even an explicit "".
+	const overwrite = mode === "replace" || typeof present.env[key] === "string";
+	const plan = planEnvEdit(envRead.bytes, envRead.path, key, "setup-preview-placeholder", { platform: ctx.platform, overwrite });
+	if (plan.error || (mode === "add" && !plan.changed)) return failure("env-unsafe");
+	return { component: "provider", provider, key, mode, aliases, source, overwrite, effects: ["write-provider-key"], inputs: { provider, key, mode, aliases, source, env: envRead.digest, identity: envRead.identity, config: configured, sources: sources.map(({ path, digest }) => ({ path, digest })) }, sources, envRead };
 }
 
 async function makePlan(request, ctx) {
 	const envRead = privateEnv(ctx.dir, ctx);
 	if (envRead.refusal) return envRead;
-	if (request.operation === "setup-provider-key") return providerPlan(request, ctx, envRead);
+	if (["setup-provider-key", "setup-provider-key-replace"].includes(request.operation)) return providerPlan(request, ctx, envRead);
 	if (request.operation === "setup-egress-start") {
 		const { planSetupEgress } = await import("./setup-egress.mjs");
 		const got = await planSetupEgress(ctx);
@@ -134,7 +164,7 @@ export async function runSetupHost(request, deps = {}) {
 	const entry = (deps.resolveEntry ?? resolveSetupWorkerEntry)();
 	if (!entry?.entry) return answer("refused", "unsafe-entry");
 	const serviceDeps = { env, cwd: dir, platform, euid: uid, fs, home: deps.home ?? homedir(), moduleDir: dirname(entry.entry), ...(deps.serviceDeps ?? {}) };
-	const ctx = { dir, fs, uid, platform, env, serviceDeps, servicePlan: deps.servicePlan ?? planServiceSetup, runService: deps.runService ?? runService, ...(deps.egressDeps ?? {}), providerCandidates: deps.providerCandidates ?? (async (provider) => (await import("./env-allowlist.mjs")).providerKeyCandidates(provider)) };
+	const ctx = { dir, fs, uid, platform, env, serviceDeps, servicePlan: deps.servicePlan ?? planServiceSetup, runService: deps.runService ?? runService, ...(deps.egressDeps ?? {}), providerCandidates: deps.providerCandidates ?? (async (provider) => (await import("./env-allowlist.mjs")).providerKeyCandidates(provider)), providerNames: deps.providerNames ?? (async () => (await import("./env-allowlist.mjs")).piProviders()) };
 	let lock;
 	try {
 		if (request.phase === "apply") {
@@ -147,23 +177,35 @@ export async function runSetupHost(request, deps = {}) {
 		if (workerRead.untrusted || workerRead.unreadable || workerRead.unread?.length || workerRead.hazardSkipped?.length) return answer("refused", "unsafe-deployment");
 		const registeredName = workerName({ ...env, ...workerRead.env });
 		const digest = hash({ operation: request.operation, entry: entry.entry, uid, dir, registeredName, inputs: plan.inputs });
-		const publicPlan = { digest, component: plan.component, manager: platform === "linux" ? "systemd" : "launchd", host: String((deps.hostname ?? hostname)()).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64), workerName: registeredName, account: String(deps.account ?? userInfo().username).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64), effects: plan.effects, ...(plan.key ? { key: plan.key, provider: plan.provider } : {}) };
+		const publicPlan = { digest, component: plan.component, manager: platform === "linux" ? "systemd" : "launchd", host: String((deps.hostname ?? hostname)()).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64), workerName: registeredName, account: String(deps.account ?? userInfo().username).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64), effects: plan.effects, ...(plan.key ? { key: plan.key, provider: plan.provider, mode: plan.mode, aliases: plan.aliases, source: plan.source } : {}) };
 		if (request.phase === "plan") return answer("planned", "ready", { plan: publicPlan });
 		if (request.phase === "status") return answer(plan.service?.planned.active ? "applied" : "unchanged", "ready", { plan: publicPlan });
 		if (request.expected !== digest) return answer("refused", "plan-stale");
 		if (plan.component === "provider") {
 			const value = request.input?.value;
-			if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > SETUP_LIMITS.keyBytes || /[\u0000-\u001f\u007f$`]/.test(value) || value.startsWith("!") || value.includes("sk-ant-oat")) return answer("refused", "key-invalid");
+			if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > SETUP_LIMITS.keyBytes || /[\u0000-\u0020\u007f$`]/.test(value) || value.startsWith("!") || value.includes("sk-ant-oat")) return answer("refused", "key-invalid");
 			const before = plan.envRead;
-			if (planEnvEdit(before.bytes, before.path, plan.key, value, { platform }).error) return answer("refused", "key-invalid");
-			const guardedFs = { ...ENV_WRITER_FS, ...fs, renameSync(from, to) {
+			const overwrite = plan.overwrite;
+			const edit = planEnvEdit(before.bytes, before.path, plan.key, value, { platform, overwrite });
+			if (edit.error) return answer("refused", "key-invalid");
+			const expectedInputs = () => {
 				const current = privateEnv(dir, ctx);
 				if (current.refusal || hash(current.identity) !== hash(before.identity) || current.digest !== before.digest || plan.sources.some((source) => { const current = sourceSnapshot(source.path, ctx); return current.refusal || current.digest !== source.digest; })) throw Object.assign(new Error("stale setup input"), { code: "SETUP_STALE" });
+			};
+			const guardedFs = { ...ENV_WRITER_FS, ...fs, readFileSync(path, ...args) {
+				if (path !== before.path) return fs.readFileSync(path, ...args);
+				// The writer must transform the exact judged bytes. Rereading this pathname
+				// could copy a transient competing edit even if the old file is restored later.
+				expectedInputs();
+				return Buffer.from(before.bytes);
+			}, renameSync(from, to) {
+				expectedInputs();
 				fs.renameSync(from, to);
 			} };
-			try { updateEnvFile(before.path, plan.key, value, { fs: guardedFs, platform, narrow: true }); }
+			let saved;
+			try { saved = updateEnvFile(before.path, plan.key, value, { fs: guardedFs, platform, narrow: true, overwrite }); }
 			catch (e) { return answer(e?.code === "SETUP_STALE" ? "refused" : "unknown", e?.code === "SETUP_STALE" ? "plan-stale" : "process-failed"); }
-			return answer("applied", "ready", { effects: plan.effects });
+			return answer(saved.changed ? "applied" : "unchanged", "ready", { effects: saved.changed ? plan.effects : [] });
 		}
 		if (plan.component === "doctor") {
 			const doctor = deps.runDoctor ?? (await import("./doctor.mjs")).runDoctor;

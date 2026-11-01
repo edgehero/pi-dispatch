@@ -1095,7 +1095,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
   (f)'s no-code-on-a-page rule has one future exception: a newly created viewer's one-time link in its initiating
   operator's confirmation response and private result DOM, never SSR, shared flash, live/cache/state data or logs.
   Durable tokens stay absent from every browser response. A write-only provider key is admitted only to private,
-  short-lived session/action state and the create-only host writer, never a diff, audit value or echoed response.
+  short-lived session/action state and the canonical-slot Add/Replace host writer, never a diff, audit value or echoed response.
   This amendment qualifies the blanket transport statements below without relaxing Host, Origin, JSON, body-size,
   session-person, revocation, read-only or role guards. Every new mutation is `person`, refused to viewers/agents
   before private dependencies. CSP and exclusion of deployment secrets from the console environment are
@@ -3367,7 +3367,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     actions (`cancel-active`, `cancel-held`, `cancel-all-held`, `cancel-queued`, `remove-failed`, `remove-all-failed`,
     `fleet-pause`, `queue-pause`, `trigger-delete`, `pause-window-delete`, `limit-delete`, `project-delete`,
     `secret-profile-remove`, `secret-bundle-remove`, `board-freeze`, `board-clear`, `board-revert`, `sandbox-end`, `setup-worker-stop`, `setup-worker-restart`, `setup-receiver-stop`,
-    `setup-receiver-restart`, `setup-viewer-revoke`) and never beside `paid`, and the bar's ring and its Confirm's
+    `setup-receiver-restart`, `setup-viewer-revoke`, `setup-provider-key-replace`) and never beside `paid`, and the bar's ring and its Confirm's
     fill follow (paid, danger or plain). `confirmLabel` says what the button does: a paid act's most ("Retry for up to
     $2.00", "Re-run (reserve
     unknown)", "<verb>, 1 job slot" with no dollar cap, and "Answer (zero-rated)" for an act that cannot spend, since
@@ -7057,14 +7057,29 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
     queued/manual/cron exposure is timestamped and complete or the start refuses; no setup reservation is made.
     Worker stop/restart states the possible interruption, including future arrivals. Unsafe proxy mutation and
     unprovable ownership remain terminal-only. OpenShell never offers the Docker/native-Podman proxy action.
-  - **Provider key**: meaningful tests show the confirmed key reaches only the intended create-only `.env` slot
-    and that a stale file, duplicate/nonblank assignment, bad mode/owner/symlink, unsupported key, shadowing
+  - **Provider keys**: Connections permanently inventories configured canonical slots, including unused keys,
+    the effective default and validated trigger/model-role/allowlist/managed references. Incomplete sources stay
+    unknown; presence does not establish validity or a running worker's reload. An explicit provider selector
+    permits Add into an absent or decoded-empty slot (including a quoted empty assignment) and a separate
+    danger-confirmed Replace into any decoded nonempty slot, including whitespace. Neither
+    operation changes default provider, model, role, allowlist, egress or routing settings. Shared canonical slots
+    name every affected provider. Meaningful tests show the confirmed key reaches only its selected `.env` slot
+    and that a stale file, duplicate assignment, wrong Add/Replace precondition, bad mode/owner/symlink, unsupported key, shadowing
     source, control/command reference or oversized value changes nothing. A selected managed subscription cannot
     silently fall back to that key. Verify actual credential-source precedence and the running worker's separate
     reload need. Leak canaries cover values and secret-derived digests in logs, audit, HTML, previews, errors,
     child argv and public/live responses. Proactive expiry, guarded Cancel, wrong-session redemption, revocation,
     role change and shutdown dispose private state even without a later request; clocks are injected. The browser
     clears the key field/transient request and cannot replay it through Preview again; retry requires re-entry.
+    Changing provider or mode clears the input and cancels private preview state, including late responses.
+    Input awaiting a delayed planner already counts toward the private limits and original lifetime. Concurrent
+    Add/Replace, response abort, pagehide, cached-page restoration and sign-in loss cannot retain input outside
+    those bounds, mint a late usable ticket or restart its expiry.
+    Official provider-specific key-creation guides include Anthropic, OpenAI, Gemini, OpenRouter and DeepSeek.
+    Subscription sign-in is separate host guidance, with configured commands and unconfigured prerequisites;
+    OpenAI remote callback recovery and Claude community compatibility versus Claude Code's own token flow are
+    explicit. Guidance grants no browser OAuth operation, raw-token import or paid validation. Plain pi API-key
+    fallback replacement explains the source switch; a managed binding always refuses API-key takeover.
   - **Viewer invitation**: browser input cannot select another role. Real concurrent consumption admits the link
     once within 60 seconds; expiry/replay/revocation fail. Codes bind the exact created token incarnation, viewer
     role and file generation at redemption; rotation, role change, same-name recreation and generation changes
@@ -7983,6 +7998,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-01 (#774, provider management) | `REQ-BROWSER-FIRST-RUN-SETUP` and `REQ-CONSOLE-SECURITY` AMENDED: permanent multi-provider inventory and explicit selected-slot Add/Replace, with danger confirmation for replacement, preserved provider/model defaults, derived aliases, source-switch/reload explanations and private cancellation across selection changes. Fixed official provider help includes OpenRouter/DeepSeek; subscription help remains host-only and distinguishes Claude community compatibility from Claude Code tokens. Admission, spend, container isolation, roles, CSP, no-secret projections and subscription credential custody UNCHANGED, checked. |
 | 2026-11-01 (#774, implementation) | `REQ-BROWSER-FIRST-RUN-SETUP`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-DEPLOYMENT-BOOTSTRAP` IMPLEMENTED after #783: explicit host grant, live setup, bounded person-only actions, private create-only API keys/viewer links, durable bootstrap and valid wizard webhook choices. Destructive-action enumeration matches the registered rules. Admission, budget reservations, trigger semantics, roles, existing model tools, CSP and side-effect-free GET contracts UNCHANGED, checked. Acceptance includes counterexamples, full integration suite, clock/temp/reporting guards, source-card comparisons and production-CSP interactions. |
 | 2026-10-31 (#774, prerequisite specs) | NEW `REQ-BROWSER-FIRST-RUN-SETUP`, DECIDED, NOT IMPLEMENTED; `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-DEPLOYMENT-BOOTSTRAP` AMENDED with bounded setup authority and future behavior/counterexample acceptance. Private key and viewer-code exceptions do not relax role, origin, ticket, audit or CSP guards. Full role/theme/width/accessibility/no-script/real-CSP verification is required before Built. Existing action/tool inventories, destructive-action enumeration, bootstrap unset semantics and ordinary job admission UNCHANGED, checked; implementation follows only after this specs PR lands. |
 | 2026-10-31 (#781) | NEW `REQ-SUBSCRIPTION-AUTHENTICATION`; `REQ-MODEL-POLICY`, `REQ-GLOBAL-PI-OVERLAY`, `REQ-OPERATOR-CONSOLE-SCREENS` and `REQ-TOKEN-ACCOUNTING-AND-CAPS` gain the explicit subscription path through that requirement. `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-MODEL-PROPOSALS-AND-CANARY`, `REQ-RUN-RECOVERY`, `REQ-RESURRECTABLE-SANDBOX` and the existing forge author gates UNCHANGED, checked: no browser authentication write, no model-callable credential control, no paid canary exemption, no account rotation or cross-model replay permission, and no sandbox credentials. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |

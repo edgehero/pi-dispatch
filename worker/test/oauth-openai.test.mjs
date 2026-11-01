@@ -1,11 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIAuthAdapter, parseOpenAIToken, verifyOpenAIIdentity, verifyPinnedOpenAIOAuth } from "../src/oauth-openai.mjs";
+import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { authorizationCallback, createOpenAIAuthAdapter, OPENAI_LOGIN_INSTRUCTIONS, OPENAI_REDIRECT_URI, parseOpenAIToken, verifyOpenAIIdentity, verifyPinnedOpenAIOAuth } from "../src/oauth-openai.mjs";
 import { makeAuthFetch, readAuthJson, loadNativeAnthropicAuth, verifyNativeAnthropicAuth } from "../src/community-auth-helper.mjs";
 
 const instant = 1_800_000_000_000;
 const now = () => instant;
 const token = () => ({ access_token: "access", refresh_token: "refresh", expires_in: 3600, scope: "openid chatgpt.tokens.use.direct", id_token: "identity" });
+
+function pinnedCallback() {
+	const path = fileURLToPath(new URL("../auth/oauth/openai-chatgpt.js", import.meta.resolve("@earendil-works/pi-ai/providers/openai")));
+	const source = readFileSync(path, "utf8");
+	const host = /const REDIRECT_URI = `http:\/\/([^:]+):\$\{CALLBACK_PORT\}\$\{CALLBACK_PATH\}`;/.exec(source)?.[1];
+	const port = /const CALLBACK_PORT = (\d+);/.exec(source)?.[1];
+	const route = /const CALLBACK_PATH = "([^"]+)";/.exec(source)?.[1];
+	assert.ok(host && port && route, "derive the callback from the installed pinned flow, not another handwritten URL");
+	return `http://${host}:${port}${route}`;
+}
 
 test("official token parsing requires direct permission and preserves precise lifetime/refresh metadata", () => {
 	assert.equal(verifyPinnedOpenAIOAuth(), true);
@@ -21,13 +34,16 @@ test("new sign-in validates identity, while returning sign-in reuses client and 
 	const requests = [];
 	let authorization;
 	let identityNonce;
-	const adapter = createOpenAIAuthAdapter({ now, fetch: async (url, options) => { requests.push({ url, options }); return Response.json(token()); }, callback: async ({ url, state }) => { authorization = new URL(url); return new URL(`http://localhost:1455/auth/callback?code=code&state=${state}&client_id=issued-client`); }, verifyIdentity: async ({ nonce, clientId }) => { identityNonce = nonce; assert.equal(clientId, "issued-client"); return { subject: "private-subject" }; } });
+	const adapter = createOpenAIAuthAdapter({ now, fetch: async (url, options) => { requests.push({ url, options }); return Response.json(token()); }, callback: async ({ url, state }) => { authorization = new URL(url); return new URL(`${pinnedCallback()}?code=code&state=${state}&client_id=issued-client`); }, verifyIdentity: async ({ nonce, clientId }) => { identityNonce = nonce; assert.equal(clientId, "issued-client"); return { subject: "private-subject" }; } });
 	const interaction = { notify() {}, prompt() {} };
 	const first = await adapter.login({ interaction, previous: { registration: { hostId: "installation-id" } } });
 	assert.equal(authorization.searchParams.get("client_id"), "dynamic_agent_client");
 	assert.equal(authorization.searchParams.get("agent_name_hint"), "pi-dispatch");
 	assert.equal(identityNonce, authorization.searchParams.get("nonce"));
 	assert.equal(requests[0].options.body.get("resource"), "https://api.openai.com/v1");
+	assert.equal(OPENAI_REDIRECT_URI, pinnedCallback());
+	assert.equal(authorization.searchParams.get("redirect_uri"), pinnedCallback());
+	assert.equal(requests[0].options.body.get("redirect_uri"), pinnedCallback());
 	assert.equal(first.registration.subject, "private-subject");
 	await adapter.login({ interaction, previous: first });
 	assert.equal(authorization.searchParams.get("client_id"), "issued-client");
@@ -38,8 +54,55 @@ test("new sign-in validates identity, while returning sign-in reuses client and 
 });
 
 test("returning sign-in cannot silently change the connected account", async () => {
-	const adapter = createOpenAIAuthAdapter({ now, fetch: async () => Response.json(token()), callback: async ({ state }) => new URL(`http://localhost:1455/auth/callback?state=${state}&code=code`), verifyIdentity: async () => ({ subject: "another-subject" }) });
+	const adapter = createOpenAIAuthAdapter({ now, fetch: async () => Response.json(token()), callback: async ({ state }) => new URL(`${pinnedCallback()}?state=${state}&code=code`), verifyIdentity: async () => ({ subject: "another-subject" }) });
 	await assert.rejects(adapter.login({ interaction: { notify() {}, prompt() {} }, previous: { registration: { clientId: "saved", hostId: "host", subject: "original" } } }), /auth-account-changed/);
+});
+
+function callbackServer() {
+	let handler;
+	const replies = [], calls = [];
+	const server = new EventEmitter();
+	server.listen = (port, host, ready) => { calls.push(["listen", port, host]); server.listening = true; ready(); };
+	server.closeAllConnections = () => calls.push(["close-connections"]);
+	server.close = (done) => { calls.push(["close"]); server.listening = false; done(); };
+	return { calls, replies, serverFactory: fn => { handler = fn; return server; }, send(url) {
+		const reply = { status: null, body: null, headers: null };
+		handler({ url }, { writeHead(status, headers) { reply.status = status; reply.headers = headers; }, end(body) { reply.body = body; } });
+		replies.push(reply);
+		return reply;
+	} };
+}
+
+test("the real default callback accepts the pinned IP route and rejects malformed or foreign callbacks without ending sign-in", async () => {
+	const host = callbackServer();
+	let promptSignal, notice;
+	const state = "expected-state";
+	const received = await authorizationCallback({ url: "https://auth.openai.com/oauth/authorize", state, serverFactory: host.serverFactory, interaction: {
+		notify(event) {
+			notice = event;
+			for (const url of ["http://[", `http://localhost:1455/auth/callback?state=${state}&code=secret-code`, `https://127.0.0.1:1455/auth/callback?state=${state}&code=secret-code`, `http://127.0.0.1:1456/auth/callback?state=${state}&code=secret-code`, "/wrong?state=expected-state&code=secret-code", "/auth/callback?state=wrong&code=secret-code", "/auth/callback?state=expected-state", "/auth/callback?state=expected-state&state=other&code=secret-code", "/auth/callback?state=expected-state&code=one&code=two"]) assert.equal(host.send(url).status, 400, url);
+			assert.equal(host.send("/auth/callback?state=expected-state&code=accepted-code&client_id=issued-client").status, 200);
+		},
+		prompt(question) { promptSignal = question.signal; return new Promise(() => {}); },
+	} });
+	assert.equal(`${received.origin}${received.pathname}`, pinnedCallback());
+	assert.equal(received.searchParams.get("code"), "accepted-code");
+	assert.deepEqual(host.calls, [["listen", 1455, "127.0.0.1"], ["close-connections"], ["close"]]);
+	assert.equal(notice.instructions, OPENAI_LOGIN_INSTRUCTIONS);
+	assert.equal(promptSignal.aborted, true);
+	assert.equal(host.replies.at(-1).headers["Cache-Control"], "no-store");
+	assert.equal(JSON.stringify(host.replies).includes("secret-code"), false);
+	assert.equal(JSON.stringify(host.replies).includes("accepted-code"), false);
+});
+
+test("manual callback uses the same pinned origin/state/code checks and closes its local listener on every outcome", async () => {
+	for (const value of [`${pinnedCallback()}?state=expected&code=manual-code`, "not a URL", "http://localhost:1455/auth/callback?state=expected&code=manual-code", `${pinnedCallback()}?state=wrong&code=manual-code`, `${pinnedCallback()}?state=expected`]) {
+		const host = callbackServer();
+		const pending = authorizationCallback({ url: "https://auth.openai.com/oauth/authorize", state: "expected", serverFactory: host.serverFactory, interaction: { notify() {}, prompt: async () => value } });
+		if (value === `${pinnedCallback()}?state=expected&code=manual-code`) assert.equal((await pending).searchParams.get("code"), "manual-code");
+		else await assert.rejects(pending, /auth-callback-invalid/);
+		assert.deepEqual(host.calls.at(-1), ["close"]);
+	}
 });
 
 test("refresh uses issued client/resource and rotating replacement, never requests scope", async () => {

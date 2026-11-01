@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import { test } from "node:test";
-import { addToken, readTokensFile, rotateToken, endAllSessions } from "@edgehero/pi-dispatch/console-tokens";
+import { addToken, readTokensFile, rotateToken, revokeToken, endAllSessions } from "@edgehero/pi-dispatch/console-tokens";
 import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { makeSetupActions, SETUP_ACTION_NAMES } from "../src/setup-actions.mjs";
+import { makeSetupActions, SETUP_ACTION_NAMES, isSetupKeyAction } from "../src/setup-actions.mjs";
+import { PROVIDER_KEY_NAMES } from "../src/provider-key-names.mjs";
+import { apiKeyVariable } from "@edgehero/pi-dispatch/provider-key";
 import { actionNamed, previewAction, confirmAction, cancelAction, readSetupExposure } from "../src/console/actions.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { consumeLoginCode, invitationMatches, loginCodesDir, mintLoginCode } from "../src/console/login-codes.mjs";
@@ -15,6 +18,21 @@ import { acquireSetupLock } from "@edgehero/pi-dispatch/setup-lock";
 
 const T0 = Date.UTC(2026, 10, 1, 0, 0, 0);
 const KEY = "setup-provider-private-canary-739c";
+const keySlot = provider => apiKeyVariable(PROVIDER_KEY_NAMES[provider] ?? []);
+const keyPlan = (provider, action = "setup-provider-key", extra = {}) => ({ digest: "d".repeat(64), component: "provider", host: "host1", account: "account", manager: "systemd", effects: ["write-provider-key"], provider, key: keySlot(provider), mode: action === "setup-provider-key-replace" ? "replace" : "add", aliases: Object.keys(PROVIDER_KEY_NAMES).filter(name => keySlot(name) === keySlot(provider)).sort(), source: action === "setup-provider-key-replace" ? "deployment-env" : "none", ...extra });
+function delayedPlanner() {
+  let release, started;
+  const gate = new Promise(resolve => { release = resolve; });
+  const seen = new Promise(resolve => { started = resolve; });
+  const calls = [];
+  return { calls, started: seen, release, broker: { async preview(action, input, { signal } = {}) {
+    const call = { action, input: structuredClone(input), signal };
+    calls.push(call);
+    started(call);
+    await gate;
+    return { state: "planned", plan: keyPlan(input.provider, action) };
+  } } };
+}
 function fixture(t, options = {}) {
   let at = T0, sweep;
   const now = () => at;
@@ -28,8 +46,8 @@ function fixture(t, options = {}) {
   const session = sessions.peek(id, readTokens().file);
   const calls = [];
   const broker = {
-    async preview(action) { calls.push(["plan", action]); return { state: "planned", plan: { digest: "d".repeat(64), component: "worker", host: "host1", account: "account", manager: "systemd", effects: [action === "setup-provider-key" ? "write-provider-key" : action === "setup-worker-stop" ? "stop-worker" : "start-worker"], provider: "anthropic", key: "ANTHROPIC_API_KEY" } }; },
-    async apply(action, entry) { calls.push(["apply", action, structuredClone(entry)]); if (action === "setup-provider-key") fs.writeFileSync(join(dir, ".env"), `ANTHROPIC_API_KEY=${entry.input.value}\n`, { mode: 0o600 }); return { state: "applied", reason: "ready" }; },
+    async preview(action, input) { calls.push(["plan", action, input]); return { state: "planned", plan: isSetupKeyAction(action) ? keyPlan(input.provider, action) : { digest: "d".repeat(64), component: "worker", host: "host1", account: "account", manager: "systemd", effects: [action === "setup-worker-stop" ? "stop-worker" : "start-worker"] } }; },
+    async apply(action, entry) { calls.push(["apply", action, structuredClone(entry)]); if (isSetupKeyAction(action)) fs.writeFileSync(join(dir, ".env"), `${entry.input.key}=${entry.input.value}\n`, { mode: 0o600 }); return { state: "applied", reason: "ready" }; },
     ...options.broker,
   };
   const service = makeSetupActions({ broker, enabled: true, deployment: dir, tokensPath: path, provider: "anthropic", sessions, readTokens, now, interval: fn => { sweep = fn; return { unref() {} }; }, clearIntervalFn() {}, readExposure: async () => ({ complete: true, at: now(), lines: ["No queued jobs; zero cron triggers. Future arrivals remain possible."], identity: "known" }), ...options, broker });
@@ -38,7 +56,7 @@ function fixture(t, options = {}) {
   const deps = { now, fs, tickets: makeConfirmTickets({ now }), sessions: { setFlash: (_id, change) => flash.push(structuredClone(change)) }, actionDeps: { setup: service }, audit: { append(row) { if (deps.failAudit) throw Object.assign(new Error("full"), { code: "ENOSPC" }); audit.push(structuredClone(row)); return { seq: audit.length }; } }, log() {} };
   function ctx(body, as = session) { return { body, session: as, deps, route: { path: "/api/act/setup-test" }, actor: () => ({ name: as.name, role: as.role, session: null }), record: row => audit.push(row), json: (status, body) => ({ status, body }) }; }
   return { service, now, path, dir, calls, session, sessions, readTokens, deps, audit, flash, advance: ms => { at += ms; }, tick: () => sweep(), ctx,
-    preview: (name, body = {}, as = session) => previewAction(ctx(body, as), actionNamed(name)),
+    preview: (name, body = {}, as = session) => previewAction(ctx(isSetupKeyAction(name) && !Object.hasOwn(body, "provider") ? { provider: typeof options.provider === "function" ? options.provider() : options.provider ?? "anthropic", ...body } : body, as), actionNamed(name)),
     confirm: (name, ticket, as = session) => confirmAction(ctx({ ticket }, as), actionNamed(name)),
   };
 }
@@ -66,6 +84,32 @@ test("confirmed API key reaches only its host writer; ordinary tickets, previews
   assert.equal((await f.confirm("setup-provider-key", p.body.ticket)).status, 409, "replay has no second effect");
 });
 
+test("redeeming a key drops the parent's submitted value before a delayed host apply returns", async t => {
+  let input, entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = fixture(t, { broker: { async apply(_action, entry) {
+    input = entry.input;
+    assert.equal(input.value, KEY, "the transport receives the confirmed value before the parent drops it");
+    entered();
+    await gate;
+    return { state: "applied", reason: "ready" };
+  } } });
+  t.after(release);
+  const preview = await f.preview("setup-provider-key", { provider: "deepseek", value: KEY });
+  assert.equal(preview.status, 200);
+  const pending = f.confirm("setup-provider-key", preview.body.ticket);
+  try {
+    await started;
+    assert.equal(input.value, undefined, "waiting on the child must not retain the plaintext in its parent input object");
+    assert.equal(input.provider, "deepseek");
+    assert.equal(input.key, "DEEPSEEK_API_KEY");
+    assert.equal(f.service.privateSize(), 0, "redemption releases the private ticket before the child finishes");
+    assert.doesNotMatch(JSON.stringify([f.audit, f.flash]), new RegExp(KEY));
+  } finally { release(); }
+  assert.equal((await pending).status, 200);
+});
+
 test("audit failure, cancellation, wrong-session redemption and proactive expiry all dispose the private key without applying", async t => {
   for (const mode of ["audit", "cancel", "foreign", "expiry", "revocation", "role", "shutdown"]) {
     const f = fixture(t);
@@ -91,8 +135,150 @@ test("key preview capacity never evicts another pending key, and unsupported inp
   assert.equal((await f.preview("setup-provider-key", { value: "another" })).status, 409);
   assert.equal(f.service.privateSize(), 1);
   for (const value of ["", "a b", "a\nsecret", "$(id)", "x".repeat(4097)]) assert.equal((await f.preview("setup-provider-key", { value })).status, 400);
-  assert.equal(f.calls.filter(row => row[0] === "plan").length, 2, "capacity is judged after non-mutating planning; malformed values are refused before any plan");
+  assert.equal(f.calls.filter(row => row[0] === "plan").length, 1, "capacity and malformed values refuse before another child is dispatched");
   assert.equal((await f.confirm("setup-provider-key", first.body.ticket)).status, 200, "the first preview survives capacity refusal");
+});
+
+test("a planning key already consumes the shared Add/Replace session and process limits before another child can start", async t => {
+  const delayed = delayedPlanner();
+  t.after(delayed.release);
+  const f = fixture(t, { maxPrivate: 1, broker: delayed.broker });
+  const body = { provider: "openai", value: KEY };
+  const pending = previewAction(f.ctx(body), actionNamed("setup-provider-key"));
+  const child = await delayed.started;
+  assert.deepEqual(child.input, { provider: "openai" }, "the metadata planner never receives entered credentials");
+  assert.equal(body.value, undefined, "the HTTP input no longer retains the value while planning");
+  assert.equal(f.service.privateSize(), 1, "bounded private state begins at input receipt, not planner completion");
+  assert.equal((await f.preview("setup-provider-key-replace", { provider: "deepseek", value: "second-private-value" })).status, 409);
+  const file = f.readTokens().file;
+  const second = f.sessions.create({ name: "operator", role: "operator", tokenHash: file.tokens[0].sha256, generation: file.generation });
+  const otherSession = f.sessions.peek(second.id, file);
+  assert.equal((await f.preview("setup-provider-key", { provider: "deepseek", value: "another-session-private-value" }, otherSession)).status, 429);
+  assert.equal(delayed.calls.length, 1, "neither cross-action nor cross-session capacity refusal invokes the broker");
+  delayed.release();
+  const preview = await pending;
+  assert.equal(preview.status, 200);
+  assert.equal(f.service.privateSize(), 1, "a refused concurrent request cannot dispose the original entry");
+  assert.equal((await f.confirm("setup-provider-key", preview.body.ticket)).status, 200);
+  assert.equal(fs.readFileSync(join(f.dir, ".env"), "utf8"), `OPENAI_API_KEY=${KEY}\n`);
+  assert.doesNotMatch(JSON.stringify([preview, f.audit, f.flash]), new RegExp(KEY));
+});
+
+test("planning time consumes the original private lifetime and never grants a fresh minute when the planner returns", async t => {
+  const delayed = delayedPlanner();
+  t.after(delayed.release);
+  const f = fixture(t, { broker: delayed.broker });
+  const pending = f.preview("setup-provider-key-replace", { provider: "deepseek", value: KEY });
+  await delayed.started;
+  f.advance(45_000);
+  delayed.release();
+  const preview = await pending;
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.expiresAt, T0 + 60_000, "expiresAt stays bound to first receipt");
+  assert.match(preview.body.html, /data-expires="15000"/, "the displayed countdown uses only the remaining lifetime");
+  f.advance(15_000);
+  f.tick();
+  assert.equal(f.service.privateSize(), 0);
+  assert.equal((await f.confirm("setup-provider-key-replace", preview.body.ticket)).status, 409);
+  assert.equal(f.calls.filter(call => call[0] === "apply").length, 0);
+});
+
+test("expiry, ended sessions, revocation, role loss and shutdown abort a planning key and cannot resurrect it from a late reply", async t => {
+  for (const mode of ["expiry", "session-end", "generation", "revoke", "role", "shutdown"]) {
+    const delayed = delayedPlanner();
+    t.after(delayed.release);
+    const f = fixture(t, { broker: delayed.broker });
+    const body = { provider: "openrouter", value: KEY };
+    const pending = previewAction(f.ctx(body), actionNamed("setup-provider-key"));
+    const child = await delayed.started;
+    assert.ok(child.signal instanceof AbortSignal, mode);
+    assert.equal(child.signal.aborted, false, mode);
+    assert.equal(body.value, undefined, mode);
+    if (mode === "expiry") { f.advance(60_000); f.tick(); }
+    if (mode === "session-end") f.service.endSession(f.session.id);
+    if (mode === "generation") { endAllSessions({ path: f.path }); f.tick(); }
+    if (mode === "revoke") { revokeToken({ path: f.path, name: "operator" }); f.tick(); }
+    if (mode === "role") { const file = f.readTokens().file; file.tokens[0].role = "viewer"; fs.writeFileSync(f.path, JSON.stringify(file)); f.tick(); }
+    if (mode === "shutdown") f.service.close();
+    assert.equal(child.signal.aborted, true, mode);
+    assert.equal(f.service.privateSize(), 0, mode);
+    delayed.release();
+    const refused = await pending;
+    assert.ok(refused.status >= 400, mode);
+    assert.equal(refused.body.ticket, undefined, mode);
+    assert.equal(f.service.privateSize(), 0, mode);
+    assert.equal(f.calls.filter(call => call[0] === "apply").length, 0, mode);
+    assert.equal(fs.existsSync(join(f.dir, ".env")), false, mode);
+    assert.doesNotMatch(JSON.stringify([refused, f.audit, f.flash, f.service.state("operator", {})]), new RegExp(KEY), mode);
+  }
+});
+
+test("a disconnected preview response aborts and disposes its planning key before a late planner reply", async t => {
+  const delayed = delayedPlanner();
+  t.after(delayed.release);
+  const f = fixture(t, { broker: delayed.broker });
+  const res = Object.assign(new EventEmitter(), { writableFinished: false, destroyed: false });
+  const ctx = { ...f.ctx({ provider: "openai", value: KEY }), res };
+  const pending = previewAction(ctx, actionNamed("setup-provider-key"));
+  const child = await delayed.started;
+  assert.equal(f.service.privateSize(), 1);
+  res.destroyed = true;
+  res.emit("close");
+  assert.equal(child.signal.aborted, true, "response disconnect reaches the running metadata child");
+  assert.equal(f.service.privateSize(), 0, "disconnected input is disposed without waiting for its planner");
+  delayed.release();
+  const response = await pending;
+  assert.equal(response?.body?.ticket, undefined, "a late plan cannot create an undelivered private ticket");
+  assert.equal(f.service.privateSize(), 0);
+  assert.equal(f.calls.filter(call => call[0] === "apply").length, 0);
+  assert.doesNotMatch(JSON.stringify([response, f.audit, f.flash]), new RegExp(KEY));
+});
+
+test("a completed preview response removes its close hook and keeps only the delivered single-use key ticket", async t => {
+  const delayed = delayedPlanner();
+  t.after(delayed.release);
+  const f = fixture(t, { broker: delayed.broker });
+  const res = Object.assign(new EventEmitter(), { writableFinished: false, destroyed: false });
+  const ctx = { ...f.ctx({ provider: "deepseek", value: KEY }), res, json(status, body) {
+    res.writableFinished = true;
+    res.emit("finish");
+    return { status, body };
+  } };
+  const pending = previewAction(ctx, actionNamed("setup-provider-key"));
+  await delayed.started;
+  delayed.release();
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.equal(res.listenerCount("close"), 0, "delivered responses retain no abandoned-preview listener");
+  res.destroyed = true;
+  res.emit("close");
+  assert.equal(f.service.privateSize(), 1, "ordinary connection close after finish does not cancel a delivered ticket");
+  assert.equal((await f.confirm("setup-provider-key", response.body.ticket)).status, 200);
+  assert.equal(fs.readFileSync(join(f.dir, ".env"), "utf8"), `DEEPSEEK_API_KEY=${KEY}\n`);
+  assert.equal(f.service.privateSize(), 0);
+});
+
+test("a failed, refused, unchanged or mismatched key plan releases its early reservation instead of blocking a later preview", async t => {
+  for (const result of ["throw", "refused", "unchanged", "mismatch"]) {
+    let attempt = 0;
+    const f = fixture(t, { maxPrivate: 1, broker: { async preview(action, input) {
+      if (++attempt === 1) {
+        if (result === "throw") throw Object.assign(new Error("planner unavailable"), { code: "EPIPE" });
+        if (result === "refused") return { state: "refused", reason: "provider-shadowed" };
+        if (result === "unchanged") return { state: "unchanged", reason: "ready" };
+        return { state: "planned", plan: keyPlan("anthropic", action) };
+      }
+      return { state: "planned", plan: keyPlan(input.provider, action) };
+    } } });
+    const first = await f.preview("setup-provider-key", { provider: "openai", value: KEY });
+    assert.equal(first.body.ticket, undefined, result);
+    assert.equal(f.service.privateSize(), 0, result);
+    const next = await f.preview("setup-provider-key-replace", { provider: "deepseek", value: "next-private-value" });
+    assert.equal(next.status, 200, result);
+    assert.equal(f.service.privateSize(), 1, result);
+    assert.equal(f.calls.filter(call => call[0] === "apply").length, 0, result);
+    assert.doesNotMatch(JSON.stringify([first, next, f.audit, f.flash]), new RegExp(`${KEY}|next-private-value`), result);
+  }
 });
 
 test("viewers and agents cannot preview a setup action or read its private dependencies", async t => {
@@ -248,8 +434,8 @@ test("unsupported runtime operations are refused even by an operator before any 
 });
 
 test("canonical key slots follow the worker's pinned provider key selector, including non-API suffix names", async t => {
-  for (const [provider, key] of [["huggingface", "HF_TOKEN"], ["github-copilot", "COPILOT_GITHUB_TOKEN"]]) {
-    const f = fixture(t, { provider, broker: { async preview() { return { state: "planned", plan: { digest: "a".repeat(64), component: "provider", host: "host1", account: "account", manager: "systemd", effects: ["write-provider-key"], provider, key } }; }, async apply(_action, entry) { assert.deepEqual(entry.input, { provider, key, value: KEY }); return { state: "applied", reason: "ready" }; } } });
+  for (const [provider, key] of [["huggingface", "HF_TOKEN"]]) {
+    const f = fixture(t, { provider, broker: { async preview() { return { state: "planned", plan: keyPlan(provider) }; }, async apply(_action, entry) { assert.deepEqual(entry.input, { provider, key, value: KEY }); return { state: "applied", reason: "ready" }; } } });
     assert.equal(f.service.state("operator", {}).providerKey, key);
     assert.ok(f.service.state("operator", {}).actions.includes("setup-provider-key"));
     const p = await f.preview("setup-provider-key", { value: KEY });
@@ -288,10 +474,10 @@ test("a host-held deployment setup lock prevents viewer token and invitation wri
   assert.ok(f.readTokens().file.tokens.some(entry => entry.name === "observer" && entry.role === "viewer"));
 });
 
-test("provider configuration changes refresh the canonical form slot and the child receives no stale provider hint", async t => {
+test("provider configuration changes refresh the default hint while each key preview binds its explicit provider", async t => {
   let provider = "anthropic";
   const f = fixture(t, { provider: () => provider, broker: {
-    async preview(action, input) { assert.deepEqual(input, {}); return { state: "planned", plan: { digest: "b".repeat(64), component: "provider", host: "host1", account: "account", manager: "systemd", effects: ["write-provider-key"], provider, key: provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY" } }; },
+    async preview(action, input) { assert.deepEqual(input, { provider: "openai" }); return { state: "planned", plan: keyPlan(input.provider) }; },
     async apply(_action, entry) { assert.deepEqual(entry.input, { provider: "openai", key: "OPENAI_API_KEY", value: KEY }); return { state: "applied", reason: "ready" }; },
   } });
   assert.equal(f.service.state("operator", {}).providerKey, "ANTHROPIC_API_KEY");
@@ -299,11 +485,103 @@ test("provider configuration changes refresh the canonical form slot and the chi
   assert.equal(f.service.state("operator", {}).providerKey, "OPENAI_API_KEY");
   const p = await f.preview("setup-provider-key", { value: KEY });
   assert.equal(p.status, 200);
-  assert.match(p.body.summary.join(" "), /Write OPENAI_API_KEY once/);
+  assert.match(p.body.summary.join(" "), /Add OPENAI_API_KEY for openai/);
+  provider = "deepseek";
   assert.equal((await f.confirm("setup-provider-key", p.body.ticket)).status, 200);
   for (provider of ["unsupported-provider", "constructor", "__proto__"]) {
     assert.equal(f.service.state("operator", {}).providerKey, null);
-    assert.equal(f.service.state("operator", {}).actions.includes("setup-provider-key"), false);
+    assert.equal(f.service.state("operator", {}).actions.includes("setup-provider-key"), true, "an unsupported default must not hide management for other providers");
+  }
+});
+
+test("an additional provider stays selected through default changes and key values never enter public metadata", async t => {
+  let provider = "anthropic";
+  const f = fixture(t, { provider: () => provider });
+  const p = await f.preview("setup-provider-key", { provider: "openrouter", value: KEY });
+  assert.equal(p.status, 200);
+  assert.match(p.body.summary.join(" "), /Add OPENROUTER_API_KEY for openrouter/);
+  assert.match(p.body.summary.join(" "), /Default provider, models, roles, routing, allowlists and budgets stay unchanged/);
+  provider = "deepseek";
+  assert.equal((await f.confirm("setup-provider-key", p.body.ticket)).status, 200);
+  const applied = f.calls.find(call => call[0] === "apply");
+  assert.deepEqual(applied[2].input, { provider: "openrouter", key: "OPENROUTER_API_KEY", value: KEY });
+  assert.doesNotMatch(JSON.stringify([p, f.audit, f.flash, f.service.state("operator", {})]), new RegExp(KEY));
+  assert.doesNotMatch(JSON.stringify(p.body), /"(?:digest|aliases|setupRef|value)":/);
+});
+
+test("Replace has a danger confirmation and names the shared slot without retaining the old key", async t => {
+  const f = fixture(t);
+  const old = "old-private-key-must-not-be-returned";
+  fs.writeFileSync(join(f.dir, ".env"), `MOONSHOT_API_KEY=${old}\n`, { mode: 0o600 });
+  const p = await f.preview("setup-provider-key-replace", { provider: "moonshotai-cn", value: KEY });
+  assert.equal(p.status, 200);
+  assert.equal(p.body.danger, true);
+  assert.equal(p.body.confirmLabel, "Replace key");
+  assert.match(p.body.summary.join(" "), /moonshotai, moonshotai-cn/);
+  assert.match(p.body.summary.join(" "), /not retained for Undo/);
+  assert.doesNotMatch(JSON.stringify(p), new RegExp(`${KEY}|${old}`));
+  assert.equal((await f.confirm("setup-provider-key-replace", p.body.ticket)).status, 200);
+  assert.equal(f.calls.find(call => call[0] === "apply")[2].input.provider, "moonshotai-cn");
+  assert.doesNotMatch(JSON.stringify([f.audit, f.flash]), new RegExp(`${KEY}|${old}`));
+});
+
+test("Add and Replace share one private key slot per session, including cross-action redemption", async t => {
+  const f = fixture(t);
+  const p = await f.preview("setup-provider-key", { provider: "openai", value: KEY });
+  assert.equal((await f.preview("setup-provider-key-replace", { provider: "anthropic", value: "replacement" })).status, 409);
+  assert.equal((await f.confirm("setup-provider-key-replace", p.body.ticket)).status, 409);
+  assert.equal((await f.confirm("setup-provider-key", p.body.ticket)).status, 409);
+  assert.equal(f.calls.filter(call => call[0] === "apply").length, 0);
+  const next = await f.preview("setup-provider-key-replace", { provider: "anthropic", value: "replacement" });
+  assert.equal(next.status, 200, "a failed redemption disposes the previous private input");
+});
+
+test("a private plan cannot swap provider, mode, canonical slot, shared aliases or source", async t => {
+  for (const change of [{ provider: "anthropic", key: "ANTHROPIC_API_KEY" }, { mode: "replace" }, { key: "OPENAI_AUTH_TOKEN" }, { aliases: ["openai", "anthropic"] }, { source: "browser-token" }, { source: "deployment-env" }]) {
+    const f = fixture(t, { broker: { async preview() { return { state: "planned", plan: keyPlan("openai", "setup-provider-key", change) }; } } });
+    const p = await f.preview("setup-provider-key", { provider: "openai", value: KEY });
+    assert.equal(p.status, 409, JSON.stringify(change));
+    assert.equal(f.calls.length, 0);
+    assert.doesNotMatch(JSON.stringify(p), new RegExp(KEY));
+  }
+});
+
+test("key management requires an explicit eligible provider even when the current default is valid", async t => {
+  const f = fixture(t);
+  for (const action of ["setup-provider-key", "setup-provider-key-replace"]) {
+    for (const provider of [undefined, null, "amazon-bedrock", "github-copilot", "google-vertex", "openai-codex", "constructor", "__proto__"]) {
+      const p = await previewAction(f.ctx({ provider, value: KEY }), actionNamed(action));
+      assert.equal(p.status, 400, `${action} ${provider}`);
+    }
+    const missing = await previewAction(f.ctx({ value: KEY }), actionNamed(action));
+    assert.equal(missing.status, 400, `${action}: no default-provider inference`);
+  }
+  assert.equal(f.calls.length, 0, "unsupported inputs never reach the private host broker");
+});
+
+test("pi API-key fallback source switching is explicit and does not request a queue scan", async t => {
+  const f = fixture(t, { readExposure: () => { throw new Error("key management must not require queue access"); }, broker: { async preview() { return { state: "planned", plan: keyPlan("openai", "setup-provider-key", { source: "pi-api-key" }) }; } } });
+  const p = await f.preview("setup-provider-key", { provider: "openai", value: KEY });
+  assert.equal(p.status, 200);
+  assert.match(p.body.summary.join(" "), /Use the deployment key.*pi API-key fallback/);
+  assert.match(p.body.summary.join(" "), /pi credential file is not changed/);
+  assert.equal(p.body.danger, false);
+});
+
+test("Replace private input expires, cancels and refuses foreign sessions without effects or leaked values", async t => {
+  for (const mode of ["expiry", "cancel", "foreign", "audit", "revoke"]) {
+    const f = fixture(t);
+    const action = "setup-provider-key-replace";
+    const p = await f.preview(action, { provider: "deepseek", value: KEY });
+    assert.equal(p.status, 200, mode);
+    if (mode === "expiry") f.advance(60_001);
+    if (mode === "cancel") assert.equal(cancelAction(f.ctx({ ticket: p.body.ticket }), actionNamed(action)).status, 200);
+    if (mode === "audit") f.deps.failAudit = true;
+    if (mode === "revoke") revokeToken({ path: f.path, name: "operator" });
+    const result = await f.confirm(action, p.body.ticket, mode === "foreign" ? { ...f.session, id: "foreign" } : f.session);
+    assert.ok(result.status >= 400, mode);
+    assert.equal(f.calls.filter(call => call[0] === "apply").length, 0, mode);
+    assert.doesNotMatch(JSON.stringify([result, f.audit, f.flash]), new RegExp(KEY));
   }
 });
 

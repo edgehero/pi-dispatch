@@ -53,11 +53,11 @@ def choice(on, icon, title, text, extra=""):
 KEY = step(6, "failed", "failed", "Not yet", "Provider key",
     "Doctor found no usable API key or explicitly bound host-owned managed subscription.",
     f"""<p class="su-small">An ordinary pi OAuth login is not unattended service authentication. No fake Use action changes a published credential.</p>
-<div class="su-ch"><span class="su-ch__h">{ic('key', 'ic ic--sm')}<b>Paste an API key</b></span>
-<span class="su-ch__s">Written once to an empty canonical key slot in .env. A running worker needs a separate restart.</span>
-<label>ANTHROPIC_API_KEY API key<input class="input input--code" type="password" autocomplete="off"></label>
-<div class="su-act">{btn('Preview saving the API key', 'primary', 'key', sm=False)}</div></div>
-<p class="su-small"><a class="link" href="#">Review provider connections</a></p>""")
+<div class="su-ch"><span class="su-ch__h">{ic('key', 'ic ic--sm')}<b>Keys for several providers</b></span>
+<span class="su-ch__s">Add or replace a write-only API key on Connections. Choose the provider explicitly; its default stays the same.</span>
+<div class="su-act"><a class="btn btn--primary" href="#p-provider-keys">Manage provider API keys</a></div></div>
+<p class="su-small">Provider guides show where to find or create keys at Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek.</p>
+<p class="su-small"><a class="link" href="#">Review subscription authentication</a> for host-owned subscription sign-in instead.</p>""")
 
 RECIPES = [("tag", "Fix issues labelled pi:fix", "a label on GitHub runs flow fix"),
            ("clock", "Tidy a folder every night", "a schedule runs flow tidy in a folder"),
@@ -87,7 +87,7 @@ SETUP_MAIN = card("Getting ready",
 
 SETUP_SIDE = f"""<div class="stack">
 {card('Ready', done_rows(), sub='3 of 8', id_="p-setup-ready")}
-{card('The one command', '<p class="muted su-p">After the exact durable installation in the Quickstart.</p>' + cmd('pi-dispatch up --console') + '<p class="muted su-p su-p2">Or from pi, which opens this page for you:</p>' + cmd('/dispatch setup'), id_="p-setup-start")}
+{card('The one command', '<p class="muted su-p">After the exact durable installation in the Quickstart.</p>' + cmd('pi-dispatch up --console') + '<p class="muted su-p su-p2">Or from pi, which opens this page for you:</p>' + cmd('/dispatch setup') + '<p class="su-small"><a class="link" href="#p-provider-keys">Manage provider API keys</a>, also after setup is ready.</p>', id_="p-setup-start")}
 </div>"""
 
 SETUP_CSS = """
@@ -163,7 +163,7 @@ First-run setup in the browser. A durable host bootstrap starts the console and 
 - **Ready** (side). Ready steps fold to a row each. The deployment is shown by its last folder, Valkey without its address and sign-in by role alone. Add a viewer previews a name and returns a private viewer-only link after Confirm, usable once within 60 seconds.
 - **Start the worker.** The preview names the service manager, local account, exact units and dependencies, queued manual jobs, armed schedules and reserve estimates. A start permits future consumption too. Stop and restart have a new preview; they can interrupt jobs and cannot undo spending.
 - **Start the egress proxy.** Only start a deployment-owned missing/stopped local Docker or native-Podman proxy. Review the allowlist links to Connections with its actual count. Unsafe replacement, shared ownership and OpenShell gateway changes remain terminal steps.
-- **Provider key.** Doctor judges existing API-key auth or a bound managed subscription. An ordinary pi OAuth login is not offered as service auth. A permitted empty canonical API-key slot accepts a write-only key through private 60-second state. The preview shows safe metadata, never the value. A running worker needs a separate restart.
+- **Provider key.** Doctor judges existing API-key auth or a bound managed subscription. An ordinary pi OAuth login is not offered as service auth. Connections permanently lists provider key sources and offers explicit Add or Replace with a new write-only value through private 60-second state. Provider guides link to the official place to find or create a key. The default provider never changes with a key write; a running worker needs a separate restart. The management link remains available after this step is Ready.
 - **Add a first trigger.** Three editable recipes: a GitHub label fix, nightly local-folder tidy and comment answer. The ordinary trigger planner previews the exact added lines; missing folder, skill or forge prerequisites stay actionable. Start from scratch remains available.
 - **Connect GitHub (optional).** Published status, Connections and the complete `setup github --webhook-url <receiver URL>` or `--no-webhook` terminal path. Browser App creation remains open under OQ-054; no placeholder claims that credentials or a host login change in the browser.
 - **In a terminal instead.** Native disclosures show the valid command, its placeholders and recovery instructions. Doctor is a separately previewed ordinary non-live, non-fixing action.

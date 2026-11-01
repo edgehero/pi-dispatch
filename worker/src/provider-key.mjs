@@ -40,6 +40,13 @@ export const OAUTH_KEY_RE = /_OAUTH_TOKEN$/;
 // bless the next provider's bearer variable. Pinned against pi in worker/test/provider-key.test.mjs.
 export const BEARER_KEY_RE = /_AUTH_TOKEN$/;
 
+// These browser setup routes require host authentication guidance even when pi exposes
+// a token-shaped environment slot. This policy does not change runtime credential loading.
+export const HOST_AUTH_PROVIDERS = Object.freeze(["amazon-bedrock", "github-copilot", "google-vertex", "openai-codex"]);
+export function needsHostAuthentication(provider) {
+	return HOST_AUTH_PROVIDERS.includes(provider);
+}
+
 /**
  * Why a variable pi reads is not an API key, or null when it is one. The two answers need different
  * advice, so the caller is told which: an OAuth token is a subscription login that expires, a bearer token

@@ -557,6 +557,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
           try {
             const connection = await m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid });
             if (Array.isArray(connection?.egress?.allowlist)) state.allowlistCount = connection.egress.allowlist.length + connection.egress.more;
+            if (connection?.providerKeys) state.providerKeys = connection.providerKeys;
           } catch { /* unknown remains unknown */ }
         }
         return state;

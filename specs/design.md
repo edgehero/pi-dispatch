@@ -2473,18 +2473,32 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   are authorized by this action. Ordinary doctor can run probe containers even without `--live`, so setup
   explicitly withholds sweeps, egress canaries and container-based forge authentication probes, publishing the
   named warning rather than claiming those probes passed. Terminal doctor behavior is UNCHANGED, checked.
-- **An API key through the browser**: the precisely scoped reversal of "printed, never written" is a write-only,
-  create-only API-key field, not a pi dialog. The permitted key name comes from the canonical API-key mapping
+- **API keys through the browser**: the precisely scoped reversal of "printed, never written" is a write-only
+  canonical-slot editor, not a pi dialog. A permanent Provider API keys card on Connections and compact Setup link
+  remain available after readiness. Inventory includes configured unused slots and validated effective provider
+  references; unreadable sources remain unknown. Presence never asserts validity or reload. Add and Replace are
+  distinct person-only operations: Add requires an absent or decoded-empty slot; Replace requires a decoded
+  nonempty slot (including whitespace) and danger
+  confirmation. Explicit provider/mode selection binds the private plan; changing either cancels it and clears
+  the field. Neither operation changes provider/model defaults, roles, routing, allowlists, budgets or egress.
+  The permitted key name comes from the canonical API-key mapping
   verified against pinned pi, not every bearer/OAuth candidate the provider might accept. A private secret ticket
   binds session, action and expected `.env` identity/content, expires proactively, and disposes its payload on
   cancellation, redemption, session end or shutdown. The preview and audit contain only safe metadata, not the
-  key, request body or a digest derived from its value. The host writer refuses nonblank existing assignments,
+  key, request body or a digest derived from its value. The preview names shared-slot aliases, any switch from pi
+  API-key fallback, replacement loss and separate reload needs. The host writer refuses a mismatched Add/Replace precondition,
   unsafe owners/modes/symlinks, changed input, command references, controls, oversize input and a shadowing key
   source. No automatic service restart follows a write: an existing worker's need to reload is explicit and
   restart has its own exposure preview. Cleanup drops references and clears buffers where possible; it does not
   promise erasure of every JavaScript string copy. Existing API-key auth and explicitly bound managed subscriptions
   use doctor's `provider.key` result without a fake "Use" mutation. Plain pi OAuth is not offered as unattended
   service auth. A managed binding cannot silently be replaced by writing an ineffective environment key.
+  A separately reviewed static help catalogue supplies fixed official HTTPS key links and short creation guides,
+  including OpenRouter and DeepSeek; credential-variable support alone does not imply a key-creation workflow.
+  Subscription help uses host-owned sign-in, prerequisites and remote callback guidance, never a token-paste field
+  or new browser authorization action. Existing Claude adapters are labelled community compatibility; Claude
+  Code's own `setup-token` is distinguished from pi-dispatch's login and current provider restrictions are linked.
+  The host credential store, refresh ownership and selected-provider-only job forwarding are UNCHANGED, checked.
 - **Tokens and invitations**: host bootstrap may create an operator hash through the existing hardened writer,
   discard the durable plaintext and print only a 60-second setup link after the console answers. It names the
   created/reused operator and exact host `link`/`rotate` recovery, so losing a link is actionable. Existing tokens
@@ -16236,6 +16250,13 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 ## DES-HOST-OWNED-SUBSCRIPTION-AUTH
 
+- **OpenAI callback correction (#774)**: the host adapter's authorization, code exchange and callback
+  validation use `http://127.0.0.1:1455/auth/callback`, matching the actual pinned pi 1.4.0 artifact and current
+  OpenAI registration contract. A whole-file pin alone did not hold the local mirror's former `localhost`
+  spelling to that contract; behavioral tests now bind both requests and reject a substituted origin, state or
+  callback path. Remote host instructions forward port 1455 or use the guarded final-callback fallback.
+  Browser-console authority, connection policy/store schemas, refresh ownership and job snapshots are
+  UNCHANGED, checked. Offline protocol tests do not claim a live provider sign-in was performed.
 - **Decision (#781)**: `PI_AUTH_CONNECTIONS_FILE` enables a separate reviewed connection policy, with one
   explicit binding per supported provider and a declared owner host. It does not repurpose `subscriptions.json`
   or import host OAuth credentials implicitly. The host owns login, refresh and logout; jobs receive only
@@ -16292,6 +16313,8 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-01 (#774, subscription guide review) | `DES-HOST-OWNED-SUBSCRIPTION-AUTH` corrects the local OpenAI callback mirror to pinned pi's explicit `127.0.0.1` redirect, with authorization/exchange and callback counterexamples. Provider-key guidance revealed the former `localhost` drift; the upstream whole-file hash alone did not compare local semantics. Connection-policy validation is moved without schema changes into an SDK-free leaf for safe console metadata. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, refresh/custody, billing routes and public snapshots UNCHANGED, checked; no live sign-in is claimed by offline verification. |
+| 2026-11-01 (#774, provider management) | `DES-BROWSER-FIRST-RUN-SETUP` AMENDED: Connections owns a permanent Provider API keys editor with complete safe inventory, explicit provider/mode binding, separate Add/Replace preconditions, derived shared-slot warnings and no retained old credential. Setup keeps a compact link after readiness. Reviewed static official help and separate host subscription guides include OpenRouter/DeepSeek, OpenAI callback recovery and honest Claude community/Claude Code distinctions. Host grant, no browser OAuth, selected job credential forwarding, default/model routing, budgets, CSP and all other console/setup decisions UNCHANGED, checked. |
 | 2026-11-01 (#774, implementation) | `DES-BROWSER-FIRST-RUN-SETUP`, `DES-FIRST-RUN-SETUP-WIZARD` and `DES-OPERATOR-CONSOLE` IMPLEMENTED after #783. Bounded worker child revalidates local package/service identities and effective provider/runtime sources; typed outcomes do not infer readiness. Setup doctor explicitly withholds probe containers and sweeps with a warning, because ordinary non-live doctor can run them. API-key and invitation payloads stay private with proactive expiry/cancellation. SetupScreen/JourneySetup generators/cards and shipped docs move together. Existing job/container, money/admission, forge, pointer, repository consent, CSP and pi-pin decisions UNCHANGED, checked; `OQ-054` remains OPEN. |
 | 2026-10-31 (#774, prerequisite specs) | NEW `DES-BROWSER-FIRST-RUN-SETUP`, DECIDED, NOT IMPLEMENTED; `DES-FIRST-RUN-SETUP-WIZARD` and `DES-OPERATOR-CONSOLE` AMENDED for an explicit local user-service grant, bounded host child, create-only API-key channel, private viewer invitations and link-only operator bootstrap. Durable package paths, ongoing queue consumption, interruption-aware Stop/Restart, start-only proxy scope, typed partial/unknown outcomes and honest Undo are explicit. GitHub browser App setup remains OPEN under `OQ-054`. CSP, no deployment secrets in console environment, pointer/repository consent, existing tools, pins, visual status and unrelated decisions UNCHANGED, checked. |
 | 2026-10-31 (#781, verification) | `DES-OPERATOR-CONSOLE` AMENDED for two isolated Chrome/server lanes after the enlarged complete corpus exceeded the existing CI time limit. Each case still runs exactly once in a fresh tab, both negative controls are required independently in each lane, and missing/rejected lanes fail the check. No-JavaScript and interactive checks, request attribution, complete document maps and cleanup remain explicit. Widths, roles, themes, CSP, fonts, frozen clocks, verdict assertions and all deadlines UNCHANGED, checked. Product behavior, authentication, quota, cost and container contracts UNCHANGED, checked. |

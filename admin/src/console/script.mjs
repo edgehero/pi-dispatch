@@ -287,8 +287,7 @@ export const CONSOLE_SCRIPT = `"use strict";
   // Sign-in, saying why only with one of the console's own reasons: whatever an answer or an event carried, nothing
   // else reaches the query string.
   function toLogin(r) {
-    setupPrivateEnded = true;
-    forgetSetupInvitation();
+    endSetupPrivate();
     location.assign(isReason(r) ? "/login?ended=" + r : "/login");
   }
   function later(fn, ms) {
@@ -303,7 +302,7 @@ export const CONSOLE_SCRIPT = `"use strict";
   // What an event stream's URL ends with to say the page's person (an EventSource can send no header), or nothing.
   var personQuery = pagePerson === null ? "" : "&" + PERSON_PARAM + "=" + encodeURIComponent(pagePerson);
   // A JSON post; \`mine\` sends the page's person with it (a preview or a confirm, made on the session's behalf).
-  function post(path, body, mine) {
+  function post(path, body, mine, signal) {
     if (typeof fetch !== "function") return Promise.reject(new Error("this browser cannot send a request"));
     var headers = { "content-type": "application/json" };
     if (mine && pagePerson !== null) headers[PERSON_HEADER] = pagePerson;
@@ -311,7 +310,8 @@ export const CONSOLE_SCRIPT = `"use strict";
       method: "POST",
       credentials: "same-origin",
       headers: headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      ...(signal ? { signal: signal } : {})
     }).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (json) {
         return { ok: res.ok, status: res.status, body: json };
@@ -557,8 +557,7 @@ export const CONSOLE_SCRIPT = `"use strict";
   var outTimer = null;
   if (out) out.addEventListener("click", function () {
     signingOut = true;
-    setupPrivateEnded = true;
-    forgetSetupInvitation();
+    endSetupPrivate();
     outPress += 1;
     var mine = outPress;
     if (outTimer !== null && typeof clearTimeout === "function") clearTimeout(outTimer);
@@ -1136,9 +1135,29 @@ ${FIT_JS}
   var slotLabel = "";
   var slotTicket = null;
   var slotBody = null;
+  var slotPreviewController = null;
+  function abortSetupPreview() {
+    if (slotPreviewController) slotPreviewController.abort();
+    slotPreviewController = null;
+  }
   var setupPrivateEnded = false;
   var setupInviteBox = null;
   var setupInviteTimer = null;
+  function clearProviderKeyFields() {
+    var fields = typeof document.querySelectorAll === "function" ? document.querySelectorAll('form[data-provider-key-form] input[name="value"]') : [];
+    for (var pk = 0; pk < fields.length; pk++) fields[pk].value = "";
+  }
+  function endSetupPrivate() {
+    setupPrivateEnded = true;
+    clearProviderKeyFields();
+    forgetSetupInvitation();
+    // Invalidate in-flight previews too, so a late reply cannot restore Confirm after navigation or sign-out.
+    if (slot && typeof slotAction === "string" && slotAction.indexOf("setup-") === 0) closeSlot();
+  }
+  if (typeof window !== "undefined" && window && typeof window.addEventListener === "function") {
+    window.addEventListener("pagehide", endSetupPrivate);
+    window.addEventListener("pageshow", function (ev) { if (ev.persisted) location.reload(); });
+  }
   function forgetSetupInvitation() {
     if (setupInviteTimer !== null && typeof clearTimeout === "function") clearTimeout(setupInviteTimer);
     setupInviteTimer = null;
@@ -1301,6 +1320,7 @@ ${FIT_JS}
     return anchor;
   }
   function openSlot(form, action, label, opener) {
+    abortSetupPreview();
     cancelSetupTicket();
     forgetSetupInvitation();
     stopCountdown();
@@ -1369,6 +1389,7 @@ ${FIT_JS}
     try { to.focus(); } catch (e) { /* the focus stays on the page */ }
   }
   function closeSlot() {
+    abortSetupPreview();
     cancelSetupTicket();
     forgetSetupInvitation();
     slotBody = null;
@@ -1455,7 +1476,7 @@ ${FIT_JS}
     var body;
     fieldErrors(form, null);
     try { body = bodyOf(form); } catch (e) { fieldErrors(form, e.message); slotSays(e.message + "; nothing was sent."); return; }
-    var privateKey = action === "setup-provider-key";
+    var privateKey = action === "setup-provider-key" || action === "setup-provider-key-replace";
     slotBody = privateKey ? null : body;
     if (privateKey && typeof form.querySelector === "function") {
       var keyField = form.querySelector('input[name="value"]');
@@ -1463,9 +1484,12 @@ ${FIT_JS}
     }
     var becauseRun = document.body.getAttribute("data-because-run");
     if (becauseRun && CONFIG_FIX_ACTIONS.indexOf(action) >= 0) body.becauseRun = becauseRun;
-    var previewRequest = post("/api/act/" + action + "/preview", body, true);
+    var controller = action.indexOf("setup-") === 0 && typeof AbortController === "function" ? new AbortController() : null;
+    slotPreviewController = controller;
+    var previewRequest = post("/api/act/" + action + "/preview", body, true, controller ? controller.signal : undefined);
     if (privateKey) body.value = undefined;
     previewRequest.then(function (r) {
+      if (slotPreviewController === controller) slotPreviewController = null;
       if (mine !== slotGen) {
         if (action.indexOf("setup-") === 0 && r.ok && r.body && typeof r.body.ticket === "string") post("/api/act/" + action + "/cancel", { ticket: r.body.ticket }, true).catch(function () {});
         return;
@@ -1483,6 +1507,7 @@ ${FIT_JS}
       }
       slotSays(r.ok ? "The console answered with no preview to show; nothing was changed." : errorOf(r));
     }, function () {
+      if (slotPreviewController === controller) slotPreviewController = null;
       if (mine === slotGen) slotSays("The console could not be reached, so nothing was previewed or changed.");
     });
   }
@@ -1566,7 +1591,7 @@ ${FIT_JS}
     if (active && panel.contains(active) && isField(active) && active.closest && active.closest(HELD_FORMS)) return true;
     var fields = panel.querySelectorAll("form[data-action] input:not([type=hidden]), form[data-action] textarea, form.filterbar input:not([type=hidden]), form[data-live-hold] input:not([type=hidden]), form[data-live-hold] textarea");
     for (var i = 0; i < fields.length; i++) if (fields[i].type === "checkbox" ? fields[i].checked !== fields[i].defaultChecked : fields[i].value !== fields[i].defaultValue) return true;
-    var lists = panel.querySelectorAll("form.filterbar select, form[data-live-hold] select");
+    var lists = panel.querySelectorAll("form.filterbar select, form[data-live-hold] select, form[data-provider-key-form] select");
     for (var j = 0; j < lists.length; j++) if (picked(lists[j])) return true;
     return false;
   }
@@ -1672,8 +1697,47 @@ ${FIT_JS}
   function enableConfigControls(root) {
     var controls = typeof root.querySelectorAll === "function" ? root.querySelectorAll("[data-config-controls]") : [];
     for (var ci = 0; ci < controls.length; ci++) controls[ci].disabled = false;
+    var keyForms = typeof root.querySelectorAll === "function" ? root.querySelectorAll("form[data-provider-key-form]") : [];
+    for (var kf = 0; kf < keyForms.length; kf++) syncProviderKeyForm(keyForms[kf], false);
   }
   enableConfigControls(document);
+  function syncProviderKeyForm(form, discardInput) {
+    if (!form || typeof form.querySelector !== "function") return;
+    var provider = form.querySelector('[name="provider"]');
+    var mode = form.querySelector("[data-provider-key-mode]");
+    var key = form.querySelector('input[name="value"]');
+    if (!provider || !mode) return;
+    if (discardInput) {
+      if (key) key.value = "";
+      // Closing also invalidates in-flight replies; their eventual tickets are cancelled on arrival.
+      if (slotForm === form && slot && !slot.hidden) closeSlot();
+      fieldErrors(form, null);
+    }
+    var replace = mode.value === "replace";
+    form.setAttribute("data-action", replace ? "setup-provider-key-replace" : "setup-provider-key");
+    var submit = form.querySelector("[data-provider-key-submit]");
+    if (submit) submit.textContent = replace ? "Preview replacing key" : "Preview adding key";
+    var contexts = form.querySelectorAll("[data-provider-context]");
+    for (var pc = 0; pc < contexts.length; pc++) contexts[pc].hidden = contexts[pc].getAttribute("data-provider-context") !== provider.value;
+  }
+  document.addEventListener("change", function (ev) {
+    var control = ev && ev.target;
+    var form = control && typeof control.closest === "function" ? control.closest("form[data-provider-key-form]") : null;
+    if (form && (control.name === "provider" || control.hasAttribute("data-provider-key-mode"))) syncProviderKeyForm(form, true);
+  });
+  document.addEventListener("click", function (ev) {
+    var button = ev && ev.target && typeof ev.target.closest === "function" ? ev.target.closest("[data-provider-pick]") : null;
+    if (!button || button.disabled) return;
+    var form = document.querySelector("form[data-provider-key-form]");
+    if (!form) return;
+    var provider = form.querySelector('[name="provider"]'), mode = form.querySelector("[data-provider-key-mode]");
+    if (!provider || !mode) return;
+    provider.value = button.getAttribute("data-provider-pick");
+    mode.value = button.getAttribute("data-provider-mode") === "replace" ? "replace" : "add";
+    syncProviderKeyForm(form, true);
+    var key = form.querySelector('input[name="value"]');
+    if (key) key.focus();
+  });
   var fixSource = document.body.getAttribute("data-because-run");
   if (fixSource && /^[A-Za-z0-9._:-]{1,200}$/.test(fixSource)) {
     var configLinks = document.querySelectorAll('a[href^="/config"]');
@@ -2147,8 +2211,7 @@ ${FIT_JS}
   // The page stream's session end also ends its transcript; tdone never takes this path.
   var ended = false;
   function streamEnded(ev) {
-    setupPrivateEnded = true;
-    forgetSetupInvitation();
+    endSetupPrivate();
     var r = null;
     try {
       var d = JSON.parse(ev && ev.data);

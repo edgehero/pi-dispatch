@@ -13,7 +13,12 @@ const request = (operation, phase = "plan", rest = {}) => ({ version: 1, id, pha
 function host(text = "PI_PROVIDER=anthropic\nANTHROPIC_API_KEY=\n") {
 	const cwd = fs.realpathSync(tempDir("setup-host-"));
 	fs.writeFileSync(join(cwd, ".env"), text, { mode: 0o600 });
-	return { cwd, home: cwd, env: {}, platform: "linux", uid: process.getuid(), account: "operator", hostname: () => "host1", resolveEntry: () => ({ entry: "/opt/worker/src/cli.mjs", version: "4.3.1" }), providerCandidates: async () => ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] };
+	return { cwd, home: cwd, env: {}, platform: "linux", uid: process.getuid(), account: "operator", hostname: () => "host1", resolveEntry: () => ({ entry: "/opt/worker/src/cli.mjs", version: "4.3.1" }), providerNames: async () => ["anthropic", "openai"], providerCandidates: async (provider) => provider === "anthropic" ? ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] : ["OPENAI_API_KEY"] };
+}
+
+async function pinnedProviders(deps) {
+	const { piProviders, providerKeyCandidates } = await import("../src/env-allowlist.mjs");
+	return { ...deps, providerNames: async () => piProviders(), providerCandidates: async (provider) => providerKeyCandidates(provider) };
 }
 
 test("setup protocol rejects unregistered commands/fields, cross-component results and private output", () => {
@@ -68,7 +73,7 @@ test("API-key refusals preserve bytes: stale input, unsafe file, unsupported slo
 test("key values cannot introduce commands/OAuth/control bytes or exceed the bound", async () => {
 	const deps = host();
 	const p = await runSetupHost(request("setup-provider-key"), deps);
-	for (const value of [" ", "!command", "$SECRET", "`id`", "a\nb", "sk-ant-oat-subscription", "x".repeat(4097)]) {
+	for (const value of [" ", "!command", "$SECRET", "`id`", "a b", "a\nb", "sk-ant-oat-subscription", "x".repeat(4097)]) {
 		const result = await runSetupHost(request("setup-provider-key", "apply", { expected: p.plan.digest, input: { value } }), deps);
 		assert.equal(result.reason, "key-invalid");
 	}
@@ -199,4 +204,206 @@ test("the durable entry resolver accepts the worker artifact and refuses disposa
 	fs.chmodSync(join(durable, "src"), 0o755);
 	fs.chmodSync(join(durable, "package.json"), 0o666);
 	assert.equal(resolveSetupWorkerEntry({ entry }).refusal, "unsafe-entry");
+});
+
+test("selected-provider Add preserves every other key and the effective default; previews cannot retarget a shared slot", async () => {
+	const deps = await pinnedProviders(host("PI_PROVIDER=anthropic\nANTHROPIC_API_KEY=existing-anthropic\nPI_SETTINGS_FILE=settings.json\nUNRELATED=preserve\n"));
+	const path = join(deps.cwd, ".env");
+	const settings = JSON.stringify({ provider: "anthropic", maxTurns: 7 });
+	fs.writeFileSync(join(deps.cwd, "settings.json"), settings);
+	for (const [provider, key] of [["openai", "OPENAI_API_KEY"], ["deepseek", "DEEPSEEK_API_KEY"]]) {
+		const p = await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), deps);
+		assert.equal(p.state, "planned");
+		assert.equal(p.plan.provider, provider);
+		assert.equal(p.plan.key, key);
+		assert.equal(p.plan.mode, "add");
+		assert.equal(p.plan.source, "none");
+		assert.equal(validSetupResult(p), true);
+		const result = await runSetupHost(request("setup-provider-key", "apply", { expected: p.plan.digest, input: { provider, value: `private-${provider}` } }), deps);
+		assert.equal(result.state, "applied");
+	}
+	const after = fs.readFileSync(path, "utf8");
+	assert.match(after, /PI_PROVIDER=anthropic\nANTHROPIC_API_KEY=existing-anthropic\nPI_SETTINGS_FILE=settings.json\nUNRELATED=preserve\n/);
+	assert.match(after, /OPENAI_API_KEY=private-openai\nDEEPSEEK_API_KEY=private-deepseek\n/);
+	assert.equal(fs.readFileSync(join(deps.cwd, "settings.json"), "utf8"), settings);
+	const p = await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "moonshotai" } }), deps);
+	assert.deepEqual(p.plan.aliases, ["moonshotai", "moonshotai-cn"]);
+	const swapped = await runSetupHost(request("setup-provider-key", "apply", { expected: p.plan.digest, input: { provider: "moonshotai-cn", value: "do-not-save" } }), deps);
+	assert.equal(swapped.reason, "plan-stale", "the selected provider is bound even when two providers share the same key name");
+	assert.equal(fs.readFileSync(path, "utf8"), after);
+});
+
+test("provider selection and alias groups are derived exhaustively from the actual pinned mapping", async () => {
+	const deps = await pinnedProviders(host("PI_AUTH_FROM_PI=0\n"));
+	const { apiKeyVariable, needsHostAuthentication, nonApiKeyKind } = await import("../src/provider-key.mjs");
+	const names = await deps.providerNames();
+	for (const provider of names) {
+		const key = apiKeyVariable(await deps.providerCandidates(provider));
+		const p = await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), deps);
+		if (needsHostAuthentication(provider)) { assert.equal(p.reason, "provider-host-auth", provider); continue; }
+		if (!key || nonApiKeyKind(key) !== null) { assert.equal(p.reason, "provider-unsupported", provider); continue; }
+		const expected = [];
+		for (const name of names) if (apiKeyVariable(await deps.providerCandidates(name)) === key) expected.push(name);
+		assert.equal(p.state, "planned", provider);
+		assert.deepEqual(p.plan.aliases, expected.sort(), provider);
+		assert.equal(p.plan.key, key, provider);
+	}
+	for (const provider of ["__proto__", "constructor", "unknown-custom-provider"]) assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), deps)).reason, "provider-unsupported");
+});
+
+test("host-auth routes cannot paste tokens through Add or Replace, while a pinned Hugging Face API token remains eligible", async () => {
+	const { HOST_AUTH_PROVIDERS } = await import("../src/provider-key.mjs");
+	for (const provider of HOST_AUTH_PROVIDERS) {
+		const deps = await pinnedProviders(host("PI_AUTH_FROM_PI=0\nCOPILOT_GITHUB_TOKEN=old-token\n"));
+		const before = fs.readFileSync(join(deps.cwd, ".env"), "utf8");
+		for (const operation of ["setup-provider-key", "setup-provider-key-replace"]) {
+			const p = await runSetupHost(request(operation, "plan", { input: { provider } }), deps);
+			assert.equal(p.reason, "provider-host-auth", provider);
+			const direct = await runSetupHost(request(operation, "apply", { expected: "f".repeat(64), input: { provider, value: "raw-token-never-written" } }), deps);
+			assert.equal(direct.reason, "provider-host-auth", provider);
+		}
+		assert.equal(fs.readFileSync(join(deps.cwd, ".env"), "utf8"), before);
+	}
+	const deps = await pinnedProviders(host("PI_AUTH_FROM_PI=0\n"));
+	const p = await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "huggingface" } }), deps);
+	assert.equal(p.plan.key, "HF_TOKEN");
+	assert.equal((await runSetupHost(request("setup-provider-key", "apply", { expected: p.plan.digest, input: { provider: "huggingface", value: "hf-private-key" } }), deps)).state, "applied");
+	assert.match(fs.readFileSync(join(deps.cwd, ".env"), "utf8"), /HF_TOKEN=hf-private-key/);
+});
+
+test("Add and Replace have distinct preconditions; replacing a shared slot updates only that slot", async () => {
+	for (const line of ["", "OPENAI_API_KEY=\n"]) {
+		const deps = await pinnedProviders(host(`PI_PROVIDER=anthropic\n${line}`));
+		assert.equal((await runSetupHost(request("setup-provider-key-replace", "plan", { input: { provider: "openai" } }), deps)).reason, "key-missing");
+	}
+	const text = "PI_PROVIDER=anthropic\nANTHROPIC_API_KEY=unrelated-private\nMOONSHOT_API_KEY=old-private\nUNRELATED=keep\n";
+	const deps = await pinnedProviders(host(text));
+	const path = join(deps.cwd, ".env");
+	assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "moonshotai-cn" } }), deps)).reason, "key-present");
+	const p = await runSetupHost(request("setup-provider-key-replace", "plan", { input: { provider: "moonshotai-cn" } }), deps);
+	assert.equal(p.plan.mode, "replace"); assert.equal(p.plan.source, "deployment-env");
+	assert.deepEqual(p.plan.aliases, ["moonshotai", "moonshotai-cn"]);
+	assert.equal(validSetupResult(p), true);
+	for (const change of [{ mode: "add" }, { source: "none" }, { aliases: [] }, { aliases: ["moonshotai-cn", "moonshotai-cn"] }]) assert.equal(validSetupResult({ ...p, plan: { ...p.plan, ...change } }), false);
+	assert.equal(JSON.stringify(p).includes("old-private"), false);
+	assert.equal(fs.readFileSync(path, "utf8"), text, "preview never replaces the key");
+	const result = await runSetupHost(request("setup-provider-key-replace", "apply", { expected: p.plan.digest, input: { provider: "moonshotai-cn", value: "new-private" } }), deps);
+	assert.equal(result.state, "applied");
+	assert.equal(fs.readFileSync(path, "utf8"), text.replace("MOONSHOT_API_KEY=old-private", "MOONSHOT_API_KEY=new-private"));
+	assert.equal(fs.statSync(path).mode & 0o777, 0o600);
+	assert.equal(JSON.stringify(result).includes("new-private"), false);
+	assert.equal((await runSetupHost(request("setup-provider-key-replace", "apply", { expected: p.plan.digest, input: { provider: "moonshotai-cn", value: "replay" } }), deps)).reason, "plan-stale");
+});
+
+test("Replace never restores an old key and refuses every stale source, mode and provider swap", async () => {
+	for (const kind of ["changed-file", "same-bytes-new-inode", "changed-default", "changed-mode", "other-provider", "other-operation"]) {
+		const text = "PI_PROVIDER=anthropic\nOPENAI_API_KEY=old-openai\nDEEPSEEK_API_KEY=old-deepseek\n";
+		const deps = await pinnedProviders(host(text));
+		const path = join(deps.cwd, ".env");
+		const p = await runSetupHost(request("setup-provider-key-replace", "plan", { input: { provider: "openai" } }), deps);
+		if (kind === "changed-file") fs.appendFileSync(path, "OTHER=concurrent\n");
+		if (kind === "same-bytes-new-inode") { fs.renameSync(path, `${path}.before`); fs.writeFileSync(path, text, { mode: 0o600 }); }
+		if (kind === "changed-default") fs.writeFileSync(path, text.replace("PI_PROVIDER=anthropic", "PI_PROVIDER=deepseek"));
+		if (kind === "changed-mode") fs.chmodSync(path, 0o644);
+		const before = fs.readFileSync(path, "utf8");
+		const got = await runSetupHost(request(kind === "other-operation" ? "setup-provider-key" : "setup-provider-key-replace", "apply", { expected: p.plan.digest, input: { provider: kind === "other-provider" ? "deepseek" : "openai", value: "do-not-save" } }), deps);
+		assert.equal(got.state, "refused", kind);
+		assert.equal(fs.readFileSync(path, "utf8"), before, kind);
+	}
+});
+
+test("replacement checks the selected managed provider and refuses inherited or bearer/OAuth shadowing", async () => {
+	for (const operation of ["setup-provider-key", "setup-provider-key-replace"]) {
+		for (const extra of ["ANTHROPIC_AUTH_TOKEN=bearer\n", "ANTHROPIC_OAUTH_TOKEN=oauth\n"]) {
+			const deps = await pinnedProviders(host(`ANTHROPIC_API_KEY=${operation.endsWith("replace") ? "old-key" : ""}\n${extra}`));
+			assert.equal((await runSetupHost(request(operation, "plan", { input: { provider: "anthropic" } }), deps)).reason, "provider-shadowed");
+		}
+		const deps = await pinnedProviders(host(`PI_PROVIDER=anthropic\nPI_AUTH_CONNECTIONS_FILE=connections.json\nOPENAI_API_KEY=${operation.endsWith("replace") ? "old-key" : ""}\n`));
+		fs.writeFileSync(join(deps.cwd, "connections.json"), JSON.stringify({ version: 1, connections: [{ id: "chatgpt", provider: "openai", adapter: "openai-chatgpt", ownerHost: "host1" }], bindings: { openai: "chatgpt" } }));
+		assert.equal((await runSetupHost(request(operation, "plan", { input: { provider: "openai" } }), deps)).reason, "provider-managed");
+		fs.writeFileSync(join(deps.cwd, "connections.json"), JSON.stringify({ version: 1, connections: [], bindings: {} }));
+		assert.equal((await runSetupHost(request(operation, "plan", { input: { provider: "openai" } }), { ...deps, env: { OPENAI_API_KEY: "inherited" } })).reason, "provider-shadowed");
+	}
+});
+
+test("Add identifies an overridden pi API-key fallback without exposing it, and binds that source through rename", async () => {
+	const deps = await pinnedProviders(host("PI_PROVIDER=anthropic\nPI_CODING_AGENT_DIR=agent\n"));
+	const dir = join(deps.cwd, "agent"); fs.mkdirSync(dir, { mode: 0o700 });
+	const path = join(dir, "auth.json");
+	const auth = JSON.stringify({ openai: { type: "api_key", key: "private-fallback-canary" }, anthropic: { type: "oauth", access: "private-oauth-canary" } });
+	fs.writeFileSync(path, auth, { mode: 0o600 });
+	const p = await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "openai" } }), deps);
+	assert.equal(p.plan.source, "pi-api-key");
+	assert.equal(JSON.stringify(p).includes("private-fallback-canary"), false);
+	const other = await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "anthropic" } }), deps);
+	assert.equal(other.plan.source, "none", "plain OAuth is not admitted as an API-key fallback");
+	let raced = false;
+	const envPath = join(deps.cwd, ".env");
+	const io = { ...fs, closeSync(fd) {
+		fs.closeSync(fd);
+		if (!raced && fs.existsSync(`${envPath}.tmp`)) { raced = true; fs.appendFileSync(path, "\n"); }
+	} };
+	const result = await runSetupHost(request("setup-provider-key", "apply", { expected: p.plan.digest, input: { provider: "openai", value: "do-not-save" } }), { ...deps, fs: io });
+	assert.equal(result.reason, "plan-stale");
+	assert.equal(fs.readFileSync(envPath, "utf8"), "PI_PROVIDER=anthropic\nPI_CODING_AGENT_DIR=agent\n");
+	assert.equal(fs.existsSync(`${envPath}.tmp`), false);
+	assert.equal(fs.readFileSync(path, "utf8"), `${auth}\n`, "the credential source is never rewritten by this writer");
+});
+
+test("Replace transforms only descriptor-judged bytes and detects a last-moment concurrent edit", async () => {
+	for (const kind of ["transient-path-read", "during-temp-write"]) {
+		const text = "PI_PROVIDER=anthropic\nOPENAI_API_KEY=old-key\nUNRELATED=original\n";
+		const deps = await pinnedProviders(host(text));
+		const path = join(deps.cwd, ".env");
+		const p = await runSetupHost(request("setup-provider-key-replace", "plan", { input: { provider: "openai" } }), deps);
+		let raced = false;
+		const io = { ...fs, readFileSync(file, ...args) {
+			if (kind === "transient-path-read" && file === path) return Buffer.from(text.replace("UNRELATED=original", "UNRELATED=transient-competing-content"));
+			return fs.readFileSync(file, ...args);
+		}, closeSync(fd) {
+			fs.closeSync(fd);
+			if (kind === "during-temp-write" && !raced && fs.existsSync(`${path}.tmp`)) { raced = true; fs.appendFileSync(path, "ARRIVAL=concurrent\n"); }
+		} };
+		const got = await runSetupHost(request("setup-provider-key-replace", "apply", { expected: p.plan.digest, input: { provider: "openai", value: "new-key" } }), { ...deps, fs: io });
+		if (kind === "transient-path-read") {
+			assert.equal(got.state, "applied");
+			assert.equal(fs.readFileSync(path, "utf8"), text.replace("OPENAI_API_KEY=old-key", "OPENAI_API_KEY=new-key"));
+		} else {
+			assert.equal(got.reason, "plan-stale");
+			assert.equal(fs.readFileSync(path, "utf8"), `${text}ARRIVAL=concurrent\n`);
+		}
+		assert.equal(fs.existsSync(`${path}.tmp`), false);
+	}
+});
+
+test("Replace keeps same-value input unchanged and enforces the UTF-8 4 KiB bound", async () => {
+	const deps = await pinnedProviders(host("OPENAI_API_KEY=old-key\n"));
+	const path = join(deps.cwd, ".env");
+	const apply = async (value) => {
+		const p = await runSetupHost(request("setup-provider-key-replace", "plan", { input: { provider: "openai" } }), deps);
+		return runSetupHost(request("setup-provider-key-replace", "apply", { expected: p.plan.digest, input: { provider: "openai", value } }), deps);
+	};
+	const before = fs.statSync(path);
+	assert.equal((await apply("old-key")).state, "unchanged");
+	assert.equal(fs.statSync(path).ino, before.ino);
+	assert.equal(fs.statSync(path).mtimeMs, before.mtimeMs);
+	for (const value of ["!command", "$KEY", "key`value", "sk-ant-oat-subscription", "a b", "a\nb", "x".repeat(4097), "é".repeat(2049)]) {
+		assert.equal((await apply(value)).reason, "key-invalid");
+		assert.equal(fs.readFileSync(path, "utf8"), "OPENAI_API_KEY=old-key\n");
+	}
+	assert.equal((await apply("é".repeat(2048))).state, "applied");
+	assert.equal(fs.statSync(path).mode & 0o777, 0o600);
+});
+
+test("Add fills a loader-proven empty quoted slot; nonempty literal whitespace still requires Replace", async () => {
+	for (const [line, mode] of [["OPENAI_API_KEY=\n", "add"], ["OPENAI_API_KEY=   \n", "add"], ['OPENAI_API_KEY=""\n', "add"], ['OPENAI_API_KEY=" "\n', "replace"], ["OPENAI_API_KEY=setup-preview-placeholder\n", "replace"]]) {
+		const deps = await pinnedProviders(host(line));
+		const operation = mode === "add" ? "setup-provider-key" : "setup-provider-key-replace";
+		if (mode === "replace") assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider: "openai" } }), deps)).reason, "key-present");
+		const p = await runSetupHost(request(operation, "plan", { input: { provider: "openai" } }), deps);
+		assert.equal(p.state, "planned", line);
+		assert.equal(p.plan.mode, mode);
+		assert.equal((await runSetupHost(request(operation, "apply", { expected: p.plan.digest, input: { provider: "openai", value: "new-key" } }), deps)).state, "applied");
+		assert.equal(fs.readFileSync(join(deps.cwd, ".env"), "utf8"), "OPENAI_API_KEY=new-key\n");
+	}
 });

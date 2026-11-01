@@ -5,6 +5,7 @@ import { subscriptionIdentity } from "./subscription-runtime.mjs";
 import { makeRedisClient } from "./connection.mjs";
 import { openBrowser } from "./open-browser.mjs";
 import { authError } from "./auth-store.mjs";
+import { OPENAI_LOGIN_INSTRUCTIONS } from "./oauth-openai.mjs";
 
 /** Native pi selects use `id`; older community callbacks use `value`. Only an offered choice can leave the prompt. */
 export function authSelectAnswer(question, answer) {
@@ -38,6 +39,7 @@ export async function runAuth(args, { env = process.env, write = (value) => proc
 			async notify(event) {
 				if (event?.type === "auth_url" && typeof event.url === "string" && event.url.startsWith("https://")) {
 					write(`Open the authorization page on this host: ${event.url}\n`);
+					if (URL.canParse(event.url) && new URL(event.url).origin === "https://auth.openai.com") write(`${OPENAI_LOGIN_INSTRUCTIONS}\n`);
 					openBrowserFn(event.url);
 				}
 				if (event?.type === "device_code") write(`Authorization code: ${event.code ?? event.userCode ?? "shown in browser"}\n`);

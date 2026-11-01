@@ -5,11 +5,8 @@ import { join, relative, dirname, isAbsolute } from "node:path";
 import { COMMUNITY_SOURCE_PINS } from "./community-auth-pins.mjs";
 import { COMMUNITY_ADAPTED_SOURCE_PINS } from "./community-auth-output-pins.mjs";
 
-export const COMMUNITY_AUTH_ADAPTERS = Object.freeze({
-	"openai-chatgpt": { provider: "openai", community: false },
-	"pi-anthropic-oauth@0.3.6": { provider: "anthropic", community: true, package: "pi-anthropic-oauth", version: "0.3.6" },
-	"@gotgenes/pi-anthropic-auth@3.4.3": { provider: "anthropic", community: true, package: "@gotgenes/pi-anthropic-auth", version: "3.4.3" },
-});
+import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
+export { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
 function replaceOnce(source, before, after) {

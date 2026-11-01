@@ -1,4 +1,4 @@
-<!-- @dsCard group="Overview" height=1780 width=1440 subtitle="First run in the browser: supported host steps have an individual preview and Confirm" -->
+<!-- @dsCard group="Overview" height=1740 width=1440 subtitle="First run in the browser: supported host steps have an individual preview and Confirm" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -123,11 +123,11 @@
     <p class="su-step__t"><span class="su-n">6</span>Provider key<span class="chip tone-failed">Not yet</span></p>
     <p class="su-step__s">Doctor found no usable API key or explicitly bound host-owned managed subscription.</p>
     <p class="su-small">An ordinary pi OAuth login is not unattended service authentication. No fake Use action changes a published credential.</p>
-<div class="su-ch"><span class="su-ch__h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-key"/></svg><b>Paste an API key</b></span>
-<span class="su-ch__s">Written once to an empty canonical key slot in .env. A running worker needs a separate restart.</span>
-<label>ANTHROPIC_API_KEY API key<input class="input input--code" type="password" autocomplete="off"></label>
-<div class="su-act"><a class="btn btn--primary" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-key"/></svg>Preview saving the API key</a></div></div>
-<p class="su-small"><a class="link" href="#">Review provider connections</a></p>
+<div class="su-ch"><span class="su-ch__h"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-key"/></svg><b>Keys for several providers</b></span>
+<span class="su-ch__s">Add or replace a write-only API key on Connections. Choose the provider explicitly; its default stays the same.</span>
+<div class="su-act"><a class="btn btn--primary" href="#p-provider-keys">Manage provider API keys</a></div></div>
+<p class="su-small">Provider guides show where to find or create keys at Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek.</p>
+<p class="su-small"><a class="link" href="#">Review subscription authentication</a> for host-owned subscription sign-in instead.</p>
   </div>
 </li><li class="su-step">
   <span class="tile tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></span>
@@ -154,7 +154,7 @@
 </section>
 <section class="card" id="p-setup-start" data-panel>
   <div class="card__head"><h2>The one command</h2></div>
-  <p class="muted su-p">After the exact durable installation in the Quickstart.</p><div class="cmd"><code>pi-dispatch up --console</code><button class="btn btn--sm" type="button">Copy</button></div><p class="muted su-p su-p2">Or from pi, which opens this page for you:</p><div class="cmd"><code>/dispatch setup</code><button class="btn btn--sm" type="button">Copy</button></div>
+  <p class="muted su-p">After the exact durable installation in the Quickstart.</p><div class="cmd"><code>pi-dispatch up --console</code><button class="btn btn--sm" type="button">Copy</button></div><p class="muted su-p su-p2">Or from pi, which opens this page for you:</p><div class="cmd"><code>/dispatch setup</code><button class="btn btn--sm" type="button">Copy</button></div><p class="su-small"><a class="link" href="#p-provider-keys">Manage provider API keys</a>, also after setup is ready.</p>
 </section>
 </div></div>
 </main>

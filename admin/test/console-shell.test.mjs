@@ -567,7 +567,10 @@ function shellDom({ theme = null, clipboard = null, secure = true } = {}) {
     getElementById: () => null,
     querySelector: (s) => ({ "[data-theme-toggle]": toggle, 'meta[name="color-scheme"]': meta, "details.more": more })[s] ?? null,
     querySelectorAll: (s) => (s === "button[data-copy][hidden]" ? [copy].filter((b) => b.hidden) : []),
-    addEventListener: (type, fn) => docListeners.set(type, fn),
+    addEventListener(type, fn) {
+      const previous = docListeners.get(type);
+      docListeners.set(type, previous ? event => { previous(event); fn(event); } : fn);
+    },
     activeElement: null,
   };
   Object.defineProperty(document, "cookie", { set: (v) => cookies.push(v), get: () => { throw new Error("the script never reads document.cookie"); } });

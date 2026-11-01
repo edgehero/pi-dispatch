@@ -42,6 +42,7 @@
   },
   "exports": {
     "./setup-contract": "./src/setup-contract.mjs",
+    "./auth-policy": "./src/auth-policy.mjs",
     "./setup-host-entry": "./src/setup-host-entry.mjs",
     "./setup-lock": "./src/setup-lock.mjs",
     "./provider-key": "./src/provider-key.mjs",

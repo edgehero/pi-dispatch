@@ -1,3 +1,4 @@
+import { readProviderInventory, providerInventoryView } from "./provider-inventory.mjs";
 import { readSubscriptionAuthView, subscriptionAuthForAgent } from "./subscription-auth-view.mjs";
 /** Display-only deployment facts (#751). Raw environment values never leave this reader. */
 import * as nodeFs from "node:fs";
@@ -200,6 +201,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   const subscriptionAuth = await readSubscriptionAuthView({ snapshot, read: reads.subscriptionAuth, now });
   return {
     now, environmentUnknown, environment, subscriptionAuth,
+    providerKeys: readProviderInventory({ deploymentDir, env, paths, snapshot, fs, platform, uid, reads: reads.providerInventory ?? { environment: reads.environment } }),
     receiver: { port: positive(file.RECEIVER_PORT, 3000), unknown: environmentUnknown },
     forges,
     egress: { on: egressOn, problem: egressProblem, allowlist: Array.isArray(allowlist) ? allowlist.slice(0, 8) : null, more: Array.isArray(allowlist) ? Math.max(0, allowlist.length - 8) : 0, hosts },
@@ -248,6 +250,7 @@ export function modelConnections(view) {
       return { id: ep.id, host, port: Number.isInteger(ep.port) && ep.port >= 1 && ep.port <= 65535 ? ep.port : null, keyless: ep.keyless === true, slots: Number.isInteger(ep.slots) && ep.slots >= 1 && ep.slots <= MAX_SLOTS ? ep.slots : null, counting, used: counting === "fleet" && Number.isInteger(ep.used) && ep.used >= 0 && ep.used <= MAX_SLOTS ? ep.used : null };
     }) : null,
     providers,
+    providerKeys: providerInventoryView(view?.providerKeys),
     mcp: { servers: (view?.mcp?.servers ?? []).filter((s) => mcpName(s.name)).map((s) => ({ name: s.name, transport: ["http", "stdio"].includes(s.transport) ? s.transport : null, enabled: s.enabled === true, referenceCount: Array.isArray(s.refs) ? s.refs.length : 0 })), refused: refusedMcpNames.filter(mcpName), invalidNameCount: invalidMcpNameCount, unreadable: !view?.mcp || Boolean(view.mcp.unreadable) },
     packages: { names: packages, stagedAt: typeof view?.packages?.stagedAt === "string" && Number.isFinite(Date.parse(view.packages.stagedAt)) ? new Date(view.packages.stagedAt).toISOString() : null, unreadable: !view?.packages || Boolean(view.packages.unreadable) },
     deployment: (view?.environment ?? []).filter((e) => Object.hasOwn(CONNECTION_ENV_TYPES, e.key) || providerKeys.has(e.key)).map((e) => ({ key: e.key, set: typeof e.value === "string" && !e.value.startsWith("not set") && !e.value.startsWith("unknown"), unknown: typeof e.value !== "string" || e.value.startsWith("unknown"), disagrees: e.disagrees === true })),

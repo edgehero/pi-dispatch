@@ -13,8 +13,9 @@ import * as ui from "../src/console/kit.mjs";
 import { runTranscriptSection } from "../src/console/transcript.mjs";
 import * as configUi from "../src/console/panels/config-ui.mjs";
 import { setupGolden } from "./helpers/setup-goldens.mjs";
+import { CONFIGURATION_DRAW } from "./helpers/configuration-goldens.mjs";
 import { CLIENT_STATES, LEDGER_CARDS, T } from "./helpers/client-states.mjs";
-import { fakeTimers, parseDocument, runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
+import { Event, fakeTimers, parseDocument, runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
 
 // Issue #737, PR 2: the browser script in every state a card names, run over the server's OWN markup (the shell, the
 // sign-in pages, the confirm slot and the bars confirm-view.mjs draws), so what is checked is that the script shows the
@@ -1695,6 +1696,24 @@ stateTest("a provider refusal marks and focuses the active provider, never the h
 
 
 const bootSetup = async () => boot(await setupGolden({ state: "idle" }), { url: "/setup", timers: fakeTimers(NOW) });
+const bootProviderKeys = async ({ live = false } = {}) => {
+  let markup = await CONFIGURATION_DRAW["connections-provider-multiple.operator"]();
+  // Connections is non-live. This opt-in drives the shared stream-end cleanup over the real editor markup,
+  // independently of navigation/sign-out, which use that same cleanup on its actual route.
+  if (live) markup = markup.replace(/(<body\b[^>]*)(>)/, '$1 data-live="connections"$2');
+  return boot(markup, { url: "/config/connections", timers: fakeTimers(NOW) });
+};
+function pickProviderControl(control, value) {
+  const options = control.querySelectorAll("option");
+  assert.ok(options.some(option => option.value === value && !option.disabled), `a selectable option names ${value}`);
+  for (const option of options) option.liveSelected = option.value === value;
+  control.dispatchEvent(new Event("change", { bubbles: true }));
+}
+function keyMode(w, mode) {
+  const form = w.document.querySelector("form[data-provider-key-form]");
+  pickProviderControl(form.querySelector("[data-provider-key-mode]"), mode);
+  return form;
+}
 async function setupPreview(w, action) {
   w.submit(formOf(w, action));
   await w.fetch.open(`/api/act/${action}/preview`).answer(200, { ok: true, ticket: "private-ticket", action, html: bar({ title: "Host setup", expiresAt: NOW + 60000 }) });
@@ -1713,7 +1732,7 @@ stateTest("setup live refresh arms the replaced controls so a real preview can r
 });
 
 stateTest("provider key input clears before preview and neither Preview again nor cancellation replays it", async () => {
-  const w = await bootSetup();
+  const w = await bootProviderKeys();
   const form = formOf(w, "setup-provider-key");
   const key = form.querySelector('[name="value"]');
   key.value = "synthetic-test-private-key";
@@ -1730,15 +1749,113 @@ stateTest("provider key input clears before preview and neither Preview again no
 });
 
 stateTest("a late private preview is cancelled after its slot closes, and a key ticket expires proactively", async () => {
-  const late = await bootSetup();
+  const late = await bootProviderKeys();
   late.submit(formOf(late, "setup-provider-key"));
+  const pending = late.fetch.open("/api/act/setup-provider-key/preview");
+  assert.equal(pending.init.signal.aborted, false);
   slotOf(late).querySelector("[data-cancel]").click();
-  await late.fetch.open("/api/act/setup-provider-key/preview").answer(200, { ok: true, ticket: "late-key", html: bar() });
+  assert.equal(pending.init.signal.aborted, true, "Cancel interrupts the host planner even before a ticket exists");
+  await pending.answer(200, { ok: true, ticket: "late-key", html: bar() });
   assert.deepEqual(late.fetch.open("/api/act/setup-provider-key/cancel").body, { ticket: "late-key" });
-  const expiry = await bootSetup();
+  const expiry = await bootProviderKeys();
   await setupPreview(expiry, "setup-provider-key");
   expiry.tick(60000);
   assert.deepEqual(expiry.fetch.open("/api/act/setup-provider-key/cancel").body, { ticket: "private-ticket" });
+  assert.equal(slotOf(expiry).querySelector("[data-confirm]").disabled, true);
+});
+
+stateTest("unsubmitted provider key input is discarded on provider and mode changes without sending it", async () => {
+  const w = await bootProviderKeys(), form = w.document.querySelector("form[data-provider-key-form]");
+  const provider = form.querySelector('[name="provider"]'), key = form.querySelector('[name="value"]');
+  w.type(key, "synthetic-unsent-provider-key");
+  pickProviderControl(provider, "openai");
+  assert.equal(key.value, "");
+  assert.equal(provider.value, "openai");
+  assert.equal(form.querySelector('[data-provider-context="openai"]').hidden, false);
+  assert.equal(form.querySelector('[data-provider-context="anthropic"]').hidden, true);
+  w.type(key, "synthetic-unsent-replacement-key");
+  keyMode(w, "replace");
+  assert.equal(key.value, "");
+  assert.equal(form.getAttribute("data-action"), "setup-provider-key-replace");
+  assert.equal(text(form.querySelector("[data-provider-key-submit]")), "Preview replacing key");
+  assert.equal(form.querySelector("[data-provider-key-mode]").getAttribute("name"), null);
+  assert.equal(w.fetch.calls.length, 0, "changing either selector never previews or sends an unsubmitted secret");
+});
+
+for (const mode of ["add", "replace"]) for (const ending of ["pagehide", "session", "signout"]) stateTest(`${mode} key: ${ending} invalidates an in-flight preview and cancels its late ticket`, async () => {
+  const w = await bootProviderKeys({ live: ending === "session" }), form = keyMode(w, mode);
+  const action = mode === "replace" ? "setup-provider-key-replace" : "setup-provider-key";
+  const key = form.querySelector('[name="value"]');
+  w.type(key, "synthetic-ending-private-key");
+  w.submit(form);
+  const pending = w.fetch.open(`/api/act/${action}/preview`);
+  assert.equal(pending.body.value, "synthetic-ending-private-key");
+  assert.equal(pending.init.signal.aborted, false);
+  if (ending === "pagehide") w.windowEvent("pagehide", { persisted: true });
+  if (ending === "session") w.streams[0].emit("end", { ended: "revoked" });
+  if (ending === "signout") w.document.getElementById("logout").click();
+  assert.equal(pending.init.signal.aborted, true, "leaving interrupts the in-flight private planner");
+  // Delivering despite abort is deliberate: a racing server reply must still be cancelled, never resurrected.
+  await pending.answer(200, { ok: true, ticket: "late-ending-ticket", action, html: bar({ expiresAt: NOW + 60000 }) });
+  assert.deepEqual(w.fetch.open(`/api/act/${action}/cancel`).body, { ticket: "late-ending-ticket" });
+  assert.equal(slotOf(w).hidden, true);
+  assert.equal(slotOf(w).querySelector("[data-confirm]").disabled, true);
+  assert.equal(key.value, "");
+  assert.equal(slotOf(w).innerHTML.includes("synthetic-ending-private-key"), false);
+  assert.equal(calls(w, `/api/act/${action}/confirm`).length, 0);
+});
+
+for (const mode of ["add", "replace"]) for (const selection of ["provider", "mode"]) stateTest(`${mode} key: changing ${selection} aborts pending planning and disposes even an adversarial late ticket`, async () => {
+  const w = await bootProviderKeys(), form = keyMode(w, mode);
+  const action = mode === "replace" ? "setup-provider-key-replace" : "setup-provider-key";
+  w.type(form.querySelector('[name="value"]'), "synthetic-selection-private-key");
+  w.submit(form);
+  const pending = w.fetch.open(`/api/act/${action}/preview`);
+  assert.equal(pending.init.signal.aborted, false);
+  if (selection === "provider") pickProviderControl(form.querySelector('[name="provider"]'), "openai");
+  else keyMode(w, mode === "replace" ? "add" : "replace");
+  assert.equal(pending.init.signal.aborted, true);
+  await pending.answer(200, { ok: true, ticket: "late-selection-ticket", action, html: bar({ expiresAt: NOW + 60000 }) });
+  assert.deepEqual(w.fetch.open(`/api/act/${action}/cancel`).body, { ticket: "late-selection-ticket" });
+  assert.equal(slotOf(w).hidden, true);
+  assert.equal(slotOf(w).querySelector("[data-confirm]").disabled, true);
+  assert.equal(form.querySelector('[name="value"]').value, "");
+  assert.equal(calls(w, `/api/act/${action}/confirm`).length, 0);
+});
+
+stateTest("back-forward cache restoration reloads after private input was discarded, ordinary pageshow does not", async () => {
+  const w = await bootProviderKeys(), form = keyMode(w, "replace"), key = form.querySelector('[name="value"]');
+  w.type(key, "synthetic-bfcache-private-key");
+  w.windowEvent("pageshow", { persisted: false });
+  assert.equal(w.location.reloads, 0);
+  assert.equal(key.value, "synthetic-bfcache-private-key");
+  w.windowEvent("pagehide", { persisted: true });
+  assert.equal(key.value, "");
+  w.windowEvent("pageshow", { persisted: true });
+  assert.equal(w.location.reloads, 1);
+  assert.equal(w.fetch.calls.length, 0, "a discarded, unsubmitted key never becomes a request");
+});
+
+stateTest("Replace key requires fresh input after Preview again and proactively disposes an expired private ticket", async () => {
+  const w = await bootProviderKeys(), form = keyMode(w, "replace"), key = form.querySelector('[name="value"]');
+  w.type(key, "synthetic-replace-replay-key");
+  w.submit(form);
+  await w.fetch.open("/api/act/setup-provider-key-replace/preview").answer(200, { ok: true, ticket: "replace-ticket", html: bar({ expiresAt: NOW + 60000 }) });
+  assert.equal(key.value, "");
+  slotOf(w).querySelector("[data-confirm]").click();
+  const expired = "this confirmation has expired. Preview the change again and confirm the new preview";
+  await w.fetch.open("/api/act/setup-provider-key-replace/confirm").answer(409, { error: expired, html: String(refusalHtml({ where: "confirm", sentence: expired, status: 409 })) });
+  slotOf(w).querySelector("[data-again]").click();
+  const attempts = calls(w, "/api/act/setup-provider-key-replace/preview");
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].body.value, "synthetic-replace-replay-key");
+  assert.equal(attempts[1].body.value, undefined, "Preview again cannot retrieve the old private value");
+  assert.equal(slotOf(w).innerHTML.includes("synthetic-replace-replay-key"), false);
+  const expiry = await bootProviderKeys();
+  keyMode(expiry, "replace");
+  await setupPreview(expiry, "setup-provider-key-replace");
+  expiry.tick(60000);
+  assert.deepEqual(expiry.fetch.open("/api/act/setup-provider-key-replace/cancel").body, { ticket: "private-ticket" });
   assert.equal(slotOf(expiry).querySelector("[data-confirm]").disabled, true);
 });
 

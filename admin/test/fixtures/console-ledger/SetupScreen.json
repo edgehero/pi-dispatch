@@ -417,6 +417,17 @@
         "panels/setup-ready.operator"
       ],
       "shows": "A worker runs"
+    },
+    {
+      "el": "Provider key management remains accessible after Ready",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup-start",
+      "source": "admin/src/console/panels/setup.mjs#setupStart",
+      "golden": [
+        "panels/setup-ready.operator"
+      ],
+      "shows": "Manage provider API keys"
     }
   ]
 }

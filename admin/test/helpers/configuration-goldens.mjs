@@ -43,6 +43,11 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
     endpoints: () => [{ id: "ollama-mini2", host: "mini2.lan", port: 11434, keyless: true, slots: 2 }, { id: "vllm-build3", host: "10.0.0.5", port: 8000, keyless: true, slots: 4 }],
     slots: async () => [1, 0],
   };
+  reads.providerInventory = {
+    environment: options => reads.environment(options),
+    settings: () => ({ overlay: snapshot.settings.overlay }),
+    document: () => ({ triggers: [] }),
+  };
   change(snapshot, reads);
   return readConnections({ deploymentDir: "/srv/deployment", paths: {}, env: { RECEIVER_PORT: "4000" }, snapshot, now, redis: {}, reads });
 }
@@ -54,6 +59,7 @@ async function draw(page, { role = "operator", readOnly = false, secrets = null,
     now: () => NOW, env: {}, fleet: { snapshot: async () => ({ parked: [] }), parkedCount: async () => 0 },
     secretsView: async () => secrets ?? consoleSecretsFixture(NOW),
     connections: async () => connections === undefined ? await consoleConnectionsFixture(NOW) : connections,
+    setup: () => ({ enabled: true, actions: ["setup-provider-key", "setup-provider-key-replace"] }),
     projectView: async () => project ?? consoleProjectFixture(NOW),
   }, { role, readOnly });
   const result = await renderPage(page, { session: { name: role === "viewer" ? "watcher" : "ops", role }, query: parsed.query, data, readOnly, theme: null });
@@ -91,6 +97,9 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "connections-mcp-compact.viewer": () => connection({ change: (s) => { s.overlayMcp.servers.push({ name: "docs", transport: "stdio", where: "npx docs-mcp", exposure: "deferred", enabled: false, refs: ["DOCS_KEY"] }, { name: "search", transport: "http", where: "search.example.com", exposure: "direct", enabled: true, refs: ["SEARCH_KEY"] }); } }, "viewer"),
   "connections-many-triggers.operator": () => connection({ change: (s) => { s.triggers.triggers.push(...Array.from({ length: 12 }, (_, n) => ({ index: n + 4, forge: "github", type: "comment" }))); } }),
   "connections-populated.viewer": () => connection({}, "viewer"),
+  "connections-provider-multiple.operator": () => connection({ change: (_, reads) => { const original = reads.environment; reads.environment = options => { const got = original(options); return { ...got, env: { ...got.env, OPENAI_API_KEY: "fixture-only", GEMINI_API_KEY: "fixture-only" } }; }; } }),
+  "connections-provider-shared.operator": () => connection({ change: (_, reads) => { const original = reads.environment; reads.environment = options => { const got = original(options); return { ...got, env: { ...got.env, MOONSHOT_API_KEY: "fixture-only" } }; }; } }),
+  "connections-provider-shadowed.operator": () => connection({ change: (_, reads) => { const original = reads.environment; reads.environment = options => { const got = original(options); return { ...got, env: { ...got.env, ANTHROPIC_AUTH_TOKEN: "fixture-only" } }; }; } }),
   "connections-readonly.operator": () => connection({}, "operator", true),
   "connections-metadata-unreadable.viewer": () => connection({ unread: true }, "viewer"),
   "connections-unavailable.viewer": () => draw("connections", { connections: null, role: "viewer" }),

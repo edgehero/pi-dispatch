@@ -35,7 +35,8 @@ test("setup GET reads only safe facts once, remains a direct destination and ren
 test("setup role/read-only projections withhold mutation fields, names and endpoint addresses", async () => {
   const operator = await draw();
   assert.match(operator.page, /data-action="setup-worker-start"/);
-  assert.match(operator.page, /type="password"/);
+  assert.match(operator.page, /href="\/config\/connections#p-provider-keys"/);
+  assert.doesNotMatch(operator.page, /data-action="setup-provider-key/);
   const doc = parseDocument(operator.page);
   for (const form of doc.querySelectorAll("form[data-action]")) assert.equal(form.querySelector("fieldset").disabled, true, "no-script mutations start disabled");
   for (const role of ["viewer", "agent"]) {

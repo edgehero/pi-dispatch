@@ -2314,6 +2314,14 @@ export async function previewAction(ctx, action) {
   if (session.role === "agent" && (action.agent.mode === "person" || action.agent.mode === "confirm" && !["setting-set", "limit-add", "limit-edit", "trigger-edit", "rerun"].includes(action.name))) return refuse(ctx, "preview", 403, `${action.name} is ${action.agent.mode}: ${action.agent.reason}`, null, null, true);
   const body = ctx.body ?? {};
   const actx = actionCtx(ctx);
+  if (action.name.startsWith("setup-") && typeof ctx.res?.once === "function") {
+    const controller = new AbortController();
+    const disconnected = () => { if (!ctx.res.writableFinished) controller.abort(); };
+    ctx.res.once("close", disconnected);
+    ctx.res.once("finish", () => ctx.res.removeListener("close", disconnected));
+    actx.signal = controller.signal;
+    if (ctx.res.destroyed) controller.abort();
+  }
   const missing = (action.needs ?? []).filter((k) => actx.a[k] === null || actx.a[k] === undefined);
   if (missing.length > 0) return refuse(ctx, "preview", 503, `this console was started without what the ${action.name} action needs (${missing.join(", ")}); see its log`, "setup");
   if (!plainBody(body)) return refuse(ctx, "preview", 400, `the request body is nested too deep or holds too much (at most ${BODY_DEPTH_MAX} levels, ${BODY_KEYS_MAX} keys per object and 256 items per list)`);
@@ -2323,6 +2331,10 @@ export async function previewAction(ctx, action) {
   let meta;
   try {
     out = await action.preview(body, actx);
+    if (actx.signal?.aborted) {
+      out?.onDiscard?.();
+      return refuse(ctx, "preview", 409, "the setup preview disconnected; enter its inputs again; nothing was changed");
+    }
     if (!out?.refusal && !out?.unchanged) meta = metaOf(action, out, body);
   } catch (e) {
     if (e instanceof BadRequest) return refuse(ctx, "preview", 400, `${e.message}; nothing was changed`);
@@ -2363,6 +2375,7 @@ export async function previewAction(ctx, action) {
     ...(typeof out.onDiscard === "function" ? { onDiscard: out.onDiscard } : {}),
   });
   const expiresAt = Number.isSafeInteger(issued?.expiresAt) ? issued.expiresAt : null;
+  if (typeof out.onDiscard === "function" && actx.signal) actx.signal.addEventListener("abort", () => deps.tickets.cancel?.({ sessionId: session.id, action: action.name, ticket: issued.ticket }), { once: true });
   const summary = session.role === "agent" ? [meta.title, judged.policy.reason] : out.summary ?? [];
   const confirmLabel = String(action.confirmLabel(out));
   // The bar's lines: the action's own markup of them where it has one (`barLines`: a change's values in bold), else the

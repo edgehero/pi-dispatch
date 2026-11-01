@@ -1,5 +1,6 @@
 from config_controls import CONFIG_CONTROLS_CSS
 from subscription_auth import SUBSCRIPTION_AUTH_CSS, SUBSCRIPTION_REFERENCE_CSS, subscription_auth_card
+from provider_keys import PROVIDER_KEYS_CSS, provider_keys_card
 """Configuration, package D: TriggerDetail, TriggerEditor, SecretsScreen, ConnectionsScreen, ProjectDetail on the Pulse kit.
 gen_fleet.py writes its screens at import, so its helpers are copied here, not imported."""
 from pulse import *
@@ -444,11 +445,7 @@ def connections():
 <div class="c2-pad2">
   {banner("attention", "attention", "mini2 reads its own copy of the file, and it does not load",
           'pi-dispatch doctor on mini2 (its own copy of the file, 3h ago) says: <b>endpoint 2: port must be 1 to 65535.</b> Fix: correct the port in model-endpoints.json on mini2, then run <span class="code">pi-dispatch egress render</span>.', small=True)}
-  <p class="c2-sub">Provider keys, by name</p>
-  <ul class="rows">
-    <li class="rowpill">{ic('key', 'ic ic--sm')}<b>anthropic</b><span class="code">ANTHROPIC_API_KEY</span><span class="end"><span class="muted">from .env</span></span></li>
-    <li class="rowpill">{ic('key', 'ic ic--sm')}<b>kimi-coding</b><span>from the pi login on each host</span></li>
-  </ul>
+  <p class="c2-sub"><a class="link" href="#p-provider-keys">Manage provider API keys</a> separately from endpoint declarations.</p>
 </div>"""
     p_ep = card("Model endpoints", endpoints, id_="p-endpoints", flush=True, sub=f'{code("model-endpoints.json")} · fleet lease counts where available')
 
@@ -475,17 +472,17 @@ def connections():
         (code("PI_WORKER_NAME"), "set on mini1, mini2, build3"),
         (code("VALKEY_URL"), f'<span class="c2-st tone-attention">{ic("attention", "ic ic--sm")}<span>this shell and the .env disagree; the service reads the .env</span></span>'),
     ], 1)
-    p_env = card("Deployment environment", env + '<p class="c2-gap2 card__sub">Read from the deployment\'s .env. Edit the file and restart the service; nothing here writes it.</p>', id_="p-env")
+    p_env = card("Deployment environment", env + '<p class="c2-gap2 card__sub">Read from the deployment\'s .env. Use the Provider API keys card for confirmed key changes; edit other declarations on the host and restart the service.</p>', id_="p-env")
 
     pkgs = f"""<p class="muted">Staged 1 Oct, 09:12 UTC.</p>
 <ul class="rows c2-gap2"><li class="rowpill">{ic('queue', 'ic ic--sm')}<b class="code">pi-lint@1.4.2</b></li><li class="rowpill">{ic('queue', 'ic ic--sm')}<b class="code">pi-test-runner@0.9.0</b></li></ul>
 <p class="c2-gap2 card__sub">They load into every job except triggers that set {code('"packages": false')} (1 does). Staged with {code('pi-dispatch import-pi --with-packages')}.</p>"""
     p_pkgs = card("Staged pi packages", pkgs, id_="p-packages", sub="2")
 
-    inner = '<section id="p-connection-problems" data-panel>' + top + '</section>' + f'<div class="cols"><div class="stack">{p_forges}{p_egress}{p_ep}{subscription_auth_card()}</div><div class="stack">{p_notify}{p_mcp}{p_env}{p_pkgs}</div></div>'
+    inner = '<section id="p-connection-problems" data-panel>' + top + '</section>' + f'<div class="cols"><div class="stack">{provider_keys_card()}{p_forges}{p_egress}{p_ep}{subscription_auth_card()}</div><div class="stack">{p_notify}{p_mcp}{p_env}{p_pkgs}</div></div>'
     return shell("Configuration", inner, "Connections", sub="Where jobs come from, what they may reach, and who hears about failures. Names and hosts only.", back="Configuration")
 
-CO_CSS = COMMON_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_REFERENCE_CSS + """
+CO_CSS = COMMON_CSS + PROVIDER_KEYS_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_REFERENCE_CSS + """
 @media (max-width: 1000px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 .c2-pad2 { padding: var(--space-4) var(--space-5) var(--space-5); border-top: 1px solid var(--line); display: grid; gap: var(--space-3); }
 .c2-pad2 .c2-sub { margin: var(--space-2) 0 0; }
@@ -768,15 +765,16 @@ A viewer sees the tables, with no Remove or forms.
   - An unconfigured forge collapses to one line saying its path answers 404. GitHub is enabled by a trigger or an explicit auth source; each other forge by any of its receiver variables. GitHub's implicit default auth source is shown as such.
   - One line says delivery health is not published and where to look instead.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
-- **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor. Provider keys are listed by variable name and where they come from.
+- **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
+- **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
 - **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Its runs are in the worker's log; their history is not published.
 - **MCP servers, Deployment environment, Staged pi packages.** All read-only, each with the command or file that changes it. Caps set only in the .env read "unknown (worker env or default)".
 
-Viewers see the same page; nothing on it writes.
+Viewers read status and provider guides without mutation controls. A read-only operator keeps the guides and terminal recovery. No-JavaScript users can read native disclosures and external links, while mutation controls stay disabled.
 
-**Subscription authentication.** Safe connection facts show the selected exact adapter, owner host, compatibility, credential health and expiry. Only a writable operator gets host-terminal sign-in, logout, usage and explicit trial commands. No browser authentication or credential value is exposed. Viewers and agents read the same safe subscription facts. Other deployment metadata is not published in the agent view.
+**Subscription authentication.** Safe connection facts show the selected exact adapter, owner host, compatibility, credential health and expiry. Native help guides explain OpenAI Sign in with ChatGPT on the owning host and Claude community compatibility, with the host setup guide and official provider guidance. Claude community routes are explicitly separate from the official Claude Code setup-token workflow. Only a writable operator gets host-terminal sign-in, logout, usage and explicit trial commands. No browser authentication or credential value is exposed. Viewers and agents read the same safe subscription facts. Other deployment metadata is not published in the agent view.
 
-**Panels.** `p-connection-problems`, `p-forges`, `p-egress`, `p-endpoints`, `p-subscription-auth`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
+**Panels.** `p-connection-problems`, `p-provider-keys`, `p-forges`, `p-egress`, `p-endpoints`, `p-subscription-auth`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
 
 **The server provides.**
 - Per forge: the triggers naming it, the auth source, whether verification secrets are set (names only), the webhook mode and path, and the polling settings.

@@ -54,6 +54,21 @@ test("host setup transport fixes executable, argv, cwd and environment; private 
   assert.ok(h.timers.every((t) => t.cleared));
 });
 
+test("apply serializes private stdin before returning its promise so the caller can release its input immediately", async () => {
+  const h = harness(({ child, wire }) => emit(child, response(wire, { state: "applied", plan: undefined, effects: ["write-provider-key"] })));
+  const input = { provider: "openai", key: "OPENAI_API_KEY", value: "private-serialization-canary" };
+  const submitted = { ...input };
+  const pending = h.broker.apply("setup-provider-key", { expected: DIGEST, input });
+  input.value = undefined;
+  input.provider = "deepseek";
+  input.key = "DEEPSEEK_API_KEY";
+  assert.deepEqual(h.wire().input, submitted, "the wire already owns the selected provider/key/value before any caller cleanup");
+  assert.equal(h.wire().expected, DIGEST);
+  assert.equal(h.calls.length, 1);
+  assert.equal(JSON.stringify(h.calls).includes(submitted.value), false, "the serialized value never rides executable arguments or environment");
+  assert.equal((await pending).state, "applied");
+});
+
 test("malformed, foreign, extended and nonzero child replies cannot enter an action response", async () => {
   for (const mutate of [
     (r) => ({ ...r, id: "0".repeat(32) }),

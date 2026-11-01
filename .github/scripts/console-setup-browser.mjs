@@ -49,16 +49,36 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
       for (const type of ["mousePressed", "mouseReleased"]) await tab.send("Input.dispatchMouseEvent", { type, ...point, button: "left", clickCount: 1 });
     };
     const type = async (selector, text) => { await evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.focus();el.select();})()`); await tab.send("Input.insertText", { text }); };
+    const press = async (key, code, windowsVirtualKeyCode) => {
+      await tab.send("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode, ...(key === "Enter" ? { text: "\r", unmodifiedText: "\r" } : {}) });
+      await tab.send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode });
+    };
+    const expectAborted = async (signal, label) => {
+      if (!signal.aborted) await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`${label}: the host planner was not cancelled`)), 10_000);
+        signal.addEventListener("abort", () => { clearTimeout(timeout); resolve(); }, { once: true });
+      });
+      assert.equal(signal.aborted, true, label);
+    };
+    const choose = async (selector, value) => {
+      const count = await evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.focus();return [...el.options].filter(option=>!option.disabled).findIndex(option=>option.value===${JSON.stringify(value)});})()`);
+      assert.ok(count >= 0, `the supported selector offers ${value}`);
+      const target = await evaluate(`document.querySelector(${JSON.stringify(selector)}).querySelector('option[value="'+${JSON.stringify(value)}+'"]')?.textContent`);
+      for (const char of target) { await tab.send("Input.dispatchKeyEvent", { type: "char", text: char }); }
+      await press("Tab", "Tab", 9);
+      assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)}).value`), value, "keyboard selects the requested provider/mode");
+    };
     const login = async role => {
       await tab.send("Network.clearBrowserCookies"); await navigate("/login");
       await until("document.querySelector('#login-form')&&!document.querySelector('#login-form').hidden");
       await type("#token", SETUP_BROWSER_TOKENS[role]); await click("#login-form button"); await until("location.pathname==='/'");
     };
-    const capture = async name => {
+    const capture = async (name, selector = null) => {
       if (!shots) return;
       mkdirSync(shots, { recursive: true }); await evaluate("window.scrollTo(0,0)");
-      const metrics = await tab.send("Page.getLayoutMetrics"), rect = metrics.cssContentSize ?? metrics.contentSize;
-      const image = await tab.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width: rect.width, height: rect.height, scale: 1 } }, 60_000);
+      const metrics = await tab.send("Page.getLayoutMetrics");
+      const rect = selector ? await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:r.x+scrollX,y:r.y+scrollY,width:r.width,height:r.height};})()`) : { x: 0, y: 0, ...(metrics.cssContentSize ?? metrics.contentSize) };
+      const image = await tab.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 } }, 60_000);
       writeFileSync(join(shots, `${name}.png`), Buffer.from(image.data, "base64"));
     };
     const paints = [];
@@ -76,6 +96,14 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
         else { assert.ok(painted.forms > 0); assert.ok(painted.labels.some(label => label.includes("worker"))); }
         paints.push({ role, theme, width, ...painted });
         if ([375, 1024, 1440].includes(width)) await capture(`setup-${role}-${theme}-${width}`);
+        await navigate("/config/connections");
+        const keysPaint = await evaluate(`(()=>{const style=getComputedStyle(document.body);return{canvas:style.getPropertyValue('--canvas').trim(),fonts:document.fonts.status,css:[...document.styleSheets].some(sheet=>sheet.href?.endsWith('/static/console.css')&&sheet.cssRules.length>100),forms:document.querySelectorAll('form[data-provider-key-form]').length,csp:window.__setupCsp};})()`);
+        assert.equal(keysPaint.canvas, theme === "light" ? "#edeeec" : "#000000"); assert.equal(keysPaint.fonts, "loaded"); assert.equal(keysPaint.css, true); assert.deepEqual(keysPaint.csp, []);
+        assert.equal(widthVerdict(await evaluate(measureSource(width, EDGE_SLACK)), width).ok, true, `${stage}: Connections sections fit`);
+        assert.equal(keysPaint.forms, role === "operator" ? 1 : 0);
+        if (role !== "operator") assert.equal(await evaluate("document.querySelectorAll('input[type=password], [data-provider-pick]').length"), 0);
+        paints.push({ role, theme, width, page: "connections", ...keysPaint });
+        if ([375, 1024, 1440].includes(width)) await capture(`provider-keys-${role}-${theme}-${width}`);
       }
     }
     await login("operator"); await navigate("/setup");
@@ -110,6 +138,7 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
     await until("document.querySelector('#p-setup-ready').innerText.includes('A worker runs')");
     stage = "private key channel";
     const key = "sk-browser-private-canary-774";
+    await navigate("/config/connections");
     await type('[data-action="setup-provider-key"] input[name=value]', key);
     await click('[data-action="setup-provider-key"] button[type=submit]');
     await until("document.querySelector('#confirm-slot [data-confirm]')&&!document.querySelector('#confirm-slot [data-confirm]').disabled");
@@ -120,6 +149,110 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
     await until("document.querySelector('#confirm-slot').hidden || !document.querySelector('#confirm-slot [data-confirm]')");
     assert.ok(fixture.keyFile().includes(key), "confirmed key reaches the injected host boundary");
     assert.ok(!JSON.stringify(fixture.logs).includes(key));
+    stage = "multiple providers and separate Replace";
+    const firstEnv = fixture.keyFile();
+    for (const provider of ["openrouter", "deepseek"]) {
+      await navigate("/config/connections");
+      await choose('[data-provider-key-form] select[name=provider]', provider);
+      await type('[data-provider-key-form] input[name=value]', `private-${provider}-canary-774`);
+      await click('[data-provider-key-form] button[type=submit]');
+      await until("document.querySelector('#confirm-slot [data-confirm]')&&!document.querySelector('#confirm-slot [data-confirm]').disabled");
+      assert.match(await evaluate("document.querySelector('#confirm-slot').innerText"), new RegExp(provider));
+      await click("#confirm-slot [data-confirm]");
+      await until("document.querySelector('#confirm-slot').hidden || !document.querySelector('#confirm-slot [data-confirm]')");
+      assert.ok(fixture.keyFile().includes(`private-${provider}-canary-774`));
+      assert.ok(fixture.keyFile().includes(firstEnv.trim()), "adding another provider preserves existing credentials and the default");
+    }
+    await navigate("/config/connections");
+    const original = fixture.keyFile();
+    await click('[data-provider-pick="openrouter"][data-provider-mode="replace"]');
+    assert.equal(await evaluate("document.activeElement?.name"), "value", "row shortcut focuses the new-key input");
+    assert.equal(await evaluate("document.querySelector('[data-provider-key-form]').getAttribute('data-action')"), "setup-provider-key-replace");
+    await type('[data-provider-key-form] input[name=value]', "replacement-openrouter-private-774");
+    await click('[data-provider-key-form] button[type=submit]');
+    await until("document.querySelector('#confirm-slot [data-confirm]')&&!document.querySelector('#confirm-slot [data-confirm]').disabled");
+    assert.equal(fixture.keyFile(), original, "Replace preview has no write");
+    assert.match(await evaluate("document.querySelector('#confirm-slot').innerText"), /not retained for Undo/);
+    assert.equal(await evaluate("document.querySelector('#confirm-slot [data-confirm]').innerText"), "Replace key");
+    assert.equal(await evaluate("document.querySelector('[data-provider-key-form] input[name=value]').value"), "");
+    await click("#confirm-slot [data-confirm]");
+    await until("document.querySelector('#confirm-slot').hidden || !document.querySelector('#confirm-slot [data-confirm]')");
+    assert.equal(fixture.keyFile(), original.replace("private-openrouter-canary-774", "replacement-openrouter-private-774"), "Replace changes only the selected key bytes");
+    stage = "provider and mode changes cancel pending private input";
+    await navigate("/config/connections");
+    await choose('[data-provider-key-form] select[name=provider]', "openai");
+    await type('[data-provider-key-form] input[name=value]', "unsubmitted-private-openai-774");
+    await choose('[data-provider-key-form] select[name=provider]', "deepseek");
+    assert.equal(await evaluate("document.querySelector('[data-provider-key-form] input[name=value]').value"), "", "changing provider clears an unsubmitted key");
+    await type('[data-provider-key-form] input[name=value]', "unsubmitted-private-mode-774");
+    await choose('[data-provider-key-form] select[data-provider-key-mode]', "replace");
+    assert.equal(await evaluate("document.querySelector('[data-provider-key-form] input[name=value]').value"), "", "changing mode clears an unsubmitted key");
+    await choose('[data-provider-key-form] select[data-provider-key-mode]', "add");
+    await choose('[data-provider-key-form] select[name=provider]', "openai");
+    const delayed = fixture.delayNextKeyPreview();
+    await type('[data-provider-key-form] input[name=value]', "late-private-openai-canary-774");
+    await click('[data-provider-key-form] button[type=submit]'); const delayedSignal = await delayed.started;
+    await choose('[data-provider-key-form] select[name=provider]', "deepseek");
+    await expectAborted(delayedSignal, "provider change aborts the real request and its private planner before it returns");
+    delayed.release();
+    await until("document.querySelector('#confirm-slot').hidden");
+    await choose('[data-provider-key-form] select[name=provider]', "openai");
+    const cancelledPlanner = fixture.delayNextKeyPreview();
+    await type('[data-provider-key-form] input[name=value]', "cancel-before-plan-private-774");
+    await click('[data-provider-key-form] button[type=submit]');
+    const cancelledSignal = await cancelledPlanner.started;
+    await click("#confirm-slot [data-cancel]");
+    await expectAborted(cancelledSignal, "Cancel aborts the real private request before its planner returns");
+    cancelledPlanner.release();
+    await choose('[data-provider-key-form] select[name=provider]', "deepseek");
+    await choose('[data-provider-key-form] select[data-provider-key-mode]', "replace");
+    await type('[data-provider-key-form] input[name=value]', "cancelled-private-deepseek-774");
+    await click('[data-provider-key-form] button[type=submit]');
+    await until("document.querySelector('#confirm-slot [data-confirm]')&&!document.querySelector('#confirm-slot [data-confirm]').disabled");
+    const cancelledMode = browser.event(message => message.sessionId === tab.sessionId && message.method === "Network.responseReceived" && message.params.response.url.endsWith("/api/act/setup-provider-key-replace/cancel"), "mode change cancellation");
+    await choose('[data-provider-key-form] select[data-provider-key-mode]', "add"); await cancelledMode;
+    assert.equal(await evaluate("document.querySelector('#confirm-slot').hidden"), true);
+    assert.equal(await evaluate("document.querySelector('[data-provider-key-form] input[name=value]').value"), "");
+    assert.ok(!fixture.keyFile().includes("late-private") && !fixture.keyFile().includes("cancelled-private"));
+    await choose('[data-provider-key-form] select[name=provider]', "openai");
+    await type('[data-provider-key-form] input[name=value]', "stale-private-openai-774");
+    await click('[data-provider-key-form] button[type=submit]');
+    await until("document.querySelector('#confirm-slot [data-confirm]')&&!document.querySelector('#confirm-slot [data-confirm]').disabled");
+    const beforeStale = fixture.keyFile() + "PI_MAX_COST_USD=2\n";
+    fixture.changeEnv(beforeStale);
+    await click("#confirm-slot [data-confirm]");
+    await until("document.querySelector('#confirm-slot').innerText.includes('deployment changed')");
+    assert.equal(fixture.keyFile(), beforeStale, "stale confirmation preserves all current bytes");
+    assert.ok(!JSON.stringify(fixture.logs).includes("private-openai"));
+    stage = "navigation aborts in-flight private input";
+    await navigate("/config/connections");
+    await choose('[data-provider-key-form] select[name=provider]', "openai");
+    const leaving = fixture.delayNextKeyPreview();
+    await type('[data-provider-key-form] input[name=value]', "navigation-private-openai-774");
+    await click('[data-provider-key-form] button[type=submit]');
+    const plannerSignal = await leaving.started;
+    await navigate("/config/connections");
+    await expectAborted(plannerSignal, "navigation's actual HTTP disconnect cancels the pending private planner");
+    leaving.release();
+    await choose('[data-provider-key-form] select[name=provider]', "openai");
+    await type('[data-provider-key-form] input[name=value]', "fresh-private-openai-774");
+    await click('[data-provider-key-form] button[type=submit]');
+    await until("document.querySelector('#confirm-slot [data-confirm]')&&!document.querySelector('#confirm-slot [data-confirm]').disabled");
+    assert.match(await evaluate("document.querySelector('#confirm-slot').innerText"), /OPENAI_API_KEY/);
+    await click("#confirm-slot [data-cancel]");
+    assert.equal(fixture.keyFile(), beforeStale, "neither abandoned nor cancelled preview writes a key");
+    for (const theme of ["light", "dark"]) for (const width of [375, 1024, 1440]) {
+      await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width <= 760 });
+      await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
+      await navigate("/config/connections");
+      assert.equal(widthVerdict(await evaluate(measureSource(width, EDGE_SLACK)), width).ok, true);
+      await capture(`provider-keys-configured-${theme}-${width}`, "#p-provider-keys");
+      await capture(`connections-configured-${theme}-${width}`);
+      await click('[data-provider-help="deepseek"] summary');
+      await capture(`provider-keys-guide-${theme}-${width}`, "#p-provider-keys");
+      for (const provider of ["openai", "anthropic"]) await click(`[data-subscription-help="${provider}"] summary`);
+      await capture(`provider-subscription-guides-${theme}-${width}`, "#p-subscription-auth");
+    }
     stage = "trigger recipe navigation and edit";
     await navigate("/setup"); await click('a[href="/config/trigger-add?recipe=comment-answer"]');
     await until("location.search==='?recipe=comment-answer'");
@@ -162,7 +295,7 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
     assert.equal(await evaluate("document.querySelectorAll('[data-setup-invitation]').length"), 0, "private result cannot survive the role change");
     stage = "no JavaScript";
     await login("operator"); await tab.send("Emulation.setScriptExecutionDisabled", { value: true }); await navigate("/setup");
-    assert.equal(await evaluate("[...document.querySelectorAll('form[data-action] fieldset')].every(fieldset=>fieldset.disabled)"), true);
+    assert.equal(await evaluate("(()=>{const fields=[...document.querySelectorAll('form[data-action] fieldset')];return fields.length>0&&fields.every(fieldset=>fieldset.disabled)})()"), true);
     const effectsBefore = fixture.effects.length;
     await click("#p-setup .su-term summary");
     assert.equal(await evaluate("document.querySelector('#p-setup .su-term').open"), true, "terminal disclosure works without script");
@@ -172,6 +305,19 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
     await until("!document.querySelector('#p-setup .su-term').open");
     assert.equal(fixture.effects.length, effectsBefore);
     await capture("setup-no-javascript");
+    for (const width of [375, 1440]) {
+      await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width <= 760 });
+      await navigate("/config/connections");
+      assert.equal(await evaluate("(()=>{const form=document.querySelector('#p-provider-keys form[data-provider-key-form]'),fields=[...document.querySelectorAll('#p-provider-keys fieldset')];return !!form&&fields.length>0&&fields.every(fieldset=>fieldset.disabled)})()"), true);
+      await click('[data-provider-help="deepseek"] summary');
+      assert.equal(await evaluate("document.querySelector('[data-provider-help=deepseek]').open"), true);
+      assert.equal(await evaluate("document.querySelector('[data-provider-help=deepseek] a').href"), "https://platform.deepseek.com/api_keys");
+      await evaluate("document.querySelector('[data-provider-help=deepseek] summary').focus()");
+      await press("Enter", "Enter", 13);
+      await until("!document.querySelector('[data-provider-help=deepseek]').open");
+      assert.equal(fixture.effects.length, effectsBefore, "native key guidance performs no host action");
+      await capture(`provider-keys-no-javascript-${width}`);
+    }
     await tab.send("Emulation.setScriptExecutionDisabled", { value: false });
     stage = "read-only";
     const effects = fixture.effects.length;
@@ -187,9 +333,14 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
       assert.equal(widthVerdict(await evaluate(measureSource(width, EDGE_SLACK)), width).ok, true);
       paints.push({ role: "read-only", theme, width });
       await capture(`setup-readonly-${theme}-${width}`);
+      await navigate("/config/connections");
+      assert.equal(await evaluate("document.querySelectorAll('form[data-provider-key-form], [data-provider-pick]').length"), 0);
+      assert.equal(widthVerdict(await evaluate(measureSource(width, EDGE_SLACK)), width).ok, true);
+      paints.push({ role: "read-only", theme, width, page: "connections" });
+      await capture(`provider-keys-readonly-${theme}-${width}`);
     }
     if (shots) writeFileSync(join(shots, "capture-proof.json"), JSON.stringify(paints, null, 2));
-    return { paints: paints.length, startingPaints: 6, effects, interactions: "real host preview/confirm, heartbeat readiness, private key, recipe save, viewer invitation and fresh revoke, native no-script keyboard reads and read-only gates", csp: "production header and hostile-inline negative control" };
+    return { paints: paints.length, startingPaints: 6, effects, interactions: "real host preview/confirm, heartbeat readiness, multi-provider Add/Replace preservation, keyboard selectors, delayed preview cancellation, stale file refusal, recipe save, viewer invitation and fresh revoke, native no-script key guidance and read-only gates", csp: "production header and hostile-inline negative control" };
   } catch (error) { throw new Error(`Setup browser ${stage}: ${error.message}; exceptions=${JSON.stringify(exceptions)}; requests=${JSON.stringify(fixture?.logs.slice(-8))}`, { cause: error }); }
   finally {
     if (tab) await tab.close().catch(() => {});
