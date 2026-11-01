@@ -7080,6 +7080,12 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
     OpenAI remote callback recovery and Claude community compatibility versus Claude Code's own token flow are
     explicit. Guidance grants no browser OAuth operation, raw-token import or paid validation. Plain pi API-key
     fallback replacement explains the source switch; a managed binding always refuses API-key takeover.
+    Provider coverage is against the exact installed pi catalogue and credential-variable source, with an
+    explicit help/authentication review on upgrades. Every eligible built-in provider and shared alias has
+    an offline Add, worker credential-resolution and Replace round trip preserving other configuration.
+    Catalogue membership is not an assertion that every pi authentication mode works in the worker: cloud
+    identity, additional endpoint settings, unsupported legacy routes and custom/extension providers retain
+    their existing admission and credential restrictions, stated explicitly in operator guidance.
   - **Viewer invitation**: browser input cannot select another role. Real concurrent consumption admits the link
     once within 60 seconds; expiry/replay/revocation fail. Codes bind the exact created token incarnation, viewer
     role and file generation at redemption; rotation, role change, same-name recreation and generation changes
@@ -7998,6 +8004,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-01 (#774, coverage verification) | `REQ-BROWSER-FIRST-RUN-SETUP` acceptance clarified: exact-pin catalogue and credential-source coverage, exhaustive eligible API-key Add/resolve/Replace tests and explicit authentication/runtime limits. Browser regression checks identify account owner and copy controls independently of preceding help guides, retaining exact destinations, full commands and actual clipboard effects. Runtime/provider authentication capabilities, cloud/custom admission, credential forwarding, spend gates, `REQ-CONSOLE-SECURITY`, `CONST-*`, `DES-*` and `INT-*` contracts UNCHANGED, checked. |
 | 2026-11-01 (#774, provider management) | `REQ-BROWSER-FIRST-RUN-SETUP` and `REQ-CONSOLE-SECURITY` AMENDED: permanent multi-provider inventory and explicit selected-slot Add/Replace, with danger confirmation for replacement, preserved provider/model defaults, derived aliases, source-switch/reload explanations and private cancellation across selection changes. Fixed official provider help includes OpenRouter/DeepSeek; subscription help remains host-only and distinguishes Claude community compatibility from Claude Code tokens. Admission, spend, container isolation, roles, CSP, no-secret projections and subscription credential custody UNCHANGED, checked. |
 | 2026-11-01 (#774, implementation) | `REQ-BROWSER-FIRST-RUN-SETUP`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-DEPLOYMENT-BOOTSTRAP` IMPLEMENTED after #783: explicit host grant, live setup, bounded person-only actions, private create-only API keys/viewer links, durable bootstrap and valid wizard webhook choices. Destructive-action enumeration matches the registered rules. Admission, budget reservations, trigger semantics, roles, existing model tools, CSP and side-effect-free GET contracts UNCHANGED, checked. Acceptance includes counterexamples, full integration suite, clock/temp/reporting guards, source-card comparisons and production-CSP interactions. |
 | 2026-10-31 (#774, prerequisite specs) | NEW `REQ-BROWSER-FIRST-RUN-SETUP`, DECIDED, NOT IMPLEMENTED; `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-DEPLOYMENT-BOOTSTRAP` AMENDED with bounded setup authority and future behavior/counterexample acceptance. Private key and viewer-code exceptions do not relax role, origin, ticket, audit or CSP guards. Full role/theme/width/accessibility/no-script/real-CSP verification is required before Built. Existing action/tool inventories, destructive-action enumeration, bootstrap unset semantics and ordinary job admission UNCHANGED, checked; implementation follows only after this specs PR lands. |

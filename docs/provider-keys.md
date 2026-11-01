@@ -9,8 +9,29 @@ deployment default, providers in validated trigger/model/fallback/role routes, e
 known slots that are configured but currently unused. Providers sharing one slot appear together.
 
 Choose another reviewed provider in the **Provider** selector. Saving its credential does not change the default
-provider, model, roles, routing, budgets or egress. Custom providers, cloud credential chains and special
-subscription logins retain their supported host setup instead of a generic token field.
+provider, model, roles, routing, budgets or egress. Authentication that requires cloud credentials or a
+subscription login cannot be enabled through this generic key field.
+
+## Provider coverage
+
+The selector and canonical key names are derived from the exact installed pi release. Tests compare every
+built-in provider, credential-variable order and the pinned source hash; a pi upgrade must pass those checks
+and a separate authentication/help review. Add, credential forwarding and Replace are tested for every
+eligible built-in provider, including aliases sharing a slot. These are offline tests of credential handling,
+not proof of a successful provider request or every authentication mode offered by pi.
+
+Provider support depends on authentication and required configuration as well as its name. Some routes need
+additional explicitly forwarded settings: Cloudflare, for example, needs its account ID and AI Gateway also
+needs its gateway ID. Saving the API key alone does not supply them. The generic browser editor deliberately
+withholds special authentication routes even where a host-configured credential is supported by the worker.
+Reviewed OpenAI and Claude managed connections have their own policy and host login requirements.
+
+The worker currently has no main-provider credential route for Amazon Bedrock or legacy `openai-codex`.
+Vertex's host API-key route is distinct from its application-default-credentials route; ADC-only authentication
+is not supported by the worker's credential gate. Keyed custom main providers are also refused. A custom main provider
+can use the explicitly declared [keyless endpoint contract](global-pi-overlay.md); registering a provider only
+inside an extension does not make it visible to the pre-spend model checks. These limits are not removed by
+appearing in pi's catalogue, and this key editor does not expand job credential permissions.
 
 ## Find or create a key at the provider
 
@@ -67,5 +88,5 @@ For supported host-owned OpenAI ChatGPT and reviewed Claude community connection
 OpenAI API keys and Sign in with ChatGPT are separate authentication and billing choices.
 
 Copilot's runtime credential variable does not mean a general GitHub personal access token is suitable.
-Amazon Bedrock, Google Vertex, legacy `openai-codex` and custom provider routes retain their own supported
-host setup. A canonical variable name is not proof a provider offers manual dashboard key creation.
+The coverage limits above apply to Amazon Bedrock, Google Vertex, legacy `openai-codex` and custom providers.
+A canonical variable name is not proof a provider offers manual dashboard key creation.

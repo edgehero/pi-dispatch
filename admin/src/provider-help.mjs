@@ -15,21 +15,21 @@ const core = {
   deepseek: { label: "DeepSeek", url: "https://platform.deepseek.com/api_keys", docsUrl: "https://api-docs.deepseek.com/", steps: ["Sign in to the DeepSeek API platform.", "Open API keys and create a key for this deployment.", "Copy it here, then preview and confirm."], notice: null },
 };
 const special = {
-  "amazon-bedrock": "Configure the owning host's AWS credential chain and permitted Bedrock access. This is not an API-key creation form.",
-  "google-vertex": "Configure the owning host's Google Cloud project and application credentials. A Gemini API key does not replace Vertex authentication.",
-  "github-copilot": "Use the supported host authentication flow. A general GitHub personal access token is not a substitute for Copilot authentication.",
-  "openai-codex": "Legacy openai-codex authentication is separate from the reviewed direct OpenAI managed connection. Follow the host guide rather than pasting an OAuth token here.",
+  "amazon-bedrock": { steps: ["Choose a provider with a supported worker credential route for the deployment's main model.", "Configuring AWS credentials on the host does not enable amazon-bedrock in pi-dispatch."], notice: "pi supports AWS credential chains and Bedrock bearer tokens. The pi-dispatch worker currently does not support amazon-bedrock as a main provider." },
+  "google-vertex": { steps: ["Configure a Google Cloud API key as GOOGLE_CLOUD_API_KEY in the worker's deployment environment on the owning host.", "Restart affected worker services separately. An ADC login or credentials file alone does not enable this Vertex route."], notice: "pi-dispatch can forward GOOGLE_CLOUD_API_KEY for google-vertex. ADC-only and service-account-file authentication are not supported for a main provider; a Gemini API key does not replace a Google Cloud API key." },
+  "github-copilot": { steps: ["Configure the correct Copilot credential as COPILOT_GITHUB_TOKEN on the owning host, outside this form.", "Restart affected worker services separately. This API-key form does not perform Copilot sign-in or refresh."], notice: "A general GitHub personal access token is not a substitute for Copilot authentication." },
+  "openai-codex": { steps: ["Choose provider openai for the reviewed managed OpenAI connection.", "Follow Subscription authentication to configure its explicit binding and complete sign-in on the owning host."], notice: "The pi-dispatch worker currently does not support pi's openai-codex OAuth route as a main provider. The reviewed managed OpenAI connection uses openai instead." },
 };
 export const PROVIDER_HELP = Object.freeze(Object.fromEntries(REVIEWED.map(provider => [provider, Object.freeze({
   label: core[provider]?.label ?? provider,
   kind: needsHostAuthentication(provider) ? "special" : "api-key",
   url: core[provider]?.url ?? null,
   docsUrl: core[provider]?.docsUrl ?? PROVIDER_KEY_GUIDE,
-  steps: Object.freeze(needsHostAuthentication(provider) ? ["Follow the supported owning-host authentication guide.", "Keep login or refresh credentials in the private host store; do not paste them into the API-key form."] : core[provider]?.steps ?? ["Use the provider's own account and credential instructions.", "Create an API key only if the provider supports the canonical slot shown here.", "Paste only that API key here; preview the target and any shared-provider effect before confirming."]),
-  notice: special[provider] ?? core[provider]?.notice ?? "Saving a key does not select this provider, validate a credential or change model routing.",
+  steps: Object.freeze(special[provider]?.steps ?? core[provider]?.steps ?? ["Use the provider's own account and credential instructions.", "Create an API key only if the provider supports the canonical slot shown here.", "Paste only that API key here; preview the target and any shared-provider effect before confirming."]),
+  notice: special[provider]?.notice ?? core[provider]?.notice ?? "Saving a key does not select this provider, validate a credential or change model routing.",
 })])));
 export function providerHelp(provider) {
-  return typeof provider === "string" && Object.hasOwn(PROVIDER_HELP, provider) ? PROVIDER_HELP[provider] : { label: "Custom provider", kind: "special", url: null, docsUrl: PROVIDER_KEY_GUIDE, steps: ["Review the custom provider's host configuration and documented authentication flow."], notice: "This provider has no reviewed generic API-key creation flow." };
+  return typeof provider === "string" && Object.hasOwn(PROVIDER_HELP, provider) ? PROVIDER_HELP[provider] : { label: "Custom provider", kind: "special", url: null, docsUrl: PROVIDER_KEY_GUIDE, steps: ["The generic form cannot configure a custom provider's credentials.", "A custom main provider requires the declared keyless local endpoint setup in the host guide."], notice: "Custom keyed main providers and extension-only models are not enabled by this form." };
 }
 export const PRIMARY_PROVIDER_HELP = Object.freeze(["anthropic", "openai", "google", "openrouter", "deepseek"]);
 // Tests compare both directions; do not silently add a newly generated provider to this reviewed catalog.

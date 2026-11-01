@@ -248,7 +248,85 @@ test("provider selection and alias groups are derived exhaustively from the actu
 		assert.deepEqual(p.plan.aliases, expected.sort(), provider);
 		assert.equal(p.plan.key, key, provider);
 	}
-	for (const provider of ["__proto__", "constructor", "unknown-custom-provider"]) assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), deps)).reason, "provider-unsupported");
+	const unchanged = fs.readFileSync(join(deps.cwd, ".env"), "utf8");
+	for (const provider of ["__proto__", "constructor", "unknown-custom-provider"]) for (const operation of ["setup-provider-key", "setup-provider-key-replace"]) {
+		assert.equal((await runSetupHost(request(operation, "plan", { input: { provider } }), deps)).reason, "provider-unsupported");
+		assert.equal((await runSetupHost(request(operation, "apply", { expected: "f".repeat(64), input: { provider, value: "unknown-route-never-written" } }), deps)).reason, "provider-unsupported");
+		assert.equal(fs.readFileSync(join(deps.cwd, ".env"), "utf8"), unchanged);
+	}
+});
+
+test("every browser-eligible pinned provider round-trips Add and Replace through the real job credential resolver", async t => {
+	const { piProviders, providerKeyCandidates, resolveProviderCredential } = await import("../src/env-allowlist.mjs");
+	const { apiKeyVariable, needsHostAuthentication, nonApiKeyKind } = await import("../src/provider-key.mjs");
+	const { deploymentServiceEnv } = await import("../src/service-env.mjs");
+	const names = piProviders().sort();
+	const eligible = names.filter(provider => {
+		const key = apiKeyVariable(providerKeyCandidates(provider));
+		return key !== null && nonApiKeyKind(key) === null && !needsHostAuthentication(provider);
+	});
+	const variables = [...new Set(names.flatMap(providerKeyCandidates))];
+	assert.ok(eligible.length > 0, "the exhaustive round trip cannot pass without exercising a provider");
+	for (const provider of eligible) await t.test(provider, async () => {
+		const key = apiKeyVariable(providerKeyCandidates(provider));
+		const otherKey = key === "ANTHROPIC_API_KEY" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
+		const base = `# retained deployment context\nPI_AUTH_FROM_PI=0\nPI_PROVIDER=anthropic\nPI_MODEL=retained-default-model\nPI_SETTINGS_FILE=settings.json\nPI_TRIGGERS_FILE=triggers.json\nPI_AUTH_CONNECTIONS_FILE=connections.json\nPI_ALLOWED_MODELS=anthropic/retained-default-model\nPI_MAX_COST_USD=2\nPI_EGRESS=1\nUNRELATED=preserve-exactly\n${otherKey}=unrelated-private-value\n`;
+		const deps = await pinnedProviders(host(base));
+		const envPath = join(deps.cwd, ".env");
+		const files = {
+			"settings.json": JSON.stringify({ provider: "anthropic", model: "retained-overlay-model", maxTurns: 7 }),
+			"triggers.json": JSON.stringify({ triggers: [], modelRoles: { default: { code: "anthropic/retained-role-model" } } }),
+			// A declared but unbound connection must not block an unrelated API-key route or be rewritten.
+			"connections.json": JSON.stringify({ version: 1, connections: [{ id: "unused-chatgpt", provider: "openai", adapter: "openai-chatgpt", ownerHost: "host1" }], bindings: {} }),
+		};
+		for (const [file, text] of Object.entries(files)) fs.writeFileSync(join(deps.cwd, file), text, { mode: 0o600 });
+		const aliases = names.filter(name => apiKeyVariable(providerKeyCandidates(name)) === key).sort();
+		const first = `private-add-${provider}`;
+		const replacement = `private-replace-${provider}`;
+		const plan = await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), deps);
+		assert.equal(plan.state, "planned");
+		assert.equal(validSetupResult(plan), true);
+		assert.equal(plan.plan.provider, provider);
+		assert.equal(plan.plan.key, key);
+		assert.equal(plan.plan.mode, "add");
+		assert.equal(plan.plan.source, "none");
+		assert.deepEqual(plan.plan.aliases, aliases);
+		assert.equal(fs.readFileSync(envPath, "utf8"), base, "Add planning does not write");
+		const added = await runSetupHost(request("setup-provider-key", "apply", { expected: plan.plan.digest, input: { provider, value: first } }), deps);
+		assert.equal(added.state, "applied");
+		assert.equal(validSetupResult(added), true);
+		assert.equal(fs.readFileSync(envPath, "utf8"), `${base}${key}=${first}\n`, "Add changes only the selected canonical slot");
+		const resolveWritten = expected => {
+			const loaded = deploymentServiceEnv({ env: {}, dir: deps.cwd, keys: variables, fs, uid: deps.uid, platform: deps.platform });
+			assert.equal(loaded.unreadable, null);
+			assert.equal(loaded.untrusted, null);
+			assert.deepEqual(loaded.unread, []);
+			for (const name of aliases) assert.deepEqual(resolveProviderCredential({ provider: name, hostEnv: loaded.env, authFromPi: false, agentDir: join(deps.cwd, "agent"), readFile() { assert.fail("a saved environment key must not fall back to any host credential store"); } }), { [key]: expected }, `${name} resolves the saved slot without another provider's key`);
+		};
+		resolveWritten(first);
+		assert.equal((await runSetupHost(request("setup-provider-key", "plan", { input: { provider } }), deps)).reason, "key-present", "Add never becomes an upsert");
+		const replace = await runSetupHost(request("setup-provider-key-replace", "plan", { input: { provider } }), deps);
+		assert.equal(replace.state, "planned");
+		assert.equal(validSetupResult(replace), true);
+		assert.equal(replace.plan.provider, provider);
+		assert.equal(replace.plan.key, key);
+		assert.equal(replace.plan.mode, "replace");
+		assert.equal(replace.plan.source, "deployment-env");
+		assert.deepEqual(replace.plan.aliases, aliases);
+		assert.equal(fs.readFileSync(envPath, "utf8"), `${base}${key}=${first}\n`, "Replace planning preserves the old value");
+		const replaced = await runSetupHost(request("setup-provider-key-replace", "apply", { expected: replace.plan.digest, input: { provider, value: replacement } }), deps);
+		assert.equal(replaced.state, "applied");
+		assert.equal(validSetupResult(replaced), true);
+		assert.equal(fs.readFileSync(envPath, "utf8"), `${base}${key}=${replacement}\n`, "Replace preserves unrelated/default/model/budget/egress declarations byte for byte");
+		resolveWritten(replacement);
+		for (const [file, text] of Object.entries(files)) assert.equal(fs.readFileSync(join(deps.cwd, file), "utf8"), text, `${file} stays byte identical`);
+		assert.equal(fs.statSync(envPath).mode & 0o777, 0o600);
+		assert.equal(fs.existsSync(`${envPath}.tmp`), false);
+		assert.equal(fs.existsSync(join(deps.cwd, ".pi-dispatch-setup.lock")), false);
+		const replies = JSON.stringify([plan, added, replace, replaced]);
+		assert.equal(replies.includes(first), false);
+		assert.equal(replies.includes(replacement), false);
+	});
 });
 
 test("host-auth routes cannot paste tokens through Add or Replace, while a pinned Hugging Face API token remains eligible", async () => {

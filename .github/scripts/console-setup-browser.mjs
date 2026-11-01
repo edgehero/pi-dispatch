@@ -252,6 +252,17 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
       await capture(`provider-keys-guide-${theme}-${width}`, "#p-provider-keys");
       for (const provider of ["openai", "anthropic"]) await click(`[data-subscription-help="${provider}"] summary`);
       await capture(`provider-subscription-guides-${theme}-${width}`, "#p-subscription-auth");
+      stage = `special authentication guidance ${theme} ${width}`;
+      await click('#p-provider-keys .pk-guide:not([data-provider-help]) > summary');
+      for (const provider of ["amazon-bedrock", "google-vertex", "openai-codex"]) {
+        await click(`[data-provider-help="${provider}"] summary`);
+        const special = await evaluate(`(()=>{const guide=document.querySelector('[data-provider-help="${provider}"]'),option=document.querySelector('[data-provider-key-form] option[value="${provider}"]');return{open:guide.open,visible:!!guide.querySelector('.pk-notice').getClientRects().length,disabled:option.disabled,notice:guide.querySelector('.pk-notice').textContent}})()`);
+        assert.equal(special.open && special.visible && special.disabled, true, "Special authentication guidance is readable while generic credential entry stays unavailable");
+        assert.match(special.notice, provider === "google-vertex" ? /ADC-only.*not supported/ : /worker.*does not support/);
+        await capture(`provider-special-${provider}-${theme}-${width}`, `[data-provider-help="${provider}"]`);
+      }
+      assert.equal(widthVerdict(await evaluate(measureSource(width, EDGE_SLACK)), width).ok, true);
+      await capture(`provider-special-guides-${theme}-${width}`, "#p-provider-keys");
     }
     stage = "trigger recipe navigation and edit";
     await navigate("/setup"); await click('a[href="/config/trigger-add?recipe=comment-answer"]');
