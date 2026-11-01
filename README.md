@@ -1,9 +1,21 @@
-# Browser setup evidence for #774
+# Issue #774, final review images
 
-Baseline: `2e5f2fd135ad05a2c2716cfa4882f1c094b5dc6a`, actual authenticated overview before the setup route existed.
+Implementation: `06d3c44f441a11a572794afd56082d41a9b1cc59`, PR #784.
 
-References: repository published-source SetupScreen, loaded through the design harness with tokens.css and bundle.css. Computed tokens, stylesheet rules, document.fonts and CDP platform fonts were verified before capture. The remote Claude artifact was inaccessible; no direct remote comparison is claimed.
+The setup baseline is main `2e5f2fd1`; the provider-management baseline is the prior PR commit `a285e870`.
+After captures use the actual console server and production CSP with pinned Chrome155.0.8059.39. The final browser
+run passed108 role/theme/width checks, six Starting checks and additional configured/expanded-guide captures.
+Phone375, intermediate1024 and desktop1440 captures include both themes and applicable viewer/agent/read-only states.
 
-Implementation source: `a285e870596a4f9f7fb0da43356c82f624ee3dd0` (PR #784). Final captures were refreshed after the last relevant source change. Actual console HTTP/session/action/SSE server under its production CSP. Pinned Chrome for Testing 155.0.8059.39, native system fonts, both themes, phone/intermediate/desktop sizes. Starting captures require the worker Starting chip, blue fourth segment, waiting-heartbeat state and absence of idle Start controls. No private invitation code is published.
+References are the repository's published-source SetupScreen and ConnectionsScreen. The remote Claude artifact was
+inaccessible, so these images do not claim direct remote comparison. All18 reference captures verified both
+`tokens.css` and `bundle.css`, computed theme tokens, font readiness and actual native platform fonts. Source-card
+preview bytes remained unchanged through the final documentation rebuild, and root refreshed the references again.
 
-Curated review images only. Temporary harnesses, full capture matrices and build output remain outside implementation and evidence branches. The implementation PR records the final source commit and verification.
+The sample reference and actual deployment hold different provider/connection observations. Review compares shared
+colours, hierarchy, labels, statuses, controls and complete sections. Expanded API-key and host subscription guides
+show the acquisition workflow. Agent withholding is intentionally neutral; no mutation controls appear for agents,
+viewers or read-only sessions. Actual configured keys are Anthropic, OpenRouter and DeepSeek; saved values never appear.
+
+All26 curated PNGs are listed in `sha256.json`. Private invitation captures, temporary scripts, build output and
+credentials are excluded. These files live on the evidence branch, outside the implementation branch.
