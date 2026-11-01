@@ -2,6 +2,8 @@
 
 This branch holds review images and verification evidence for PRs [#786](https://github.com/edgehero/pi-dispatch/pull/786), [#785](https://github.com/edgehero/pi-dispatch/pull/785) and [#787](https://github.com/edgehero/pi-dispatch/pull/787). Each implementation PR targets `main` and includes permanent automated verification. Planning notes, scratch capture scripts, temporary files and generated admin build output remain outside the implementation branches.
 
+The maintainer subsequently requested landing these PRs. See [landing verification](775/landing/README.md) for the merged receiver and refreshed integration commits. The original handoff records below retain their original revisions and successful checks.
+
 ## Source and capture provenance
 
 | Slice | Final implementation commit | Last rendered implementation revision |

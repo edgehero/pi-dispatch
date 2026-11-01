@@ -1,0 +1,74 @@
+{
+  "issue": 775,
+  "verifiedAtUTC": "2026-11-01T19:01:50.626664+00:00",
+  "receiverMerged": {
+    "pr": 786,
+    "head": "c3f0884c8891762f21804be02bc92b973a9e60d2",
+    "mergeCommit": "195c9777ac6bbcb7c9264f8536dacde88d7d1a6d"
+  },
+  "hooks": {
+    "pr": 785,
+    "head": "0c72eea748ecb61af5e7b0553095838199672840",
+    "tree": "83fc42cde3096f477f6a5d3bb264a45046e42a99",
+    "localRoot": {
+      "tests": 12585,
+      "pass": 12579,
+      "fail": 0,
+      "skipped": 6
+    },
+    "node": "22.19.0",
+    "valkey": "8.0.2",
+    "requiredIntegrationFlags": [
+      "LOADER",
+      "WORKER",
+      "RECEIVER"
+    ],
+    "browser": {
+      "receiver": 38,
+      "aged": 2,
+      "maxName": 32,
+      "unknownName": 2,
+      "negativeControl": true,
+      "coexistenceHooks": 38,
+      "hookDeletionPreservesReceiver": true
+    },
+    "styledReferences": 12,
+    "allLocalCaptureHashesChecked": 113,
+    "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898037",
+    "ciStateAtPublication": "running; PR remains draft until green"
+  },
+  "images": {
+    "775/landing/hooks/hooks-readonly-operator-no-script-light-1440.png": "d7d3dca8e55bc570e80295d94daa57420bff4d35fec47cae0d67fe03bc456f57",
+    "775/landing/hooks/hooks-operator-dark-800.png": "9f18d06ae4fcf8329737ce2f56499957654cba66c651547d5681f2ddaa16c592",
+    "775/landing/hooks/hooks-section-viewer-dark-390.png": "b8139e68ede691452bad99b97d0d6a297c9c51268c6829b6d15c6542e17225bb",
+    "775/landing/hooks/hooks-section-operator-light-390.png": "77aeb3d19b242c60b2385a0fe5ea23aebe583cf4515d4d079ad4d42c796a6ad0",
+    "775/landing/hooks/hooks-section-operator-light-1440.png": "8da914ce3c70bfbde56aedb56121121b8cf19439b312457f533bccc536b59841",
+    "775/landing/hooks/hooks-not-reported-light-1440.png": "24c5f14c24959f918dd311cbfca26b2ef47fe86b737e5e6472876537ec6cfbd6",
+    "775/landing/hooks/hooks-section-viewer-dark-1440.png": "d98e0b050d12742ae0907f58530aef1652bbd92eb04340e4e49de3f155b7beb9",
+    "775/landing/hooks/reference/reference-endpoints-light-800.png": "a8a55427a05d89b9b16dfc9d07a6914b300aeba41fe8186aff9453666a9548fd",
+    "775/landing/hooks/reference/reference-endpoints-dark-1440.png": "9ebbf6fa78e2070685b9200e9e9bbc89af8b0a35c6f2dda76c8409503bce2ea4",
+    "775/landing/hooks/reference/reference-endpoints-light-390.png": "1a17b936b4d74d0ac76fa42ce8f31732c883cb0bb0780df2b4e3bed377fd7714",
+    "775/landing/hooks/reference/reference-dark-390.png": "6619e21e24bd8a57c5d65645b650f2a12ecfa0d03b4bb15e56e2e172c6acd556",
+    "775/landing/hooks/reference/reference-hooks-light-1440.png": "67f95a52f3b0d3fc19c9b62b6673f87596835534d9e42a8bcfe1b3702a77d5e0",
+    "775/landing/hooks/reference/reference-dark-800.png": "f5c354844bdee603f46840c0a97051ec66793f4e375ddf439ea22f3174e3956f",
+    "775/landing/hooks/reference/reference-receiver-light-390.png": "e1dcc901d79440abc9114f5170426c407175274e5fe59f6045bac774070a9580",
+    "775/landing/hooks/reference/reference-endpoints-light-1440.png": "86845eb2cbc7fc10dd2b2f3f3bad908ceae798fb6e34a21bf23c6275362d9a66",
+    "775/landing/hooks/reference/reference-receiver-dark-1440.png": "643a00f0837134b920a3e988939ef74b678a5b94e3ff1413adff7fe37e0558f9",
+    "775/landing/hooks/reference/reference-receiver-dark-800.png": "6b2dfcceb57a5bb6641675e416252b64f9cac22321af04cc1c97977b5ae5ff11",
+    "775/landing/hooks/reference/reference-receiver-dark-390.png": "c5a4c345a1aad56ccf00d636b4ec6d52e08063b579e9dbfa3fd2f7d2535c75c6",
+    "775/landing/hooks/reference/reference-receiver-light-800.png": "9ea3ee7509483a2a30f5aebe07cad45236ad1707ecbf954b5d0e65805c5e47a0",
+    "775/landing/hooks/reference/reference-hooks-light-800.png": "d6d1f8330490faa70eed4ae8050be82978b71ea1805151ba1cbe4db7d57a68d2",
+    "775/landing/hooks/reference/reference-hooks-dark-390.png": "4bf997c13b1a976876e233742d671c292ecb0ad532a9b8021a0f09cd65d5c462",
+    "775/landing/hooks/reference/reference-receiver-light-1440.png": "bad25e85d5d366be31811f4827c9a251c3572ca979627e77e44b56a12a12b8b2",
+    "775/landing/hooks/reference/reference-endpoints-dark-800.png": "9deb7aa7f2c14677fc455769451f178dccd2c16244d50c8b824541c3755ed9a5",
+    "775/landing/hooks/reference/reference-light-800.png": "9682af3cb3aa8d9cd79b1c1056e1e5a847657f6a808c88c14133ef6b03ac4eb2",
+    "775/landing/hooks/reference/reference-light-390.png": "4ab09d417d2373b9e14857736eaf49cca5606adafea7b34ee79fc295fbe84d8a",
+    "775/landing/hooks/reference/reference-hooks-dark-1440.png": "c72ed422cfbb9e8b80442911f07541df3dc60c1dea45cac5fb1dfde8a2a24509",
+    "775/landing/hooks/reference/reference-light-1440.png": "63b3d27d98594ca5c76e70a94753c9c86798e5ce7e97955179fdd74cb70b9a64",
+    "775/landing/hooks/reference/reference-endpoints-dark-390.png": "33af07162c6c5ab07e584d3466a04ed8fd74a7829973cf1dedded3dd39746de5",
+    "775/landing/hooks/reference/reference-hooks-dark-800.png": "15a6eca7236fcb789c8461f62db7eedb06f32fa01111ee38bb06d9249f127b61",
+    "775/landing/hooks/reference/reference-hooks-light-390.png": "e59a77704b61d0149aabb97cdbd2b54faed36e1ecace276afc6db4b8468b3af9",
+    "775/landing/hooks/reference/reference-dark-1440.png": "58751285407e70cfe5aeccf12b1b495a6ab4a5422e3cd9c0de2ecbb69feeb4c8"
+  },
+  "baselineImages": "Original Notifications before captures from b9279bfada39ea151823b11bbc792592f9db8e4c are retained under775/hooks; receiver merge does not change that Notifications implementation."
+}
