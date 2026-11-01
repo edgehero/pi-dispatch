@@ -1,0 +1,81 @@
+{
+  "sourceCommit": "f5574c8187767f12f1b75d2df5f13d59d1ba54a8",
+  "sourceTree": "69525ecf82a6cc82b0283b325314f1bc5118cfd1",
+  "workingTreeClean": true,
+  "normalPaints": 38,
+  "agedPaints": 2,
+  "referencePaints": 12,
+  "selection": "Selected final review images and measurements; remaining matrix renders were verified but are not all published here.",
+  "published": [
+    {
+      "file": "receiver-aged-refusal-operator-dark-1440.png",
+      "sha256": "5601d80b1823bb3451d10b6232d5e56bf5fbd3073bacd4be85883167ec51a4a1",
+      "modifiedAt": "2026-11-01T13:11:51.202899+00:00"
+    },
+    {
+      "file": "receiver-aged-refusal-viewer-light-390.png",
+      "sha256": "4ff5850d75880e6b5d28671e0846ecd52e3050c6fca3b9a2de716cd8bd32ac51",
+      "modifiedAt": "2026-11-01T13:11:50.964483+00:00"
+    },
+    {
+      "file": "receiver-hours-operator-light-1440.png",
+      "sha256": "fe26e84042a19da216d2c8a66bce53b32b16f1ba3a01509941f3890421a3b7d7",
+      "modifiedAt": "2026-11-01T13:11:42.286103+00:00"
+    },
+    {
+      "file": "receiver-hours-viewer-dark-390.png",
+      "sha256": "4a2837566e4303ea98e0e67e1006220797c5c55aee76f2f01fa0aa8112bcc2db",
+      "modifiedAt": "2026-11-01T13:11:47.392347+00:00"
+    },
+    {
+      "file": "receiver-not-reported-light-1440.png",
+      "sha256": "fba8846834006e3cf328edd77d869e8b244fecb61f583e54a6bcdd91a7adf5bf",
+      "modifiedAt": "2026-11-01T13:11:50.681256+00:00"
+    },
+    {
+      "file": "receiver-operator-dark-800.png",
+      "sha256": "79669a4e15417dd644c4be350985b0e0788620ef7177918ba4813372dfd1c5cd",
+      "modifiedAt": "2026-11-01T13:11:43.362361+00:00"
+    },
+    {
+      "file": "receiver-readonly-operator-no-script-light-1440.png",
+      "sha256": "b871f976c5c95d2e80fd5f5b482f1faf2e198a078ded78ae5d329735148ea5dc",
+      "modifiedAt": "2026-11-01T13:11:50.385515+00:00"
+    },
+    {
+      "file": "receiver-section-operator-light-1440.png",
+      "sha256": "ad17f984cd1e18731c0ac530cbab6c26f879d62bbe35d4569e7b410bc2af6aab",
+      "modifiedAt": "2026-11-01T13:11:41.914222+00:00"
+    },
+    {
+      "file": "receiver-section-operator-light-390.png",
+      "sha256": "866de4f64508e76e18e7b1acbf472a3fe778585bcf5434f577294c0134ac7086",
+      "modifiedAt": "2026-11-01T13:11:40.528826+00:00"
+    },
+    {
+      "file": "receiver-section-viewer-dark-1440.png",
+      "sha256": "af450665e7a3acd056c33dc5b5d94b865417961e45e1ef65d9b7a7ef70db57b8",
+      "modifiedAt": "2026-11-01T13:11:48.363837+00:00"
+    },
+    {
+      "file": "receiver-section-viewer-dark-390.png",
+      "sha256": "ff3ebaac19c20bf1f7611fa024d100bc47e39cf4418b65dbb416df17afc8fe75",
+      "modifiedAt": "2026-11-01T13:11:47.028344+00:00"
+    },
+    {
+      "file": "receiver-measurements.json",
+      "sha256": "6d5a0fbe411d8026b97cd37f5c66ed4e36a8106dc46b8782cb9e44ab6bb7addd",
+      "modifiedAt": "2026-11-01T13:11:51.204052+00:00"
+    },
+    {
+      "file": "receiver-aged-refusal-measurements.json",
+      "sha256": "884e392c2f741cc75bba220ea99c0e97c3b9cec3479f1d33d20c47b5fc546521",
+      "modifiedAt": "2026-11-01T13:11:51.203469+00:00"
+    },
+    {
+      "file": "reference/reference-proof.json",
+      "sha256": "976ef01c76014d5bebc3d5fe4b78c8a6fc07bea62c7d71af11964515ed4a7eda",
+      "modifiedAt": "2026-11-01T13:12:40.499959+00:00"
+    }
+  ]
+}
