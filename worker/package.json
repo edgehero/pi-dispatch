@@ -64,6 +64,7 @@
     "./live-transcript": "./src/live-transcript.mjs",
     "./run-progress": "./src/run-progress.mjs",
     "./reserve-estimate": "./src/reserve-estimate.mjs",
+    "./endpoint-status": "./src/endpoint-status.mjs",
     "./model-endpoints": "./src/model-endpoints.mjs",
     "./egress-allowlist": "./src/egress-allowlist.mjs",
     "./egress": "./src/egress.mjs",

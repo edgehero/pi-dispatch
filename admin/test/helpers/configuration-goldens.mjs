@@ -51,6 +51,10 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
     allowlist: () => ["api.github.com", ".githubusercontent.com", "registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "mcp.example.com", "api.example.com", "gitlab.example.com", "more.example.com"],
     endpoints: () => [{ id: "ollama-mini2", host: "mini2.lan", port: 11434, keyless: true, slots: 2 }, { id: "vllm-build3", host: "10.0.0.5", port: 8000, keyless: true, slots: 4 }],
     slots: async () => [1, 0],
+    endpointStatus: async () => ({ state: "reported", partial: false, more: 0, hosts: [
+      { name: "mini2", at: now - 1000, ageMs: 1000, state: "reported", endpointsMore: 0, endpoints: [{ id: "ollama-mini2", slots: 2, used: 1, fleet: 1 }] },
+      { name: "build3", at: now - 2000, ageMs: 2000, state: "reported", endpointsMore: 0, endpoints: [{ id: "vllm-build3", slots: 4, used: 0, fleet: 1 }] },
+    ] }),
     receivers: async () => ({ hosts: [receiverFixture(now)], complete: true, more: 0 }),
     hookRuns: async () => ({ partial: false, more: 0, hosts: [] }),
   };
@@ -110,6 +114,15 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "connections-hook-timeout.viewer": () => connection({ change: (_, reads) => { reads.hookRuns = () => ({ partial: false, more: 0, hosts: [{ name: "mini1", runs: [buildHookRun({ jobId: "gh-f0c2", outcome: "failed", reason: "infra", detail: "timeout", code: null }, NOW - 60_000)] }] }); } }, "viewer"),
   "connections-hook-unreadable.viewer": () => connection({ change: (_, reads) => { reads.hookRuns = () => ({ partial: true, more: 3, hosts: [{ name: "build3", runs: [], unreadable: true }] }); } }, "viewer"),
   "connections-receiver-missing-secret.operator": () => connection({ change: (_, r) => { r.environment = () => ({ env: { GITHUB_AUTH_SOURCE: "gh" } }); } }),
+  "connections-endpoint-bounds.operator": () => connection({ change: (_, r) => { r.endpointStatus = async () => ({ state: "reported", partial: false, more: 0, hosts: [
+    { name: "mini1", at: NOW - 1000, ageMs: 1000, state: "reported", endpointsMore: 0, endpoints: [{ id: "ollama-mini2", slots: 2, used: 1, fleet: 1 }] },
+    { name: "mini2", at: NOW - 2000, ageMs: 2000, state: "reported", endpointsMore: 0, endpoints: [{ id: "ollama-mini2", slots: 3, used: 2, fleet: 1 }] },
+  ] }); } }),
+  "connections-endpoint-occupancy-unknown.viewer": () => connection({ change: (_, r) => { r.endpointStatus = async () => ({ state: "reported", partial: true, more: 1, hosts: [
+    { name: "mini1", at: null, ageMs: null, state: "unsupported", endpointsMore: null, endpoints: null },
+    { name: "mini2", at: null, ageMs: null, state: "unreadable", endpointsMore: null, endpoints: null },
+    { name: "build3", at: null, ageMs: null, state: "not-reported", endpointsMore: null, endpoints: null },
+  ] }); } }, "viewer"),
   "connections-endpoints.operator": () => connection({ problem: "endpoints" }),
   "connections-mcp-compact.viewer": () => connection({ change: (s) => { s.overlayMcp.servers.push({ name: "docs", transport: "stdio", where: "npx docs-mcp", exposure: "deferred", enabled: false, refs: ["DOCS_KEY"] }, { name: "search", transport: "http", where: "search.example.com", exposure: "direct", enabled: true, refs: ["SEARCH_KEY"] }); } }, "viewer"),
   "connections-many-triggers.operator": () => connection({ change: (s) => { s.triggers.triggers.push(...Array.from({ length: 12 }, (_, n) => ({ index: n + 4, forge: "github", type: "comment" }))); } }),

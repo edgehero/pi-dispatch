@@ -124,7 +124,7 @@
       "source": "admin/src/console/panels/connections.mjs#connectionsEgress"
     },
     {
-      "el": "Loaded endpoints and fleet slot leases",
+      "el": "Fleet leases, actual per-host slot occupancy, scope, beat age and shared bound disagreements",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints"
@@ -250,6 +250,21 @@
       "shows": [
         "Claude subscription and community compatibility",
         "Official claude setup-token is for Claude Code"
+      ]
+    },
+    {
+      "el": "Shared endpoint bounds disagree without hiding host occupancy",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints",
+      "panel": "p-endpoints",
+      "golden": [
+        "panels/connections-endpoint-bounds.operator"
+      ],
+      "shows": [
+        "One server, one id",
+        "1 of 2",
+        "2 of 3"
       ]
     },
     {

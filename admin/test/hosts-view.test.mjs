@@ -624,3 +624,18 @@ test("the hidden-jobs summary wraps rather than clips at a narrow width", async 
   assert.match(body({ render: () => lines }, 47), /\+28 more running, 12 orphaned containers/, "whole, across the wrap");
   assert.ok(!lines.some((l) => /\+28.*…/.test(l)), "never clipped with an ellipsis");
 });
+
+test("endpoint occupancy in raw registry rows remains outside the shared snapshot and state API", async () => {
+  const { stateOf } = await import("../src/console/live.mjs");
+  const row = { name: "mini1", routes: "true", concurrency: "4", endpointsVersion: "1", endpointsStartedAt: "1", endpoints: '[{"id":"model","slots":2,"used":1,"fleet":1}]', endpointsMore: "3" };
+  const fleet = fakeFleet([row]);
+  const d = createDashboardDeps({ valkeyUrl: "redis://x", logsDir: "/nope", schedulerStallMax: 3 }, fleet.deps);
+  try {
+    const snapshot = await d.fetchSnapshot();
+    assert.equal(snapshot.hostBudgets[0].name, "mini1", "the real registry projection read the supplied row");
+    for (const field of ["endpointsVersion", "endpointsStartedAt", "endpoints", "endpointsMore"]) assert.equal(Object.hasOwn(snapshot.hostBudgets[0], field), false, field);
+    const state = stateOf(snapshot, "viewer");
+    assert.equal(state.hosts[0].name, "mini1");
+    for (const field of ["endpointsVersion", "endpointsStartedAt", "endpoints", "endpointsMore"]) assert.equal(Object.hasOwn(state.hosts[0], field), false, field);
+  } finally { await d.dispose(); }
+});

@@ -12087,6 +12087,14 @@ per host, visible tinted error words, explicit absence and unknown, and no deliv
 read the safe records; `dispatch_connections` projects them through the strict allowlist. The agent HTML restriction
 and `/api/state` are unchanged.
 
+**AMENDED 2026-11-01 (#775, endpoint occupancy).** Connections reads the optional versioned endpoint
+publication directly, off the shared snapshot and state API. The worker heartbeat reports the same map
+both processors claim; it creates no second semaphore or admission authority. Fleet leases lead each
+endpoint, then host observations with declared capacity, scope and beat age. "One server, one id" warns
+when shared hosts declare different bounds; different per-machine capacities are independent. Missing or
+unreadable evidence remains unknown, and all bounds are named rather than hiding missing observations.
+`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` and `DES-ADMIN-VIA-PI-EXTENSION` are UNCHANGED, checked.
+
 
 - **AMENDED 2026-11-01 (#774)**: `DES-BROWSER-FIRST-RUN-SETUP` is the bounded
   exception to the existing read-model-only action surface and rejection of local runtime checks from the
@@ -16743,3 +16751,5 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-01 (#775, hooks) | `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` and `DES-OPERATOR-CONSOLE` AMENDED: completed hook attempts gain safe bounded display history, retained-detail counts, explicit absence/unknown and a typed `dispatch_connections` projection. Rejected pending-notification persistence remains rejected. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION`, `DES-DOCTOR-RESULTS-PUBLISHED`, `DES-HOST-REGISTRY`, `CONST-HMAC-OVER-RAW-BODY`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, run outcomes and `/api/state`. |
 | 2026-11-01 (#775, hook table readability) | `DES-OPERATOR-CONSOLE` CORRECTED: Notifications allocates a stable host column, retains whole header words and provides keyboard-accessible scrolling for long identities, matching the corrected published card. The browser oracle measures actual host/header text with the native font and drives a long-identity scroll counterexample. `INT-HOOK-RUNS-KEY`, typed projections, roles, CSP, hook firing, outcome and admission rules UNCHANGED, checked. |
 | 2026-11-01 (#775, receiver and hook integration) | `DES-OPERATOR-CONSOLE` reviewed with receiver and hook publications together: preserve native receiver disclosures, complete identities, hook history and explicit unknown states without adding a live page or authority. `DES-ADMIN-VIA-PI-EXTENSION`, shared visual tokens/styles, pending-notification-store rejection, endpoint enforcement and all runtime decisions UNCHANGED, checked. |
+| 2026-11-01 (#775, endpoint occupancy) | `DES-OPERATOR-CONSOLE` AMENDED: versioned host observations display the shared in-process endpoint map and last-good file, through bounded page-only reads and existing Pulse slot marks. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-ADMIN-VIA-PI-EXTENSION`, admission, release, CSP, shared tokens and stylesheet are UNCHANGED, checked. |
+| 2026-11-01 (#775, three publication channels) | `DES-OPERATOR-CONSOLE` reviewed with all three bounded publication channels together, preserving receiver disclosures and identities, hook history and endpoint fleet/host scopes with explicit unknown states. `DES-ADMIN-VIA-PI-EXTENSION`, shared tokens/styles, pending-notification-store rejection, fleet lease enforcement and all runtime decisions UNCHANGED, checked. |

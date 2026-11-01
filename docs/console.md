@@ -2115,11 +2115,17 @@ these extra file/lease reads.
   filter drops are separate. The forge's delivery history still identifies individual deliveries.
 - **Egress:** policy posture, listed hosts and exact model endpoints, then each host's proxy check with its
   date and age. An absent doctor check remains unknown. A failed proxy leads with its latest refused run and fix.
-- **Model endpoints:** id, host/port, keyless state and declared slot capacity. Live fleet occupancy is counted
-  only for endpoints outside the per-machine aliases `host.docker.internal` and `host.containers.internal`,
-  when the deployment declares `PI_WORKER_NAME`. Those aliases and deployments without that declaration
-  say **not counted**, with the declared capacity retained; a failed metadata or lease read says **unknown**.
-  A real fleet zero still reads `0 of N`. Per-host counts are not published. Each host's failing endpoints-file doctor check keeps its own fix.
+- **Model endpoints:** id, host/port, keyless state and declared capacity. Fleet leases lead, followed by
+  each host's own `n of slots`, linked host, beat age and scope. Agreed live bounds provide the fleet
+  denominator; conflicting bounds have none. The console's local file declaration is labelled separately. Per-machine aliases and workers without
+  `PI_WORKER_NAME` show host occupancy and say they have no fleet bound. Different shared slot declarations
+  are flagged with "one server, one id"; independent per-machine capacities may differ. A reduced capacity
+  can show more held slots than its new limit until existing jobs finish. A host's endpoint still appears
+  without a declaration in this console's local file, with no invented address. Missing or unreadable
+  publications say not reported or unknown; zero appears only after a successful observation. Newer formats
+  are refused, and truncated or partial reads are labelled. Each host's failing endpoints-file doctor check
+  keeps its own fix. Wider tables scroll in their own labelled region; focus it and use the arrow keys.
+  Phone rows stack their labels. These facts are read on page load; reload to see a later beat.
   Provider rows name the first candidate set in the `.env`, or say none is set there, with the configured
   source at the row's end. Actual per-host credentials remain unpublished.
 - **Subscription authentication:** selected adapter and exact version, owner host, compatibility, credential health, expiry and refresh time. Community adapters are labelled. A recognized package is not a verified installation, and connected means a credential record exists, not that a paid request succeeded. Credentials, profile details and private paths never reach this page. A writable operator may copy `pi-dispatch auth login CONNECTION_ID`, `logout`, `usage` or an offered `trial` command to the owning host's terminal. There is no browser sign-in or credential mutation. Viewers, agents and read-only operators see safe subscription facts only. Other deployment metadata is not published in the agent Connections view.

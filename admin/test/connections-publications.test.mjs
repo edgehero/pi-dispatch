@@ -15,13 +15,15 @@ function fixture() {
   observations.observe("github", 401);
   const receiver = { v: 1, name: "mini1", version: "4.3.1", startedAt: AT - 60_000, at: AT, ageMs: 0, port: 3000, bind: "loopback", forges: ["github"], deliveries: observations.snapshot(), rawBody: "SECRET_SENTINEL" };
   const publications = {
+    endpointStatus: { state: "reported", partial: false, more: 0, rawAddress: "SECRET_SENTINEL", hosts: [{ name: "mini1", state: "reported", at: AT, ageMs: 5000, endpointsMore: 0, rawAddress: "SECRET_SENTINEL", endpoints: [{ id: "shared-model", slots: 4, used: 1, fleet: 1, rawAddress: "SECRET_SENTINEL" }, { id: "local-model", slots: 2, used: 2, fleet: 0, rawAddress: "SECRET_SENTINEL" }] }] },
     slots: [2],
     receivers: { complete: true, more: 0, hosts: [receiver] },
     hookRuns: { partial: false, more: 0, hosts: [{ name: "mini1", runs: [{ ...buildHookRun({ jobId: "gh-union", outcome: "failed", reason: "infra", detail: "exit", code: 3 }, AT), rawOutput: "SECRET_SENTINEL" }] }] },
   };
-  const read = (key) => async (redis) => {
+  const read = (key) => async (redis, options) => {
     assert.equal(redis, client);
     assert.equal(closed, false, `${key} must finish before the owned client is disconnected`);
+    if (key === "slots") assert.deepEqual(options.map((ep) => ep.id), ["shared-model"], "host-only occupancy must not read a fleet lease key");
     calls.push(key);
     return publications[key];
   };
@@ -35,7 +37,7 @@ function fixture() {
       reads: {
         environment: () => ({ env: { PI_WORKER_NAME: "mini1", GITHUB_AUTH_SOURCE: "gh", WEBHOOK_SECRET: "SECRET_SENTINEL" } }),
         allowlist: () => [], endpoints: () => [endpoint],
-        slots: read("slots"), receivers: read("receivers"), hookRuns: read("hookRuns"),
+        endpointStatus: read("endpointStatus"), slots: read("slots"), receivers: read("receivers"), hookRuns: read("hookRuns"),
       },
     },
   };
@@ -43,6 +45,21 @@ function fixture() {
 
 function assertOtherPublications(model, failed = null) {
   assert.equal(model.endpoints[0].used, failed === "slots" ? null : 2);
+  assert.equal(model.endpointStatus.state, failed === "endpointStatus" ? "unknown" : "reported");
+  assert.equal(model.endpointStatus.partial, failed === "endpointStatus");
+  if (failed !== "endpointStatus") {
+    assert.deepEqual(model.endpointStatus.hosts, [{ name: "mini1", state: "reported", at: AT, ageMs: 5000, endpointsMore: 0 }]);
+    assert.deepEqual(model.endpoints[0].hostCounts, [{ name: "mini1", slots: 4, used: 1, fleet: 1, at: AT, ageMs: 5000 }]);
+    assert.equal(model.endpoints[1].id, "local-model");
+    assert.equal(model.endpoints[1].host, null);
+    assert.equal(model.endpoints[1].counting, "host-only");
+    assert.equal(model.endpoints[1].used, null);
+    assert.deepEqual(model.endpoints[1].hostCounts, [{ name: "mini1", slots: 2, used: 2, fleet: 0, at: AT, ageMs: 5000 }]);
+  } else {
+    assert.deepEqual(model.endpointStatus.hosts, []);
+    assert.deepEqual(model.endpoints[0].hostCounts, []);
+    assert.equal(model.endpoints.length, 1);
+  }
   assert.equal(model.receivers.complete, failed !== "receivers");
   if (failed !== "receivers") assert.equal(model.receivers.hosts[0].deliveries.github.counts.unauthorized, 1);
   else assert.deepEqual(model.receivers.hosts, []);
@@ -54,7 +71,7 @@ function assertOtherPublications(model, failed = null) {
   assert.doesNotMatch(JSON.stringify(model), /SECRET_SENTINEL/);
 }
 
-test("lease, receiver and hook reads share one owned client through the last asynchronous read", async () => {
+test("endpoint, lease, receiver and hook reads share one owned client through the last asynchronous read", async () => {
   const f = fixture();
   let release, started;
   const gate = new Promise((resolve) => { release = resolve; });
@@ -75,12 +92,12 @@ test("lease, receiver and hook reads share one owned client through the last asy
     assert.equal(f.closed(), false);
   } finally { release(); }
   assertOtherPublications(modelConnections(await reading));
-  assert.deepEqual([...f.calls].sort(), ["connect", "slots", "receivers", "hooks-start", "hooks-end", "disconnect"].sort());
+  assert.deepEqual([...f.calls].sort(), ["connect", "endpointStatus", "slots", "receivers", "hooks-start", "hooks-end", "disconnect"].sort());
   assert.equal(f.calls[0], "connect"); assert.equal(f.calls.at(-1), "disconnect");
 });
 
 test("a borrowed client is never constructed or disconnected, including after a failed source", async () => {
-  for (const failed of [null, "receivers"]) {
+  for (const failed of [null, "endpointStatus", "slots", "receivers", "hookRuns"]) {
     const f = fixture();
     let factoryCalls = 0;
     f.options.redis = f.client;
@@ -88,20 +105,20 @@ test("a borrowed client is never constructed or disconnected, including after a 
     if (failed) f.options.reads[failed] = () => { f.calls.push(failed); throw Error("SECRET_SENTINEL"); };
     assertOtherPublications(modelConnections(await readConnections(f.options)), failed);
     assert.equal(factoryCalls, 0);
-    assert.deepEqual([...f.calls].sort(), ["slots", "receivers", "hookRuns"].sort());
+    assert.deepEqual([...f.calls].sort(), ["endpointStatus", "slots", "receivers", "hookRuns"].sort());
     assert.equal(f.closed(), false);
   }
 });
 
 test("each failed publication source preserves the other slices and still releases the one owned client", async () => {
-  for (const failed of ["slots", "receivers", "hookRuns"]) {
+  for (const failed of ["endpointStatus", "slots", "receivers", "hookRuns"]) {
     const f = fixture();
     f.options.reads[failed] = (redis) => {
       assert.equal(redis, f.client); assert.equal(f.closed(), false);
       f.calls.push(failed); throw Error("SECRET_SENTINEL");
     };
     assertOtherPublications(modelConnections(await readConnections(f.options)), failed);
-    assert.deepEqual([...f.calls].sort(), ["connect", "slots", "receivers", "hookRuns", "disconnect"].sort());
+    assert.deepEqual([...f.calls].sort(), ["connect", "endpointStatus", "slots", "receivers", "hookRuns", "disconnect"].sort());
     assert.equal(f.calls[0], "connect"); assert.equal(f.calls.at(-1), "disconnect");
     assert.equal(f.closed(), true);
   }
@@ -122,13 +139,13 @@ test("fully injected publication readers without a URL run without constructing 
   let factoryCalls = 0;
   f.options.paths = {};
   f.options.redisFn = () => { factoryCalls++; throw Error("injected readers without a URL must not construct a real client"); };
-  for (const key of ["slots", "receivers", "hookRuns"]) f.options.reads[key] = async (redis) => {
+  for (const key of ["endpointStatus", "slots", "receivers", "hookRuns"]) f.options.reads[key] = async (redis) => {
     assert.equal(redis, null);
     f.calls.push(key);
     return f.publications[key];
   };
   assertOtherPublications(modelConnections(await readConnections(f.options)));
   assert.equal(factoryCalls, 0);
-  assert.deepEqual([...f.calls].sort(), ["slots", "receivers", "hookRuns"].sort());
+  assert.deepEqual([...f.calls].sort(), ["endpointStatus", "slots", "receivers", "hookRuns"].sort());
   assert.equal(f.closed(), false);
 });

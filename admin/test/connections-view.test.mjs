@@ -178,7 +178,7 @@ test("per-machine endpoint aliases use the worker's canonical host rule and neve
     assert.equal(redisCalls, 0);
     assert.equal(slotReads, 0);
     assert.equal(value.endpointFleetDeclared, true);
-    assert.deepEqual(value.endpoints[0], { ...endpoint, counting: "per-machine", used: null });
+    assert.deepEqual(value.endpoints[0], { ...endpoint, declaredSlots: endpoint.slots, counting: "per-machine", used: null, hostCounts: [], conflict: false, mixedScope: false });
     assert.equal(modelConnections(value).endpoints[0].counting, "per-machine");
     assert.equal(modelConnections(value).endpoints[0].used, null);
   }
@@ -359,4 +359,68 @@ test("private subscription locations expose presence only, including in the comp
   assert.doesNotMatch(JSON.stringify(value), /private-location-sentinel|private-store-sentinel/);
   assert.doesNotMatch(JSON.stringify(modelConnections(value)), /private-location-sentinel|private-store-sentinel/);
   for (const key of keys) assert.equal(value.environment.find(row => row.key === key).value, "set");
+});
+
+test("host occupancy joins endpoint ids absent from the local file, preserves host-only use and detects only shared-cap conflicts", async () => {
+  const host = (name, slots, used, fleet, id = "shared") => ({ name, at: AT, ageMs: 1000, state: "reported", endpointsMore: 0, endpoints: [{ id, slots, used, fleet }] });
+  const status = { state: "reported", hosts: [host("mini1", 2, 1, 1), host("mini2", 3, 2, 1), host("unnamed", 9, 4, 0), host("local", 2, 1, 0, "local-model")], more: 0, partial: false };
+  const asked = [];
+  const value = await readConnections({ now: AT, snapshot: snapshot(), reads: reads({}, { endpointStatus: async () => status, slots: async (_redis, eps) => { asked.push(...eps.map((e) => e.id)); return [2]; } }) });
+  assert.deepEqual(asked, ["shared"]);
+  assert.deepEqual(value.endpoints.map((e) => [e.id, e.host, e.used, e.conflict, e.mixedScope]), [["shared", null, 2, true, true], ["local-model", null, null, false, false]]);
+  assert.deepEqual(value.endpoints[1].hostCounts.map((h) => [h.name, h.used, h.slots, h.fleet]), [["local", 1, 2, 0]]);
+  assert.equal(modelConnections(value).endpoints[1].hostCounts[0].used, 1, "the model tool sees actual host use even when no fleet lease exists");
+  assert.equal(modelConnections(value).endpoints[1].keyless, null, "a host-only publication cannot invent whether an undeclared server needs a key");
+  const independent = { ...status, hosts: [host("mini1", 2, 1, 0, "local-model"), host("mini2", 3, 2, 0, "local-model")] };
+  const local = await readConnections({ now: AT, reads: reads({}, { endpointStatus: async () => independent }) });
+  assert.equal(local.endpoints[0].conflict, false, "different per-machine servers may have different capacities under one id");
+});
+
+test("Connections bounds the endpoint union before lease reads and setup can opt out of publication reads", async () => {
+  const entries = Array.from({ length: 100 }, (_, i) => ({ id: `model-${i}`, host: "models.lan", port: 443, slots: 1, keyless: true }));
+  let asked = 0;
+  let publications = 0;
+  const input = reads({ PI_WORKER_NAME: "mini1" }, { endpoints: () => entries, endpointStatus: async () => { publications++; return { state: "unknown", hosts: [], partial: true, more: 0 }; }, slots: async (_redis, endpoints) => { asked = endpoints.length; return endpoints.map(() => 0); } });
+  const value = await readConnections({ now: AT, reads: input });
+  assert.equal(asked, 64);
+  assert.equal(value.endpointsMore, 36);
+  assert.equal(value.endpoints.length, 64);
+  asked = 0;
+  await readConnections({ now: AT, reads: input, publications: false });
+  assert.equal(publications, 1);
+  assert.equal(asked, 0, "setup metadata reads neither publication nor fleet leases");
+});
+
+test("model endpoint publications reconstruct safe closed DTOs and retain lowered capacities without free text", () => {
+  const extra = { secret: "PRIVATE_PUBLISH_SENTINEL", path: "/PRIVATE_PUBLISH_SENTINEL" };
+  const valid = { name: "mini1", slots: 1, used: 2, fleet: 1, at: AT, ageMs: 1, ...extra };
+  const view = { endpointFleetDeclared: true, endpoints: [{ id: "model", host: "models.lan", port: 443, slots: 1, used: 2, hostCounts: [valid, { ...valid, name: "bad/path" }, { ...valid, used: "secret" }], ...extra }], endpointStatus: { state: "reported", hosts: [{ ...valid, state: "unsupported", endpointsMore: 0 }], partial: true, more: 2, ...extra } };
+  const dto = modelConnections(view);
+  assert.deepEqual(dto.endpoints[0].hostCounts, [{ name: "mini1", slots: 1, used: 2, fleet: 1, at: AT, ageMs: 1 }]);
+  assert.equal(dto.endpointStatus.hosts[0].state, "unsupported");
+  assert.doesNotMatch(JSON.stringify(dto), /PRIVATE_PUBLISH_SENTINEL|bad\/path|secret|path/);
+});
+
+
+test("endpoint discovery prioritizes the actual hostBudgets live-host projection when its index is lost", async () => {
+  let wanted;
+  await readConnections({ now: AT, snapshot: snapshot({ hostBudgets: [{ name: "mini1" }] }), reads: reads({}, { endpointStatus: async (_redis, { hosts }) => { wanted = hosts; return { state: "reported", hosts: [], more: 0, partial: false }; } }) });
+  assert.deepEqual(wanted, [{ name: "mini1" }]);
+});
+
+
+test("an agreed live fleet bound takes precedence over a different console file, while disagreements have no denominator", async () => {
+  const ep = { id: "model", host: "models.lan", port: 443, slots: 4, keyless: true };
+  const host = (name, slots) => ({ name, at: AT, ageMs: 1000, state: "reported", endpointsMore: 0, endpoints: [{ id: "model", slots, used: 1, fleet: 1 }] });
+  const get = (hosts) => readConnections({ now: AT, reads: reads({ PI_WORKER_NAME: "mini1" }, { endpoints: () => [ep], endpointStatus: async () => ({ state: "reported", hosts, more: 0, partial: false }), slots: async () => [1] }) });
+  const agree = (await get([host("mini1", 3), host("mini2", 3)])).endpoints[0];
+  assert.equal(agree.slots, 3); assert.equal(agree.declaredSlots, 4);
+  const conflict = (await get([host("mini1", 2), host("mini2", 3)])).endpoints[0];
+  assert.equal(conflict.slots, null); assert.equal(conflict.conflict, true); assert.equal(conflict.declaredSlots, 4);
+});
+
+test("a hostile model view cannot exceed the endpoint DTO bound and reports its omitted observations", () => {
+  const endpoints = Array.from({ length: 100 }, (_, i) => ({ id: `model-${i}`, host: "models.lan", port: 443, keyless: true, slots: 2, used: 0 }));
+  const dto = modelConnections({ endpoints, endpointFleetDeclared: true });
+  assert.equal(dto.endpoints.length, 64); assert.equal(dto.endpointsMore, 36);
 });

@@ -528,3 +528,15 @@ a receiver stopped; the page says what was reported and preserves unknown reads.
 ## Failure hook history
 
 Each firing worker publishes safe results under `hook:h:<name>`, indexed by `hook:hosts`, using the worker's resolved name even without a declared fleet. Connections and `dispatch_connections` read this display history across hosts: up to 20 entries per host, with seven days of inactivity expiry. Counts describe retained hook details, not delivered notifications. Publication is background best effort; missing or unreadable records never mean healthy. Deleting this keyspace changes no hook, job, routing or admission decision.
+
+## Endpoint occupancy
+
+Connections also shows each host's endpoint occupancy from its heartbeat: the host's own loaded `slots`,
+actual in-process use, counting scope and beat age. Unnamed workers and per-machine endpoint aliases still
+publish their host use, with no fleet bound. Shared server ids must have the same `slots` on each host;
+Connections flags differences with "one server, one id". Per-machine servers may have different capacities.
+The row is display-only, expires after 90 seconds without a beat, and lists at most 32 endpoints per host.
+Its generation must match the current worker start: an older worker restarting over leftover fields cannot
+make the previous process's occupancy look fresh.
+The page reads at most 64 hosts and names any omitted observations. Missing or unreadable data never means
+zero use. Deleting these fields cannot admit a job or release a held slot.

@@ -23,7 +23,7 @@ const evidence = () => ({
   unauthorized: "2", receiverPort: "3000", receiverTimes: 2,
   links: ["/fleet/host?name=mini1", "/run?id=gh-timeout-775"],
   hookCounts: { exit: 1, timeout: 1 }, hookAttention: ["timeout"], hookTimes: 1, hookWordsOk: true, hookScrollOk: true,
-  hostSlots: { "local-model:mini1": "1 of 2", "shared-model:mini2": "2 of 3", "shared-model:build3": "1 of 4" }, localScope: true, endpointWordsOk: true,
+  hostSlots: { "local-model:mini1": "1 of 2", "shared-model:mini2": "2 of 3", "shared-model:build3": "1 of 4" }, fleetSlots: { "shared-model": "Fleet leases: 3 in use" }, localScope: true, endpointWordsOk: true, endpointPortsOk: true,
 });
 const options = { slice: "all", width: 390, theme: "dark", receiverPort: 3000 };
 
@@ -33,7 +33,7 @@ test("the browser oracle judges observed values, navigation and exception classi
     ["unauthorized", "0", "actual unauthorized count"], ["receiverPort", "4000", "actual listening port"],
     ["hookCounts", { exit: 2, timeout: 0 }, "Retained hook detail counts"], ["hookWordsOk", false, "host identities or header words"], ["hookScrollOk", false, "not keyboard accessible"], ["hookAttention", [], "timeout lost"],
     ["hostSlots", { "local-model:mini1": "0 of 2", "shared-model:mini2": "2 of 3", "shared-model:build3": "0 of 4" }, "host usage"],
-    ["links", [], "link is wrong"], ["localScope", false, "claims a fleet bound"], ["endpointWordsOk", false, "squeezed into fragments"],
+    ["links", [], "link is wrong"], ["localScope", false, "claims a fleet bound"], ["endpointWordsOk", false, "squeezed into fragments"], ["endpointPortsOk", false, "ports are split"], ["fleetSlots", { "shared-model": "Fleet leases: 0 in use" }, "positive fleet lease count"],
   ]) assert.ok(connectionsEvidenceProblems({ ...evidence(), [field]: wrong }, options).some(problem => problem.includes(message)), field);
 });
 
@@ -52,7 +52,21 @@ test("the browser oracle refuses missing shared styles and facts after metadata 
   for (const change of [{ css: false }, { canvas: "white" }, { font: "Times New Roman" }, { width: 1000 }, { csp: ["script-src:inline"] }]) {
     assert.ok(connectionsEvidenceProblems({ ...evidence(), ...change }, options).length > 0);
   }
-  const removed = { ...evidence(), forges: "No live receiver", notify: "no hook run published", endpoints: "host occupancy not reported" };
+  const removed = { ...evidence(), forges: "No live receiver", notify: "no hook run published", endpoints: "host occupancy not reported", fleetSlots: { "shared-model": "Fleet leases: 3 of 4" } };
   assert.deepEqual(connectionsEvidenceProblems(removed, { ...options, absent: true }), []);
   for (const slice of ["receiver", "hooks", "endpoints"]) assert.ok(connectionsEvidenceProblems(evidence(), { ...options, slice, absent: true }).length > 0, slice);
+});
+
+
+test("endpoint paints retain receiver and hook facts when only endpoint observations are removed", () => {
+  const endpointOptions = { ...options, slice: "endpoints" };
+  for (const absent of [false, true]) {
+    const current = { ...evidence(), ...(absent ? { endpoints: "host occupancy not reported", fleetSlots: { "shared-model": "Fleet leases: 3 of 4" } } : {}) };
+    assert.deepEqual(connectionsEvidenceProblems(current, { ...endpointOptions, absent }), []);
+    for (const [field, wrong, message] of [
+      ["unauthorized", "0", "actual unauthorized count"], ["receiverPort", "4000", "actual listening port"], ["receiverTimes", 0, "Receiver times"],
+      ["hookCounts", { exit: 0, timeout: 0 }, "Retained hook detail counts"], ["hookAttention", [], "timeout lost"], ["hookTimes", 0, "hook time"],
+      ["fleetSlots", { "shared-model": "Fleet leases: 0 in use" }, absent ? "changed the existing positive fleet leases" : "positive fleet lease count"],
+    ]) assert.ok(connectionsEvidenceProblems({ ...current, [field]: wrong }, { ...endpointOptions, absent }).some(problem => problem.includes(message)), `${field}, absent=${absent}`);
+  }
 });

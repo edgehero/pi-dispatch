@@ -6327,3 +6327,29 @@ test("runStart removes only its own durable inventory after the publisher closes
 		assert.equal(await redis.sismember(SANDBOX_INVENTORY_HOSTS, unrelated), 1);
 	}
 });
+
+test("endpoint heartbeat thunks share startWorker's admission map and follow a live file reload", { skip }, async () => {
+	const file = join(tempDir("endpoint-beat-"), "model-endpoints.json");
+	const write = (slots) => writeFileSync(file, JSON.stringify({ version: 1, endpoints: [{ id: "model", host: "host.docker.internal", port: 11434, slots }] }));
+	write(2);
+	let fields;
+	await runStart({
+		env: { PI_MODEL_ENDPOINTS_FILE: file },
+		makeHostRegistry: () => ({ start: async (value) => { fields = value; }, close: async () => {}, self: () => "mini1", livePeers: async () => ({ hosts: [] }), publish: async () => {} }),
+		whileRunning: async ({ captured }) => {
+			assert.equal(fields.endpointsVersion, 1);
+			assert.equal(typeof fields.endpoints, "function");
+			captured.endpointSlots.tryAcquire("model", 2);
+			captured.endpointSlots.tryAcquire("model", 2);
+			assert.deepEqual(JSON.parse(fields.endpoints()), [{ id: "model", slots: 2, used: 2, fleet: 0 }]);
+			write(1);
+			for (let i = 0; i < 100 && captured.modelEndpoints()[0].slots !== 1; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+			assert.deepEqual(JSON.parse(fields.endpoints()), [{ id: "model", slots: 1, used: 2, fleet: 0 }], "the declaration reload cannot invent a release of held slots");
+			captured.endpointSlots.release("model");
+			assert.equal(JSON.parse(fields.endpoints())[0].used, 1);
+			writeFileSync(file, '{"invalid":true}');
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			assert.equal(JSON.parse(fields.endpoints())[0].slots, 1, "invalid reload keeps the same last good file as admission");
+		},
+	});
+});

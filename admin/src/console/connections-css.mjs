@@ -49,6 +49,22 @@ export const CONNECTIONS_CSS = `
 .cn-icon-list>li{display:flex;gap:8px;align-items:flex-start}
 .cn-icon-list>li>span{min-width:0;overflow-wrap:anywhere}
 .cn-icon-list .code{white-space:normal;overflow-wrap:anywhere}
+.cn-endpoint-port{white-space:nowrap}
+.cn-endpoint-scroll{max-width:100%;overflow-x:auto;outline-offset:3px}
+.cn-endpoint-scroll:focus-visible{outline:2px solid var(--running)}
+.cn-endpoint-scroll>.tbl-wrap{overflow:visible}
+@media(min-width:761px){
+[data-page="connections"] #p-endpoints .tbl{min-width:820px}
+[data-page="connections"] #p-endpoints .tbl th:nth-child(1){width:150px}
+[data-page="connections"] #p-endpoints .tbl th:nth-child(2){width:270px}
+[data-page="connections"] #p-endpoints .tbl th:nth-child(3){width:120px}
+[data-page="connections"] #p-endpoints .tbl td:nth-child(2) .code,[data-page="connections"] #p-endpoints .tbl td:nth-child(3){white-space:nowrap;overflow-wrap:normal}
+}
+.cn-slots{display:inline-block;vertical-align:middle;max-width:96px;flex-shrink:0}
+.cn-slot-used{fill:var(--running)}
+.cn-slot-free{fill:none;stroke:var(--line-strong);stroke-width:1.2}
+.cn-endpoint-hosts{list-style:none;padding:0;margin:4px 0 0;display:grid;gap:8px}
+.cn-endpoint-hosts small{display:block;color:var(--ink-muted);font-size:11px}
 .cn-hook-scroll{overflow-x:auto}
 .cn-hook-scroll>.tbl-wrap{overflow:visible}
 [data-page="connections"] #p-notify .tbl th,[data-page="connections"] #p-notify .tbl td{padding-left:8px;padding-right:8px}

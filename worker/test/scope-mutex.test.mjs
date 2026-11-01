@@ -1228,3 +1228,28 @@ test("the host slot's and an endpoint's deferral name the project the pickup res
 	await assert.rejects(() => ep.processor(e1.job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
 	assert.deepEqual(reasonOf(ep.redis, e1.job), { why: "endpoint", bucket: "slot", until: NOW + mod.ENDPOINT_BUSY_RECHECK_MS, project: "shop", holder: null, endpoint: "lan-ollama" });
 });
+
+test("published endpoint use is the shared processors' map for per-machine and unnamed workers, including deferral and release", { skip }, async () => {
+	const { endpointStatusFields } = await import("../src/endpoint-status.mjs");
+	for (const host of ["host.docker.internal", "host.containers.internal", "gpu.lan"]) {
+		const endpoint = { ...OLLAMA, host };
+		const models = { providers: { "local-ollama": { api: "openai-completions", baseUrl: `http://${host}:11434/v1`, models: [{ id: "qwen" }] } } };
+		const wiring = endpointWiring({ endpoints: [endpoint], models, lease: false });
+		const shared = harness({ getSettings: LOCAL_MODEL, extra: wiring.extra });
+		const own = harness({ getSettings: LOCAL_MODEL, extra: wiring.extra });
+		const published = () => JSON.parse(endpointStatusFields([endpoint], wiring.endpointSlots, false).endpoints)[0];
+		const running = shared.processor(localJob("first", "/a").job, "token", new AbortController().signal);
+		await shared.untilStarted(1);
+		assert.deepEqual(published(), { id: "lan-ollama", slots: 1, used: 1, fleet: 0 });
+		await assert.rejects(own.processor(localJob("second", "/b").job, "token", new AbortController().signal), (error) => error.name === "DelayedError");
+		assert.equal(published().used, 1, "deferring another pickup must not release the original's slot");
+		shared.releaseNext();
+		await running;
+		assert.equal(published().used, 0);
+		const next = own.processor(localJob("third", "/b").job, "token", new AbortController().signal);
+		await own.untilStarted(1);
+		assert.equal(published().used, 1, "the other processor takes the same map after release");
+		own.releaseNext(); await next;
+		assert.equal(published().used, 0);
+	}
+});

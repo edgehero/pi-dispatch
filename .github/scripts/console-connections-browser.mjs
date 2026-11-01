@@ -32,8 +32,8 @@ export function connectionsEvidenceProblems(evidence, { slice, width, theme, rec
   require(evidence.css === true && evidence.cardRadius >= 10, "The shared card stylesheet is absent");
   require(evidence.width <= width + 1, "The complete page exceeds its viewport");
   require(evidence.csp.length === 0, "The page violated its CSP");
-  if (slice === "receiver" || slice === "hooks" || slice === "all") {
-    if (absent && slice !== "hooks") require(/no live receiver|not reported/i.test(evidence.forges), "Receiver deletion did not become unreported");
+  if (["receiver", "hooks", "endpoints", "all"].includes(slice)) {
+    if (absent && ["receiver", "all"].includes(slice)) require(/no live receiver|not reported/i.test(evidence.forges), "Receiver deletion did not become unreported");
     else {
       require(evidence.unauthorized === String(unauthorized), "The actual unauthorized count is wrong");
       require(evidence.receiverPort === String(receiverPort), "The actual listening port is wrong");
@@ -42,8 +42,8 @@ export function connectionsEvidenceProblems(evidence, { slice, width, theme, rec
       require(evidence.receiverTimes > 0, "Receiver times were not rendered as times");
     }
   }
-  if (slice === "hooks" || slice === "all") {
-    if (absent) require(/no hook run published/i.test(evidence.notify), "Hook deletion did not become unreported");
+  if (["hooks", "endpoints", "all"].includes(slice)) {
+    if (absent && ["hooks", "all"].includes(slice)) require(/no hook run published/i.test(evidence.notify), "Hook deletion did not become unreported");
     else {
       require(evidence.hookCounts.exit === 1 && evidence.hookCounts.timeout === 1, "Retained hook detail counts are wrong");
       require(evidence.links.includes("/run?id=gh-timeout-775"), "The last hook run link is wrong");
@@ -54,20 +54,25 @@ export function connectionsEvidenceProblems(evidence, { slice, width, theme, rec
     }
   }
   if (slice === "endpoints" || slice === "all") {
-    if (absent) require(/occupancy not reported/i.test(evidence.endpoints), "Endpoint deletion did not become unreported");
+    if (absent) {
+      require(/occupancy not reported/i.test(evidence.endpoints), "Endpoint deletion did not become unreported");
+      require(evidence.fleetSlots?.["shared-model"] === "Fleet leases: 3 of 4", "Deleting host observations changed the existing positive fleet leases");
+    }
     else {
       require(evidence.hostSlots["local-model:mini1"] === "1 of 2", "Per-machine host usage is wrong");
       require(evidence.hostSlots["shared-model:mini2"] === "2 of 3", "The second host's usage or declaration is wrong");
       require(evidence.hostSlots["shared-model:build3"] === "1 of 4", "An unnamed host's local usage was lost");
       require(evidence.localScope === true, "The per-machine endpoint claims a fleet bound");
+      require(evidence.fleetSlots?.["shared-model"] === "Fleet leases: 3 in use", "The real positive fleet lease count is wrong");
       require(evidence.endpointWordsOk === true, "Endpoint key words are squeezed into fragments");
+      require(evidence.endpointPortsOk === true, "Endpoint ports are split into unreadable fragments");
       require(/one server, one id/i.test(evidence.endpoints), "Conflicting shared-server slot declarations have no warning");
     }
   }
   return problems;
 }
 
-const EVIDENCE = `(()=>{const text=id=>document.querySelector(id)?.innerText??'',f=document.querySelector('#p-forges'),n=document.querySelector('#p-notify'),ep=document.querySelector('#p-endpoints'),s=getComputedStyle(document.body),tables=[...document.querySelectorAll('table')],outcome=tables.find(t=>t.getAttribute('aria-label')==='mini1 github delivery outcomes'),unauthorized=[...(outcome?.tBodies[0]?.rows??[])].find(r=>r.cells[0].textContent.trim()==='unauthorized'),receiver=document.querySelector('[aria-label="Receiver on mini1"]'),port=receiver?.textContent.match(/(?:port[: ]+)([0-9]+)/i)?.[1]??null,hook=tables.find(t=>t.getAttribute('aria-label')==='Failure hook runs'),hostSlots={};for(const list of document.querySelectorAll('ul[aria-label$=" host slot counts"]')){const id=list.getAttribute('aria-label').replace(/ host slot counts$/,'');for(const li of list.querySelectorAll('li[data-host]'))hostSlots[id+':'+li.dataset.host]=li.querySelector('b')?.textContent.trim();}const context=document.createElement('canvas').getContext('2d');const endpointWordsOk=[...ep.querySelectorAll('tbody tr td:nth-child(3)')].every(cell=>{const cs=getComputedStyle(cell);context.font=cs.font;const available=cell.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight);return cell.textContent.trim().split(/\\s+/).every(word=>context.measureText(word).width<=available+1);});const hookWordMetrics=[];const wordsOf=(cell,node,kind)=>{const cs=getComputedStyle(node),box=getComputedStyle(cell),available=cell.clientWidth-parseFloat(box.paddingLeft)-parseFloat(box.paddingRight);context.font=cs.font;for(const word of node.textContent.trim().split(/\\s+/)){const measured=context.measureText(word).width;hookWordMetrics.push({kind,word,measured,available,fits:measured<=available+1});}};if(hook){for(const cell of hook.querySelectorAll('thead th'))if(cell.getClientRects().length)wordsOf(cell,cell,'header');for(const link of hook.querySelectorAll('tbody td:first-child a'))wordsOf(link.closest('td'),link,'host');}const hookWordsOk=hookWordMetrics.every(word=>word.fits);const hookScroll=n?.querySelector('.cn-hook-scroll'),hookScrollOk=!hookScroll||hookScroll.scrollWidth<=hookScroll.clientWidth+1||hookScroll.tabIndex===0&&hookScroll.getAttribute('role')==='region';const counts={};for(const match of (hook?.innerText??'').matchAll(/(exit|timeout):\\s*(\\d+)/g))counts[match[1]]=Number(match[2]);return{canvas:s.getPropertyValue('--canvas').trim(),fonts:document.fonts.status,font:s.fontFamily,css:[...document.styleSheets].some(t=>t.href?.endsWith('/static/console.css')&&t.cssRules.length>100),cardRadius:parseFloat(getComputedStyle(document.querySelector('.card')).borderRadius),width:document.scrollingElement.scrollWidth,csp:window.__connectionsCsp??[],forges:f?.innerText??'',notify:n?.innerText??'',endpoints:ep?.innerText??'',problems:text('#p-connection-problems'),links:[...document.querySelectorAll('a[href]')].map(a=>a.getAttribute('href')),unauthorized:unauthorized?.cells[1].textContent.trim()??null,receiverPort:port,receiverTimes:f?.querySelectorAll('time[datetime]').length??0,hookCounts:counts,hookAttention:[...(n?.querySelectorAll('.cn-state.tone-attention')??[])].map(e=>e.textContent.trim()),hookTimes:n?.querySelectorAll('time[datetime]').length??0,hookWordsOk,hookWordMetrics,hookScrollOk,hostSlots,endpointWordsOk,localScope:[...ep.querySelectorAll('ul[aria-label="local-model host slot counts"] li')].every(li=>/no fleet bound/.test(li.innerText))};})()`;
+const EVIDENCE = `(()=>{const text=id=>document.querySelector(id)?.innerText??'',f=document.querySelector('#p-forges'),n=document.querySelector('#p-notify'),ep=document.querySelector('#p-endpoints'),s=getComputedStyle(document.body),tables=[...document.querySelectorAll('table')],outcome=tables.find(t=>t.getAttribute('aria-label')==='mini1 github delivery outcomes'),unauthorized=[...(outcome?.tBodies[0]?.rows??[])].find(r=>r.cells[0].textContent.trim()==='unauthorized'),receiver=document.querySelector('[aria-label="Receiver on mini1"]'),port=receiver?.textContent.match(/(?:port[: ]+)([0-9]+)/i)?.[1]??null,hook=tables.find(t=>t.getAttribute('aria-label')==='Failure hook runs'),hostSlots={};for(const list of document.querySelectorAll('ul[aria-label$=" host slot counts"]')){const id=list.getAttribute('aria-label').replace(/ host slot counts$/,'');for(const li of list.querySelectorAll('li[data-host]'))hostSlots[id+':'+li.dataset.host]=li.querySelector('b')?.textContent.trim();}const fleetSlots={};for(const row of ep.querySelectorAll('table tbody tr')){const id=row.cells[0]?.textContent.trim(),line=row.cells[3]?.querySelector('.cn-cell>span');if(id&&line)fleetSlots[id]=line.textContent.replace(/\\s+/g,' ').trim();}const context=document.createElement('canvas').getContext('2d');const endpointWordsOk=[...ep.querySelectorAll('tbody tr td:nth-child(3)')].every(cell=>{const cs=getComputedStyle(cell);context.font=cs.font;const available=cell.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight);return cell.textContent.trim().split(/\\s+/).every(word=>context.measureText(word).width<=available+1);});const portNodes=[...ep.querySelectorAll('.cn-endpoint-port')];const endpointPortsOk=portNodes.length>0&&portNodes.every(node=>{const range=document.createRange();range.selectNodeContents(node);return /^\\d+$/.test(node.textContent)&&range.getClientRects().length===1&&range.getBoundingClientRect().width>0;});const hookWordMetrics=[];const wordsOf=(cell,node,kind)=>{const cs=getComputedStyle(node),box=getComputedStyle(cell),available=cell.clientWidth-parseFloat(box.paddingLeft)-parseFloat(box.paddingRight);context.font=cs.font;for(const word of node.textContent.trim().split(/\\s+/)){const measured=context.measureText(word).width;hookWordMetrics.push({kind,word,measured,available,fits:measured<=available+1});}};if(hook){for(const cell of hook.querySelectorAll('thead th'))if(cell.getClientRects().length)wordsOf(cell,cell,'header');for(const link of hook.querySelectorAll('tbody td:first-child a'))wordsOf(link.closest('td'),link,'host');}const hookWordsOk=hookWordMetrics.every(word=>word.fits);const hookScroll=n?.querySelector('.cn-hook-scroll'),hookScrollOk=!hookScroll||hookScroll.scrollWidth<=hookScroll.clientWidth+1||hookScroll.tabIndex===0&&hookScroll.getAttribute('role')==='region';const counts={};for(const match of (hook?.innerText??'').matchAll(/(exit|timeout):\\s*(\\d+)/g))counts[match[1]]=Number(match[2]);return{canvas:s.getPropertyValue('--canvas').trim(),fonts:document.fonts.status,font:s.fontFamily,css:[...document.styleSheets].some(t=>t.href?.endsWith('/static/console.css')&&t.cssRules.length>100),cardRadius:parseFloat(getComputedStyle(document.querySelector('.card')).borderRadius),width:document.scrollingElement.scrollWidth,csp:window.__connectionsCsp??[],forges:f?.innerText??'',notify:n?.innerText??'',endpoints:ep?.innerText??'',problems:text('#p-connection-problems'),links:[...document.querySelectorAll('a[href]')].map(a=>a.getAttribute('href')),unauthorized:unauthorized?.cells[1].textContent.trim()??null,receiverPort:port,receiverTimes:f?.querySelectorAll('time[datetime]').length??0,hookCounts:counts,hookAttention:[...(n?.querySelectorAll('.cn-state.tone-attention')??[])].map(e=>e.textContent.trim()),hookTimes:n?.querySelectorAll('time[datetime]').length??0,hookWordsOk,hookWordMetrics,hookScrollOk,hostSlots,fleetSlots,endpointWordsOk,endpointPortsOk,localScope:[...ep.querySelectorAll('ul[aria-label="local-model host slot counts"] li')].every(li=>/no fleet bound/.test(li.innerText))};})()`;
 
 export async function checkConnectionsBrowser({ chrome, slice, shots = null, sandbox = process.env.GITHUB_ACTIONS !== "true" } = {}) {
   assert.ok(CONNECTIONS_SLICES.includes(slice), "Choose the explicit implementation slice to verify");
@@ -93,7 +98,7 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
         try { if (await evaluate(expression)) return; } catch (error) { if (!/context|navigat/.test(error.message)) throw error; }
         await new Promise(resolve => setTimeout(resolve, 25));
       }
-      throw Error(`Timed out: ${expression}; scroll=${JSON.stringify(await evaluate("(()=>{const r=document.querySelector('.cn-receiver-hours-scroll');return r?{left:r.scrollLeft,x:r.getBoundingClientRect().left,head:r.querySelector('th').getBoundingClientRect().left,wrap:r.firstElementChild.getBoundingClientRect().left,active:document.activeElement.className}:null;})()"))}`);
+      throw Error(`Timed out: ${expression}`);
     };
     const navigate = async path => {
       const loaded = browser.event(m => m.sessionId === tab.sessionId && m.method === "Page.loadEventFired", "Connections document load");
@@ -186,6 +191,19 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
       assert.equal(await evaluate("document.querySelectorAll('form[data-action]').length"), 0);
       await capture(`${slice}-readonly-operator-${theme}-${width}`);
     }
+    if (slice === "endpoints" || slice === "all") {
+      stage = "endpoint table keyboard scrolling";
+      await tab.send("Emulation.setDeviceMetricsOverride", { width: 800, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await navigate("/config/connections");
+      assert.equal(await evaluate("(()=>{const e=document.querySelector('.cn-endpoint-scroll');return e.scrollWidth>e.clientWidth;})()"), true);
+      await evaluate("document.querySelector('.cn-endpoint-scroll').focus()");
+      await press("ArrowRight", "ArrowRight", 39);
+      await until("document.querySelector('.cn-endpoint-scroll').scrollLeft>0");
+      stage = "endpoint port readability negative control";
+      await evaluate("document.querySelector('link[href=\"/static/console.css\"]').sheet.insertRule('.cn-endpoint-port{display:inline-block!important;width:4px!important;white-space:normal!important;overflow-wrap:anywhere!important}',0)");
+      assert.ok(connectionsEvidenceProblems(await evaluate(EVIDENCE), { slice, width: 800, theme: "dark", receiverPort: fixture.receiverPort, unauthorized }).some(problem => problem.includes("ports are split")), "The actual DOM oracle must see a deliberately fragmented port");
+      await tab.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    }
     stage = "native disclosure keyboard";
     await navigate("/config/connections");
     const summary = slice === "receiver" ? '#p-forges details>summary' : '#p-env details>summary';
@@ -194,7 +212,7 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
     assert.equal(await evaluate(`document.querySelector(${JSON.stringify(summary)}).parentElement.open`), true);
     await press("Enter", "Enter", 13);
     assert.equal(await evaluate(`document.querySelector(${JSON.stringify(summary)}).parentElement.open`), false);
-    if (slice === "hooks" || slice === "all") {
+    if (["hooks", "endpoints", "all"].includes(slice)) {
       stage = "whole hook identity in a keyboard-scrollable table";
       const savedHost = await evaluate("document.querySelector('#p-notify tbody td:first-child a').textContent");
       await evaluate("document.querySelector('#p-notify tbody td:first-child a').textContent='h'.repeat(64)");
@@ -213,7 +231,7 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
       await evaluate(`document.querySelector(${JSON.stringify(hostLink)}).focus()`); await press("Enter", "Enter", 13);
       await until("location.pathname==='/fleet/host'"); await navigate("/config/connections");
     }
-    if (slice === "hooks" || slice === "all") {
+    if (["hooks", "endpoints", "all"].includes(slice)) {
       stage = "keyboard run navigation";
       await evaluate("document.querySelector('#p-notify a[href=\"/run?id=gh-timeout-775\"]').focus()"); await press("Enter", "Enter", 13);
       await until("location.pathname==='/run'&&location.search==='?id=gh-timeout-775'"); await navigate("/config/connections");
@@ -245,7 +263,24 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
     await evaluate("document.querySelector('link[href=\"/static/console.css\"]').disabled=true");
     assert.ok(connectionsEvidenceProblems(await evaluate(EVIDENCE), { slice, width: 1440, theme: "light", receiverPort: fixture.receiverPort, unauthorized }).length > 0);
     if (!["all", "baseline"].includes(slice)) {
-      stage = "deleted publications are unknown"; await fixture.removeTelemetry();
+      stage = "deleted publications are unknown";
+      const retainedHosts = slice === "endpoints" ? await Promise.all(["mini1", "mini2", "build3"].map(async name => ({ name, facts: await fixture.redis.hgetall(`host:h:${name}`) }))) : [];
+      await fixture.removeTelemetry();
+      const endpointFields = ["endpoints", "endpointsMore", "endpointsVersion", "endpointsStartedAt"];
+      const assertRetainedHosts = async () => {
+        for (const { name, facts } of retainedHosts) {
+          const row = await fixture.redis.hgetall(`host:h:${name}`);
+          for (const key of ["name", "version", "startedAt"]) assert.equal(row[key], facts[key], `Endpoint-only deletion preserves ${name}'s ${key}`);
+          assert.ok(await fixture.redis.pttl(`host:h:${name}`) > 0, "The host keeps its live registry expiry");
+          // A scheduled beat may already have replaced absent fields with empty unpublished facts.
+          for (const key of endpointFields) assert.equal(row[key] ?? "", "", "Only endpoint observations remain unpublished after the next real host beat");
+        }
+      };
+      if (retainedHosts.length) {
+        await assertRetainedHosts();
+        await fixture.publishHosts();
+        await assertRetainedHosts();
+      }
       await navigate("/config/connections"); await check(1440, "light", true);
       await capture(`${slice}-not-reported-light-1440`);
     }
@@ -353,7 +388,7 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
       additional.identityNegativeControl = true;
     }
     writeFileSync(shots ? join(shots, `${slice}-measurements.json`) : join(work, "measurements.json"), JSON.stringify(paints, null, 2));
-    return { ok: true, slice, paints: paints.length, ...additional, interactions: ["keyboard-disclosure", ...(slice === "baseline" ? [] : ["keyboard-host-navigation"]), ...(["hooks", "all"].includes(slice) ? ["keyboard-run-navigation"] : []), ...(["receiver", "all"].includes(slice) ? ["hourly-disclosure-and-sums", "actual-delivery-and-reload", "complete-receiver-identities", "receiver-identity-negative-control"] : []), "theme", "no-script", "CSP-negative-control", "styling-negative-control", ...(["all", "baseline"].includes(slice) ? [] : ["deletion"])] };
+    return { ok: true, slice, paints: paints.length, ...additional, interactions: ["keyboard-disclosure", ...(slice === "baseline" ? [] : ["keyboard-host-navigation"]), ...(["hooks", "endpoints", "all"].includes(slice) ? ["keyboard-run-navigation"] : []), ...(["receiver", "all"].includes(slice) ? ["hourly-disclosure-and-sums", "actual-delivery-and-reload", "complete-receiver-identities", "receiver-identity-negative-control"] : []), ...(["endpoints", "all"].includes(slice) ? ["positive-fleet-leases", "endpoint-keyboard-scroll", "endpoint-port-negative-control"] : []), ...(slice === "endpoints" ? ["receiver-hook-coexistence", "deletion-preserves-receiver-hooks-and-fleet-leases"] : []), "theme", "no-script", "CSP-negative-control", "styling-negative-control", ...(["all", "baseline"].includes(slice) ? [] : ["deletion"])] };
   } catch (error) { throw new Error(`Connections browser ${stage}: ${error.message}`, { cause: error }); }
   finally {
     if (tab) await tab.close().catch(() => {});

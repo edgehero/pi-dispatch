@@ -7,6 +7,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { makeHostRegistry } from "@edgehero/pi-dispatch/host-registry";
+import { makeFleetLease, endpointSlotKey, hash16 } from "@edgehero/pi-dispatch/fleet-lease";
 import { makeInFlight } from "@edgehero/pi-dispatch/scoped-limits";
 import { startSetupBrowserFixture, SETUP_BROWSER_TOKENS } from "./setup-browser.mjs";
 import { SETUP_AT } from "./setup-goldens.mjs";
@@ -21,6 +22,8 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
   const address = new URL(url); address.pathname = "/14";
   const redis = makeRedisClient(address.href);
   const closers = [];
+  const registries = [];
+  let endpointFactsEnabled = true;
   let fixture, edge, ownsDatabase = false;
   let at = agedReceiver ? SETUP_AT - 25 * 3_600_000 : SETUP_AT;
   const receiverRecordKey = `receiver:h:${receiverName}`;
@@ -67,9 +70,18 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
         slots.tryAcquire("local-model", 2);
         slots.tryAcquire("shared-model", 4);
         if (name === "mini2") slots.tryAcquire("shared-model", 4);
-        fields = endpointStatusFields(endpoints.map(endpoint => ({ ...endpoint, ...(name === "mini2" && endpoint.id === "shared-model" ? { slots: 3 } : {}) })), slots, name !== "build3");
+        if (name !== "build3") {
+          const lease = makeFleetLease({ redis, holderPrefix: name, keyFor: endpointSlotKey, ttlMs: 600_000, now });
+          for (let index = 0; index < (name === "mini2" ? 2 : 1); index++) {
+            const claim = await lease.acquire(`fixture-${name}-${index}`, { slots: name === "mini2" ? 3 : 4, keyArgs: [hash16("shared-model")] });
+            assert.ok(claim?.ok && !claim.degraded, "The real shared model lease must be acquired");
+            closers.push({ close: () => claim.release() });
+          }
+        }
+        const endpointFields = endpointStatusFields(endpoints.map(endpoint => ({ ...endpoint, ...(name === "mini2" && endpoint.id === "shared-model" ? { slots: 3 } : {}) })), slots, name !== "build3");
+        fields = Object.fromEntries(Object.entries(endpointFields).map(([key, value]) => [key, facts => endpointFactsEnabled ? typeof value === "function" ? value(facts) : value : ""]));
       }
-      await registry.start({ version: "4.3.1", ...fields }); closers.push(registry);
+      await registry.start({ version: "4.3.1", ...fields }); closers.push(registry); registries.push(registry);
     }
     let receiverCounter = null, receiverPublisher = null;
     const send = async (body, authorized = true, path = "/") => {
@@ -83,7 +95,7 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
         outgoing.once("error", reject); outgoing.end(raw);
       });
     };
-    if (slice === "receiver" || slice === "hooks" || slice === "all") {
+    if (["receiver", "hooks", "endpoints", "all"].includes(slice)) {
       const { makeReceiverObservations, makeReceiverPublisher } = await import("../../../worker/src/receiver-status.mjs");
       const { makeReceiver } = await import("../../../receiver/src/receiver.mjs");
       receiverCounter = makeReceiverObservations({ now });
@@ -103,7 +115,7 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
         await drain(async () => { receiverPublisher.beat(); return JSON.parse(await redis.get(receiverRecordKey)).at === at; });
       }
     }
-    if (slice === "hooks" || slice === "all") {
+    if (["hooks", "endpoints", "all"].includes(slice)) {
       const { makeHookRunsPublisher } = await import("../../../worker/src/hook-runs.mjs");
       const { makeOnFailure } = await import("../../../worker/src/on-failure.mjs");
       const publisher = makeHookRunsPublisher({ redis, name: "build3", now }); closers.push(publisher);
@@ -125,12 +137,16 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
           return JSON.parse(await redis.get(receiverRecordKey)).deliveries.github.unauthorized.hours.some(([, count]) => count === 3);
         });
       },
+      async publishHosts() { await Promise.all(registries.map(registry => registry.publish())); },
       async removeTelemetry() {
         if (slice === "receiver" && receiverPublisher) await receiverPublisher.close();
-        // Hold the absent-publication state long enough to inspect it; a normal beat republishes it in 15 seconds.
-        if (slice === "endpoints") for (const closer of closers) await closer.close?.();
+        // Keep the hosts alive while only their optional endpoint observations disappear.
+        if (slice === "endpoints") {
+          endpointFactsEnabled = false;
+          await Promise.all(registries.map(registry => registry.publish()));
+        }
         const keys = await redis.keys(slice === "receiver" ? "receiver:*" : slice === "hooks" ? "hook:*" : "host:h:*");
-        if (slice === "endpoints") for (const key of keys) await redis.hdel(key, "endpoints", "endpointsMore", "endpointsVersion");
+        if (slice === "endpoints") for (const key of keys) await redis.hdel(key, "endpoints", "endpointsMore", "endpointsVersion", "endpointsStartedAt");
         else if (keys.length) await redis.del(...keys);
       },
       close,
