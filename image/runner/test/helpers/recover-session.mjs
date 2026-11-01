@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { trackPiRefreshes } from "./track-pi-refreshes.mjs";
 
 /**
  * Issue #645: a real pi session on a scripted offline model, shared by recover.test.mjs and the child it kills
@@ -48,6 +49,9 @@ export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root,
 	const modelsPath = join(agentDir, "models.json");
 	const definition = { id: MODEL_ID, name: "fake", api, reasoning, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 4096 };
 	writeFileSync(modelsPath, `${JSON.stringify({ providers: { [PROVIDER]: { apiKey: "pi-dispatch-recover-fake-key", baseUrl: "http://127.0.0.1:1", api, models: [definition] } } })}\n`);
+	// A registration starts its own unawaited refresh. Awaiting the explicit refresh below cannot settle that
+	// sibling, whose credential read can recreate auth.json after this test's temporary directory was removed.
+	trackPiRefreshes(pi.ModelRuntime);
 	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath });
 	const contexts = [];
 	modelRuntime.registerProvider(PROVIDER, {
