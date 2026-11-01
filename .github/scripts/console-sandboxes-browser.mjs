@@ -172,8 +172,16 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
     assert.equal(await evaluate("document.querySelector('#sb-workspace').value"), workspace);
     await click("#p-sb-kept h2");
     assert.equal(await evaluate("window.__sbWorkspace===document.querySelector('#sb-workspace')"), true, "unapplied select choice remains held after blur");
-    await click("#p-sb-run form[method=get] button");
-    await until(`new URLSearchParams(location.search).get('id')===${JSON.stringify(workspace)} && document.querySelector('#p-sb-run').innerText.includes('pi-job:reviewed-workspace')`);
+    const reviewedWorkspace = `new URLSearchParams(location.search).get('id')===${JSON.stringify(workspace)} && document.querySelector('#p-sb-run')?.innerText.includes('pi-job:reviewed-workspace')`;
+    const documentGate = fixture.holdWorkspaceDocument(workspace);
+    try {
+      await click("#p-sb-run form[method=get] button");
+      await until(`new URLSearchParams(location.search).get('id')===${JSON.stringify(workspace)} && document.readyState==='loading' && !document.querySelector('#p-sb-run')`);
+      const response = await documentGate.started;
+      assert.equal(response.status, 200); assert.equal(response.csp, SECURITY_HEADERS["content-security-policy"]);
+      assert.equal(await evaluate(`Boolean(${reviewedWorkspace})`), false, "the exact destination predicate waits while its real document is still parsing");
+    } finally { documentGate.release(); }
+    await until(reviewedWorkspace);
     assert.equal(fixture.effects.queued.length, 0, "reviewing GET choices dispatches no host work");
     fixture.inventory.hosts[0].settings.image = originalImage;
     fixture.inventory.hosts[0].rows[0].image = originalWorkspaceImage;
