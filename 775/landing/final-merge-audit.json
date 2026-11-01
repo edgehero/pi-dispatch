@@ -1,0 +1,506 @@
+{
+  "verifiedAtUTC": "2026-11-01T19:54:15.703932+00:00",
+  "pullRequests": [
+    {
+      "closingIssuesReferences": [],
+      "headRefOid": "c3f0884c8891762f21804be02bc92b973a9e60d2",
+      "isDraft": false,
+      "mergeCommit": {
+        "oid": "195c9777ac6bbcb7c9264f8536dacde88d7d1a6d"
+      },
+      "mergedAt": "2026-11-01T18:34:43Z",
+      "number": 786,
+      "state": "MERGED",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:35:52Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994394/job/124893982339",
+          "name": "the terminal opener holds its handoff (ubuntu-24.04)",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:43:48Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994383/job/124893982261",
+          "name": "the openshell venue holds its declarations",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "openshell conformance"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:35:39Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982640",
+          "name": "pins are exact (CONST-PI-VERSION-PINNED)",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:39:29Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994374/job/124893982258",
+          "name": "the rootless podman venue holds its declarations",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "podman conformance"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:35:50Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994394/job/124893982631",
+          "name": "the terminal opener holds its handoff (macos-15)",
+          "startedAt": "2026-11-01T15:35:31Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:36:01Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994394/job/124893982558",
+          "name": "the terminal opener holds its handoff (windows-2025)",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:35:38Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982557",
+          "name": "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T16:13:14Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982431",
+          "name": "pinned assumptions still hold (offline, no API key)",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:41:06Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982601",
+          "name": "the job image holds its contract",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:35:52Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982635",
+          "name": "the admin extension survives latest pi (canary)",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:36:19Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982582",
+          "name": "the job's MCP survives latest pi (canary)",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T15:35:49Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982625",
+          "name": "host-pi mirrors survive latest pi (canary)",
+          "startedAt": "2026-11-01T15:35:30Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        }
+      ],
+      "url": "https://github.com/edgehero/pi-dispatch/pull/786"
+    },
+    {
+      "closingIssuesReferences": [],
+      "headRefOid": "0c72eea748ecb61af5e7b0553095838199672840",
+      "isDraft": false,
+      "mergeCommit": {
+        "oid": "fc7cd9f8f98e22e42cd6676a46e0276db0741c34"
+      },
+      "mergedAt": "2026-11-01T19:38:08Z",
+      "number": 785,
+      "state": "MERGED",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:53:40Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898014/job/124944486193",
+          "name": "the terminal opener holds its handoff (ubuntu-24.04)",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:01:24Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898123/job/124944486514",
+          "name": "the openshell venue holds its declarations",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "openshell conformance"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:53:29Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898037/job/124944486597",
+          "name": "pins are exact (CONST-PI-VERSION-PINNED)",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:58:18Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898016/job/124944486096",
+          "name": "the rootless podman venue holds its declarations",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "podman conformance"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:53:38Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898014/job/124944486318",
+          "name": "the terminal opener holds its handoff (macos-15)",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:53:52Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898014/job/124944486053",
+          "name": "the terminal opener holds its handoff (windows-2025)",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:53:27Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898037/job/124944486451",
+          "name": "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+          "startedAt": "2026-11-01T18:53:21Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:37:28Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898037/job/124944486540",
+          "name": "pinned assumptions still hold (offline, no API key)",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:57:32Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898037/job/124944486228",
+          "name": "the job image holds its contract",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:53:43Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898037/job/124944486454",
+          "name": "the admin extension survives latest pi (canary)",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:54:03Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898037/job/124944486528",
+          "name": "the job's MCP survives latest pi (canary)",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T18:53:39Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41338898037/job/124944486517",
+          "name": "host-pi mirrors survive latest pi (canary)",
+          "startedAt": "2026-11-01T18:53:20Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        }
+      ],
+      "url": "https://github.com/edgehero/pi-dispatch/pull/785"
+    },
+    {
+      "closingIssuesReferences": [
+        {
+          "id": "I_kwDOTZNMQc8AAAABbLf5yw",
+          "number": 775,
+          "repository": {
+            "id": "R_kgDOTZNMQQ",
+            "name": "pi-dispatch",
+            "owner": {
+              "id": "MDQ6VXNlcjY2NzMxMjM=",
+              "login": "edgehero"
+            }
+          },
+          "url": "https://github.com/edgehero/pi-dispatch/issues/775"
+        }
+      ],
+      "headRefOid": "84fe5f471db7a2127953dfdd76d3e594465da4ec",
+      "isDraft": false,
+      "mergeCommit": {
+        "oid": "39763244d60fdcfcae0e1dda30fc8c1401e9beeb"
+      },
+      "mergedAt": "2026-11-01T19:53:04Z",
+      "number": 787,
+      "state": "MERGED",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:15:35Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765180/job/124950070242",
+          "name": "the terminal opener holds its handoff (ubuntu-24.04)",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:23:26Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765421/job/124950070328",
+          "name": "the openshell venue holds its declarations",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "openshell conformance"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:15:13Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765406/job/124950071028",
+          "name": "pins are exact (CONST-PI-VERSION-PINNED)",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:19:16Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765221/job/124950070121",
+          "name": "the rootless podman venue holds its declarations",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "podman conformance"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:15:19Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765180/job/124950069988",
+          "name": "the terminal opener holds its handoff (macos-15)",
+          "startedAt": "2026-11-01T19:15:06Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:15:38Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765180/job/124950070169",
+          "name": "the terminal opener holds its handoff (windows-2025)",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "opener native handoff"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:15:12Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765406/job/124950070952",
+          "name": "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:50:46Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765406/job/124950071015",
+          "name": "pinned assumptions still hold (offline, no API key)",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:20:06Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765406/job/124950070628",
+          "name": "the job image holds its contract",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:15:27Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765406/job/124950071008",
+          "name": "the admin extension survives latest pi (canary)",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:15:49Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765406/job/124950071095",
+          "name": "the job's MCP survives latest pi (canary)",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-11-01T19:15:22Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/edgehero/pi-dispatch/actions/runs/41340765406/job/124950071093",
+          "name": "host-pi mirrors survive latest pi (canary)",
+          "startedAt": "2026-11-01T19:15:05Z",
+          "status": "COMPLETED",
+          "workflowName": "pi upgrade check"
+        }
+      ],
+      "url": "https://github.com/edgehero/pi-dispatch/pull/787"
+    }
+  ],
+  "issue": {
+    "number": 775,
+    "state": "closed",
+    "reason": "completed",
+    "closedAt": "2026-11-01T19:53:05Z"
+  },
+  "main": {
+    "head": "39763244d60fdcfcae0e1dda30fc8c1401e9beeb",
+    "tree": "dd60d3cf4df2ece8e96ad820e74bf79a6ba8ce2a",
+    "equalsActualFinalCICheckoutAndCapturedSource": true,
+    "postMergeCI": [
+      {
+        "conclusion": "",
+        "databaseId": 41343987464,
+        "headSha": "39763244d60fdcfcae0e1dda30fc8c1401e9beeb",
+        "status": "in_progress",
+        "workflowName": "receiver-image"
+      },
+      {
+        "conclusion": "",
+        "databaseId": 41343987446,
+        "headSha": "39763244d60fdcfcae0e1dda30fc8c1401e9beeb",
+        "status": "in_progress",
+        "workflowName": "openshell conformance"
+      },
+      {
+        "conclusion": "",
+        "databaseId": 41343987480,
+        "headSha": "39763244d60fdcfcae0e1dda30fc8c1401e9beeb",
+        "status": "in_progress",
+        "workflowName": "podman conformance"
+      },
+      {
+        "conclusion": "",
+        "databaseId": 41343987444,
+        "headSha": "39763244d60fdcfcae0e1dda30fc8c1401e9beeb",
+        "status": "pending",
+        "workflowName": "release"
+      },
+      {
+        "conclusion": "",
+        "databaseId": 41343987466,
+        "headSha": "39763244d60fdcfcae0e1dda30fc8c1401e9beeb",
+        "status": "in_progress",
+        "workflowName": "pi upgrade check"
+      }
+    ]
+  },
+  "all36FinalPRChecksSuccess": true,
+  "requiredContexts": [
+    "pins are exact (CONST-PI-VERSION-PINNED)",
+    "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+    "pinned assumptions still hold (offline, no API key)",
+    "the job image holds its contract",
+    "the admin extension survives latest pi (canary)",
+    "the rootless podman venue holds its declarations"
+  ],
+  "enforceAdmins": true,
+  "branchesPreserved": true,
+  "originalCheckoutPreserved": true,
+  "worktreesClean": true,
+  "localValkeyServicesStoppedAfterVerifiedOwnership": true,
+  "remoteArtifact": "Unavailable403/Cloudflare; verified published-source cards instead",
+  "integrationFlags": [
+    "LOADER",
+    "WORKER",
+    "RECEIVER"
+  ],
+  "localSuite": {
+    "pass": 12598,
+    "fail": 0,
+    "skipped": 6
+  },
+  "finalCINormalAnd399SuiteEach": {
+    "pass": 12599,
+    "fail": 0,
+    "skipped": 5,
+    "skipScope": "platform/filesystem cases and unavailable optional zsh; zsh passed locally"
+  },
+  "reportingOracleFiles": 615,
+  "browserSweep": {
+    "pageRenders": 4163,
+    "shellRenders": 2241,
+    "problems": 0
+  }
+}
