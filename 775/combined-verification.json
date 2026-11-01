@@ -80,6 +80,7 @@
       "admin/test/helpers/sandbox-browser.mjs"
     ],
     "effect": "Deterministic native-GET loading regression and guarded destination wait; production and Connections sources unchanged.",
-    "localVerification": "Final full receiver suite12559pass/0fail/6platformskips; full Sandbox18+56 pass and remove-only-guard negative control."
+    "localVerification": "Final full receiver suite12559pass/0fail/6platformskips; full Sandbox18+56 pass and remove-only-guard negative control.",
+    "finalCI": "Receiver c3f0884c: all12reportingcontextsSUCCESS; fullordinary/399/count/width/allbrowserlanesincludingdeterministicSandboxregression passed."
   }
 }

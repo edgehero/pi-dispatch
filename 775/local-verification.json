@@ -20,7 +20,91 @@
       },
       "platform": "macOS arm64",
       "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
-      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339"
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339",
+      "finalCI": {
+        "result": "SUCCESS",
+        "reportingChecks": 12,
+        "requiredContexts": 6,
+        "normalRootSuite": {
+          "tests": 12565,
+          "pass": 12560,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 5,
+          "todo": 0
+        },
+        "clockShiftDays": 399,
+        "shiftedRootSuite": {
+          "tests": 12565,
+          "pass": 12560,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 5,
+          "todo": 0
+        },
+        "declaredTestFiles": 610,
+        "completeWidthSweep": {
+          "pageRuns": 3963,
+          "pages": 419,
+          "shellRuns": 2241,
+          "shellPages": 113,
+          "failed": 0,
+          "otherProblems": 0
+        },
+        "browserLanes": {
+          "sandbox": {
+            "normal": 18,
+            "exceptional": 56,
+            "result": "passed"
+          },
+          "agentControls": {
+            "answerer": {
+              "paints": 48,
+              "longPaints": 28,
+              "longRulePaints": 6,
+              "interactions": "real confirmed reply, edited provenance, separate standing adoption, live draft preservation, person-role refusals and native no-script reads"
+            },
+            "models": {
+              "ok": true,
+              "paints": 144,
+              "subscription": "safe roles, complete phone fields, quota/staleness/trial counterexamples, real clipboard write, no-JavaScript facts",
+              "csp": "production header and negative control",
+              "writes": "preview, confirm, undo, stale, expired and role/read-only refusals"
+            }
+          },
+          "setup": {
+            "paints": 108,
+            "startingPaints": 6,
+            "effects": 5,
+            "interactions": "real host preview/confirm, heartbeat readiness, multi-provider Add/Replace preservation, keyboard selectors, delayed preview cancellation, stale file refusal, recipe save, viewer invitation and fresh revoke, native no-script key guidance and read-only gates",
+            "csp": "production header and hostile-inline negative control"
+          },
+          "connections": {
+            "ok": true,
+            "slice": "receiver",
+            "paints": 38,
+            "agedPaints": 2,
+            "maxIdentityPaints": 32,
+            "unreadableIdentityPaints": 2,
+            "identityNegativeControl": true,
+            "interactions": [
+              "keyboard-disclosure",
+              "keyboard-host-navigation",
+              "hourly-disclosure-and-sums",
+              "actual-delivery-and-reload",
+              "complete-receiver-identities",
+              "receiver-identity-negative-control",
+              "theme",
+              "no-script",
+              "CSP-negative-control",
+              "styling-negative-control",
+              "deletion"
+            ]
+          }
+        },
+        "skips": "Four platform/filesystem cases and unavailable optional zsh; local zsh round trip passed.",
+        "logSha256": "e724a17a166a80e74889f1858014aa6076a418e0d2b73700ddaddf8e976e34a4"
+      }
     },
     "hooks": {
       "sourceCommit": "06732c0f13d161bf681c063e28efed8195db7864",
@@ -42,7 +126,84 @@
       },
       "platform": "macOS arm64",
       "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
-      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685"
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685",
+      "finalCI": {
+        "result": "SUCCESS",
+        "reportingChecks": 12,
+        "requiredContexts": 6,
+        "normalRootSuite": {
+          "tests": 12534,
+          "pass": 12529,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 5,
+          "todo": 0
+        },
+        "clockShiftDays": 399,
+        "shiftedRootSuite": {
+          "tests": 12534,
+          "pass": 12529,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 5,
+          "todo": 0
+        },
+        "declaredTestFiles": 608,
+        "completeWidthSweep": {
+          "pageRuns": 3963,
+          "pages": 419,
+          "shellRuns": 2241,
+          "shellPages": 113,
+          "failed": 0,
+          "otherProblems": 0
+        },
+        "browserLanes": {
+          "sandbox": {
+            "normal": 18,
+            "exceptional": 56,
+            "result": "passed"
+          },
+          "agentControls": {
+            "answerer": {
+              "paints": 48,
+              "longPaints": 28,
+              "longRulePaints": 6,
+              "interactions": "real confirmed reply, edited provenance, separate standing adoption, live draft preservation, person-role refusals and native no-script reads"
+            },
+            "models": {
+              "ok": true,
+              "paints": 144,
+              "subscription": "safe roles, complete phone fields, quota/staleness/trial counterexamples, real clipboard write, no-JavaScript facts",
+              "csp": "production header and negative control",
+              "writes": "preview, confirm, undo, stale, expired and role/read-only refusals"
+            }
+          },
+          "setup": {
+            "paints": 108,
+            "startingPaints": 6,
+            "effects": 5,
+            "interactions": "real host preview/confirm, heartbeat readiness, multi-provider Add/Replace preservation, keyboard selectors, delayed preview cancellation, stale file refusal, recipe save, viewer invitation and fresh revoke, native no-script key guidance and read-only gates",
+            "csp": "production header and hostile-inline negative control"
+          },
+          "connections": {
+            "ok": true,
+            "slice": "hooks",
+            "paints": 38,
+            "interactions": [
+              "keyboard-disclosure",
+              "keyboard-host-navigation",
+              "keyboard-run-navigation",
+              "theme",
+              "no-script",
+              "CSP-negative-control",
+              "styling-negative-control",
+              "deletion"
+            ]
+          }
+        },
+        "skips": "Four platform/filesystem cases and unavailable optional zsh; local zsh round trip passed.",
+        "logSha256": "d78cfc36c5469744f9fb23ff46636b7defe6b483402e1db20e1bf78bc75d7f0f"
+      }
     },
     "endpoints": {
       "sourceCommit": "a6d861edfb1f14dece63ba6af1eaf7cd496780ff",
@@ -64,7 +225,87 @@
       },
       "platform": "macOS arm64",
       "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
-      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506"
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506",
+      "finalCI": {
+        "result": "SUCCESS",
+        "reportingChecks": 12,
+        "requiredContexts": 6,
+        "normalRootSuite": {
+          "tests": 12538,
+          "pass": 12533,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 5,
+          "todo": 0
+        },
+        "clockShiftDays": 399,
+        "shiftedRootSuite": {
+          "tests": 12538,
+          "pass": 12533,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 5,
+          "todo": 0
+        },
+        "declaredTestFiles": 606,
+        "completeWidthSweep": {
+          "pageRuns": 3923,
+          "pages": 418,
+          "shellRuns": 2241,
+          "shellPages": 113,
+          "failed": 0,
+          "otherProblems": 0
+        },
+        "browserLanes": {
+          "sandbox": {
+            "normal": 18,
+            "exceptional": 56,
+            "result": "passed"
+          },
+          "agentControls": {
+            "answerer": {
+              "paints": 48,
+              "longPaints": 28,
+              "longRulePaints": 6,
+              "interactions": "real confirmed reply, edited provenance, separate standing adoption, live draft preservation, person-role refusals and native no-script reads"
+            },
+            "models": {
+              "ok": true,
+              "paints": 144,
+              "subscription": "safe roles, complete phone fields, quota/staleness/trial counterexamples, real clipboard write, no-JavaScript facts",
+              "csp": "production header and negative control",
+              "writes": "preview, confirm, undo, stale, expired and role/read-only refusals"
+            }
+          },
+          "setup": {
+            "paints": 108,
+            "startingPaints": 6,
+            "effects": 5,
+            "interactions": "real host preview/confirm, heartbeat readiness, multi-provider Add/Replace preservation, keyboard selectors, delayed preview cancellation, stale file refusal, recipe save, viewer invitation and fresh revoke, native no-script key guidance and read-only gates",
+            "csp": "production header and hostile-inline negative control"
+          },
+          "connections": {
+            "ok": true,
+            "slice": "endpoints",
+            "paints": 38,
+            "interactions": [
+              "keyboard-disclosure",
+              "keyboard-host-navigation",
+              "positive-fleet-leases",
+              "endpoint-keyboard-scroll",
+              "endpoint-port-negative-control",
+              "deletion-preserves-fleet-leases",
+              "theme",
+              "no-script",
+              "CSP-negative-control",
+              "styling-negative-control",
+              "deletion"
+            ]
+          }
+        },
+        "skips": "Four platform/filesystem cases and unavailable optional zsh; local zsh round trip passed.",
+        "logSha256": "a7ec469e7c439d6eb7184df084e36ba1ded57045f026f5afbc6dcc8795be1959"
+      }
     }
   },
   "sandboxBrowser": {

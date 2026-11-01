@@ -1,0 +1,268 @@
+{
+  "requiredContexts": [
+    "pins are exact (CONST-PI-VERSION-PINNED)",
+    "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+    "pinned assumptions still hold (offline, no API key)",
+    "the job image holds its contract",
+    "the admin extension survives latest pi (canary)",
+    "the rootless podman venue holds its declarations"
+  ],
+  "pullRequests": [
+    {
+      "number": 786,
+      "url": "https://github.com/edgehero/pi-dispatch/pull/786",
+      "head": "c3f0884c8891762f21804be02bc92b973a9e60d2",
+      "draft": false,
+      "mergeState": "CLEAN",
+      "closingIssues": [],
+      "commitsChecked": 6,
+      "filesChecked": 64,
+      "checks": [
+        {
+          "name": "the terminal opener holds its handoff (ubuntu-24.04)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994394/job/124893982339"
+        },
+        {
+          "name": "the openshell venue holds its declarations",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994383/job/124893982261"
+        },
+        {
+          "name": "pins are exact (CONST-PI-VERSION-PINNED)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982640"
+        },
+        {
+          "name": "the rootless podman venue holds its declarations",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994374/job/124893982258"
+        },
+        {
+          "name": "the terminal opener holds its handoff (macos-15)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994394/job/124893982631"
+        },
+        {
+          "name": "the terminal opener holds its handoff (windows-2025)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994394/job/124893982558"
+        },
+        {
+          "name": "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982557"
+        },
+        {
+          "name": "pinned assumptions still hold (offline, no API key)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982431"
+        },
+        {
+          "name": "the job image holds its contract",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982601"
+        },
+        {
+          "name": "the admin extension survives latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982635"
+        },
+        {
+          "name": "the job's MCP survives latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982582"
+        },
+        {
+          "name": "host-pi mirrors survive latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339/job/124893982625"
+        }
+      ]
+    },
+    {
+      "number": 785,
+      "url": "https://github.com/edgehero/pi-dispatch/pull/785",
+      "head": "06732c0f13d161bf681c063e28efed8195db7864",
+      "draft": false,
+      "mergeState": "CLEAN",
+      "closingIssues": [],
+      "commitsChecked": 5,
+      "filesChecked": 63,
+      "checks": [
+        {
+          "name": "the terminal opener holds its handoff (ubuntu-24.04)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000700/job/124867118006"
+        },
+        {
+          "name": "the openshell venue holds its declarations",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000727/job/124867117930"
+        },
+        {
+          "name": "pins are exact (CONST-PI-VERSION-PINNED)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685/job/124867118072"
+        },
+        {
+          "name": "the rootless podman venue holds its declarations",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000688/job/124867117807"
+        },
+        {
+          "name": "the terminal opener holds its handoff (macos-15)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000700/job/124867118197"
+        },
+        {
+          "name": "the terminal opener holds its handoff (windows-2025)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000700/job/124867118173"
+        },
+        {
+          "name": "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685/job/124867118070"
+        },
+        {
+          "name": "pinned assumptions still hold (offline, no API key)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685/job/124867118128"
+        },
+        {
+          "name": "the job image holds its contract",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685/job/124867118012"
+        },
+        {
+          "name": "the admin extension survives latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685/job/124867117861"
+        },
+        {
+          "name": "the job's MCP survives latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685/job/124867118048"
+        },
+        {
+          "name": "host-pi mirrors survive latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685/job/124867118069"
+        }
+      ]
+    },
+    {
+      "number": 787,
+      "url": "https://github.com/edgehero/pi-dispatch/pull/787",
+      "head": "a6d861edfb1f14dece63ba6af1eaf7cd496780ff",
+      "draft": false,
+      "mergeState": "CLEAN",
+      "closingIssues": [
+        775
+      ],
+      "commitsChecked": 3,
+      "filesChecked": 62,
+      "checks": [
+        {
+          "name": "the terminal opener holds its handoff (ubuntu-24.04)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745503/job/124881286020"
+        },
+        {
+          "name": "the openshell venue holds its declarations",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745499/job/124881285953"
+        },
+        {
+          "name": "pins are exact (CONST-PI-VERSION-PINNED)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506/job/124881286221"
+        },
+        {
+          "name": "the rootless podman venue holds its declarations",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745495/job/124881285682"
+        },
+        {
+          "name": "the terminal opener holds its handoff (macos-15)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745503/job/124881285830"
+        },
+        {
+          "name": "the terminal opener holds its handoff (windows-2025)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745503/job/124881286106"
+        },
+        {
+          "name": "no automatic merge (CONST-MERGE-NEVER-AUTOMATIC)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506/job/124881286105"
+        },
+        {
+          "name": "pinned assumptions still hold (offline, no API key)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506/job/124881286200"
+        },
+        {
+          "name": "the job image holds its contract",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506/job/124881286254"
+        },
+        {
+          "name": "the admin extension survives latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506/job/124881286270"
+        },
+        {
+          "name": "the job's MCP survives latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506/job/124881286204"
+        },
+        {
+          "name": "host-pi mirrors survive latest pi (canary)",
+          "status": "COMPLETED",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/edgehero/pi-dispatch/actions/runs/41317745506/job/124881286231"
+        }
+      ]
+    }
+  ],
+  "verifiedAtUTC": "2026-11-01T16:15:37.114552+00:00",
+  "enforceAdmins": true
+}

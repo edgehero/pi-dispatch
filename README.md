@@ -32,6 +32,9 @@ Verification also covers a dirty ordinary database versus the isolated browser s
 
 ## Verification records
 
+All three PRs are ready for review on the recorded final commits. All 12 reporting checks on each commit are SUCCESS, including all six required contexts; admin enforcement remains enabled. Both Linux root-suite runs per PR have zero failures and five skips: four platform/filesystem cases and unavailable optional zsh (the local zsh round trip passed). No required integration flag was disabled.
+
+- `775/final-remote-audit.json`: final heads, ready/clean PR states, all 36 successful reporting contexts, required contexts, commit/DCO/file audits and recognized closing reference.
 - `775/manifest.json`: final/captured revisions, per-image hashes and source revisions, verification-only deltas and unchanged render objects.
 - `775/combined-verification.json` and `775/combined-source-provenance.json`: the manually reconciled final union passed both 12,600-test root runs, the 615-file reporting oracle, real-CSP browser cases and the complete 4,163-page-render plus 2,241-shell-render sweep.
 - `775/local-verification.json`: final full local suites, required integration flags, pinned local dependencies, browser matrices, counterexamples and final CI links.
