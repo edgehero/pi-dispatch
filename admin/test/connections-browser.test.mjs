@@ -8,7 +8,7 @@ const evidence = () => ({
   unauthorized: "2", receiverPort: "3000", receiverTimes: 2,
   links: ["/fleet/host?name=mini1", "/run?id=gh-timeout-775"],
   hookCounts: { exit: 1, timeout: 1 }, hookAttention: ["timeout"], hookTimes: 1,
-  hostSlots: { "local-model:mini1": "1 of 2", "shared-model:mini2": "2 of 3", "shared-model:build3": "1 of 4" }, localScope: true,
+  hostSlots: { "local-model:mini1": "1 of 2", "shared-model:mini2": "2 of 3", "shared-model:build3": "1 of 4" }, localScope: true, endpointWordsOk: true,
 });
 const options = { slice: "all", width: 390, theme: "dark", receiverPort: 3000 };
 
@@ -18,7 +18,7 @@ test("the browser oracle judges observed values, navigation and exception classi
     ["unauthorized", "0", "actual unauthorized count"], ["receiverPort", "4000", "actual listening port"],
     ["hookCounts", { exit: 2, timeout: 0 }, "Retained hook detail counts"], ["hookAttention", [], "timeout lost"],
     ["hostSlots", { "local-model:mini1": "0 of 2", "shared-model:mini2": "2 of 3", "shared-model:build3": "0 of 4" }, "host usage"],
-    ["links", [], "link is wrong"], ["localScope", false, "claims a fleet bound"],
+    ["links", [], "link is wrong"], ["localScope", false, "claims a fleet bound"], ["endpointWordsOk", false, "squeezed into fragments"],
   ]) assert.ok(connectionsEvidenceProblems({ ...evidence(), [field]: wrong }, options).some(problem => problem.includes(message)), field);
 });
 

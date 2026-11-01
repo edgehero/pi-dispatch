@@ -464,9 +464,9 @@ def connections():
 </ul>
   {table([("Host", ""), ("Last hook run", ""), ("Retained runs by detail", "")], [
       [('<a href="#host-mini1">mini1</a>', "id c2-first"),
-       (f'<time datetime="2026-10-08T15:11:00Z">2026-10-08 15:11 UTC</time><br>{runlink("gh-f0c2")}<br><span class="c2-st tone-attention">{ic("attention", "ic ic--sm")}<span>timeout</span></span><br><span class="muted">Run: failed · infra</span>', "wide c2-span"),
-       ("exit: 2<br>timeout: 1", "wide c2-span")],
-      [('<a href="#host-build3">build3</a>', "id c2-first"), ("no hook run published", "wide c2-span"), ("none", "wide c2-span")]
+       (f'<time datetime="2026-10-08T15:11:00Z">2026-10-08 15:11 UTC</time><br>{runlink("gh-f0c2")}<br><span class="c2-st tone-attention">{ic("attention", "ic ic--sm")}<span>timeout</span></span><br><span class="muted">Run: failed · infra</span>', "wide"),
+       ("exit: 2<br>timeout: 1", "wide")],
+      [('<a href="#host-build3">build3</a>', "id c2-first"), ("no hook run published", "wide"), ("none", "wide")]
   ], caption="Failure hook runs", stack=True)}
   <p class="c2-gap2 card__sub">Up to 20 runs per host, kept until seven days after the last append. An exit code describes the hook, not notification delivery.</p>"""
     p_notify = card("Notifications", notify, id_="p-notify")

@@ -112,11 +112,15 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
       async addRefusal() {
         assert.ok(receiverPublisher);
         assert.equal(await send({}, false), 401);
-        receiverPublisher.beat();
-        await drain(async () => JSON.parse(await redis.get("receiver:h:mini1")).deliveries.github.unauthorized.hours.some(([, count]) => count === 3));
+        await drain(async () => {
+          receiverPublisher.beat();
+          return JSON.parse(await redis.get("receiver:h:mini1")).deliveries.github.unauthorized.hours.some(([, count]) => count === 3);
+        });
       },
       async removeTelemetry() {
         if (receiverPublisher) await receiverPublisher.close();
+        // Hold the absent-publication state long enough to inspect it; a normal beat republishes it in 15 seconds.
+        if (slice === "endpoints") for (const closer of closers) await closer.close?.();
         const keys = await redis.keys(slice === "receiver" ? "receiver:*" : slice === "hooks" ? "hook:*" : "host:h:*");
         if (slice === "endpoints") for (const key of keys) await redis.hdel(key, "endpoints", "endpointsMore", "endpointsVersion");
         else if (keys.length) await redis.del(...keys);

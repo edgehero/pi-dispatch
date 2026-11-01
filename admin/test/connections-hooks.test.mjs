@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { buildHookRun } from "@edgehero/pi-dispatch/hook-runs";
 import { readConnections, modelConnections } from "../src/connections-view.mjs";
 import { connectionsNotify } from "../src/console/panels/connections.mjs";
@@ -9,6 +10,30 @@ const AT = Date.UTC(2026, 10, 1, 12);
 const run = (change = {}) => buildHookRun({ jobId: "gh-1", outcome: "failed", reason: "infra", detail: "exit", code: 0, ...change }, AT - 60_000);
 const history = (runs) => ({ hosts: [{ name: "mini1", runs }], partial: false, more: 0 });
 const reads = { environment: () => ({ env: {} }), endpoints: () => [], allowlist: () => [] };
+
+test("the published hook reference retains the complete last-run and detail-count cells", () => {
+  const reference = readFileSync(new URL("../../design/system/components/ConnectionsScreen/preview.html", import.meta.url), "utf8");
+  const doc = parseDocument(reference);
+  const table = doc.querySelector("#p-notify table");
+  assert.ok(table);
+  const rows = table.querySelectorAll("tbody tr");
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    const cells = row.querySelectorAll("td");
+    assert.equal(cells.length, 3, "a last-run colspan must not drop the retained-count cell");
+    assert.equal(cells[1].getAttribute("data-l"), "Last hook run", "the phone retains a readable last-run label");
+    assert.equal(cells[2].getAttribute("data-l"), "Retained runs by detail", "the phone retains its count label");
+    assert.ok(cells.every((cell) => Number(cell.getAttribute("colspan") ?? 1) === 1));
+  }
+  const first = rows[0].querySelectorAll("td");
+  assert.equal(first[0].textContent, "mini1");
+  assert.equal(first[1].querySelector("time").getAttribute("datetime"), "2026-10-08T15:11:00Z");
+  assert.match(first[1].textContent, /gh-f0c2.*timeout.*Run: failed/);
+  assert.deepEqual(Object.fromEntries([...first[2].textContent.matchAll(/(exit|timeout):\s*(\d+)/g)].map((match) => [match[1], Number(match[2])])), { exit: 2, timeout: 1 });
+  const second = rows[1].querySelectorAll("td");
+  assert.equal(second[1].textContent, "no hook run published");
+  assert.equal(second[2].textContent, "none");
+});
 
 test("Connections alone reads history using live names; Setup opts out; model projection gets safe records and counts", async () => {
   const calls = [];

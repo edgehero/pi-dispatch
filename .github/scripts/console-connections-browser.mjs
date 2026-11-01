@@ -43,13 +43,14 @@ export function connectionsEvidenceProblems(evidence, { slice, width, theme, rec
       require(evidence.hostSlots["shared-model:mini2"] === "2 of 3", "The second host's usage or declaration is wrong");
       require(evidence.hostSlots["shared-model:build3"] === "1 of 4", "An unnamed host's local usage was lost");
       require(evidence.localScope === true, "The per-machine endpoint claims a fleet bound");
+      require(evidence.endpointWordsOk === true, "Endpoint key words are squeezed into fragments");
       require(/one server, one id/i.test(evidence.endpoints), "Conflicting shared-server slot declarations have no warning");
     }
   }
   return problems;
 }
 
-const EVIDENCE = `(()=>{const text=id=>document.querySelector(id)?.innerText??'',f=document.querySelector('#p-forges'),n=document.querySelector('#p-notify'),ep=document.querySelector('#p-endpoints'),s=getComputedStyle(document.body),tables=[...document.querySelectorAll('table')],outcome=tables.find(t=>t.getAttribute('aria-label')==='mini1 github delivery outcomes'),unauthorized=[...(outcome?.tBodies[0]?.rows??[])].find(r=>r.cells[0].textContent.trim()==='unauthorized'),receiver=document.querySelector('[aria-label="Receiver on mini1"]'),port=receiver?.textContent.match(/(?:port[: ]+)([0-9]+)/i)?.[1]??null,hook=tables.find(t=>t.getAttribute('aria-label')==='Failure hook runs'),hostSlots={};for(const list of document.querySelectorAll('ul[aria-label$=" host slot counts"]')){const id=list.getAttribute('aria-label').replace(/ host slot counts$/,'');for(const li of list.querySelectorAll('li[data-host]'))hostSlots[id+':'+li.dataset.host]=li.querySelector('b')?.textContent.trim();}const counts={};for(const match of (hook?.innerText??'').matchAll(/(exit|timeout):\\s*(\\d+)/g))counts[match[1]]=Number(match[2]);return{canvas:s.getPropertyValue('--canvas').trim(),fonts:document.fonts.status,font:s.fontFamily,css:[...document.styleSheets].some(t=>t.href?.endsWith('/static/console.css')&&t.cssRules.length>100),cardRadius:parseFloat(getComputedStyle(document.querySelector('.card')).borderRadius),width:document.scrollingElement.scrollWidth,csp:window.__connectionsCsp??[],forges:f?.innerText??'',notify:n?.innerText??'',endpoints:ep?.innerText??'',problems:text('#p-connection-problems'),links:[...document.querySelectorAll('a[href]')].map(a=>a.getAttribute('href')),unauthorized:unauthorized?.cells[1].textContent.trim()??null,receiverPort:port,receiverTimes:f?.querySelectorAll('time[datetime]').length??0,hookCounts:counts,hookAttention:[...(n?.querySelectorAll('.cn-state.tone-attention')??[])].map(e=>e.textContent.trim()),hookTimes:n?.querySelectorAll('time[datetime]').length??0,hostSlots,localScope:[...ep.querySelectorAll('ul[aria-label="local-model host slot counts"] li')].every(li=>/no fleet bound/.test(li.innerText))};})()`;
+const EVIDENCE = `(()=>{const text=id=>document.querySelector(id)?.innerText??'',f=document.querySelector('#p-forges'),n=document.querySelector('#p-notify'),ep=document.querySelector('#p-endpoints'),s=getComputedStyle(document.body),tables=[...document.querySelectorAll('table')],outcome=tables.find(t=>t.getAttribute('aria-label')==='mini1 github delivery outcomes'),unauthorized=[...(outcome?.tBodies[0]?.rows??[])].find(r=>r.cells[0].textContent.trim()==='unauthorized'),receiver=document.querySelector('[aria-label="Receiver on mini1"]'),port=receiver?.textContent.match(/(?:port[: ]+)([0-9]+)/i)?.[1]??null,hook=tables.find(t=>t.getAttribute('aria-label')==='Failure hook runs'),hostSlots={};for(const list of document.querySelectorAll('ul[aria-label$=" host slot counts"]')){const id=list.getAttribute('aria-label').replace(/ host slot counts$/,'');for(const li of list.querySelectorAll('li[data-host]'))hostSlots[id+':'+li.dataset.host]=li.querySelector('b')?.textContent.trim();}const context=document.createElement('canvas').getContext('2d');const endpointWordsOk=[...ep.querySelectorAll('tbody tr td:nth-child(3)')].every(cell=>{const cs=getComputedStyle(cell);context.font=cs.font;const available=cell.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight);return cell.textContent.trim().split(/\\s+/).every(word=>context.measureText(word).width<=available+1);});const counts={};for(const match of (hook?.innerText??'').matchAll(/(exit|timeout):\\s*(\\d+)/g))counts[match[1]]=Number(match[2]);return{canvas:s.getPropertyValue('--canvas').trim(),fonts:document.fonts.status,font:s.fontFamily,css:[...document.styleSheets].some(t=>t.href?.endsWith('/static/console.css')&&t.cssRules.length>100),cardRadius:parseFloat(getComputedStyle(document.querySelector('.card')).borderRadius),width:document.scrollingElement.scrollWidth,csp:window.__connectionsCsp??[],forges:f?.innerText??'',notify:n?.innerText??'',endpoints:ep?.innerText??'',problems:text('#p-connection-problems'),links:[...document.querySelectorAll('a[href]')].map(a=>a.getAttribute('href')),unauthorized:unauthorized?.cells[1].textContent.trim()??null,receiverPort:port,receiverTimes:f?.querySelectorAll('time[datetime]').length??0,hookCounts:counts,hookAttention:[...(n?.querySelectorAll('.cn-state.tone-attention')??[])].map(e=>e.textContent.trim()),hookTimes:n?.querySelectorAll('time[datetime]').length??0,hostSlots,endpointWordsOk,localScope:[...ep.querySelectorAll('ul[aria-label="local-model host slot counts"] li')].every(li=>/no fleet bound/.test(li.innerText))};})()`;
 
 export async function checkConnectionsBrowser({ chrome, slice, shots = null, sandbox = process.env.GITHUB_ACTIONS !== "true" } = {}) {
   assert.ok(CONNECTIONS_SLICES.includes(slice), "Choose the explicit implementation slice to verify");
@@ -128,6 +129,7 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
         if ([390, 800, 1440].includes(width)) {
           await capture(`${slice}-${role}-${theme}-${width}`);
           if (width === 390 || width === 1440) await capture(`${slice}-section-${role}-${theme}-${width}`, slice === "receiver" ? "#p-forges" : slice === "hooks" ? "#p-notify" : "#p-endpoints");
+          if (slice === "baseline" && (width === 390 || width === 1440)) for (const [name, selector] of [["receiver", "#p-forges"], ["hooks", "#p-notify"], ["endpoints", "#p-endpoints"]]) await capture(`before-${name}-${role}-${theme}-${width}`, selector);
           if (slice === "receiver" || slice === "all") {
             const disclosure = '#p-forges .cn-receiver-detail>summary';
             await evaluate(`document.querySelector(${JSON.stringify(disclosure)}).focus()`); await press("Enter", "Enter", 13);
@@ -136,6 +138,14 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
             assert.equal(hourly.length, 24);
             assert.equal(hourly.filter(value => /^\d+$/.test(value)).reduce((sum, value) => sum + Number(value), 0), unauthorized, "Hourly rendered counts add to the observed outcome count");
             assert.ok(hourly.slice(0, 23).every(value => !/^\d+$/.test(value)), "Hours before receiver startup remain unobserved");
+            const hourLayout = await evaluate(`(()=>{const region=document.querySelector('.cn-receiver-hours-scroll'),table=region.querySelector('table'),context=document.createElement('canvas').getContext('2d');return{scroll:region.scrollWidth,client:region.clientWidth,words:[...table.tHead.rows[0].cells].map(cell=>{const cs=getComputedStyle(cell);context.font=cs.font;return {text:cell.textContent.trim(),fits:context.measureText(cell.textContent.trim()).width<=cell.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight)+1};})};})()`);
+            assert.ok(hourLayout.words.every(word => word.fits), "Every hourly column label retains its actual rendered word width");
+            if (hourLayout.scroll > hourLayout.client) {
+              await evaluate("document.querySelector('.cn-receiver-hours-scroll').focus()");
+              await press("ArrowRight", "ArrowRight", 39);
+              await until("document.querySelector('.cn-receiver-hours-scroll').scrollLeft>0");
+              await evaluate("document.querySelector('.cn-receiver-hours-scroll').scrollLeft=0");
+            }
             await check(width, theme);
             await capture(`${slice}-hours-${role}-${theme}-${width}`, "#p-forges");
           }
@@ -206,7 +216,7 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
       await capture(`${slice}-not-reported-light-1440`);
     }
     writeFileSync(shots ? join(shots, `${slice}-measurements.json`) : join(work, "measurements.json"), JSON.stringify(paints, null, 2));
-    return { ok: true, slice, paints: paints.length, interactions: ["keyboard-disclosure", "keyboard-navigation", "theme", "no-script", "CSP-negative-control", "styling-negative-control", "deletion"] };
+    return { ok: true, slice, paints: paints.length, interactions: ["keyboard-disclosure", ...(slice === "baseline" ? [] : ["keyboard-host-navigation"]), ...(["hooks", "all"].includes(slice) ? ["keyboard-run-navigation"] : []), ...(["receiver", "all"].includes(slice) ? ["hourly-disclosure-and-sums", "actual-delivery-and-reload"] : []), "theme", "no-script", "CSP-negative-control", "styling-negative-control", ...(["all", "baseline"].includes(slice) ? [] : ["deletion"])] };
   } catch (error) { throw new Error(`Connections browser ${stage}: ${error.message}`, { cause: error }); }
   finally {
     if (tab) await tab.close().catch(() => {});
