@@ -71,7 +71,7 @@ const IN_SCOPE_CARDS = Object.freeze({
   OverviewScreen: 3,
   OverviewAllClear: 3,
   OverviewPhone: 3,
-  SetupScreen: 774,
+  SetupScreen: 784,
   TimelineAndWaitlists: 3,
   RunsScreen: 4,
   RunsPhone: 4,

@@ -71,10 +71,10 @@ JOURNEYS = {
         sub="One command in a terminal, then everything else from the console.",
         steps=[
             ("SetupScreen", ["#p-setup-start"], None,
-             "A durable host bootstrap starts the console and prints a private setup link.", "Built", "#774",
+             "A durable host bootstrap starts the console and prints a private setup link.", "Built", "#784",
              ("system", "The console opens")),
             ("SetupScreen", ["#p-setup"], None,
-             "Preview and confirm supported local steps. GitHub and unsafe host changes keep their terminal route.", "Built", "#774",
+             "Preview and confirm supported local steps. GitHub and unsafe host changes keep their terminal route.", "Built", "#784",
              ("person", "Add the first trigger")),
             ("TriggerEditor", ["#p-trigger-preview", "#p-trigger-add"], None,
              "The first trigger is previewed as the lines it adds to the triggers file.", "Built", "#750",
@@ -263,7 +263,7 @@ README = {
   4. the first run on the Overview;
   5. its result on Runs.
 - Under each step, the next line says who moves it on: *you* or *pi-dispatch*.
-- The ribbon on each step says whether that screen is built, planned or proposed, and its issue. Supported browser setup is built by #774; GitHub App creation remains open.
+- The ribbon on each step says whether that screen is built, planned or proposed, and its issue. Supported browser setup is built by PR #784 (#774); GitHub App creation remains open.
 
 **Panels.** The strip of steps (`j-strip`); there are no console panels on a guide card.
 

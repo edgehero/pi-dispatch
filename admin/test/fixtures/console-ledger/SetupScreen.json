@@ -1,6 +1,6 @@
 {
   "card": "SetupScreen",
-  "pr": 774,
+  "pr": 784,
   "panels": [
     "p-setup",
     "p-setup-ready",

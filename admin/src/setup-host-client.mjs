@@ -2,9 +2,10 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SETUP_LIMITS, SETUP_VERSION, validSetupRequest, validSetupResult } from "@edgehero/pi-dispatch/setup-contract";
+import { setupDeploymentIdentity } from "@edgehero/pi-dispatch/setup-lock";
 import { resolveSetupWorkerEntry } from "@edgehero/pi-dispatch/setup-host-entry";
 
 /** Resolve from the deployment first; a globally installed console may share its durable worker's module tree. */
@@ -29,17 +30,23 @@ export function checkedSetupEntry(entry, { check = resolveSetupWorkerEntry, read
   } catch { return null; }
 }
 
+/** The parent and private viewer writer bind the same canonical deployment incarnation. */
+export const checkedSetupDeployment = setupDeploymentIdentity;
+
 /** argv/cwd/env come only from host wiring; request input never selects any of them. */
-export function makeSetupBroker({ cliPath, deployment, env = process.env, execPath = process.execPath, spawn = nodeSpawn, random = randomBytes, setTimer = setTimeout, clearTimer = clearTimeout, checkEntry = checkedSetupEntry } = {}) {
+export function makeSetupBroker({ cliPath, deployment, env = process.env, execPath = process.execPath, spawn = nodeSpawn, random = randomBytes, setTimer = setTimeout, clearTimer = clearTimeout, checkEntry = checkedSetupEntry, checkDeployment = checkedSetupDeployment } = {}) {
   const children = new Set();
   let closed = false;
   const initialEntry = cliPath ? checkEntry(cliPath) : null;
+  const initialDeployment = deployment ? checkDeployment(deployment) : null;
   async function request(phase, operation, input = {}, { expected, signal } = {}) {
     const id = random(16).toString("hex");
     const wire = { version: SETUP_VERSION, id, phase, operation, ...(expected ? { expected } : {}), ...(Object.keys(input).length ? { input } : {}) };
     const result = (state, reason) => ({ version: SETUP_VERSION, id, operation, state, reason });
     if (closed || signal?.aborted) return result("refused", "unavailable");
     if (!cliPath || !deployment || !validSetupRequest(wire)) return result("refused", "invalid-request");
+    const currentDeployment = checkDeployment(deployment);
+    if (!initialDeployment || !currentDeployment || JSON.stringify(initialDeployment) !== JSON.stringify(currentDeployment)) return result("refused", "unsafe-deployment");
     const currentEntry = checkEntry(cliPath);
     if (!initialEntry || !currentEntry || JSON.stringify(initialEntry) !== JSON.stringify(currentEntry)) return result("refused", "unsafe-entry");
     const payload = JSON.stringify(wire);
@@ -73,7 +80,7 @@ export function makeSetupBroker({ cliPath, deployment, env = process.env, execPa
       };
       const abort = () => terminate("unavailable");
       try {
-        child = spawn(execPath, [cliPath, "setup-host"], { cwd: resolve(deployment), env: { ...env }, shell: false, stdio: ["pipe", "pipe", "pipe"], detached: false });
+        child = spawn(execPath, [cliPath, "setup-host"], { cwd: initialDeployment.path, env: { ...env }, shell: false, stdio: ["pipe", "pipe", "pipe"], detached: false });
         children.add(child);
         child.once("error", () => finish(result(uncertain(), "process-failed")));
         child.stdout.on("data", (chunk) => {

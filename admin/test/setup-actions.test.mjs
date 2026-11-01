@@ -348,3 +348,61 @@ test("changed deployment exposure configuration refuses with console recovery ra
   assert.match(changed.body.error, /Nothing was started/);
   assert.equal(f.calls.filter(row => row[0] === "apply").length, 0);
 });
+
+test("a replaced or retargeted deployment cannot reuse an existing viewer/key preview even with identical token bytes", async t => {
+  for (const mode of ["replace-directory", "retarget-symlink", "alias-same-inode", "unsafe-mode"]) {
+    const f = fixture(t);
+    const key = await f.preview("setup-provider-key", { value: KEY });
+    const viewer = await f.preview("setup-viewer-add", { name: "observer" });
+    assert.equal(key.status, 200);
+    assert.equal(viewer.status, 200);
+    const bytes = fs.readFileSync(f.path, "utf8");
+    const parking = tempDir("pd-setup-incarnation-");
+    if (mode === "unsafe-mode") fs.chmodSync(f.dir, 0o777);
+    else {
+      const original = join(parking, "original");
+      fs.renameSync(f.dir, original);
+      if (mode === "alias-same-inode") fs.symlinkSync(original, f.dir, "dir");
+      else {
+        const replacement = mode === "retarget-symlink" ? join(parking, "replacement") : f.dir;
+        fs.mkdirSync(replacement, { mode: 0o700 });
+        fs.writeFileSync(join(replacement, "tokens.json"), bytes, { mode: 0o600 });
+        if (mode === "retarget-symlink") fs.symlinkSync(replacement, f.dir, "dir");
+      }
+    }
+    assert.equal((await f.confirm("setup-viewer-add", viewer.body.ticket)).status, 409, mode);
+    assert.equal(f.service.privateSize(), 0, "loss of deployment authority disposes all pending private payloads");
+    assert.equal((await f.confirm("setup-provider-key", key.body.ticket)).status, 409, mode);
+    assert.equal(f.calls.filter(row => row[0] === "apply").length, 0, mode);
+    assert.equal(fs.readFileSync(f.path, "utf8"), bytes, mode);
+    assert.equal(fs.existsSync(loginCodesDir(f.path)), false, mode);
+    assert.equal(f.service.state("operator", {}).enabled, false, mode);
+    assert.equal((await f.preview("setup-viewer-add", { name: "later" })).status, 403, mode);
+    if (mode === "unsafe-mode") fs.chmodSync(f.dir, 0o700);
+  }
+});
+
+test("viewer apply rechecks the captured deployment incarnation after acquiring its shared lock", async t => {
+  let moveOnLock = false, f;
+  const parking = tempDir("pd-setup-lock-incarnation-");
+  const io = { ...fs, writeFileSync(path, ...args) {
+    const result = fs.writeFileSync(path, ...args);
+    if (moveOnLock && String(path).endsWith("/.pi-dispatch-setup.lock")) {
+      moveOnLock = false;
+      const tokens = fs.readFileSync(f.path, "utf8");
+      fs.renameSync(f.dir, join(parking, "original"));
+      fs.mkdirSync(f.dir, { mode: 0o700 });
+      fs.writeFileSync(f.path, tokens, { mode: 0o600 });
+    }
+    return result;
+  } };
+  f = fixture(t, { fs: io });
+  const before = fs.readFileSync(f.path, "utf8");
+  const p = await f.preview("setup-viewer-add", { name: "observer" });
+  moveOnLock = true;
+  const result = await f.confirm("setup-viewer-add", p.body.ticket);
+  assert.equal(result.status, 409);
+  assert.equal(fs.readFileSync(f.path, "utf8"), before);
+  assert.equal(fs.existsSync(loginCodesDir(f.path)), false);
+  assert.equal(f.service.privateSize(), 0);
+});

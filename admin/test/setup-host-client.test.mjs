@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdirSync, realpathSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { makeSetupBroker, setupWorkerEntry } from "../src/setup-host-client.mjs";
+import { checkedSetupDeployment, makeSetupBroker, setupWorkerEntry } from "../src/setup-host-client.mjs";
 
 const DIGEST = "d".repeat(64);
 const plan = { digest: DIGEST, component: "worker", manager: "systemd", host: "build3", account: "ops", effects: ["start-worker"] };
@@ -11,6 +14,7 @@ function harness(reply = null, options = {}) {
   let child, wire;
   const broker = makeSetupBroker({
     cliPath: "/deployment/node_modules/@edgehero/pi-dispatch/src/cli.mjs", deployment: "/deployment", execPath: "/node", env: { PATH: "/bin" },
+    checkDeployment: path => ({ path, uid: 501, dev: 1, ino: 2 }),
     checkEntry: (entry) => ({ entry, version: "4.3.1", identity: "test-entry" }),
     ...options,
     random: (n) => Buffer.alloc(n, 0xab),
@@ -132,4 +136,20 @@ test("entry authority is rechecked before each child and changed identities refu
   identity = null;
   assert.equal((await h.broker.preview("setup-worker-start", {})).reason, "unsafe-entry");
   assert.equal(h.calls.length, 1);
+});
+
+
+test("host grant binds the canonical deployment incarnation before dispatch, including symlink retargets and replaced directories", async () => {
+  const base = realpathSync(tempDir("setup-bound-deployment-"));
+  const first = join(base, "first"), second = join(base, "second"), selected = join(base, "selected");
+  mkdirSync(first); mkdirSync(second); symlinkSync(first, selected);
+  const h = harness(({ child, wire }) => emit(child, response(wire)), { deployment: selected, checkDeployment: checkedSetupDeployment });
+  assert.equal((await h.broker.preview("setup-worker-start", {})).state, "planned");
+  assert.equal(h.calls[0].options.cwd, first, "the child uses the canonical grant, not the mutable alias");
+  unlinkSync(selected); symlinkSync(second, selected);
+  assert.equal((await h.broker.preview("setup-worker-start", {})).reason, "unsafe-deployment");
+  unlinkSync(selected); symlinkSync(first, selected);
+  renameSync(first, join(base, "old-first")); mkdirSync(first);
+  assert.equal((await h.broker.apply("setup-worker-start", { expected: DIGEST })).reason, "unsafe-deployment");
+  assert.equal(h.calls.length, 1, "neither retargeted nor same-path replacement receives execution authority");
 });

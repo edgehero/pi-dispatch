@@ -10531,7 +10531,9 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   Plan hashes can include secret-bearing source files and never enter HTTP, audit or shared state. CLI exit 2
   with a matching validated refused result remains a determinate refusal; other broken/nonzero replies are
   refused before mutation or unknown after apply dispatch. The parent revalidates entry ownership, ancestors,
-  canonical path, package/version and captured CLI/metadata content identity before each dispatch.
+  canonical path, package/version and captured CLI/metadata content identity before each dispatch. Every setup
+  writer also binds the canonical deployment device/inode at grant creation; retargeted aliases and replaced
+  directories refuse rather than transferring that authority, including private viewer writes.
 - **Transport and bounds**: run the known worker entry with `shell:false` and fixed argv. The child receives one
   versioned JSON request on stdin (at most 64 KiB), with server-chosen operation id and validated operation
   fields; the key value, if any, never rides argv/environment. Unknown versions, keys and operations refuse.

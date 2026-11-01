@@ -5,7 +5,7 @@ import { SETUP_OPERATIONS, SETUP_REASONS, SETUP_LIMITS } from "@edgehero/pi-disp
 import { addToken, revokeToken, readTokensSnapshot, TOKEN_NAME_RE } from "@edgehero/pi-dispatch/console-tokens";
 import { loginCodesDir, mintLoginCode } from "./console/login-codes.mjs";
 import { apiKeyVariable, nonApiKeyKind } from "@edgehero/pi-dispatch/provider-key";
-import { acquireSetupLock } from "@edgehero/pi-dispatch/setup-lock";
+import { acquireSetupLock, setupDeploymentIdentity } from "@edgehero/pi-dispatch/setup-lock";
 import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
 
 export const SETUP_ACTION_NAMES = Object.freeze([...SETUP_OPERATIONS, "setup-viewer-add", "setup-viewer-revoke"]);
@@ -39,14 +39,25 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
   const progress = new Map();
   const active = new Map();
   let closed = false;
+  const initialDeployment = setupDeploymentIdentity(deployment, { fs });
+  const sameDeployment = () => {
+    const current = setupDeploymentIdentity(deployment, { fs });
+    return initialDeployment !== null && current !== null && JSON.stringify(current) === JSON.stringify(initialDeployment);
+  };
   function currentProviderKey() {
     let selected;
     try { selected = typeof provider === "function" ? provider() : provider; } catch { return null; }
     const key = canonicalKey(selected);
     return KEY_SLOT(key) ? key : null;
   }
-  const granted = () => enabled === true && !closed;
+  const granted = () => enabled === true && !closed && sameDeployment();
   function authorized(session) {
+    if (!sameDeployment()) {
+      for (const ref of held.keys()) discard(ref);
+      for (const entry of active.values()) entry.controller.abort();
+      receipts.clear();
+      return false;
+    }
     if (!granted() || session?.role !== "operator" || typeof session.id !== "string") return false;
     try {
       if (typeof isAuthorized === "function") return isAuthorized(session) === true;

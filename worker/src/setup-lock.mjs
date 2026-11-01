@@ -3,19 +3,25 @@ import * as nodeFs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 
-export function acquireSetupLock(deployment, { fs = nodeFs, uid = process.geteuid?.(), random = randomBytes, pid = process.pid } = {}) {
-	let dir;
+/** Canonical, account-owned directory incarnation bound to a setup grant. */
+export function setupDeploymentIdentity(deployment, { fs = nodeFs, uid = process.geteuid?.() } = {}) {
 	try {
-		dir = fs.realpathSync(deployment);
+		const dir = fs.realpathSync(deployment);
 		const st = fs.statSync(dir);
-		if (!st.isDirectory() || st.uid !== uid || (st.mode & 0o022)) return { refusal: "unsafe-deployment" };
+		if (!st.isDirectory() || st.uid !== uid || (st.mode & 0o022)) return null;
 		for (let parent = dirname(dir); ; parent = dirname(parent)) {
 			const ancestor = fs.statSync(parent);
-			if (!ancestor.isDirectory() || (ancestor.uid !== uid && ancestor.uid !== 0) || ((ancestor.mode & 0o022) && !(ancestor.mode & 0o1000))) return { refusal: "unsafe-deployment" };
+			if (!ancestor.isDirectory() || (ancestor.uid !== uid && ancestor.uid !== 0) || ((ancestor.mode & 0o022) && !(ancestor.mode & 0o1000))) return null;
 			if (parent === dirname(parent)) break;
 		}
-	} catch { return { refusal: "unsafe-deployment" }; }
-	const path = join(dir, ".pi-dispatch-setup.lock");
+		return { path: dir, uid: st.uid, dev: st.dev, ino: st.ino };
+	} catch { return null; }
+}
+
+export function acquireSetupLock(deployment, { fs = nodeFs, uid = process.geteuid?.(), random = randomBytes, pid = process.pid } = {}) {
+	const identity = setupDeploymentIdentity(deployment, { fs, uid });
+	if (!identity) return { refusal: "unsafe-deployment" };
+	const path = join(identity.path, ".pi-dispatch-setup.lock");
 	const text = `${pid}:${random(16).toString("hex")}`;
 	try { fs.writeFileSync(path, text, { flag: "wx", mode: 0o600 }); }
 	catch { return { refusal: "setup-busy" }; }
