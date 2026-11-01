@@ -343,6 +343,14 @@ jobs:
           - 6379:6379
         options: >-
           --health-cmd "valkey-cli ping" --health-interval 10s --health-timeout 3s --health-retries 5
+      # Connections owns its database; the suite intentionally leaves expiring transcript keys in
+      # database 14 on the other service. Isolation preserves the fixture's empty-database assertion.
+      connections-valkey:
+        image: valkey/valkey:8.0.2
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "valkey-cli ping" --health-interval 10s --health-timeout 3s --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -546,7 +554,7 @@ jobs:
       - name: "Connections hooks publication works under the real console CSP (#775)"
         if: ${{ (success() || failure()) && steps.install.outcome == 'success' }}
         env:
-          VALKEY_TEST_URL: "redis://127.0.0.1:6379"
+          VALKEY_TEST_URL: "redis://127.0.0.1:16379"
         run: CHROME="$RUNNER_TEMP/cft/chrome-linux64/chrome" node .github/scripts/console-connections-browser.mjs --require --slice hooks
 
   image:

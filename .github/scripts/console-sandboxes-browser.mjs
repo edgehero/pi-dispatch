@@ -141,9 +141,13 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
     stage = "live GET drafts";
     const streamReady = browser.event((m) => m.sessionId === tab.sessionId && m.method === "Network.responseReceived" && m.params.response.url.startsWith(fixture.origin + "/api/events?page=sandboxes"), "sandbox live stream connected");
     await navigate(path); await streamReady;
+    const originalImage = fixture.inventory.hosts[0].settings.image;
+    // Response headers precede the first applied panel. Prove that application before retaining field identities.
+    fixture.inventory.hosts[0].settings.image = "pi-job:initial-sse-ready";
+    await fixture.refresh();
+    await until("document.querySelector('#p-sb-new')?.innerText.includes('pi-job:initial-sse-ready')");
     await evaluate("window.__sbRef=document.querySelector('#sb-ref');window.__sbRepo=document.querySelector('#sb-repo')");
     await type("#sb-repo", "acme/draft"); await type("#sb-ref", "feature/draft");
-    const originalImage = fixture.inventory.hosts[0].settings.image;
     fixture.inventory.hosts[0].settings.image = "pi-job:live-refresh";
     await fixture.refresh();
     await until("document.querySelector('#p-sb-new .held')");
