@@ -1,6 +1,6 @@
 # Issue #775 review images
 
-This branch holds durable review evidence only. The three implementation PRs target `main`; no image, capture script, planning note or generated admin build is added to those branches.
+This branch holds durable review evidence. The three implementation PRs target `main` and include permanent automated verification scripts, including the Connections browser lane with optional screenshots. Final review images and provenance live here. Scratch capture scripts, planning notes and generated admin build output stay outside the implementation branches.
 
 The `775/` directories contain before/after Connections captures, correctly styled published-source reference cards, and machine-readable browser measurements. Before captures use main at `b9279bfada39ea151823b11bbc792592f9db8e4c`. Each after capture uses its implementation slice with production renderers, authentication, CSP, readers and live Valkey 8.0.2 publishers. Service fixtures use synthetic worker/job data and an injected clock; no paid agent run was made. The images demonstrate observation, not a notification-delivery guarantee.
 
