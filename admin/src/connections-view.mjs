@@ -1,4 +1,5 @@
 import { readProviderInventory, providerInventoryView } from "./provider-inventory.mjs";
+import { readReceiverStatus, parseReceiverStatus, receiverForgeFacts, RECEIVER_FORGES, RECEIVER_OUTCOMES } from "@edgehero/pi-dispatch/receiver-status";
 import { readSubscriptionAuthView, subscriptionAuthForAgent } from "./subscription-auth-view.mjs";
 /** Display-only deployment facts (#751). Raw environment values never leave this reader. */
 import * as nodeFs from "node:fs";
@@ -145,7 +146,7 @@ export function connectionsProblems(hosts, runs = [], forges = []) {
 }
 
 /** Injected sources make every exceptional state independent; no metadata read changes a capability or worker env. */
-export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, platform = process.platform, uid = process.geteuid?.(), publications = true } = {}) {
+export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, publications = true, platform = process.platform, uid = process.geteuid?.() } = {}) {
   let file = {};
   let metadata = null;
   try {
@@ -175,27 +176,42 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   let endpoints = null;
   try { endpoints = (reads.endpoints ?? (() => loadModelEndpoints({ modelEndpointsFile: modelEndpointsFilePath(file), valkeyUrl: file.VALKEY_URL ?? paths.valkeyUrl }, { cwd: deploymentDir, readFileSync: fs.readFileSync, existsSync: fs.existsSync })))(); } catch { /* One refused source must not erase the forges or MCP. */ }
   let owned = null;
+  const publicationClient = (injectedRead) => {
+    if (redis) return redis;
+    if (owned) return owned;
+    // An injected reader needs no connection when its fixture supplies no URL. Real readers share one owner.
+    if (injectedRead && typeof paths.valkeyUrl !== "string") return null;
+    return (owned = redisFn(paths.valkeyUrl));
+  };
   const endpointFleetDeclared = endpointFleetDeclaration(file, environmentUnknown);
   // The worker takes fleet leases only with a declared host queue, and never for a per-machine alias. Reading
   // absent fleet keys in those cases would invent zero usage while the in-process slots may all be held.
   const fleetEndpoints = Array.isArray(endpoints) ? endpoints.filter((ep) => endpointCounting(ep.host, endpointFleetDeclared) === "fleet") : [];
   const slots = new Map();
-  if (publications && fleetEndpoints.length) {
-    try {
-      const client = redis ?? (owned = redisFn(paths.valkeyUrl));
-      const counted = await (reads.slots ?? readEndpointSlots)(client, fleetEndpoints);
-      for (const [index, endpoint] of fleetEndpoints.entries()) slots.set(endpoint.id, Number.isInteger(counted?.[index]) ? counted[index] : null);
-    } catch { /* Fleet occupancy is unknown; the declared slots and counting scope remain readable. */ }
-  }
+  let receivers = { hosts: [], complete: false, more: 0 };
   let hookHistory = hookRunsView(null);
-  if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.hookRuns)) {
-    try {
-      const client = redis ?? owned ?? (owned = redisFn(paths.valkeyUrl));
-      const names = (snapshot?.hostBudgets ?? []).map((host) => host.name);
-      hookHistory = hookRunsView(await (reads.hookRuns ?? readHookRuns)(client, { names }));
-    } catch { /* Missing evidence stays unknown; a hook's configuration is independent of its past runs. */ }
+  try {
+    if (publications && fleetEndpoints.length) {
+      try {
+        const counted = await (reads.slots ?? readEndpointSlots)(publicationClient(reads.slots), fleetEndpoints);
+        for (const [index, endpoint] of fleetEndpoints.entries()) slots.set(endpoint.id, Number.isInteger(counted?.[index]) ? counted[index] : null);
+      } catch { /* Fleet occupancy is unknown; the declared slots and counting scope remain readable. */ }
+    }
+    if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.receivers)) {
+      try {
+        receivers = await (reads.receivers ?? readReceiverStatus)(publicationClient(reads.receivers), { names: (snapshot?.hostBudgets ?? []).map((h) => h.name), now: () => now });
+      } catch { /* Unknown is not an empty, healthy receiver population. */ }
+    }
+    if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.hookRuns)) {
+      try {
+        const names = (snapshot?.hostBudgets ?? []).map((host) => host.name);
+        hookHistory = hookRunsView(await (reads.hookRuns ?? readHookRuns)(publicationClient(reads.hookRuns), { names }));
+      } catch { /* Missing evidence stays unknown; a hook's configuration is independent of its past runs. */ }
+    }
+  } finally {
+    // A borrowed client belongs to the caller; our one client stays open until every publication read finishes.
+    try { owned?.disconnect(); } catch {}
   }
-  try { owned?.disconnect(); } catch {}
   const hosts = doctorFacts(snapshot);
   let egressOn = null;
   let egressProblem = null;
@@ -211,7 +227,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   return {
     now, environmentUnknown, environment, subscriptionAuth,
     providerKeys: readProviderInventory({ deploymentDir, env, paths, snapshot, fs, platform, uid, reads: reads.providerInventory ?? { environment: reads.environment } }),
-    receiver: { port: positive(file.RECEIVER_PORT, 3000), unknown: environmentUnknown },
+    receiver: { port: positive(file.RECEIVER_PORT, 3000), unknown: environmentUnknown, ...receivers },
     forges,
     egress: { on: egressOn, problem: egressProblem, allowlist: Array.isArray(allowlist) ? allowlist.slice(0, 8) : null, more: Array.isArray(allowlist) ? Math.max(0, allowlist.length - 8) : 0, hosts },
     endpointFleetDeclared,
@@ -252,6 +268,7 @@ export function modelConnections(view) {
   return {
     hookRuns: hookRunsView(view?.notify?.history),
     subscriptionAuth: subscriptionAuthForAgent(view?.subscriptionAuth),
+    receivers: modelReceivers(view?.receiver, view?.now),
     forges: (view?.forges ?? []).filter((f) => Object.hasOwn(FORGES, f.name)).map((f) => ({ name: f.name, configured: typeof f.enabled === "boolean" ? f.enabled : null, path: ROUTES[f.name], authSource: ["app", "gh", "pat", "gh (default)", "invalid", "shared token"].includes(f.source) ? f.source : "unknown", activationKeys: (f.activationKeys ?? []).filter((k) => FORGE_ACTIVATION_KEYS[f.name].includes(k)), secret: { key: f.name === "github" ? "WEBHOOK_SECRET" : `${f.name.toUpperCase()}_WEBHOOK_SECRET`, set: typeof f.secret?.set === "boolean" ? f.secret.set : null }, triggerCount: (f.triggers ?? []).filter((i) => Number.isSafeInteger(i) && i >= 0).length })),
     egress: { on: typeof view?.egress?.on === "boolean" ? view.egress.on : null, hosts: (view?.egress?.hosts ?? []).filter((h) => name(h.name)).map((h) => ({ name: h.name, state: h.unreadable ? "unknown" : ["ok", "warn", "fail"].includes(h.proxy?.level) ? h.proxy.level : "not-published", stale: h.stale === true })) },
     endpoints: Array.isArray(view?.endpoints) ? view.endpoints.filter((ep) => typeof ep.id === "string" && MODEL_ENDPOINT_ID_RE.test(ep.id)).map((ep) => {
@@ -265,4 +282,15 @@ export function modelConnections(view) {
     packages: { names: packages, stagedAt: typeof view?.packages?.stagedAt === "string" && Number.isFinite(Date.parse(view.packages.stagedAt)) ? new Date(view.packages.stagedAt).toISOString() : null, unreadable: !view?.packages || Boolean(view.packages.unreadable) },
     deployment: (view?.environment ?? []).filter((e) => Object.hasOwn(CONNECTION_ENV_TYPES, e.key) || providerKeys.has(e.key)).map((e) => ({ key: e.key, set: typeof e.value === "string" && !e.value.startsWith("not set") && !e.value.startsWith("unknown"), unknown: typeof e.value !== "string" || e.value.startsWith("unknown"), disagrees: e.disagrees === true })),
   };
+}
+
+/** Rebuild again at the model boundary: callers may hand us an untrusted view DTO rather than our own reader. */
+export function modelReceivers(value, now) {
+  const hosts = [];
+  for (const row of Array.isArray(value?.hosts) ? value.hosts.slice(0, 64) : []) {
+    const parsed = parseReceiverStatus(JSON.stringify(row));
+    if (!parsed || !Number.isSafeInteger(now) || now < 0) continue;
+    hosts.push({ name: parsed.name, version: parsed.version, startedAt: parsed.startedAt, at: parsed.at, port: parsed.port, bind: parsed.bind, forges: [...parsed.forges], deliveries: Object.fromEntries(RECEIVER_FORGES.map((forge) => [forge, receiverForgeFacts(parsed, forge, now)])) });
+  }
+  return { complete: value?.complete === true && value?.more === 0 && value?.moreUnknown !== true && hosts.length === (Array.isArray(value?.hosts) ? value.hosts.length : 0), moreUnknown: value?.moreUnknown === true, more: Number.isSafeInteger(value?.more) && value.more >= 0 ? value.more : null, hosts };
 }

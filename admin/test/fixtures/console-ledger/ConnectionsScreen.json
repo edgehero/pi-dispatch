@@ -280,6 +280,43 @@
         "hook history unavailable",
         "Retained runs by detail"
       ]
+    },
+    {
+      "el": "Receiver placement and per-forge delivery observations",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsForges",
+      "panel": "p-forges",
+      "golden": [
+        "panels/connections-populated.viewer"
+      ],
+      "shows": [
+        "Receiver on",
+        "Port 3000",
+        "all interfaces",
+        "Last taken",
+        "Last refused",
+        "24 UTC hours"
+      ]
+    },
+    {
+      "el": "No live receiver, unauthorized-only and unknown observation states",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsForges",
+      "panel": "p-forges",
+      "golden": [
+        "panels/connections-receiver-none.operator",
+        "panels/connections-receiver-unauthorized.viewer",
+        "panels/connections-receiver-unknown.viewer"
+      ]
+    },
+    {
+      "el": "Versioned, bounded, display-only receiver source",
+      "kind": "provides",
+      "status": "new",
+      "source": "worker/src/receiver-status.mjs#readReceiverStatus",
+      "holds": "RECEIVER_HOSTS_MAX"
     }
   ]
 }

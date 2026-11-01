@@ -1,8 +1,9 @@
 /** The ConnectionsScreen card, from page-specific, already projected deployment facts (#751). */
+import { RECEIVER_FORGES, RECEIVER_OUTCOMES, receiverForgeFacts } from "@edgehero/pi-dispatch/receiver-status";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { table } from "./config-ui.mjs";
-import { ageText, timeHtml } from "./common.mjs";
+import { ageText, timeHtml, utcText } from "./common.mjs";
 import { docsHref } from "../../words.mjs";
 import { hookRunsView } from "@edgehero/pi-dispatch/hook-runs";
 
@@ -63,8 +64,48 @@ export function connectionsProblems(view) {
   return html`${hit ? ui.banner({ status: "refused", title: hit.title, body: html`${hit.text} ${hit.fix}`, actions: hit.host || hit.run ? html`${hit.host ? ui.btn({ href: `/fleet/host?name=${encodeURIComponent(hit.host)}`, label: `Open ${hit.host}` }) : null}${hit.run ? ui.btn({ href: `/run?id=${encodeURIComponent(hit.run)}`, label: `Open ${hit.run}` }) : null}` : null }) : null}${v.environmentUnknown ? ui.banner({ status: "attention", title: "Deployment metadata could not be read completely", body: "Some settings are unknown. Check the deployment's .env and its permissions; no values from an unreadable declaration are shown." }) : null}${v.snapshotUnreadable ? ui.banner({ status: "attention", title: "Fleet facts unavailable", body: "The console could not read the host registry, doctor records or trigger facts. File sections remain readable." }) : null}`;
 }
 
+function receiverWarnings(v) {
+  const read = v.receiver;
+  const hosts = (read?.hosts ?? []).filter((h) => !h.unreadable);
+  const banners = [];
+  if (read?.complete === true) {
+    for (const forge of v.forges.filter((f) => f.enabled === true)) {
+      if (!hosts.some((h) => h.forges.includes(forge.name))) banners.push(ui.banner({ status: "attention", title: `No live receiver reported for ${forge.name}`, body: "The forge is armed. Check the receiver service on its host; an absent observation does not prove the service stopped.", sm: true }));
+    }
+    for (const forge of RECEIVER_FORGES) {
+      const counts = Object.fromEntries(RECEIVER_OUTCOMES.map((word) => [word, hosts.reduce((sum, h) => sum + receiverForgeFacts(h, forge, v.now).counts[word], 0)]));
+      if (counts.unauthorized > 0 && RECEIVER_OUTCOMES.every((word) => word === "unauthorized" || counts[word] === 0)) banners.push(ui.banner({ status: "attention", title: `${forge}: only unauthorized deliveries in 24 UTC hours`, body: "Check the webhook secret on both sides.", sm: true }));
+    }
+  }
+  for (const forge of RECEIVER_FORGES) if (hosts.some((h) => receiverForgeFacts(h, forge, v.now).counts["not-configured"] > 0)) banners.push(ui.banner({ status: "attention", title: `${forge}: deliveries reached an unconfigured route`, body: "Check that the receiver serves this forge and that its webhook URL names the right route.", sm: true }));
+  return banners;
+}
+
+function receiverDeliveries(host, forge, now) {
+  const facts = receiverForgeFacts(host, forge, now);
+  const rows = RECEIVER_OUTCOMES.map((word) => [html`<span class="code">${word}</span>`, facts.counts[word]]);
+  const end = Math.floor(now / 3_600_000) * 3_600_000;
+  const byWord = Object.fromEntries(RECEIVER_OUTCOMES.map((word) => [word, new Map(host.deliveries[forge][word].hours)]));
+  const hours = Array.from({ length: 24 }, (_, i) => {
+    const at = end - (23 - i) * 3_600_000;
+    const unobserved = at + 3_600_000 <= host.startedAt;
+    const coverage = unobserved ? "before receiver started" : at < host.startedAt ? `since ${utcText(host.startedAt)}` : "observed";
+    return [utcText(at), coverage, ...RECEIVER_OUTCOMES.map((word) => unobserved ? "not observed" : byWord[word].get(at) ?? 0)];
+  });
+  return html`<h3>${forge}${host.forges.includes(forge) ? null : html` <span class="muted">(not served)</span>`}</h3>${ui.facts([["Last taken", facts.lastTaken === null ? "none recorded" : timeHtml(facts.lastTaken)], ["Last refused", facts.lastRefused === null ? "none recorded" : timeHtml(facts.lastRefused)]], { cols: 2 })}<details class="cn-receiver-detail"><summary>${forge}: outcomes in 24 UTC hours</summary>${detailTable(`${host.name} ${forge} delivery outcomes`, ["Outcome", "Count"], rows, "")}
+  <details><summary>Counts per UTC hour</summary><p class="muted">Scroll horizontally to compare outcomes. Hours before this receiver started are not observed.</p><div class="cn-receiver-hours-scroll" role="region" aria-label="${`${host.name} ${forge} delivery hours, scroll horizontally`}" tabindex="0">${ui.tbl({ label: `${host.name} ${forge} delivery counts per UTC hour`, heads: ["UTC hour", "Coverage", ...RECEIVER_OUTCOMES], rows: hours })}</div></details></details>`;
+}
+
 export function connectionsForges(view) {
-  return card(view, "Forges", (v) => html`<p class="muted">Receiver port: ${v.receiver.unknown ? "unknown" : v.receiver.port}; its location is not published.</p>${detailTable("Forge connections", ["Forge", "State", "Auth", "Webhook", "Polling", "Who may fire"], v.forges.map(forgeRow), "No forge facts available.")}<p class="cn-note">${ui.icon("info", { size: "sm" })}<span>Delivery health is not published. Check the forge's delivery history for 401/404 refusals; the receiver log can help with 503 or enqueue failures.</span></p>`, "where jobs come from");
+  return card(view, "Forges", (v) => {
+    const read = v.receiver;
+    const hosts = read?.hosts ?? [];
+    return html`${receiverWarnings(v)}<div class="cn-receivers">${hosts.map((host) => host.unreadable ? html`<p>${hostLink(host.name)}: ${state("receiver observation unreadable", "attention", "info")}</p>` : html`<section aria-label="${`Receiver on ${host.name}`}"><h3>Receiver on ${hostLink(host.name)}</h3><p>Port ${host.port} · ${host.bind === "all" ? "all interfaces" : host.bind === "loopback" ? "loopback" : "specific address"} · beat ${ageText(host.ageMs)} ago · version ${host.version}. Observed ${timeHtml(host.at)}. Receiver started ${timeHtml(host.startedAt)}; counts since then within 24 UTC hours.</p>${RECEIVER_FORGES.filter((forge) => {
+      const facts = receiverForgeFacts(host, forge, v.now);
+      // Last-event times outlive the count window, including for a route this process never served.
+      return host.forges.includes(forge) || facts.lastTaken !== null || facts.lastRefused !== null || Object.values(facts.counts).some((n) => n > 0);
+    }).map((forge) => receiverDeliveries(host, forge, v.now))}</section>`)}</div>${read?.complete !== true ? html`<p>${state("Receiver observations could not be read completely", "attention", "info")}. Counts and receiver absence are unknown.${read?.more ? html` ${read.moreUnknown ? "At least " : null}${read.more} more hosts were not read.` : read?.moreUnknown ? " Other indexed hosts may not have been read." : null}</p>` : hosts.length === 0 ? html`<p>No live receiver reported.</p>` : null}<p class="muted">Configured receiver port: ${read?.unknown ? "unknown" : read?.port ?? "unknown"}; live ports are shown above.</p><div class="cn-forge-config">${detailTable("Forge connections", ["Forge", "State", "Auth", "Webhook", "Polling", "Who may fire"], v.forges.map(forgeRow), "No forge facts available.")}</div><p class="cn-note">${ui.icon("info", { size: "sm" })}<span>Counts cover the current UTC hour and the preceding 23. Last-event times are retained separately. Taken means queued, deduplicated, held or steered; filter drops are separate. Refused includes malformed requests, authentication, configuration, lookup, enqueue and internal errors. The forge's delivery history remains available for individual deliveries.</span></p>`;
+  }, "where jobs come from");
 }
 
 export function connectionsEgress(view) {

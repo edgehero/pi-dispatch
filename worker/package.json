@@ -41,6 +41,7 @@
     "pi-dispatch": "src/cli.mjs"
   },
   "exports": {
+    "./receiver-status": "./src/receiver-status.mjs",
     "./setup-contract": "./src/setup-contract.mjs",
     "./auth-policy": "./src/auth-policy.mjs",
     "./setup-host-entry": "./src/setup-host-entry.mjs",

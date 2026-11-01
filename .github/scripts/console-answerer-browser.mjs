@@ -45,6 +45,23 @@ export async function checkAnswererBrowser({ chrome, shots = null, sandbox = pro
       await until("document.readyState==='complete'");
       await evaluate("document.fonts.ready.then(()=>true)");
     };
+    const navigateDropReady = async () => {
+      // An initial live panel can replace an enabled button between native mouse press and release. Gate that
+      // request until the HTTP node is retained, then prove the real replacement was applied before clicking.
+      await tab.send("Fetch.enable", { patterns: [{ urlPattern: `${fixture.origin}/api/events*`, requestStage: "Request" }] });
+      const initial = browser.event(m => m.sessionId === tab.sessionId && m.method === "Fetch.requestPaused" && new URL(m.params.request.url).origin === fixture.origin && new URL(m.params.request.url).pathname === "/api/events", "initial answer-draft live request", 10000);
+      initial.catch(() => {});
+      try {
+        await navigate(`/run?id=${encodeURIComponent(fixture.sourceRunId)}`);
+        const request = await initial;
+        await evaluate("window.__answererInitialDrop=document.querySelector('form[data-action=\"answer-draft-drop\"] button[type=\"submit\"]')");
+        assert.equal(await evaluate("!!window.__answererInitialDrop&&!window.__answererInitialDrop.matches(':disabled')"), true, "The HTTP-rendered drop control is armed before its initial live panel");
+        await tab.send("Fetch.continueRequest", { requestId: request.params.requestId });
+        await until("!window.__answererInitialDrop.isConnected&&document.querySelector('form[data-action=\"answer-draft-drop\"] button[type=\"submit\"]')&&!document.querySelector('form[data-action=\"answer-draft-drop\"] button[type=\"submit\"]').matches(':disabled')");
+      } finally {
+        await tab.send("Fetch.disable");
+      }
+    };
     const click = async selector => {
       const rect = await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing click target');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;if(!document.elementFromPoint(x,y)?.closest(${JSON.stringify(selector)}))throw Error('obscured click target');return{x,y};})()`);
       for (const type of ["mousePressed", "mouseReleased"]) await tab.send("Input.dispatchMouseEvent", { type, ...rect, button: "left", clickCount: 1 });
@@ -208,7 +225,7 @@ export async function checkAnswererBrowser({ chrome, shots = null, sandbox = pro
     assert.equal(await evaluate(`document.querySelector('form[data-action="answer-draft-drop"]').closest('fieldset').disabled`), true);
     await tab.send("Emulation.setScriptExecutionDisabled", { value: false });
     stage = "stale drop confirmation refuses before changing the retained draft";
-    await navigate(`/run?id=${encodeURIComponent(fixture.sourceRunId)}`);
+    await navigateDropReady();
     await click('form[data-action="answer-draft-drop"] button[type="submit"]');
     await until("document.querySelector('[data-confirm]')&&!document.querySelector('[data-confirm]').disabled");
     const originalDocument = fixture.document();
@@ -225,7 +242,7 @@ export async function checkAnswererBrowser({ chrome, shots = null, sandbox = pro
     fixture.saveDocument(originalDocument);
     await fixture.refresh();
     stage = "dropping the exact retained draft leaves the parked question and queue unchanged";
-    await navigate(`/run?id=${encodeURIComponent(fixture.sourceRunId)}`);
+    await navigateDropReady();
     const dropCount = await fixture.queue.getJobCountByTypes("waiting");
     await click('form[data-action="answer-draft-drop"] button[type="submit"]');
     await until("document.querySelector('[data-confirm]')&&!document.querySelector('[data-confirm]').disabled");

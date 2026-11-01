@@ -30,6 +30,8 @@
  */
 
 import http from "node:http";
+import { workerName } from "@edgehero/pi-dispatch/config";
+import { makeReceiverPublisher, receiverBind } from "@edgehero/pi-dispatch/receiver-status";
 import { readFileSync, watch } from "node:fs";
 import { dirname, basename } from "node:path";
 import { loadReceiverConfig, triggersFilePath, reloadTriggers } from "./config.mjs";
@@ -52,6 +54,11 @@ import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArmin
 import { githubFailureFields } from "@edgehero/pi-dispatch/octokit-log";
 import { retryIdentity } from "./boot-retry.mjs";
 
+const RECEIVER_VERSION = (() => {
+	try { return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version ?? ""; }
+	catch { return ""; }
+})();
+
 /**
  * Boot the receiver. Collaborators are injected (defaulting to the real ones) so the whole wiring is
  * testable offline with no GitHub, no Valkey, and no socket. Returns the listening server.
@@ -67,6 +74,7 @@ export async function startReceiver(
 		makeQueueFn = makeQueue,
 		makeForgeRouterFn = makeForgeRouter,
 		createServer = http.createServer,
+		makeReceiverPublisherFn = makeReceiverPublisher,
 		resolveGitLabSelfId: resolveSelfIdFn = resolveGitLabSelfId,
 		makeResolveAuthority: makeResolveAuthorityFn = makeResolveAuthority,
 		resolveForgejoSelfId: resolveForgejoSelfIdFn = resolveForgejoSelfId,
@@ -238,11 +246,23 @@ export async function startReceiver(
 			};
 		}
 
-		const handler = makeReceiver({ queue, router, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority, watchEnv: env });
+		const handler = makeReceiver({ queue, router, selfId, cfg, log, gitlab, forgejo, azure, resolveAuthority, watchEnv: env, now });
 		const server = createServer(handler);
-		server.listen(cfg.port, cfg.bind, () =>
-			log({ event: "receiver_started", port: cfg.port, bind: cfg.bind, valkey: cfg.valkeyUrl }),
-		);
+		let receiverPublisher = null;
+		server.listen(cfg.port, cfg.bind, () => {
+			log({ event: "receiver_started", port: cfg.port, bind: cfg.bind, valkey: cfg.valkeyUrl });
+			// A socket, not configuration, proves where the process actually listens. Publication is optional:
+			// an unusable name or missing socket fact must never change the receiver's startup decision.
+			try {
+				const socket = server.address?.();
+				if (!socket || typeof socket !== "object" || !Number.isInteger(socket.port) || socket.port < 1 || socket.port > 65535) throw new Error("socket");
+				const name = workerName(env);
+				const publisher = makeReceiverPublisherFn({ client: () => queue.client, name, version: RECEIVER_VERSION, port: socket?.port, bind: receiverBind(socket?.address), forges: [cfg.servesGithub && "github", gitlab && "gitlab", forgejo && "forgejo", azure && "azure"].filter(Boolean), observations: handler.observations, now, log: (event, fields) => log({ event, ...fields }) });
+				receiverPublisher = publisher;
+				closers.push(publisher);
+				publisher.start();
+			} catch { try { log({ event: "receiver_status_unavailable", reason: "identity-or-socket" }); } catch {} }
+		});
 
 		// The watch arms UNCONDITIONALLY now (issue #301). Armed only on the real entry, the lifecycle defect
 		// was muted under test rather than closed, and this file had no coverage that the watch arms at all --
@@ -264,6 +284,7 @@ export async function startReceiver(
 			const shutdown = async (signal) => {
 				log({ event: "receiver_stopping", signal });
 				await new Promise((resolve) => server.close(resolve));
+				try { receiverPublisher?.close(); } catch {}
 				await queue.close();
 				await router.close();
 				// The watch closer, and whatever joins it later. Per-item try, because a throw here would strand

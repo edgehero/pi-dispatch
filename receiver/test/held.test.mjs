@@ -510,3 +510,11 @@ test("live Valkey: a run the worker registered holds the pre-label reply, a rede
 		await redis.quit().catch(() => {});
 	}
 });
+
+for (const forge of Object.keys(FORGES)) test(`${forge}: a real held answer increments only its in-memory word (#775)`, async () => {
+	const { handler, res } = await deliver(forge, { body: "@pi the answer", survivor: "survivor-1" });
+	assert.equal(res.statusCode, 202); assert.equal(JSON.parse(res.body).status, "held");
+	const counts = handler.observations.snapshot()[forge];
+	assert.equal(counts.held.hours.reduce((n, r) => n + r[1], 0), 1);
+	assert.equal(counts.deduplicated.hours.reduce((n, r) => n + r[1], 0), 0);
+});
