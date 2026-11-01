@@ -1,0 +1,89 @@
+{
+  "slices": {
+    "receiver": {
+      "sourceCommit": "0b3c239ba09f4238e54a15fc2f93c4001e76cdc9",
+      "renderedCommit": "f5574c8187767f12f1b75d2df5f13d59d1ba54a8",
+      "node": "22.19.0",
+      "valkey": "8.0.2",
+      "requiredIntegrationFlags": [
+        "LOADER",
+        "WORKER",
+        "RECEIVER"
+      ],
+      "localRootSuite": {
+        "tests": 12563,
+        "pass": 12557,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 6,
+        "todo": 0
+      },
+      "platform": "macOS arm64",
+      "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41312971569"
+    },
+    "hooks": {
+      "sourceCommit": "06732c0f13d161bf681c063e28efed8195db7864",
+      "renderedCommit": "077af5493eb9bbb0167cb62bf09f5e84011b3189",
+      "node": "22.19.0",
+      "valkey": "8.0.2",
+      "requiredIntegrationFlags": [
+        "LOADER",
+        "WORKER",
+        "RECEIVER"
+      ],
+      "localRootSuite": {
+        "tests": 12534,
+        "pass": 12528,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 6,
+        "todo": 0
+      },
+      "platform": "macOS arm64",
+      "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41313000685"
+    },
+    "endpoints": {
+      "sourceCommit": "b8493be55c4f019a609cb1c0cd3a3adbc9582250",
+      "renderedCommit": "0065c8ae206508de6054f554ed9b914cbdade158",
+      "node": "22.19.0",
+      "valkey": "8.0.2",
+      "requiredIntegrationFlags": [
+        "LOADER",
+        "WORKER",
+        "RECEIVER"
+      ],
+      "localRootSuite": {
+        "tests": 12538,
+        "pass": 12532,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 6,
+        "todo": 0
+      },
+      "platform": "macOS arm64",
+      "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41312993586"
+    }
+  },
+  "sandboxBrowser": {
+    "normalRenders": 18,
+    "exceptionalRenders": 56,
+    "result": "passed",
+    "coverage": [
+      "real CSP",
+      "preview/confirm",
+      "preparation",
+      "End",
+      "Fleet settings",
+      "roles",
+      "no JavaScript",
+      "draft node identity and focus after applied SSE marker"
+    ]
+  },
+  "counterexamples": {
+    "isolatedValkey": "Dirty ordinary database is refused; foreign key survives isolated production fixture and cleanup.",
+    "temporaryCleanup": "Original untracked control reproduces late directory; actual helper regression fails when only tracker call is removed."
+  }
+}

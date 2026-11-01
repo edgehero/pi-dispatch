@@ -2,9 +2,9 @@
   "issue": 775,
   "revisions": {
     "baseline": "b9279bfada39ea151823b11bbc792592f9db8e4c",
-    "receiver": "f5574c8187767f12f1b75d2df5f13d59d1ba54a8",
-    "hooks": "077af5493eb9bbb0167cb62bf09f5e84011b3189",
-    "endpoints": "0065c8ae206508de6054f554ed9b914cbdade158"
+    "receiver": "0b3c239ba09f4238e54a15fc2f93c4001e76cdc9",
+    "hooks": "06732c0f13d161bf681c063e28efed8195db7864",
+    "endpoints": "b8493be55c4f019a609cb1c0cd3a3adbc9582250"
   },
   "pullRequests": {
     "receiver": 786,
@@ -67,5 +67,63 @@
     "775/receiver/reference/reference-receiver-light-1440.png": "bad25e85d5d366be31811f4827c9a251c3572ca979627e77e44b56a12a12b8b2",
     "775/receiver/reference/reference-receiver-light-390.png": "e1dcc901d79440abc9114f5170426c407175274e5fe59f6045bac774070a9580",
     "775/receiver/reference/reference-receiver-light-800.png": "878c43d054d18f5b9157794da253e8b1c46e0d193ed098a3b3141fed9525f180"
+  },
+  "renderedRevisions": {
+    "receiver": "f5574c8187767f12f1b75d2df5f13d59d1ba54a8",
+    "hooks": "077af5493eb9bbb0167cb62bf09f5e84011b3189",
+    "endpoints": "0065c8ae206508de6054f554ed9b914cbdade158"
+  },
+  "verificationOnlyChanges": {
+    "receiver": {
+      "files": [
+        ".github/scripts/console-sandboxes-browser.mjs",
+        ".github/workflows/pi-upgrade-check.yml",
+        "image/runner/test/helpers/recover-session.mjs",
+        "image/runner/test/temp-dir-settle.test.mjs"
+      ],
+      "unchangedRenderObjects": {
+        "admin/src": "33c11318e916733b45566db3ee253c31cce0dbb5",
+        "worker/src": "3e6f52f81778ad77210f4c96046731e7a3135a6b",
+        "receiver/src": "52c51e2d42f7220d0280624b0a1c908c54144804",
+        "design/system": "d55b64591b83f6d40d2243c6a21747799ac1f4ea",
+        ".github/scripts/console-connections-browser.mjs": "4f185385b016668fd6c994782150e837706b82f9",
+        "admin/test/helpers/connections-browser.mjs": "c69401f73aee223f39ad4f15886bd058f1803991",
+        "admin/test/helpers/setup-browser.mjs": "a81475cc583a9b0765fe3fee73a7686de9591e24"
+      }
+    },
+    "hooks": {
+      "files": [
+        ".github/scripts/console-sandboxes-browser.mjs",
+        ".github/workflows/pi-upgrade-check.yml",
+        "image/runner/test/helpers/recover-session.mjs",
+        "image/runner/test/temp-dir-settle.test.mjs"
+      ],
+      "unchangedRenderObjects": {
+        "admin/src": "85473c8d65f61c9835cccd6f1dfef2a913d0b581",
+        "worker/src": "2f4babfe5f934e4f75335a34b983d5ac916518f2",
+        "receiver/src": "da49f9f73e2ca1212471df4674ca6c6afae902b4",
+        "design/system": "b0428594aa52bc0afacda15ab8fbdbb5efc221b7",
+        ".github/scripts/console-connections-browser.mjs": "16d4143b79993a2e7ff348c4a94f6d67e2e6e0a1",
+        "admin/test/helpers/connections-browser.mjs": "5ed3d653726705b6c6a2b2be63bf898ac04a4991",
+        "admin/test/helpers/setup-browser.mjs": "a81475cc583a9b0765fe3fee73a7686de9591e24"
+      }
+    },
+    "endpoints": {
+      "files": [
+        ".github/scripts/console-sandboxes-browser.mjs",
+        ".github/workflows/pi-upgrade-check.yml",
+        "image/runner/test/helpers/recover-session.mjs",
+        "image/runner/test/temp-dir-settle.test.mjs"
+      ],
+      "unchangedRenderObjects": {
+        "admin/src": "078a4d4182d4475ef44a46053bf20d587eff74ff",
+        "worker/src": "a57932f02f8168e8bfcd4b2bcdd4b8a4250a8e82",
+        "receiver/src": "da49f9f73e2ca1212471df4674ca6c6afae902b4",
+        "design/system": "f265d7783ec29de6069d2fab710123cf09a730f0",
+        ".github/scripts/console-connections-browser.mjs": "3dc4c27680f718fe71fd153997fb67cab1072b55",
+        "admin/test/helpers/connections-browser.mjs": "3cc4716e7acff81e928052a6aa8bc4a8e921e472",
+        "admin/test/helpers/setup-browser.mjs": "a81475cc583a9b0765fe3fee73a7686de9591e24"
+      }
+    }
   }
 }
