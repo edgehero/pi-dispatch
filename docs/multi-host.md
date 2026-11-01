@@ -511,3 +511,14 @@ The additional registry facts are display telemetry: orphan venue/time, a one-mi
 budget provenance and CPU-reserve state. They contain identifiers and fixed words, never workspace paths or issue
 text. Removing them changes reporting, never admission. Cleanup commands must be run on the affected host; the
 console cannot operate another host's runtime. A host-queue pause still leaves shared jobs available to that host.
+
+
+Connections also shows each host's endpoint occupancy from its heartbeat: the host's own loaded `slots`,
+actual in-process use, counting scope and beat age. Unnamed workers and per-machine endpoint aliases still
+publish their host use, with no fleet bound. Shared server ids must have the same `slots` on each host;
+Connections flags differences with "one server, one id". Per-machine servers may have different capacities.
+The row is display-only, expires after 90 seconds without a beat, and lists at most 32 endpoints per host.
+Its generation must match the current worker start: an older worker restarting over leftover fields cannot
+make the previous process's occupancy look fresh.
+The page reads at most 64 hosts and names any omitted observations. Missing or unreadable data never means
+zero use. Deleting these fields cannot admit a job or release a held slot.

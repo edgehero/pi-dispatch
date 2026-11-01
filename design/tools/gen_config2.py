@@ -438,11 +438,17 @@ def connections():
 {table([("Host", ""), ("Proxy", ""), ("Checked", "")], erows, caption="Egress proxy per host", stack=True)}"""
     p_egress = card("Egress", egress, id_="p-egress", flush=True, sub="what jobs may reach")
 
-    ep_rows = [[(f'<b class="code">ollama-mini2</b>', "id c2-first"), (code("mini2.lan:11434"), ""), ("keyless", ""), (f'<svg class="c2-slots" viewBox="0 0 40 10" role="img" aria-label="1 of 2 slots in use"><circle class="c2-on" cx="5" cy="5" r="4.5"/><circle class="c2-offs" cx="17" cy="5" r="4"/></svg> 1 of 2', "c2-actc")],
-               [(f'<b class="code">vllm-build3</b>', "id c2-first"), (code("10.0.0.5:8000"), ""), ("keyless", ""), (f'<svg class="c2-slots c2-slots--4" viewBox="0 0 52 10" role="img" aria-label="0 of 4 slots in use"><circle class="c2-offs" cx="5" cy="5" r="4"/><circle class="c2-offs" cx="17" cy="5" r="4"/><circle class="c2-offs" cx="29" cy="5" r="4"/><circle class="c2-offs" cx="41" cy="5" r="4"/></svg> 0 of 4', "c2-actc")]]
-    ep_rows.append([(f'<b class="code">local-model</b>', "id c2-first"), (code("host.docker.internal:11434"), "wide"), ("keyless", ""), (f'{state_line("idle", "minus", "not counted")}<div class="muted">2 declared · per-machine endpoint</div>', "wide")])
-    endpoints = f"""{table([("Endpoint", ""), ("Host and port", ""), ("Key", ""), ("Slots in use", "act")], ep_rows, caption="Model endpoints", stack=True)}
+    def host_slots(name, used, slots, fleet=True):
+        circles = ''.join(f'<circle class="c2-on" cx="{6+i*12}" cy="6" r="4"/>' if i < used else f'<circle class="c2-offs" cx="{6+i*12}" cy="6" r="4"/>' for i in range(min(slots,8)))
+        return f'<li><a href="#">{name}</a>: <svg class="c2-slots" viewBox="0 0 {min(slots,8)*12} 12" width="{min(slots,8)*12}" height="12" aria-hidden="true">{circles}</svg> <b>{used} of {slots}</b><small>{"shared fleet bound" if fleet else "host only, no fleet bound"} · beat 4 s ago</small></li>'
+    ep_rows = [[(f'<b class="code">ollama-mini2</b>', "id c2-first"), (code("mini2.lan:11434"), "wide"), ("keyless", ""), ('Fleet leases: 2 in use<small class="c2-endpoint-declared">Declared here: 2 slots.</small><ul class="c2-endpoint-hosts">' + host_slots("mini1",1,2) + host_slots("mini2",1,3) + '</ul>', "wide")],
+               [(f'<b class="code">vllm-build3</b>', "id c2-first"), (code("10.0.0.5:8000"), "wide"), ("keyless", ""), ('Fleet leases: 0 of 4<ul class="c2-endpoint-hosts">' + host_slots("build3",0,4) + '</ul>', "wide")]]
+    ep_rows.append([(f'<b class="code">local-model</b>', "id c2-first"), (code("host.docker.internal:11434"), "wide"), ("keyless", ""), ('Fleet leases: not counted · per-machine endpoint, no fleet bound<ul class="c2-endpoint-hosts">' + host_slots("mini1",1,2,False) + host_slots("mini2",2,3,False) + '</ul>', "wide")])
+    endpoint_conflict = banner("attention", "attention", "ollama-mini2: hosts declare different slot bounds", "One server, one id: hosts sharing an endpoint id must declare the same slots. Correct model-endpoints.json on those hosts.", small=True).replace("\n  \n", "\n\n")
+    endpoint_table = table([("Endpoint", ""), ("Host and port", ""), ("Key", ""), ("Slots in use", "act")], ep_rows, caption="Model endpoints", stack=True).replace('<div class="tbl-wrap">', '<div class="tbl-wrap c2-endpoint-scroll" tabindex="0" role="region" aria-label="Model endpoint slots and host occupancy">', 1)
+    endpoints = f"""{endpoint_table}
 <div class="c2-pad2">
+  {endpoint_conflict}
   {banner("attention", "attention", "mini2 reads its own copy of the file, and it does not load",
           'pi-dispatch doctor on mini2 (its own copy of the file, 3h ago) says: <b>endpoint 2: port must be 1 to 65535.</b> Fix: correct the port in model-endpoints.json on mini2, then run <span class="code">pi-dispatch egress render</span>.', small=True)}
   <p class="c2-sub"><a class="link" href="#p-provider-keys">Manage provider API keys</a> separately from endpoint declarations.</p>
@@ -495,7 +501,18 @@ CO_CSS = COMMON_CSS + PROVIDER_KEYS_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_R
 .c2-st.c2-quiet .ic { color: var(--tone-ink); }
 #p-env .fact { grid-template-columns: 150px minmax(0, 1fr); }
 #p-env .fact dt .code { font-size: 12px; }
-.c2-slots { width: 40px; height: 10px; vertical-align: -1px; margin-right: 4px; }
+.c2-endpoint-scroll:focus-visible { outline: 2px solid var(--running); outline-offset: 3px; }
+.c2-endpoint-declared { display: block; font-size: 11px; line-height: 16px; color: var(--ink-muted); }
+@media (min-width: 761px) {
+  #p-endpoints .tbl { min-width: 820px; }
+  #p-endpoints .tbl th:nth-child(1) { width: 150px; }
+  #p-endpoints .tbl th:nth-child(2) { width: 270px; }
+  #p-endpoints .tbl th:nth-child(3) { width: 120px; }
+  #p-endpoints .tbl td:nth-child(2) .code, #p-endpoints .tbl td:nth-child(3) { white-space: nowrap; overflow-wrap: normal; }
+}
+.c2-endpoint-hosts { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 8px; }
+.c2-endpoint-hosts small { display: block; font-size: 11px; color: var(--ink-muted); }
+.c2-slots { max-width: 96px; height: 12px; vertical-align: -1px; margin-right: 4px; }
 .c2-slots--4 { width: 52px; }
 .c2-on { fill: var(--running); }
 .c2-offs { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
@@ -766,7 +783,7 @@ A viewer sees the tables, with no Remove or forms.
   - One line says delivery health is not published and where to look instead.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
 - **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
-- **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
+- **Model endpoints.** Each endpoint's host and port, whether it is keyless, fleet leases first and each host's own slots in use with beat age and scope. Per-machine aliases and unnamed workers publish host occupancy with no fleet bound; unread or absent publications stay unknown. Different shared bounds are flagged with “one server, one id”; independent per-machine capacities may differ. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
 - **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Its runs are in the worker's log; their history is not published.
 - **MCP servers, Deployment environment, Staged pi packages.** All read-only, each with the command or file that changes it. Caps set only in the .env read "unknown (worker env or default)".
 
@@ -786,7 +803,7 @@ Viewers read status and provider guides without mutation controls. A read-only o
 
 **Why it works this way.**
 - **Delivery health.** The receiver has no health check of its own, so the console cannot say whether deliveries arrive. Use the forge's delivery history for 401/404 refusals. The receiver log can help with 503 or enqueue failures; signature, route and early request refusals do not write a log line, and not every 503 is logged.
-- **Endpoint slots.** Fleet leases count endpoints only when PI_WORKER_NAME is declared and the endpoint is not host.docker.internal or host.containers.internal. These aliases use per-machine capacity; without a host queue, the worker takes no fleet lease. Both cases say not counted and retain the declared capacity, rather than claiming zero. A failed lease read remains unknown.
+- **Endpoint slots.** The heartbeat publishes the same in-process map both queue processors claim. Each host lists its own used and declared slots, and whether it also takes a fleet lease. Per-machine aliases and unnamed workers have no fleet bound but still publish host use. A lowered capacity may read above its declaration until held slots return. Publications have no admission authority; missing, newer, truncated or unreadable data never becomes zero.
 - **Egress.** With egress on, each local or podman job gets its own internal network and reaches out only through its host's proxy: HTTPS (443) and plain HTTP (80) to listed hosts, plus the declared model endpoints. OpenShell applies its own sandbox policy from the same sources. A leading dot covers subdomains.
 - **Notifications.** pi-dispatch sends none of its own. Forge comments are always on: one fixed sentence on the issue for a paid failure, and one when a run stops to ask. The failure hook runs once per paid failure with "job, outcome, reason, host" and has 10 s to answer; it never runs for completions, free refusals, recovered retries or a cancel.
 - **MCP servers** are named by reference only; values never reach the page, and there is no form for them here.

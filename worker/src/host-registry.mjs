@@ -125,7 +125,8 @@ export function makeHostRegistry({ redis, name, now = () => Date.now(), ttlMs = 
 		for (const [k, v] of Object.entries(fields)) {
 			let resolved;
 			try {
-				resolved = typeof v === "function" ? v() : v;
+				// A dependent display fact can bind to this row's generation without guessing another clock.
+				resolved = typeof v === "function" ? v(fields) : v;
 			} catch {
 				resolved = ""; // a fact that cannot be computed is absent, never a reason to skip the beat
 			}

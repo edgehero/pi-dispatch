@@ -55,6 +55,7 @@ import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { makeHostRegistry, readLiveHosts } from "./host-registry.mjs";
+import { endpointStatusFields, ENDPOINT_STATUS_VERSION } from "./endpoint-status.mjs";
 import { liveJobsFields, liveJobsOf } from "./live-jobs.mjs";
 import { makeSandboxTelemetry, parseBudgetFrom, parseCpuReserve } from "./host-telemetry.mjs";
 import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
@@ -83,7 +84,7 @@ import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckWaitSkew, makeDisa
 import { makeBundleResolver } from "./secret-bundles.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
-import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, loadScopedLimits, SCOPED_LIMITS_VERSION, scopeClaimRows } from "./scoped-limits.mjs";
+import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, makeInFlight, loadScopedLimits, SCOPED_LIMITS_VERSION, scopeClaimRows } from "./scoped-limits.mjs";
 import { escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
 import { NO_ENVELOPE_FINGERPRINT, makeAllocationAudit, makeAllocationLogReaper, makeAllocationState } from "./allocation.mjs";
@@ -2151,6 +2152,8 @@ export async function startWorker(
 	}
 	// Resolved once: `Intl` is not free, and this value cannot change without a restart.
 	const hostTz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
+	const endpointSlots = makeInFlight();
+	const endpointStatusNow = () => endpointStatusFields(modelEndpoints.current, endpointSlots, config.workerNameDeclared);
 	const registry = makeHostRegistryFn({ redis, name: config.workerName, log });
 	const retainedNow = makeSandboxTelemetry({ list: () => listSandboxesFn({ sandboxDir: config.sandboxDir, throwOnReadFailure: true }), deadline: sandboxDeadline, retentionHours: config.sandboxRetentionHours, canOpen: (manifest) => !sandboxSyncRefusal({ jobId: manifest.jobId, manifest, blessed: config.backends }), now, log });
 	// Issue #596, phase 2: one integer of the host budget's snapshot for the beat, or "" before the worker exists.
@@ -2262,6 +2265,10 @@ export async function startWorker(
 		waiters: () => snapshotField("waiters"),
 		jobs: () => (worker ? liveJobsNow().jobs : ""),
 		jobsMore: () => (worker ? liveJobsNow().jobsMore : ""),
+		endpointsVersion: ENDPOINT_STATUS_VERSION,
+		endpointsStartedAt: endpointStatusNow().endpointsStartedAt,
+		endpoints: () => endpointStatusNow().endpoints,
+		endpointsMore: () => endpointStatusNow().endpointsMore,
 		budgetHolds: () => snapshotField("holds"),
 		budgetOrphans: () => snapshotField("orphans"),
 		// whether the boot listing of the job containers left from before this worker started has been read
@@ -2707,6 +2714,7 @@ export async function startWorker(
 	});
 
 	const worker = createWorkerFn({
+		endpointSlots,
 		connection: valkeyConn(),
 		// Issue #596, phase 2 (DES-HOST-BUDGET): the host budget's inputs. `createWorker` builds the ONE budget from them and
 		// shares it between both queues' processors. The settings and the default size were refused at boot if bad.

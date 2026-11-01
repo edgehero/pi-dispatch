@@ -12080,6 +12080,15 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+**AMENDED 2026-11-01 (#775, endpoint occupancy).** Connections reads the optional versioned endpoint
+publication directly, off the shared snapshot and state API. The worker heartbeat reports the same map
+both processors claim; it creates no second semaphore or admission authority. Fleet leases lead each
+endpoint, then host observations with declared capacity, scope and beat age. "One server, one id" warns
+when shared hosts declare different bounds; different per-machine capacities are independent. Missing or
+unreadable evidence remains unknown, and all bounds are named rather than hiding missing observations.
+`DES-FLEET-LEASES-FOR-SHARED-BOUNDS` and `DES-ADMIN-VIA-PI-EXTENSION` are UNCHANGED, checked.
+
+
 - **AMENDED 2026-11-01 (#774)**: `DES-BROWSER-FIRST-RUN-SETUP` is the bounded
   exception to the existing read-model-only action surface and rejection of local runtime checks from the
   console. It requires a process-owned local host grant, shared setup plan/apply funnels and a fixed worker
@@ -16717,3 +16726,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-31 (#771, initial live snapshot) | DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL and DES-OPERATOR-CONSOLE keep a fresh Sandboxes page's cleanup warnings until a fresh live read replaces them. Rejected replaying an old cached empty view and waiting for a later timer tick to repair it. Failed fresh reads retain the rendered panels with stale status. Other-page cache/replay policy, cursor reconnects, shared visual tokens/styles, role guards, actions and all worker/container contracts UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AI-TRIGGER-FLOW-GATE`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` and `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN` AMENDED: explicit transition authority, private no-post classifier jobs, evidence-bound drafts and generic external-guidance extension seams. `DES-OPERATOR-CONSOLE` uses the existing ticket/guard/visual system; parent session ownership, approval authority, ordinary queue contracts and all unrelated decisions UNCHANGED, checked. |
 | 2026-10-31 (#772, long-label review) | `DES-OPERATOR-CONSOLE` CORRECTED after the complete browser sweep found a valid long run identifier expanding a phone card: bounded grid tracks and normal code-label whitespace preserve full run/source/standing labels, including the private draft origin on the run page. Generator styles, three rebuilt cards and the console's hashed paste agree. Browser counterexamples verify complete text lines, exact links and keyboard navigation in both themes across phone/intermediate/desktop widths and applicable roles. Shared visual tokens, fonts, privacy/role boundaries, API/session/provenance/ticket contracts and all worker paid gates UNCHANGED, checked. |
+| 2026-11-01 (#775, endpoint occupancy) | `DES-OPERATOR-CONSOLE` AMENDED: versioned host observations display the shared in-process endpoint map and last-good file, through bounded page-only reads and existing Pulse slot marks. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-ADMIN-VIA-PI-EXTENSION`, admission, release, CSP, shared tokens and stylesheet are UNCHANGED, checked. |

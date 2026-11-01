@@ -9222,6 +9222,29 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 ## INT-HOST-REGISTRY-CONTRACT
 
+**AMENDED 2026-11-01 (#775, endpoint occupancy).** Optional `endpointsVersion: 1`, `endpointsStartedAt`, `endpoints` and
+`endpointsMore` describe this host's loaded model-endpoints file and its in-process slot map. `startWorker`
+owns that map and passes it to both processors through `createWorker`; the heartbeat reads the same map and
+current last-good file on each beat. `endpoints` is JSON `[{"id","slots","used","fleet"}]`, in id order,
+at most 32 entries; `endpointsMore` counts the rest. `fleet` is integer 0 for per-machine aliases or without
+a declared `PI_WORKER_NAME`, else 1. `used` is a nonnegative integer and may exceed a reduced `slots` until
+existing holds return. Empty loaded declarations publish `""` with zero more. No hostname, port, path, model,
+repository or credential is carried. These fields inherit the row's 15-second beat and 90-second expiry.
+`endpointsStartedAt` must match the row's own `startedAt`. Registry fact thunks receive the current
+fact bag as their optional argument, so this generation uses the registry's exact start instant rather
+than a second clock sample. An older worker's HSET can preserve fields it does not know; its new
+`startedAt` invalidates the previous process's endpoint observations even while it renews the hash TTL.
+A reader refuses newer versions and treats absent, malformed, expired or unreadable fields as unknown,
+never an idle zero. Connections alone reads these fields directly; the existing `hostRowOf` and
+`INT-CONSOLE-STATE-API` projections are unchanged. Its read prioritizes known live hosts, falls back to the
+index through at most four SSCAN pages with COUNT 64, reads SCARD to name overflow, and reads no more than
+64 hashes and TTLs, without pruning or other writes, within one 2.5-second bound. The endpoint union is
+bounded to 64 before fleet lease reads; every cut is said. A host-only id absent from the console's file
+still appears, with its address unknown. Every field is display-only: deleting them changes neither
+admission, lease ownership nor release. `INT-MODEL-ENDPOINTS-FILE-CONTRACT` and fleet lease behavior are
+UNCHANGED, checked.
+
+
 **Extension (#771).** Retained-workspace telemetry optionally adds prepared origin, a manifest generation digest, host reopenability and validated recorded image/kind. It publishes no project badge invented from current configuration. Existing caps and unknown semantics remain. The same cached projection supplies `INT-SANDBOX-INVENTORY-CONTRACT`; heartbeat facts remain display-only.
 
 **AMENDED 2026-10-29 (#749)**: Each running `jobs` entry may additionally publish `h`, nonnegative safe-integer micro-dollars actually reserved, and `ha`, positive safe-integer reservation epoch milliseconds. Missing fields mean unknown (older workers/orphans), not zero. Modern pickups publish explicit zero until reservation, update after success, and clear after settlement/release. The fields obey the same content, byte and list bounds; dropped/missing jobs keep sums incomplete. They are display telemetry, never an admission decision.
@@ -9278,6 +9301,10 @@ abstains.
                     `m`/`c` left out when not known, `o` only on an orphan; orphan `v` is its venue and
                     `s` its failed-stop epoch ms, both optional for older workers; running `h` is the actual reserved
                     micro-dollars and `ha` its reservation epoch ms (both absent when unknown); "" before the worker exists
+    endpointsVersion 1, the optional endpoint occupancy format
+    endpointsStartedAt this process generation, exactly the row's startedAt, otherwise unreadable
+    endpoints       JSON [{"id","slots","used","fleet"}], sorted, at most 32, "" when none load
+    endpointsMore   the number beyond 32
     jobsMore        how many running jobs `jobs` does not list (past 32, or with no id or instant), an integer
     sandboxes       JSON [{"id":<safe job id or sha256 digest>,"v":<venue>,"until":<epoch ms|null>,"pin":<boolean>}],
                     newest first, at most 32; cached directory read at most once per 60 seconds
@@ -12477,3 +12504,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-10-31 (#766, #772) | NEW `INT-ANSWER-DRAFT-STORE`; `INT-STEER-INBOX-CONTRACT`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API` and `INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED: answer rule/standing schemas, agent role, applied receipts, safe projections and digest-bound result. Ordinary exit numbers/MAC, trigger run payloads, parent transcript promotion, approval decisions, global overlay, deploy mirrors and dependency pins UNCHANGED, checked. |
 | 2026-10-31 (#781, local credential custody) | INT-CONTAINER-JOB-INPUTS, INT-RUN-HISTORY-FILE-CONTRACT and INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: every local job refuses a mount containing the private refresh store, including unbound API jobs, future paths, symlink parents and directory aliases, as the fixed path-free local-folder-holds-subscription-auth reason. The free pickup gate precedes token minting and final preparation repeats the check on the resolved mount source before reservation or container start; transient boundary reads remain infrastructure failures. The store path stays in host closures. Container environment and exit protocol, forge contracts, paid meter, hook reasons and other interfaces UNCHANGED, checked. |
 | 2026-10-31 (#781, host filesystem refusals) | INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: policy, private-store, OpenAI pinned-source and community-adapter validation classify all filesystem reads by the shared determinate errno allowlist, including outer path checks and descriptor close. Malformed metadata and known path faults refuse; credential-store absence still reads disconnected; EACCES, EIO and unknown faults remain retryable without changing the durable grant. Dependency existence uses strict stat rather than suppressing I/O errors. An explicitly marked read-only adapter preflight failure after the durable refresh marker restores the pre-marker row because no remote rotation began; an error code alone never proves this. Fixed diagnostics carry no path or token. Credential schemas, permission/owner checks, remote refresh rotation and uncertainty, snapshots, container/image transports, adapter source/output pins, public telemetry and all other interfaces UNCHANGED, checked. |
+| 2026-11-01 (#775, endpoint occupancy) | `INT-HOST-REGISTRY-CONTRACT` AMENDED: versioned, generation-bound endpoint occupancy from the shared admission map and last-good file, direct bounded read for Connections only. `INT-MODEL-ENDPOINTS-FILE-CONTRACT`, fleet lease contracts, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT` and `CONST-HMAC-OVER-RAW-BODY` UNCHANGED, checked: no decision or existing projection reads the new display fields. |

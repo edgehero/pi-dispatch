@@ -1,3 +1,5 @@
+import { readEndpointStatus, ENDPOINT_STATUS_HOSTS_MAX } from "@edgehero/pi-dispatch/endpoint-status";
+import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { readProviderInventory, providerInventoryView } from "./provider-inventory.mjs";
 import { readSubscriptionAuthView, subscriptionAuthForAgent } from "./subscription-auth-view.mjs";
 /** Display-only deployment facts (#751). Raw environment values never leave this reader. */
@@ -144,7 +146,7 @@ export function connectionsProblems(hosts, runs = [], forges = []) {
 }
 
 /** Injected sources make every exceptional state independent; no metadata read changes a capability or worker env. */
-export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, platform = process.platform, uid = process.geteuid?.() } = {}) {
+export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, publications = true, platform = process.platform, uid = process.geteuid?.() } = {}) {
   let file = {};
   let metadata = null;
   try {
@@ -175,18 +177,39 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   try { endpoints = (reads.endpoints ?? (() => loadModelEndpoints({ modelEndpointsFile: modelEndpointsFilePath(file), valkeyUrl: file.VALKEY_URL ?? paths.valkeyUrl }, { cwd: deploymentDir, readFileSync: fs.readFileSync, existsSync: fs.existsSync })))(); } catch { /* One refused source must not erase the forges or MCP. */ }
   let owned = null;
   const endpointFleetDeclared = endpointFleetDeclaration(file, environmentUnknown);
-  // The worker takes fleet leases only with a declared host queue, and never for a per-machine alias. Reading
-  // absent fleet keys in those cases would invent zero usage while the in-process slots may all be held.
-  const fleetEndpoints = Array.isArray(endpoints) ? endpoints.filter((ep) => endpointCounting(ep.host, endpointFleetDeclared) === "fleet") : [];
-  const slots = new Map();
-  if (fleetEndpoints.length) {
+  let endpointStatus = { state: "unknown", hosts: [], more: 0, partial: true };
+  let shownEndpoints = Array.isArray(endpoints) ? endpoints.map((ep) => ({ ...ep })) : [];
+  let endpointsMore = 0;
+  if (publications && (redis || paths.valkeyUrl || reads.endpointStatus)) {
     try {
-      const client = redis ?? (owned = redisFn(paths.valkeyUrl));
+      const client = redis ?? (paths.valkeyUrl ? (owned = redisFn(paths.valkeyUrl)) : {});
+      endpointStatus = await (reads.endpointStatus ?? readEndpointStatus)(client, { hosts: [...(snapshot?.hostBudgets ?? []), ...(snapshot?.hosts ?? [])], now: () => now });
+    } catch { /* Publication failure is unknown, never zero occupancy. */ }
+  }
+  const endpointHosts = (id) => (endpointStatus.hosts ?? []).flatMap((host) => (host.endpoints ?? []).filter((ep) => ep.id === id).map((ep) => ({ name: host.name, at: host.at, ageMs: host.ageMs, slots: ep.slots, used: ep.used, fleet: ep.fleet })));
+  const ids = new Set(shownEndpoints.map((ep) => ep.id));
+  for (const host of endpointStatus.hosts ?? []) for (const ep of host.endpoints ?? []) if (!ids.has(ep.id)) {
+    ids.add(ep.id);
+    shownEndpoints.push({ id: ep.id, host: null, port: null, keyless: null, slots: null });
+  }
+  endpointsMore = Math.max(0, shownEndpoints.length - 64);
+  shownEndpoints = shownEndpoints.slice(0, 64).map((ep) => {
+    const hostCounts = endpointHosts(ep.id);
+    const fleetRows = hostCounts.filter((h) => h.fleet === 1);
+    const counting = fleetRows.length ? "fleet" : ep.host === null ? hostCounts.length ? "host-only" : "unknown" : endpointCounting(ep.host, endpointFleetDeclared);
+    const caps = [...new Set(fleetRows.map((h) => h.slots))];
+    return { ...ep, declaredSlots: ep.slots, slots: caps.length === 1 ? caps[0] : caps.length > 1 ? null : ep.slots, counting, hostCounts, conflict: caps.length > 1, mixedScope: fleetRows.length > 0 && hostCounts.some((h) => h.fleet === 0) };
+  });
+  const fleetEndpoints = shownEndpoints.filter((ep) => ep.counting === "fleet");
+  const slots = new Map();
+  try {
+    if (publications && fleetEndpoints.length) {
+      const client = redis ?? owned ?? (reads.slots && !paths.valkeyUrl ? {} : (owned = redisFn(paths.valkeyUrl)));
       const counted = await (reads.slots ?? readEndpointSlots)(client, fleetEndpoints);
       for (const [index, endpoint] of fleetEndpoints.entries()) slots.set(endpoint.id, Number.isInteger(counted?.[index]) ? counted[index] : null);
-    } catch { /* Fleet occupancy is unknown; the declared slots and counting scope remain readable. */ }
-    finally { try { owned?.disconnect(); } catch {} }
-  }
+    }
+  } catch { /* Fleet occupancy is unknown; declarations and host occupancy remain readable. */ }
+  finally { try { owned?.disconnect(); } catch {} }
   const hosts = doctorFacts(snapshot);
   let egressOn = null;
   let egressProblem = null;
@@ -205,8 +228,8 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     receiver: { port: positive(file.RECEIVER_PORT, 3000), unknown: environmentUnknown },
     forges,
     egress: { on: egressOn, problem: egressProblem, allowlist: Array.isArray(allowlist) ? allowlist.slice(0, 8) : null, more: Array.isArray(allowlist) ? Math.max(0, allowlist.length - 8) : 0, hosts },
-    endpointFleetDeclared,
-    endpoints: Array.isArray(endpoints) ? endpoints.map((ep) => ({ id: ep.id, host: ep.host, port: ep.port, keyless: ep.keyless, slots: ep.slots, counting: endpointCounting(ep.host, endpointFleetDeclared), used: slots.get(ep.id) ?? null })) : null,
+    endpointFleetDeclared, endpointStatus, endpointsMore,
+    endpoints: Array.isArray(endpoints) || shownEndpoints.length ? shownEndpoints.map((ep) => ({ ...ep, used: slots.get(ep.id) ?? null })) : null,
     providers: providerNames.map((name) => {
       const variables = providerKeyCandidates(name);
       // The worker forwards every truthy candidate in pi's pinned precedence order; no value leaves this reader.
@@ -244,11 +267,14 @@ export function modelConnections(view) {
     subscriptionAuth: subscriptionAuthForAgent(view?.subscriptionAuth),
     forges: (view?.forges ?? []).filter((f) => Object.hasOwn(FORGES, f.name)).map((f) => ({ name: f.name, configured: typeof f.enabled === "boolean" ? f.enabled : null, path: ROUTES[f.name], authSource: ["app", "gh", "pat", "gh (default)", "invalid", "shared token"].includes(f.source) ? f.source : "unknown", activationKeys: (f.activationKeys ?? []).filter((k) => FORGE_ACTIVATION_KEYS[f.name].includes(k)), secret: { key: f.name === "github" ? "WEBHOOK_SECRET" : `${f.name.toUpperCase()}_WEBHOOK_SECRET`, set: typeof f.secret?.set === "boolean" ? f.secret.set : null }, triggerCount: (f.triggers ?? []).filter((i) => Number.isSafeInteger(i) && i >= 0).length })),
     egress: { on: typeof view?.egress?.on === "boolean" ? view.egress.on : null, hosts: (view?.egress?.hosts ?? []).filter((h) => name(h.name)).map((h) => ({ name: h.name, state: h.unreadable ? "unknown" : ["ok", "warn", "fail"].includes(h.proxy?.level) ? h.proxy.level : "not-published", stale: h.stale === true })) },
-    endpoints: Array.isArray(view?.endpoints) ? view.endpoints.filter((ep) => typeof ep.id === "string" && MODEL_ENDPOINT_ID_RE.test(ep.id)).map((ep) => {
+    endpoints: Array.isArray(view?.endpoints) ? view.endpoints.slice(0, 64).filter((ep) => typeof ep.id === "string" && MODEL_ENDPOINT_ID_RE.test(ep.id)).map((ep) => {
       const host = typeof ep.host === "string" && /^[A-Za-z0-9.:[\]-]+$/.test(ep.host) ? ep.host : null;
-      const counting = host === null ? "unknown" : endpointCounting(host, view.endpointFleetDeclared);
-      return { id: ep.id, host, port: Number.isInteger(ep.port) && ep.port >= 1 && ep.port <= 65535 ? ep.port : null, keyless: ep.keyless === true, slots: Number.isInteger(ep.slots) && ep.slots >= 1 && ep.slots <= MAX_SLOTS ? ep.slots : null, counting, used: counting === "fleet" && Number.isInteger(ep.used) && ep.used >= 0 && ep.used <= MAX_SLOTS ? ep.used : null };
+      const hostCounts = (Array.isArray(ep.hostCounts) ? ep.hostCounts : []).filter((h) => typeof h.name === "string" && WORKER_NAME_RE.test(h.name) && Number.isInteger(h.slots) && h.slots >= 1 && h.slots <= MAX_SLOTS && Number.isInteger(h.used) && h.used >= 0 && h.used <= MAX_SLOTS && [0, 1].includes(h.fleet)).slice(0, ENDPOINT_STATUS_HOSTS_MAX).map((h) => ({ name: h.name, slots: h.slots, used: h.used, fleet: h.fleet, at: Number.isSafeInteger(h.at) && h.at >= 0 ? h.at : null, ageMs: Number.isSafeInteger(h.ageMs) && h.ageMs >= 0 ? h.ageMs : null }));
+      const counting = hostCounts.some((h) => h.fleet === 1) ? "fleet" : host === null ? hostCounts.length ? "host-only" : "unknown" : endpointCounting(host, view.endpointFleetDeclared);
+      return { id: ep.id, host, hostCounts, conflict: new Set(hostCounts.filter((h) => h.fleet === 1).map((h) => h.slots)).size > 1, mixedScope: hostCounts.some((h) => h.fleet === 1) && hostCounts.some((h) => h.fleet === 0), port: Number.isInteger(ep.port) && ep.port >= 1 && ep.port <= 65535 ? ep.port : null, keyless: typeof ep.keyless === "boolean" ? ep.keyless : null, slots: Number.isInteger(ep.slots) && ep.slots >= 1 && ep.slots <= MAX_SLOTS ? ep.slots : null, declaredSlots: Number.isInteger(ep.declaredSlots) && ep.declaredSlots >= 1 && ep.declaredSlots <= MAX_SLOTS ? ep.declaredSlots : null, counting, used: counting === "fleet" && Number.isInteger(ep.used) && ep.used >= 0 && ep.used <= MAX_SLOTS ? ep.used : null };
     }) : null,
+    endpointsMore: Math.max(Array.isArray(view?.endpoints) ? Math.max(0, view.endpoints.length - 64) : 0, Number.isSafeInteger(view?.endpointsMore) && view.endpointsMore >= 0 ? view.endpointsMore : 0),
+    endpointStatus: { state: view?.endpointStatus?.state === "reported" ? "reported" : "unknown", partial: view?.endpointStatus?.partial !== false, more: Number.isSafeInteger(view?.endpointStatus?.more) && view.endpointStatus.more >= 0 ? view.endpointStatus.more : null, hosts: (Array.isArray(view?.endpointStatus?.hosts) ? view.endpointStatus.hosts : []).filter((h) => typeof h.name === "string" && WORKER_NAME_RE.test(h.name)).slice(0, ENDPOINT_STATUS_HOSTS_MAX).map((h) => ({ name: h.name, state: ["reported", "not-reported", "unsupported", "unreadable"].includes(h.state) ? h.state : "unreadable", at: Number.isSafeInteger(h.at) && h.at >= 0 ? h.at : null, ageMs: Number.isSafeInteger(h.ageMs) && h.ageMs >= 0 ? h.ageMs : null, endpointsMore: Number.isSafeInteger(h.endpointsMore) && h.endpointsMore >= 0 ? h.endpointsMore : null })) },
     providers,
     providerKeys: providerInventoryView(view?.providerKeys),
     mcp: { servers: (view?.mcp?.servers ?? []).filter((s) => mcpName(s.name)).map((s) => ({ name: s.name, transport: ["http", "stdio"].includes(s.transport) ? s.transport : null, enabled: s.enabled === true, referenceCount: Array.isArray(s.refs) ? s.refs.length : 0 })), refused: refusedMcpNames.filter(mcpName), invalidNameCount: invalidMcpNameCount, unreadable: !view?.mcp || Boolean(view.mcp.unreadable) },

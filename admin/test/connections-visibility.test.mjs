@@ -11,22 +11,22 @@ test("endpoint occupancy distinguishes real fleet zero, failed reads and uncount
   for (const [counting, used, first, reason] of [
     ["fleet", 0, "0 of 4", null],
     ["fleet", 2, "2 of 4", null],
-    ["fleet", null, "unknown", "4 declared"],
-    ["per-machine", 0, "not counted", "4 declared · per-machine endpoint"],
-    ["worker-name-absent", 0, "not counted", "4 declared · PI_WORKER_NAME not declared in .env"],
+    ["fleet", null, "unknown", "4 declared here"],
+    ["per-machine", 0, "not counted", "4 declared · per-machine endpoint, no fleet bound"],
+    ["worker-name-absent", 0, "not counted", "4 declared · PI_WORKER_NAME not declared in .env, no fleet bound"],
     ["unknown", null, "unknown", "4 declared · fleet counting unavailable"],
     [undefined, 0, "unknown", "4 declared · fleet counting unavailable"],
   ]) {
     const doc = documentOf(connectionsEndpoints(context([{ ...endpoint, counting, used }])));
     const row = doc.querySelector("tbody tr");
     const cell = row.querySelectorAll("td").at(-1);
-    assert.ok(cell.textContent.startsWith(first), `${counting}: ${cell.textContent}`);
+    assert.ok(cell.textContent.replace(/\s+/g, " ").startsWith("Fleet leases: "+first), `${counting}: ${cell.textContent}`);
     if (reason) {
       assert.match(cell.textContent, new RegExp(reason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
       assert.doesNotMatch(cell.textContent, /(?:0|null|unknown|not counted) of 4/);
       assert.equal(cell.classList.contains("wide"), true, "the complete observation fact gets the stacked table's full phone row");
     } else {
-      assert.equal(cell.classList.contains("wide"), false, "a genuine numeric fleet count keeps the compact secondary track");
+      assert.equal(cell.classList.contains("wide"), true, "fleet and host occupancy share one full-width phone fact");
     }
     assert.match(row.textContent, /model.*mini1\.lan:11434.*keyless/);
   }

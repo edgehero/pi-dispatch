@@ -2508,11 +2508,22 @@ writes retain their existing interactive confirmation. This adds no unattended p
     doctor proxy state/time/age. A missing check and an unavailable doctor result remain distinct, with their shared
     explanation below the table. Linked operator documentation explains ports 443/80, exact model endpoints,
     subdomain-dot semantics, isolation and the OpenShell policy.
-    Endpoints use the worker loader and show host, port, keyless state and declared slots. Fleet occupancy is
-    counted only with a declared PI_WORKER_NAME and outside the host.docker.internal/host.containers.internal
-    per-machine aliases. Those two uncounted cases say not counted, never zero; unread declaration/lease facts
-    remain unknown. Those longer explanations keep adjacent endpoint labels readable on phones. A verified fleet zero remains 0 of N. No per-host count is invented; unread file doctor checks retain their fix. Compact provider rows name the first candidate
-    set in the .env, or none there, and its configured source. Actual per-host credentials are unpublished, stated once.
+    Endpoints use the worker loader and show host, port, keyless state and declared slots. Fleet lease
+    occupancy leads, followed by each host's own used and declared slots, linked host, beat age and counting
+    scope. Agreed live fleet bounds provide the fleet denominator; conflicting live bounds have none,
+    and the console's own file declaration is labelled separately. Per-machine aliases and unnamed workers have no fleet bound but show actual host occupancy.
+    A lowered capacity may read above its new declaration while existing holds remain. Different shared
+    slot declarations for an id are flagged with "one server, one id"; independent per-machine capacities
+    may differ. Mixed host-only/shared declarations are flagged separately. Endpoint ids published by a
+    host appear even without a local declaration, with no invented address. Missing, deleted, newer,
+    unreadable or expired data is unknown or not reported, never zero. Overflow and partial publications
+    are said, with no more than 64 host reads and 64 endpoint fleet counts. Both human roles read these
+    facts and `dispatch_connections` carries their safe counts and times. `/api/state` stays unchanged.
+    Desktop columns retain whole key words and port digits, with a named keyboard-scrollable region
+    where the table needs more room. Phone rows retain their stacked labels.
+    Each host's failing endpoints-file doctor check keeps its own fix. Provider rows name the first
+    candidate set in the .env, or none there, and its configured source. Actual per-host credentials are
+    unpublished, stated once.
     Notifications use compact icon rows for forge comments, status-comment triggers and hook basename, with hook
     history in the worker log. Timing, arguments and exclusions live in linked documentation. MCP retains its facts
     and refusal reason in compact per-server rows,
@@ -8313,3 +8324,4 @@ instead of drifting.
 | 2026-10-31 (#771, initial live snapshot) | REQ-SANDBOX-FROM-THE-CONSOLE acceptance now explicitly prevents an older event-stream snapshot from erasing freshly rendered cleanup warnings or incomplete shell counts. Initial Sandboxes subscriptions await a fresh bounded read and retain their rendered panels on failure. Cursor reconnects, other pages, stream admission/authentication, paid work, container isolation and every other requirement UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS` acceptance, `REQ-STEER-RUNNING-JOB`, `REQ-JOB-STATUS-COMMENTS` and `REQ-PARKED-ANSWERER` AMENDED/implemented: bounded agent role/actions, shared tools, safe reads, shell flags and person-sent cited drafts. `REQ-APPROVAL-GATES`, isolation, budget-before-spend, receiver author gating, ordinary session/resume and unrelated requirements UNCHANGED, checked. |
 | 2026-10-31 (#766, paid-start documentation) | `REQ-ADMIN-VIA-PI-EXTENSION` CORRECTED: the explicit hourly grant belongs to Fire now and local/cron reruns. `dispatch_run` preserves its existing default of three starts per hour when the process value is absent or invalid; zero disables it. The admin README and console tool documentation now distinguish that default and interactive confirmation from granted headless Fire. Runtime admission, process-owned roots, write grants, the shared hourly counter, budget-before-spend and every other contract UNCHANGED, checked. |
+| 2026-11-01 (#775, endpoint occupancy) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) AMENDED: fleet leases followed by actual per-host endpoint occupancy, scope and beat age, shared-bound conflicts, unknown/version/overflow states and safe tool projection. `REQ-CONSOLE-SECURITY`, endpoint admission, spend, isolation, other Connections sections and `/api/state` UNCHANGED, checked. |

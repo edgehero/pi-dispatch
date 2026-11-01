@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { parseDocument } from "./helpers/script-dom.mjs";
 import * as panels from "../src/console/panels/connections.mjs";
 import { cardDocument, cardText } from "./helpers/card-structure.mjs";
 import { consoleConnectionsFixture } from "./helpers/configuration-goldens.mjs";
@@ -137,7 +138,7 @@ test("phone stack rows retain all labelled forge, proxy and endpoint facts toget
   for (const [panel, name, labels, content] of [
     ["connectionsForges", "github", ["Forge", "State", "Auth", "Webhook", "Polling", "Who may fire"], /GitHub App.*WEBHOOK_SECRET.*X-GitHub-Delivery.*60 s.*write access/],
     ["connectionsEgress", "build3", ["Host", "Proxy", "Checked"], /build3 running.*2026-10-30/],
-    ["connectionsEndpoints", "ollama-mini2", ["Endpoint", "Host and port", "Key", "Slots in use"], /ollama-mini2 mini2\.lan:11434 keyless 1 of 2/],
+    ["connectionsEndpoints", "ollama-mini2", ["Endpoint", "Host and port", "Key", "Slots in use"], /ollama-mini2 mini2\.lan:\s*11434 keyless Fleet leases: 1 of 2/],
   ]) {
     const result = draw(panel, facts);
     const html = row(result, name);
@@ -169,4 +170,28 @@ test("many armed triggers retain each accessible numbered link without repeating
   const poll = doc.nodes.find((node) => node.tag === "td" && node.attrs["data-l"] === "Polling");
   assert.ok(poll.classes.includes("wide"), "the detailed polling fact keeps the full phone row when State lists many triggers");
   assert.match(cardText(doc.within(poll)), /on.*60 s.*App installation repositories/);
+});
+
+test("endpoint host facts preserve exact host links, nonzero local counts, changed caps, age and shared-scope conflicts for both roles", async () => {
+  const facts = await consoleConnectionsFixture(AT);
+  const endpoint = facts.endpoints[0];
+  endpoint.hostCounts = [
+    { name: "mini1", slots: 1, used: 2, fleet: 1, ageMs: 1000 },
+    { name: "mini2", slots: 3, used: 1, fleet: 1, ageMs: 1000 },
+    { name: "build3", slots: 4, used: 3, fleet: 0, ageMs: 2000 },
+  ];
+  endpoint.conflict = true; endpoint.mixedScope = true;
+  for (const role of ["operator", "viewer"]) {
+    const result = String(panels.connectionsEndpoints({ role, data: { connections: facts } }));
+    const document = parseDocument(`<html><body>${result}</body></html>`);
+    const list = document.querySelector('ul[aria-label="ollama-mini2 host slot counts"]');
+    const hosts = list.querySelectorAll("li");
+    assert.deepEqual(hosts.map((h) => h.querySelector("b").textContent), ["2 of 1", "1 of 3", "3 of 4"]);
+    assert.deepEqual(hosts.map((h) => h.querySelector("a").getAttribute("href")), ["/fleet/host?name=mini1", "/fleet/host?name=mini2", "/fleet/host?name=build3"]);
+    assert.match(hosts[0].textContent, /capacity lowered while slots are held.*shared fleet bound.*beat/);
+    assert.match(hosts[2].textContent, /host only, no fleet bound/);
+    assert.match(cardText(result), /One server, one id/);
+    assert.ok(result.indexOf("Fleet leases:") < result.indexOf("host slot counts"));
+    assert.doesNotMatch(result, /<form|<button/);
+  }
 });

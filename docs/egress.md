@@ -230,6 +230,15 @@ reads the same table.
 
 ### Slots: how many jobs use a server at once
 
+Connections shows fleet leases first and each host's own slots in use, capacity and last heartbeat.
+Per-machine aliases and unnamed workers have no fleet bound but still report host occupancy. A lowered
+capacity can temporarily show more slots held than declared. Different shared bounds for an id are flagged
+with "one server, one id"; independent per-machine capacities may differ. Missing publications, unreadable
+records, newer formats and observations from a previous worker process stay unknown, never zero. The heartbeat
+carries no server address or credential,
+and deleting it changes no slot enforcement. Reload Connections for a later observation.
+
+
 `slots` is how many requests the server runs at once (Ollama's `OLLAMA_NUM_PARALLEL`, llama.cpp's
 `--parallel`, vLLM's `--max-num-seqs`, LM Studio's default of 4). A job whose model is served by the endpoint takes
 one slot when it is picked up and keeps it until it ends. When every slot is taken, the next such job waits: the
