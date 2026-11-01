@@ -462,12 +462,12 @@ def connections():
   <li>{ic('comment')}<span><b>Forge comments:</b> on. Trigger 3 also keeps a <b>status comment</b> up to date while it runs.</span></li>
   <li>{ic('bell')}<span><b>Failure hook:</b> {code('PI_ON_FAILURE')} → {code('…/ntfy-page')}, once per paid failure.</span></li>
 </ul>
-  {table([("Host", ""), ("Last hook run", ""), ("Retained runs by detail", "")], [
+  <div class="c2-hook-scroll" tabindex="0" role="region" aria-label="Failure hook history">{table([("Host", ""), ("Last hook run", ""), ("Retained runs by detail", "")], [
       [('<a href="#host-mini1">mini1</a>', "id c2-first"),
        (f'<time datetime="2026-10-08T15:11:00Z">2026-10-08 15:11 UTC</time><br>{runlink("gh-f0c2")}<br><span class="c2-st tone-attention">{ic("attention", "ic ic--sm")}<span>timeout</span></span><br><span class="muted">Run: failed · infra</span>', "wide"),
        ("exit: 2<br>timeout: 1", "wide")],
       [('<a href="#host-build3">build3</a>', "id c2-first"), ("no hook run published", "wide"), ("none", "wide")]
-  ], caption="Failure hook runs", stack=True)}
+  ], caption="Failure hook runs", stack=True)}</div>
   <p class="c2-gap2 card__sub">Up to 20 runs per host, kept until seven days after the last append. An exit code describes the hook, not notification delivery.</p>"""
     p_notify = card("Notifications", notify, id_="p-notify")
 
@@ -506,6 +506,13 @@ CO_CSS = COMMON_CSS + PROVIDER_KEYS_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_R
 .c2-on { fill: var(--running); }
 .c2-offs { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
 .c2-names .muted { font-size: 12px; align-self: center; }
+.c2-hook-scroll { overflow-x: auto; }
+.c2-hook-scroll > .tbl-wrap { overflow: visible; }
+#p-notify .tbl th, #p-notify .tbl td { padding-left: 8px; padding-right: 8px; }
+#p-notify .tbl th { overflow-wrap: normal; word-break: normal; }
+#p-notify .tbl th:first-child { width: 76px; min-width: 76px; }
+#p-notify .tbl { table-layout: auto; }
+#p-notify .tbl td:first-child, #p-notify .tbl td:first-child a { white-space: nowrap; overflow-wrap: normal; word-break: normal; }
 #p-mcp .rowpill { min-height: 36px; padding-top: 5px; padding-bottom: 5px; border-radius: var(--radius-md); line-height: 17px; }
 @media (min-width: 761px) { #p-forges td.c2-span { white-space: normal; } }
 @media (max-width: 760px) {

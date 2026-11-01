@@ -40,6 +40,13 @@ export const CONNECTIONS_CSS = `
 .cn-icon-list>li{display:flex;gap:8px;align-items:flex-start}
 .cn-icon-list>li>span{min-width:0;overflow-wrap:anywhere}
 .cn-icon-list .code{white-space:normal;overflow-wrap:anywhere}
+.cn-hook-scroll{overflow-x:auto}
+.cn-hook-scroll>.tbl-wrap{overflow:visible}
+[data-page="connections"] #p-notify .tbl th,[data-page="connections"] #p-notify .tbl td{padding-left:8px;padding-right:8px}
+[data-page="connections"] #p-notify .tbl th{overflow-wrap:normal;word-break:normal}
+[data-page="connections"] #p-notify .tbl th:first-child{width:76px;min-width:76px}
+[data-page="connections"] #p-notify .tbl{table-layout:auto}
+[data-page="connections"] #p-notify .tbl td:first-child,[data-page="connections"] #p-notify .tbl td:first-child a{white-space:nowrap;overflow-wrap:normal;word-break:normal}
 .cn-list{padding-left:18px;display:grid;gap:12px}
 @media(min-width:761px){[data-page="connections"] #p-forges .tbl{min-width:780px}}
 @media(max-width:760px){[data-page="connections"] #p-forges .tbl--stack tr{grid-template-columns:minmax(0,1fr) minmax(0,2fr)}}

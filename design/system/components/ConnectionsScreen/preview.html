@@ -164,6 +164,13 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
 .c2-on { fill: var(--running); }
 .c2-offs { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
 .c2-names .muted { font-size: 12px; align-self: center; }
+.c2-hook-scroll { overflow-x: auto; }
+.c2-hook-scroll > .tbl-wrap { overflow: visible; }
+#p-notify .tbl th, #p-notify .tbl td { padding-left: 8px; padding-right: 8px; }
+#p-notify .tbl th { overflow-wrap: normal; word-break: normal; }
+#p-notify .tbl th:first-child { width: 76px; min-width: 76px; }
+#p-notify .tbl { table-layout: auto; }
+#p-notify .tbl td:first-child, #p-notify .tbl td:first-child a { white-space: nowrap; overflow-wrap: normal; word-break: normal; }
 #p-mcp .rowpill { min-height: 36px; padding-top: 5px; padding-bottom: 5px; border-radius: var(--radius-md); line-height: 17px; }
 @media (min-width: 761px) { #p-forges td.c2-span { white-space: normal; } }
 @media (max-width: 760px) {
@@ -248,7 +255,7 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
   <li><svg class="ic" aria-hidden="true"><use href="#i-comment"/></svg><span><b>Forge comments:</b> on. Trigger 3 also keeps a <b>status comment</b> up to date while it runs.</span></li>
   <li><svg class="ic" aria-hidden="true"><use href="#i-bell"/></svg><span><b>Failure hook:</b> <span class="code">PI_ON_FAILURE</span> → <span class="code">…/ntfy-page</span>, once per paid failure.</span></li>
 </ul>
-  <div class="tbl-wrap"><table class="tbl tbl--stack"><caption class="sr">Failure hook runs</caption><thead><tr><th scope="col">Host</th><th scope="col">Last hook run</th><th scope="col">Retained runs by detail</th></tr></thead><tbody><tr><td class="id c2-first"><a href="#host-mini1">mini1</a></td><td class="wide" data-l="Last hook run"><time datetime="2026-10-08T15:11:00Z">2026-10-08 15:11 UTC</time><br><a class="link code" href="#">gh-f0c2</a><br><span class="c2-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span>timeout</span></span><br><span class="muted">Run: failed · infra</span></td><td class="wide" data-l="Retained runs by detail">exit: 2<br>timeout: 1</td></tr><tr><td class="id c2-first"><a href="#host-build3">build3</a></td><td class="wide" data-l="Last hook run">no hook run published</td><td class="wide" data-l="Retained runs by detail">none</td></tr></tbody></table></div>
+  <div class="c2-hook-scroll" tabindex="0" role="region" aria-label="Failure hook history"><div class="tbl-wrap"><table class="tbl tbl--stack"><caption class="sr">Failure hook runs</caption><thead><tr><th scope="col">Host</th><th scope="col">Last hook run</th><th scope="col">Retained runs by detail</th></tr></thead><tbody><tr><td class="id c2-first"><a href="#host-mini1">mini1</a></td><td class="wide" data-l="Last hook run"><time datetime="2026-10-08T15:11:00Z">2026-10-08 15:11 UTC</time><br><a class="link code" href="#">gh-f0c2</a><br><span class="c2-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span>timeout</span></span><br><span class="muted">Run: failed · infra</span></td><td class="wide" data-l="Retained runs by detail">exit: 2<br>timeout: 1</td></tr><tr><td class="id c2-first"><a href="#host-build3">build3</a></td><td class="wide" data-l="Last hook run">no hook run published</td><td class="wide" data-l="Retained runs by detail">none</td></tr></tbody></table></div></div>
   <p class="c2-gap2 card__sub">Up to 20 runs per host, kept until seven days after the last append. An exit code describes the hook, not notification delivery.</p>
 </section><section class="card" id="p-mcp" data-panel>
   <div class="card__head"><h2>MCP servers</h2><span class="card__sub">from the overlay's mcp.json</span></div>

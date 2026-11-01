@@ -56,6 +56,9 @@ test("both human roles get actual last outcome and retained counts; hook errors 
     const facts = { hook: null, unknown: false, triggers: [], history: history([run(fields), run()]) };
     const markup = String(connectionsNotify({ role, data: { connections: { notify: facts } } }));
     const doc = parseDocument(`<html><body>${markup}</body></html>`);
+    assert.equal(doc.querySelector(".cn-hook-scroll").getAttribute("tabindex"), "0");
+    assert.equal(doc.querySelector(".cn-hook-scroll").getAttribute("role"), "region");
+    assert.equal(doc.querySelector("tbody td").classList.contains("id"), true, "host identity uses the table's id treatment");
     assert.equal(doc.querySelector('a[href="/run?id=gh-1"]').textContent, "gh-1");
     assert.ok(doc.querySelector('a[href="/fleet/host?name=mini1"]'));
     assert.match(markup, /datetime="2026-11-01T11:59:00.000Z"/);
