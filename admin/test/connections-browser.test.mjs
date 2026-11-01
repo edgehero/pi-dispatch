@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { connectionsEvidenceProblems } from "../../.github/scripts/console-connections-browser.mjs";
+import { connectionsEvidenceProblems, receiverIdentityProblems } from "../../.github/scripts/console-connections-browser.mjs";
+
+test("the receiver identity oracle rejects clipped characters even when the complete page fits", () => {
+  const name = "W".repeat(64);
+  const options = { name, width: 390 };
+  const good = { text: name, href: `/fleet/host?name=${name}`, pageWidth: 390,
+    header: { left: 0, right: 300, top: 0, bottom: 80 }, clip: { left: 0, right: 390, top: 0, bottom: 1000 },
+    characters: Array.from({ length: 64 }, (_, i) => ({ left: i % 20 * 12, right: i % 20 * 12 + 12, top: Math.floor(i / 20) * 20, bottom: Math.floor(i / 20) * 20 + 16 })),
+  };
+  assert.deepEqual(receiverIdentityProblems(good, options), []);
+  assert.ok(receiverIdentityProblems({ ...good, clip: { ...good.clip, right: 80 } }, options).some(p => p.includes("characters are clipped")), "a clipping parent cannot hide behind a fitting page");
+  assert.ok(receiverIdentityProblems({ ...good, characters: good.characters.slice(1) }, options).some(p => p.includes("geometry is incomplete")));
+  assert.ok(receiverIdentityProblems({ ...good, text: name.slice(1) }, options).some(p => p.includes("complete receiver identity")));
+  assert.ok(receiverIdentityProblems({ ...good, href: "/fleet/host?name=mini1" }, options).some(p => p.includes("another host")));
+  assert.ok(receiverIdentityProblems({ ...good, pageWidth: 867 }, options).some(p => p.includes("widens the page")));
+});
 
 const evidence = () => ({
   canvas: "#000000", fonts: "loaded", font: "system-ui", css: true, cardRadius: 12, width: 390, csp: [],

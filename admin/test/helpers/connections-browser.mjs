@@ -15,7 +15,7 @@ export const CONNECTIONS_BROWSER_TOKENS = SETUP_BROWSER_TOKENS;
 export const CONNECTIONS_SLICES = Object.freeze(["receiver", "hooks", "endpoints", "all", "baseline"]);
 
 /** The database belongs to this one CLI invocation, never a running deployment. */
-export async function startConnectionsBrowserFixture(dir, { slice, readOnly = false, agedReceiver = false, url = process.env.VALKEY_TEST_URL } = {}) {
+export async function startConnectionsBrowserFixture(dir, { slice, readOnly = false, agedReceiver = false, receiverName = "mini1", url = process.env.VALKEY_TEST_URL } = {}) {
   assert.ok(CONNECTIONS_SLICES.includes(slice), "Choose an explicit Connections slice");
   assert.ok(url, "Connections browser verification needs VALKEY_TEST_URL");
   const address = new URL(url); address.pathname = "/14";
@@ -23,6 +23,7 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
   const closers = [];
   let fixture, edge, ownsDatabase = false;
   let at = agedReceiver ? SETUP_AT - 25 * 3_600_000 : SETUP_AT;
+  const receiverRecordKey = `receiver:h:${receiverName}`;
   const now = () => at;
   const drain = async predicate => {
     const end = Date.now() + 5000;
@@ -94,12 +95,12 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
         assert.equal(await send({}, false), 401);
         assert.equal(await send({}, false), 401);
       }
-      receiverPublisher = makeReceiverPublisher({ client: () => redis, name: "mini1", version: "4.3.1", port: edge.address().port, bind: "loopback", forges: ["github"], observations: receiverCounter, now });
+      receiverPublisher = makeReceiverPublisher({ client: () => redis, name: receiverName, version: "4.3.1", port: edge.address().port, bind: "loopback", forges: ["github"], observations: receiverCounter, now });
       receiverPublisher.start(); closers.push(receiverPublisher);
-      await drain(async () => Boolean(await redis.get("receiver:h:mini1")));
+      await drain(async () => Boolean(await redis.get(receiverRecordKey)));
       if (agedReceiver) {
         at = SETUP_AT;
-        await drain(async () => { receiverPublisher.beat(); return JSON.parse(await redis.get("receiver:h:mini1")).at === at; });
+        await drain(async () => { receiverPublisher.beat(); return JSON.parse(await redis.get(receiverRecordKey)).at === at; });
       }
     }
     if (slice === "hooks" || slice === "all") {
@@ -115,13 +116,13 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
       await drain(async () => Number(await redis.llen("hook:h:build3")) >= 2);
     }
     return {
-      ...fixture, slice, redis, now, receiverPort: edge?.address().port ?? null, agedRefusedAt: agedReceiver ? SETUP_AT - 25 * 3_600_000 : null,
+      ...fixture, slice, redis, now, receiverName, receiverPort: edge?.address().port ?? null, agedRefusedAt: agedReceiver ? SETUP_AT - 25 * 3_600_000 : null,
       async addRefusal() {
         assert.ok(receiverPublisher);
         assert.equal(await send({}, false), 401);
         await drain(async () => {
           receiverPublisher.beat();
-          return JSON.parse(await redis.get("receiver:h:mini1")).deliveries.github.unauthorized.hours.some(([, count]) => count === 3);
+          return JSON.parse(await redis.get(receiverRecordKey)).deliveries.github.unauthorized.hours.some(([, count]) => count === 3);
         });
       },
       async removeTelemetry() {

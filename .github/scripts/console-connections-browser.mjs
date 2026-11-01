@@ -9,6 +9,21 @@ import { findChrome, chromeLaunchArgs, measureSource, widthVerdict, EDGE_SLACK }
 import { startConnectionsBrowserFixture, CONNECTIONS_BROWSER_TOKENS, CONNECTIONS_SLICES } from "../../admin/test/helpers/connections-browser.mjs";
 import { SECURITY_HEADERS } from "../../admin/src/console/headers.mjs";
 
+/** Text geometry is separate from page overflow: a clipping card can keep the page narrow while hiding a name. */
+export function receiverIdentityProblems(evidence, { name, width }) {
+  const problems = [];
+  if (evidence.text !== name) problems.push("The complete receiver identity was lost");
+  if (evidence.href !== `/fleet/host?name=${encodeURIComponent(name)}`) problems.push("The receiver identity link names another host");
+  const rect = (r) => r && [r.left, r.right, r.top, r.bottom].every(Number.isFinite) && r.right > r.left && r.bottom > r.top;
+  const chars = evidence.characters;
+  if (!rect(evidence.header) || !rect(evidence.clip) || !Array.isArray(chars) || chars.length !== name.length) problems.push("Receiver identity character geometry is incomplete");
+  else if (chars.some((r) => !rect(r) || r.left < Math.max(evidence.header.left, evidence.clip.left) - 1 || r.right > Math.min(evidence.header.right, evidence.clip.right) + 1 || r.top < Math.max(evidence.header.top, evidence.clip.top) - 1 || r.bottom > Math.min(evidence.header.bottom, evidence.clip.bottom) + 1)) problems.push("Receiver identity characters are clipped or outside their container");
+  if (!Number.isFinite(evidence.pageWidth) || evidence.pageWidth > width + 1) problems.push("The receiver identity widens the page");
+  return problems;
+}
+
+const RECEIVER_IDENTITY = `(()=>{const a=document.querySelector('.cn-receivers a[href]'),header=a.closest('h3')??a.closest('p'),box=r=>({left:r.left,right:r.right,top:r.top,bottom:r.bottom}),range=document.createRange();range.selectNodeContents(a);const clip={left:0,right:innerWidth,top:-Number.MAX_SAFE_INTEGER,bottom:Number.MAX_SAFE_INTEGER},clipping=[];for(let e=a;e;e=e.parentElement){const s=getComputedStyle(e),r=e.getBoundingClientRect();if(/^(hidden|clip|auto|scroll)$/.test(s.overflowX)){clip.left=Math.max(clip.left,r.left+e.clientLeft);clip.right=Math.min(clip.right,r.left+e.clientLeft+e.clientWidth);clipping.push({tag:e.tagName,cls:e.className,axis:'x',...box(r)});}if(/^(hidden|clip|auto|scroll)$/.test(s.overflowY)){clip.top=Math.max(clip.top,r.top+e.clientTop);clip.bottom=Math.min(clip.bottom,r.top+e.clientTop+e.clientHeight);}}const characters=[];for(let i=0;i<a.firstChild.length;i++){const r=document.createRange();r.setStart(a.firstChild,i);r.setEnd(a.firstChild,i+1);characters.push(box(r.getBoundingClientRect()));}const s=getComputedStyle(a);return{text:a.textContent,href:a.getAttribute('href'),header:box(header.getBoundingClientRect()),clip,clipping,characters,rawText:box(range.getBoundingClientRect()),rawLines:[...range.getClientRects()].map(box),font:s.font,fontSize:parseFloat(s.fontSize),fonts:document.fonts.status,canvas:getComputedStyle(document.body).getPropertyValue('--canvas').trim(),css:[...document.styleSheets].some(t=>t.href?.endsWith('/static/console.css')&&t.cssRules.length>100),pageWidth:document.scrollingElement.scrollWidth,csp:window.__connectionsCsp??[],errors:window.__connectionsErrors??[]};})()`;
+
 export function connectionsEvidenceProblems(evidence, { slice, width, theme, receiverPort, unauthorized = 2, absent = false } = {}) {
   const problems = [];
   const require = (condition, reason) => { if (!condition) problems.push(reason); };
@@ -57,6 +72,7 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
   const work = mkdtempSync(join(tmpdir(), "pd-connections-browser-")), children = new Set();
   let fixture, browser, tab, stage = "startup", unauthorized = 2, scriptsDisabled = false;
   const paints = [];
+  const additional = { agedPaints: 0, maxIdentityPaints: 0, unreadableIdentityPaints: 0, identityNegativeControl: false };
   try {
     mkdirSync(join(work, "chrome")); mkdirSync(join(work, "app"));
     fixture = await startConnectionsBrowserFixture(join(work, "app"), { slice });
@@ -249,9 +265,80 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
         await capture(`receiver-aged-refusal-${role}-${theme}-${width}`, "#p-forges");
       }
       if (shots) writeFileSync(join(shots, "receiver-aged-refusal-measurements.json"), JSON.stringify(agedPaints, null, 2));
+      additional.agedPaints = agedPaints.length;
+    }
+    if (slice === "receiver" || slice === "all") {
+      stage = "complete maximum-length receiver identity";
+      await fixture.close(); fixture = null;
+      const name = "W".repeat(64);
+      fixture = await startConnectionsBrowserFixture(join(work, "max-app"), { slice: "receiver", receiverName: name });
+      const published = JSON.parse(await fixture.redis.get(`receiver:h:${name}`));
+      assert.equal(published.name, name, "the maximum identity comes from the production publisher");
+      const inspectIdentity = async (role, theme, width) => {
+        await evaluate("(()=>{const r=document.querySelector('.cn-receivers').getBoundingClientRect();scrollTo({left:0,top:r.top+scrollY,behavior:'instant'});})()");
+        await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+        const observed = await evaluate(RECEIVER_IDENTITY);
+        assert.deepEqual(receiverIdentityProblems(observed, { name, width }), [], `${stage}: ${JSON.stringify(observed)}`);
+        assert.equal(observed.fonts, "loaded"); assert.equal(observed.css, true); assert.ok(observed.fontSize >= 12);
+        assert.equal(observed.canvas, theme === "light" ? "#edeeec" : "#000000");
+        assert.deepEqual(observed.csp, []); assert.deepEqual(observed.errors, []);
+        const { root } = await tab.send("DOM.getDocument", { depth: 1 });
+        const { nodeId } = await tab.send("DOM.querySelector", { nodeId: root.nodeId, selector: ".cn-receivers a[href]" });
+        const { fonts } = await tab.send("CSS.getPlatformFontsForNode", { nodeId });
+        assert.ok(fonts.length > 0 && fonts.every(font => font.glyphCount > 0 && !/Times|serif/i.test(font.familyName)));
+        assert.ok(fonts.reduce((sum, font) => sum + font.glyphCount, 0) >= name.length, "all identity glyphs use the loaded native font");
+        assert.equal(widthVerdict(await evaluate(measureSource(width, EDGE_SLACK)), width).ok, true);
+        return { role, theme, width, ...observed, platformFonts: fonts };
+      };
+      const maxPaints = [];
+      for (const role of ["operator", "viewer"]) {
+        await login(role);
+        for (const theme of ["light", "dark"]) for (const width of [320, 375, 390, 760, 761, 800, 1024, 1440]) {
+          stage = `maximum receiver ${role} ${theme} ${width}`;
+          await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width <= 760 });
+          await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
+          await navigate("/config/connections");
+          maxPaints.push(await inspectIdentity(role, theme, width));
+          if ([320, 390, 800, 1440].includes(width)) await capture(`receiver-max-name-${role}-${theme}-${width}`, "#p-forges");
+        }
+      }
+      stage = "receiver identity wrapping negative control";
+      await tab.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 1000, deviceScaleFactor: 1, mobile: true });
+      await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] });
+      await login("operator"); await navigate("/config/connections");
+      const beforeNegative = await inspectIdentity("operator", "light", 390);
+      const rule = await evaluate("(()=>{const sheet=document.querySelector('link[href=\"/static/console.css\"]').sheet,index=[...sheet.cssRules].findIndex(rule=>rule.selectorText==='.cn-receivers a');if(index<0)throw Error('receiver identity rule absent');const text=sheet.cssRules[index].cssText;sheet.deleteRule(index);return{index,text};})()");
+      await evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+      const clipped = await evaluate(RECEIVER_IDENTITY);
+      assert.ok(receiverIdentityProblems(clipped, { name, width: 390 }).some(problem => problem.includes("characters are clipped")), "removing only the scoped rule must reproduce missing glyphs");
+      await capture("receiver-max-name-negative-control-light-390", "#p-forges");
+      await evaluate(`document.querySelector('link[href="/static/console.css"]').sheet.insertRule(${JSON.stringify(rule.text)},${rule.index})`);
+      const restored = await inspectIdentity("operator", "light", 390);
+      if (shots) writeFileSync(join(shots, "receiver-max-name-negative-control.json"), JSON.stringify({ before: beforeNegative, clipped, restored }, null, 2));
+      const unsupported = { ...published, v: 2 };
+      await fixture.removeTelemetry();
+      await fixture.redis.set(`receiver:h:${name}`, JSON.stringify(unsupported), "PX", 90_000);
+      await fixture.redis.sadd("receiver:live", name);
+      const unreadablePaints = [];
+      for (const [role, theme, width] of [["viewer", "light", 320], ["operator", "dark", 390]]) {
+        stage = `unreadable maximum receiver ${role} ${theme} ${width}`;
+        await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: true });
+        await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
+        await login(role); await navigate("/config/connections");
+        assert.match(await evaluate("document.querySelector('.cn-receivers').innerText"), /receiver observation unreadable/);
+        unreadablePaints.push(await inspectIdentity(role, theme, width));
+        await capture(`receiver-max-name-unreadable-${role}-${theme}-${width}`, "#p-forges");
+      }
+      if (shots) {
+        writeFileSync(join(shots, "receiver-max-name-measurements.json"), JSON.stringify(maxPaints, null, 2));
+        writeFileSync(join(shots, "receiver-max-name-unreadable-measurements.json"), JSON.stringify(unreadablePaints, null, 2));
+      }
+      additional.maxIdentityPaints = maxPaints.length;
+      additional.unreadableIdentityPaints = unreadablePaints.length;
+      additional.identityNegativeControl = true;
     }
     writeFileSync(shots ? join(shots, `${slice}-measurements.json`) : join(work, "measurements.json"), JSON.stringify(paints, null, 2));
-    return { ok: true, slice, paints: paints.length, interactions: ["keyboard-disclosure", ...(slice === "baseline" ? [] : ["keyboard-host-navigation"]), ...(["hooks", "all"].includes(slice) ? ["keyboard-run-navigation"] : []), ...(["receiver", "all"].includes(slice) ? ["hourly-disclosure-and-sums", "actual-delivery-and-reload"] : []), "theme", "no-script", "CSP-negative-control", "styling-negative-control", ...(["all", "baseline"].includes(slice) ? [] : ["deletion"])] };
+    return { ok: true, slice, paints: paints.length, ...additional, interactions: ["keyboard-disclosure", ...(slice === "baseline" ? [] : ["keyboard-host-navigation"]), ...(["hooks", "all"].includes(slice) ? ["keyboard-run-navigation"] : []), ...(["receiver", "all"].includes(slice) ? ["hourly-disclosure-and-sums", "actual-delivery-and-reload", "complete-receiver-identities", "receiver-identity-negative-control"] : []), "theme", "no-script", "CSP-negative-control", "styling-negative-control", ...(["all", "baseline"].includes(slice) ? [] : ["deletion"])] };
   } catch (error) { throw new Error(`Connections browser ${stage}: ${error.message}`, { cause: error }); }
   finally {
     if (tab) await tab.close().catch(() => {});

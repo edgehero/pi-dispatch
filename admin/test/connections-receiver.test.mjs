@@ -37,6 +37,27 @@ test("Connections shows each receiver's real location, correct totals and last h
   }
 });
 
+test("complete maximum-length receiver identities and named links survive reported and unreadable states for both roles (#775)", async () => {
+  const name = "W".repeat(64);
+  const row = { ...receiver({ change: (o) => o.observe("github", 401) }), name };
+  assert.ok(parseReceiverStatus(JSON.stringify(row)), "the maximum identity is valid publication data");
+  for (const role of ["operator", "viewer"]) for (const unreadable of [false, true]) {
+    const facts = await view({ hosts: [unreadable ? { name, unreadable: true } : row], complete: !unreadable, more: 0 });
+    const doc = parseDocument(`<html><body>${draw(facts, role)}</body></html>`);
+    const links = doc.querySelectorAll(".cn-receivers a");
+    assert.equal(links.length, 1);
+    assert.equal(links[0].textContent, name);
+    assert.equal(links[0].getAttribute("href"), `/fleet/host?name=${name}`);
+    if (unreadable) assert.match(doc.body.textContent, /receiver observation unreadable/);
+    else {
+      assert.equal(modelConnections(facts).receivers.hosts[0].name, name);
+      const table = doc.querySelectorAll("table").find((n) => n.getAttribute("aria-label") === `${name} github delivery outcomes`);
+      const counts = Object.fromEntries(table.querySelectorAll("tbody tr").map((tr) => tr.querySelectorAll("td").map((cell) => cell.textContent.trim())));
+      assert.equal(counts.unauthorized, "1", "the complete identity still names the actual observations");
+    }
+  }
+});
+
 test("only unauthorized warns only for a nonempty pure refusal window; a drop or malformed request disproves it (#775)", async () => {
   for (const code of [null, 204, 400, 202]) {
     const row = receiver({ change: (o) => { o.observe("github", 401); if (code !== null) o.observe("github", code, code === 202 ? "queued" : undefined); } });

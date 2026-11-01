@@ -15,6 +15,7 @@ export const CONNECTIONS_CSS = `
 .cn-receiver-detail{margin:12px 0}
 .cn-receiver-detail summary{cursor:pointer;color:var(--running-ink);font-size:12px}
 .cn-receivers section+section{margin-top:20px}
+.cn-receivers a{overflow-wrap:anywhere}
 .cn-receiver-hours-scroll{max-width:100%;min-width:0;overflow-x:auto;margin-top:12px;border-radius:var(--radius-md)}
 .cn-receiver-hours-scroll:focus-visible{outline:2px solid var(--running-ink);outline-offset:2px}
 .cn-receiver-hours-scroll>.tbl-wrap{overflow:visible}

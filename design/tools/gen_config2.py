@@ -431,7 +431,7 @@ def connections():
         before = i < 23
         hourly_rows.append([(hour.strftime("%Y-%m-%d %H:%M UTC"), ""), ("before receiver started" if before else "observed", "")] + [("not observed" if before else str({"queued": 128, "unauthorized": 2}.get(word, 0)), "") for word in health_words])
     hourly = table([("UTC hour", ""), ("Coverage", "")] + [(word, "") for word in health_words], hourly_rows, caption="mini1 github delivery counts per UTC hour")
-    receiver = f"""<div class="c2-pad3"><h3>Receiver on <a class="link" href="/fleet/host?name=mini1">mini1</a></h3>
+    receiver = f"""<div class="c2-pad3 c2-receivers"><h3>Receiver on <a class="link" href="/fleet/host?name=mini1">mini1</a></h3>
 <p>Port 3000 · all interfaces · beat 8 seconds ago · version 4.3.1. Receiver started 15:00 UTC; counts since then within 24 UTC hours.</p><h3>github</h3>
 {facts([("Last taken", "15:30 UTC"), ("Last refused", "15:20 UTC")], 2)}
 <details class="c2-receiver-detail"><summary>github: outcomes in 24 UTC hours</summary>{table([("Outcome", ""), ("Count", "")], health_rows, caption="mini1 github delivery outcomes", stack=True)}
@@ -504,6 +504,7 @@ CO_CSS = COMMON_CSS + PROVIDER_KEYS_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_R
 .c2-pad3 { padding: 0 var(--space-5) var(--space-4); }
 .c2-receiver-detail { margin: 12px 0; }
 .c2-receiver-detail summary { cursor: pointer; color: var(--running-ink); font-size: 12px; }
+.c2-receivers a { overflow-wrap: anywhere; }
 .c2-receiver-hours-scroll { max-width: 100%; min-width: 0; overflow-x: auto; margin-top: 12px; border-radius: var(--radius-md); }
 .c2-receiver-hours-scroll:focus-visible { outline: 2px solid var(--running-ink); outline-offset: 2px; }
 .c2-receiver-hours-scroll > .tbl-wrap { overflow: visible; }
@@ -785,7 +786,7 @@ A viewer sees the tables, with no Remove or forms.
 - **Forges.**
   - For each armed forge: which triggers arm it, the auth source and per-job token, how deliveries are verified and de-duplicated, polling, and who may fire.
   - An unconfigured forge collapses to one line saying its path answers 404. GitHub is enabled by a trigger or an explicit auth source; each other forge by any of its receiver variables. GitHub's implicit default auth source is shown as such.
-  - Live receivers name their host, socket port, closed bind category and beat age. Each forge has its last taken/refused time and 24 UTC-hour counts by every outcome. Native disclosures show hourly counts. Unserved routes retain their last taken/refused times after their window counts reach zero; routes without history stay hidden.
+  - Live receivers name their host, socket port, closed bind category and beat age. Complete receiver identities wrap within their section at phone widths, including unreadable observations. Each forge has its last taken/refused time and 24 UTC-hour counts by every outcome. Native disclosures show hourly counts. Unserved routes retain their last taken/refused times after their window counts reach zero; routes without history stay hidden.
   - Warnings name an armed forge without a reported receiver, only-unauthorized traffic and any not-configured refusal; incomplete reads stay unknown.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
 - **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
