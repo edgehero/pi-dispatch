@@ -13,3 +13,5 @@ Receiver screenshots additionally show the 24-hour disclosure. Its wide table ha
 `775/manifest.json` records implementation revisions and image hashes. Review full-page images at native pixel size when assessing small digits. Section captures are provided for legibility.
 
 Receiver evidence was refreshed after the final lifetime-window correction (`f5574c81`). It includes two additional real-publisher views after 25 hours: the unserved route retains its refusal time, all eleven current-window counts are zero, empty unserved routes stay hidden, and no stale alert appears. Epoch-zero timestamp retention is covered by a valid-record behavior regression. The source tree, clean state and selected capture hashes are recorded in `775/receiver/receiver-capture-provenance.json`.
+
+The actual public GitHub pages for PRs #786, #785 and #787 were opened in pinned Chrome after embedding the final images. All 27 embedded images decoded successfully with positive native dimensions (11 receiver, eight hooks, eight endpoints). `775/pr-render-proof.json` records their actual image URLs and dimensions.

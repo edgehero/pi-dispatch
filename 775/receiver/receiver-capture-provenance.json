@@ -76,6 +76,36 @@
       "file": "reference/reference-proof.json",
       "sha256": "976ef01c76014d5bebc3d5fe4b78c8a6fc07bea62c7d71af11964515ed4a7eda",
       "modifiedAt": "2026-11-01T13:12:40.499959+00:00"
+    },
+    {
+      "file": "reference/reference-receiver-dark-1440.png",
+      "sha256": "643a00f0837134b920a3e988939ef74b678a5b94e3ff1413adff7fe37e0558f9",
+      "modifiedAt": "2026-11-01T13:12:40.246048+00:00"
+    },
+    {
+      "file": "reference/reference-receiver-dark-390.png",
+      "sha256": "c5a4c345a1aad56ccf00d636b4ec6d52e08063b579e9dbfa3fd2f7d2535c75c6",
+      "modifiedAt": "2026-11-01T13:12:38.811954+00:00"
+    },
+    {
+      "file": "reference/reference-receiver-dark-800.png",
+      "sha256": "d231ac244160f6df31f9b18d66db1e4b0fc28366ef10fe2d7fb93924de059af8",
+      "modifiedAt": "2026-11-01T13:12:39.412530+00:00"
+    },
+    {
+      "file": "reference/reference-receiver-light-1440.png",
+      "sha256": "bad25e85d5d366be31811f4827c9a251c3572ca979627e77e44b56a12a12b8b2",
+      "modifiedAt": "2026-11-01T13:12:37.774960+00:00"
+    },
+    {
+      "file": "reference/reference-receiver-light-390.png",
+      "sha256": "e1dcc901d79440abc9114f5170426c407175274e5fe59f6045bac774070a9580",
+      "modifiedAt": "2026-11-01T13:12:36.297950+00:00"
+    },
+    {
+      "file": "reference/reference-receiver-light-800.png",
+      "sha256": "878c43d054d18f5b9157794da253e8b1c46e0d193ed098a3b3141fed9525f180",
+      "modifiedAt": "2026-11-01T13:12:36.905656+00:00"
     }
   ]
 }
