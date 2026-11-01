@@ -65,6 +65,7 @@ import { createHash } from "node:crypto";
 import { DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_WHY_RE, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { hostQueueName } from "@edgehero/pi-dispatch/queue";
+import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
 import { auditedWrite } from "../audited-write.mjs";
 import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
@@ -83,6 +84,7 @@ export { evaluateActionPolicy } from "../action-policy.mjs";
 import { checkAgentRerun, paidStartEnvironment } from "../agent-starts.mjs";
 import { ANSWERER_ACTIONS, ANSWERER_WRITE_RULES } from "./answerer-actions.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
+import { SETUP_HTTP_ACTIONS, SETUP_WRITE_RULES } from "./setup-actions.mjs";
 import { MODEL_ROLE_EDIT_FIELDS } from "../model-role-plans.mjs";
 
 /** The diff moved to the confirm view with the rest of the bar's markup (issue #737); re-exported where it always was. */
@@ -339,6 +341,43 @@ function reserveInputs(ctx) {
     modelEndpoints = null;
   }
   return { overlay: overlayOf(ctx), env: ctx.a.env ?? {}, modelEndpoints, ...(typeof ctx.a.builtinModel === "function" ? { builtinModel: ctx.a.builtinModel } : {}) };
+}
+
+/** Complete bounded observations before starting a worker; counts are observations, never reservations (#774). */
+export async function readSetupExposure(ctx) {
+  const at = typeof ctx.now === "function" ? ctx.now() : Date.now();
+  try {
+    const got = await snapshotOf(ctx, { switchQueues: true, waiting: true, freshWaiting: true });
+    const s = got.snapshot;
+    const waiting = s?.waiting;
+    if (!s || switchShortOf(s).length || s.queue?.fleetDegraded || !Array.isArray(s.queueCounts) || !waiting || waiting.unreachable || waiting.truncated || !Array.isArray(waiting.rows) || !Array.isArray(waiting.scheduled)) return { complete: false, at };
+    const jobs = [...waiting.rows, ...waiting.scheduled];
+    // Queue-data reads are keyed by job ID. A duplicate across queues cannot be priced independently here.
+    if (jobs.length > 100 || new Set(jobs.map(row => row.queue)).size > 32 || new Set(jobs.map(row => row.jobId)).size !== jobs.length) return { complete: false, at };
+    if (s.queueCounts.some(row => !row.counts || ["waiting", "paused", "delayed", "active"].some(key => !Number.isSafeInteger(row.counts[key]) || row.counts[key] < 0))) return { complete: false, at };
+    const counted = waitingIn(s.queueCounts);
+    if (jobs.length < counted || jobs.some(row => typeof row.jobId !== "string" || typeof row.queue !== "string")) return { complete: false, at };
+    const text = ctx.fs.readFileSync(ctx.a.paths.triggersPath, "utf8");
+    const document = parseTriggersDocument(text, ctx.a.paths.triggersPath);
+    const cron = document.triggers.filter(row => row.on.type === "cron" && row.disarmed !== true);
+    if (cron.length > 100) return { complete: false, at };
+    const reserves = await retryReserves(ctx, jobs);
+    if ([...reserves.values()].some(r => !r || r.unknown || r.invalid)) return { complete: false, at };
+    const cronReserves = cron.map(row => ctx.a.rm.estimateReserve(row.run, reserveInputs(ctx)));
+    if (cronReserves.some(r => !r || r.unknown || r.invalid)) return { complete: false, at };
+    const queued = [...reserves.values()];
+    const finiteSum = list => list.every(r => Number.isSafeInteger(r.dollarsMicros)) ? list.reduce((sum, r) => sum + r.dollarsMicros, 0) : null;
+    const dollars = finiteSum(queued), cronDollars = finiteSum(cronReserves);
+    if (dollars !== null && !Number.isSafeInteger(dollars) || cronDollars !== null && !Number.isSafeInteger(cronDollars)) return { complete: false, at };
+    const jobIds = jobs.map(row => row.jobId).sort();
+    const cronIds = cron.map(row => row.on.id).sort();
+    const lines = [`Observed ${new Date(at).toISOString()}: ${jobs.length} queued/scheduled jobs and ${cron.length} cron triggers; starting permits ongoing consumption and future arrivals.`,
+      `Queued reserves: ${dollars === null ? "one slot per job; no single dollar bound" : `$${formatMicros(dollars)} across current jobs in each applicable dollar window`}.`,
+      `Cron reserves per future occurrence: ${cronDollars === null ? "one slot each; no single dollar bound" : `$${formatMicros(cronDollars)} across the configured cron triggers in each applicable window`}. No setup reservation is taken.`];
+    if (jobIds.length) lines.push(`Current job IDs: ${jobIds.join(", ")}.`);
+    if (cronIds.length) lines.push(`Cron triggers: ${cronIds.join(", ")}.`);
+    return { complete: true, at, queued: jobs.length, cron: cron.length, lines, identity: sha256(JSON.stringify({ jobIds, cronIds, queued, cronReserves })) };
+  } catch { return { complete: false, at }; }
 }
 
 /** A bulk list's reserves summed: slots, the known dollars, and how many are unknown. */
@@ -1926,6 +1965,7 @@ const bulkDone = (verb, noun) => (out, _body, { done, count }) => (done === coun
  */
 const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
 const WRITE_RULES = {
+  ...SETUP_WRITE_RULES,
   ...ANSWERER_WRITE_RULES,
   "model-role-edit": {
     fields: MODEL_ROLE_EDIT_FIELDS, danger: false,
@@ -2168,7 +2208,7 @@ const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((ope
 
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
 export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...modelRoleActions, ...ANSWERER_ACTIONS].map(withRules));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...modelRoleActions, ...ANSWERER_ACTIONS, ...SETUP_HTTP_ACTIONS].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {
@@ -2274,6 +2314,14 @@ export async function previewAction(ctx, action) {
   if (session.role === "agent" && (action.agent.mode === "person" || action.agent.mode === "confirm" && !["setting-set", "limit-add", "limit-edit", "trigger-edit", "rerun"].includes(action.name))) return refuse(ctx, "preview", 403, `${action.name} is ${action.agent.mode}: ${action.agent.reason}`, null, null, true);
   const body = ctx.body ?? {};
   const actx = actionCtx(ctx);
+  if (action.name.startsWith("setup-") && typeof ctx.res?.once === "function") {
+    const controller = new AbortController();
+    const disconnected = () => { if (!ctx.res.writableFinished) controller.abort(); };
+    ctx.res.once("close", disconnected);
+    ctx.res.once("finish", () => ctx.res.removeListener("close", disconnected));
+    actx.signal = controller.signal;
+    if (ctx.res.destroyed) controller.abort();
+  }
   const missing = (action.needs ?? []).filter((k) => actx.a[k] === null || actx.a[k] === undefined);
   if (missing.length > 0) return refuse(ctx, "preview", 503, `this console was started without what the ${action.name} action needs (${missing.join(", ")}); see its log`, "setup");
   if (!plainBody(body)) return refuse(ctx, "preview", 400, `the request body is nested too deep or holds too much (at most ${BODY_DEPTH_MAX} levels, ${BODY_KEYS_MAX} keys per object and 256 items per list)`);
@@ -2283,6 +2331,10 @@ export async function previewAction(ctx, action) {
   let meta;
   try {
     out = await action.preview(body, actx);
+    if (actx.signal?.aborted) {
+      out?.onDiscard?.();
+      return refuse(ctx, "preview", 409, "the setup preview disconnected; enter its inputs again; nothing was changed");
+    }
     if (!out?.refusal && !out?.unchanged) meta = metaOf(action, out, body);
   } catch (e) {
     if (e instanceof BadRequest) return refuse(ctx, "preview", 400, `${e.message}; nothing was changed`);
@@ -2319,8 +2371,11 @@ export async function previewAction(ctx, action) {
     targets: out.targets ?? null,
     count: Number.isSafeInteger(out.count) ? out.count : null,
     meta,
+    ...(Number.isFinite(out.ttlMs) ? { ttlMs: out.ttlMs } : {}),
+    ...(typeof out.onDiscard === "function" ? { onDiscard: out.onDiscard } : {}),
   });
   const expiresAt = Number.isSafeInteger(issued?.expiresAt) ? issued.expiresAt : null;
+  if (typeof out.onDiscard === "function" && actx.signal) actx.signal.addEventListener("abort", () => deps.tickets.cancel?.({ sessionId: session.id, action: action.name, ticket: issued.ticket }), { once: true });
   const summary = session.role === "agent" ? [meta.title, judged.policy.reason] : out.summary ?? [];
   const confirmLabel = String(action.confirmLabel(out));
   // The bar's lines: the action's own markup of them where it has one (`barLines`: a change's values in bold), else the
@@ -2345,6 +2400,15 @@ export async function previewAction(ctx, action) {
     undo: meta.undo,
     html: String(html`<p class="agent-policy"><b>${AGENT_POLICY_TITLES[judged.policy.mode]}</b>: ${judged.policy.reason}</p>${previewBarHtml({ title: meta.title, lines, reserve: reserveText(out.reserve), diff: session.role === "agent" ? null : out.diff ?? null, undo: meta.undo, undoable: meta.undoable, confirmLabel, paid: Boolean(action.paid), danger: meta.danger, expiresAt, now: clockOf(deps) })}`),
   });
+}
+
+/** Cancel is guarded like a confirm but releases only its author's private preview. */
+export function cancelAction(ctx, action) {
+  if (ctx.session?.role !== "operator") return refuse(ctx, "confirm", 403, "Setup cancellation requires its operator sign-in.");
+  if (!plainBody(ctx.body) || Object.keys(ctx.body ?? {}).some(key => key !== "ticket") || typeof ctx.body.ticket !== "string") return refuse(ctx, "confirm", 400, "Cancel takes only its confirmation ticket.");
+  const cancelled = ctx.deps.tickets.cancel?.({ sessionId: ctx.session.id, action: action.name, ticket: ctx.body.ticket }) === true;
+  ctx.record({ actor: ctx.actor(), action: "write", kind: action.kind, target: "private-preview", outcome: cancelled ? "ok" : "refused", reason: cancelled ? "private setup preview cancelled" : "private setup preview unavailable" });
+  return ctx.json(cancelled ? 200 : 409, cancelled ? { ok: true, cancelled: true } : { error: "The setup preview is no longer available to cancel." });
 }
 
 /**
@@ -2449,7 +2513,10 @@ export async function confirmAction(ctx, action) {
   }
   const entry = redeemed.entry;
   const judged = authorizeTransition({ actor: session, action, transition: entry.meta?.policyTransition });
-  if (!judged.ok || entry.meta?.issuedRole && entry.meta.issuedRole !== session.role) return refuse(ctx, "confirm", 403, judged.refusal ?? "The role changed; preview the change again.");
+  if (!judged.ok || entry.meta?.issuedRole && entry.meta.issuedRole !== session.role) {
+    if (entry.payload?.setupRef) deps.actionDeps?.setup?.discard?.(entry.payload.setupRef);
+    return refuse(ctx, "confirm", 403, judged.refusal ?? "The role changed; preview the change again.");
+  }
   const tag = sha256(ticket).slice(0, 12);
   entry.ticketDigest = sha256(ticket);
   const log = (line) => deps.log(String(line).replace(/^panel: /, "console: "));
@@ -2464,8 +2531,10 @@ export async function confirmAction(ctx, action) {
     );
   } catch (e) {
     deps.log(`console: the ${action.name} write threw (${codeOf(e)})`);
+    if (action.name.startsWith("setup-")) { deps.actionDeps?.setup?.discard?.(entry.payload?.setupRef); return refuse(ctx, "confirm", 500, "Host setup did not return a complete result. Some effects may have landed; inspect the host before retrying.", "partial"); }
     return refuse(ctx, "confirm", 500, `the ${action.name} change could not be made; nothing was changed, and the console's log has the reason`, "failed");
   }
+  if (entry.payload?.setupRef) deps.actionDeps?.setup?.discard?.(entry.payload.setupRef);
   if (result?.[AUDIT]) return refuse(ctx, "confirm", 500, AUDIT_FAILED, "audit");
   // A refusal the apply marks `partial` came after part of the write was made (the kill switch reached some queues), so
   // its bar says what may have changed and offers Look again; any other was refused before anything was written.

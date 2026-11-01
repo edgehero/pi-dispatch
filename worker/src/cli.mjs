@@ -23,7 +23,7 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
                            --secrets resolves each project secret bundle here and prints its variable names, never values;
                            every run publishes its checks to Valkey for the console and the panel (labels with paths
                            and secret values redacted, kept 7 days), and --no-publish skips that
-  pi-dispatch up [--yes] [--adopt-volume] [--restart-proxy] [--refresh-proxy-rules]
+  pi-dispatch up [--console] [--yes] [--adopt-volume] [--restart-proxy] [--refresh-proxy-rules]
                            one consented pass: pull+tag the job image, start Valkey, init, doctor
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here
@@ -113,6 +113,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		// The environment rides along so the next steps match the venue (issue #453): PI_BACKENDS=podman alone gets
 		// the podman ladder.
 		return runInit(process.cwd(), { env });
+	}
+	if (cmd === "setup-host") {
+		if (argv.length !== 1) return 2;
+		const { runSetupHostCli } = await import("./setup-host.mjs");
+		return runSetupHostCli({ env });
 	}
 
 	if (cmd === "doctor") {

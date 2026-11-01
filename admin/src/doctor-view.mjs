@@ -279,7 +279,7 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   const applies = s !== null && noRun && (noHost || triggerList.length === 0);
   const doctorRows = doctorHostsOf(s).filter((r) => !r.unreadable);
   const doctorRead = s !== null && s.doctor && !s.doctor.unreachable;
-  const role = session?.role === "operator" ? "operator" : session?.role === "viewer" ? "viewer" : null;
+  const role = session?.role === "operator" ? "operator" : session?.role === "viewer" ? "viewer" : session?.role === "agent" ? "agent" : null;
 
   const step = (id, state, sentence, { commands = [] } = {}) => ({ id, state, title: state === "ready" ? STEP_TITLES[id].done : STEP_TITLES[id].todo, sentence, commands });
 
@@ -292,6 +292,7 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   // 3. The console's tokens: the role of the session asking.
   if (role === "operator") steps.push(step("token", "ready", ["You are signed in as ", { b: "an operator" }, ". Give people who only watch a viewer token."], { commands: [FIRST_RUN_COMMANDS.token] }));
   else if (role === "viewer") steps.push(step("token", "ready", ["You are signed in as ", { b: "a viewer" }, "."]));
+  else if (role === "agent") steps.push(step("token", "ready", ["You are signed in as ", { b: "an agent" }, ". Host setup is for a person."]));
   else steps.push(step("token", "check", ["The console could not say who is signed in."]));
   // 4. A worker: a registry row that beats, or a worker BullMQ sees (a worker from before the registry).
   const workerCommands = [FIRST_RUN_COMMANDS.service, FIRST_RUN_COMMANDS.worker];
@@ -315,15 +316,15 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   // 6. The provider key: present or not, never its value.
   const provider = doctorRead ? worstCheck(doctorRows, (id) => PROVIDER_ID_RE.test(id)) : null;
   if (provider !== null) {
-    steps.push(step("provider", stateOfLevel(provider.level), doctorSaid(provider, { ok: "found the provider key", notOk: ["Jobs use this host's pi login if it has one; otherwise set the key in the deployment's ", { code: ".env" }, ", then run doctor again."] }), { commands: provider.level === "ok" ? [] : [FIRST_RUN_COMMANDS.doctor] }));
+    steps.push(step("provider", stateOfLevel(provider.level), doctorSaid(provider, { ok: "found the provider key", notOk: ["Use a configured API key or a bound, host-owned managed subscription. For API-key setup, set the key in the deployment's ", { code: ".env" }, ", then run doctor again."] }), { commands: provider.level === "ok" ? [] : [FIRST_RUN_COMMANDS.doctor] }));
   } else if (newest !== null) {
     const predates = doctorRows.some((r) => (Array.isArray(r.checks) ? r.checks : []).some((c) => typeof c?.id === "string" && PROVIDER_DERIVED_RE.test(c.id)));
     steps.push(step("provider", "check", predates ? ["Doctor on ", { b: newest.host }, " checked the provider but not the key by name: its doctor predates the check."] : ["Doctor on ", { b: newest.host }, " did not judge the provider key."], { commands: [FIRST_RUN_COMMANDS.doctor] }));
   } else steps.push(step("provider", "to-do", NO_DOCTOR_YET("whether the provider key is found"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
-  // 7. A first trigger: nothing starts a job until one matches.
+  // 7. A first trigger arms matching deliveries; a manual run can already be queued without one.
   if (triggerList.length > 0) steps.push(step("trigger", "ready", [`The triggers file holds ${triggerList.length} ${triggerList.length === 1 ? "trigger" : "triggers"}.`]));
   else if (s?.triggers?.invalid) steps.push(step("trigger", "not-yet", ["The triggers file does not load, so no trigger can match."]));
-  else steps.push(step("trigger", "to-do", ["Nothing starts a job until a trigger matches: a cron trigger for a folder, or a label, comment or pull request trigger for a repository."]));
+  else steps.push(step("trigger", "to-do", ["A matching trigger starts a scheduled or forge job: a cron trigger for a folder, or a label, comment or pull request trigger for a repository. A manual run can be queued without a trigger."]));
   // 8. The forge credentials: only a forge's triggers need them.
   const forgeTrigger = triggerList.some((t) => t && t.type !== "cron");
   const forge = forgeTrigger && doctorRead ? worstCheck(doctorRows, (id) => FORGE_ID_RE.test(id)) : null;

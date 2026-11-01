@@ -80,7 +80,58 @@ If the provider declares an earliest refresh time and the existing access token 
 job waits until that instant without a refresh call, uncertain marker or spent queue attempt. The same free
 deferral handles quota or owner state that changed during selected preparation.
 
+## OpenAI Sign in with ChatGPT
+
+An OpenAI API key and Sign in with ChatGPT are separate choices. Use the [API-key guide](provider-keys.md)
+for a project API key. For the reviewed host-owned ChatGPT route, first configure the `openai-chatgpt`
+connection and explicit `openai` binding shown above. There is no token to retrieve into the browser form.
+
+Run the installed command from the deployment directory, as the account that owns the connection store:
+
+```sh
+cd /absolute/deployment
+./node_modules/.bin/pi-dispatch auth login chatgpt-main
+./node_modules/.bin/pi-dispatch auth status
+```
+
+`chatgpt-main` must be the configured connection ID, and its `ownerHost` must match the effective
+`PI_WORKER_NAME`. The CLI reads the selected deployment settings from this directory and refuses conflicting
+shell/file declarations. Keep `PI_AUTH_CONNECTIONS_FILE`, `PI_AUTH_STORE_DIR`, `PI_SETTINGS_FILE`, worker name
+and the deployment's actual `VALKEY_URL`/Valkey credential context consistent with the worker. An unavailable
+Valkey or another host's policy is not evidence of a successful login.
+
+The worker adapter requests `http://127.0.0.1:1455/auth/callback` and listens on
+`127.0.0.1:1455`. When the browser runs on another machine, establish a separate callback tunnel first:
+
+```sh
+ssh -L 1455:127.0.0.1:1455 <owner-host>
+```
+
+Port 1455 is the provider authorization callback, not the operator console's port. The host terminal may
+accept the final callback URL as part of its existing login flow; never paste OAuth tokens, refresh grants or
+callback URLs into the browser API-key field. Keep renewal on the declared owner and do not copy its refresh
+store to several workers.
+
+**Callback compatibility:** the worker follows pinned pi 1.4.0's upstream direct-auth source and the
+[current official registration guide](https://developers.openai.com/siwc/token-sharing-open-source/sign-in):
+`http://127.0.0.1:1455/auth/callback`. Use the exact URI returned by the current login flow; do not substitute
+`localhost` or edit callback/state fields. Earlier builds used a different loopback hostname, so update the
+worker if its generated authorization still requests `localhost`. This path is source-checked and covered by
+callback validation tests; this credential-management page does not itself perform a live authenticated login.
+
+See the official [Sign in with ChatGPT overview](https://developers.openai.com/siwc/token-sharing-open-source)
+and [self-hosted VM guidance](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)
+for current registration, host identity and remote-host requirements. Their protected credential-transfer
+procedure is not a generic instruction to clone this worker's owner-managed refresh store.
+
 ## Claude community compatibility
+
+Official Claude Code documents `claude setup-token` as a Claude Code authentication flow. It is not an
+Anthropic API-key retrieval command for this form. See [Claude Code authentication](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token).
+The vendor's [current authentication and credential-use restrictions](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+distinguish native Claude applications from third-party integrations. Review those restrictions before
+choosing a community adapter. The compatibility below records what the pinned packages implement; it is
+not a claim that vendor terms permit a particular deployment or that Anthropic endorses the integration.
 
 Supported profiles are `pi-anthropic-oauth@0.3.6` and `@gotgenes/pi-anthropic-auth@3.4.3`. These are
 operator-selected community extensions, with tested compatibility at their pinned versions. This is not a

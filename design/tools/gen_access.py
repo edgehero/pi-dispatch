@@ -12,13 +12,13 @@ def term(*cmds):
             "".join(cmd(c) for c in cmds) + "</details>")
 
 DONE = [("Deployment found", "the console reads its files from <span class='code'>pi-dispatch</span>"),
-        ("Queue reachable", "Valkey answers at <span class='code'>redis://127.0.0.1:6399/0</span>"),
-        ("Your operator token", "made by the first command; you are signed in as <b>ops</b>")]
+        ("Queue reachable", "Valkey answers; its address stays private"),
+        ("Your operator token", "you are signed in as <b>an operator</b>")]
 
 def done_rows():
     return '<ul class="su-done">' + "".join(
         f'<li><span class="tile tile--sm tone-ok">{ic("done")}</span><b>{t}</b><span>{d}</span></li>' for t, d in DONE) + \
-        f'<li class="su-done__act">{btn("Add a viewer", "", "plus")}<span>a name, then a link that works once, for 60 seconds</span></li></ul>'
+        f'<li class="su-done__act">{btn("Add a viewer", "", "plus")}<span>preview a name, then Confirm; its private link works once, for 60 seconds</span></li></ul>'
 
 def step(n, tone, glyph, word, title, sentence, body):
     return f"""<li class="su-step">
@@ -31,13 +31,14 @@ def step(n, tone, glyph, word, title, sentence, body):
 </li>"""
 
 WORKER = step(4, "running", "running", "Starting", "Start the worker",
-    "It runs as a user service on build3, as the account <b>rob</b>.",
+    "The preview names its local service, current queue exposure and reserve estimates.",
     f"""<ol class="su-prog2" aria-live="polite" aria-label="Starting the worker">
   <li class="is-done">{ic('done', 'ic ic--sm')}<span>Wrote the service unit <span class="code">pi-dispatch-worker.service</span></span></li>
   <li class="is-done">{ic('done', 'ic ic--sm')}<span>Started it with the service manager</span></li>
   <li class="is-now">{ic('hourglass', 'ic ic--sm')}<span>Waiting for its first heartbeat, 8 s</span></li>
 </ol>
-<p class="su-small">Started by ops at 15:39 UTC · audit row 2 · <a class="link" href="#">Stop it</a></p>
+<p class="su-small">The start is recorded in the audit log. Stopping requires a fresh preview and may interrupt work.</p>
+<p class="su-small">A worker consumes manual jobs already in line and future matching events. Starting it can spend money.</p>
 {term('pi-dispatch service install')}""")
 
 EGRESS = step(5, "failed", "failed", "Not yet", "Start the egress proxy",
@@ -49,14 +50,14 @@ def choice(on, icon, title, text, extra=""):
     return f"""<label class="su-ch{' su-ch--on' if on else ''}"><input type="radio" name="su-key"{' checked' if on else ''}>
   <span class="su-ch__h">{ic(icon, 'ic ic--sm')}<b>{title}</b></span><span class="su-ch__s">{text}</span>{extra}</label>"""
 
-KEY = step(6, "attention", "attention", "Choose", "Provider key",
-    "Doctor found no key in the deployment's <span class='code'>.env</span>. Pick one way:",
-    f"""<div class="su-chs" role="radiogroup" aria-label="Provider key">
-  {choice(True, 'done', 'Use the pi login on build3', 'pi on build3 is signed in to anthropic. Jobs use that login; nothing is stored here.')}
-  {choice(False, 'key', 'Paste an API key', 'Written once to the deployment&#39;s .env, then never shown on any page again.',
-          '<span class="su-ch__f"><input class="input input--code" type="password" placeholder="ANTHROPIC_API_KEY" aria-label="API key" autocomplete="off"></span>')}
-</div>
-<div class="su-act">{btn('Use the pi login', '', 'done', sm=False)}</div>""")
+KEY = step(6, "failed", "failed", "Not yet", "Provider key",
+    "Doctor found no usable API key or explicitly bound host-owned managed subscription.",
+    f"""<p class="su-small">An ordinary pi OAuth login is not unattended service authentication. No fake Use action changes a published credential.</p>
+<div class="su-ch"><span class="su-ch__h">{ic('key', 'ic ic--sm')}<b>Keys for several providers</b></span>
+<span class="su-ch__s">Add or replace a write-only API key on Connections. Choose the provider explicitly; its default stays the same.</span>
+<div class="su-act"><a class="btn btn--primary" href="#p-provider-keys">Manage provider API keys</a></div></div>
+<p class="su-small">Provider guides show where to find or create keys at Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek.</p>
+<p class="su-small"><a class="link" href="#">Review subscription authentication</a> for host-owned subscription sign-in instead.</p>""")
 
 RECIPES = [("tag", "Fix issues labelled pi:fix", "a label on GitHub runs flow fix"),
            ("clock", "Tidy a folder every night", "a schedule runs flow tidy in a folder"),
@@ -68,18 +69,16 @@ TRIG = step(7, "idle", "plus", "To do", "Add a first trigger",
 
 GH = step(8, "idle", "git", "Optional", "Connect GitHub",
     "Only forge triggers need it; schedules on local folders run without.",
-    f"""<div class="su-chs su-chs--3">
-  <a class="su-ch su-ch--link" href="#"><span class="su-ch__h">{ic('git', 'ic ic--sm')}<b>Create a GitHub App</b></span><span class="su-ch__s">Recommended. GitHub opens, you approve, and it comes back here with the app's key.</span></a>
-  <a class="su-ch su-ch--link" href="#"><span class="su-ch__h">{ic('terminal', 'ic ic--sm')}<b>Use gh on build3</b></span><span class="su-ch__s">gh is signed in on this host. Fine for one person.</span></a>
-  <a class="su-ch su-ch--link" href="#"><span class="su-ch__h">{ic('key', 'ic ic--sm')}<b>Paste a token</b></span><span class="su-ch__s">A fine-grained token, written once, never shown again.</span></a>
-</div>
-{term('pi-dispatch setup github')}""")
+    f"""<p class="su-small">GitHub App creation and forge credentials stay in the terminal. Choose a webhook URL, or --no-webhook when using the poller.</p>
+<p><a class="link" href="#">Review Connections</a></p>
+{term('pi-dispatch setup github --webhook-url <receiver URL>')}
+<p class="su-small">Replace the receiver URL, or pass --no-webhook instead. Browser App creation remains open in OQ-054.</p>""")
 
 def su_bar():
-    tones = ["ok", "ok", "ok", "running", "failed", "attention", "idle", "idle"]
+    tones = ["ok", "ok", "ok", "running", "failed", "failed", "idle", "idle"]
     n = len(tones); gap = 0.8; w = (100 - gap * (n - 1)) / n
     segs = "".join(f'<rect class="su-seg tone-{t}{" su-seg--todo" if t == "idle" else ""}" x="{i * (w + gap):.2f}%" y="0" width="{w:.2f}%" height="10" rx="5"/>' for i, t in enumerate(tones))
-    return f'<svg class="su-bar" height="10" role="img" aria-label="3 of 8 ready, 1 starting, 1 not yet, 1 to choose, 2 to do">{segs}</svg>'
+    return f'<svg class="su-bar" height="10" role="img" aria-label="3 of 8 ready, 1 starting, 2 not yet, 1 to do, 1 optional">{segs}</svg>'
 
 SETUP_MAIN = card("Getting ready",
     f'<div class="su-prog"><p><b class="su-big">3</b> of 8 ready · 1 starting</p>{su_bar()}</div>'
@@ -88,7 +87,7 @@ SETUP_MAIN = card("Getting ready",
 
 SETUP_SIDE = f"""<div class="stack">
 {card('Ready', done_rows(), sub='3 of 8', id_="p-setup-ready")}
-{card('The one command', '<p class="muted su-p">The only step in a terminal.</p>' + cmd('npx @edgehero/pi-dispatch up --console') + '<p class="muted su-p su-p2">Or from pi, which opens this page for you:</p>' + cmd('/dispatch setup'), id_="p-setup-start")}
+{card('The one command', '<p class="muted su-p">After the exact durable installation in the Quickstart.</p>' + cmd('pi-dispatch up --console') + '<p class="muted su-p su-p2">Or from pi, which opens this page for you:</p>' + cmd('/dispatch setup') + '<p class="su-small"><a class="link" href="#p-provider-keys">Manage provider API keys</a>, also after setup is ready.</p>', id_="p-setup-start")}
 </div>"""
 
 SETUP_CSS = """
@@ -140,64 +139,52 @@ SETUP_CSS = """
 .su-p2 { margin-top: var(--space-3); }
 #p-setup-ready .su-done { margin-bottom: 0; }
 @media (max-width: 760px) { .su-step { grid-template-columns: minmax(0, 1fr); gap: 10px; } .su-step__t .chip, .su-step__t .su-opt { margin-left: 0; } .su-chs, .su-chs--3, .su-rec { grid-template-columns: minmax(0, 1fr); } .su-done li { grid-template-columns: auto minmax(0, 1fr); } .su-done li > span:last-child { grid-column: 2; } .su-done__act { padding-left: 0; } }
+.setup-layout .su-step__s .code,.setup-layout .su-done .code{white-space:normal;overflow-wrap:anywhere}
+.setup-layout .su-step__b,.setup-layout .su-done li{min-width:0}
+.setup-layout .su-done li>details{grid-column:2 / -1}
+.setup-layout .su-act .act{max-width:100%}
+.setup-layout .su-step__t .chip{max-width:100%;height:auto;white-space:normal}
+.setup-layout .config-form fieldset{min-width:0}
+.setup-layout .su-step__s,.setup-layout .su-done span{overflow-wrap:anywhere}
+.setup-layout .su-r:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
 """
 
-write("SetupScreen", card_marker("Overview", 1600, 1440, "First run in the browser: after one command, every step runs from this page with a preview and Confirm"),
+write("SetupScreen", card_marker("Overview", 1600, 1440, "First run in the browser: supported host steps have an individual preview and Confirm"),
       "Set up pi-dispatch",
       shell("Overview", f'<div class="cols">{SETUP_MAIN}{SETUP_SIDE}</div>', "Set up pi-dispatch",
-            sub="You started this with one command. Everything else happens on this page.", parked=0), SETUP_CSS)
+            sub="Finish supported steps here. The terminal way remains available for every step.", parked=0), SETUP_CSS)
 readme("SetupScreen", """
-First run in the browser. After one command, every remaining setup step runs from this page, each with a preview and Confirm, so nobody has to go back to the terminal. The terminal way stays one click away on every step.
+First-run setup in the browser. A durable host bootstrap starts the console and prints a one-time link. Supported remaining steps each have a preview and Confirm. Terminal alternatives remain available.
 
 **How a person uses it.**
-- **The one command.** The only step in a terminal: `npx @edgehero/pi-dispatch up --console`. It starts the queue, runs the console as a service, makes the operator token and prints a one-time link that signs the person in here. From pi, `/dispatch setup` does the same and opens the page.
-- **Progress.** A big "3 of 8 ready", with what is starting, and a segmented bar, one segment per step in its state's tone. The page is live, so steps turn Ready by themselves.
-- **Ready** (side). Done steps fold to one line each: deployment, queue, operator token. *Add a viewer* takes a name and gives a link that works once, for 60 seconds.
-- **Start the worker.** One button. The step shows its progress as it happens: the service unit written, started, then waiting for the first heartbeat. Each start names the service manager, the host and the account it runs as, and has its audit row and a *Stop it* link.
-- **Start the egress proxy.** One button, plus *Review the allowlist* (12 hosts), because the allowlist is what the proxy enforces.
-- **Provider key.** Two choices:
-  - use the pi login doctor found on the host, which stores nothing;
-  - paste a key into a write-only field. It is written once to `.env` and never shown again. The audit row keeps the key's name, never its value.
-- **Add a first trigger.** Three recipes (fix on a label, a nightly tidy, answer a comment), each opening the trigger editor prefilled, with the triggers.json diff before anything is saved, or *Start from scratch*.
-- **Connect GitHub (optional).**
-  - Create a GitHub App: GitHub's own app-manifest flow opens, the person approves, and it returns here with the app's key.
-  - Use the `gh` login on the host.
-  - Paste a token, written once.
-- **In a terminal instead.** Each step folds out the exact command.
+- **The one command.** After the exact durable installation in the Quickstart, `pi-dispatch up --console` starts the console, creates or preserves an operator entry and prints a one-use 60-second setup link. It never starts a worker. `/dispatch setup` offers the same handoff.
+- **Progress.** A big "3 of 8 ready", a segment for each step and real Starting progress. Published heartbeat and doctor facts decide readiness; a completed process alone does not. Missing, stale, partial and timed-out observations stay explicit.
+- **Ready** (side). Ready steps fold to a row each. The deployment is shown by its last folder, Valkey without its address and sign-in by role alone. Add a viewer previews a name and returns a private viewer-only link after Confirm, usable once within 60 seconds.
+- **Start the worker.** The preview names the service manager, local account, exact units and dependencies, queued manual jobs, armed schedules and reserve estimates. A start permits future consumption too. Stop and restart have a new preview; they can interrupt jobs and cannot undo spending.
+- **Start the egress proxy.** Only start a deployment-owned missing/stopped local Docker or native-Podman proxy. Review the allowlist links to Connections with its actual count. Unsafe replacement, shared ownership and OpenShell gateway changes remain terminal steps.
+- **Provider key.** Doctor judges existing API-key auth or a bound managed subscription. An ordinary pi OAuth login is not offered as service auth. Connections permanently lists provider key sources and offers explicit Add or Replace with a new write-only value through private 60-second state. Provider guides link to the official place to find or create a key. The default provider never changes with a key write; a running worker needs a separate restart. The management link remains available after this step is Ready.
+- **Add a first trigger.** Three editable recipes: a GitHub label fix, nightly local-folder tidy and comment answer. The ordinary trigger planner previews the exact added lines; missing folder, skill or forge prerequisites stay actionable. Start from scratch remains available.
+- **Connect GitHub (optional).** Published status, Connections and the complete `setup github --webhook-url <receiver URL>` or `--no-webhook` terminal path. Browser App creation remains open under OQ-054; no placeholder claims that credentials or a host login change in the browser.
+- **In a terminal instead.** Native disclosures show the valid command, its placeholders and recovery instructions. Doctor is a separately previewed ordinary non-live, non-fixing action.
 
 **Panels.** `p-setup`, `p-setup-ready`, `p-setup-start`.
 
 **The server provides.**
-- The deployment pointer (last folder), Valkey reachability, and the signed-in token's name and role.
-- Host registry rows and the service manager's state for each pi-dispatch service.
-- The newest doctor result (egress proxy, provider key present or not and whether a pi login exists, forge credentials), the trigger count, and the progress of a running setup action.
+- The deployment's last folder, queue reachability and the session role, never a shared sign-in name or Valkey address.
+- Published host heartbeats and sanitized doctor checks for egress, provider and forge readiness, with freshness and partial-read status.
+- A process-owned host grant's safe operation availability and bounded actual action progress, never authority inferred from fleet rows.
+- The trigger count, Connections allowlist count and closed trigger-recipe defaults.
 
-**Who sees what.** A viewer sees the steps and their states, with no buttons, no key field and no forge choices. A read-only console shows the steps with the terminal commands only.
-
-**What this asks the repo for.** None of these actions exist in the console today, so each is new:
-- `up --console`: one command that also makes the operator token, installs the console service and prints a one-time link;
-- a narrow supervisor that may only start, stop or restart pi-dispatch's own services through the user's service manager;
-- doctor runs from the console;
-- write-only `.env` fields for a closed list of key names;
-- viewer tokens from the console (operator tokens stay CLI-only);
-- GitHub's app-manifest flow, returning to the console on 127.0.0.1.
-
-Each must keep the console's rules: operators only, preview then Confirm, an audit row, nothing on a read-only console. The wizard's rule that it never asks for the provider key becomes a choice: the pi login stays the first option.
+**Who sees what.** A viewer sees states without forms or terminal commands. An agent receives safe machine facts without person-only controls. A read-only operator sees terminal alternatives only. Missing host grant, unsupported manager, unsafe environment or remote runtime gives actionable host recovery. Private keys and invitation results never enter shared panels, role caches or live events.
 
 **Why it works this way.**
-- Every step runs from this page, and each one shows what it will do, then waits for the person's Confirm. Nothing starts a job until a trigger matches, so starting the worker is safe on its own.
-- The page may run a closed list and nothing else, with no free commands and no other programs:
-  - start, stop or restart pi-dispatch's own services (the worker, the receiver and the egress proxy);
-  - run doctor and show its result;
-  - write a provider key or a forge token to `.env`, once, from a closed list of names;
-  - add a viewer. Operator tokens are still made in a terminal.
+- Each supported mutation is a person-only preview, Confirm, audit row and honest Undo line. The default-off host grant admits a closed local worker child, never arbitrary shell commands.
+- A worker may immediately consume manual jobs without any trigger. The start preview describes present exposure and future arrivals retain ordinary admission and budget gates.
+- Provider keys are create-only; invitation links bind the created viewer entry and stay private to the initiating session. Cancellation, expiry and sign-in changes dispose private state.
+- Both themes, phone/intermediate/desktop layouts, keyboard focus through live swaps, native no-script reads and real-CSP interactions are verified. Mutation controls stay disabled without JavaScript.
 
-  Every action is a preview, then Confirm, and an audit row. Operators only; a read-only console offers none of it.
-- A pasted key goes from the page to the file and nowhere else. The audit row keeps its name, never the value, and viewers never see the key step's form.
-- Only label, comment, issue and pull request triggers need GitHub; schedules on local folders run without it, so the step is optional.
-- Once set up, the Overview starts empty: nothing needs you, nothing runs, and build3 shows up under Hosts as soon as it beats.
-
-**Fixture note.** All of it is sample: a deployment on build3 with no worker, no egress proxy and no triggers, while the worker is starting. The commands are the repo's, except `up --console`, which is proposed.
+**Fixture note.** This card is a sample deployment on build3. The worker is starting, three steps are ready and doctor still needs refreshing. Counts, host names and progress are illustrative, never runtime defaults. The published-source card is the reference when the remote artifact cannot be accessed.
 """)
 
 # =====================================================================================

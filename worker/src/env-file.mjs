@@ -775,7 +775,7 @@ function keyAlreadySet(text, key, platform) {
  *   a `# KEY=` comment inside a multi-line value, each left the key unset while the writer reported it written.
  *   `verify` lets a caller add its own condition on the new text.
  */
-function planEnvEdit(raw, path, key, value, { overwrite = false, platform = process.platform, verify } = {}) {
+export function planEnvEdit(raw, path, key, value, { overwrite = false, platform = process.platform, verify } = {}) {
 	const refusal = envFileEditRefusal(raw, path);
 	if (refusal !== null) return { error: refusal };
 	const text = typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8");

@@ -10263,7 +10263,7 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
 
 ## INT-CONSOLE-TOKENS-FILE-CONTRACT
 
-- **AMENDED 2026-10-31 (#774, decided, not implemented)**: the CLI-only writer rule below gains two narrow
+- **AMENDED 2026-11-01 (#774)**: the CLI-only writer rule below gains two narrow
   uses of the same hardened expected-input writer under `INT-CONSOLE-SETUP-HOST`: host `up --console` may create
   an operator entry, and a granted operator browser may create/revoke a viewer entry. Browser input never names
   an operator/agent role. These paths discard durable plaintext, retain the existing hash-only shape and modes,
@@ -10333,12 +10333,12 @@ in.
 
 ## INT-CONSOLE-AUDIT-LOG
 
-- **Decided, not implemented (#774)**: setup preserves audit-before-apply and compensating failed rows.
+- **Implemented (#774)**: setup preserves audit-before-apply and compensating failed rows.
   `INT-CONSOLE-SETUP-HOST` adds only safe operation/effect metadata through the existing row schema. Provider
   values, secret-derived input digests, raw child diagnostics, token/code bodies and private ticket payloads never
   enter a row. Confirm's intent is not an applied receipt or a cross-file transaction: partial/unknown effects
   must be reported from typed readback, never automatically retried. Existing actor/chain/mirror rules are
-  UNCHANGED, checked. Concrete setup action kinds and exhaustive schema tests land with their implementation.
+  UNCHANGED, checked. Setup action kinds and exhaustive schema tests accompany the implementation.
 
 - **Agent receipts (#766)**: `actor.role` additionally accepts `agent`. HTTP uses the minted token name; pi tools use the scrubbed account login, even when a person confirmed. `action: "write"` remains the audit-before-write intent and compensating failed outcome. A successful agent write appends correlated `action: "write-applied"`, same ticket/kind/target, only after the side effect; bulk actions append one receipt per successful target. Receipt failure is reported as incomplete accounting and never retries a side effect. The overview counts verified local-console applied receipts since UTC midnight with bounded pagination, explicitly partial for an unresolved intent, retained prefix, scan bound, damaged/unavailable chain or newer rows beyond verification. Its link filters `role=agent&action=write-applied`; audit history has a broader time scope. No draft/question or standing text enters this log.
 
@@ -10493,7 +10493,7 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 
 ## INT-CONSOLE-SETUP-HOST
 
-- **Status**: **DECIDED, NOT IMPLEMENTED** (issue #774), prerequisite to the code PR. This is a local setup
+- **Status**: **IMPLEMENTED** (issue #774), after prerequisite specs PR #783. This is a local setup
   protocol and private action-state contract, not an additional listener, shell API or public snapshot format.
 - **Authority**: the console process must be started with `serve --host-setup`, explicitly persisted only by
   `service install --console --host-setup` or the shown equivalent in `up --console`. Bind it to the canonical
@@ -10504,7 +10504,7 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   Windows, Linux system scope, ambiguous entries and foreign units refuse with the supported terminal path.
 - **Operation set**: version 1 permits install-and-start/start/stop/restart for the deployment's own worker or
   installed receiver user service, start-only of its missing/stopped egress proxy after runtime endpoint-locality
-  verification, ordinary non-live/non-fixing doctor, create-only provider API-key assignment, and viewer add/revoke
+  verification, explicit non-live/non-fixing `setupReadOnly` doctor without probe containers, selected-provider API-key Add and separate Replace, and viewer add/revoke
   through the hardened token writer.
   The implementation's registration/protocol/policy enumerations must be checked both ways. No arbitrary command,
   executable, argument vector, path, environment, forge credential or operator-token mutation comes from HTTP.
@@ -10515,11 +10515,26 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   read-only console, changed sign-in, changed plan, unsafe ownership or stale file/unit before apply. Incomplete
   queue/cron exposure refuses operations that can start/restart a worker; key writes, viewer operations and
   doctor do not acquire an unrelated queue-scan prerequisite. A per-deployment lock serializes setup mutations
-  across callers. Revalidate after taking it; no lock is represented as stopping ordinary job admission. Record
+  across callers, including browser viewer writes and independent host children. A stale lock fails closed;
+  host recovery inspects its PID/external effects before removal rather than racing an automatic reaper.
+  Revalidate after taking it; no lock is represented as stopping ordinary job admission. Record
   audit intent before the first effect. Recheck the authorizing session/grant immediately before dispatch, monitor
   their loss and abort further dispatches. An already submitted service-manager action may finish after
   cancellation; bound its child lifetime and report observed partial/unknown effects without retrying it. Do not
   promise an in-memory parent session can atomically revoke an external manager action already submitted.
+- **Version 1 wire shape**: `worker/src/setup-contract.mjs` is the derivable closed vocabulary. Requests carry
+  `version`, 32-hex `id`, `phase` (`plan`, `apply`, `status`), `operation`, optional private 64-hex `expected`, and
+  provider-only `input` (`provider`, `key`, `value`). Apply requires `expected`; only apply may carry a value.
+  Results carry matching version/id/operation, closed `state`/`reason`, optional closed effects and a private plan:
+  digest, component, user manager, local host/account, effects and optional canonical provider/key/workerName.
+  Key plans also bind Add/Replace mode, derived shared-slot aliases and safe credential-source metadata.
+  The worker name is the validated effective `PI_WORKER_NAME`, so readiness binds the real heartbeat identity.
+  Plan hashes can include secret-bearing source files and never enter HTTP, audit or shared state. CLI exit 2
+  with a matching validated refused result remains a determinate refusal; other broken/nonzero replies are
+  refused before mutation or unknown after apply dispatch. The parent revalidates entry ownership, ancestors,
+  canonical path, package/version and captured CLI/metadata content identity before each dispatch. Every setup
+  writer also binds the canonical deployment device/inode at grant creation; retargeted aliases and replaced
+  directories refuse rather than transferring that authority, including private viewer writes.
 - **Transport and bounds**: run the known worker entry with `shell:false` and fixed argv. The child receives one
   versioned JSON request on stdin (at most 64 KiB), with server-chosen operation id and validated operation
   fields; the key value, if any, never rides argv/environment. Unknown versions, keys and operations refuse.
@@ -10530,24 +10545,38 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 - **Result**: report a server-chosen operation id, closed operation/stage/reason tokens and validated effects.
   Distinguish unchanged, applied, partial, unknown and refused. A timeout or broken result after dispatch may mean
   partial/unknown, not "nothing changed". Never retry it automatically. "Unit written", "start accepted" and
-  "waiting for heartbeat" are distinct from Ready: the last requires actual published heartbeat/doctor evidence
-  within a bounded 90-second readiness wait. A timer expiring leaves a named timeout/check state with recovery.
+  "waiting for heartbeat" are distinct from Ready. Worker starts wait at most 90 seconds for an actual fresh
+  heartbeat; expiry leaves a named timeout/check state with recovery. Receiver manager readback is an applied
+  operation, while forge/provider/egress readiness still comes from their separate published doctor evidence.
+  Worker starts require a heartbeat whose observation and beat are at or after dispatch; a cached pre-start row,
+  missing/future observation timestamp, stale row or degraded registry cannot become fresh as wall time passes.
   Audit intent or a zero exit cannot manufacture readiness. Bounded progress may reach operator live panels;
   observer projections include safe state only and no account/path, body, token or private result.
 - **Service/exposure checks**: include actual multi-unit dependencies and configuration effects; refuse adoption,
   shared/foreign ownership or unpreviewable disruption. Show timestamped current queue/cron counts and existing
-  paid-action reserve estimates. Unknown/partial exposure refuses start, never reads zero. No budget is reserved
+  paid-action reserve estimates. The scan explicitly bypasses the display waiting cache; duplicate job ids across
+  queues refuse because the shared reserve reader keys by id. Unknown/partial exposure refuses start, never reads zero. No budget is reserved
   for the setup action. Worker admission and reservations remain per job. Stop/restart/Undo explicitly warn of
   interruption, including work arriving after preview, and never claim to undo spent money. Proxy mutation is
   start-only; destructive restart/removal/rules refresh retain terminal recovery and its active-job precautions.
 - **Private key state**: only canonical API-key names selected by the server are writable; reject bearer/OAuth
   slots and providers without a supported key slot. Limit UTF-8 values to 4 KiB and private entries to 32 per
   process, at most one per session, with at most 60 seconds lifetime. Reject at capacity rather than silently
-  evicting a preview the person is confirming. Keep value/expected inputs outside ordinary diff/flash/live/cache
+  evicting a preview the person is confirming. Reserve and start that lifetime at input receipt, including time
+  awaiting the metadata-only host planner; concurrency/capacity checks run before dispatch. A delayed plan cannot
+  renew the lifetime or recreate expired/disconnected/session-ended state. HTTP response abort disposes the
+  reservation, and an undelivered ticket is cancelled. Browser pagehide/sign-out/session end invalidates in-flight
+  replies; a restored cached document reloads before accepting new private actions. Keep value/expected inputs outside ordinary diff/flash/live/cache
   metadata. Private input comparison hashes never enter audit or public output. Expiry runs without new traffic;
   guarded Cancel, any redeem attempt, logout/revocation/role change and shutdown release the state. Best-effort
   buffer clearing is not a guarantee about JavaScript string copies. Reject controls/command references,
-  duplicate/nonblank assignments, shadowed sources and managed-binding conflicts. The writer rechecks owner,
+  duplicate assignments, wrong Add/Replace preconditions, shadowed sources and managed-binding conflicts. Add
+  requires an absent or decoded-empty canonical slot; Replace requires a decoded nonempty slot (including
+  whitespace), a separate operation/ticket and
+  danger confirmation. Provider selection is explicit and never retargeted when the default changes. Changing
+  selection/mode disposes pending browser/server input; late preview replies are cancelled. Both operations share
+  the one-key-per-session limit. Only the entered value is written; no previous value is retained for Undo.
+  Shared canonical slots are derived from the pinned mapping and named before confirmation. The writer rechecks owner,
   mode, real target and bytes before exclusive temporary-file creation, then repeats the expected-input check
   immediately before atomic rename; unsafe or intervening inputs change nothing. Browser submission clears the
   field/transient value references and bypasses ordinary retained request bodies and Preview again replay; a
@@ -10571,8 +10600,10 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   operator mint or new token-print exception is admitted.
 - **Projection**: `/api/state`'s public shape is UNCHANGED, checked by this prerequisite. `/setup` reuses existing
   panel/SSE framing with role-separated caches. Setup action progress is bounded state, not authority; private
-  tickets/keys/invitation links never enter the snapshot. `dispatch_setup` remains a read, never a setup executor.
-- **Acceptance**: `REQ-BROWSER-FIRST-RUN-SETUP`; future tests must verify the real packaged child boundary,
+  tickets/keys/invitation links never enter the snapshot. Operator key-slot metadata follows the same selected
+  host-shell keys, deployment-file overrides and settings-overlay precedence as the child, refusing invalid
+  sources without spawning a process. `dispatch_setup` remains a read, never a setup executor.
+- **Acceptance**: `REQ-BROWSER-FIRST-RUN-SETUP`; tests verify the real packaged child boundary,
   expected-input writer, session isolation, lifecycle limits, counterexamples and meaningful end-to-end effects.
 
 ## INT-CONSOLE-STATE-API
@@ -12081,6 +12112,9 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-01 (#774, shared auth metadata) | Subscription adapter descriptors move to an SDK-free metadata leaf, mirrored byte-identically into the runner and added to its mirror guard. Policy parsing moves without changing validation or schemas. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, adapter transformation/output/source pins and container credential capabilities UNCHANGED, checked. Private setup lifetime now starts at input receipt, including a pending planner; abort, navigation and sign-in changes cannot restart it or mint a late usable ticket. |
+| 2026-11-01 (#774, provider management) | `INT-CONSOLE-SETUP-HOST` AMENDED: separate selected-provider Add/Replace operations and private mode/alias/source metadata; one pending key across both operations, unchanged private lifetime and descriptor-bound expected-input rename. Add requires absent/blank, Replace requires nonblank, and default changes never retarget a selected key. Public state/SSE/audit schemas, token files, subscription policy/store schemas, refresh ownership, job credential forwarding, trigger/pointer/run-record/container contracts and deploy mirrors UNCHANGED, checked. |
+| 2026-11-01 (#774, implementation) | `INT-CONSOLE-SETUP-HOST`, `INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` IMPLEMENTED after #783. Closed v1 requests/results, bounded fixed child, trusted-entry recheck, effective worker identity, expected-input key writer, exact-incarnation viewer code and private lifecycle are wired through existing guards. Typed exit-2 refusals retain their reason; uncertain effects are never retried. Operator key-slot metadata follows the same verified source precedence as the child, correcting stale-startup and shell-only labels. Hash-only token format, generation, audit-chain schema, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, trigger/pointer/run-record/container/auth-store contracts and deploy mirrors UNCHANGED, checked. |
 | 2026-10-31 (#774, prerequisite specs) | NEW `INT-CONSOLE-SETUP-HOST`, DECIDED, NOT IMPLEMENTED: local process grant, fixed versioned child protocol, bounded lifecycle, revalidated effect/exposure plans, private key cancellation/expiry, session-only viewer link and typed applied/partial/unknown outcomes. `INT-CONSOLE-TOKENS-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` AMENDED narrowly for setup writers and safe intent/result reporting. Hash-only token shape, modes, roles, revocation, audit-chain format, public `INT-CONSOLE-STATE-API`, ordinary `INT-CONSOLE-EVENT-STREAM` framing, trigger/pointer/run-record/container contracts, auth stores and deploy mirrors UNCHANGED, checked. |
 | 2026-10-31 (#781) | NEW `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE` and `INT-SUBSCRIPTION-QUOTA-KEY`; `INT-SDK-SESSION-OPTIONS`, `INT-CONTAINER-JOB-INPUTS`, `INT-PI-PACKAGES-FILE-CONTRACT`, `INT-DEFER-REASON-KEY` and the runner/history cost-refusal vocabulary AMENDED through those explicit contracts. `INT-SUBSCRIPTIONS-FILE-CONTRACT` corrects its obsolete blanket OAuth rationale; analytics-only enforcement UNCHANGED, checked. Model cooldown storage, ordinary container mounts, queue data, recovery checkpoint model, sandbox credentials, session promotion, forged-output rejection, model ceilings and the ordinary reservation/settlement ledgers UNCHANGED, checked. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |
 | 2026-10-31 (#773) | INT-DOCTOR-RESULTS-KEY AMENDED with the explicitly typed/redacted proposal-detail exception, preserving unrelated successful-check privacy. UNCHANGED, checked: container isolation, budget-before-tokens, infrastructure-only retries, merge prohibition, exact pi pins, failover/replay safety, recovery physical model, cooldown storage and PII-free run-record shape. |

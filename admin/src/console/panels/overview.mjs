@@ -1199,7 +1199,7 @@ export function overviewSetup(view) {
   if (!st.applies) return html``;
   const from = st.doctor === null ? null : `from doctor on ${st.doctor.host}${Number.isSafeInteger(st.doctor.ageMs) ? `, ${ageWords(st.doctor.ageMs)} ago` : ""}`;
   const prog = html`<div class="su-prog"><p><b class="su-big">${count(st.ready)}</b> of ${count(st.total)} ready</p>${progressBar(st.steps)}<p class="muted">${st.sub}</p></div>`;
-  return ui.card({ title: "Getting ready", sub: from, body: html`${prog}<ol class="su-steps">${st.steps.map((x, i) => stepHtml(x, i, view))}</ol>` });
+  return ui.card({ title: "Getting ready", sub: from, body: html`${prog}<p class="su-p"><a class="btn" href="/setup">Open setup</a></p><ol class="su-steps">${st.steps.map((x, i) => stepHtml(x, i, view))}</ol>` });
 }
 
 /** "Do it from pi": the guided setup, `/dispatch setup`, its command an operator's. */

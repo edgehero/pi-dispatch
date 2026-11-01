@@ -255,6 +255,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// STRICTLY `=== true`, so only the CLI's own flag arms it: a truthy string from a caller that forwarded an
 		// option bag runs nothing. The fs, PID-liveness and nonce are seams so the sequence is driven without Docker.
 		live = false,
+		// The granted browser action publishes observations without starting/sweeping probe containers (#774).
+		setupReadOnly = false,
 		// Issue #683: `--openshell`, the openshell venue's lines (doctor-openshell.mjs), strictly `=== true` as `live`.
 		// `openshellRun` is their spawn seam, for the tests.
 		openshell = false,
@@ -437,7 +439,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -555,7 +557,7 @@ async function publishResults({ seams, publishDoctor, writeErr, record }) {
 }
 
 /** The real write: doctor's own fail-fast client, bounded, always dropped (`withDoctorClient`). */
-async function defaultPublishDoctor(url, name, record) {
+export async function defaultPublishDoctor(url, name, record) {
 	const { publishDoctorRecord } = await import("./doctor-results.mjs");
 	await withDoctorClient(url, (client) => publishDoctorRecord(client, name, record));
 }
@@ -2674,7 +2676,7 @@ export async function collectChecks(shellVars, seams) {
 	// is podman's answer to the question docker's endpoint read answers below: the token must not ride to another
 	// machine. A deployment with `local` probes on docker exactly as before, and only there: one hand-off of the token per
 	// doctor run, not one per venue, and that deployment's output unchanged.
-	const ghProbeBin = localUsed
+	const ghProbeBin = seams.setupReadOnly ? null : localUsed
 		? dockerCode === 0 && imageCode === 0
 			? "docker"
 			: null
@@ -7103,7 +7105,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// ONE detach gate for this doctor run (issue #452, gate round 3), shared by the sweep and the canary: `local` can be a
 	// rootless Podman 4.x reached as `docker`, where both of them detach the running proxy.
 	const gate = makeDetachGate(canaryDocker, { bin: "docker", ...(seams.readFactsOnce ? { readRuntime: async () => runtimeFromFacts(await seams.readFactsOnce()) } : {}) });
-	checks.push(...(await sweepStaleCanaryNetworks({ run: canaryDocker, pid, isAlive, endpoint, gate })));
+	if (!seams.setupReadOnly) checks.push(...(await sweepStaleCanaryNetworks({ run: canaryDocker, pid, isAlive, endpoint, gate })));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
@@ -7264,6 +7266,10 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		// an operator's alike: never this folder's, which may not be the one mounted (gate round 2).
 		const mounted = readIncludeBindSource(parsed?.mounts);
 		checks.push(endpointsIncludeCheck({ answer: inside, endpoints, bin: "docker", proxy, prefix: "", mounted, recreate: custom ? `recreate ${proxy} so it mounts the file anew` : `\`docker rm -f -v ${proxy}\`, then \`pi-dispatch up\` starts it on the file anew (a restart cuts running jobs' tunnels)` }));
+	}
+	if (seams.setupReadOnly) {
+		checks.push({ ok: false, warn: true, label: "Egress canary: not run by browser setup", fix: "run pi-dispatch doctor in the deployment terminal for the container probe" });
+		return checks;
 	}
 	if (imageCode !== 0) return checks;
 	// Issue #431: the canary itself is `runEgressCanary`, shared with the podman venue's `--live` and the conformance

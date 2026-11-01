@@ -78,7 +78,7 @@ test("every page, both roles: the pills in order, aria-current on the screen sho
       assert.ok(nav.includes('<details class="more">'), `${name}.${role}: More includes Models for every role`);
       if (role === "viewer") assert.ok(!html.includes('href="/audit"'), `${name}: a viewer is never offered the audit log`);
       const current = [...nav.matchAll(/<a href="([^"]*)" aria-current="page">/g)].map((m) => m[1]);
-      const here = ["secrets", "connections", "project"].includes(name) ? "config" : name === "answer-rules" ? "parked" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
+      const here = name === "setup" ? "overview" : ["secrets", "connections", "project"].includes(name) ? "config" : name === "answer-rules" ? "parked" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
       if (PAGES[name].auth === "operator" && role !== "operator") assert.deepEqual(current, [], `${name}.${role}: the refused page has no pill to mark`);
       else assert.deepEqual(current, [PAGES[here].path], `${name}.${role}: the one current pill`);
     }
@@ -567,7 +567,10 @@ function shellDom({ theme = null, clipboard = null, secure = true } = {}) {
     getElementById: () => null,
     querySelector: (s) => ({ "[data-theme-toggle]": toggle, 'meta[name="color-scheme"]': meta, "details.more": more })[s] ?? null,
     querySelectorAll: (s) => (s === "button[data-copy][hidden]" ? [copy].filter((b) => b.hidden) : []),
-    addEventListener: (type, fn) => docListeners.set(type, fn),
+    addEventListener(type, fn) {
+      const previous = docListeners.get(type);
+      docListeners.set(type, previous ? event => { previous(event); fn(event); } : fn);
+    },
     activeElement: null,
   };
   Object.defineProperty(document, "cookie", { set: (v) => cookies.push(v), get: () => { throw new Error("the script never reads document.cookie"); } });

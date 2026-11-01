@@ -8,7 +8,7 @@ A guide card: setting up a new deployment, from the one command in a terminal to
   4. the first run on the Overview;
   5. its result on Runs.
 - Under each step, the next line says who moves it on: *you* or *pi-dispatch*.
-- The ribbon on each step says whether that screen is built, planned or proposed, and its issue. Setting up from the browser is proposed in #774.
+- The ribbon on each step says whether that screen is built, planned or proposed, and its issue. Supported browser setup is built by PR #784 (#774); GitHub App creation remains open.
 
 **Panels.** The strip of steps (`j-strip`); there are no console panels on a guide card.
 

@@ -103,6 +103,7 @@ function fakeValkey({ hexists = false } = {}) {
     redis,
     zadd: (key, member, score) => zsets.set(key, [...(zsets.get(key) ?? []).filter(([m]) => m !== member), [member, score]]),
     lpush: (key, ...ids) => lists.set(key, [...ids.reverse(), ...(lists.get(key) ?? [])]),
+    setList: (key, ids) => lists.set(key, [...ids]),
     hset: (key, obj) => hashes.set(key, { ...(hashes.get(key) ?? {}), ...obj }),
     sadd: (key, ...ids) => sets.set(key, new Set([...(sets.get(key) ?? []), ...ids])),
   };
@@ -988,4 +989,24 @@ test("the switch's queues come from the registry read at the time: a host regist
   } finally {
     await reader.dispose();
   }
+});
+
+test("setup's freshWaiting observation sees same-count replacement before the display cache expires", async () => {
+  const logsDir = tempDir("pd-774-fresh-waiting-");
+  const v = fakeValkey();
+  addJob(v, "pi-jobs", "old-job", { state: "waiting" });
+  let at = AT;
+  const reader = readerOf(logsDir, snapshotValkey(v), { now: () => at });
+  try {
+    const displayed = await reader.snapshot({ waiting: true });
+    assert.deepEqual(displayed.waiting.rows.map(row => row.jobId), ["old-job"]);
+    v.setList("bull:pi-jobs:wait", []);
+    addJob(v, "pi-jobs", "replacement-job", { state: "waiting" });
+    at += 1;
+    assert.equal((await reader.snapshot({ waiting: true })).waiting, displayed.waiting, "the normal display keeps its bounded polling cache");
+    const confirmed = await reader.snapshot({ waiting: true, freshWaiting: true });
+    assert.deepEqual(confirmed.waiting.rows.map(row => row.jobId), ["replacement-job"], "setup reads the replacement even at the same queue count within 5 seconds");
+    assert.equal(confirmed.waiting.at, at);
+    assert.deepEqual((await reader.snapshot({ waiting: true })).waiting.rows.map(row => row.jobId), ["replacement-job"], "the new observation also refreshes the ordinary display");
+  } finally { await reader.dispose(); }
 });

@@ -81,8 +81,9 @@ import * as nodeFs from "node:fs";
 import { createServer } from "node:http";
 import { readRawBody } from "@edgehero/pi-dispatch/http-body";
 import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
-import { ACTIONS, actionNamed, confirmAction, plural, previewAction } from "./actions.mjs";
+import { ACTIONS, actionNamed, cancelAction, confirmAction, plural, previewAction } from "./actions.mjs";
 import { refusalHtml } from "./confirm-view.mjs";
+import { invitationMatches } from "./login-codes.mjs";
 import { renderTriggerCheckResult } from "./panels/triggers.mjs";
 import { errorPage as realErrorPage } from "./error-pages.mjs";
 import { contentTypeRefusal, hostnameOf, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
@@ -305,6 +306,8 @@ function startSession(ctx, entry, file, action, extra = {}) {
   }
   if (presented) {
     deps.sessions.destroy(presented, "elsewhere");
+    deps.actionDeps?.setup?.endSession?.(presented);
+    deps.tickets?.endSession?.(presented);
     res.once("finish", () => deps.hub?.endSession(presented, "elsewhere"));
   }
   const cookie = deps.cookies.sessionCookie(id, { maxAgeSec: Math.floor(deps.config.maxMs / 1000) });
@@ -354,6 +357,7 @@ async function postLoginCode(ctx) {
   if (!file) return;
   const entry = file.tokens.find((t) => t.name === consumed.name);
   if (!entry) return refuse("the link named a token that no longer exists");
+  if (consumed.binding !== undefined && !invitationMatches(consumed.binding, entry, file)) return refuse("the viewer invitation entry or generation changed");
   // Issue #708: the page the link returns to, judged HERE by the page parser (`returnPathOf`), so the browser is only
   // ever sent to one of this console's own pages; anything else, or nothing, lands on the overview. The script checks
   // the answer's shape again before it navigates.
@@ -376,6 +380,8 @@ async function postLogout(ctx) {
     // `elsewhere`: the tab that signed out ignores its own stream's end (the script knows it is signing out), and every
     // other tab of this session is told the browser signed out elsewhere.
     const ended = deps.sessions.destroy(id, "elsewhere");
+    deps.actionDeps?.setup?.endSession?.(id);
+    deps.tickets?.endSession?.(id);
     // The session's open streams end now, not at the hub's next tick.
     deps.hub?.endSession(id, "elsewhere");
     // Signing out is never refused: a failed audit append is logged, and the session is gone either way. Each row names
@@ -594,6 +600,7 @@ function actionRoutes(actions) {
   return actions.flatMap((a) => [
     { method: "POST", path: `/api/act/${a.name}/preview`, auth: "operator", write: true, action: a.name, handler: (ctx) => previewAction(ctx, a) },
     { method: "POST", path: `/api/act/${a.name}/confirm`, auth: "operator", write: true, action: a.name, handler: (ctx) => confirmAction(ctx, a) },
+    ...(a.name.startsWith("setup-") ? [{ method: "POST", path: `/api/act/${a.name}/cancel`, auth: "operator", write: true, action: a.name, handler: ctx => cancelAction(ctx, a) }] : []),
   ]);
 }
 
@@ -701,6 +708,8 @@ function resolveSession(deps, req) {
   if (!read?.file) return { unavailable: true };
   const session = deps.sessions.get(id, read.file) ?? null;
   if (session) return { session };
+  deps.actionDeps?.setup?.endSession?.(id);
+    deps.tickets?.endSession?.(id);
   return { session: null, presented: true, ended: endedReasonOf(deps.sessions.endedOf?.(id) ?? null) };
 }
 
@@ -935,6 +944,7 @@ export function createConsoleServer({
       sendFailure({ req, res, deps }, 500, CONSOLE_FAILED, { page: { kind: "failed" } });
     });
   });
+  server.once("close", () => { actionDeps?.setup?.close?.(); tickets?.close?.(); });
   server.maxConnections = limits.maxConnections;
   return server;
 }

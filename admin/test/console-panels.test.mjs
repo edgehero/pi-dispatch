@@ -1430,7 +1430,10 @@ test("every id the pinned catalog prices passes the what-if rule, reaches the da
  */
 function spendDom({ items, tips = [], hash = "", rect = { left: 0, top: 0, width: 600, height: 300 }, vbThrows = false }) {
   const listeners = new Map();
-  const on = (target) => (type, fn) => listeners.set(`${target}:${type}`, fn);
+  const on = (target) => (type, fn) => {
+    const key = `${target}:${type}`, previous = listeners.get(key);
+    listeners.set(key, previous ? event => { previous(event); fn(event); } : fn);
+  };
   const classList = () => {
     const set = new Set();
     return { add: (c) => set.add(c), remove: (c) => set.delete(c), contains: (c) => set.has(c), set };

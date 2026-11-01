@@ -40,13 +40,6 @@ function proxyState(host) {
   return state("check warning", "attention");
 }
 
-function providerRow(provider) {
-  const source = provider.credentialSource;
-  const value = source === "unknown" || provider.unknown ? state("unknown", "attention", "info") : provider.selectedVariable ? html`<span class="code">${provider.selectedVariable}</span>` : "none in the .env";
-  const end = source === "deployment-env" ? "from .env" : source === "pi-login" ? "pi login on each host (fallback)" : source === "worker-env" ? "worker environment (pi login off)" : "source unknown";
-  return ui.rowPill({ icon: "key", items: [html`<b>${provider.name}</b>`, value], end: { text: end, faint: true } });
-}
-
 function endpointSlots(endpoint) {
   if (endpoint.counting === "fleet" && Number.isInteger(endpoint.used) && endpoint.used >= 0) {
     const count = html`${endpoint.used} of ${endpoint.slots}${endpoint.used > endpoint.slots ? " (leases exceed the current declaration)" : ""}`;
@@ -78,7 +71,7 @@ export function connectionsEgress(view) {
 }
 
 export function connectionsEndpoints(view) {
-  return card(view, "Model endpoints", (v) => html`<p class="muted"><span class="code">model-endpoints.json</span>; fleet lease counts where available. Per-host counts are not published.</p>${v.endpoints === null ? html`<p>${state("endpoints unavailable", "attention", "info")} Correct model-endpoints.json, then render the deployment's egress rules.</p>` : detailTable("Model endpoint slots", ["Endpoint", "Host and port", "Key", "Slots in use"], v.endpoints.map((ep) => [{ html: ep.id, id: true }, { html: html`<span class="code">${ep.host}:${ep.port}</span>`, wide: true }, ep.keyless ? "keyless" : "provider key required", endpointSlots(ep)]), "No model endpoint is declared.")}${v.egress.hosts.filter((h) => h.endpoints).map((h) => ui.banner({ status: "attention", title: `${h.name} reads its own copy of the endpoints file, and it does not load`, body: html`${h.endpoints.label} ${h.endpoints.fix ? html`Fix: ${h.endpoints.fix}` : null} ${h.ageMs === null ? null : html`Checked ${ageText(h.ageMs)} ago.`}`, actions: ui.btn({ href: `/fleet/host?name=${encodeURIComponent(h.name)}`, label: `Open ${h.name}` }), sm: true }))}<h3>Provider keys, by name</h3><ul class="rows cn-providers">${v.providers.map(providerRow)}</ul><p class="cn-note">${ui.icon("info", { size: "sm" })}<span>Deployment declarations only; a worker's service environment or pi login may differ. Credential values are never shown here.</span></p>`);
+  return card(view, "Model endpoints", (v) => html`<p class="muted"><span class="code">model-endpoints.json</span>; fleet lease counts where available. Per-host counts are not published.</p>${v.endpoints === null ? html`<p>${state("endpoints unavailable", "attention", "info")} Correct model-endpoints.json, then render the deployment's egress rules.</p>` : detailTable("Model endpoint slots", ["Endpoint", "Host and port", "Key", "Slots in use"], v.endpoints.map((ep) => [{ html: ep.id, id: true }, { html: html`<span class="code">${ep.host}:${ep.port}</span>`, wide: true }, ep.keyless ? "keyless" : "provider key required", endpointSlots(ep)]), "No model endpoint is declared.")}${v.egress.hosts.filter((h) => h.endpoints).map((h) => ui.banner({ status: "attention", title: `${h.name} reads its own copy of the endpoints file, and it does not load`, body: html`${h.endpoints.label} ${h.endpoints.fix ? html`Fix: ${h.endpoints.fix}` : null} ${h.ageMs === null ? null : html`Checked ${ageText(h.ageMs)} ago.`}`, actions: ui.btn({ href: `/fleet/host?name=${encodeURIComponent(h.name)}`, label: `Open ${h.name}` }), sm: true }))}<p class="cn-note"><a class="link" href="#p-provider-keys">Manage provider API keys</a> separately from endpoint declarations.</p>`);
 }
 
 export function connectionsNotify(view) {
@@ -98,7 +91,7 @@ export function connectionsEnvironment(view) {
     const first = v.environment.filter((e) => important.has(e.key) || e.disagrees || !/^(?:not set|unknown)/.test(e.value));
     const rest = v.environment.filter((e) => !first.includes(e));
     const rows = (entries) => entries.map((e) => html`<tr><th scope="row" class="code">${e.key}</th><td>${e.value}${e.disagrees ? html`<br>${state("this shell and the .env differ; the service reads the .env", "attention")}` : null}</td></tr>`);
-    return html`${table("Deployment environment keys", ["Key", "Declaration"], rows(first), "No deployment metadata is available.")}${rest.length ? html`<details class="cn-env-rest"><summary>${rest.length} other keys, not set or unknown</summary>${table("Other deployment environment keys", ["Key", "Declaration"], rows(rest), "")}</details>` : null}<p class="muted">Read from the deployment's .env. Edit the file and restart the service; nothing here writes it. Each worker may also receive settings from its service environment.</p>`;
+    return html`${table("Deployment environment keys", ["Key", "Declaration"], rows(first), "No deployment metadata is available.")}${rest.length ? html`<details class="cn-env-rest"><summary>${rest.length} other keys, not set or unknown</summary>${table("Other deployment environment keys", ["Key", "Declaration"], rows(rest), "")}</details>` : null}<p class="muted">Read from the deployment's .env. Use the Provider API keys card for its confirmed key changes; edit other declarations on the host and restart the service. Each worker may also receive settings from its service environment.</p>`;
   });
 }
 

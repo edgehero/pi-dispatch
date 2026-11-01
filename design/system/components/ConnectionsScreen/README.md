@@ -7,15 +7,16 @@ Where jobs come from and what they may reach: forges and their webhooks, egress 
   - An unconfigured forge collapses to one line saying its path answers 404. GitHub is enabled by a trigger or an explicit auth source; each other forge by any of its receiver variables. GitHub's implicit default auth source is shown as such.
   - One line says delivery health is not published and where to look instead.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
-- **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor. Provider keys are listed by variable name and where they come from.
+- **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
+- **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
 - **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Its runs are in the worker's log; their history is not published.
 - **MCP servers, Deployment environment, Staged pi packages.** All read-only, each with the command or file that changes it. Caps set only in the .env read "unknown (worker env or default)".
 
-Viewers see the same page; nothing on it writes.
+Viewers read status and provider guides without mutation controls. A read-only operator keeps the guides and terminal recovery. No-JavaScript users can read native disclosures and external links, while mutation controls stay disabled.
 
-**Subscription authentication.** Safe connection facts show the selected exact adapter, owner host, compatibility, credential health and expiry. Only a writable operator gets host-terminal sign-in, logout, usage and explicit trial commands. No browser authentication or credential value is exposed. Viewers and agents read the same safe subscription facts. Other deployment metadata is not published in the agent view.
+**Subscription authentication.** Safe connection facts show the selected exact adapter, owner host, compatibility, credential health and expiry. Native help guides explain OpenAI Sign in with ChatGPT on the owning host and Claude community compatibility, with the host setup guide and official provider guidance. Claude community routes are explicitly separate from the official Claude Code setup-token workflow. Only a writable operator gets host-terminal sign-in, logout, usage and explicit trial commands. No browser authentication or credential value is exposed. Viewers and agents read the same safe subscription facts. Other deployment metadata is not published in the agent view.
 
-**Panels.** `p-connection-problems`, `p-forges`, `p-egress`, `p-endpoints`, `p-subscription-auth`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
+**Panels.** `p-connection-problems`, `p-provider-keys`, `p-forges`, `p-egress`, `p-endpoints`, `p-subscription-auth`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
 
 **The server provides.**
 - Per forge: the triggers naming it, the auth source, whether verification secrets are set (names only), the webhook mode and path, and the polling settings.

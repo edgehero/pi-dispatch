@@ -1,0 +1,41 @@
+/** Reviewed navigation only. Credential support comes from pinned pi, never from these links. */
+import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
+import { HOST_AUTH_PROVIDERS, needsHostAuthentication } from "@edgehero/pi-dispatch/provider-key";
+export const PROVIDER_HELP_REVIEWED_AT = "2026-11-01";
+export const PROVIDER_KEY_GUIDE = "https://github.com/edgehero/pi-dispatch/blob/main/docs/provider-keys.md";
+export const SUBSCRIPTION_AUTH_GUIDE = "https://github.com/edgehero/pi-dispatch/blob/main/docs/subscription-auth.md";
+// A new pinned provider must be reviewed before it gains a browser credential workflow or help claim.
+const REVIEWED = ["amazon-bedrock", "ant-ling", "anthropic", "azure", "baseten", "cerebras", "cloudflare-ai-gateway", "cloudflare-workers-ai", "deepseek", "fireworks", "github-copilot", "google", "google-vertex", "groq", "huggingface", "kimi-coding", "meta", "minimax", "minimax-cn", "mistral", "moonshotai", "moonshotai-cn", "nvidia", "openai", "openai-codex", "opencode", "opencode-go", "openrouter", "qwen-token-plan", "qwen-token-plan-cn", "qwen-token-plan-individual", "radius", "together", "typesafe", "vercel-ai-gateway", "xai", "xiaomi", "xiaomi-token-plan-ams", "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp", "zai", "zai-coding-cn"];
+export const SPECIAL_AUTH_PROVIDERS = HOST_AUTH_PROVIDERS;
+const core = {
+  anthropic: { label: "Anthropic / Claude API", url: "https://platform.claude.com/settings/keys", docsUrl: "https://platform.claude.com/docs/en/get-api-key", steps: ["Sign in to Claude Console and open API keys.", "Create a key for the intended workspace or service account and copy it when shown.", "Paste the new API key into the write-only field here, then preview and confirm."], notice: "Claude subscription sign-in and Claude Code setup-token are separate from an Anthropic API key." },
+  openai: { label: "OpenAI API", url: "https://platform.openai.com/api-keys", docsUrl: "https://developers.openai.com/api/docs/quickstart", steps: ["Sign in to OpenAI Platform and select the intended project.", "Create an API key and copy it when shown.", "Paste the new API key here, then preview and confirm. ChatGPT plan sign-in uses the separate host connection guide."], notice: "An API key and Sign in with ChatGPT use different credential and billing routes." },
+  google: { label: "Google Gemini API", url: "https://aistudio.google.com/apikey", docsUrl: "https://ai.google.dev/gemini-api/docs/api-key", steps: ["Sign in to Google AI Studio and open API keys.", "Choose the intended Cloud project and create or copy a Gemini API key.", "Paste it here, then preview and confirm. Vertex credentials use a separate host setup."], notice: "Use the Gemini API key flow, not a Vertex or Google account login token." },
+  openrouter: { label: "OpenRouter", url: "https://openrouter.ai/workspaces/default/keys", docsUrl: "https://openrouter.ai/docs/api_reference/authentication", steps: ["Sign in to OpenRouter and open Keys.", "Create a named key and choose its credit limit.", "Copy the key into this write-only field, then preview and confirm."], notice: null },
+  deepseek: { label: "DeepSeek", url: "https://platform.deepseek.com/api_keys", docsUrl: "https://api-docs.deepseek.com/", steps: ["Sign in to the DeepSeek API platform.", "Open API keys and create a key for this deployment.", "Copy it here, then preview and confirm."], notice: null },
+};
+const special = {
+  "amazon-bedrock": { steps: ["Choose a provider with a supported worker credential route for the deployment's main model.", "Configuring AWS credentials on the host does not enable amazon-bedrock in pi-dispatch."], notice: "pi supports AWS credential chains and Bedrock bearer tokens. The pi-dispatch worker currently does not support amazon-bedrock as a main provider." },
+  "google-vertex": { steps: ["Configure a Google Cloud API key as GOOGLE_CLOUD_API_KEY in the worker's deployment environment on the owning host.", "Restart affected worker services separately. An ADC login or credentials file alone does not enable this Vertex route."], notice: "pi-dispatch can forward GOOGLE_CLOUD_API_KEY for google-vertex. ADC-only and service-account-file authentication are not supported for a main provider; a Gemini API key does not replace a Google Cloud API key." },
+  "github-copilot": { steps: ["Configure the correct Copilot credential as COPILOT_GITHUB_TOKEN on the owning host, outside this form.", "Restart affected worker services separately. This API-key form does not perform Copilot sign-in or refresh."], notice: "A general GitHub personal access token is not a substitute for Copilot authentication." },
+  "openai-codex": { steps: ["Choose provider openai for the reviewed managed OpenAI connection.", "Follow Subscription authentication to configure its explicit binding and complete sign-in on the owning host."], notice: "The pi-dispatch worker currently does not support pi's openai-codex OAuth route as a main provider. The reviewed managed OpenAI connection uses openai instead." },
+};
+export const PROVIDER_HELP = Object.freeze(Object.fromEntries(REVIEWED.map(provider => [provider, Object.freeze({
+  label: core[provider]?.label ?? provider,
+  kind: needsHostAuthentication(provider) ? "special" : "api-key",
+  url: core[provider]?.url ?? null,
+  docsUrl: core[provider]?.docsUrl ?? PROVIDER_KEY_GUIDE,
+  steps: Object.freeze(special[provider]?.steps ?? core[provider]?.steps ?? ["Use the provider's own account and credential instructions.", "Create an API key only if the provider supports the canonical slot shown here.", "Paste only that API key here; preview the target and any shared-provider effect before confirming."]),
+  notice: special[provider]?.notice ?? core[provider]?.notice ?? "Saving a key does not select this provider, validate a credential or change model routing.",
+})])));
+export function providerHelp(provider) {
+  return typeof provider === "string" && Object.hasOwn(PROVIDER_HELP, provider) ? PROVIDER_HELP[provider] : { label: "Custom provider", kind: "special", url: null, docsUrl: PROVIDER_KEY_GUIDE, steps: ["The generic form cannot configure a custom provider's credentials.", "A custom main provider requires the declared keyless local endpoint setup in the host guide."], notice: "Custom keyed main providers and extension-only models are not enabled by this form." };
+}
+export const PRIMARY_PROVIDER_HELP = Object.freeze(["anthropic", "openai", "google", "openrouter", "deepseek"]);
+// Tests compare both directions; do not silently add a newly generated provider to this reviewed catalog.
+export const providerHelpCatalogMatchesPin = () => Object.keys(PROVIDER_HELP).sort().join("\n") === Object.keys(PROVIDER_KEY_NAMES).sort().join("\n");
+
+export const PROVIDER_AUTH_GUIDES = Object.freeze({
+  openai: Object.freeze({ label: "Sign in with ChatGPT on the owning host", docsUrl: SUBSCRIPTION_AUTH_GUIDE, officialUrl: "https://developers.openai.com/siwc/token-sharing-open-source", command: "pi-dispatch auth login <connection-id>", steps: Object.freeze(["Configure an openai-chatgpt connection and explicit openai binding in the reviewed policy.", "On its owning host, run the login command from this deployment with the worker's settings and Valkey context.", "Complete the provider browser authorization. A remote browser needs callback port 1455 forwarded to that host."]), notice: "The console never receives OAuth credentials. Complete the loopback authorization on the owning host; this page does not perform a sign-in." }),
+  anthropic: Object.freeze({ label: "Claude subscription and community compatibility", docsUrl: SUBSCRIPTION_AUTH_GUIDE, officialUrl: "https://code.claude.com/docs/en/legal-and-compliance", command: null, steps: Object.freeze(["Read the vendor's current authentication restrictions before selecting a community route.", "The reviewed pi community adapters are pinned compatibility paths with their own host staging and login instructions.", "Official claude setup-token is for Claude Code; its token is not an API key to paste here."]), notice: "Compatibility with pinned community packages is not vendor endorsement. Follow the host guide rather than pasting a Claude login token." }),
+});

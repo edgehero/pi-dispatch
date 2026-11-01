@@ -287,7 +287,7 @@ test("SECURITY: a viewer and an operator on the same page and query never share 
 
 test("a runs view is loaded at most every pageMinMs (5 s), not every tick; other pages load every tick; a new filter loads at once", async () => {
   // The run detail is held to 2 s since issue #644 made it live (its load reads a record and searches for children).
-  assert.deepEqual(LIVE_DEFAULTS.pageMinMs, { sandboxes: 5000, runs: 5000, run: 2000, parked: 5000 });
+  assert.deepEqual(LIVE_DEFAULTS.pageMinMs, { setup: 2000, sandboxes: 5000, runs: 5000, run: 2000, parked: 5000 });
   const now = clock();
   const h = hubOn({ now, pageMinMs: undefined });
   h.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "runs", query: { q: "zz1" } });
@@ -1745,4 +1745,36 @@ test("stateOf: a refused scheduler key has no stall count, including a stored nu
   assert.equal(result.schedulers[0].name, null);
   assert.equal(result.schedulers[0].stalls, null);
   assert.equal(result.schedulers[1].stalls, 2);
+});
+
+
+test("setup progress is re-read at the two-second boundary through the existing live cache", async () => {
+  const now = clock();
+  const h = hubOn({ now, pageMinMs: undefined });
+  h.hub.subscribe({ res: fakeRes(), sessionId: "s1", session: OP, page: "setup", query: {} });
+  await h.hub.tick();
+  const count = () => h.loads.filter(([name]) => name === "setup").length;
+  assert.equal(count(), 1);
+  now.advance(1000); await h.hub.tick(); assert.equal(count(), 1, "reuse inside the progress read interval");
+  now.advance(1000); await h.hub.tick(); assert.equal(count(), 2, "fresh progress at its two-second boundary");
+  h.hub.close();
+});
+
+
+test("a fresh setup document cannot be overwritten by a warm Not yet view after a confirmed start", async () => {
+  let value = "Not yet", reads = 0;
+  const h = hubOn({ pageMinMs: { setup: 2000 }, load: async () => { reads++; return { value }; }, pagePanels: async (_page, { data }) => [{ id: "p-setup", html: data.value }] });
+  try {
+    const old = fakeRes();
+    h.hub.subscribe({ res: old, sessionId: "s1", session: OP, page: "setup", query: {} });
+    await h.hub.tick();
+    assert.equal(panelsIn(old.text())[0].html, "Not yet");
+    value = "Starting: waiting for heartbeat";
+    const fresh = fakeRes();
+    h.hub.subscribe({ res: fresh, sessionId: "s2", session: OP, page: "setup", query: {} });
+    assert.deepEqual(panelsIn(fresh.text()), [], "do not replay the warm pre-start view at subscribe");
+    await h.hub.tick();
+    assert.equal(reads, 2, "a new HTTP document forces a fresh read inside the normal two-second cadence");
+    assert.equal(panelsIn(fresh.text())[0].html, "Starting: waiting for heartbeat", "the first panel agrees with fresh post-confirm evidence");
+  } finally { h.hub.close(); }
 });

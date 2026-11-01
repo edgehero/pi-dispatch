@@ -587,6 +587,7 @@ readers ([Live updates](#live-updates)).
 | Page | What it shows |
 |---|---|
 | `/` | The overview ([The overview](#the-overview)): a line under the title that says what needs you, then four cards (Needs you: the questions nobody has answered, the failed jobs the queue keeps and the registered hosts whose doctor fails, with the day's failed and refused runs under them; In line: how many jobs wait to start and why; Running: the jobs in each host's slots; Spend today), then the timeline of what ran and what is in line ([The overview's timeline](#the-overviews-timeline)) with the caps under it, and beside them the waiting jobs by reason ([Waitlists](#waitlists)) and the hosts. A deployment that has never run a job sees what stands before its first job instead ([First run](#first-run)). `?rows=`, `?zoom=` and `?project=` choose how the timeline is drawn. |
+| `/setup` | The live first-run checklist, bounded person-only host setup when explicitly granted, and terminal alternatives ([First run](#first-run)). |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
 | `/runs/sandboxes` | Operators only: kept workspaces and registered shells across hosts, terminal handoff and copy commands, confirmed preparation/pin/End requests. See [Opening a sandbox](#opening-a-sandbox). |
 | `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status and numbers with a banner explaining what is hidden. |
@@ -1036,72 +1037,99 @@ shows, which it counts as not read), or both in one sentence. Under the groups, 
 
 ### First run
 
-A deployment that has never run a job sees a checklist in the overview's place, "Getting ready": how many of its eight
-steps are ready, a bar of them, and what jobs wait for ("Jobs start once a worker runs and its egress proxy is up.").
-The line under the title says how many steps stand between the deployment and its first job ("The console is up. Two
-steps stand between this deployment and its first job."). The page stays the overview, and it updates as each step is
-done: as soon as the checklist no longer applies (below), the overview takes its place without a reload.
+`/setup` is the live checklist for finishing a deployment. The overview links to it while Valkey answers,
+no run is recorded and either no host is registered or no trigger exists. The direct setup page remains available
+once jobs run. A temporary outage never turns an established deployment into a new one.
 
-**When it applies.** Only when the console read the deployment's Valkey, no run is on record (neither among the newest
-runs nor in the last 24 hours), and either no host is registered (in a registry that was read) or the triggers file
-holds no trigger. So a Valkey that does not answer for a moment never turns the overview into the checklist (its cards
-say Valkey could not be read), and neither does every worker of a deployment that has run jobs going down: its
-overview says no worker is online.
-
-**The steps**, in doctor's order, each Ready, Not yet, Check, To do or Optional:
-
-1. **Deployment**: the deployment folder the console reads its files from, by its last folder alone.
-2. **Queue**: "Valkey answers." It never shows Valkey's address: a viewer's page carries none.
-3. **Console token**: whether you are signed in as an operator or a viewer; an operator is offered the command that
-   makes a viewer token for people who only watch.
-4. **A worker**: a registered host that beat within the last minute (measured as the Hosts card measures it, by when
-   Valkey last refreshed its row), or, with no host registered, a worker the queue sees connected. A host that is
-   registered but has not beat for a minute is Check, and so is a host registry that cannot be read; none is Not yet,
-   with `pi-dispatch service install`, or `pi-dispatch worker` to run one in a terminal.
-5. **The egress proxy**: the worst any host's last doctor run said of its egress proxy, on every venue that runs one.
-   Not running is Not yet ("Every job is refused before it starts until the egress proxy runs."), with
-   `pi-dispatch up`. A doctor result that does not name the check is Check (egress may be off there, or that doctor is
-   older than the check); no doctor result at all is To do, with `pi-dispatch doctor` (a worker runs doctor a minute
-   after it starts).
-6. **The provider key**: the worst any host's doctor said of the provider key, whether it is found and never its
-   value, with `pi-dispatch doctor` to run again once it is set. A doctor that checked the provider but not the key by
-   name is older than the check, and the step says so.
-7. **A first trigger**: how many triggers the triggers file holds. A file that does not load is Not yet, and none is
-   To do, with **Add a trigger** for an operator on a console that takes changes (it opens the configuration page) and
-   a link to what triggers can do ([`triggers.md`](triggers.md)).
-8. **Forge credentials**: Optional while every trigger is a cron trigger; with a label, comment, issue or pull request
-   trigger, the worst of doctor's GitHub and other forge checks.
-
-Each step that doctor judged says which host's doctor said it, and the card says how long ago the newest doctor run
-was. A check that did not pass is quoted as the check it is, failing or warning, never as if doctor said it was so (a
-check's label names the check, and many read as the passing case): "Doctor on build3 reports a failing check: <the
-check's label>.", then what it means for jobs, or "Doctor on build3 reports a warning: <the check's label>.". Beside
-the steps, **Do it from pi** offers the guided setup in pi, which walks through every step and asks before each one
-and never asks for the provider key; and **The Overview, once it runs** shows what each of its cards says while
-nothing has happened yet ("nothing needs you", "no runs in the spend window", ...), except that In line, Running and
-Hosts say what they already have ("2 jobs waiting to start", "1 host registered", or, when the waiting jobs were not
-all read and none was found, "Not every waiting job was read, so jobs in line may be missing here."), so the preview
-never says no host is registered beside a host that beats.
-
-The shell commands an operator is offered, each with a Copy button:
+Bootstrap from the deployment folder with the durable installed CLI:
 
 ```bash
-pi-dispatch-console token add --name '<name>' --role viewer
-pi-dispatch service install
-pi-dispatch worker
-pi-dispatch up
-pi-dispatch doctor
-pi-dispatch setup github --webhook-url '<receiver URL>'
+npm install --save-exact @edgehero/pi-dispatch@4.3.1 @edgehero/pi-dispatch-admin@4.3.1 @earendil-works/pi-coding-agent@1.4.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+./node_modules/.bin/pi-dispatch up --console
 ```
 
-`setup github` is refused without `--webhook-url` or `--no-webhook`, so it is offered whole. A command with a
-placeholder in angle brackets carries a line under it that says what to put there, since a command copied as it
-stands does something nobody asked for: for the token, "Put a name for whoever will hold the token in place of
-`<name>`; the command prints the token once."; for `setup github`, the public URL of this deployment's
-`pi-dispatch-receiver`, where GitHub delivers events, in place of `<receiver URL>`, or, without a receiver,
-`--no-webhook` instead of `--webhook-url` and its URL. Do it from pi offers `/dispatch setup`, which runs in pi. A
-viewer sees the same steps and states with no command, no hint and no Add button; on a read-only console an operator
-still gets the commands and their hints (they run in a shell, not here), but not the Add button.
+`up --console` checks the installed console, exact pi peer, supported user manager, deployment, token file and
+service paths before changing anything. A worker-only `npx` cache cannot become a service. The ordinary `up` pass
+still asks about its infrastructure actions. The extra consent names the console service's `--host-setup` grant.
+Bootstrap preserves existing tokens, or creates an operator hash and discards its durable plaintext. It starts
+only the console service and prints a one-use `/setup` sign-in link after that console answers. The link is good
+for 60 seconds. Its recovery instructions name `pi-dispatch-console link --name '<operator>' --next /setup` and
+`token rotate`. Multiple operators require an explicit choice. On a remote machine, open your own tunnel before
+using its loopback link. `/dispatch setup` offers the same browser route and retains its terminal guided route.
+
+The steps keep this order:
+
+1. **Deployment** shows the deployment's last folder, never its full path.
+2. **Queue** says whether Valkey answered, never its address.
+3. **Console token** recognizes operator, viewer or agent. An operator may create a viewer invitation.
+4. **A worker** uses the host's actual heartbeat or queue connection. A stale or unreadable observation says Check.
+5. **Egress** uses published doctor checks and the actual Connections allowlist count. OpenShell uses gateway
+   policy, so its instructions lead to Connections rather than a Docker/native-Podman proxy action.
+6. **Provider key** uses doctor's credential check, never a sample credential or a successful key write alone.
+7. **A first trigger** offers editable label-fix, nightly-tidy and comment-answer recipes through the normal
+   trigger editor. Opening or cancelling a recipe writes nothing; saving still needs its preview and Confirm.
+8. **Forge credentials** are optional for local cron jobs. GitHub App creation remains a terminal step:
+   `pi-dispatch setup github --webhook-url '<receiver URL>'`, or `--no-webhook` for polling. Browser App creation
+   remains open in `OQ-054`; the console's CSP is unchanged.
+
+Ready, Starting, Not yet, Check, To do and Optional are distinct. An accepted worker start stays Starting until
+a fresh heartbeat arrives; a 90-second wait ends in a named timeout with recovery. Provider, egress and forge readiness separately use
+fresh doctor observations. Partial, stale
+or missing records cannot make a step Ready. Every role sees the safe live steps; viewer and agent pages have
+no setup mutations. Read-only operators retain terminal guidance. Shared panels never carry a person's name,
+service account, secret, private invitation or Valkey address.
+
+Host actions require the process argument `pi-dispatch-console serve --host-setup`. Install it persistently with
+`pi-dispatch service install --console --host-setup`. Existing consoles have no grant; `.env`, a deployment pointer,
+a browser request or a fleet host row cannot enable it. Reinstall without the flag and restart to revoke it.
+Linux user systemd and macOS LaunchAgents are supported; Windows, system services and foreign/shared units use the
+terminal. Each supported action has its own preview, Confirm, audit intent and Undo explanation.
+
+Worker and installed receiver services can be installed/started, stopped or restarted. The preview names the
+actual unit dependencies and, for worker starts/restarts, timestamped waiting/manual/cron exposure and reserve
+estimates. An incomplete scan refuses. Starting can consume waiting work and arm cron; later arrivals still pass
+the normal admission gates. Setup itself reserves no budget. Queue scans bypass the display cache; ambiguous
+job ids or a changed reserve environment refuse. Review conflicting shell/deployment overrides and restart the
+console before previewing under changed paths, provider defaults or dollar limits. Saving only a key does not
+require a console restart. Stop, restart and Undo may interrupt in-flight or
+newly admitted work; stopping cannot undo spending. Egress is start-only for a safe, owned local proxy. Replacement,
+restart, removal, rules refresh, adoption and uncertain ownership require the terminal.
+
+All setup mutations share the deployment lock, including viewer writes. A crash can leave
+`.pi-dispatch-setup.lock`. Inspect its PID and the external service/file effects on the host first; remove it only
+when no setup operation remains. The console never guesses that a stale lock is safe to remove.
+
+**Run doctor** is an explicit non-live, non-fixing observation. Its setup mode withholds probe containers, sweeps
+and container-based forge authentication probes; the published warning says which probes were withheld. It makes
+no paid provider call. Ordinary terminal doctor keeps its existing behavior.
+
+The permanent **Provider API keys** card on Connections lists configured keys, including providers not currently
+used, the default and referenced providers. Select a provider explicitly, then **Add key** to an empty slot or
+**Replace key** to overwrite its existing deployment key through a separate danger confirmation. Shared slots name
+every affected provider. Saving preserves the default provider, models, roles, routing and egress. Presence means
+the slot is set, not that the key works or a running worker has loaded it. Incomplete sources remain unknown.
+
+The field is write-only and limited to 4 KiB. Shadowed credentials, managed-subscription bindings, unsafe files and
+changed inputs refuse. Preview clears the browser field; changing provider or mode, Cancel, expiry, session end
+and shutdown discard the private 60-second ticket. Re-entry is required after failure or expiry. Neither the value
+nor a secret-derived comparison hash appears in previews, audit or live state. No previous key is retained for
+Undo. Saving does not reload a running worker; restart is a separate confirmed interruption. Keep the previous
+provider-side key valid until reload is verified, then revoke it at the provider if appropriate.
+
+Provider-specific **Get API key** links and short guides include OpenAI, Anthropic, Gemini, OpenRouter and DeepSeek.
+See [Provider keys](provider-keys.md) for creation and replacement, and [Subscription authentication](subscription-auth.md)
+for host sign-in. Subscription credentials use a separate managed connection; this form does not import raw
+subscription tokens or perform browser OAuth. Setup keeps a management link after its provider step is ready.
+
+**Add a viewer** creates only a viewer entry and shows its one-use 60-second link solely in the initiating
+operator's confirmation slot. Copy it privately; the recipient needs a route or their own tunnel. It grants a
+session, not a retained token. The link disappears on expiry or sign-in change and is never stored in shared
+HTML, live panels, flash or browser storage. Token rotation, role changes, generation changes and same-name
+replacement invalidate it. If link creation fails after the entry was saved, the result explains the retained
+viewer and host recovery. Revoke previews the exact created entry and refuses a replacement with the same name.
+
+Without JavaScript the checklist, commands, details and recipe navigation remain readable. Mutations stay disabled
+with instructions to use the terminal; no GET request starts a process or changes a file.
 
 ### Money and times
 

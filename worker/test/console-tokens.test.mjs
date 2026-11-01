@@ -363,3 +363,23 @@ test("the file the writers produce parses back to exactly what was written", { s
 	assert.deepEqual(Object.keys(raw), ["version", "generation", "tokens"]);
 	assert.deepEqual(parseTokensFile(text, path), raw);
 });
+
+test("browser setup token writes compare the preview and revoke only the exact viewer incarnation", { skip: !posix }, () => {
+	const dir = tempDir("pd-ctok-setup-");
+	const path = join(dir, "console-tokens.json");
+	const random = counter();
+	addToken({ path, name: "operator", role: "operator", now, random, uid });
+	const before = fs.readFileSync(path, "utf8");
+	const viewer = addToken({ path, name: "observer", role: "viewer", expect: before, now, random, uid });
+	assert.ok(viewer.entry);
+	assert.match(addToken({ path, name: "second", role: "viewer", expect: before, now, random, uid }).invalid, /changed after preview/);
+	assert.equal(readTokensFile({ path, uid }).file.tokens.some(t => t.name === "second"), false);
+	const expected = fs.readFileSync(path, "utf8");
+	rotateToken({ path, name: "observer", now, random, uid });
+	assert.match(revokeToken({ path, name: "observer", expect: expected, identity: viewer.entry, random, uid }).invalid, /changed after preview/);
+	assert.match(revokeToken({ path, name: "observer", identity: viewer.entry, random, uid }).invalid, /replacement was not revoked/);
+	const current = readTokensFile({ path, uid }).file.tokens.find(t => t.name === "observer");
+	assert.ok(revokeToken({ path, name: "observer", identity: current, random, uid }).ok);
+	assert.equal(readTokensFile({ path, uid }).file.tokens.some(t => t.name === "observer"), false);
+	assert.ok(fs.readdirSync(dir).every(name => !name.endsWith(".tmp")));
+});

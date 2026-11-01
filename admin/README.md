@@ -282,20 +282,18 @@ See [`docs/multi-host.md`](https://github.com/edgehero/pi-dispatch/blob/main/doc
 pi install npm:@edgehero/pi-dispatch-admin   # then, in pi:  /dispatch
 ```
 
-**This is the default way to set up pi-dispatch.** With nothing configured, `/dispatch` starts a guided
-setup, in this order:
+**This is the default way to set up pi-dispatch.** With nothing configured, `/dispatch` offers
+**Finish setup in browser**, checks Docker or rootless Podman (and OpenShell when configured), installs
+exact worker, admin and pi packages in a durable deployment folder, then runs the consented
+`up --console` pass. It offers a deployment pointer and opens `/setup` with a private one-use link.
+The checklist uses actual heartbeat and doctor evidence, keeps Starting distinct from Ready, and offers
+individually previewed and confirmed service actions, a create-only provider key field and editable
+first-trigger recipes. [First run](../docs/console.md#first-run) explains the explicit local host grant,
+read-only/viewer/agent views, key and invitation privacy, and terminal recovery.
 
-1. an opening choice and a deployment folder;
-2. a container runtime check (Docker, or rootless Podman on Linux), with pointers per OS if it is missing.
-   It runs **first** on purpose, so no bandwidth is spent where `up` cannot work;
-3. a consented npm install of the pinned runtime;
-4. `pi-dispatch up`, running its own prompts in your terminal (Valkey with its password, the egress proxy,
-   the config files);
-5. the deployment pointer, so `/dispatch` finds this deployment from any directory;
-6. a notice naming the file your provider key belongs in;
-7. optional: the worker as a service, GitHub App credentials (`setup github`, the one step that mints a
-   private key), a trigger edge (receiver service, docker compose profile or the polling command), and a
-   first **cron** trigger for the repo you are in.
+**Guided setup** retains the terminal workflow: runtime check and pinned install, `up`, deployment pointer,
+provider-key guidance, optional worker service, GitHub credentials, receiver or polling, and a first local
+cron trigger. GitHub setup asks for a webhook URL or `--no-webhook`; browser App creation remains open.
 
 Every step says what it will do, asks first and can be declined. Nothing is written into your repo, and no
 credential passes through a dialog. A deployment whose queue is only down keeps the unreachable banner:

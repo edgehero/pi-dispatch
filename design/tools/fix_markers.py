@@ -31,7 +31,7 @@ WORD = {BUILT: ("ok", "done", "Built"), PLANNED: ("running", "clock", "Planned")
 STATUS = {
     "OverviewScreen": (BUILT, "In main since #745."), "OverviewAllClear": (BUILT, "In main since #745."),
     "OverviewPhone": (BUILT, "In main since #745."),
-    "SetupScreen": (PROPOSED, "#774. Today the overview draws the first-run checklist (#745); setting up from the browser is new."),
+    "SetupScreen": (BUILT, "Built by PR #784 (#774). Bounded local setup; browser GitHub App creation remains open."),
     "RunsScreen": (BUILT, "In main since #746."), "RunsPhone": (BUILT, "In main since #746."),
     "ParkedPhone": (BUILT, "In main since #746."),
     **{n: (BUILT, "Built by #747; managed forks added by #648. Watch remains separate work.") for n in ["RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered",
@@ -42,6 +42,7 @@ STATUS = {
     "TriggersScreen": (BUILT, "Built by #767 (#750). Watch links its existing screen; Dispatchers remains proposed."),
     "TriggerDetail": (BUILT, "Built by #767 (#750)."), "TriggerEditor": (BUILT, "Built by #767 (#750)."), "ConfigScreen": (BUILT, "Built by #767 (#750)."),
     **{n: (BUILT, "Built by #751, Secrets, Connections and project detail.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
+    "ConnectionsScreen": (BUILT, "Built by #751; provider API key management added by PR #784 (#774)."),
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
     "ApprovalRequest": (BUILT, "Built by #649: budget raises are worker-enforced; external gates are advisory. Model text stays in the transcript."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),
     "ModelsScreen": (BUILT, "#780. Scoped roles, fallbacks, cooldowns and retained canaries (#773)."),

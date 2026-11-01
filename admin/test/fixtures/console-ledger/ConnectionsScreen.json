@@ -1,8 +1,9 @@
 {
   "card": "ConnectionsScreen",
-  "pr": 751,
+  "pr": 784,
   "panels": [
     "p-connection-problems",
+    "p-provider-keys",
     "p-forges",
     "p-egress",
     "p-endpoints",
@@ -63,8 +64,7 @@
       ],
       "shows": [
         "1 of 2",
-        "0 of 4",
-        "ANTHROPIC_API_KEY"
+        "0 of 4"
       ]
     },
     {
@@ -124,7 +124,7 @@
       "source": "admin/src/console/panels/connections.mjs#connectionsEgress"
     },
     {
-      "el": "Loaded endpoints and fleet slot leases, provider key names and sources",
+      "el": "Loaded endpoints and fleet slot leases",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints"
@@ -187,6 +187,69 @@
       "source": "admin/src/console/panels/subscription-auth.mjs#connectionsSubscriptionAuth",
       "golden": [
         "panels/connections-subscription.operator"
+      ]
+    },
+    {
+      "el": "p-provider-keys",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys",
+      "golden": [
+        "panels/connections-proxy.operator",
+        "panels/connections-populated.viewer"
+      ],
+      "shows": [
+        "Provider API keys",
+        "Find or create a key at the provider"
+      ]
+    },
+    {
+      "el": "Permanent multiple-provider Add and Replace with an unchanged default",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys"
+    },
+    {
+      "el": "Official key acquisition guides remain readable without JavaScript",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys"
+    },
+    {
+      "el": "Claude subscription connections are community integrations, separate from official setup-token",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/subscription-auth.mjs#connectionsSubscriptionAuth"
+    },
+    {
+      "el": "OpenAI owning-host Sign in with ChatGPT acquisition guide",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-subscription-auth",
+      "source": "admin/src/console/panels/subscription-auth.mjs#subscriptionGuides",
+      "golden": [
+        "panels/connections-subscription.operator",
+        "panels/connections-subscription.viewer"
+      ],
+      "shows": [
+        "Sign in with ChatGPT on the owning host",
+        "Host connection guide",
+        "Official provider guidance"
+      ]
+    },
+    {
+      "el": "Claude community acquisition guide distinguishes official setup-token",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-subscription-auth",
+      "source": "admin/src/console/panels/subscription-auth.mjs#subscriptionGuides",
+      "golden": [
+        "panels/connections-subscription.operator",
+        "panels/connections-subscription.viewer"
+      ],
+      "shows": [
+        "Claude subscription and community compatibility",
+        "Official claude setup-token is for Claude Code"
       ]
     }
   ]

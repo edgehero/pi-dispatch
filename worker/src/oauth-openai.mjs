@@ -8,7 +8,8 @@ import { readAuthJson } from "./community-auth-helper.mjs";
 
 const ISSUER = "https://auth.openai.com";
 const RESOURCE = "https://api.openai.com/v1";
-const REDIRECT = "http://localhost:1455/auth/callback";
+export const OPENAI_REDIRECT_URI = "http://127.0.0.1:1455/auth/callback";
+export const OPENAI_LOGIN_INSTRUCTIONS = `For sign-in from another machine, forward port 1455 to 127.0.0.1:1455 on this host, or paste the final ${OPENAI_REDIRECT_URI} URL into this terminal.`;
 const SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 const TERMINAL = new Set(["invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused"]);
 export const PINNED_OPENAI_OAUTH_SHA256 = "4cf9fc758a07ffe4ee022326404b5dcc86767ee4154945c0417c7f95eaecdcc2";
@@ -44,13 +45,16 @@ export async function verifyOpenAIIdentity({ token, clientId, nonce, fetch = glo
 	} catch { throw authError("auth-identity-invalid"); }
 }
 
-async function authorizationCallback({ url, state, interaction, signal, serverFactory = createServer }) {
+export async function authorizationCallback({ url, state, interaction, signal, serverFactory = createServer }) {
+	signal?.throwIfAborted();
 	const manualAbort = new AbortController();
 	let resolveCallback;
 	const callback = new Promise((resolve) => { resolveCallback = resolve; });
+	const valid = (received) => received?.origin === new URL(OPENAI_REDIRECT_URI).origin && received.pathname === "/auth/callback" && received.searchParams.getAll("state").length === 1 && received.searchParams.get("state") === state && received.searchParams.getAll("code").length === 1 && Boolean(received.searchParams.get("code"));
 	const server = serverFactory((request, response) => {
-		const received = new URL(request.url, REDIRECT);
-		if (received.pathname !== "/auth/callback" || received.searchParams.get("state") !== state || !received.searchParams.get("code")) { response.writeHead(400); response.end("Invalid authorization callback"); return; }
+		let received;
+		try { received = new URL(request.url, OPENAI_REDIRECT_URI); } catch { /* Invalid input cannot end the pending sign-in. */ }
+		if (!valid(received)) { response.writeHead(400); response.end("Invalid authorization callback"); return; }
 		response.writeHead(200, { "Content-Type": "text/plain", "Cache-Control": "no-store" }); response.end("Sign-in complete. Return to pi-dispatch.");
 		resolveCallback(received);
 	});
@@ -58,11 +62,11 @@ async function authorizationCallback({ url, state, interaction, signal, serverFa
 	signal?.addEventListener("abort", abort, { once: true });
 	try {
 		await new Promise((resolve) => { server.once("error", resolve); server.listen(1455, "127.0.0.1", resolve); });
-		interaction.notify({ type: "auth_url", url, instructions: "Complete sign-in, or paste the final localhost callback URL. Forward port 1455 when using another machine." });
-		const manual = Promise.resolve(interaction.prompt({ type: "manual_code", message: "Paste the final callback URL", signal: AbortSignal.any([manualAbort.signal, ...(signal ? [signal] : [])]) })).then((value) => new URL(value));
+		interaction.notify({ type: "auth_url", url, instructions: OPENAI_LOGIN_INSTRUCTIONS });
+		const manual = Promise.resolve(interaction.prompt({ type: "manual_code", message: "Paste the final callback URL", signal: AbortSignal.any([manualAbort.signal, ...(signal ? [signal] : [])]) })).then((value) => { try { return new URL(value); } catch { throw authError("auth-callback-invalid"); } });
 		const received = await Promise.race([callback, manual]);
 		signal?.throwIfAborted();
-		if (!received || received.origin !== "http://localhost:1455" || received.pathname !== "/auth/callback" || received.searchParams.get("state") !== state || !received.searchParams.get("code")) throw authError("auth-callback-invalid");
+		if (!valid(received)) throw authError("auth-callback-invalid");
 		return received;
 	} finally { manualAbort.abort(); signal?.removeEventListener("abort", abort); server.closeAllConnections?.(); if (server.listening) await new Promise((resolve) => server.close(resolve)); }
 }
@@ -91,11 +95,11 @@ export function createOpenAIAuthAdapter({ fetch = globalThis.fetch, now = () => 
 			const hostId = previous.registration.hostId;
 			const savedClient = previous.registration.clientId;
 			const url = new URL(`${ISSUER}/oauth/authorize`);
-			url.search = new URLSearchParams({ client_id: savedClient ?? "dynamic_agent_client", ...(savedClient ? {} : { agent_name_hint: "pi-dispatch" }), ext_agent_host_id: `urn:uuid:${hostId}`, response_type: "code", redirect_uri: REDIRECT, resource: RESOURCE, scope: SCOPES, state, nonce, code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256" }).toString();
+			url.search = new URLSearchParams({ client_id: savedClient ?? "dynamic_agent_client", ...(savedClient ? {} : { agent_name_hint: "pi-dispatch" }), ext_agent_host_id: `urn:uuid:${hostId}`, response_type: "code", redirect_uri: OPENAI_REDIRECT_URI, resource: RESOURCE, scope: SCOPES, state, nonce, code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256" }).toString();
 			const returned = await callback({ url: url.toString(), state, interaction, signal });
 			const clientId = savedClient ?? returned.searchParams.get("client_id");
 			if (typeof clientId !== "string" || !clientId || clientId.length > 1024) throw authError("auth-client-invalid");
-			const data = await tokenRequest({ grant_type: "authorization_code", client_id: clientId, code: returned.searchParams.get("code"), code_verifier: verifier, redirect_uri: REDIRECT, resource: RESOURCE }, signal);
+			const data = await tokenRequest({ grant_type: "authorization_code", client_id: clientId, code: returned.searchParams.get("code"), code_verifier: verifier, redirect_uri: OPENAI_REDIRECT_URI, resource: RESOURCE }, signal);
 			const identity = await verifyIdentity({ token: data.id_token, clientId, nonce, fetch, now });
 			if (previous.registration.subject && previous.registration.subject !== identity.subject) throw authError("auth-account-changed");
 			return { credential: { ...parseOpenAIToken(data, { now }), clientId }, registration: { hostId, clientId, subject: identity.subject } };

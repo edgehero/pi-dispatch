@@ -57,6 +57,7 @@ import { sharedShellIgnored } from "./deployment-venue.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { ENV_WRITER_FS, updateEnvFile } from "./env-file.mjs";
 import { operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.mjs";
+import { resolveSetupWorkerEntry, setupCachePath } from "./setup-host-entry.mjs";
 import { deploymentServiceEnv } from "./service-env.mjs";
 import * as nodeFs from "node:fs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
@@ -436,6 +437,7 @@ const SERVICE_USAGE = `pi-dispatch service — run the worker (or --receiver, or
   flags: --receiver          the webhook receiver instead of the worker
          --console           the operator console (pi-dispatch-console serve) instead of the worker;
                              install needs an operator token (pi-dispatch-console token add)
+         --host-setup        render|install --console: grant bounded local setup, Linux/macOS user scope
          --user | --system   linux scope (default --user; --system never executes root commands)
          --force             replace an existing unit in the same scope
          --print             also print the rendered unit before installing
@@ -497,6 +499,7 @@ export async function runService(argv = [], deps = {}) {
 			options: {
 				receiver: { type: "boolean", default: false },
 				console: { type: "boolean", default: false },
+				"host-setup": { type: "boolean", default: false },
 				user: { type: "boolean", default: false },
 				system: { type: "boolean", default: false },
 				force: { type: "boolean", default: false },
@@ -519,6 +522,7 @@ export async function runService(argv = [], deps = {}) {
 	// One component per invocation: every subcommand addresses exactly one unit, and guessing which of two was meant
 	// would install, stop or remove the other one.
 	if (values.receiver && values.console) return fail(err, "--receiver and --console are mutually exclusive: each names one service; run the command once for each");
+	if (values["host-setup"] && (!values.console || !["render", "install"].includes(cmd) || values.system || !["linux", "darwin"].includes(platform))) return fail(err, "--host-setup is only for render/install --console in a Linux or macOS user service");
 	if (platform === "darwin" && values.system) {
 		// The Docker Desktop reason is the worker's; the console and the receiver start no container (round 1 review of #708).
 		return fail(err, values.console || values.receiver ? "macOS is user-scope only here (a LaunchAgent, in your login session, where this command installs every unit). Drop --system." : "macOS is user-scope only (a LaunchAgent): Docker Desktop lives in the login session, so a system daemon would wait on a docker socket that only exists once you log in. Drop --system.");
@@ -570,6 +574,10 @@ export async function runService(argv = [], deps = {}) {
 		which: values.receiver ? "receiver" : values.console ? "console" : "worker",
 		scope: platform === "linux" && values.system ? "system" : "user",
 		force: values.force,
+		// The terminal bootstrap reuses this exact planner for an existing granted console.
+		// This dependency is internal; no environment variable or start flag grants authority.
+		hostSetup: values["host-setup"] || (values.console && deps.setupConsoleGrant === true),
+		setupExpected: deps.setupExpected,
 		// The operator's env-setup script, or null for the shipped default. Null is load-bearing: with no
 		// seam configured every render below is byte-identical to what it produced before issue #209.
 		envSetup: null,
@@ -586,7 +594,13 @@ export async function runService(argv = [], deps = {}) {
 		if (resolved.error) return fail(err, resolved.error);
 		ctx.envSetup = resolved.path;
 	}
+	if (ctx.hostSetup && (!(deps.setupEntry ?? resolveSetupWorkerEntry)().entry || setupCachePath(ctx.consoleEntry))) return fail(err, "--host-setup needs durable installed worker and console entries, never npm execution-cache paths");
 
+	if (deps.setupPlan === true) return setupServicePlan(ctx, cmd);
+	if (deps.setupExpected !== undefined) {
+		const current = await setupServicePlan(ctx, cmd);
+		if (JSON.stringify(current) !== JSON.stringify(deps.setupExpected)) return fail(err, "the setup service plan changed before dispatch; preview it again");
+	}
 	switch (cmd) {
 		case "render":
 			return doRender(ctx);
@@ -631,8 +645,81 @@ const COMPONENT_TEMPLATES = Object.freeze({
  */
 function execArgvFor(ctx) {
 	if (ctx.which === "receiver") return [ctx.execPath, ctx.receiverStart];
-	if (ctx.which === "console") return [ctx.execPath, ctx.consoleEntry, "serve", "--deployment", ctx.deployDir];
+	if (ctx.which === "console") return [ctx.execPath, ctx.consoleEntry, "serve", "--deployment", ctx.deployDir, ...(ctx.hostSetup ? ["--host-setup"] : [])];
 	return [ctx.execPath, ctx.cliPath, "worker"];
+}
+
+/** The browser's planner uses the installer's own render and stack plan, never a second unit template (#774). */
+export async function planServiceSetup(argv, deps = {}) {
+	return runService(argv, { ...deps, setupPlan: true, out: () => {}, err: () => {} });
+}
+
+async function setupServicePlan(ctx, operation) {
+	const no = (reason) => ({ refusal: reason });
+	if (!["linux", "darwin"].includes(ctx.platform) || ctx.scope !== "user" || (ctx.platform === "darwin" && ctx.euid === 0)) return no("unsupported");
+	if (ctx.which === "receiver" && !ctx.receiverStart) return no("missing-receiver");
+	if (ctx.which === "console" && !ctx.consoleEntry) return no("unsafe-entry");
+	if (renderRefusal(ctx) !== null) return no("unsafe-deployment");
+	const paths = unitPaths(ctx);
+	if (ctx.which === "worker" && paths.otherScopeWorkerPaths.some((p) => ctx.fs.existsSync(p))) return no("foreign-service");
+	const venue = deploymentVenue(ctx);
+	if (venue.error) return no("unsafe-deployment");
+	let stack = null;
+	if (ctx.platform === "linux" && ctx.which === "worker") {
+		stack = await stackFor(ctx, venue, { readKeeper: true });
+		if (stack?.error || stack?.valkeyRefusal || stack?.pendingPassword || (stack?.plan.restart?.length ?? 0) > 0 || (stack?.plan.clientsRestarted?.length ?? 0) > 0 || stack?.plan.files.some((f) => f.state === "changed")) return no("unsafe-dependencies");
+		if (stack) {
+			const foreign = await foreignContainers(stack.plan, (cmd, args) => runQuery(ctx, cmd, args));
+			if (foreign.found.length || foreign.unknown.length) return no("unsafe-dependencies");
+		}
+	}
+	const text = ctx.platform === "linux" ? renderLinuxUnit(ctx, stack?.plan.start ?? [], venue.venues ?? null, venue.openshell) : renderPlist(ctx, { pathDirs: openshellPathDirs(ctx, venue) });
+	let before = null;
+	if (ctx.fs.existsSync(paths.installPath)) {
+		try {
+			const st = ctx.fs.lstatSync?.(paths.installPath);
+			if (st && (st.isSymbolicLink() || !st.isFile() || st.uid !== ctx.euid || (st.mode & 0o022))) return no("foreign-service");
+			before = ctx.fs.readFileSync(paths.installPath, "utf8");
+		} catch { return no("foreign-service"); }
+		// A hand-edited unit can launch anything this account can launch; it is not a setup-owned service.
+		if (before !== text) return no("foreign-service");
+	}
+	if (operation === "install" && before !== null) return no("service-exists");
+	if (operation !== "install" && before === null) return no("missing-service");
+	let active = false;
+	let loaded = false;
+	if (ctx.platform === "linux") {
+		const manager = await runQuery(ctx, "systemctl", ["--user", "show-environment"]);
+		if (manager.code !== 0 || managerEnvRefusal(manager, { home: ctx.home, euid: ctx.euid, user: ctx.user, realpath: ctx.realpath })) return no("manager-unavailable");
+		const status = await runQuery(ctx, "systemctl", ["--user", "show", "--property=LoadState,ActiveState,FragmentPath,DropInPaths,WorkingDirectory,ExecStart", paths.name]);
+		if (status.code !== 0) return no("manager-unavailable");
+		const properties = Object.fromEntries(String(status.stdout).split("\n").map((line) => { const at = line.indexOf("="); return [line.slice(0, at), line.slice(at + 1)]; }));
+		if (before !== null) {
+			try {
+				if (properties.LoadState !== "loaded" || !properties.FragmentPath || ctx.realpath(properties.FragmentPath) !== ctx.realpath(paths.installPath) || properties.DropInPaths !== "" || !properties.WorkingDirectory || ctx.realpath(properties.WorkingDirectory) !== ctx.realpath(ctx.deployDir)) return no("foreign-service");
+				const argv = /(?:^|[ ;])argv\[\]=([^;]*);/.exec(properties.ExecStart ?? "")?.[1]?.trim();
+				if (argv !== execArgvFor(ctx).join(" ")) return no("foreign-service");
+			} catch { return no("foreign-service"); }
+		} else if (properties.LoadState && properties.LoadState !== "not-found") return no("foreign-service");
+		loaded = properties.LoadState === "loaded";
+		active = /^ActiveState=active$/m.test(status.stdout);
+	} else {
+		const manager = await runQuery(ctx, "launchctl", ["print", `gui/${ctx.euid}`]);
+		if (manager.code !== 0) return no("manager-unavailable");
+		const status = await runQuery(ctx, "launchctl", ["print", `gui/${ctx.euid}/${paths.name}`]);
+		loaded = status.code === 0;
+		if (loaded) {
+			try {
+				const source = /^\s*path = (.+)$/m.exec(status.stdout)?.[1];
+				const directory = /^\s*working directory = (.+)$/m.exec(status.stdout)?.[1];
+				const argumentsText = /arguments = \{\s*\n([\s\S]*?)\n\s*\}/.exec(status.stdout)?.[1];
+				const argv = argumentsText?.split("\n").map((line) => line.trim()).filter(Boolean);
+				if (!before || !source || ctx.realpath(source) !== ctx.realpath(paths.installPath) || !directory || ctx.realpath(directory) !== ctx.realpath(ctx.deployDir) || JSON.stringify(argv) !== JSON.stringify(["/bin/sh", ctx.wrapperSh, ...execArgvFor(ctx)])) return no("foreign-service");
+			} catch { return no("foreign-service"); }
+		}
+		active = status.code === 0 && /state = running/.test(status.stdout);
+	}
+	return { operation, which: ctx.which, path: paths.installPath, text, before, active, loaded, stack: stack?.plan ?? null, effects: [...(operation === "install" ? [`write-${ctx.which}-unit`] : []), `${operation === "install" ? "start" : operation}-${ctx.which}`, ...(stack?.plan.files.some((f) => f.state === "new") ? ["write-stack-files"] : []), ...(stack?.plan.start ?? []).flatMap((unit) => unit.includes("valkey") ? ["start-valkey"] : unit.includes("proxy") ? ["start-proxy"] : unit.includes("keeper") ? ["start-keeper"] : [])] };
 }
 
 /**
@@ -1840,6 +1927,10 @@ async function startStop(ctx, verb) {
 	}
 	let code;
 	if (ctx.platform === "darwin") {
+		if (verb === "start" && ctx.setupExpected?.loaded === false) {
+			const loaded = await run(ctx, "launchctl", ["bootstrap", `gui/${ctx.euid}`, paths.installPath]);
+			if (loaded !== 0) return fail(ctx.err, "the previewed LaunchAgent could not be loaded");
+		}
 		code =
 			verb === "start"
 				? await run(ctx, "launchctl", ["kickstart", `gui/${ctx.euid}/${paths.name}`])

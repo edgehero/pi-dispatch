@@ -294,3 +294,20 @@ test("probeLine: running, not running with the reason and both ways to start it,
   assert.equal(probeLine({ state: "not-running", reason: "nothing listens there" }), "not running (nothing listens there): start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)");
   assert.match(probeLine({ state: "unknown", reason: "port 0" }), /not known: port 0/);
 });
+
+test("setup link uses the private guarded opener and validated /setup destination, never the public opener or audit payload", async () => {
+  const h = harness();
+  const result = await consoleCommand(["setup", "--link"], h.deps);
+  assert.equal(result.minted, true);
+  assert.equal(consolePagePath("setup"), "setup");
+  assert.deepEqual(h.order, ["probe", "guarded", "read", "audit:ok", "mint", "openLink"]);
+  assert.equal(h.opened[0], `http://127.0.0.1:4790/login/code#${CODE}&next=/setup`);
+  assert.ok(!JSON.stringify(h.rows).includes(CODE));
+  const unsafe = harness({ guarded: false });
+  assert.equal((await consoleCommand(["setup", "--link"], unsafe.deps)).minted, undefined);
+  assert.ok(!unsafe.order.includes("mint"));
+  assert.deepEqual(unsafe.opened, []);
+  const rpc = harness({ mode: "rpc" });
+  await consoleCommand(["setup", "--link"], rpc.deps);
+  assert.ok(!rpc.order.includes("mint"), "an RPC client never receives the setup credential");
+});

@@ -412,7 +412,7 @@ test("first run's commands are the CLIs' own: each is in its usage, and setup gi
   assert.deepEqual(FIRST_RUN_COMMANDS.token, ["pi-dispatch-console", "token", "add", "--name", "<name>", "--role", "viewer"]);
   assert.match(usage, /pi-dispatch service <render\|install\|/);
   assert.match(usage, /\n {2}pi-dispatch worker {2,}drain the queue/);
-  assert.match(usage, /\n {2}pi-dispatch up \[--yes\]/);
+  assert.match(usage, /\n {2}pi-dispatch up \[--console\] \[--yes\]/);
   assert.match(usage, /\n {2}pi-dispatch doctor \[--json\] \[--fix\]/);
   assert.match(usage, /pi-dispatch setup github[^]*\(--webhook-url <URL> \| --no-webhook\)/);
   assert.deepEqual(FIRST_RUN_COMMANDS.github.slice(0, 4), ["pi-dispatch", "setup", "github", "--webhook-url"]);

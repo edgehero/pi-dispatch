@@ -4,12 +4,12 @@ import { request } from "node:http";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, readSideOf, RESERVE_ENV_KEYS, runCli, USAGE } from "../src/console/cli.mjs";
+import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, setupProviderOf, USAGE } from "../src/console/cli.mjs";
 import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
 import * as server from "../src/console/server.mjs";
-import { readTriggerEditor, configLocationsOf } from "../src/read-model.mjs";
+import { readTriggerEditor, configLocationsOf, panelEnv, PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
 import * as realWhatif from "../src/console/whatif.mjs";
 
 // `pi-dispatch-console` (issue #640) on injected modules: the token, session, code, ticket and audit modules are fakes
@@ -222,7 +222,7 @@ test("--port on any command but link is refused before anything runs: it would b
     assert.deepEqual(r.err, ["pi-dispatch-console: --port is for link only"], argv.join(" "));
     assert.deepEqual([r.out, r.modules.calls, r.modules.rows], [[], [], []], `${argv.join(" ")}: nothing ran`);
   }
-  assert.match(USAGE, /^  link --name <name> \[--port <n>\] {10}a one-time sign-in link, valid 60 seconds$/m);
+  assert.match(USAGE, /^  link --name <name> \[--port <n>\] \[--next \/setup\] {2}a one-time sign-in link, valid 60 seconds$/m);
 });
 
 test("audit verify: intact is 0, a broken chain is 2 naming where", async () => {
@@ -919,4 +919,131 @@ test("the rules read joins retained local history, mirrored records and verified
   assert.equal(typeof real.scheduleZones.readTriggerScheduleZones, "function");
   assert.equal(typeof real.triggerCheck.checkTriggerEvent, "function");
   assert.equal(typeof real.triggerList.triggerListOf, "function");
+});
+
+test("host setup authority comes only from the serve flag, and production wiring keeps preview/apply separate from page reads", async () => {
+  for (const explicit of [false, true]) {
+    const dep = deployment({ PI_CONSOLE_HOST_SETUP: "1" });
+    writeFileSync(join(dep.dir, ".env"), `PI_CONSOLE_HOST_SETUP=1\nPI_BACKENDS=openshell\nPI_PROVIDER=openai\nPI_LOGS_DIR=${dep.env.PI_LOGS_DIR}\nPI_CONSOLE_LISTEN=${dep.env.PI_CONSOLE_LISTEN}\n`, { mode: 0o600 });
+    const modules = fakeModules();
+    const { deploymentServiceEnv } = await import("@edgehero/pi-dispatch/service-env");
+    modules.serviceEnv = { deploymentServiceEnv };
+    modules.readModel.panelEnv = panelEnv;
+    modules.readModel.PANEL_SERVICE_KEYS = PANEL_SERVICE_KEYS;
+    modules.workerConfig = { ...(await import("@edgehero/pi-dispatch/config")), settingsFilePath: () => join(dep.dir, "settings.json") };
+    modules.readModel.readSettingsView = () => ({ overlay: {} });
+    let options, pageReads = 0, brokerCalls = 0, exposureContext;
+    modules.setupHostClient = { setupWorkerEntry: () => ({ entry: "/installed/worker/src/cli.mjs" }), makeSetupBroker: () => { brokerCalls++; return { close() {} }; } };
+    modules.consoleActions = { readSetupExposure: ctx => { exposureContext = ctx; return { complete: true, at: T0, lines: [] }; } };
+    modules.setupActions = { SETUP_ACTION_NAMES: ["setup-worker-start", "setup-provider-key", "setup-egress-start"], makeSetupActions: opts => { options = opts; return { state: role => { pageReads++; return { enabled: opts.enabled, actions: role === "operator" && opts.enabled ? opts.operations : [], progress: [] }; }, close() {} }; } };
+    let captured;
+    modules.server = { ...server, createConsoleServer: opts => { captured = opts; return server.createConsoleServer(opts); } };
+    const r = await cli(["serve", ...(explicit ? ["--host-setup"] : [])], { dir: dep.dir, env: dep.env, modules, platform: "linux", until: Promise.resolve() });
+    assert.equal(r.code, 0, r.err.join(" "));
+    assert.equal(options.enabled, explicit, "neither a shell variable nor deployment .env can grant setup");
+    assert.equal(captured.config.hostSetup, explicit);
+    assert.equal(brokerCalls, explicit ? 1 : 0);
+    if (explicit) {
+      assert.equal(typeof options.provider, "function");
+      assert.equal(options.provider(), "openai", "safe metadata uses the current actual deployment provider");
+      assert.equal(options.deployment, dep.dir, "the viewer lock binds the host-resolved deployment");
+      assert.equal(options.operations.includes("setup-egress-start"), false, "gateway-only deployments offer no proxy action");
+    }
+    await captured.pageDeps.setup({ role: "viewer", snapshot: {} });
+    assert.equal(pageReads, 1);
+    assert.equal(brokerCalls, explicit ? 1 : 0, "a setup page read never constructs or invokes another child");
+    assert.equal((await options.readExposure()).complete, true);
+    assert.equal(exposureContext.a, captured.actionDeps, "the actual complete fleet/queue reserve path is wired, not a permanent refusal stub");
+    assert.equal(exposureContext.fs.readFileSync, readFileSync);
+  }
+});
+
+test("CLI setup destinations and grants reject misuse before any token or code write", async () => {
+  const linked = await cli(["link", "--name", "alice", "--next", "/setup"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env });
+  assert.equal(linked.code, 0);
+  assert.equal(linked.out[0], `http://127.0.0.1:4790/login/code#${CODE}&next=/setup`);
+  for (const argv of [["link", "--name", "alice", "--next", "https://evil.example"], ["link", "--name", "alice", "--next", "/runs"], ["token", "list", "--host-setup"], ["serve", "--next", "/setup"]]) {
+    const res = await cli(argv, { until: Promise.resolve() });
+    assert.equal(res.code, 2, argv.join(" "));
+    assert.deepEqual(res.out, []);
+    assert.ok(!res.modules.calls.some(call => ["mint", "add", "rotate", "revoke"].includes(call[0])));
+  }
+});
+
+test("link audit failure cannot create a code, and a failed mint appends a correlated failed intent without logging the code", async () => {
+  const denied = fakeModules({ auditFails: true });
+  const refusal = await cli(["link", "--name", "alice", "--next", "/setup"], { modules: denied });
+  assert.equal(refusal.code, 1);
+  assert.deepEqual(refusal.out, []);
+  assert.equal(denied.calls.some(([name]) => name === "mint"), false);
+  assert.match(refusal.err.join("\n"), /no sign-in code was minted.*audit row could not be written/);
+  for (const throws of [false, true]) {
+    const modules = fakeModules();
+    modules.loginCodes.mintLoginCode = () => {
+      assert.equal(modules.rows.length, 1, "the durable intent precedes the first mint attempt");
+      if (throws) throw Object.assign(new Error("fixture mint failure"), { code: "EACCES" });
+      return { refusal: "fixture login-code directory is unavailable" };
+    };
+    const failed = await cli(["link", "--name", "alice"], { modules });
+    assert.equal(failed.code, throws ? 1 : 2);
+    assert.deepEqual(failed.out, []);
+    assert.deepEqual(modules.rows.map(row => [row.action, row.outcome]), [["login-code", "ok"], ["login-code", "failed"]]);
+    assert.equal(modules.rows[0].ticket, modules.rows[1].ticket);
+    assert.match(modules.rows[0].ticket, /^[0-9a-f]{12}$/);
+    assert.equal(modules.rows[1].reason, "login-code-mint-failed");
+    assert.ok(!JSON.stringify(modules.rows).includes(CODE));
+  }
+});
+
+
+test("setup starts refuse stale reserve context while key-only .env edits preserve current observations", async () => {
+  const before = { env: { PI_MAX_COST_USD: "1", PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "" }, paths: { valkeyUrl: "redis://local/0", settingsFile: "/deployment/settings.json" } };
+  let current = structuredClone(before), reads = 0;
+  const read = makeSetupExposureReader({ initial: before, readSide: () => current, readExposure: async () => { reads++; return { complete: true, at: T0 }; } });
+  assert.equal((await read()).complete, true);
+  current.env.ANTHROPIC_API_KEY = "synthetic-key-never-in-guard-output";
+  assert.equal((await read()).complete, true);
+  for (const change of [
+    side => { side.env.PI_MAX_COST_USD = "10"; },
+    side => { side.env.PI_PROVIDER = "openai"; },
+    side => { side.env.PI_MODEL = "another"; },
+    side => { side.env.PI_ALLOWED_MODELS = "another"; },
+    side => { side.env.PI_MODEL_ENDPOINTS_FILE = "another.json"; },
+    side => { side.paths.settingsFile = "/deployment/new-settings.json"; },
+    side => { side.paths.valkeyUrl = "redis://other/0"; },
+  ]) {
+    current = structuredClone(before); change(current);
+    assert.deepEqual(await read(), { complete: false, reason: "configuration-drift" });
+  }
+  assert.equal(reads, 2, "no cached reserve scan runs under changed configuration");
+  const broken = makeSetupExposureReader({ initial: before, readSide: () => { throw Error("private detail"); }, readExposure: async () => assert.fail("must refuse") });
+  assert.deepEqual(await broken(), { complete: false });
+});
+
+
+test("setup key metadata matches shell/file/overlay precedence and refuses invalid sources without a child", async () => {
+  const dir = tempDir("setup-provider-metadata-");
+  const shellSettings = join(dir, "shell-settings.json"), fileSettings = join(dir, "file-settings.json");
+  const workerConfig = await import("@edgehero/pi-dispatch/config");
+  const serviceEnv = await import("@edgehero/pi-dispatch/service-env");
+  const { readSettingsView } = await import("../src/read-model.mjs");
+  const env = { PI_PROVIDER: "openai", PI_SETTINGS_FILE: shellSettings };
+  const m = { serviceEnv, workerConfig, readModel: { readSettingsView } };
+  const read = () => setupProviderOf({ m, env, dir });
+  writeFileSync(join(dir, ".env"), "", { mode: 0o600 });
+  assert.equal(read(), "openai", "a shell-only provider matches the child rather than labelling Anthropic");
+  writeFileSync(join(dir, ".env"), "PI_PROVIDER=groq\n");
+  assert.equal(read(), "groq", "the deployment file overrides the host shell");
+  writeFileSync(shellSettings, JSON.stringify({ provider: "openrouter" }));
+  assert.equal(read(), "openrouter", "a shell-only settings path is the same source the child reads");
+  writeFileSync(fileSettings, JSON.stringify({ provider: "deepseek" }));
+  writeFileSync(join(dir, ".env"), `PI_PROVIDER=mistral\nPI_SETTINGS_FILE=${fileSettings}\n`);
+  assert.equal(read(), "deepseek", "file-selected overlay overrides both provider defaults");
+  writeFileSync(fileSettings, "{");
+  assert.equal(read(), null, "invalid overlays never invent a supported key slot");
+  writeFileSync(join(dir, ".env"), "PI_PROVIDER=invalid/provider\n");
+  env.PI_SETTINGS_FILE = join(dir, "absent-settings.json");
+  assert.equal(read(), null, "invalid effective provider refuses metadata");
+  chmodSync(join(dir, ".env"), 0o666);
+  assert.equal(read(), null, "unsafe deployment metadata refuses without loading a host executor");
 });

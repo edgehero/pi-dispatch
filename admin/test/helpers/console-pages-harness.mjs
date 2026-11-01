@@ -2,7 +2,7 @@ import { parseSandboxOpenUrl } from "@edgehero/pi-dispatch/opener-protocol";
 import { zeroTouchFixture } from "./zero-touch-goldens.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,7 @@ const run = promisify(execFile);
 
 /** The screens and the query each is rendered with. */
 export const SHOTS = Object.freeze([
+  ["setup", "setup", ""],
   ["models", "models", ""],
   ["overview", "overview", ""],
   // Issue #737: the timeline by host over its widest window, the overview's other grouping, through its query.
@@ -280,7 +281,9 @@ async function renderInChild() {
 
   // The environment, emptied; the clock, frozen; both before any project module loads.
   for (const k of Object.keys(process.env)) delete process.env[k];
-  const work = tempDir("console-pages-");
+  // The real host planner rejects source paths whose spelling traverses a symlink.
+  // Normalize the fixture before declaring absolute sources, including macOS's /var alias.
+  const work = realpathSync(tempDir("console-pages-"));
   Object.assign(process.env, { TZ: "UTC", HOME: join(work, "home"), PI_CODING_AGENT_DIR: join(work, "agent") });
   mkdirSync(process.env.HOME, { recursive: true });
   mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
@@ -490,6 +493,14 @@ async function renderInChild() {
       const parsed = P.parsePageQuery(name, new URLSearchParams(qs));
       if (parsed.refusal) throw new Error(`${shot}: ${parsed.refusal}`);
       const data = await P.loadPageData(name, parsed.query, deps);
+      if (name === "connections") {
+        // Assert outside the page's tolerant read boundary: a reader failure must not
+        // become a newly accepted unavailable-state golden in this healthy fixture.
+        assert.equal(data.connections?.providerKeys.state, "ready", "healthy fixture sources use canonical owned paths on every platform");
+        assert.equal(data.connections.providerKeys.defaultProvider, "anthropic");
+        assert.ok(data.connections.providerKeys.rows.some(row => row.provider === "anthropic" && row.usage.includes("default")));
+        assert.ok(data.connections.providerKeys.rows.some(row => row.provider === "kimi-coding" && row.usage.includes("trigger")));
+      }
       for (const role of ROLES) {
         pages[`${shot}.${role}`] = await draw(name, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data: ["watch-board", "zero-touch"].includes(name) ? await P.loadPageData(name, parsed.query, deps, { role }) : data, readOnly: false });
       }

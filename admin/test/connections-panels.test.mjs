@@ -88,22 +88,11 @@ test("proxy rows carry concise glyph-word states and stale evidence stays separa
   marked(draw("connectionsEgress", facts), "unknown", "info", "attention");
 });
 
-test("provider rows show the first declared candidate with one source at the end, with a shared host caveat", async () => {
-  const facts = await consoleConnectionsFixture(AT, { change: (_, reads) => { reads.environment = () => ({ env: { PI_PROVIDER: "anthropic", ANTHROPIC_AUTH_TOKEN: "first-private", ANTHROPIC_API_KEY: "second-private" } }); } });
-  const provider = facts.providers.find((p) => p.name === "anthropic");
-  assert.equal(provider.selectedVariable, "ANTHROPIC_AUTH_TOKEN");
+test("Model endpoints links to the permanent provider-key card without duplicating credential source claims", async () => {
+  const facts = await consoleConnectionsFixture(AT);
   const result = draw("connectionsEndpoints", facts);
-  const line = row(result, "anthropic", "li");
-  assert.match(cardText(line), /^anthropic ANTHROPIC_AUTH_TOKEN from \.env$/);
-  assert.doesNotMatch(line, /ANTHROPIC_API_KEY|first-private|second-private/);
-  assert.equal(cardText(result).match(/a worker's service environment or pi login may differ/g).length, 1);
-  for (const [source, tail] of [["pi-login", "pi login on each host (fallback)"], ["worker-env", "worker environment (pi login off)"], ["unknown", "source unknown"]]) {
-    const value = { ...facts, providers: [{ ...provider, unknown: source === "unknown", selectedVariable: null, credentialSource: source }] };
-    const line = row(draw("connectionsEndpoints", value), "anthropic", "li");
-    if (source === "unknown") { marked(line, "unknown", "info", "attention"); assert.doesNotMatch(cardText(line), /none in the \.env/); }
-    else assert.match(cardText(line), /none in the \.env/);
-    assert.ok(cardText(line).endsWith(tail));
-  }
+  assert.match(result, /href="#p-provider-keys"/);
+  assert.doesNotMatch(result, /ANTHROPIC_API_KEY|Provider keys, by name|pi login on each host/);
 });
 
 test("Notifications uses two icon rows and short hook configuration, with timing and payload details in the docs", async () => {

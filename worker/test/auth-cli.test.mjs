@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runAuth, authSelectAnswer } from "../src/auth-cli.mjs";
 import { loadNativeAnthropicAuth } from "../src/community-auth-helper.mjs";
+import { OPENAI_LOGIN_INSTRUCTIONS } from "../src/oauth-openai.mjs";
 
 function fixture() {
 	const calls = [];
@@ -30,6 +31,22 @@ test("unknown actions cannot reach authentication and unsupported usage is repor
 	assert.deepEqual(calls, []);
 	assert.equal(await runAuth(["usage", "claude"], options), 2);
 	assert.deepEqual(calls, [["usage", "claude"], ["quit"]]);
+});
+
+test("the OpenAI terminal login prints fixed remote-callback guidance without copying adapter instruction text", async () => {
+	const { options, output } = fixture();
+	const service = options.configure();
+	const opened = [];
+	service.auth.login = async (_id, { interaction }) => {
+		interaction.notify({ type: "auth_url", url: "https://auth.openai.com/oauth/authorize?state=ephemeral", instructions: "private-adapter-instruction-canary" });
+		interaction.notify({ type: "auth_url", url: "https://auth.openai.com.example.invalid/authorize", instructions: "another-private-canary" });
+	};
+	assert.equal(await runAuth(["login", "chatgpt"], { ...options, configure: () => service, interaction: null, openBrowserFn: url => opened.push(url) }), 0);
+	assert.equal(output.filter(line => line.includes(OPENAI_LOGIN_INSTRUCTIONS)).length, 1);
+	assert.match(output.join(""), /forward port 1455 to 127\.0\.0\.1:1455/);
+	assert.match(output.join(""), /http:\/\/127\.0\.0\.1:1455\/auth\/callback/);
+	assert.doesNotMatch(output.join(""), /private-adapter-instruction-canary|another-private-canary/);
+	assert.equal(opened.length, 2);
 });
 
 test("terminal selection accepts native IDs and legacy values, rejecting every unoffered answer", () => {

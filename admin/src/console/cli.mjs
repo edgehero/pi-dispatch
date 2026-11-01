@@ -21,6 +21,7 @@
  * planners and the action deps) are loaded here and nowhere else, by `loadModules`; `runCli` takes them injected, so its tests run on fakes, and `--help` loads none.
  */
 import * as nodeFs from "node:fs";
+import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, isAbsolute, resolve as resolvePath } from "node:path";
@@ -41,7 +42,8 @@ export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
   token revoke --name <name>               remove a token; its sessions end at their next request
   token rotate --name <name>               a new secret for a name; prints it once
   sessions end-all                         sign every browser out
-  link --name <name> [--port <n>]          a one-time sign-in link, valid 60 seconds
+  link --name <name> [--port <n>] [--next /setup]  a one-time sign-in link, valid 60 seconds
+  serve --host-setup                       explicitly allow local person-only setup actions
   audit verify                             check the audit log's hash chain
 
 The deployment is --deployment, else the one the setup wizard recorded, else the current directory.`;
@@ -53,7 +55,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans] = await Promise.all([
+  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -85,8 +87,11 @@ export async function loadModules() {
     import("../sandbox-data.mjs"),
     import("../models-view.mjs"),
     import("../model-role-plans.mjs"),
+    import("../setup-actions.mjs"),
+    import("../setup-host-client.mjs"),
+    import("./actions.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans };
+  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -155,6 +160,32 @@ const RELATIVE_PATH_FIELDS = Object.freeze(["logsDir", "settingsFile", "triggers
 
 /** The env keys a reserve estimate reads beyond the panel's own (issue #642): `estimateReserve`'s and the endpoint loader's. */
 export const RESERVE_ENV_KEYS = Object.freeze(["PI_ALLOWED_MODELS", "PI_PROVIDER", "PI_MODEL", "PI_MAX_COST_USD", "PI_MODEL_ENDPOINTS_FILE"]);
+
+/** Safe metadata follows the child's host-wired source precedence, without loading provider SDKs. */
+export function setupProviderOf({ m, env, dir, fs = nodeFs, platform = process.platform, uid = process.geteuid?.() }) {
+  try {
+    const keys = ["PI_PROVIDER", "PI_SETTINGS_FILE"];
+    const declared = m.serviceEnv.deploymentServiceEnv({ env: {}, dir, keys, fs, platform, uid });
+    if (declared.untrusted || declared.unreadable || declared.hazardSkipped?.length || declared.unread?.length) return null;
+    const configured = { ...Object.fromEntries(keys.filter(key => typeof env?.[key] === "string").map(key => [key, env[key]])), ...declared.env };
+    const settingsFile = resolvePath(dir, m.workerConfig.settingsFilePath(configured));
+    const loaded = m.readModel.readSettingsView({ settingsFile, fs });
+    if (loaded.invalid) return null;
+    return loaded.overlay?.provider ?? m.workerConfig.providerFrom(configured);
+  } catch { return null; }
+}
+
+/** A start preview cannot price fresh host configuration with a console's stale reserve inputs. */
+export function makeSetupExposureReader({ initial, readSide, readExposure, keys = RESERVE_ENV_KEYS }) {
+  const signature = side => JSON.stringify({ env: [...new Set(keys)].sort().map(key => [key, side.env?.[key] ?? null]), paths: Object.entries(side.paths ?? {}).sort(([a], [b]) => a.localeCompare(b)) });
+  const expected = signature(initial);
+  return async () => {
+    try {
+      if (signature(readSide()) !== expected) return { complete: false, reason: "configuration-drift" };
+      return await readExposure();
+    } catch { return { complete: false }; }
+  };
+}
 
 /**
  * The model-endpoint snapshot a reserve estimate is judged against (issue #642), read the way the worker reads it at
@@ -231,7 +262,7 @@ function parse(argv) {
     return parseArgs({
       args: argv,
       allowPositionals: true,
-      options: { deployment: { type: "string" }, name: { type: "string" }, role: { type: "string" }, port: { type: "string" }, help: { type: "boolean", short: "h" } },
+      options: { deployment: { type: "string" }, name: { type: "string" }, role: { type: "string" }, port: { type: "string" }, next: { type: "string" }, "host-setup": { type: "boolean" }, help: { type: "boolean", short: "h" } },
     });
   } catch (e) {
     throw new Refusal(`${e?.message ?? "the arguments could not be read"}; run pi-dispatch-console --help`);
@@ -300,13 +331,15 @@ async function run(argv, io) {
   if (!known.includes(command)) throw new Refusal(`unknown command "${command.slice(0, 40)}"; run pi-dispatch-console --help`);
   // Refused before anything is read or written, so a `--port` that would be silently ignored never runs its command.
   if (values.port !== undefined && command !== "link") throw new Refusal("--port is for link only");
+  if (values.next !== undefined && (command !== "link" || values.next !== "/setup")) throw new Refusal("--next is for link only and must be /setup");
+  if (values["host-setup"] && command !== "serve") throw new Refusal("--host-setup is an explicit serve grant only");
 
   const m = io.modules ?? (await loadModules());
   const where = deploymentDirOf({ arg: values.deployment ?? null, env, fs, cwd });
   if (where.notice) io.err(`pi-dispatch-console: ${where.notice}`);
   const layered = consoleEnv({ env, dir: where.dir, fs, platform, uid });
   if (layered.notice) io.err(`pi-dispatch-console: ${layered.notice}`);
-  const config = consoleConfig({ env: layered.env, dir: where.dir, platform, tokensFilePath: m.tokens.tokensFilePath });
+  const config = { ...consoleConfig({ env: layered.env, dir: where.dir, platform, tokensFilePath: m.tokens.tokensFilePath }), hostSetup: values["host-setup"] === true };
   if (config.refusal) throw new Refusal(config.refusal);
   const random = io.random;
   const withRandom = (args) => (random ? { ...args, random } : args);
@@ -371,11 +404,20 @@ async function run(argv, io) {
       const read = m.tokens.readTokensFile({ path: config.tokensPath, fs, uid });
       if (read.refusal) throw new Refusal(read.refusal);
       if (!read.file.tokens.some((t) => t.name === name)) throw new Refusal(`there is no token named "${name}"; see pi-dispatch-console token list`);
-      const minted = m.loginCodes.mintLoginCode(withRandom({ dir: m.loginCodes.loginCodesDir(config.tokensPath), name, fs, now }));
-      if (minted.refusal) throw new Refusal(minted.refusal);
-      if (!record({ action: "login-code", target: name })) return 1;
+      // Bootstrap composes this command, so its audit intent must exist before a code file can be created.
+      const row = { actor: SHELL, action: "login-code", target: name, ticket: (random ?? randomBytes)(6).toString("hex") };
+      try { audit.append({ ...row, outcome: "ok" }); }
+      catch (e) { io.err(`pi-dispatch-console: no sign-in code was minted because its audit row could not be written (${e?.code ?? "error"}); check PI_LOGS_DIR and run audit verify`); return 1; }
+      const failed = () => {
+        try { audit.append({ ...row, outcome: "failed", reason: "login-code-mint-failed" }); }
+        catch (e) { io.err(`pi-dispatch-console: the sign-in code was not minted, but its failed audit row could not be written (${e?.code ?? "error"}); run audit verify`); }
+      };
+      let minted;
+      try { minted = m.loginCodes.mintLoginCode(withRandom({ dir: m.loginCodes.loginCodesDir(config.tokensPath), name, fs, now })); }
+      catch (e) { failed(); throw e; }
+      if (minted.refusal) { failed(); throw new Refusal(minted.refusal); }
       const base = port !== null ? `http://localhost:${port}/` : (listenUrl(config.listen) ?? "http://localhost:<the local port of your ssh -L tunnel>/");
-      io.out(`${base}login/code#${minted.code}`);
+      io.out(`${base}login/code#${minted.code}${values.next === "/setup" ? "&next=/setup" : ""}`);
       io.err("open it within 60 seconds; it works once");
       return 0;
     }
@@ -418,6 +460,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
   let redis = null;
   let fleet = null;
   let hub = null;
+  let setup = null;
+  let setupBroker = null;
   try {
     // Every Valkey client of this process (the audit copy's, the fleet reader's) takes its password and its facts
     // about the deployment's Valkey from THIS deployment's `.env`, through the panel's one reader, as the pi extension
@@ -474,12 +518,50 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       checkModelsKnown: m.modelCatalog?.checkModelsKnown,
       canarySample: async ({ role, candidate, flow }) => (await modelsView?.())?.canaries?.find((sample) => sample.role === role && sample.candidate === candidate && sample.flow === flow) ?? null,
     });
+    let actionDeps;
+    const setupPlatform = ["linux", "darwin"].includes(io.platform ?? process.platform);
+    const setupEntry = config.hostSetup && setupPlatform ? m.setupHostClient?.setupWorkerEntry(config.dir) : null;
+    const setupEnabled = config.hostSetup && setupPlatform && !config.readOnly && typeof setupEntry?.entry === "string";
+    const setupReason = !config.hostSetup ? "host-setup-disabled" : !setupPlatform ? "unsupported" : config.readOnly ? "read-only" : setupEntry?.refusal ?? null;
+    if (setupEnabled) setupBroker = m.setupHostClient.makeSetupBroker({ cliPath: setupEntry.entry, deployment: config.dir, env: shellEnv });
+    let setupBackends = null;
+    const setupProvider = () => setupProviderOf({ m, env: shellEnv, dir: config.dir, fs, platform: io.platform ?? process.platform, uid });
+    if (config.hostSetup && typeof m.serviceEnv?.deploymentServiceEnv === "function") {
+      try {
+        const declared = m.serviceEnv.deploymentServiceEnv({ env: {}, dir: config.dir, keys: ["PI_BACKENDS", "PI_PROVIDER"], fs, platform: io.platform ?? process.platform, uid }).env;
+        setupBackends = declared.PI_BACKENDS ?? "local";
+      } catch { /* unknown provider metadata leaves the key form unavailable; the terminal can repair it */ }
+    }
+    const gatewayOnly = typeof setupBackends === "string" && setupBackends.split(",").every(name => ["openshell", "openshell-bind"].includes(name.trim()));
+    setup = m.setupActions?.makeSetupActions({
+      broker: setupBroker, enabled: setupEnabled, reason: setupReason, tokensPath: config.tokensPath, deployment: config.dir,
+      provider: setupProvider, sessions, readTokens, now, fs,
+      operations: m.setupActions?.SETUP_ACTION_NAMES.filter(name => !gatewayOnly || name !== "setup-egress-start"),
+      readExposure: makeSetupExposureReader({
+        initial: side,
+        keys: [...(m.readModel.PANEL_SERVICE_KEYS ?? []), ...RESERVE_ENV_KEYS],
+        readSide: () => readSideOf({ m, env: {}, dir: config.dir, fs, platform: io.platform ?? process.platform, uid }),
+        readExposure: () => m.consoleActions.readSetupExposure({ a: actionDeps, fs, now }),
+      }),
+    }) ?? null;
     const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
     const pageDeps = {
       fleet,
       sandboxes,
       answerer,
       modelsView,
+      setup: async ({ role, snapshot } = {}) => {
+        const state = setup?.state(role ?? "operator", snapshot) ?? { enabled: false, reason: "host-setup-disabled", actions: [], providerKey: null, progress: [], allowlistCount: null };
+        // Connections owns the allowlist reader; setup copies only its count, never a sample or secret.
+        if (typeof m.connectionsView?.readConnections === "function") {
+          try {
+            const connection = await m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid });
+            if (Array.isArray(connection?.egress?.allowlist)) state.allowlistCount = connection.egress.allowlist.length + connection.egress.more;
+            if (connection?.providerKeys) state.providerKeys = connection.providerKeys;
+          } catch { /* unknown remains unknown */ }
+        }
+        return state;
+      },
       agentWrites: () => readAgentWritesToday({ read: (opts) => m.audit.readConsoleAudit({ logsDir: config.logsDir, ...opts, positions: true, fs }), verify: () => m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs, withLast: true }), now, host: side.env.PI_WORKER_NAME ?? "console" }),
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
@@ -551,6 +633,29 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       now,
       log,
     });
+    actionDeps = {
+    modelRoles,
+    watch: fleet.watch,
+    zeroTouch,
+    sandboxes,
+    answerer,
+    rm: m.readModel,
+    plans: m.writePlans ?? null,
+    paths: side.paths,
+    env: side.env,
+    grantsEnv: shellEnv,
+    fleet,
+    killSwitchPlanFn,
+    urlShown: m.connection?.urlShown,
+    envelopeProblem: m.insights?.envelopeProblem,
+    host: hostname(),
+    // A retry's reserve reads the failed job's queue data (read-only); only the reserve reaches a page.
+    readJobsData: m.jobData?.readJobsData,
+    // Every reserve estimate's zero-rated inputs, the worker's: the endpoint snapshot and the builtin catalog's costs.
+    modelEndpoints: endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs }),
+    builtinModel: m.modelCatalog?.builtinModel,
+      setup,
+    };
     server = m.server.createConsoleServer({
       config,
       fs,
@@ -569,28 +674,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       // What the action table writes with (issue #642, `actions.mjs`): the read model's funnels and the pi-free planners
       // the tools use, over the paths and env the read side resolved, so a console write lands in the files and queues
       // the service reads, refused in the tools' own words.
-      actionDeps: {
-        modelRoles,
-        watch: fleet.watch,
-        zeroTouch,
-        sandboxes,
-        answerer,
-        rm: m.readModel,
-        plans: m.writePlans ?? null,
-        paths: side.paths,
-        env: side.env,
-        grantsEnv: shellEnv,
-        fleet,
-        killSwitchPlanFn,
-        urlShown: m.connection?.urlShown,
-        envelopeProblem: m.insights?.envelopeProblem,
-        host: hostname(),
-        // A retry's reserve reads the failed job's queue data (read-only); only the reserve reaches a page.
-        readJobsData: m.jobData?.readJobsData,
-        // Every reserve estimate's zero-rated inputs, the worker's: the endpoint snapshot and the builtin catalog's costs.
-        modelEndpoints: endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs }),
-        builtinModel: m.modelCatalog?.builtinModel,
-      },
+      actionDeps,
       pages: m.pages,
       pageDeps,
       hub,
@@ -622,6 +706,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     return 0;
   } finally {
     // The streams first, so closing the server is not held open by them; then the listener, the reader, the copy.
+    setup?.close();
+    setupBroker?.close();
     hub?.close();
     if (server?.listening) {
       await new Promise((resolve) => {

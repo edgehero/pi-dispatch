@@ -72,6 +72,17 @@ test("the overrides move every pi package and may add only pi packages, and only
 	assert.throws(() => rewriteOverrides(root.replace(/\n {2}/g, "\n\t"), "1.0.4"), /does not round-trip/);
 });
 
+test("documented install commands bump only pi, including when worker/admin versions equal the old pi pin", () => {
+	for (const path of ["README.md", "docs/console.md"]) {
+		const site = PI_PIN_SITES.find((row) => row.path === path);
+		assert.ok(site, `${path} participates in the actual bump path set`);
+		const text = "npm install --save-exact @edgehero/pi-dispatch@1.0.3 @edgehero/pi-dispatch-admin@1.0.3 @earendil-works/pi-coding-agent@1.0.3 --ignore-scripts\n";
+		assert.equal(siteVersion(site, text), "1.0.3");
+		assert.equal(rewriteSite(site, text, "1.0.4"), text.replace("@earendil-works/pi-coding-agent@1.0.3", "@earendil-works/pi-coding-agent@1.0.4"));
+		assert.ok(BUMP_PATHS.includes(path));
+	}
+});
+
 test("the prune takes pi's whole tree, at any depth and in any workspace, and nothing else", () => {
 	const lock = { lockfileVersion: 3, packages: { "": {}, "node_modules/undici": { version: "8.10.2" }, "node_modules/@earendil-works/pi-ai": {}, "admin/node_modules/@earendil-works/pi-coding-agent": {}, "node_modules/@earendil-works/pi-coding-agent/node_modules/lru-cache": {}, "node_modules/@earendil-works-not/x": {} } };
 	assert.deepEqual(Object.keys(JSON.parse(prunePiTree(JSON.stringify(lock))).packages), ["", "node_modules/undici", "node_modules/@earendil-works-not/x"]);

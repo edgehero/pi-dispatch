@@ -4484,13 +4484,13 @@ export function createFleetReader(
   // other: a Valkey that times out is sent the whole pipeline once per WAITING_TTL_MS, never on every snapshot. Its
   // `unreachable` is a boolean: no client's words reach a snapshot.
   let waitingCache = null;
-  const waitingOf = async (queues, projects, triggers) => {
+  const waitingOf = async (queues, projects, triggers, fresh = false) => {
     const registry = [...new Set(queues.map((q) => q?.name).filter((n) => typeof n === "string"))];
     const found = (await existingQueueNames()).names;
     const names = [...registry, ...[...new Set(found)].filter((n) => typeof n === "string" && !registry.includes(n)).sort()];
     const at = nowFn();
     const key = names.join("\n");
-    if (waitingCache && waitingCache.key === key && at >= waitingCache.at && at - waitingCache.at < WAITING_TTL_MS) return waitingCache.got;
+    if (!fresh && waitingCache && waitingCache.key === key && at >= waitingCache.at && at - waitingCache.at < WAITING_TTL_MS) return waitingCache.got;
     const entry = { at, key, got: null };
     const list = names.map((name) => pool.get(name) ?? { name });
     entry.got = readWaiting(redis, { queues: list, now: nowFn, timeoutMs: FLEET_READ_TIMEOUT_MS, projects, triggers }).catch(() => ({ unreachable: true }));
@@ -4502,6 +4502,8 @@ export function createFleetReader(
     watch,
     // `waiting` (issue #737): true reads the waiting jobs into the snapshot's `waiting` (see the header); anything else
     // reads none, so a caller that draws no waiting job pays nothing for one.
+    // `freshWaiting` bypasses the display cache for a setup preview/confirm that must observe the current IDs and
+    // reserves. This remains a bounded observation, not a promise that another job cannot arrive afterwards.
     // `switchQueues` (issue #737): true reads every per-queue field over the queues the kill switch flips (`switchQueues`:
     // the registry's and every queue that exists), for a preview of a write that reaches them; anything else reads the
     // registry's queues, the set every surface draws. Such a snapshot reads at most `SWITCH_PREVIEW_QUEUES_MAX` of them
@@ -4538,7 +4540,7 @@ export function createFleetReader(
       const projectsView = readProjects({ projectsPath: paths.projectsFile });
       // Issue #737: the waiting jobs, started now beside the queue reads and awaited at the end (cached, so at most one
       // read per WAITING_TTL_MS). Null when this call did not ask for them.
-      const waitingRead = waiting === true ? waitingOf(queues, Array.isArray(projectsView?.projects) ? projectsView.projects : null, Array.isArray(triggersView?.triggers) ? triggersView.triggers : null) : null;
+      const waitingRead = waiting === true ? waitingOf(queues, Array.isArray(projectsView?.projects) ? projectsView.projects : null, Array.isArray(triggersView?.triggers) ? triggersView.triggers : null, opts?.freshWaiting === true) : null;
       const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
         Promise.all(queues.map((q) => q.isPaused())),
         Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed"))),
