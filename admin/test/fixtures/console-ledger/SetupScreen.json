@@ -1,31 +1,422 @@
 {
   "card": "SetupScreen",
-  "pr": 3,
-  "panels": ["p-setup", "p-setup-pi", "p-setup-empty"],
+  "pr": 774,
+  "panels": [
+    "p-setup",
+    "p-setup-ready",
+    "p-setup-start"
+  ],
   "elements": [
-    {"el":"p-setup","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewSetup","golden":["panels/setup-nothing-ready.operator","panels/setup-partial.operator","panels/setup-partial.viewer"]},
-    {"el":"p-setup-pi","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewSetupPi","golden":["panels/setup-partial.operator"]},
-    {"el":"p-setup-empty","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewSetupEmpty","golden":["panels/setup-partial.operator"]},
-    {"el":"3 of 8 ready, and the segmented bar","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/doctor-view.mjs#firstRunState","golden":["panels/setup-partial.operator"],"shows":"class=\"su-bar\""},
-    {"el":"The sentence under it: what stands between the deployment and its first job","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/doctor-view.mjs#firstRunState","holds":"Jobs start once","golden":["panels/setup-partial.operator"],"shows":"Jobs start once"},
-    {"el":"Each step's tile, word, sentence and command","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/doctor-view.mjs#FIRST_RUN_STATES","golden":["panels/setup-nothing-ready.operator","panels/setup-partial.operator","panels/setup-partial.viewer"],"shows":"Not yet"},
-    {"el":"The order follows the doctor","kind":"readme","status":"new","source":"admin/src/doctor-view.mjs#FIRST_RUN_STEPS"},
-    {"el":"Add a trigger, the one primary action","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/console/panels/overview.mjs#overviewSetup","golden":["panels/setup-nothing-ready.operator","panels/setup-partial.operator"],"shows":"Add a trigger","reason":"it links to the configuration page until the trigger editor exists"},
-    {"el":"What triggers can do","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/words.mjs#docsHref","golden":["panels/setup-partial.operator"],"shows":"What triggers can do"},
-    {"el":"Do it from pi: /dispatch setup","kind":"readme","status":"new","panel":"p-setup-pi","source":"admin/src/doctor-view.mjs#FIRST_RUN_COMMANDS","holds":"setup","golden":["panels/setup-partial.operator"],"shows":"<span>/dispatch</span> <span>setup</span>"},
-    {"el":"Once it runs: the Overview panels' empty states","kind":"readme","status":"new","panel":"p-setup-empty","source":"admin/src/console/panels/overview.mjs#overviewSetupEmpty","sentence":"admin/src/console/panels/overview.mjs#NEEDS_EMPTY.title","golden":["panels/setup-partial.operator"]},
-    {"el":"The page is live and gives way to the Overview","kind":"readme","status":"new","source":"admin/src/doctor-view.mjs#firstRunState","holds":"applies"},
-    {"el":"A viewer sees the steps without the commands or Add","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/console/panels/overview.mjs#overviewSetup","golden":["panels/setup-partial.viewer"],"shows":"You are signed in as <b>a viewer</b>"},
-    {"el":"from doctor on build3, 2 minutes ago","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/console/panels/overview.mjs#overviewSetup","holds":"from doctor on","golden":["panels/setup-partial.operator"],"shows":"from doctor on build3, 2 minutes ago"},
-    {"el":"The title Set up pi-dispatch","kind":"readme","status":"illustrative","reason":"one route: the page stays Overview, and its headline says how many steps stand before the first job"},
-    {"el":"Valkey's URL","kind":"readme","status":"illustrative","reason":"the step says Valkey answers; a viewer's page carries no address"},
-    {"el":"pi-dispatch setup github as drawn","kind":"readme","status":"illustrative","reason":"the CLI refuses it without --webhook-url or --no-webhook; the console prints the full form"},
-    {"el":"The deployment pointer, by its last folder","kind":"provides","status":"new","source":"admin/src/console/cli.mjs#deploymentOf","holds":"basename(dir)"},
-    {"el":"Whether Valkey answers","kind":"provides","status":"new","source":"admin/src/doctor-view.mjs#firstRunState","holds":"Valkey answers"},
-    {"el":"The signed-in token's name and role","kind":"provides","status":"real","source":"admin/src/console/shell.mjs#shellHtml","reason":"the step names the role alone: a live panel is drawn once per role, so a name would be one session's on every operator's page"},
-    {"el":"Host registry rows","kind":"provides","status":"real","source":"admin/src/read-model.mjs#createFleetReader","holds":"hostBudgets"},
-    {"el":"The newest doctor checks for the egress proxy, the provider key and the forge credentials","kind":"provides","status":"new","source":"worker/src/doctor-results.mjs#NAMED_CHECK_IDS","holds":"provider.key","reason":"the forge credentials are judged by their sections, github and forges: no one check holds them"},
-    {"el":"The trigger count","kind":"provides","status":"real","source":"admin/src/read-model.mjs#createFleetReader","holds":"triggers"},
-    {"el":"A deployment with no worker, no egress proxy and no triggers","kind":"sample","status":"illustrative","reason":"sample; the panel goldens draw their own"}
+    {
+      "el": "p-setup",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/setup.mjs#setupMain",
+      "golden": [
+        "panels/setup-starting.operator",
+        "panels/setup-starting.viewer"
+      ]
+    },
+    {
+      "el": "p-setup-pi",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewSetupPi",
+      "golden": [
+        "panels/setup-partial.operator"
+      ]
+    },
+    {
+      "el": "p-setup-empty",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/overview.mjs#overviewSetupEmpty",
+      "golden": [
+        "panels/setup-partial.operator"
+      ]
+    },
+    {
+      "el": "3 of 8 ready, and the segmented bar",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/doctor-view.mjs#firstRunState",
+      "golden": [
+        "panels/setup-partial.operator"
+      ],
+      "shows": "class=\"su-bar\""
+    },
+    {
+      "el": "The sentence under it: what stands between the deployment and its first job",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/doctor-view.mjs#firstRunState",
+      "holds": "Jobs start once",
+      "golden": [
+        "panels/setup-partial.operator"
+      ],
+      "shows": "Jobs start once"
+    },
+    {
+      "el": "Each step's tile, word, sentence and command",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/doctor-view.mjs#FIRST_RUN_STATES",
+      "golden": [
+        "panels/setup-nothing-ready.operator",
+        "panels/setup-partial.operator",
+        "panels/setup-partial.viewer"
+      ],
+      "shows": "Not yet"
+    },
+    {
+      "el": "The order follows the doctor",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/doctor-view.mjs#FIRST_RUN_STEPS"
+    },
+    {
+      "el": "The overview Add a trigger and link to full setup",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/console/panels/overview.mjs#overviewSetup",
+      "golden": [
+        "panels/setup-nothing-ready.operator",
+        "panels/setup-partial.operator"
+      ],
+      "shows": "Add a trigger",
+      "reason": "it links to the configuration page until the trigger editor exists"
+    },
+    {
+      "el": "What triggers can do",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/words.mjs#docsHref",
+      "golden": [
+        "panels/setup-partial.operator"
+      ],
+      "shows": "What triggers can do"
+    },
+    {
+      "el": "Do it from pi: /dispatch setup",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup-pi",
+      "source": "admin/src/doctor-view.mjs#FIRST_RUN_COMMANDS",
+      "holds": "setup",
+      "golden": [
+        "panels/setup-partial.operator"
+      ],
+      "shows": "<span>/dispatch</span> <span>setup</span>"
+    },
+    {
+      "el": "Once it runs: the Overview panels' empty states",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup-empty",
+      "source": "admin/src/console/panels/overview.mjs#overviewSetupEmpty",
+      "sentence": "admin/src/console/panels/overview.mjs#NEEDS_EMPTY.title",
+      "golden": [
+        "panels/setup-partial.operator"
+      ]
+    },
+    {
+      "el": "The page is live and gives way to the Overview",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/doctor-view.mjs#firstRunState",
+      "holds": "applies"
+    },
+    {
+      "el": "A viewer sees the steps without the commands or Add",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/console/panels/overview.mjs#overviewSetup",
+      "golden": [
+        "panels/setup-partial.viewer"
+      ],
+      "shows": "You are signed in as <b>a viewer</b>"
+    },
+    {
+      "el": "from doctor on build3, 2 minutes ago",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/console/panels/overview.mjs#overviewSetup",
+      "holds": "from doctor on",
+      "golden": [
+        "panels/setup-partial.operator"
+      ],
+      "shows": "from doctor on build3, 2 minutes ago"
+    },
+    {
+      "el": "The title Set up pi-dispatch",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#PAGES",
+      "golden": [
+        "panels/setup-starting.operator"
+      ],
+      "shows": "Set up pi-dispatch"
+    },
+    {
+      "el": "Valkey's URL",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "the step says Valkey answers; a viewer's page carries no address"
+    },
+    {
+      "el": "pi-dispatch setup github as drawn",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "The full CLI command includes --webhook-url and its placeholder, or --no-webhook; browser App creation remains open."
+    },
+    {
+      "el": "The deployment pointer, by its last folder",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/cli.mjs#deploymentOf",
+      "holds": "basename(dir)"
+    },
+    {
+      "el": "Whether Valkey answers",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/doctor-view.mjs#firstRunState",
+      "holds": "Valkey answers"
+    },
+    {
+      "el": "The signed-in token's name and role",
+      "kind": "provides",
+      "status": "real",
+      "source": "admin/src/console/shell.mjs#shellHtml",
+      "reason": "the step names the role alone: a live panel is drawn once per role, so a name would be one session's on every operator's page"
+    },
+    {
+      "el": "Host registry rows",
+      "kind": "provides",
+      "status": "real",
+      "source": "admin/src/read-model.mjs#createFleetReader",
+      "holds": "hostBudgets"
+    },
+    {
+      "el": "The newest doctor checks for the egress proxy, the provider key and the forge credentials",
+      "kind": "provides",
+      "status": "new",
+      "source": "worker/src/doctor-results.mjs#NAMED_CHECK_IDS",
+      "holds": "provider.key",
+      "reason": "the forge credentials are judged by their sections, github and forges: no one check holds them"
+    },
+    {
+      "el": "The trigger count",
+      "kind": "provides",
+      "status": "real",
+      "source": "admin/src/read-model.mjs#createFleetReader",
+      "holds": "triggers"
+    },
+    {
+      "el": "A deployment with no worker, no egress proxy and no triggers",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "sample; the panel goldens draw their own"
+    },
+    {
+      "el": "p-setup-ready",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/setup.mjs#setupReady",
+      "golden": [
+        "panels/setup-starting.operator",
+        "panels/setup-starting.viewer"
+      ]
+    },
+    {
+      "el": "p-setup-start",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/setup.mjs#setupStart",
+      "golden": [
+        "panels/setup-starting.operator",
+        "panels/setup-starting.viewer"
+      ]
+    },
+    {
+      "el": "Real host progress and published readiness",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "golden": [
+        "panels/setup-starting.operator"
+      ],
+      "shows": [
+        "Starting",
+        "Waiting for a fresh heartbeat"
+      ]
+    },
+    {
+      "el": "Worker starts disclose manual jobs and future spend",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/console/panels/setup.mjs#SETUP_START_NOTICE",
+      "golden": [
+        "panels/setup-starting.operator"
+      ],
+      "shows": "Starting a worker admits queued jobs"
+    },
+    {
+      "el": "Viewer invitation is private after Confirm",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup-ready",
+      "source": "admin/src/console/panels/setup.mjs#setupReady",
+      "golden": [
+        "panels/setup-starting.operator"
+      ],
+      "shows": [
+        "Add a viewer",
+        "one-use link"
+      ]
+    },
+    {
+      "el": "Provider API key and managed connection distinction",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/console/panels/setup.mjs#SETUP_PROVIDER_NOTICE",
+      "golden": [
+        "panels/setup-starting.operator"
+      ],
+      "shows": [
+        "managed subscription",
+        "ordinary pi OAuth login"
+      ]
+    },
+    {
+      "el": "Three editable ordinary trigger recipes",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/trigger-recipes.mjs#TRIGGER_RECIPES",
+      "golden": [
+        "panels/setup-starting.operator"
+      ],
+      "shows": [
+        "Fix issues labelled pi:fix",
+        "Tidy a folder every night",
+        "Answer @pi in comments"
+      ]
+    },
+    {
+      "el": "Browser GitHub App creation remains open",
+      "kind": "readme",
+      "status": "absent",
+      "sentence": "admin/src/console/panels/setup.mjs#SETUP_GITHUB_NOTICE",
+      "roles": [
+        "operator",
+        "viewer"
+      ],
+      "golden": [
+        "panels/setup-starting.operator",
+        "panels/setup-starting.viewer"
+      ],
+      "reason": "OQ-054 keeps the manifest and credential writes in the terminal, with the full webhook shape command."
+    },
+    {
+      "el": "Process-granted operation availability and allowlist count",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/setup-view.mjs#setupFacts"
+    },
+    {
+      "el": "No shared sign-in name or Valkey address",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "reason": "Shared panels draw a role and last folder only; the original card sample URL and person name are intentionally absent."
+    },
+    {
+      "el": "setup-no-grant.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "golden": [
+        "panels/setup-no-grant.operator"
+      ],
+      "shows": "verified durable installation"
+    },
+    {
+      "el": "setup-timeout.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "golden": [
+        "panels/setup-timeout.operator"
+      ],
+      "shows": "Timed out"
+    },
+    {
+      "el": "setup-unknown.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "golden": [
+        "panels/setup-unknown.operator"
+      ],
+      "shows": "Outcome unknown"
+    },
+    {
+      "el": "setup-partial-doctor.viewer",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "golden": [
+        "panels/setup-partial-doctor.viewer"
+      ],
+      "shows": "incomplete or stale"
+    },
+    {
+      "el": "setup-unreadable.viewer",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "golden": [
+        "panels/setup-unreadable.viewer"
+      ],
+      "shows": "Valkey does not answer"
+    },
+    {
+      "el": "setup-readonly.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-setup",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "golden": [
+        "panels/setup-readonly.operator"
+      ],
+      "shows": "read-only"
+    },
+    {
+      "el": "setup-ready.operator",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-setup-ready",
+      "source": "admin/src/setup-view.mjs#setupState",
+      "golden": [
+        "panels/setup-ready.operator"
+      ],
+      "shows": "A worker runs"
+    }
   ]
 }

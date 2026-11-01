@@ -103,7 +103,7 @@ const VALKEY_RM_ARGS = ["rm", "pi-dispatch-valkey"];
 //
 // The per-job networks are NOT here: the worker creates one per job and attaches this container to it for
 // the life of that run. This is only the proxy and its way out.
-const EGRESS_NETWORK_ARGS = ["network", "create", "pi-dispatch-egress-out"];
+export const EGRESS_NETWORK_ARGS = ["network", "create", "pi-dispatch-egress-out"];
 // A stopped CURRENT shipped proxy is started (a paused one unpaused) as it is; a STALE one is removed and run again from
 // the argv below (issue #453; the reasons are at step e2).
 const EGRESS_START_ARGS = ["start", "pi-dispatch-egress-proxy"];
@@ -115,7 +115,7 @@ const EGRESS_RM_ARGS = ["rm", "-f", "-v", "pi-dispatch-egress-proxy"];
 const EGRESS_RESTART_ARGS = ["restart", "pi-dispatch-egress-proxy"];
 // The deployment folder's files the shipped proxy mounts, each checked before a start or a recreate.
 const PROXY_FOLDER_FILES = Object.freeze(["egress-allowlist.conf", "deploy/egress-proxy.conf", MODEL_ENDPOINTS_INCLUDE_NAME]);
-const EGRESS_RUN_ARGS = [
+export const EGRESS_RUN_ARGS = [
 	"run",
 	"-d",
 	"--name",
@@ -173,6 +173,10 @@ function defaultConsoleOperators(dir, platform) {
 }
 
 export async function runUp(argv = [], deps = {}) {
+	if (argv.includes("--console")) {
+		const { runConsoleUp } = await import("./console-bootstrap.mjs");
+		return runConsoleUp(argv, { ...deps, runUpFn: deps.runUpFn ?? runUp });
+	}
 	const {
 		env = process.env,
 		spawn = nodeSpawn,

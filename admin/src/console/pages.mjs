@@ -1,3 +1,6 @@
+import { SETUP_PANELS, SETUP_DESCRIPTION } from "./panels/setup.mjs";
+import { setupFacts } from "../setup-view.mjs";
+import { TRIGGER_RECIPES } from "../trigger-recipes.mjs";
 import { subscriptionAuthForAgent } from "../subscription-auth-view.mjs";
 import { connectionsSubscriptionAuth } from "./panels/subscription-auth.mjs";
 import { MODELS_PANELS } from "./panels/models.mjs";
@@ -135,6 +138,7 @@ import { overviewAgentWrites } from "./panels/agent-writes.mjs";
  * searches for its children.
  */
 export const PAGES = Object.freeze({
+  setup: Object.freeze({ path: "/setup", auth: "viewer", live: true, title: "Set up pi-dispatch", nav: null, icon: "home" }),
   models: Object.freeze({ path: "/models", auth: "viewer", live: false, title: "Models", nav: "Models", icon: "spend" }),
   overview: Object.freeze({ path: "/", auth: "viewer", live: true, title: "Overview", nav: "Overview", icon: "home" }),
   runs: Object.freeze({ path: "/runs", auth: "viewer", live: true, title: "Runs", nav: "Runs", icon: "runs" }),
@@ -166,6 +170,7 @@ export const PAGES = Object.freeze({
 
 /** Each screen's panels, in page order: `[id, renderer]`. An id is `p-<panel>`, unique within its screen. */
 const PAGE_PANELS = Object.freeze({
+  setup: SETUP_PANELS,
   models: MODELS_PANELS,
   sandboxes: SANDBOX_PANELS,
   "zero-touch": ZERO_TOUCH_PANELS,
@@ -227,6 +232,7 @@ const PAGE_HEADLINES = Object.freeze({ overview: overviewHeadline, run: runHeadl
  * its screen exactly once (checked as this module loads), so no panel is drawn twice or lost.
  */
 const PAGE_LAYOUT = Object.freeze({
+  setup: [{ cls: "cols setup-layout", items: ["p-setup", { cls: "stack", items: ["p-setup-ready", "p-setup-start"] }] }],
   models: [{ cls: "stack", items: ["p-model-problems"] }, { cls: "cols models-layout", items: [{ cls: "stack", items: ["p-roles"] }, { cls: "stack", items: ["p-cooldowns", "p-models"] }] }, { cls: "stack", items: ["p-subscription-quota", "p-proposals"] }],
   sandboxes: [{ cls: "cols", items: [{ cls: "stack", items: ["p-sb-run", "p-sb-new"] }, { cls: "stack", items: ["p-sb-open", "p-sb-kept", "p-sb-browser"] }] }],
   "zero-touch": [{ cls: "cards-4 zt-kpis", items: ["p-zt-rate", "p-zt-streak", "p-zt-wait", "p-zt-handled"] }, { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions"] }, { cls: "stack zt-side", items: ["p-zt-causes", "p-zt-fixes"] }] }],
@@ -276,6 +282,7 @@ export function panelIds(name) {
 
 /** The parameters each screen takes; any other refuses the request. */
 const PAGE_PARAMS = Object.freeze({
+  setup: [],
   sandboxes: ["id", "repo", "index", "ref", "host", "pin", "request"],
   overview: ["rows", "zoom", "project"],
   runs: [...RUN_FILTER_FIELDS, "before", "touched", "days", "scope"],
@@ -299,7 +306,7 @@ const PAGE_PARAMS = Object.freeze({
   trigger: ["index"],
   triggers: ["kind"],
   "trigger-check": [],
-  "trigger-add": [],
+  "trigger-add": ["recipe"],
   watch: ["rule"],
   "watch-board": ["rule", "finding"],
   audit: [...AUDIT_PARAMS],
@@ -485,6 +492,11 @@ export function parsePageQuery(name, searchParams) {
       if (project !== null && !PROJECT_ID_RE.test(project)) return { refusal: "project must be a project id (lowercase letters, digits and '-', at most 32 characters)" };
       return { query: Object.freeze({ rows, zoom, project }) };
     }
+    case "trigger-add": {
+      const recipe = one("recipe");
+      if (params.has("recipe") && (recipe === null || !Object.hasOwn(TRIGGER_RECIPES, recipe))) return { refusal: `recipe must be one of ${Object.keys(TRIGGER_RECIPES).join(", ")}` };
+      return { query: Object.freeze(recipe === null ? {} : { recipe }) };
+    }
     case "audit":
       // Issue #737: the audit page's own parser (audit-view.mjs) judges every parameter, the cursor exactly as
       // `readConsoleAudit` takes it, so a refused cursor or filter never reaches a read.
@@ -506,6 +518,7 @@ export function pageQueryString(name, query) {
     if (q.project) p.set("project", q.project);
     if (q.scope) p.set("scope", q.scope);
   }
+  if (name === "trigger-add" && q.recipe) p.set("recipe", q.recipe);
   if (name === "trigger" && Number.isSafeInteger(q.index)) p.set("index", String(q.index));
   if (name === "sandboxes") {
     for (const k of ["id", "repo", "index", "ref", "host", "request"]) if (q[k] !== null && q[k] !== undefined) p.set(k, String(q[k]));
@@ -582,6 +595,7 @@ export function returnPathOf(raw) {
  * `/api/state`, and a reader built to read them would make every other screen pay for a read it never draws.
  */
 const PAGE_READS = Object.freeze({
+  setup: ["snapshot", "setup"],
   models: ["snapshot", "waiting", "models"],
   sandboxes: ["parkedCount"],
   "zero-touch": ["parkedCount"],
@@ -765,6 +779,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
       data.readFailed = true;
     }
+  }
+  if (reads.includes("setup")) {
+    try { data.setup = setupFacts(typeof deps.setup === "function" ? await deps.setup({ role: who.role, snapshot: data.snapshot }) : null, { role: who.role ?? "operator" }); }
+    catch { data.setup = setupFacts(null, { role: who.role }); }
   }
   if (reads.includes("models")) {
     try { data.models = typeof deps.modelsView === "function" ? await deps.modelsView(data.snapshot) : null; }
@@ -991,7 +1009,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     data.parkedChecks = Object.fromEntries(rows.map((p, i) => [p.jobId, got[i]]));
   }
   if (reads.includes("parkedCount")) data.parkedCount = await parkedCountOf(deps);
-  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
+  return who?.role === "agent" ? { ...agentReadProjection(data), ...(name === "setup" ? { setup: setupFacts(data.setup, { role: "agent" }) } : {}), ...(name === "models" ? { models: modelsForAgent(data.models) } : {}), ...(name === "connections" ? { connections: null, subscriptionAuth: subscriptionAuthForAgent(data.connections?.subscriptionAuth) } : {}) } : data;
 }
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------
@@ -1097,7 +1115,7 @@ export async function renderPage(name, ctx) {
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
   const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
-  const titleOptions = configOptions ?? triggerListOptions ?? (name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
+  const titleOptions = configOptions ?? triggerListOptions ?? (name === "setup" ? { description: SETUP_DESCRIPTION } : name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   const body = shellHtml(name, ctx, html`${["runs", "zero-touch", "sandboxes"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = name === "project" && ctx?.data?.projectView?.state !== "ready" || places !== null && !runPlaces(places).shown ? 503 : 200;

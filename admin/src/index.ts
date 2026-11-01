@@ -1501,6 +1501,19 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
     piVersionAdvisory = undefined;
   }
 
+  const openSetupConsoleFn = async (_chosenDir: string) => {
+    const env = deploymentEnv();
+    const dir = pointerState().deploymentDir;
+    const currentPaths = resolvePaths(env);
+    await consoleCommand(["setup", "--link"], {
+      hasUI: Boolean(ctx?.hasUI), mode: ctx?.mode, notify,
+      select: typeof ctx?.ui?.select === "function" ? ctx.ui.select.bind(ctx.ui) : undefined,
+      env, sessionEnv: process.env, logsDir: currentPaths.logsDir,
+      tokensPath: consoleTokensPathFor(env, dir),
+      guarded: (codesDir: string) => guardedFiles().some(g => g.dir === true && g.path === codesDir),
+    });
+  };
+
   if (sub === "") {
     // Detection decides what a bare /dispatch means (issue #92). Lazy import: the wizard module loads
     // only on the bare command and `setup`, never for the read subcommands or the LLM tools.
@@ -1520,7 +1533,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       // returns), so there is deliberately NO notify here: two notices for one degrade reads like two
       // separate failures. `initialDetection` hands over the verdict just computed -- one keypress must
       // not cost two detections, queue probe included.
-      await runSetupWizard(paths, ctx, notify, { openDashboardFn: openDashboard, initialDetection: det });
+      await runSetupWizard(paths, ctx, notify, { openDashboardFn: openDashboard, openSetupConsoleFn, initialDetection: det });
       return;
     }
     if (det.state === "pointer" && !runtimeSkewNoticed) {
@@ -1736,7 +1749,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       // step (and its "Open the panel anyway" escape) reuse this module's opener without a cycle at
       // evaluation time.
       const { runSetupWizard } = await import("./setup-wizard.ts");
-      await runSetupWizard(paths, ctx, notify, { openDashboardFn: openDashboard });
+      await runSetupWizard(paths, ctx, notify, { openDashboardFn: openDashboard, openSetupConsoleFn });
       return;
     }
     default:

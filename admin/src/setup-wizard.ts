@@ -30,6 +30,7 @@ import { join } from "node:path";
 // The single source of truth for skill-directory names -- the same regex the worker's flow gate applies
 // at job time, so the wizard can never offer a flow the gate would refuse on shape.
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
+import { trustedSetupFile } from "@edgehero/pi-dispatch/setup-host-entry";
 import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
 import {
   POINTER_ENV_ALLOWLIST,
@@ -56,7 +57,7 @@ import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 // lazy-imports this module from its /dispatch handler and statically imports registerNudge below), but
 // never at evaluation time: both sides only CALL across the boundary at runtime, after both modules
 // have finished loading.
-import { buildTriggerEntry } from "./index.ts";
+import { buildTriggerEntry, SUPPORTED_PI_VERSION } from "./index.ts";
 
 type Notify = ((message: string, type?: string) => void) | undefined;
 
@@ -261,6 +262,32 @@ export function npmInstallArgsFor(pkgName: string, version: string): string[] {
 /** The runtime's own install argv -- the pinned pair applied to the shared shape above. */
 export function npmInstallArgs(): string[] {
   return npmInstallArgsFor(RUNTIME_PKG, RUNTIME_VERSION);
+}
+
+/** Browser bootstrap installs durable artifacts together and pins the admin's otherwise floating pi peer. */
+export function browserInstallArgs(): string[] {
+  const args = npmInstallArgs();
+  args.splice(2, 0, `@edgehero/pi-dispatch-admin@${RUNTIME_VERSION}`, `@earendil-works/pi-coding-agent@${SUPPORTED_PI_VERSION}`, "--save-exact");
+  return args;
+}
+
+export function browserInstallProblem(fs: any, dir: string): string | null {
+  // Validate the actual published pi bin, whose bundled entry differs from its internal CLI module.
+  // All three metadata files and entries share the service broker's ownership, ancestor and cache checks.
+  const packages = [["@edgehero/pi-dispatch", RUNTIME_VERSION, "src/cli.mjs"], ["@edgehero/pi-dispatch-admin", RUNTIME_VERSION, "dist/console.mjs"], ["@earendil-works/pi-coding-agent", SUPPORTED_PI_VERSION, "dist/bundle/cli.js"]];
+  const trusted = (path: string) => trustedSetupFile(path, { realpath: fs.realpathSync, stat: fs.statSync });
+  for (const [name, version, entry] of packages) {
+    const base = join(dir, "node_modules", ...name.split("/"));
+    const metadata = join(base, "package.json");
+    const built = join(base, entry);
+    try {
+      if (fs.existsSync(metadata) && !trusted(metadata)) return `unsafe browser setup artifact: ${name} package metadata or its parent directory is writable by another account, foreign-owned or cache-backed`;
+      if (fs.existsSync(built) && !trusted(built)) return `unsafe browser setup artifact: ${name} built entry or its parent directory is writable by another account, foreign-owned or cache-backed`;
+      const pkg = JSON.parse(fs.readFileSync(metadata, "utf8"));
+      if (pkg.name !== name || pkg.version !== version || !trusted(built) || (name === "@earendil-works/pi-coding-agent" && pkg.bin?.pi !== entry)) return `${name}@${version} and its trusted built entry are required`;
+    } catch { return `${name}@${version} and its trusted built entry are required`; }
+  }
+  return null;
 }
 
 /** The receiver's install argv, same shape, its own pin (the trigger-edge step's service answer). */
@@ -711,6 +738,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
     reapplyFn = reapplyDeploymentPointer,
     detectFn = detectDeployment,
     openDashboardFn,
+    openSetupConsoleFn,
     writeTriggersFn = writeTriggers,
     resolvePathsFn = resolvePaths,
     listRepoSkillsFn = listRepoSkills,
@@ -746,12 +774,14 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // setup` path, and every test that wants the seam), the wizard detects for itself as before.
   const det = initialDetection ?? (await detectFn({ env, cwd: ctx?.cwd, fs }));
   notify?.(`pi-dispatch setup — detected: ${det.detail}`, "info");
-  const intent = await ui.select("pi-dispatch setup", ["Guided setup", "Open the panel anyway", "Cancel"]);
+  const intent = await ui.select("pi-dispatch setup", ["Finish setup in browser", "Guided setup", "Open the panel anyway", "Cancel"]);
   if (intent === "Open the panel anyway") {
     if (typeof openDashboardFn === "function") await openDashboardFn(paths, ctx, notify);
     return;
   }
-  if (intent !== "Guided setup") return;
+  const browser = intent === "Finish setup in browser";
+  if (!browser && intent !== "Guided setup") return;
+  if (browser && !["linux", "darwin"].includes(platform)) { notify?.("Browser host setup needs a Linux user service or macOS LaunchAgent. Choose Guided setup for this platform.", "warning"); return; }
 
   // ── (2) the deployment dir ─────────────────────────────────────────────────────────────────────
   // The one step with no "skip": every later step names this dir, so blank AND cancel both take the
@@ -825,7 +855,19 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   }
 
   // ── (4) install the pinned runtime ─────────────────────────────────────────────────────────────
-  if (readInstalledVersion(fs, runtimeDir) === RUNTIME_VERSION) {
+  if (browser) {
+    const problem = browserInstallProblem(fs, dir);
+    if (problem?.startsWith("unsafe browser setup artifact:")) { notify?.(`Browser setup stopped: ${problem}. Repair the durable install permissions or select a trusted deployment folder before retrying.`, "error"); return; }
+    if (problem !== null) {
+      const args = browserInstallArgs();
+      const { bin, options } = npmSpawnOptions(platform, dir);
+      if (!await ui.confirm("Install the browser setup packages", `Run in ${dir}:\n  ${bin} ${args.join(" ")}\n\nInstall exact worker, admin and pi peer versions durably in this folder. Scripts are disabled; no service points into npm's disposable execution cache.`)) { notify?.("Browser setup installation declined. Nothing was started.", "info"); return; }
+      ensureDeploymentPackageJson(fs, dir);
+      const res = await runAttachedFn(ctx, { title: "Install the pinned browser setup packages", argv0: bin, args, cwd: options.cwd, shell: options.shell, env });
+      const missing = browserInstallProblem(fs, dir);
+      if (res.error || res.code !== 0 || missing !== null) { notify?.(`Browser setup stopped: ${missing ?? "the package install did not succeed"}. Fix the durable install and run /dispatch setup again.`, "error"); return; }
+    } else notify?.(`Exact browser setup artifacts already installed in ${dir}; skipping npm install.`, "info");
+  } else if (readInstalledVersion(fs, runtimeDir) === RUNTIME_VERSION) {
     // Convergence, said out loud: a re-run of the wizard must not re-download a runtime that is
     // already the pinned version -- and must SAY it skipped, so the operator is not left wondering.
     notify?.(`runtime ${RUNTIME_VERSION} already installed in ${dir} — skipping npm install`, "info");
@@ -884,23 +926,27 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   const upEnv =
     !podmanVenue ? env : fileAssigns ? (typeof env?.PI_BACKENDS === "string" ? withoutBackends(env) : env) : upAddsBackends ? { ...env, PI_BACKENDS: "podman" } : env;
   const podmanUpText = `Run in ${dir}:\n  ${upAddsBackends ? "PI_BACKENDS=podman " : ""}${execPath} ${cliPath} up\n\nup shows each podman and systemctl action (the job image, then Valkey, the egress proxy and its rootless network keeper as Quadlet units) and asks y/N before it: nothing is auto-accepted.`;
+  const upArgs = [cliPath, "up", ...(browser ? ["--console"] : [])];
   const okUp = await ui.confirm(
-    "Bring the deployment up",
+    browser ? "Bring up the console with local setup authority" : "Bring the deployment up",
+    browser ? `Run in ${dir}:\n  ${execPath} ${upArgs.join(" ")}\n\nThe child asks before each host mutation and before granting bounded local host setup. It creates or preserves an operator entry and starts the console user service; it does not start the worker. No --yes is forwarded.` :
     podmanVenue ? podmanUpText :
     openshell !== null ? `Run in ${dir}:\n  ${execPath} ${cliPath} up\n\nup shows each ${runtime} action (the job image into the gateway's ${runtime} store, Valkey) and the openshell gateway's registration, and asks y/N before each: nothing is auto-accepted.` :
     `Run in ${dir}:\n  ${execPath} ${cliPath} up\n\nup shows each docker action and asks y/N before it — nothing is auto-accepted.`,
   );
   if (!okUp) {
+    if (browser) { notify?.("Console bootstrap declined. Run the displayed up --console command when ready.", "info"); return; }
     notify?.(`skipped — run it later: node ${cliPath} up  (in ${dir})`, "info");
   } else {
     const res = await runAttachedFn(ctx, {
       title: `pi-dispatch up — in ${dir}`,
       argv0: execPath,
-      args: [cliPath, "up"],
+      args: upArgs,
       cwd: dir,
       env: upEnv,
     });
     if (res.error || res.code !== 0) {
+      if (browser) { notify?.("Console bootstrap did not finish. Inspect its terminal output and follow its exact recovery commands; setup will not mint another link yet.", "error"); return; }
       // up's own exit code mirrors doctor's verdict, so a nonzero here usually means "something is
       // still missing", not "everything failed" -- the operator, who just watched the output, decides.
       const why = res.error ? `could not start (${res.error.message})` : `exited ${res.code}`;
@@ -948,6 +994,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   const pPath = pointerPath(env);
   // The JSON is shown VERBATIM: this file is the one artifact that redirects every future /dispatch,
   // so the operator approves the exact bytes-to-be, not a summary of them.
+  let pointerWritten = false;
   const okPointer = await ui.confirm("Write the deployment pointer", `${pPath} gets:\n${JSON.stringify(pointer, null, 2)}`);
   if (!okPointer) {
     notify?.(`skipped — without the pointer, /dispatch finds this deployment only when pi runs from ${dir}`, "info");
@@ -959,8 +1006,15 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
       // Re-apply immediately so THIS session's panel opens against the new deployment -- the memoized
       // factory-time apply already ran, and reapply is its one sanctioned refresh (no restart needed).
       reapplyFn(env, { fs });
+      pointerWritten = true;
       notify?.(`pointer written — the panel now finds ${dir} from any directory, in this session too`, "info");
     }
+  }
+
+  if (browser) {
+    if (pointerWritten && typeof openSetupConsoleFn === "function") await openSetupConsoleFn(dir, ctx, notify);
+    else notify?.("Continue with the one-time setup link printed in the terminal. To open private links from /dispatch, record this deployment pointer first.", "info");
+    return;
   }
 
   // ── (7) provider key: notice only, never-tier ──────────────────────────────────────────────────
@@ -968,7 +1022,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // not a credential channel) nor a wizard-written file. The operator edits the named file themselves,
   // or leans on the already-logged-into-pi fallback the worker honours.
   notify?.(
-    `provider key: set ANTHROPIC_API_KEY (or your provider's key) in ${join(dir, ".env")} — already logged into pi on this machine? leave it blank and jobs use that login. Setup never reads or writes the key itself.`,
+    `provider key: set ANTHROPIC_API_KEY (or your provider's key) in ${join(dir, ".env")} — a stored API key or an explicitly configured managed subscription can supply credentials. A plain pi OAuth login is not an unattended service credential. Setup never reads or writes the key itself.`,
     "info",
   );
 
@@ -999,15 +1053,17 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
     "Only needed for label/comment/PR triggers on GitHub repos. Local cron triggers need none of this — declining is the normal choice for a first setup. Mint GitHub App credentials now?",
   );
   if (okGithub) {
-    await runAttachedFn(ctx, {
-      title: `pi-dispatch setup github — in ${dir}`,
-      argv0: execPath,
-      args: [cliPath, "setup", "github"],
-      cwd: dir,
-      env,
-    });
+    const shape = await ui.select("How will GitHub deliver events?", ["Webhook URL", "No webhook, use polling", "Cancel"]);
+    let flags: string[] | null = shape === "No webhook, use polling" ? ["--no-webhook"] : null;
+    if (shape === "Webhook URL") {
+      const url = await ui.input("Public GitHub receiver URL", "https://example.com/webhook");
+      try { const parsed = new URL(url ?? ""); if (["http:", "https:"].includes(parsed.protocol) && !parsed.username && !parsed.password && !parsed.hash) flags = ["--webhook-url", parsed.href]; } catch { /* refused below; no invalid handoff */ }
+      if (!flags) notify?.("GitHub setup needs a valid http(s) receiver URL without credentials or a fragment. No GitHub command was run.", "warning");
+    }
+    if (flags) await runAttachedFn(ctx, { title: `pi-dispatch setup github — in ${dir}`, argv0: execPath, args: [cliPath, "setup", "github", ...flags], cwd: dir, env });
+    else if (shape !== "Webhook URL") notify?.("GitHub setup cancelled; no credentials were changed.", "info");
   } else {
-    notify?.(`later: node ${cliPath} setup github  (in ${dir})`, "info");
+    notify?.(`later: node ${cliPath} setup github --no-webhook (polling), or setup github --webhook-url <receiver URL> (in ${dir})`, "info");
   }
 
   // ── (10) the trigger edge: how a forge event actually reaches the queue ─────────────────────────

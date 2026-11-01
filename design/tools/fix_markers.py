@@ -31,7 +31,7 @@ WORD = {BUILT: ("ok", "done", "Built"), PLANNED: ("running", "clock", "Planned")
 STATUS = {
     "OverviewScreen": (BUILT, "In main since #745."), "OverviewAllClear": (BUILT, "In main since #745."),
     "OverviewPhone": (BUILT, "In main since #745."),
-    "SetupScreen": (PROPOSED, "#774. Today the overview draws the first-run checklist (#745); setting up from the browser is new."),
+    "SetupScreen": (BUILT, "Built by #774. Bounded local setup; browser GitHub App creation remains open."),
     "RunsScreen": (BUILT, "In main since #746."), "RunsPhone": (BUILT, "In main since #746."),
     "ParkedPhone": (BUILT, "In main since #746."),
     **{n: (BUILT, "Built by #747; managed forks added by #648. Watch remains separate work.") for n in ["RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered",

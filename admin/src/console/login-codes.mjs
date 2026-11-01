@@ -101,7 +101,7 @@ function take(file, fs, uid) {
   }
   try {
     const raw = JSON.parse(text);
-    return { name: raw?.name, expiresAt: Date.parse(raw?.expiresAt) };
+    return { name: raw?.name, expiresAt: Date.parse(raw?.expiresAt), ...(Object.hasOwn(raw ?? {}, "binding") ? { binding: raw.binding } : {}) };
   } catch {
     return { name: undefined, expiresAt: Number.NaN };
   }
@@ -137,7 +137,8 @@ function reap(dir, fs, t) {
  * Make a code for token `name`, valid for `ttlMs`: `{code}` (to put in the link's fragment, printed once) or
  * `{refusal}`. The caller has already checked that `name` is in the tokens file.
  */
-export function mintLoginCode({ dir, name, fs = nodeFs, now = () => Date.now(), random = randomBytes, ttlMs = 60000 }) {
+export function mintLoginCode({ dir, name, fs = nodeFs, now = () => Date.now(), random = randomBytes, ttlMs = 60000, binding = undefined }) {
+  if (binding !== undefined && !validBinding(binding)) return { refusal: "the viewer invitation binding is invalid; create a new invitation" };
   if (typeof name !== "string" || name === "") return { refusal: "a login code needs the name of a token in the tokens file" };
   const problem = dirProblem(dir, fs, { create: true });
   if (problem) return { refusal: problem };
@@ -146,7 +147,7 @@ export function mintLoginCode({ dir, name, fs = nodeFs, now = () => Date.now(), 
   const code = random(32).toString("base64url");
   const file = join(dir, `${codeHash(code)}.json`);
   try {
-    fs.writeFileSync(file, `${JSON.stringify({ name, expiresAt: new Date(t + ttlMs).toISOString() })}\n`, { mode: 0o600, flag: "wx" });
+    fs.writeFileSync(file, `${JSON.stringify({ name, expiresAt: new Date(t + ttlMs).toISOString(), ...(binding === undefined ? {} : { binding }) })}\n`, { mode: 0o600, flag: "wx" });
   } catch (e) {
     return { refusal: `the login code could not be written in ${dir} (${errCode(e)}); nothing was made` };
   }
@@ -184,5 +185,15 @@ export function consumeLoginCode({ dir, code, fs = nodeFs, now = () => Date.now(
   // clock step) was written by something else.
   if (taken.expiresAt > t + ttlMs + EXPIRY_SKEW_MS) return { refusal: used };
   if (typeof taken.name !== "string" || taken.name === "") return { refusal: used };
-  return { name: taken.name };
+  if (Object.hasOwn(taken, "binding") && !validBinding(taken.binding)) return { refusal: used };
+  return { name: taken.name, ...(taken.binding === undefined ? {} : { binding: taken.binding }) };
+}
+
+/** Browser invitations cannot follow a same-name replacement into a different role or token incarnation (#774). */
+function validBinding(b) {
+  return b !== null && typeof b === "object" && !Array.isArray(b) && Object.keys(b).sort().join(",") === "createdAt,generation,role,sha256" && b.role === "viewer" && /^[0-9a-f]{64}$/.test(b.sha256) && typeof b.createdAt === "string" && Number.isFinite(Date.parse(b.createdAt)) && Number.isSafeInteger(b.generation) && b.generation >= 0;
+}
+
+export function invitationMatches(binding, entry, file) {
+  return validBinding(binding) && entry?.role === binding.role && entry?.sha256 === binding.sha256 && entry?.createdAt === binding.createdAt && file?.generation === binding.generation;
 }

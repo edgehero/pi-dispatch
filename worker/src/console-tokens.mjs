@@ -150,6 +150,11 @@ export function readTokensFile({ path, fs = nodeFs, uid = processUid() }) {
 	return read.refusal ? { refusal: read.refusal } : { file: read.file };
 }
 
+/** The validated descriptor's bytes and shape for a confirmed caller; neither may be rendered (#774). */
+export function readTokensSnapshot({ path, fs = nodeFs, uid = processUid() }) {
+	return readTokensText(path, fs, uid);
+}
+
 /** `readTokensFile`, plus the exact `text` that was judged and parsed (a writer's `before`). */
 function readTokensText(path, fs, uid) {
 	const problem = tokensFileProblem({ path, fs, uid });
@@ -305,13 +310,14 @@ function iso(now) {
  * `{invalid}`. Creates the file at 0600 when it is missing. An existing name is refused: rotate it instead, so a typo
  * never silently replaces someone's secret.
  */
-export function addToken({ path, name, role, fs = nodeFs, now = () => Date.now(), random = randomBytes, uid = processUid() }) {
+export function addToken({ path, name, role, fs = nodeFs, now = () => Date.now(), random = randomBytes, uid = processUid(), expect = undefined }) {
 	if (typeof name !== "string" || !TOKEN_NAME_RE.test(name)) {
 		return { invalid: "a token name is 1 to 32 characters of a-z, 0-9, '.', '_' and '-', starting with a letter or digit" };
 	}
 	if (!TOKEN_ROLES.includes(role)) return { invalid: `a token's role is ${TOKEN_ROLES.join(" or ")}` };
 	const loaded = loadForWrite(path, fs, uid, { create: true });
 	if (loaded.invalid) return loaded;
+	if (expect !== undefined && loaded.text !== expect) return { invalid: "the console tokens file changed after preview; nothing was written" };
 	if (loaded.file.tokens.some((t) => t.name === name)) {
 		return { invalid: `a token named "${name}" already exists; give it a new secret with \`pi-dispatch-console token rotate --name ${name}\`, or choose another name` };
 	}
@@ -323,10 +329,13 @@ export function addToken({ path, name, role, fs = nodeFs, now = () => Date.now()
 }
 
 /** Remove the token named `name`: `{ok}` or `{invalid}`. Every session signed in with it ends on its next request. */
-export function revokeToken({ path, name, fs = nodeFs, random = randomBytes, uid = processUid() }) {
+export function revokeToken({ path, name, fs = nodeFs, random = randomBytes, uid = processUid(), expect = undefined, identity = undefined }) {
 	const loaded = loadForWrite(path, fs, uid, { create: false });
 	if (loaded.invalid) return loaded;
-	if (!loaded.file.tokens.some((t) => t.name === name)) return { invalid: `there is no token named "${String(name)}"; \`pi-dispatch-console token list\` shows the names` };
+	if (expect !== undefined && loaded.text !== expect) return { invalid: "the console tokens file changed after preview; nothing was written" };
+	const entry = loaded.file.tokens.find((t) => t.name === name);
+	if (identity !== undefined && (!entry || entry.sha256 !== identity.sha256 || entry.createdAt !== identity.createdAt || entry.role !== identity.role)) return { invalid: "the viewer entry changed; the replacement was not revoked" };
+	if (!entry) return { invalid: `there is no token named "${String(name)}"; \`pi-dispatch-console token list\` shows the names` };
 	return writeTokens(path, { ...loaded.file, tokens: loaded.file.tokens.filter((t) => t.name !== name) }, loaded.text, fs, random);
 }
 

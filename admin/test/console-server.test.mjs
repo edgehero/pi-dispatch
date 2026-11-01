@@ -241,12 +241,12 @@ async function start(overrides = {}) {
     log: (line) => seen.logs.push(line),
     readTokens: overrides.readTokens ?? (() => ({ file: FILE })),
     findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha256(presented)) ?? null,
-    consumeLoginCode: (code) => {
+    consumeLoginCode: overrides.consumeLoginCode ?? ((code) => {
       codesTried.push(code);
       const name = codes.get(code);
       codes.delete(code);
       return name ? { name } : { refusal: "unknown" };
-    },
+    }),
     writePauseWindows: (args) => {
       writes.push(args);
       return (overrides.writePauseWindows ?? realWritePauseWindows)(args);
@@ -501,7 +501,7 @@ test("the route table: every route declares auth and write, writes are POST, and
   }
   assert.equal(lookupRoute("POST", "/api/pause-windows/preview").route.action, "pause-windows");
   assert.equal(lookupRoute("POST", "/api/pause-windows/confirm").route.action, "pause-windows");
-  assert.equal(ROUTES.filter((r) => r.path.startsWith("/api/act/")).length, 2 * ACTIONS.length);
+  assert.equal(ROUTES.filter((r) => r.path.startsWith("/api/act/")).length, 2 * ACTIONS.length + ACTIONS.filter(action => action.name.startsWith("setup-")).length);
   assert.equal(STREAMS_TOTAL_MAX, 32);
   assert.ok(STREAMS_TOTAL_MAX < SERVER_LIMITS.maxConnections, "streams can never take every connection");
 });
@@ -2237,4 +2237,26 @@ test("a real viewer event check runs the shared receiver rules but returns no jo
   assert.equal(c.writes.length, 0);
   assert.equal(c.tickets.held.size, 0);
   assert.ok(!seen.logs.some((line) => line.includes("private-comment-marker") || line.includes(privatePrompt)));
+});
+
+
+test("browser invitation redemption refuses rotation, role escalation, recreation and generation drift before issuing a session", async () => {
+  for (const kind of ["valid", "rotation", "role", "recreated", "generation"]) {
+    const file = structuredClone(FILE);
+    const original = file.tokens.find(entry => entry.role === "viewer");
+    const binding = { sha256: original.sha256, createdAt: original.createdAt, role: "viewer", generation: file.generation };
+    const code = "invitation-binding-canary-" + "b".repeat(24);
+    secrets.add(code);
+    let consumed = false;
+    const c = await start({ readTokens: () => ({ file }), consumeLoginCode: () => { if (consumed) return { refusal: "used" }; consumed = true; return { name: original.name, binding }; } });
+    if (kind === "rotation") original.sha256 = "f".repeat(64);
+    if (kind === "role") original.role = "operator";
+    if (kind === "recreated") original.createdAt = "2026-10-14T12:00:01.000Z";
+    if (kind === "generation") file.generation += 1;
+    const result = await c.post("/login/code", { code, next: "/setup" });
+    assert.equal(result.status, kind === "valid" ? 200 : 401, kind);
+    if (kind === "valid") assert.equal(result.json().role, "viewer");
+    else assert.equal(result.headers["set-cookie"], undefined, "no session cookie for a replacement");
+    assert.equal((await c.post("/login/code", { code })).status, 401, "consumption is one use even on mismatch");
+  }
 });

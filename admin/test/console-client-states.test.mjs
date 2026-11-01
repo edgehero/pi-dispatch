@@ -12,8 +12,9 @@ import { errorPage } from "../src/console/error-pages.mjs";
 import * as ui from "../src/console/kit.mjs";
 import { runTranscriptSection } from "../src/console/transcript.mjs";
 import * as configUi from "../src/console/panels/config-ui.mjs";
+import { setupGolden } from "./helpers/setup-goldens.mjs";
 import { CLIENT_STATES, LEDGER_CARDS, T } from "./helpers/client-states.mjs";
-import { parseDocument, runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
+import { fakeTimers, parseDocument, runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
 
 // Issue #737, PR 2: the browser script in every state a card names, run over the server's OWN markup (the shell, the
 // sign-in pages, the confirm slot and the bars confirm-view.mjs draws), so what is checked is that the script shows the
@@ -1690,4 +1691,86 @@ stateTest("a provider refusal marks and focuses the active provider, never the h
   assert.ok(!hiddenId.closest(".field").classList.contains("field--err"));
   assert.equal(hiddenId.closest(".field").querySelector("[data-field-error]").hidden,true);
 
+});
+
+
+const bootSetup = async () => boot(await setupGolden({ state: "idle" }), { url: "/setup", timers: fakeTimers(NOW) });
+async function setupPreview(w, action) {
+  w.submit(formOf(w, action));
+  await w.fetch.open(`/api/act/${action}/preview`).answer(200, { ok: true, ticket: "private-ticket", action, html: bar({ title: "Host setup", expiresAt: NOW + 60000 }) });
+}
+
+stateTest("setup live refresh arms the replaced controls so a real preview can reach Confirm", async () => {
+  const w = await bootSetup();
+  const original = w.document.getElementById("p-setup-start").innerHTML;
+  w.streams[0].emit("panel", { id: "p-setup-start", html: original });
+  const form = formOf(w, "setup-worker-start");
+  assert.ok(form);
+  assert.equal(form.querySelector("[data-config-controls]").disabled, false);
+  await setupPreview(w, "setup-worker-start");
+  slotOf(w).querySelector("[data-confirm]").click();
+  assert.equal(calls(w, "/api/act/setup-worker-start/confirm").length, 1);
+});
+
+stateTest("provider key input clears before preview and neither Preview again nor cancellation replays it", async () => {
+  const w = await bootSetup();
+  const form = formOf(w, "setup-provider-key");
+  const key = form.querySelector('[name="value"]');
+  key.value = "synthetic-test-private-key";
+  w.submit(form);
+  assert.equal(key.value, "");
+  const sent = w.fetch.open("/api/act/setup-provider-key/preview");
+  assert.equal(sent.body.value, "synthetic-test-private-key");
+  await sent.answer(200, { ok: true, ticket: "key-ticket", action: "setup-provider-key", html: bar({ expiresAt: NOW + 60000 }) });
+  slotOf(w).querySelector("[data-cancel]").click();
+  assert.deepEqual(w.fetch.open("/api/act/setup-provider-key/cancel").body, { ticket: "key-ticket" });
+  assert.equal(slotOf(w).innerHTML.includes("synthetic-test-private-key"), false);
+  w.submit(form);
+  assert.equal(calls(w, "/api/act/setup-provider-key/preview")[1].body.value, undefined);
+});
+
+stateTest("a late private preview is cancelled after its slot closes, and a key ticket expires proactively", async () => {
+  const late = await bootSetup();
+  late.submit(formOf(late, "setup-provider-key"));
+  slotOf(late).querySelector("[data-cancel]").click();
+  await late.fetch.open("/api/act/setup-provider-key/preview").answer(200, { ok: true, ticket: "late-key", html: bar() });
+  assert.deepEqual(late.fetch.open("/api/act/setup-provider-key/cancel").body, { ticket: "late-key" });
+  const expiry = await bootSetup();
+  await setupPreview(expiry, "setup-provider-key");
+  expiry.tick(60000);
+  assert.deepEqual(expiry.fetch.open("/api/act/setup-provider-key/cancel").body, { ticket: "private-ticket" });
+  assert.equal(slotOf(expiry).querySelector("[data-confirm]").disabled, true);
+});
+
+stateTest("viewer invitation stays in the initiating slot, disappears on expiry or session end, and rejects external addresses", async () => {
+  const href = `/login/code#${"v".repeat(43)}&next=/setup`;
+  for (const ending of ["expiry", "session", "close", "revoke"]) {
+    const w = await bootSetup();
+    await setupPreview(w, "setup-viewer-add");
+    slotOf(w).querySelector("[data-confirm]").click();
+    await w.fetch.open("/api/act/setup-viewer-add/confirm").answer(200, { ok: true, invitation: { href, expiresAt: NOW + 60000 }, viewer: { name: "guest", identity: "a".repeat(32) } });
+    const privateBox = w.document.querySelector("[data-setup-invitation]");
+    assert.ok(privateBox);
+    assert.equal(text(privateBox.querySelector("code")), `http://127.0.0.1:4790${href}`);
+    assert.equal(w.location.reloads, 0);
+    if (ending === "expiry") w.tick(60000);
+    if (ending === "session") w.streams[0].emit("end", { reason: "revoked" });
+    if (ending === "close") slotOf(w).querySelector("[data-cancel]").click();
+    if (ending === "revoke") {
+      const revoke = w.document.querySelector("[data-setup-revoke]");
+      assert.ok(revoke);
+      w.submit(revoke);
+      assert.deepEqual(w.fetch.open("/api/act/setup-viewer-revoke/preview").body, { name: "guest", identity: "a".repeat(32) });
+      await w.fetch.open("/api/act/setup-viewer-revoke/preview").answer(200, { ok: true, ticket: "revoke-ticket", html: bar({ title: "Revoke guest" }) });
+      slotOf(w).querySelector("[data-confirm]").click();
+      assert.deepEqual(w.fetch.open("/api/act/setup-viewer-revoke/confirm").body, { ticket: "revoke-ticket" });
+    }
+    assert.equal(w.document.body.textContent.includes(href), false, ending);
+  }
+  const w = await bootSetup();
+  await setupPreview(w, "setup-viewer-add");
+  slotOf(w).querySelector("[data-confirm]").click();
+  await w.fetch.open("/api/act/setup-viewer-add/confirm").answer(200, { ok: true, invitation: { href: `https://foreign.invalid${href}` } });
+  assert.equal(w.document.querySelector("[data-setup-invitation]"), null);
+  assert.equal(w.document.body.textContent.includes("foreign.invalid"), false);
 });

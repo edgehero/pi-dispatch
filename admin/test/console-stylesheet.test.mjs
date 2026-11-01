@@ -87,7 +87,7 @@ test("the shell and configuration declarations hold no colour literal: every col
 
 test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR 3: the overview; PR 4: runs, parked), each served only under its own body", () => {
   assert.ok(Object.isFrozen(PAGE_CSS));
-  assert.deepEqual(Object.keys(PAGE_CSS), ["sandboxes", "zero-touch", "insights", "insights-budget-split", "insights-capacity", "insights-breakdown", "insights-flows", "login", "login-code", "error", "audit", "overview", "run", "runs", "parked", "answer-rules", "fleet", "host", "venue"]);
+  assert.deepEqual(Object.keys(PAGE_CSS), ["setup", "sandboxes", "zero-touch", "insights", "insights-budget-split", "insights-capacity", "insights-breakdown", "insights-flows", "login", "login-code", "error", "audit", "overview", "run", "runs", "parked", "answer-rules", "fleet", "host", "venue"]);
   assert.equal(PAGE_CSS.runs, RUNS_CSS);
   assert.equal(PAGE_CSS.parked, PARKED_CSS + ANSWERER_CSS);
   assert.equal(PAGE_CSS["answer-rules"], ANSWERER_CSS);
@@ -96,7 +96,7 @@ test("PAGE_CSS holds the converted pages' rules (PR 2: sign-in, error, audit; PR
   assert.ok(PAGE_CSS.audit.endsWith(PAGE_CSS.error), "the audit page carries the error card's rules too");
   const served = pageCss();
   assert.ok(CONSOLE_CSS.includes(served));
-  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:sandboxes|zero-touch|insights(?:-budget-split|-capacity|-breakdown|-flows)?|login|login-code|error|audit|overview|run|runs|parked|answer-rules|fleet|host|venue)"\](?:$|[ >])/, sel);
+  for (const sel of selectorsOf(served)) assert.match(sel, /^body\[data-page="(?:setup|sandboxes|zero-touch|insights(?:-budget-split|-capacity|-breakdown|-flows)?|login|login-code|error|audit|overview|run|runs|parked|answer-rules|fleet|host|venue)"\](?:$|[ >])/, sel);
   for (const name of Object.keys(PAGE_CSS)) assert.ok(served.includes(`body[data-page="${name}"] `), name);
   assert.equal(scopeCss('body[data-page="runs"]', ".x .y{color:var(--ink)}\nbody{gap:0}"), 'body[data-page="runs"] .x .y{color:var(--ink)}\nbody[data-page="runs"]{gap:0}');
 });

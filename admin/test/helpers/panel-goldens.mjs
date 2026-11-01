@@ -1,3 +1,4 @@
+import { SETUP_DRAW } from "./setup-goldens.mjs";
 import { MODELS_DRAW } from "./models-goldens.mjs";
 import { ANSWERER_DRAW, AGENT_OVERVIEW_DRAW } from "./answerer-goldens.mjs";
 import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
@@ -798,6 +799,7 @@ const RUN_CARD_STATES = {
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 
 const DRAW = {
+  ...SETUP_DRAW,
   ...ANSWERER_DRAW,
   ...AGENT_OVERVIEW_DRAW,
   ...SANDBOX_DRAW,

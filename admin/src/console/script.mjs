@@ -287,6 +287,8 @@ export const CONSOLE_SCRIPT = `"use strict";
   // Sign-in, saying why only with one of the console's own reasons: whatever an answer or an event carried, nothing
   // else reaches the query string.
   function toLogin(r) {
+    setupPrivateEnded = true;
+    forgetSetupInvitation();
     location.assign(isReason(r) ? "/login?ended=" + r : "/login");
   }
   function later(fn, ms) {
@@ -555,6 +557,8 @@ export const CONSOLE_SCRIPT = `"use strict";
   var outTimer = null;
   if (out) out.addEventListener("click", function () {
     signingOut = true;
+    setupPrivateEnded = true;
+    forgetSetupInvitation();
     outPress += 1;
     var mine = outPress;
     if (outTimer !== null && typeof clearTimeout === "function") clearTimeout(outTimer);
@@ -1132,6 +1136,58 @@ ${FIT_JS}
   var slotLabel = "";
   var slotTicket = null;
   var slotBody = null;
+  var setupPrivateEnded = false;
+  var setupInviteBox = null;
+  var setupInviteTimer = null;
+  function forgetSetupInvitation() {
+    if (setupInviteTimer !== null && typeof clearTimeout === "function") clearTimeout(setupInviteTimer);
+    setupInviteTimer = null;
+    if (setupInviteBox) setupInviteBox.textContent = "This private invitation is no longer shown. Ask for a new link on the host if needed.";
+    setupInviteBox = null;
+  }
+  function cancelSetupTicket() {
+    if (!slotTicket || typeof slotAction !== "string" || slotAction.indexOf("setup-") !== 0) return;
+    var ticket = slotTicket, action = slotAction;
+    slotTicket = null;
+    post("/api/act/" + action + "/cancel", { ticket: ticket }, true).catch(function () { /* expiry and session cleanup remain the backstop */ });
+  }
+  function showSetupInvitation(invitation, started, viewer) {
+    if (setupPrivateEnded || signingOut || !invitation || typeof invitation.href !== "string" || !(new RegExp("^/login/code#[A-Za-z0-9_-]{43}&next=/setup$")).test(invitation.href)) return false;
+    var href;
+    try {
+      var address = new URL(invitation.href, location.href);
+      if (address.origin !== location.origin || (address.protocol !== "http:" && address.protocol !== "https:")) return false;
+      href = address.href;
+    } catch (e) { return false; }
+    forgetSetupInvitation();
+    slotSays("Viewer created. Copy this one-use link privately; it is good for at most 60 seconds. The viewer needs a route or their own tunnel to this console.");
+    var message = inSlot("[data-slot-message]");
+    if (!message || typeof document.createElement !== "function") return false;
+    var box = document.createElement("div");
+    box.setAttribute("data-setup-invitation", "");
+    box.setAttribute("role", "status");
+    var command = document.createElement("div"); command.className = "cmd";
+    var code = document.createElement("code"); code.textContent = href;
+    var copy = document.createElement("button"); copy.setAttribute("type", "button"); copy.hidden = true;
+    copy.setAttribute("data-copy", ""); copy.className = "btn btn--sm"; copy.textContent = "Copy invitation";
+    command.appendChild(code); command.appendChild(copy); box.appendChild(command);
+    if (viewer && typeof viewer.name === "string" && /^[a-z0-9][a-z0-9._-]{0,31}$/.test(viewer.name) && typeof viewer.identity === "string" && /^[0-9a-f]{32}$/.test(viewer.identity)) {
+      var revoke = document.createElement("form"); revoke.setAttribute("data-action", "setup-viewer-revoke"); revoke.setAttribute("data-setup-revoke", ""); revoke.className = "su-act";
+      for (var field of ["name", "identity"]) {
+        var hidden = document.createElement("input"); hidden.setAttribute("type", "hidden"); hidden.setAttribute("name", field); hidden.setAttribute("value", viewer[field]); revoke.appendChild(hidden);
+      }
+      var undo = document.createElement("button"); undo.setAttribute("type", "submit"); undo.className = "btn btn--ghost btn--sm"; undo.textContent = "Preview revoking this viewer"; revoke.appendChild(undo); box.appendChild(revoke);
+    }
+    message.after(box);
+    setupInviteBox = box;
+    copyButtons(box);
+    // Subtract the whole request round trip, a conservative lifetime that does not trust a browser/server clock offset.
+    var remaining = Math.max(0, 60000 - Math.max(0, Date.now() - started));
+    setupInviteTimer = later(forgetSetupInvitation, remaining);
+    slotDisable("[data-cancel]", false);
+    return true;
+  }
+
   // Bumped whenever the slot is opened or closed, so an answer that comes back for a slot since re-used is dropped.
   var slotGen = 0;
   // Why the bar in the slot says this browser is someone else's now (the person refusal's ended, "switched"), or null:
@@ -1245,6 +1301,8 @@ ${FIT_JS}
     return anchor;
   }
   function openSlot(form, action, label, opener) {
+    cancelSetupTicket();
+    forgetSetupInvitation();
     stopCountdown();
     slotGen += 1;
     fillSlot(skeleton);
@@ -1311,6 +1369,9 @@ ${FIT_JS}
     try { to.focus(); } catch (e) { /* the focus stays on the page */ }
   }
   function closeSlot() {
+    cancelSetupTicket();
+    forgetSetupInvitation();
+    slotBody = null;
     // Asked before the fill takes what holds it. In the slot, or on nothing (a browser that does not focus a button on
     // a click, Safari's, leaves the body focused when Cancel is pressed): never focus the reader put elsewhere.
     var active = document.activeElement;
@@ -1371,6 +1432,7 @@ ${FIT_JS}
       el.textContent = Math.floor(s / 60) + ":" + pad2(s % 60);
       if (left > 0) return;
       stopCountdown();
+      cancelSetupTicket();
       slotTicket = null;
       slotDisable("[data-confirm]", true);
     };
@@ -1393,11 +1455,21 @@ ${FIT_JS}
     var body;
     fieldErrors(form, null);
     try { body = bodyOf(form); } catch (e) { fieldErrors(form, e.message); slotSays(e.message + "; nothing was sent."); return; }
-    slotBody = body;
+    var privateKey = action === "setup-provider-key";
+    slotBody = privateKey ? null : body;
+    if (privateKey && typeof form.querySelector === "function") {
+      var keyField = form.querySelector('input[name="value"]');
+      if (keyField) keyField.value = "";
+    }
     var becauseRun = document.body.getAttribute("data-because-run");
     if (becauseRun && CONFIG_FIX_ACTIONS.indexOf(action) >= 0) body.becauseRun = becauseRun;
-    post("/api/act/" + action + "/preview", body, true).then(function (r) {
-      if (mine !== slotGen) return;
+    var previewRequest = post("/api/act/" + action + "/preview", body, true);
+    if (privateKey) body.value = undefined;
+    previewRequest.then(function (r) {
+      if (mine !== slotGen) {
+        if (action.indexOf("setup-") === 0 && r.ok && r.body && typeof r.body.ticket === "string") post("/api/act/" + action + "/cancel", { ticket: r.body.ticket }, true).catch(function () {});
+        return;
+      }
       var b = r.body || {};
       if (signedOut(r)) return;
       if (!r.ok) fieldErrors(form, b.refusal || b.error || errorOf(r));
@@ -1423,10 +1495,15 @@ ${FIT_JS}
     var mine = slotGen;
     slotDisable("[data-confirm]", true);
     slotDisable("[data-cancel]", true);
+    var confirmStarted = Date.now();
     post("/api/act/" + slotAction + "/confirm", { ticket: ticket }, true).then(function (c) {
       if (mine !== slotGen) return;
       var b = c.body || {};
       if (c.ok) {
+        if (slotAction === "setup-viewer-add" && b.invitation) {
+          if (!showSetupInvitation(b.invitation, confirmStarted, b.viewer)) slotSays("The viewer was created, but the private invitation could not be displayed safely. Mint a new link on the host; do not add the viewer again.");
+          return;
+        }
         // Adoption is a distinct human act. Keep the exact confirmed reply in memory, never in a URL or storage,
         // and open its own editor rather than silently turning an answer into standing policy.
         var keep = slotAction === "parked-answer" && slotForm && slotForm.querySelector("[data-keep-standing]");
@@ -1523,7 +1600,7 @@ ${FIT_JS}
       // This panel's fresh server state is authoritative (including expiry/not-kept reasons). A previous entry's
       // connection status must not overwrite it when question/tail slots are refilled after another panel swap.
       if (el.id === "p-transcript") tstate = null;
-      try { enableAnswererControls(el); } catch (e) { /* actions remain disabled if they cannot be armed */ }
+      try { enableAnswererControls(el); enableConfigControls(el); } catch (e) { /* actions remain disabled if they cannot be armed */ }
       try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
       try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
       try { foldBars(el); } catch (e) { /* the swapped panel's filters stay shown */ }
@@ -1592,7 +1669,11 @@ ${FIT_JS}
     for (var ac = 0; ac < controls.length; ac++) controls[ac].disabled = false;
   }
   enableAnswererControls(document);
-  var configControls = typeof document.querySelectorAll === "function" ? document.querySelectorAll("[data-config-controls]") : [];
+  function enableConfigControls(root) {
+    var controls = typeof root.querySelectorAll === "function" ? root.querySelectorAll("[data-config-controls]") : [];
+    for (var ci = 0; ci < controls.length; ci++) controls[ci].disabled = false;
+  }
+  enableConfigControls(document);
   var fixSource = document.body.getAttribute("data-because-run");
   if (fixSource && /^[A-Za-z0-9._:-]{1,200}$/.test(fixSource)) {
     var configLinks = document.querySelectorAll('a[href^="/config"]');
@@ -1602,7 +1683,6 @@ ${FIT_JS}
       configLinks[ci].setAttribute("href", fixLink.pathname + fixLink.search + fixLink.hash);
     }
   }
-  for (var ci = 0; ci < configControls.length; ci++) configControls[ci].disabled = false;
   // One native picker keeps keyboard and touch behavior, while both declarations use their existing action paths.
   function resolverFields(form) {
     var kind = form.querySelector('[name="kind"]');
@@ -2067,6 +2147,8 @@ ${FIT_JS}
   // The page stream's session end also ends its transcript; tdone never takes this path.
   var ended = false;
   function streamEnded(ev) {
+    setupPrivateEnded = true;
+    forgetSetupInvitation();
     var r = null;
     try {
       var d = JSON.parse(ev && ev.data);

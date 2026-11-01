@@ -93,12 +93,28 @@ If you already use pi, let the console set everything up:
 pi install npm:@edgehero/pi-dispatch-admin   # then, inside pi:  /dispatch
 ```
 
-With nothing configured, `/dispatch` starts a guided setup. It creates a deployment folder, installs the
-exact pi-dispatch version the console expects, runs the same `up` pass shown below, and can install the
-worker as a service and a
-receiver for forge events. It ends in the admin panel, with an optional first trigger for the repo you
-are in. Every step says what it will do and asks first. Nothing is written into your repo, and no
-credential passes through a dialog.
+With nothing configured, `/dispatch` offers **Finish setup in browser**. It checks the runtime, installs
+exact worker, console and pi versions durably, runs the consented `up --console` pass and opens `/setup`
+with a private one-use link. The live checklist offers individually previewed and confirmed host setup,
+a create-only provider key field and editable first-trigger recipes. Viewers can watch progress.
+**Guided setup** retains the terminal route. Nothing is written into your repo without its separate opt-in,
+and no credential passes through a pi dialog. [First run](docs/console.md#first-run) explains authority,
+readiness, key handling and unsupported steps.
+
+### Finish setup in the browser
+
+Install into a durable deployment folder, then use its installed command:
+
+```bash
+mkdir my-dispatch && cd my-dispatch
+npm install --save-exact @edgehero/pi-dispatch@4.3.1 @edgehero/pi-dispatch-admin@4.3.1 @earendil-works/pi-coding-agent@1.4.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+./node_modules/.bin/pi-dispatch up --console
+```
+
+It asks before the infrastructure actions and the console's local host setup grant, then prints a
+60-second sign-in link to `/setup`. It starts the console service; worker starts need their own preview
+of waiting jobs and cron exposure. A remote host needs your tunnel. Existing consoles have no host setup
+authority unless explicitly installed with `--host-setup`. GitHub App creation remains in the terminal.
 
 ### Servers and headless
 

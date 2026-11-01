@@ -228,3 +228,16 @@ test("consume refuses and removes a code file this minter did not write: loose m
   plant(dir, fine);
   assert.deepEqual(consumeLoginCode({ dir, code: fine, now }), { name: "rob" }, "a 0600 file of this account within the ttl");
 });
+
+test("browser viewer codes retain a validated exact-incarnation binding while ordinary host links keep their old shape", { skip: !posix }, () => {
+  const { dir } = setup();
+  const now = clock();
+  const binding = { sha256: "a".repeat(64), createdAt: new Date(T0).toISOString(), role: "viewer", generation: 2 };
+  const { code } = mintLoginCode({ dir, name: "observer", binding, now });
+  assert.deepEqual(consumeLoginCode({ dir, code, now }), { name: "observer", binding });
+  for (const invalid of [{ ...binding, role: "operator" }, { ...binding, generation: -1 }, { ...binding, sha256: "bad" }, { ...binding, unexpected: true }]) assert.ok(mintLoginCode({ dir, name: "observer", binding: invalid, now }).refusal);
+  const forged = Buffer.alloc(32, 209).toString("base64url");
+  fs.writeFileSync(join(dir, `${sha(forged)}.json`), JSON.stringify({ name: "observer", expiresAt: new Date(T0 + 60_000).toISOString(), binding: { ...binding, role: "operator" } }), { mode: 0o600 });
+  assert.ok(consumeLoginCode({ dir, code: forged, now }).refusal);
+  assert.equal(fs.existsSync(join(dir, `${sha(forged)}.json`)), false);
+});

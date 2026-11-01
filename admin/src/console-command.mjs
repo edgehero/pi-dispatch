@@ -43,10 +43,10 @@ import { probeConsole } from "@edgehero/pi-dispatch/console-probe";
 import { CONSOLE_START_ADVICE } from "./console/link.mjs";
 import { RUN_ID_RE } from "./read-model.mjs";
 
-export const CONSOLE_USAGE = "usage: /dispatch console [runs|fleet|insights|config|parked|audit|<run id>] [--link [token name]] [--no-open]";
+export const CONSOLE_USAGE = "usage: /dispatch console [setup|runs|fleet|insights|config|parked|audit|<run id>] [--link [token name]] [--no-open]";
 
 /** The page words the command takes, each the console page of that name. Anything else that is a run id is `run?id=`. */
-export const CONSOLE_PAGE_WORDS = Object.freeze(["runs", "fleet", "insights", "config", "parked", "audit"]);
+export const CONSOLE_PAGE_WORDS = Object.freeze(["setup", "runs", "fleet", "insights", "config", "parked", "audit"]);
 
 /** How to make an operator token, said when `--link` finds none. */
 const TOKEN_ADD_HINT = "add one in the operator's own shell with pi-dispatch-console token add --name <name> --role operator";

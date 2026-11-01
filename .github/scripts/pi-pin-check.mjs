@@ -10,7 +10,8 @@
  *   - the overrides name every pi package the lockfile holds, each at the pin;
  *   - every pi package entry in package-lock.json (at any depth) is at the pin;
  *   - the places the pin is written by hand agree with it: the runner's pi-mcp and pi-agent-core, the worker's pi-ai
- *     and pi-tui, the admin devDependency, admin/src/index.ts's SUPPORTED_PI_VERSION and image/Dockerfile's PI_VERSION.
+ *     and pi-tui, the admin devDependency, admin/src/index.ts's SUPPORTED_PI_VERSION, image/Dockerfile's PI_VERSION
+ *     and the durable-install commands in README.md and docs/console.md.
  *
  * `piPinProblems` is pure (the files are handed in) so its test pins the rule on constructed input as well as on this
  * repository's own files. Run as a script it reads the repository and exits 1 on any problem.
@@ -19,9 +20,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const SCOPE = "@earendil-works/";
+/** One documented command per file; the bump uses the same sites and version capture. */
+export const PI_DOC_SITES = Object.freeze(["README.md", "docs/console.md"]);
+export const PI_DOC_VERSION_RE = /@earendil-works\/pi-coding-agent@([^\s`]+)/;
 
 /** The problems with these files' pi pins, as sentences; empty when every pin agrees. */
-export function piPinProblems({ root, lock, runner, worker, admin, adminIndex, dockerfile }) {
+export function piPinProblems({ root, lock, runner, worker, admin, adminIndex, dockerfile, documents }) {
 	const problems = [];
 	const pin = runner?.dependencies?.[`${SCOPE}pi-coding-agent`];
 	if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) return [`image/runner/package.json pins pi-coding-agent at ${JSON.stringify(pin)}, not an exact version`];
@@ -41,6 +45,11 @@ export function piPinProblems({ root, lock, runner, worker, admin, adminIndex, d
 	want("admin/package.json's devDependency @earendil-works/pi-coding-agent", admin?.devDependencies?.[`${SCOPE}pi-coding-agent`]);
 	want("admin/src/index.ts's SUPPORTED_PI_VERSION", /^export const SUPPORTED_PI_VERSION = "([^"]*)";$/m.exec(adminIndex ?? "")?.[1]);
 	want("image/Dockerfile's PI_VERSION", /^ARG PI_VERSION=(\S*)$/m.exec(dockerfile ?? "")?.[1]);
+	for (const path of PI_DOC_SITES) {
+		const copies = [...String(documents?.[path] ?? "").matchAll(new RegExp(PI_DOC_VERSION_RE.source, "g"))];
+		if (copies.length !== 1) problems.push(`${path} holds ${copies.length} documented pi installation pins, want exactly one`);
+		else want(`${path}'s documented pi installation pin`, copies[0][1]);
+	}
 	const overrides = root?.overrides ?? {};
 	const locked = new Map();
 	for (const [path, entry] of Object.entries(lock?.packages ?? {})) {
@@ -68,6 +77,7 @@ export function repositoryPins(repo) {
 		admin: json("admin/package.json"),
 		adminIndex: readFileSync(new URL("admin/src/index.ts", repo), "utf8"),
 		dockerfile: readFileSync(new URL("image/Dockerfile", repo), "utf8"),
+		documents: Object.fromEntries(PI_DOC_SITES.map((path) => [path, readFileSync(new URL(path, repo), "utf8")])),
 	};
 }
 

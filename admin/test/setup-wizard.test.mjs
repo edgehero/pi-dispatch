@@ -6,6 +6,7 @@ import * as realFs from "node:fs";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { PI_DOC_SITES } from "../../.github/scripts/pi-pin-check.mjs";
 
 /**
  * The `/dispatch setup` wizard (setup-wizard.ts): the detection tree, the pinned npm shapes, the
@@ -22,6 +23,7 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const mod = await jiti.import(fileURLToPath(new URL("../src/setup-wizard.ts", import.meta.url)));
+const PINNED_PI = JSON.parse(readFileSync(new URL("../../worker/package.json", import.meta.url), "utf8")).dependencies["@earendil-works/pi-ai"];
 
 /** A probe that fails the test if detection consults the network when it must not. */
 const mustNotProbe = async () => {
@@ -378,6 +380,17 @@ test("RECEIVER_VERSION matches the in-repo receiver/package.json version (same a
   const receiverPkg = JSON.parse(readFileSync(fileURLToPath(new URL("../../receiver/package.json", import.meta.url)), "utf8"));
   assert.equal(mod.RECEIVER_VERSION, receiverPkg.version);
   assert.equal(receiverPkg.name, "@edgehero/pi-dispatch-receiver", "and the package name the argv pins");
+});
+
+test("documented browser bootstrap commands install the current exact worker and admin releases", () => {
+  const packages = ["worker", "admin"].map(workspace => JSON.parse(readFileSync(new URL(`../../${workspace}/package.json`, import.meta.url), "utf8")));
+  for (const path of PI_DOC_SITES) {
+    const text = readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+    const command = /^npm install --save-exact .*@earendil-works\/pi-coding-agent@.*$/m.exec(text)?.[0];
+    assert.ok(command, `${path} keeps its complete durable install command`);
+    const args = command.split(/\s+/);
+    for (const pkg of packages) assert.deepEqual(args.filter(arg => arg.startsWith(`${pkg.name}@`)), [`${pkg.name}@${pkg.version}`], `${path} installs the current exact ${pkg.name} release`);
+  }
 });
 
 // ── runAttached: the suspend/spawn/restore bracket ───────────────────────────────────────────────
@@ -1949,4 +1962,141 @@ test("probeOpenshell (#712): the CLI's version and the gateway judged by the wor
   assert.deepEqual(mod.probeOpenshell(null, exec({ "--version": "openshell 0.1.4\n", "status -o json": "not json" })), { version: "0.1.4", connected: false, local: false });
   assert.deepEqual(mod.probeOpenshell(null, exec({ "--version": Object.assign(new Error("spawn openshell ENOENT"), { code: "ENOENT" }) })), { missing: true });
   assert.deepEqual(mod.probeOpenshell(null, exec({ "--version": Object.assign(new Error("x"), { status: 2 }) })), { broken: "`openshell --version` exited 2" });
+});
+
+// #774: actual durable artifacts, rather than npm exit codes or a workspace symlink, authorize browser bootstrap.
+function plantBrowserArtifacts(dir, { adminVersion = mod.RUNTIME_VERSION, piVersion = PINNED_PI, missingEntry = null } = {}) {
+  for (const [name, version, entry] of [["@edgehero/pi-dispatch", mod.RUNTIME_VERSION, "src/cli.mjs"], ["@edgehero/pi-dispatch-admin", adminVersion, "dist/console.mjs"], ["@earendil-works/pi-coding-agent", piVersion, "dist/bundle/cli.js"]]) {
+    const base = join(dir, "node_modules", ...name.split("/"));
+    mkdirSync(join(base, ...entry.split("/").slice(0, -1)), { recursive: true });
+    writeFileSync(join(base, "package.json"), JSON.stringify({ name, version, ...(name === "@earendil-works/pi-coding-agent" ? { bin: { pi: entry } } : {}) }));
+    if (entry !== missingEntry) writeFileSync(join(base, entry), "// fixture artifact\n");
+  }
+}
+
+test("browser wizard installs exact durable worker/admin/pi artifacts, checks their built entries, and hands off privately to /setup without starting a worker", async () => {
+  const dir = emptyDir();
+  const { ui, notes, seen } = wizardUi({ select: ["Finish setup in browser"], input: [dir], confirm: [true, true, true] });
+  const opened = [];
+  const { deps, attached, pointerWrites, dashboards } = wizardDeps({
+    openSetupConsoleFn: async selected => opened.push(selected),
+    runAttachedFn: async (_ctx, opts) => { attached.push(opts); if (opts.argv0 === "npm") plantBrowserArtifacts(dir); else writeFileSync(join(dir, ".env"), ""); return { code: 0 }; },
+  });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.deepEqual(attached[0].args, ["install", `@edgehero/pi-dispatch@${mod.RUNTIME_VERSION}`, `@edgehero/pi-dispatch-admin@${mod.RUNTIME_VERSION}`, `@earendil-works/pi-coding-agent@${PINNED_PI}`, "--save-exact", "--omit=dev", "--omit=optional", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"]);
+  assert.equal(attached[0].cwd, dir);
+  assert.equal(attached[0].shell, undefined);
+  assert.deepEqual(attached[1].args, [cliPathOf(dir), "up", "--console"]);
+  assert.ok(attached.every(call => !call.args.includes("--yes")));
+  assert.equal(pointerWrites[0].pointer.deploymentDir, dir);
+  assert.deepEqual(opened, [dir]);
+  assert.deepEqual(dashboards, []);
+  assert.equal(attached.length, 2, "only pinned install and the consented bootstrap run");
+  assert.match(seen.confirm.find(row => /local setup authority/.test(row.title)).message, /--console.*local host setup/s);
+  assert.ok(!notes.some(row => /Setup never reads or writes/.test(row.m)), "browser branch exits before legacy credential/worker steps");
+});
+
+test("browser wizard refuses missing/wrong artifacts after a successful-looking install and never starts up or writes a pointer", async () => {
+  for (const bad of [{ adminVersion: "0.0.0" }, { piVersion: "0.0.0" }, { missingEntry: "dist/console.mjs" }, { missingEntry: "src/cli.mjs" }]) {
+    const dir = emptyDir();
+    const { ui, notes } = wizardUi({ select: ["Finish setup in browser"], input: [dir], confirm: [true] });
+    const { deps, attached, pointerWrites } = wizardDeps({ runAttachedFn: async (_ctx, opts) => { attached.push(opts); plantBrowserArtifacts(dir, bad); return { code: 0 }; } });
+    await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+    assert.equal(attached.length, 1);
+    assert.equal(pointerWrites.length, 0);
+    assert.ok(notes.some(row => /Browser setup stopped/.test(row.m)), JSON.stringify(bad));
+  }
+});
+
+test("browser setup converges exact artifacts and preserves independent bootstrap/pointer consent", async () => {
+  for (const pointerAccepted of [false, true]) {
+    const dir = emptyDir();
+    plantBrowserArtifacts(dir);
+    const { ui } = wizardUi({ select: ["Finish setup in browser"], input: [dir], confirm: [true, pointerAccepted] });
+    const opened = [];
+    const { deps, attached } = wizardDeps({ openSetupConsoleFn: async selected => opened.push(selected) });
+    await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+    assert.deepEqual(attached.map(call => call.args), [[cliPathOf(dir), "up", "--console"]], "no redundant install and no service command outside up");
+    assert.equal(opened.length, pointerAccepted ? 1 : 0, "a declined pointer cannot mint into an unguarded deployment");
+  }
+  const dir = emptyDir();
+  const { ui } = wizardUi({ select: ["Finish setup in browser"], input: [dir], confirm: [false] });
+  const { deps, attached, pointerWrites } = wizardDeps();
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.deepEqual(attached, []);
+  assert.deepEqual(pointerWrites, []);
+});
+
+test("browser route failure keeps the operator in terminal recovery and never mints a fresh private link", async () => {
+  const dir = emptyDir();
+  plantBrowserArtifacts(dir);
+  const { ui, notes } = wizardUi({ select: ["Finish setup in browser"], input: [dir], confirm: [true] });
+  let opened = false;
+  const { deps, pointerWrites } = wizardDeps({ runAttachedFn: async () => ({ code: 2 }), openSetupConsoleFn: async () => { opened = true; } });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.equal(opened, false);
+  assert.equal(pointerWrites.length, 0);
+  assert.ok(notes.some(row => /exact recovery commands/.test(row.m)));
+});
+
+test("legacy GitHub setup asks its delivery shape, passes real flags, and cancel/invalid URL runs no credential command", async () => {
+  for (const [shape, url, expected] of [["Webhook URL", "https://example.com/webhook", ["--webhook-url", "https://example.com/webhook"]], ["No webhook, use polling", undefined, ["--no-webhook"]], ["Cancel", undefined, null], ["Webhook URL", "https://name:secret@example.com/hook", null], ["Webhook URL", undefined, null]]) {
+    const dir = emptyDir();
+    plantRuntime(dir, mod.RUNTIME_VERSION);
+    const { ui } = wizardUi({ select: ["Guided setup", "Skip", shape, "Skip"], input: [dir, url], confirm: [false, false, true] });
+    const { deps, attached } = wizardDeps();
+    await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+    assert.deepEqual(attached.map(call => call.args), expected ? [[cliPathOf(dir), "setup", "github", ...expected]] : []);
+  }
+});
+
+test("both bare and explicit setup commands pass the private console opener using the actual write guard", () => {
+  const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.match(source, /runSetupWizard\(paths, ctx, notify, \{ openDashboardFn: openDashboard, openSetupConsoleFn, initialDetection: det \}\)/);
+  assert.match(source, /runSetupWizard\(paths, ctx, notify, \{ openDashboardFn: openDashboard, openSetupConsoleFn \}\)/);
+  const opener = source.slice(source.indexOf("const openSetupConsoleFn ="), source.indexOf('  if (sub === "")'));
+  assert.match(opener, /consoleCommand\(\["setup", "--link"\]/);
+  assert.match(opener, /guardedFiles\(\)\.some/);
+  assert.doesNotMatch(opener, /sendMessage|send\(/);
+});
+
+test("browser bootstrap refuses untrusted package bytes or ancestors before npm, runtime execution, pointer writes or private link minting", async () => {
+  for (const kind of ["entry-mode", "metadata-mode", "ancestor-mode", "foreign-owner", "cache"]) {
+    const parent = emptyDir();
+    const dir = kind === "cache" ? join(parent, "_npx", "deployment") : parent;
+    mkdirSync(dir, { recursive: true });
+    plantBrowserArtifacts(dir);
+    const entry = cliPathOf(dir);
+    const metadata = join(dir, "node_modules", "@edgehero", "pi-dispatch", "package.json");
+    const ancestor = join(dir, "node_modules", "@edgehero");
+    if (kind === "entry-mode") realFs.chmodSync(entry, 0o666);
+    if (kind === "metadata-mode") realFs.chmodSync(metadata, 0o666);
+    if (kind === "ancestor-mode") realFs.chmodSync(ancestor, 0o777);
+    const fs = kind === "foreign-owner" ? { ...realFs, statSync(path) { const info = realFs.statSync(path); if (path === realpathSync(metadata)) Object.defineProperty(info, "uid", { value: (process.geteuid?.() ?? 0) + 1000 }); return info; } } : realFs;
+    const { ui, notes } = wizardUi({ select: ["Finish setup in browser"], input: [dir], confirm: [true, true, true] });
+    let opened = false;
+    const { deps, attached, pointerWrites } = wizardDeps({ fs, openSetupConsoleFn: async () => { opened = true; } });
+    await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+    assert.deepEqual(attached, [], kind);
+    assert.deepEqual(pointerWrites, [], kind);
+    assert.equal(opened, false, kind);
+    assert.ok(notes.some(row => /Browser setup stopped: unsafe browser setup artifact/.test(row.m)), kind);
+    if (kind === "ancestor-mode") realFs.chmodSync(ancestor, 0o755);
+  }
+});
+
+test("browser artifact verification checks pi's actual published bin and refuses a changed or missing bundle entry", () => {
+  const dir = emptyDir();
+  plantBrowserArtifacts(dir);
+  assert.equal(mod.browserInstallProblem(realFs, dir), null);
+  const base = join(dir, "node_modules", "@earendil-works", "pi-coding-agent");
+  const metadata = join(base, "package.json");
+  const pkg = JSON.parse(readFileSync(metadata, "utf8"));
+  writeFileSync(metadata, JSON.stringify({ ...pkg, bin: { pi: "dist/cli.js" } }));
+  assert.match(mod.browserInstallProblem(realFs, dir), /pi-coding-agent.*trusted built entry/);
+  writeFileSync(metadata, JSON.stringify(pkg));
+  realFs.unlinkSync(join(base, "dist", "bundle", "cli.js"));
+  mkdirSync(join(base, "dist"), { recursive: true });
+  writeFileSync(join(base, "dist", "cli.js"), "// internal module is not the installed bin\n");
+  assert.match(mod.browserInstallProblem(realFs, dir), /pi-coding-agent.*trusted built entry/);
 });

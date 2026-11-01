@@ -21,9 +21,16 @@ export const PREVIEW_AGAIN = "Preview the change again and confirm the new previ
 export function makeConfirmTickets({ now = () => Date.now(), random = randomBytes, ttlMs = 300000, max = 256 } = {}) {
   // Insertion order is issue order, so the first key is always the oldest.
   const tickets = new Map();
+  const disposers = new Map();
+  function drop(id) {
+    tickets.delete(id);
+    const dispose = disposers.get(id);
+    disposers.delete(id);
+    try { dispose?.(); } catch { /* private input cleanup must not change the refusal */ }
+  }
 
   function sweep(t) {
-    for (const [id, entry] of tickets) if (entry.expiresAt <= t) tickets.delete(id);
+    for (const [id, entry] of tickets) if (entry.expiresAt <= t) drop(id);
   }
 
   return {
@@ -37,13 +44,14 @@ export function makeConfirmTickets({ now = () => Date.now(), random = randomByte
      * file as it was is known: `{ title, undo, inverse, danger }`. It rides the ticket for the same reason the payload
      * does: the browser never sends it back, so it cannot claim an Undo the preview did not offer.
      */
-    issue({ sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve = null, targets = null, count = null, meta = null }) {
+    issue({ sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve = null, targets = null, count = null, meta = null, ttlMs: entryTtlMs = ttlMs, onDiscard = null }) {
       const t = now();
       sweep(t);
-      while (tickets.size >= max) tickets.delete(tickets.keys().next().value);
+      while (tickets.size >= max) drop(tickets.keys().next().value);
       const ticket = random(32).toString("base64url");
-      const expiresAt = t + ttlMs;
+      const expiresAt = t + Math.min(ttlMs, Number.isFinite(entryTtlMs) && entryTtlMs > 0 ? entryTtlMs : ttlMs);
       tickets.set(ticket, { sessionId, action, target, payload, expect, beforeDigest, afterDigest, reserve, targets, count, meta, issuedAt: t, expiresAt });
+      if (typeof onDiscard === "function") disposers.set(ticket, onDiscard);
       return { ticket, expiresAt };
     },
 
@@ -55,13 +63,26 @@ export function makeConfirmTickets({ now = () => Date.now(), random = randomByte
     redeem({ sessionId, ticket, action }) {
       const entry = typeof ticket === "string" ? tickets.get(ticket) : undefined;
       if (typeof ticket === "string") tickets.delete(ticket);
+      const dispose = disposers.get(ticket);
+      disposers.delete(ticket);
+      const refused = (refusal) => { try { dispose?.(); } catch {} return { refusal }; };
       const again = PREVIEW_AGAIN;
-      if (!entry) return { refusal: `this confirmation is not valid: it was already used, has expired, or was never issued. ${again}` };
-      if (entry.expiresAt <= now()) return { refusal: `this confirmation has expired. ${again}` };
-      if (entry.sessionId !== sessionId) return { refusal: `this confirmation belongs to another sign-in. ${again}` };
-      if (entry.action !== action) return { refusal: `this confirmation was issued for another action. ${again}` };
+      if (!entry) return refused(`this confirmation is not valid: it was already used, has expired, or was never issued. ${again}`);
+      if (entry.expiresAt <= now()) return refused(`this confirmation has expired. ${again}`);
+      if (entry.sessionId !== sessionId) return refused(`this confirmation belongs to another sign-in. ${again}`);
+      if (entry.action !== action) return refused(`this confirmation was issued for another action. ${again}`);
       return { entry };
     },
+
+    /** Guarded Cancel burns only this session's ticket and disposes its private payload. */
+    cancel({ sessionId, ticket, action }) {
+      const entry = tickets.get(ticket);
+      if (!entry || entry.sessionId !== sessionId || entry.action !== action) return false;
+      drop(ticket);
+      return true;
+    },
+    endSession(sessionId) { for (const [id, entry] of tickets) if (entry.sessionId === sessionId) drop(id); },
+    close() { for (const id of tickets.keys()) drop(id); },
 
     /** How many tickets are held (expired ones included until the next issue). */
     size() {

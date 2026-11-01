@@ -538,6 +538,11 @@ jobs:
           VALKEY_TEST_URL: "redis://127.0.0.1:6379"
         run: CHROME="$RUNNER_TEMP/cft/chrome-linux64/chrome" node .github/scripts/console-answerer-browser.mjs --require
 
+      - name: "First-run setup works under the real console CSP (#774)"
+        if: (success() || failure()) && steps.install.outcome == 'success'
+        timeout-minutes: 5
+        run: CHROME="$RUNNER_TEMP/cft/chrome-linux64/chrome" node .github/scripts/console-setup-browser.mjs --require
+
   image:
     name: the job image holds its contract
     runs-on: ubuntu-latest

@@ -2,10 +2,12 @@
  * The operator's delegation is about a concrete transition, never a model's reason for wanting it (#766).
  * Keep this module independent of HTTP and pi so both surfaces judge exactly the same evidence.
  */
+import { SETUP_ACTION_NAMES } from "./setup-actions.mjs";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 const rule = (mode, reason, ...tools) => Object.freeze({ mode, reason, tools: Object.freeze(tools) });
 export const AGENT_MODES = Object.freeze(["unattended", "confirm", "person"]);
 export const ACTION_AGENT_POLICIES = Object.freeze({
+  ...Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, rule("person", "Host services, credentials and viewer invitations require the operator at the console.")])),
   "setting-set": rule("confirm", "Only a decrease of a cap explicitly present in the settings file is unattended.", "dispatch_set"),
   "setting-unset": rule("confirm", "Unsetting can restore a larger inherited limit.", "dispatch_set"),
   "trigger-add": rule("confirm", "A trigger acts later and can widen a reviewed narrowing.", "dispatch_trigger_add"),

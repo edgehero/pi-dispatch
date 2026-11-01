@@ -55,6 +55,7 @@ const run = promisify(execFile);
 
 /** The screens and the query each is rendered with. */
 export const SHOTS = Object.freeze([
+  ["setup", "setup", ""],
   ["models", "models", ""],
   ["overview", "overview", ""],
   // Issue #737: the timeline by host over its widest window, the overview's other grouping, through its query.

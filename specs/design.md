@@ -2313,7 +2313,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-FIRST-RUN-SETUP-WIZARD
 
-- **AMENDED 2026-10-31 (#774, decided, not implemented)**: `DES-BROWSER-FIRST-RUN-SETUP` authorizes a
+- **AMENDED 2026-11-01 (#774)**: `DES-BROWSER-FIRST-RUN-SETUP` authorizes a
   console handoff after the existing consented host bootstrap. The wizard will offer the console service and
   an operator-only one-time link to `/setup`, using the private opener transport, while keeping the terminal
   route. Its GitHub handoff must ask for a webhook URL or no webhook and pass `--webhook-url` or `--no-webhook`;
@@ -2421,9 +2421,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-BROWSER-FIRST-RUN-SETUP
 
-- **Status**: **DECIDED, NOT IMPLEMENTED** (issue #774). This prerequisite settles authority before any code.
-  It must land before the implementation PR. Current action/tool inventories and design status describe shipped
-  code until that PR updates them and their tests; this entry does not claim a new route, flag or action exists.
+- **Status**: **IMPLEMENTED** (issue #774), following prerequisite specs PR #783. `setup-host.mjs` and
+  `setup-contract.mjs` own host plans/protocol; the console uses `setup-host-client.mjs` and `setup-actions.mjs`.
+  `console-bootstrap.mjs`, `setup-wizard.ts` and the SetupScreen/JourneySetup generators complete the route.
 - **Decision**: after a consented terminal bootstrap, `/setup` is the live place to finish a deployment. It uses
   `firstRunState`'s eight steps and the SetupScreen panels `p-setup`, `p-setup-ready`, `p-setup-start`, with the
   ready summary, segmented progress, actual action progress and a terminal alternative for every unfinished step.
@@ -2467,10 +2467,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   proxy, so the page links to Connections and its applicable host instructions. Allowlist counts come from the
   Connections read, never a sample constant. A proxy's Undo line names the terminal stop prerequisites; it must
   not offer a destructive button on the strength of an active-zero read that a running worker can invalidate.
-- **Doctor is an explicit action**: a person may preview and confirm one ordinary, non-live, non-fixing doctor
-  child under the same grant. Published sanitized checks feed the steps; raw stdout/stderr never does. The page
+- **Doctor is an explicit action**: a person may preview and confirm one non-live, non-fixing doctor
+  child in its explicit `setupReadOnly` mode under the same grant. Published sanitized checks feed the steps; raw stdout/stderr never does. The page
   makes no claim that this validates a provider by paid inference. No live-probe containers or automatic fixes
-  are authorized by this action.
+  are authorized by this action. Ordinary doctor can run probe containers even without `--live`, so setup
+  explicitly withholds sweeps, egress canaries and container-based forge authentication probes, publishing the
+  named warning rather than claiming those probes passed. Terminal doctor behavior is UNCHANGED, checked.
 - **An API key through the browser**: the precisely scoped reversal of "printed, never written" is a write-only,
   create-only API-key field, not a pi dialog. The permitted key name comes from the canonical API-key mapping
   verified against pinned pi, not every bearer/OAuth candidate the provider might accept. A private secret ticket
@@ -12064,7 +12066,7 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
-- **AMENDED 2026-10-31 (#774, decided, not implemented)**: `DES-BROWSER-FIRST-RUN-SETUP` is the bounded
+- **AMENDED 2026-11-01 (#774)**: `DES-BROWSER-FIRST-RUN-SETUP` is the bounded
   exception to the existing read-model-only action surface and rejection of local runtime checks from the
   console. It requires a process-owned local host grant, shared setup plan/apply funnels and a fixed worker
   child; it grants no remote-host execution or general command path. Its write-only key and session-private
@@ -16290,6 +16292,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-01 (#774, implementation) | `DES-BROWSER-FIRST-RUN-SETUP`, `DES-FIRST-RUN-SETUP-WIZARD` and `DES-OPERATOR-CONSOLE` IMPLEMENTED after #783. Bounded worker child revalidates local package/service identities and effective provider/runtime sources; typed outcomes do not infer readiness. Setup doctor explicitly withholds probe containers and sweeps with a warning, because ordinary non-live doctor can run them. API-key and invitation payloads stay private with proactive expiry/cancellation. SetupScreen/JourneySetup generators/cards and shipped docs move together. Existing job/container, money/admission, forge, pointer, repository consent, CSP and pi-pin decisions UNCHANGED, checked; `OQ-054` remains OPEN. |
 | 2026-10-31 (#774, prerequisite specs) | NEW `DES-BROWSER-FIRST-RUN-SETUP`, DECIDED, NOT IMPLEMENTED; `DES-FIRST-RUN-SETUP-WIZARD` and `DES-OPERATOR-CONSOLE` AMENDED for an explicit local user-service grant, bounded host child, create-only API-key channel, private viewer invitations and link-only operator bootstrap. Durable package paths, ongoing queue consumption, interruption-aware Stop/Restart, start-only proxy scope, typed partial/unknown outcomes and honest Undo are explicit. GitHub browser App setup remains OPEN under `OQ-054`. CSP, no deployment secrets in console environment, pointer/repository consent, existing tools, pins, visual status and unrelated decisions UNCHANGED, checked. |
 | 2026-10-31 (#781, verification) | `DES-OPERATOR-CONSOLE` AMENDED for two isolated Chrome/server lanes after the enlarged complete corpus exceeded the existing CI time limit. Each case still runs exactly once in a fresh tab, both negative controls are required independently in each lane, and missing/rejected lanes fail the check. No-JavaScript and interactive checks, request attribution, complete document maps and cleanup remain explicit. Widths, roles, themes, CSP, fonts, frozen clocks, verdict assertions and all deadlines UNCHANGED, checked. Product behavior, authentication, quota, cost and container contracts UNCHANGED, checked. |
 | 2026-10-31 (#781) | NEW `DES-HOST-OWNED-SUBSCRIPTION-AUTH`; `DES-SUBSCRIPTIONS-ARE-COUNTERFACTUAL-ONLY` corrects the old blanket OAuth rationale while preserving analytics-only enforcement. `DES-MODEL-FAILOVER`, `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`, `DES-OPERATOR-GLOBAL-OVERLAY` and `DES-OPERATOR-CONSOLE` AMENDED through the explicit subscription contract. `DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED for the same-ticket final-payload recheck; reservation and settlement ledgers, `DES-MODEL-ROLES`, recovery physical-model selection, staged-package opt-out precedence, forge-token authority, automatic-merge prohibition and the pasted visual-system tokens/stylesheets UNCHANGED, checked. Mixed subscription/API route sets now explicitly refuse as `auth-mixed-billing`; reviewed cross-provider subscription fallback and the admitted Claude runtime versus independent legacy-call boundary are recorded. Separate pi CLI/Node subscription dispatch is explicitly unsupported without attested admission; shared admitted-runtime child sessions remain supported. Normal-entrypoint offline image proofs cover all three supported profiles, initial cost refusal and authenticated bounded-retry throttle evidence. Known staged adapter conflicts refuse freely as `auth-adapter-conflicting`, final snapshot validation rechecks the stage, and monitoring selections are explicitly a display focus that cannot hide or disable known exhaustion.  Stored Claude bearer formats now refuse before paid work; host status uses shared producer/reader bounds, observed subscription activation strengthens the billing fence, and logout preserves truthful remote-revocation reporting. |

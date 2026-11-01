@@ -1,3 +1,4 @@
+import { SETUP_ACTION_NAMES } from "../src/setup-actions.mjs";
 import { makeSandboxService } from "../src/sandbox-data.mjs";
 import { sandboxFixture } from "./helpers/sandbox-goldens.mjs";
 import assert from "node:assert/strict";
@@ -312,6 +313,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
   }
   // The kinds the contract names, held to the table so a spec and the code cannot drift apart.
   assert.deepEqual(Object.fromEntries(ACTIONS.map((a) => [a.name, a.kind])), {
+    ...Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, name])),
     "sandbox-prepare": "sandbox-prepare", "sandbox-pin": "sandbox-pin", "sandbox-end": "sandbox-end", "sandbox-host-set": "sandbox-host-set",
     "cancel-active": "cancel-active",
     "run-enqueue": "run-enqueue",
@@ -388,7 +390,8 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "zero-touch-group": ["runId"], "zero-touch-name": ["groupId", "name"], "zero-touch-instruction": ["runId", "groupId", "index", "sentence"], "zero-touch-undo": ["fixId"],
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
-  assert.equal(ACTIONS.length, 57);
+  Object.assign(FIELDS, Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, name === "setup-provider-key" ? ["value"] : name === "setup-viewer-add" ? ["name"] : name === "setup-viewer-revoke" ? ["name", "identity"] : []])));
+  assert.equal(ACTIONS.length, 57 + SETUP_ACTION_NAMES.length);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -400,7 +403,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     // Issue #737: every one of the 38 says what it did, for the banner after the write.
     for (const fn of ["undo", "inverse", "confirmLabel", "done"]) assert.equal(typeof a[fn], "function", `${a.name}: ${fn}`);
   }
-  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["board-clear", "board-freeze", "board-revert", "cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "sandbox-end", "secret-bundle-remove", "secret-profile-remove", "trigger-delete"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["board-clear", "board-freeze", "board-revert", "cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "sandbox-end", "secret-bundle-remove", "secret-profile-remove", "setup-receiver-restart", "setup-receiver-stop", "setup-viewer-revoke", "setup-worker-restart", "setup-worker-stop", "trigger-delete"]);
   assert.ok(Object.isFrozen(UNDO_SENTENCES));
   for (const [k, v] of Object.entries(UNDO_SENTENCES)) assert.match(v, /^[A-Z][^]*\.$/, `${k}: a sentence`);
 });
@@ -445,6 +448,13 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   const windows = { scope: "*", from: "01:00", to: "02:00", tz: "UTC" };
   // [action, out, undo, inverse (or null), label, done, done's result for a bulk act]
   const rows = [
+    ...["worker", "receiver"].flatMap(component => ["install", "start"].map(verb => [`setup-${component}-${verb}`, {}, ["Preview Stop separately. SIGTERM can interrupt work, including a job admitted after this preview; stopping does not undo spending or remove the unit.", "Use Stop through a fresh confirmation. SIGTERM can interrupt in-flight or newly admitted work; stopping does not undo spending or remove the unit."], { action: `setup-${component}-stop`, body: {} }, "Confirm setup", "Applied host setup; check the live readiness observation"])),
+    ...["worker", "receiver"].flatMap(component => ["stop", "restart"].map(verb => [`setup-${component}-${verb}`, {}, twice("Use the corresponding terminal service command after reviewing the interruption and current workload. Money already spent cannot be undone."), null, "Confirm interruption", "Applied host setup; check the live readiness observation"])),
+    ["setup-egress-start", {}, twice("Use the host terminal to stop the proxy after its workers and attached jobs are stopped; this page cannot prove a destructive stop is safe."), null, "Confirm setup", "Applied host setup; check the live readiness observation"],
+    ["setup-doctor", {}, twice("Run doctor again for a newer observation. Its published checks expire; no configuration was changed."), null, "Confirm setup", "Ran doctor; readiness follows its published checks"],
+    ["setup-provider-key", {}, twice("Review and remove the key on the host if needed; this page keeps no previous credential. Restarting a worker is a separate confirmed action."), null, "Save key once", "Saved the provider key; a running worker needs a separate restart"],
+    ["setup-viewer-add", {}, twice("Revoke the exact viewer entry through a fresh confirmation, or use pi-dispatch-console token revoke on the host."), null, "Create viewer invitation", "Created a viewer invitation"],
+    ["setup-viewer-revoke", {}, twice("Create a new viewer invitation to restore access. The old entry and its sessions cannot be restored."), null, "Revoke viewer", "Revoked the created viewer entry"],
     ["model-role-edit", { plan: { scope: "default", role: "editor", inverseBody: { scope: "default", role: "editor", entry: "openai/old", expectedEntry: "openai/new" } }, payload: { body: { scope: "default", role: "editor" } } }, twice("Restore the previous mapping for default/editor; another role edit is refused if this mapping has changed"), { action: "model-role-edit", body: { scope: "default", role: "editor", entry: "openai/old", expectedEntry: "openai/new" } }, "Save role mapping", "Changed model role default/editor; no run was started"],
     ["run-enqueue", { reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Start run for up to $2.00", "Queued the local run"],
     ["standing-answer-add", {}, twice("Remove the standing answer by hand from triggers.json after reviewing any draft that cited it."), null, "Adopt standing answer", "Adopted the standing answer"],
@@ -553,7 +563,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   }
   // A re-run's way back is the cancel of the job it queued, asked again at the confirm with the apply's answer
   // (`atConfirm`); no other rule is, and no bulk one can be (a bulk confirm asks no rule again).
-  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-enqueue", "run-fork", "trigger-fire", "rerun", "zero-touch-instruction"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-enqueue", "run-fork", "trigger-fire", "rerun", "zero-touch-instruction", "setup-viewer-add"]);
   assert.ok(ACTIONS.every((a) => typeof a.atConfirm === "boolean" && !(a.atConfirm && a.bulk)), "atConfirm is a single act's, and a boolean on every action");
   const rerun = ACTIONS.find((a) => a.name === "rerun");
   const landed = { ok: true, jobId: "cron:t0:1760000000000", queue: "pi-jobs@build3" };
@@ -3275,6 +3285,25 @@ test("a role edit uses the actual ticket/audit/CAS pipeline, exact Undo and pers
   const before = previews;
   assert.equal((await readOnly.act("model-role-edit", params)).status, 403);
   assert.equal(previews, before);
+});
+
+test("each setup registration uses the generated HTTP preview and confirmed apply with its own audit kind", async () => {
+  const { paths } = deployment();
+  const applied = [];
+  const c = await start({ paths, a: { setup: {
+    preview: async name => ({ target: "setup", payload: { opaque: name }, summary: ["Apply host setup", "A person confirms this deployment operation."] }),
+    apply: async (name, entry) => { applied.push([name, entry.payload.opaque]); return { ok: true }; },
+  } } });
+  for (const name of SETUP_ACTION_NAMES) {
+    const body = name === "setup-provider-key" ? { value: "key" } : name === "setup-viewer-add" ? { name: "observer" } : name === "setup-viewer-revoke" ? { name: "observer", identity: "1".repeat(32) } : {};
+    const before = applied.length;
+    const p = await c.act(name, body);
+    assert.equal(p.status, 200, p.text);
+    assert.equal(applied.length, before, "preview has no effect");
+    assert.equal((await c.confirm(name, p.json().ticket)).status, 200);
+    assert.deepEqual(applied.at(-1), [name, name]);
+    assert.equal(lastWrite(c).kind, name);
+  }
 });
 
 test("every action's preview was held to the copy rules: no arrow, no empty item", live, () => {

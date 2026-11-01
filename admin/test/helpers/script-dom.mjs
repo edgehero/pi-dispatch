@@ -903,7 +903,7 @@ export function fakeEventSource() {
  * Every name the script may reach beyond the language: each is a parameter of the function it runs in, so none is
  * ever Node's own.
  */
-export const GLOBALS = Object.freeze(["document", "location", "history", "fetch", "EventSource", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame", "navigator", "isSecureContext", "Date", "URLSearchParams", "getComputedStyle", "ResizeObserver", "MouseEvent", "window", "innerHeight"]);
+export const GLOBALS = Object.freeze(["document", "location", "history", "fetch", "EventSource", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "requestAnimationFrame", "navigator", "isSecureContext", "Date", "URL", "URLSearchParams", "getComputedStyle", "ResizeObserver", "MouseEvent", "window", "innerHeight"]);
 
 /**
  * Run `script` (the console's `CONSOLE_SCRIPT`) over `markup` (a whole page) at `url` (its path, query and fragment).
@@ -916,6 +916,8 @@ export function runConsoleScript(script, markup, { url = "/", fetch = fakeFetch(
   const document = parseDocument(markup);
   const at = new URL(url, "http://127.0.0.1:4790");
   const location = {
+    href: at.href,
+    origin: at.origin,
     pathname: at.pathname,
     search: at.search,
     hash: at.hash,
@@ -965,6 +967,7 @@ export function runConsoleScript(script, markup, { url = "/", fetch = fakeFetch(
     navigator,
     isSecureContext: secure,
     Date: fakeDate(timers),
+    URL,
     URLSearchParams,
     getComputedStyle: undefined,
     ResizeObserver: undefined,

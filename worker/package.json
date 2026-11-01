@@ -41,6 +41,10 @@
     "pi-dispatch": "src/cli.mjs"
   },
   "exports": {
+    "./setup-contract": "./src/setup-contract.mjs",
+    "./setup-host-entry": "./src/setup-host-entry.mjs",
+    "./setup-lock": "./src/setup-lock.mjs",
+    "./provider-key": "./src/provider-key.mjs",
     ".": "./src/index.mjs",
     "./config": "./src/config.mjs",
     "./exit-code": "./src/exit-code.mjs",

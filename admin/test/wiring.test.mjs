@@ -208,7 +208,7 @@ test("setup with a ctx lacking dialogs degrades to a notice, never the model cha
  * a REAL dev Valkey on 6379 and go green under the test's feet.
  *
  * That state now lands the operator IN the wizard, not in front of a confirm asking whether they want
- * one: the wizard's own first select IS the consent, and it offers the panel as a real third answer.
+ * one: the wizard's own first select IS the consent, and it offers browser setup and the panel as real alternatives.
  * The load-bearing part is what a "Cancel" costs -- nothing: no spawn, no write, no overlay. recordingPi
  * still enforces USED_API throughout, so the direct-entry path cannot quietly grow a new pi member.
  */
@@ -246,7 +246,7 @@ test("bare /dispatch with nothing configured lands in the wizard select; Cancel 
     await def.handler("", view.ctx);
     assert.equal(selects.length, 1, "exactly one dialog: the wizard's own intent select");
     assert.match(selects[0][0], /pi-dispatch setup/, "and it is the wizard's, not an offer confirm");
-    assert.deepEqual(selects[0][1], ["Guided setup", "Open the panel anyway", "Cancel"], "three answers, the panel among them");
+    assert.deepEqual(selects[0][1], ["Finish setup in browser", "Guided setup", "Open the panel anyway", "Cancel"], "browser first, with guided setup and the panel preserved");
     assert.equal(confirms.length, 0, "no confirm asks permission to ask");
     assert.equal(inputs.length, 0, "Cancel stops before the deployment-dir input");
     assert.equal(view.customCalls.length, 0, "Cancel: no dashboard overlay, no attached spawn");
@@ -1629,7 +1629,7 @@ test("the gated context follows pi when it swaps or invalidates its ui (#404)", 
 test("index.ts resolves paths and the worker name only through deploymentEnv (#471)", () => {
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8").replace(/^\s*(\/\/|\*).*$/gm, "");
   const calls = [...src.matchAll(/\bresolvePaths\(/g)].map((m) => src.slice(m.index, m.index + 30));
-  assert.deepEqual(calls.filter((c) => !c.startsWith("resolvePaths(deploymentEnv())")), ["resolvePaths(env);\n        ret", "resolvePaths(env), env }))); }", "resolvePaths(env), env, deploy"], "only the three shared tool adapters use the captured deployment environment");
+  assert.deepEqual(calls.filter((c) => !c.startsWith("resolvePaths(deploymentEnv())")), ["resolvePaths(env);\n        ret", "resolvePaths(env), env }))); }", "resolvePaths(env), env, deploy", "resolvePaths(env);\n    await c"], "the three shared tool adapters and browser setup opener use the captured deployment environment");
   assert.match(src, /const env = deploymentEnv\(\);\n\s*const paths = resolvePaths\(env\);/);
   assert.match(src, /const env = deploymentEnv\(\); return toolText/);
   // Two fewer since the rebase over issue #468: the pause and resume tools resolve their Valkeys through `killSwitchSet`

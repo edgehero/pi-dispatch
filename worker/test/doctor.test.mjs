@@ -193,6 +193,17 @@ const ghStatusOutput = [
 	"",
 ].join("\n");
 
+test("browser setup doctor publishes inspected facts without a probe container or canary cleanup (#774)", async () => {
+	const calls = [];
+	const { out, text } = capture();
+	await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-example", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "private-pat" }, {
+		out, setupReadOnly: true, spawn: fakeSpawn({ ...green, "gh auth status": 0, "docker run": 0 }, calls), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0",
+	});
+	assert.match(text(), /Egress proxy running/);
+	assert.match(text(), /Egress canary: not run by browser setup/);
+	assert.equal(calls.some(({ cmd, args }) => ["docker", "podman"].includes(cmd) && (["run", "create", "rm"].includes(args[0]) || args[0] === "network" && ["create", "connect", "disconnect", "rm"].includes(args[1]))), false);
+});
+
 test("doctor: all prerequisites present passes and exits 0", async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(

@@ -1,3 +1,4 @@
+import { TRIGGER_RECIPES } from "../../trigger-recipes.mjs";
 /** Trigger pages keep prompt text private and use the same add/edit contracts as the tools (#750). */
 import { triggerWhoMayFire } from "../../trigger-policy.mjs";
 import { outcomeWord, reasonWords, recordReason } from "../../words.mjs";
@@ -356,31 +357,35 @@ export function triggerAdd(v) {
       "Add a trigger",
       html`<p>Forms are off on this read-only console.</p>`,
     );
+  const recipe = TRIGGER_RECIPES[v.query?.recipe] ?? null;
+  const prefill = recipe?.fields ?? {};
+  const forges = opts(v).forges ?? [];
+  const missingForge = Boolean(prefill.forge && !forges.includes(prefill.forge));
   const kinds = ["cron", "label", "comment", "pull_request", "issue"];
   const starts = html`${field("kind", "Kind", {
     options: kinds,
-    value: "label",
+    value: prefill.kind ?? "label",
   })}${kinds.map(
     (kind) =>
       html`<fieldset data-trigger-kind="${kind}">
         <legend>${kind}</legend>
         ${kind === "cron"
-          ? html`${field("id", "Scheduler id")}${field(
+          ? html`${field("id", "Scheduler id", { value: prefill.id ?? "" })}${field(
               "pattern",
-              "Cron pattern (5 or 6 fields)",
-            )}${field("folder", "Local repository folder")}${area(
+              "Cron pattern (5 or 6 fields)", { value: prefill.pattern ?? "" },
+            )}${field("folder", "Local repository folder", { required: prefill.kind === "cron", hint: prefill.kind === "cron" ? "Choose the existing local repository folder. No sample path is saved for you." : null })}${area(
               "task",
-              "Task",
+              "Task", { required: prefill.kind === "cron", hint: null },
             )}`
           : html`${field("forge", "Forge", {
-              options: opts(v).forges ?? [], required: true, hint: opts(v).forges?.length ? "Only forges with configured webhooks are offered." : "No webhook is configured. Configure a forge connection or choose cron.",
+              options: missingForge ? [{ value: "", label: "Choose a configured forge" }, ...forges] : forges, value: missingForge ? "" : prefill.forge ?? "", required: true, hint: opts(v).forges?.length ? "Only forges with configured webhooks are offered." : "No webhook is configured. Configure a forge connection or choose cron.",
             })}${["label", "comment"].includes(kind)
               ? field("repository", "Repository (optional)")
               : null}${kind === "comment"
-              ? field("phrase", "Comment phrase")
+              ? field("phrase", "Comment phrase", { value: prefill.phrase ?? "" })
               : null}${["label", "pull_request"].includes(kind)
               ? field("labels", "Labels (required for labeled)", {
-                  type: "list",
+                  type: "list", value: prefill.labels ?? "",
                 })
               : null}${["pull_request", "issue"].includes(kind)
               ? html`${field("action", "Actions (forge words)", {
@@ -400,7 +405,7 @@ export function triggerAdd(v) {
   )}`;
   return card(
     "Add a trigger",
-    html`<p>
+    html`${recipe ? html`<p class="su-small">Recipe: <b>${recipe.title}</b>. Change any field before the preview.${missingForge ? " This recipe needs a GitHub webhook; configure Connections or choose a different configured forge." : null}${prefill.kind === "cron" ? " Add the existing folder; the schedule is 02:00 in the deployment’s configured timezone (UTC by default)." : null}</p>` : null}<p>
         Preview the added lines, then confirm with a person's single-use
         five-minute ticket.
       </p>
@@ -409,7 +414,7 @@ export function triggerAdd(v) {
         fields: html`<h3>1. What starts it</h3>
           ${starts}
           <h3>2. What it runs</h3>
-          ${editFields(v, {}, "run")}
+          ${editFields(v, { flow: prefill.flow ?? "" }, "run")}
           <p>
             The flow's skill must live in the repository's .pi/skills or
             .agents/skills, or an available deployment skill tier. Suggestions:
