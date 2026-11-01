@@ -158,3 +158,30 @@ test("the timeout SIGTERMs, escalates to SIGKILL after the grace, and names itse
 	await new Promise((r) => setTimeout(r, 40 + 2100));
 	assert.deepEqual(stubborn.child.kills, ["SIGTERM", "SIGKILL"], "the ladder lands on a child that ignored SIGTERM");
 });
+
+test("display publication follows the unchanged log, covers early refusals and cannot affect fire (#775)", async () => {
+	for (const mode of ["exit", "unresolvable", "spawn", "argv-unusable"]) {
+		const events = [];
+		const child = fakeChild();
+		const fire = makeOnFailure({ command: "/x", realExecutablePath: () => mode === "unresolvable" ? null : "/x", spawnFn: () => { if (mode === "spawn") throw Error("no"); return child; }, log: (event, values) => { events.push([event, values]); throw Error("sink"); }, publish: (record) => { events.push(["published", record]); return Promise.reject(Error("display")); } });
+		assert.equal(fire({ jobId: mode === "argv-unusable" ? "-bad" : "gh-1", outcome: "failed", reason: "message with private text" }), undefined);
+		if (mode === "exit") { child.emit("exit", 3, null); child.emit("error", Error("late")); }
+		await flush();
+		assert.deepEqual(events.map((item) => item[0]), ["on_failure", "published"]);
+		assert.deepEqual(Object.keys(events[0][1]), ["jobId", "code", "detail"]);
+		assert.equal(events[1][1].reason, "infra");
+		assert.equal(events[1][1].detail, mode);
+	}
+});
+
+test("timeout publication keeps its detail, and a hung or synchronously throwing display cannot delay fire (#775)", async () => {
+	const published = [];
+	const child = fakeChild();
+	const fire = makeOnFailure({ command: "/x", timeoutMs: 5, realExecutablePath: () => "/x", spawnFn: () => child, publish: (record) => { published.push(record); return new Promise(() => {}); } });
+	assert.equal(fire({ jobId: "gh-timeout", outcome: "failed", reason: "infra" }), undefined);
+	await new Promise((resolve) => setTimeout(resolve, 15));
+	child.emit("exit", null, "SIGTERM");
+	assert.deepEqual(published, [{ jobId: "gh-timeout", outcome: "failed", reason: "infra", detail: "timeout", code: null }]);
+	const throwing = makeOnFailure({ command: "/missing", realExecutablePath: () => null, publish() { throw Error("display"); } });
+	assert.equal(throwing({ jobId: "gh-missing", outcome: "failed", reason: "infra" }), undefined);
+});

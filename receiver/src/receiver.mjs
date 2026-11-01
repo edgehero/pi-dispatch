@@ -19,6 +19,8 @@
  * session and binds no port.
  */
 
+import { makeReceiverObservations } from "@edgehero/pi-dispatch/receiver-status";
+
 import { makeVerifiedHandler } from "./verify.mjs";
 import { filter, wantsCloserAuthority } from "./filter.mjs";
 import { enqueueForgeJob, enqueueGitHubJob, enqueueGitLabJob } from "@edgehero/pi-dispatch/queue";
@@ -37,7 +39,11 @@ import { makeWatchStore } from "@edgehero/pi-dispatch/watch-store";
 import { enqueueWatchJob } from "@edgehero/pi-dispatch/queue";
 
 /** Write a small JSON body with an explicit status; a 204 carries no body. verify's `respond` is private. */
+const responseResults = new WeakMap();
 function respond(res, status, obj) {
+	// Only our own closed response words disambiguate 202 and 503; no request body is inspected.
+	if (status === 202) responseResults.set(res, obj?.status);
+	if (status === 503) responseResults.set(res, obj?.error === "enqueue-failed" ? "enqueue-failed" : "lookup-failed");
 	if (status === 204) {
 		res.writeHead(204);
 		res.end();
@@ -139,7 +145,7 @@ export function parseSubset(payload) {
  * undefined, i.e. never drops the harness's own comments. Absent property therefore means no route; the
  * failure of a forgotten property is a 404 an operator sees, never a paid recursion they get billed for.
  */
-export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null, steerRedis, now = Date.now, watchEnv = process.env, watchStore = null, enqueueWatch = enqueueWatchJob }) {
+export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null, steerRedis, now = Date.now, watchEnv = process.env, watchStore = null, enqueueWatch = enqueueWatchJob, observations = makeReceiverObservations({ now }) }) {
 	const watch = makeWatchHandler({ cfg, env: watchEnv, now, log: (event, fields) => log?.({ event, ...fields }), store: watchStore ?? Object.fromEntries(["ingest", "appendTrace", "recordVerdict", "noteIssueActivity"].map(method => [method, async (...args) => makeWatchStore(await queue.client, { now })[method](...args)])), enqueue: fields => enqueueWatch(queue, fields, { now }) });
 	// The Valkey client comment steering (issue #646) reads the live runs with and pushes into: by default the shared
 	// queue's own connection (`queue.client`, BullMQ's promise of its ioredis client), so steering opens no second
@@ -172,7 +178,7 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 		"/azure": azure ? makeAzureHandler({ queue, routeTo, cfg, log, ...azure, steer }) : null,
 	};
 
-	return async function receiverHandler(req, res) {
+	const route = async (req, res) => {
 		const path = pathOf(req.url);
 		if (path === "/watch" || path.startsWith("/watch/")) return watch(req, res);
 		if (Object.hasOwn(routes, path)) {
@@ -190,6 +196,24 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 		if (!github) return respond(res, 404, { error: "github webhooks are not configured" });
 		return await github(req, res);
 	};
+	const receiverHandler = async (req, res) => {
+		const path = pathOf(req.url);
+		if (path === "/watch" || path.startsWith("/watch/")) return route(req, res);
+		const forge = ({ "/gitlab": "gitlab", "/forgejo": "forgejo", "/azure": "azure" })[path] ?? "github";
+		const end = res.end;
+		let counted = false;
+		res.end = function (...args) {
+			const result = end.apply(this, args);
+			if (!counted) {
+				counted = true;
+				try { observations.observe(forge, res.statusCode, responseResults.get(res)); } catch {}
+			}
+			return result;
+		};
+		try { return await route(req, res); }
+		finally { res.end = end; responseResults.delete(res); }
+	};
+	return Object.assign(receiverHandler, { observations });
 }
 
 /** The path portion of a request URL, without query or trailing slash. Never throws on a malformed URL. */

@@ -549,7 +549,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   otherwise) which the worker executes with id-only argv -- `<jobId> <outcome> <reason> <host>` -- when a
   paid job reaches a terminal failure: the final infrastructure failure, a worker abort, or an
   in-container policy stop. Fire and forget: at most once per job, fault-isolated so a hook failure can
-  never change a job's outcome, all stdio ignored, exit code logged and unread. Unset, the deployment is
+  never change a job's outcome, all stdio ignored, exit code logged and published for display only (`INT-HOOK-RUNS-KEY`). Unset, the deployment is
   byte-identical to one where the feature does not exist. This project ships NO transport, ever; the
   operator wires ntfy, Slack or mail themselves in one line.
 - **Why**: the cheap failures announce themselves (every pre-spend refusal comments) while the expensive
@@ -742,6 +742,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   refuse, and doctor fails on it when another account owns it.
 
 ## REQ-ADMIN-VIA-PI-EXTENSION
+
+- **Receiver observations (#775)**: `dispatch_connections` adds only rebuilt host identities, closed bind/forge
+  words, ports, counts and instants from the display record. Unreadable or newer telemetry remains unknown; no
+  delivery identifier, payload text or publication value extends the tool's authority.
 
 - **Models read (#773)**: `dispatch_models` returns the Models reader's explicit bounded machine projection: scoped roles, effective fallback policy, catalog/price eligibility, observed cooldown/window facts, typed proposals and retained canary lineage/metrics/coverage. Operator prose, doctor labels, paths, commands, diff context, repository-agent definitions and arbitrary record extras are withheld. The console's agent page uses the same projection. Role edits and adoption are `person` actions with no mutation tool, even in an interactive operator session.
 
@@ -2502,9 +2506,15 @@ writes retain their existing interactive confirmation. This adds no unattended p
     defaults are labelled. Every state pairs a glyph with words. Webhook method/key state and muted route/delivery
     identity occupy separate lines; polling shows off, on with its interval, or unknown. Mobile table tracks remain
     bounded when many triggers arm a forge, and label words retain enough space to read whole. Visible trigger
-    numbers count from one and retain full accessible link names. Delivery health is explicitly
-    unpublished. The forge delivery history holds 401/404 refusals; receiver logs can help with 503/enqueue
-    failures, without implying that early request refusals or every 503 are logged. Egress gives one concise PI_EGRESS posture fact, the allowlist's first hosts/count and each host's
+    numbers count from one and retain full accessible link names. Each live receiver is listed by host link, actual socket port, closed bind word, version and beat age.
+    Per forge, last taken/refused times and all eleven outcome counts cover 24 UTC hours, with native outcome/hourly
+    disclosures. The process start qualifies the window; hours before it are not observed, and the first partial hour
+    names its start. UTC bucket labels remain UTC in the browser. Expanded hourly tables retain whole labels and values in a named,
+    focusable horizontal scroll region whose ArrowRight pans the table without widening the page. Receiver identities remain complete and readable within their section at phone widths, including valid 64-character names and unreadable observations; named links retain the complete identity. Unserved routes with traffic remain visible, including retained last taken/refused times after all window counts expire. Unserved routes without history remain hidden. An armed forge without a reported live receiver warns
+    only over a complete read; a nonempty window containing only unauthorized warns to check the webhook secret on
+    both sides; any not-configured count warns about the route. Incomplete observations remain unknown, never zero
+    or healthy. A request adds no telemetry Valkey command; records contain no delivery or payload value.
+    The forge delivery history remains available for individual deliveries. Egress gives one concise PI_EGRESS posture fact, the allowlist's first hosts/count and each host's
     doctor proxy state/time/age. A missing check and an unavailable doctor result remain distinct, with their shared
     explanation below the table. Linked operator documentation explains ports 443/80, exact model endpoints,
     subdomain-dot semantics, isolation and the OpenShell policy.
@@ -2525,7 +2535,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     candidate set in the .env, or none there, and its configured source. Actual per-host credentials are
     unpublished, stated once.
     Notifications use compact icon rows for forge comments, status-comment triggers and hook basename, with hook
-    history in the worker log. Timing, arguments and exclusions live in linked documentation. MCP retains its facts
+    history per host: last hook time, linked run id, originating outcome/reason, hook detail/code and retained counts by detail. Nonzero exits, timeout and unresolvable carry visible tinted states. Missing history reads "no hook run published", never healthy; unavailable reads are unknown. Host identity cells stay whole and header words wrap at word boundaries. Long identities scroll inside a named, keyboard-focusable region without widening the page. Both human roles see safe facts, and `dispatch_connections` includes typed counts and times. Timing, arguments and exclusions live in linked documentation. MCP retains its facts
     and refusal reason in compact per-server rows,
     adds the image-owned forge server without inventing its version and explains import-pi. Environment values
     are shown only through closed numeric/switch/vocabulary rules; URLs/tokens/secrets read set, paths by basename,
@@ -8324,4 +8334,11 @@ instead of drifting.
 | 2026-10-31 (#771, initial live snapshot) | REQ-SANDBOX-FROM-THE-CONSOLE acceptance now explicitly prevents an older event-stream snapshot from erasing freshly rendered cleanup warnings or incomplete shell counts. Initial Sandboxes subscriptions await a fresh bounded read and retain their rendered panels on failure. Cursor reconnects, other pages, stream admission/authentication, paid work, container isolation and every other requirement UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | `REQ-ADMIN-VIA-PI-EXTENSION`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-DELEGATED-ALLOCATION`, `REQ-SCOPED-PAUSE-WINDOWS` acceptance, `REQ-STEER-RUNNING-JOB`, `REQ-JOB-STATUS-COMMENTS` and `REQ-PARKED-ANSWERER` AMENDED/implemented: bounded agent role/actions, shared tools, safe reads, shell flags and person-sent cited drafts. `REQ-APPROVAL-GATES`, isolation, budget-before-spend, receiver author gating, ordinary session/resume and unrelated requirements UNCHANGED, checked. |
 | 2026-10-31 (#766, paid-start documentation) | `REQ-ADMIN-VIA-PI-EXTENSION` CORRECTED: the explicit hourly grant belongs to Fire now and local/cron reruns. `dispatch_run` preserves its existing default of three starts per hour when the process value is absent or invalid; zero disables it. The admin README and console tool documentation now distinguish that default and interactive confirmation from granted headless Fire. Runtime admission, process-owned roots, write grants, the shared hourly counter, budget-before-spend and every other contract UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) and `REQ-ADMIN-VIA-PI-EXTENSION` AMENDED: receiver host/socket placement, beat age, last handoffs/refusals, 24 UTC-hour outcome counts, native hourly details and conservative missing/unauthorized/unconfigured warnings for both human roles; safe counts/times reach dispatch_connections. `REQ-CONSOLE-SECURITY`, all admission/authorization/spend rules, hook/endpoint behavior and other screens UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver lifetime visibility) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: unserved forge sections retain their last taken/refused times after all 24 UTC-hour counts expire. A zero window cannot hide lifetime evidence; an unserved route without history stays hidden, while a recent filter drop still supplies count evidence. `REQ-CONSOLE-SECURITY`, current-window warnings, receiver responses, publication/expiry, state API and all admission contracts UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver identity wrapping) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED after an actual-CSP 390px probe showed a valid 64-character identity expanding the page to 867px and losing visible glyphs. Complete identity text and named links now remain readable in reported and unreadable states. Character rectangles, ancestor clipping and a scoped-style removal control verify visibility independently of page overflow. `REQ-CONSOLE-SECURITY`, publication bounds/schema, state API, role/authority and runtime decisions UNCHANGED, checked. |
+| 2026-11-01 (#775, hooks) | `REQ-OPERATOR-FAILURE-NOTIFICATION` and `REQ-OPERATOR-CONSOLE-SCREENS` (g6) AMENDED: failure hook results gain bounded per-host display history and typed model projection, with explicit absence/unknown and no delivery claim. UNCHANGED, checked: firing/exclusion rules, `REQ-CONSOLE-SECURITY`, raw-body verification, admission, spend, retry, `/api/state` and unrelated screens. |
+| 2026-11-01 (#775, hook table readability) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) CORRECTED: hook host identity cells keep whole names, headers retain whole words, and long identity overflow has a keyboard-focusable local scroll region. Actual native-font canvas measurements and a long-identity keyboard scroll exercise verify the rendered behavior. `REQ-CONSOLE-SECURITY`, hook firing rules, record schemas, admission, spend and retry UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver and hook integration) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) and `REQ-OPERATOR-FAILURE-NOTIFICATION` reviewed together: receiver observations and retained hook results remain visible to both human roles and the typed Connections projection, while Setup opts out of both publication reads. `REQ-CONSOLE-SECURITY`, receiver acceptance, hook exclusions, endpoint leasing and all spend/admission rules UNCHANGED, checked. |
 | 2026-11-01 (#775, endpoint occupancy) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) AMENDED: fleet leases followed by actual per-host endpoint occupancy, scope and beat age, shared-bound conflicts, unknown/version/overflow states and safe tool projection. `REQ-CONSOLE-SECURITY`, endpoint admission, spend, isolation, other Connections sections and `/api/state` UNCHANGED, checked. |
+| 2026-11-01 (#775, three publication channels) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) reviewed with receiver location/health, retained hook results and per-host endpoint use together. Both human roles and the typed Connections projection retain all safe observations; Setup opts out of every publication read. `REQ-CONSOLE-SECURITY`, receiver acceptance, hook exclusions, endpoint admission, spend, isolation and unrelated screens UNCHANGED, checked. |

@@ -41,6 +41,7 @@
     "pi-dispatch": "src/cli.mjs"
   },
   "exports": {
+    "./receiver-status": "./src/receiver-status.mjs",
     "./setup-contract": "./src/setup-contract.mjs",
     "./auth-policy": "./src/auth-policy.mjs",
     "./setup-host-entry": "./src/setup-host-entry.mjs",
@@ -127,6 +128,7 @@
     "./wait-state": "./src/wait-state.mjs",
     "./cancel-state": "./src/cancel-state.mjs",
     "./host-registry": "./src/host-registry.mjs",
+    "./hook-runs": "./src/hook-runs.mjs",
     "./doctor-results": "./src/doctor-results.mjs",
     "./identity": "./src/identity.mjs",
     "./gitlab-identity": "./src/gitlab-identity.mjs",

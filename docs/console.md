@@ -2103,9 +2103,16 @@ these extra file/lease reads.
   GitHub is armed: the receiver refuses to start unless its service environment supplies it. States pair a
   glyph with a word. Webhook method/key state and route/delivery identity occupy separate lines; polling
   shows its interval only when configured on. Phone fields keep readable label widths even for a forge armed
-  by many triggers; numeric trigger links retain their full accessible names. Receiver placement and delivery health are not published; use the forge's
-  delivery history for 401/404 refusals. The receiver log can help with 503 or enqueue failures. Early
-  400/401/404/405/413/415 responses write no receiver log line; not every 503 is logged.
+  by many triggers; numeric trigger links retain their full accessible names. Live receivers now name their host, actual listening port, bind category, version and beat age. Each served forge
+  shows last taken/refused times and counts by outcome in 24 UTC hours; native disclosures give the hourly counts.
+  The receiver start qualifies coverage: earlier hours say not observed, and the first partial hour names its start.
+  Receiver names stay complete at phone widths, including unreadable observations. Unserved routes retain their
+  last taken/refused times even after their 24-hour counts reach zero; routes without
+  history stay hidden. Warnings name an armed forge without a reported receiver,
+  unauthorized-only deliveries (check the webhook secret on both sides), and deliveries reaching an unconfigured
+  route. Unknown or incomplete reads never mean zero or healthy. The window is the current UTC hour plus the
+  preceding 23; last-event times are kept independently. Queued, deduplicated, held and steered count as taken;
+  filter drops are separate. The forge's delivery history still identifies individual deliveries.
 - **Egress:** policy posture, listed hosts and exact model endpoints, then each host's proxy check with its
   date and age. An absent doctor check remains unknown. A failed proxy leads with its latest refused run and fix.
 - **Model endpoints:** id, host/port, keyless state and declared capacity. Fleet leases lead, followed by
@@ -2123,7 +2130,7 @@ these extra file/lease reads.
   source at the row's end. Actual per-host credentials remain unpublished.
 - **Subscription authentication:** selected adapter and exact version, owner host, compatibility, credential health, expiry and refresh time. Community adapters are labelled. A recognized package is not a verified installation, and connected means a credential record exists, not that a paid request succeeded. Credentials, profile details and private paths never reach this page. A writable operator may copy `pi-dispatch auth login CONNECTION_ID`, `logout`, `usage` or an offered `trial` command to the owning host's terminal. There is no browser sign-in or credential mutation. Viewers, agents and read-only operators see safe subscription facts only. Other deployment metadata is not published in the agent Connections view.
 - **Notifications:** fixed forge comments, triggers with status comments and the failure hook's last folder.
-  Hook execution history is in the worker log, not collected by this page. Timing, arguments and exclusions
+  Each host's last hook run shows its time, linked run, outcome/reason and hook detail/code, followed by counts over up to 20 retained entries. Nonzero exits, timeout and unresolvable are tinted; no entry says "no hook run published", and unreadable history stays unknown. The list expires seven days after its last append; a zero exit does not prove delivery. Timing, arguments and exclusions
   are in the linked [hook reference](notifications.md).
 - **MCP servers:** transport, location, exposure, on/off and referenced variable names, with refused names and
   reasons. The worker's forge server is described separately; its version belongs to the image. Import with
@@ -2135,7 +2142,7 @@ these extra file/lease reads.
   `pi-dispatch import-pi --with-packages`; the receipt does not record who staged them.
 
 Viewers read fixes as sentences without commands to copy. `dispatch_connections` provides a safe agent read
-of names, hosts and key presence, with no credentials, references or full paths. See [Egress](egress.md) and
+of names, hosts, receiver counts/times and key presence, with no credentials, references or full paths. See [Egress](egress.md) and
 [Notifications](notifications.md).
 
 ## One project

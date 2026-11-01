@@ -130,7 +130,7 @@
       "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints"
     },
     {
-      "el": "Fixed comments, status comments, hook timeout/exclusions and unpublished history",
+      "el": "Fixed comments, status comments, last per-host hook result and retained detail counts",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/connections.mjs#connectionsNotify"
@@ -266,6 +266,72 @@
         "1 of 2",
         "2 of 3"
       ]
+    },
+    {
+      "el": "Hook timeout retains typed outcomes without a delivery claim",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsNotify",
+      "panel": "p-notify",
+      "golden": [
+        "panels/connections-hook-timeout.operator",
+        "panels/connections-hook-timeout.viewer"
+      ],
+      "shows": [
+        "timeout",
+        "An exit code describes the hook, not notification delivery"
+      ]
+    },
+    {
+      "el": "Unreadable hook history stays unknown rather than healthy",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsNotify",
+      "panel": "p-notify",
+      "golden": [
+        "panels/connections-hook-unreadable.viewer"
+      ],
+      "shows": [
+        "hook history unavailable",
+        "Retained runs by detail"
+      ]
+    },
+    {
+      "el": "Receiver placement and per-forge delivery observations",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsForges",
+      "panel": "p-forges",
+      "golden": [
+        "panels/connections-populated.viewer"
+      ],
+      "shows": [
+        "Receiver on",
+        "Port 3000",
+        "all interfaces",
+        "Last taken",
+        "Last refused",
+        "24 UTC hours"
+      ]
+    },
+    {
+      "el": "No live receiver, unauthorized-only and unknown observation states",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsForges",
+      "panel": "p-forges",
+      "golden": [
+        "panels/connections-receiver-none.operator",
+        "panels/connections-receiver-unauthorized.viewer",
+        "panels/connections-receiver-unknown.viewer"
+      ]
+    },
+    {
+      "el": "Versioned, bounded, display-only receiver source",
+      "kind": "provides",
+      "status": "new",
+      "source": "worker/src/receiver-status.mjs#readReceiverStatus",
+      "holds": "RECEIVER_HOSTS_MAX"
     }
   ]
 }

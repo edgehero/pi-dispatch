@@ -512,6 +512,24 @@ budget provenance and CPU-reserve state. They contain identifiers and fixed word
 text. Removing them changes reporting, never admission. Cleanup commands must be run on the affected host; the
 console cannot operate another host's runtime. A host-queue pause still leaves shared jobs available to that host.
 
+## Receiver observations
+
+Connections lists receivers independently from workers. A receiver uses `PI_WORKER_NAME`, else the same sanitized
+hostname as a worker, so a colocated receiver links to that host. Its live socket supplies the port and a closed
+bind category: all interfaces, loopback or a specific address. The address itself is never published.
+
+Each receiver publishes one display record every 15 seconds with a 90-second expiry. It holds only counts, times,
+closed outcomes and the host/version/socket facts, never delivery identifiers or payload values. Counts cover the
+current UTC hour and the preceding 23. Last taken/refused times remain separate. A request updates memory only;
+Valkey outages can remove this display but cannot change an answer or delay enqueueing. Polling publishes none.
+Deleting `receiver:*` changes no routing, authentication or queue behavior. An absent observation is not proof that
+a receiver stopped; the page says what was reported and preserves unknown reads.
+
+## Failure hook history
+
+Each firing worker publishes safe results under `hook:h:<name>`, indexed by `hook:hosts`, using the worker's resolved name even without a declared fleet. Connections and `dispatch_connections` read this display history across hosts: up to 20 entries per host, with seven days of inactivity expiry. Counts describe retained hook details, not delivered notifications. Publication is background best effort; missing or unreadable records never mean healthy. Deleting this keyspace changes no hook, job, routing or admission decision.
+
+## Endpoint occupancy
 
 Connections also shows each host's endpoint occupancy from its heartbeat: the host's own loaded `slots`,
 actual in-process use, counting scope and beat age. Unnamed workers and per-machine endpoint aliases still

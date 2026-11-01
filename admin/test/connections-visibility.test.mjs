@@ -35,9 +35,9 @@ test("endpoint occupancy distinguishes real fleet zero, failed reads and uncount
   assert.equal(documentOf(capped).querySelector("tbody tr").querySelectorAll("td").at(-1).classList.contains("wide"), true);
 });
 
-test("delivery guidance directs quiet 401/404 refusals to forge history and qualifies receiver-log help", () => {
+test("delivery guidance defines the UTC window, successful handoffs and separate drops while retaining individual forge history", () => {
   const doc = documentOf(connectionsForges(context([])));
   const note = doc.querySelector(".cn-note").textContent;
-  assert.equal(note, "Delivery health is not published. Check the forge's delivery history for 401/404 refusals; the receiver log can help with 503 or enqueue failures.");
+  assert.equal(note, "Counts cover the current UTC hour and the preceding 23. Last-event times are retained separately. Taken means queued, deduplicated, held or steered; filter drops are separate. Refused includes malformed requests, authentication, configuration, lookup, enqueue and internal errors. The forge's delivery history remains available for individual deliveries.");
   assert.doesNotMatch(note, /all failures|every 503|history or the receiver/);
 });

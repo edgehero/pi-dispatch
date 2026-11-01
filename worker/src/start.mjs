@@ -91,6 +91,7 @@ import { NO_ENVELOPE_FINGERPRINT, makeAllocationAudit, makeAllocationLogReaper, 
 import { makeConsoleAuditReaper } from "./console-audit.mjs";
 import { optionalUsdMicros } from "./money.mjs";
 import { makeOnFailure } from "./on-failure.mjs";
+import { makeHookRunsPublisher } from "./hook-runs.mjs";
 import { makeWaitChecker } from "./wait-check.mjs";
 import { makeWaitState } from "./wait-state.mjs";
 import { hostQueueName, makeQueue, enqueueWatchJob, discoverHostQueuesReporting, QUEUE } from "./queue.mjs";
@@ -2660,8 +2661,10 @@ export async function startWorker(
 	// `hostEnv: env`, not the default process.env -- the #309 rule every spawner in this file follows
 	// (runContainer, resolveSecrets): a subprocess runs with THIS worker's env, identical on the real
 	// path and divergent only under an injected one, which is exactly where the difference would hide.
+	const hookRuns = config.onFailure ? makeHookRunsPublisher({ redis, name: config.workerName, now, log }) : null;
+	if (hookRuns) extraClosers.push(hookRuns);
 	const onFailure = config.onFailure
-		? makeOnFailure({ command: config.onFailure, timeoutMs: config.onFailureTimeoutMs, host: config.workerName ?? "", hostEnv: env, log })
+		? makeOnFailure({ command: config.onFailure, timeoutMs: config.onFailureTimeoutMs, host: config.workerName ?? "", hostEnv: env, log, publish: hookRuns.publish })
 		: null;
 	// Which POLICY reasons page the operator. Paid terminals only: worker-abort, runner-policy and every
 	// named runner reason cost a container and ended wrong. The runner's named reasons are SPREAD from

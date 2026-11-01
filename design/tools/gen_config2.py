@@ -421,11 +421,26 @@ def connections():
                           (f'<span class="muted">No receiver variable for {f} is set, so its webhook path answers 404 ("{f} webhooks are not configured").</span>', "wide c2-span"),
                           ("", "hide-phone"), ("", "hide-phone"), ("", "hide-phone")]))
     forges = table([("Forge", ""), ("State", ""), ("Auth", ""), ("Webhook", ""), ("Polling", ""), ("Who may fire", "")], frows, caption="Forges", stack=True)
-    forges += f"""<div class="c2-pad2">
-  <p class="c2-st tone-idle">{ic('info', 'ic ic--sm')}<span><b>Delivery health is not published.</b> Check the forge's delivery history for 401/404 refusals; the receiver log can help with 503 or enqueue failures. The receiver's location is not published.</span></p>
-</div>"""
+    health_words = ["queued", "deduplicated", "held", "steered", "dropped", "unauthorized", "not-configured", "lookup-failed", "enqueue-failed", "malformed", "error"]
+    health_rows = [[(code(word), ""), (str({"queued": 128, "unauthorized": 2}.get(word, 0)), "")] for word in health_words]
+    from datetime import datetime, timedelta, timezone
+    end_hour = datetime(2026, 11, 1, 15, tzinfo=timezone.utc)
+    hourly_rows = []
+    for i in range(24):
+        hour = end_hour - timedelta(hours=23-i)
+        before = i < 23
+        hourly_rows.append([(hour.strftime("%Y-%m-%d %H:%M UTC"), ""), ("before receiver started" if before else "observed", "")] + [("not observed" if before else str({"queued": 128, "unauthorized": 2}.get(word, 0)), "") for word in health_words])
+    hourly = table([("UTC hour", ""), ("Coverage", "")] + [(word, "") for word in health_words], hourly_rows, caption="mini1 github delivery counts per UTC hour")
+    receiver = f"""<div class="c2-pad3 c2-receivers"><h3>Receiver on <a class="link" href="/fleet/host?name=mini1">mini1</a></h3>
+<p>Port 3000 · all interfaces · beat 8 seconds ago · version 4.3.1. Receiver started 15:00 UTC; counts since then within 24 UTC hours.</p><h3>github</h3>
+{facts([("Last taken", "15:30 UTC"), ("Last refused", "15:20 UTC")], 2)}
+<details class="c2-receiver-detail"><summary>github: outcomes in 24 UTC hours</summary>{table([("Outcome", ""), ("Count", "")], health_rows, caption="mini1 github delivery outcomes", stack=True)}
+<details><summary>Counts per UTC hour</summary><p class="muted">Scroll horizontally to compare outcomes. Hours before this receiver started are not observed.</p><div class="c2-receiver-hours-scroll" role="region" aria-label="mini1 github delivery hours, scroll horizontally" tabindex="0">{hourly}</div></details></details>
+<p class="muted">Configured receiver port: 3000; live ports are shown above.</p></div>"""
+    forges = receiver + forges + f"""<div class="c2-pad2"><p class="c2-st tone-idle">{ic('info', 'ic ic--sm')}<span>Counts cover the current UTC hour and the preceding 23. Last-event times are retained separately. Taken means queued, deduplicated, held or steered; filter drops are separate. Refused includes malformed requests, authentication, configuration, lookup, enqueue and internal errors. The forge's delivery history remains available for individual deliveries.</span></p></div>"""
+
     p_forges = card("Forges", forges, id_="p-forges", flush=True, sub="where jobs come from",
-                    end='<span class="card__sub">Receiver: port 3000; its location is not published</span>')
+                    end='<span class="card__sub">Receiver observations, refreshed every 15 seconds</span>')
 
     E_ = [("mini1", "ok", "done", "running", "denies unlisted hosts (doctor, 2h ago)"),
           ("mini2", "ok", "done", "running", "denies unlisted hosts (doctor, 3h ago)"),
@@ -468,7 +483,13 @@ def connections():
   <li>{ic('comment')}<span><b>Forge comments:</b> on. Trigger 3 also keeps a <b>status comment</b> up to date while it runs.</span></li>
   <li>{ic('bell')}<span><b>Failure hook:</b> {code('PI_ON_FAILURE')} → {code('…/ntfy-page')}, once per paid failure.</span></li>
 </ul>
-  <p class="c2-gap2 c2-st c2-quiet tone-ok">{ic('done', 'ic ic--sm')}<span>The hook's runs are in the worker's log; hook history is not published.</span></p>"""
+  <div class="c2-hook-scroll" tabindex="0" role="region" aria-label="Failure hook history">{table([("Host", ""), ("Last hook run", ""), ("Retained runs by detail", "")], [
+      [('<a href="#host-mini1">mini1</a>', "id c2-first"),
+       (f'<time datetime="2026-10-08T15:11:00Z">2026-10-08 15:11 UTC</time><br>{runlink("gh-f0c2")}<br><span class="c2-st tone-attention">{ic("attention", "ic ic--sm")}<span>timeout</span></span><br><span class="muted">Run: failed · infra</span>', "wide"),
+       ("exit: 2<br>timeout: 1", "wide")],
+      [('<a href="#host-build3">build3</a>', "id c2-first"), ("no hook run published", "wide"), ("none", "wide")]
+  ], caption="Failure hook runs", stack=True)}</div>
+  <p class="c2-gap2 card__sub">Up to 20 runs per host, kept until seven days after the last append. An exit code describes the hook, not notification delivery.</p>"""
     p_notify = card("Notifications", notify, id_="p-notify")
 
     env = facts([
@@ -493,6 +514,14 @@ CO_CSS = COMMON_CSS + PROVIDER_KEYS_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_R
 .c2-pad2 { padding: var(--space-4) var(--space-5) var(--space-5); border-top: 1px solid var(--line); display: grid; gap: var(--space-3); }
 .c2-pad2 .c2-sub { margin: var(--space-2) 0 0; }
 .c2-pad3 { padding: 0 var(--space-5) var(--space-4); }
+.c2-receiver-detail { margin: 12px 0; }
+.c2-receiver-detail summary { cursor: pointer; color: var(--running-ink); font-size: 12px; }
+.c2-receivers a { overflow-wrap: anywhere; }
+.c2-receiver-hours-scroll { max-width: 100%; min-width: 0; overflow-x: auto; margin-top: 12px; border-radius: var(--radius-md); }
+.c2-receiver-hours-scroll:focus-visible { outline: 2px solid var(--running-ink); outline-offset: 2px; }
+.c2-receiver-hours-scroll > .tbl-wrap { overflow: visible; }
+#p-forges .c2-receiver-hours-scroll .tbl { width: max-content; min-width: 1320px; table-layout: auto; }
+#p-forges .c2-receiver-hours-scroll .tbl th, #p-forges .c2-receiver-hours-scroll .tbl td { white-space: nowrap; overflow-wrap: normal; word-break: normal; }
 .c2-pad2 > .c2-st { font-weight: 500; color: var(--ink-muted); }
 .c2-pad2 > .c2-st b { color: var(--ink); }
 #p-forges .tbl td, #p-egress .tbl td { vertical-align: top; }
@@ -517,6 +546,13 @@ CO_CSS = COMMON_CSS + PROVIDER_KEYS_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_R
 .c2-on { fill: var(--running); }
 .c2-offs { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
 .c2-names .muted { font-size: 12px; align-self: center; }
+.c2-hook-scroll { overflow-x: auto; }
+.c2-hook-scroll > .tbl-wrap { overflow: visible; }
+#p-notify .tbl th, #p-notify .tbl td { padding-left: 8px; padding-right: 8px; }
+#p-notify .tbl th { overflow-wrap: normal; word-break: normal; }
+#p-notify .tbl th:first-child { width: 76px; min-width: 76px; }
+#p-notify .tbl { table-layout: auto; }
+#p-notify .tbl td:first-child, #p-notify .tbl td:first-child a { white-space: nowrap; overflow-wrap: normal; word-break: normal; }
 #p-mcp .rowpill { min-height: 36px; padding-top: 5px; padding-bottom: 5px; border-radius: var(--radius-md); line-height: 17px; }
 @media (min-width: 761px) { #p-forges td.c2-span { white-space: normal; } }
 @media (max-width: 760px) {
@@ -780,11 +816,12 @@ A viewer sees the tables, with no Remove or forms.
 - **Forges.**
   - For each armed forge: which triggers arm it, the auth source and per-job token, how deliveries are verified and de-duplicated, polling, and who may fire.
   - An unconfigured forge collapses to one line saying its path answers 404. GitHub is enabled by a trigger or an explicit auth source; each other forge by any of its receiver variables. GitHub's implicit default auth source is shown as such.
-  - One line says delivery health is not published and where to look instead.
+  - Live receivers name their host, socket port, closed bind category and beat age. Complete receiver identities wrap within their section at phone widths, including unreadable observations. Each forge has its last taken/refused time and 24 UTC-hour counts by every outcome. Native disclosures show hourly counts. Unserved routes retain their last taken/refused times after their window counts reach zero; routes without history stay hidden.
+  - Warnings name an armed forge without a reported receiver, only-unauthorized traffic and any not-configured refusal; incomplete reads stay unknown.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
 - **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
 - **Model endpoints.** Each endpoint's host and port, whether it is keyless, fleet leases first and each host's own slots in use with beat age and scope. Per-machine aliases and unnamed workers publish host occupancy with no fleet bound; unread or absent publications stay unknown. Different shared bounds are flagged with “one server, one id”; independent per-machine capacities may differ. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
-- **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Its runs are in the worker's log; their history is not published.
+- **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Each host's last hook run links its time and run, with the hook exit detail and counts over its retained entries. Timeout, an unresolvable script and nonzero exits are tinted; no history says "no hook run published", never healthy.
 - **MCP servers, Deployment environment, Staged pi packages.** All read-only, each with the command or file that changes it. Caps set only in the .env read "unknown (worker env or default)".
 
 Viewers read status and provider guides without mutation controls. A read-only operator keeps the guides and terminal recovery. No-JavaScript users can read native disclosures and external links, while mutation controls stay disabled.
@@ -798,11 +835,11 @@ Viewers read status and provider guides without mutation controls. A read-only o
 - Per host: the egress proxy state and the newest egress doctor lines.
 - The model endpoints file, declared slots and whether fleet leases count that endpoint, and the provider key sources.
 - The overlay MCP servers with their refusals, and the staged packages receipt.
-- The `PI_ON_FAILURE` hook by its last folder, its timeout and the fact that its runs are in the worker's log.
+- The `PI_ON_FAILURE` hook by its last folder, its timeout, and up to 20 safe runs per host from the versioned seven-day-expiring display list. Incomplete reads are unknown; the exit code cannot prove notification delivery.
 - The .env keys the console reads, and any shell-versus-.env disagreement.
 
 **Why it works this way.**
-- **Delivery health.** The receiver has no health check of its own, so the console cannot say whether deliveries arrive. Use the forge's delivery history for 401/404 refusals. The receiver log can help with 503 or enqueue failures; signature, route and early request refusals do not write a log line, and not every 503 is logged.
+- **Delivery health.** Counts, times and fixed words are observed after the existing response. A request adds no Valkey command; one bounded background beat publishes every 15 seconds with a 90-second expiry. No new route or delivery policy is added. The count window is the current UTC hour and the preceding 23; last-event times are retained separately. Missing or unreadable observations never mean healthy.
 - **Endpoint slots.** The heartbeat publishes the same in-process map both queue processors claim. Each host lists its own used and declared slots, and whether it also takes a fleet lease. Per-machine aliases and unnamed workers have no fleet bound but still publish host use. A lowered capacity may read above its declaration until held slots return. Publications have no admission authority; missing, newer, truncated or unreadable data never becomes zero.
 - **Egress.** With egress on, each local or podman job gets its own internal network and reaches out only through its host's proxy: HTTPS (443) and plain HTTP (80) to listed hosts, plus the declared model endpoints. OpenShell applies its own sandbox policy from the same sources. A leading dot covers subdomains.
 - **Notifications.** pi-dispatch sends none of its own. Forge comments are always on: one fixed sentence on the issue for a paid failure, and one when a run stops to ask. The failure hook runs once per paid failure with "job, outcome, reason, host" and has 10 s to answer; it never runs for completions, free refusals, recovered retries or a cancel.
@@ -810,8 +847,8 @@ Viewers read status and provider guides without mutation controls. A read-only o
 
 **Fixture note.**
 - **From the fixture:** build3's missing proxy, gh-e9a0, the linear MCP server, and the forges named by triggers 1 to 7.
-- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. Receiver location and hook history are not published, so the card says where to look rather than inventing them.
-- **Known repo gaps:** webhook health is not published, and there is no notification setting beyond the hook.""",
+- **Sample:** the receiver port, the allowlist hosts, the model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. Receiver observations, hook history and endpoint occupancy are sample display evidence.
+- **Known repo gaps:** there is no notification setting beyond the hook.""",
 
 "ProjectDetail": """One project on its own page: what it spent against its share, its members, its job size against what its runs use, and the rows that govern it.
 

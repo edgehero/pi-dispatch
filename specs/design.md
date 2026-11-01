@@ -9537,6 +9537,7 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   `budgetReserved: false` guard. Rejected: one generic "an MCP server stopped the run" token, which would hide
   again which of six different fixes applies; and reading the server's name off the exit line into the comment,
   which would put a container-written string in a public comment.
+- **Display history (#775)**: the one post-log callback publishes `INT-HOOK-RUNS-KEY` through a bounded memory drain, never awaited by a hook or job. This records completed hook attempts, not pending notifications; nothing reads it to decide. The log keys, firing rules and at-most-once best-effort delivery remain unchanged.
 - **Rejected**, each with its why: an in-project transport (webhook/ntfy/Slack/mail: a dependency, a
   queue and a retry policy this layer has no business growing -- the argv IS the feature);
   comment-on-every-attempt (a flaky daemon posts three comments for one recovery); the hook receiving
@@ -12079,6 +12080,12 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   worker/src/run-container.mjs, worker/src/processor.mjs (`peakReachedLimit`), image/verify-image.sh.
 
 ## DES-OPERATOR-CONSOLE
+
+**AMENDED 2026-11-01 (#775, hooks)**: Connections reads `INT-HOOK-RUNS-KEY` only in its page-specific reader,
+with Setup's shared metadata call opting out. Its Notifications table shows the last run and retained-detail counts
+per host, visible tinted error words, explicit absence and unknown, and no delivery-success claim. Host identities use the table id treatment with enough column space; header words remain whole. Unusually long identities scroll in a named keyboard-focusable region inside the card. Both human roles
+read the safe records; `dispatch_connections` projects them through the strict allowlist. The agent HTML restriction
+and `/api/state` are unchanged.
 
 **AMENDED 2026-11-01 (#775, endpoint occupancy).** Connections reads the optional versioned endpoint
 publication directly, off the shared snapshot and state API. The worker heartbeat reports the same map
@@ -15020,6 +15027,18 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   (forge comment bodies and other untrusted text are not run facts). The remaining security, write, terminal and
   session lifecycle rules are UNCHANGED, checked.
 
+<!-- #775 receiver observation display -->
+**Connections receiver observations (#775).** The Connections-only reader loads `INT-RECEIVER-STATUS-KEY`; Setup
+passes `publications: false` and other pages and `/api/state` load no such keys. Forges retains its configuration
+table and adds receiver sections with host links, actual socket ports, closed bind words and beat ages. Receiver identity
+links wrap within their section without truncation or page overflow, including maximum-length names and unreadable rows. Last taken
+and refused times are independent from the current and preceding 23 UTC-hour counters. Their unserved forge section
+remains visible after its window counts expire; an unserved route without history stays hidden. Native disclosures expose
+all closed outcomes and their hourly counts for both human roles without JavaScript. Unknown/partial reads never
+prove absence or zero; only complete reads permit no-receiver and only-unauthorized warnings. Positive unconfigured
+traffic remains actionable even alongside a partial population. No new chart, mutation, receiver route or decision
+is introduced. The design generator owns the published card before the console uses its hierarchy.
+
 ## DES-LIVE-TRANSCRIPT-STREAM
 
 - **Status**: issue #643 (2026-10-16), resolving `OQ-044`. The worker half (the live file, the tailer, the
@@ -16726,4 +16745,11 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-31 (#771, initial live snapshot) | DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL and DES-OPERATOR-CONSOLE keep a fresh Sandboxes page's cleanup warnings until a fresh live read replaces them. Rejected replaying an old cached empty view and waiting for a later timer tick to repair it. Failed fresh reads retain the rendered panels with stale status. Other-page cache/replay policy, cursor reconnects, shared visual tokens/styles, role guards, actions and all worker/container contracts UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AI-TRIGGER-FLOW-GATE`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` and `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN` AMENDED: explicit transition authority, private no-post classifier jobs, evidence-bound drafts and generic external-guidance extension seams. `DES-OPERATOR-CONSOLE` uses the existing ticket/guard/visual system; parent session ownership, approval authority, ordinary queue contracts and all unrelated decisions UNCHANGED, checked. |
 | 2026-10-31 (#772, long-label review) | `DES-OPERATOR-CONSOLE` CORRECTED after the complete browser sweep found a valid long run identifier expanding a phone card: bounded grid tracks and normal code-label whitespace preserve full run/source/standing labels, including the private draft origin on the run page. Generator styles, three rebuilt cards and the console's hashed paste agree. Browser counterexamples verify complete text lines, exact links and keyboard navigation in both themes across phone/intermediate/desktop widths and applicable roles. Shared visual tokens, fonts, privacy/role boundaries, API/session/provenance/ticket contracts and all worker paid gates UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver) | `DES-OPERATOR-CONSOLE` display AMENDED: bounded Connections-only receiver observations, native outcome/hourly disclosures, conservative warnings and no Setup/state reads. `DES-ADMIN-VIA-PI-EXTENSION` authority/tool vocabulary, `DES-HOST-REGISTRY`, pending notification-store rejection and all job/receiver decisions UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver lifetime visibility) | `DES-OPERATOR-CONSOLE` CORRECTED: the section visibility predicate uses retained last taken/refused times as well as current-window counts. Otherwise an unserved route loses its last refusal after 24 hours despite the independently retained timestamp. The published card describes this lifetime visibility; empty unserved routes remain hidden. `INT-RECEIVER-STATUS-KEY`, shared visual tokens/styles, native interactions, role/CSP boundaries, current-window warning rules and every runtime decision UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver identity wrapping) | `DES-OPERATOR-CONSOLE` CORRECTED: scoped receiver identity links wrap complete valid names in the published generator/card and console. A native-font browser probe exposed 37 characters outside a 390px viewport; the regression measures every character within the visible container and verifies a rule-removal counterexample, both roles/themes and breakpoint widths. `INT-RECEIVER-STATUS-KEY`, shared tokens/bundle, CSP, authority, counts/times and all runtime behavior UNCHANGED, checked. |
+| 2026-11-01 (#775, hooks) | `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` and `DES-OPERATOR-CONSOLE` AMENDED: completed hook attempts gain safe bounded display history, retained-detail counts, explicit absence/unknown and a typed `dispatch_connections` projection. Rejected pending-notification persistence remains rejected. UNCHANGED, checked: `DES-ADMIN-VIA-PI-EXTENSION`, `DES-DOCTOR-RESULTS-PUBLISHED`, `DES-HOST-REGISTRY`, `CONST-HMAC-OVER-RAW-BODY`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, run outcomes and `/api/state`. |
+| 2026-11-01 (#775, hook table readability) | `DES-OPERATOR-CONSOLE` CORRECTED: Notifications allocates a stable host column, retains whole header words and provides keyboard-accessible scrolling for long identities, matching the corrected published card. The browser oracle measures actual host/header text with the native font and drives a long-identity scroll counterexample. `INT-HOOK-RUNS-KEY`, typed projections, roles, CSP, hook firing, outcome and admission rules UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver and hook integration) | `DES-OPERATOR-CONSOLE` reviewed with receiver and hook publications together: preserve native receiver disclosures, complete identities, hook history and explicit unknown states without adding a live page or authority. `DES-ADMIN-VIA-PI-EXTENSION`, shared visual tokens/styles, pending-notification-store rejection, endpoint enforcement and all runtime decisions UNCHANGED, checked. |
 | 2026-11-01 (#775, endpoint occupancy) | `DES-OPERATOR-CONSOLE` AMENDED: versioned host observations display the shared in-process endpoint map and last-good file, through bounded page-only reads and existing Pulse slot marks. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-ADMIN-VIA-PI-EXTENSION`, admission, release, CSP, shared tokens and stylesheet are UNCHANGED, checked. |
+| 2026-11-01 (#775, three publication channels) | `DES-OPERATOR-CONSOLE` reviewed with all three bounded publication channels together, preserving receiver disclosures and identities, hook history and endpoint fleet/host scopes with explicit unknown states. `DES-ADMIN-VIA-PI-EXTENSION`, shared tokens/styles, pending-notification-store rejection, fleet lease enforcement and all runtime decisions UNCHANGED, checked. |

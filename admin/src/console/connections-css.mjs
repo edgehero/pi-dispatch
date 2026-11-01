@@ -3,15 +3,24 @@ export const CONNECTIONS_CSS = `
 .connections-layout{grid-template-columns:minmax(0,2fr) minmax(280px,1fr)}
 [data-page="connections"] .tbl{font-size:12px}
 [data-page="connections"] .tbl th,[data-page="connections"] .tbl td{vertical-align:top;white-space:normal;overflow-wrap:anywhere}
-[data-page="connections"] #p-forges .tbl{table-layout:fixed}
-[data-page="connections"] #p-forges .tbl th:nth-child(1){width:84px}
-[data-page="connections"] #p-forges .tbl td:first-child{white-space:nowrap}
-[data-page="connections"] #p-forges .tbl th:nth-child(2){width:120px}
-[data-page="connections"] #p-forges .tbl th:nth-child(3){width:135px}
-[data-page="connections"] #p-forges .tbl th:nth-child(4){width:190px}
-[data-page="connections"] #p-forges .tbl th:nth-child(5){width:140px}
-[data-page="connections"] #p-forges .tbl th:nth-child(6){width:110px}
+[data-page="connections"] #p-forges .cn-forge-config .tbl{table-layout:fixed}
+[data-page="connections"] #p-forges .cn-forge-config .tbl th:nth-child(1){width:84px}
+[data-page="connections"] #p-forges .cn-forge-config .tbl td:first-child{white-space:nowrap}
+[data-page="connections"] #p-forges .cn-forge-config .tbl th:nth-child(2){width:120px}
+[data-page="connections"] #p-forges .cn-forge-config .tbl th:nth-child(3){width:135px}
+[data-page="connections"] #p-forges .cn-forge-config .tbl th:nth-child(4){width:190px}
+[data-page="connections"] #p-forges .cn-forge-config .tbl th:nth-child(5){width:140px}
+[data-page="connections"] #p-forges .cn-forge-config .tbl th:nth-child(6){width:110px}
 [data-page="connections"] #p-env .tbl th:first-child{width:44%;overflow-wrap:anywhere}
+.cn-receiver-detail{margin:12px 0}
+.cn-receiver-detail summary{cursor:pointer;color:var(--running-ink);font-size:12px}
+.cn-receivers section+section{margin-top:20px}
+.cn-receivers a{overflow-wrap:anywhere}
+.cn-receiver-hours-scroll{max-width:100%;min-width:0;overflow-x:auto;margin-top:12px;border-radius:var(--radius-md)}
+.cn-receiver-hours-scroll:focus-visible{outline:2px solid var(--running-ink);outline-offset:2px}
+.cn-receiver-hours-scroll>.tbl-wrap{overflow:visible}
+[data-page="connections"] .cn-receiver-hours-scroll .tbl{width:max-content;min-width:1320px;table-layout:auto}
+[data-page="connections"] .cn-receiver-hours-scroll .tbl th,[data-page="connections"] .cn-receiver-hours-scroll .tbl td{white-space:nowrap;overflow-wrap:normal;word-break:normal}
 .cn-env-rest{margin:12px 0}
 .cn-env-rest summary{cursor:pointer;color:var(--running-ink);font-size:12px}
 [data-page="connections"] .tbl .code{white-space:normal;overflow-wrap:anywhere}
@@ -56,8 +65,15 @@ export const CONNECTIONS_CSS = `
 .cn-slot-free{fill:none;stroke:var(--line-strong);stroke-width:1.2}
 .cn-endpoint-hosts{list-style:none;padding:0;margin:4px 0 0;display:grid;gap:8px}
 .cn-endpoint-hosts small{display:block;color:var(--ink-muted);font-size:11px}
+.cn-hook-scroll{overflow-x:auto}
+.cn-hook-scroll>.tbl-wrap{overflow:visible}
+[data-page="connections"] #p-notify .tbl th,[data-page="connections"] #p-notify .tbl td{padding-left:8px;padding-right:8px}
+[data-page="connections"] #p-notify .tbl th{overflow-wrap:normal;word-break:normal}
+[data-page="connections"] #p-notify .tbl th:first-child{width:76px;min-width:76px}
+[data-page="connections"] #p-notify .tbl{table-layout:auto}
+[data-page="connections"] #p-notify .tbl td:first-child,[data-page="connections"] #p-notify .tbl td:first-child a{white-space:nowrap;overflow-wrap:normal;word-break:normal}
 .cn-list{padding-left:18px;display:grid;gap:12px}
-@media(min-width:761px){[data-page="connections"] #p-forges .tbl{min-width:780px}}
-@media(max-width:760px){[data-page="connections"] #p-forges .tbl--stack tr{grid-template-columns:minmax(0,1fr) minmax(0,2fr)}}
+@media(min-width:761px){[data-page="connections"] #p-forges .cn-forge-config .tbl{min-width:780px}}
+@media(max-width:760px){[data-page="connections"] #p-forges .cn-forge-config .tbl--stack tr{grid-template-columns:minmax(0,1fr) minmax(0,2fr)}}
 @media(max-width:1000px){.connections-layout{grid-template-columns:minmax(0,1fr)}}
 `;

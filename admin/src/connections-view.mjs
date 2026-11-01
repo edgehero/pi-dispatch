@@ -1,6 +1,7 @@
 import { readEndpointStatus, ENDPOINT_STATUS_HOSTS_MAX } from "@edgehero/pi-dispatch/endpoint-status";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { readProviderInventory, providerInventoryView } from "./provider-inventory.mjs";
+import { readReceiverStatus, parseReceiverStatus, receiverForgeFacts, RECEIVER_FORGES, RECEIVER_OUTCOMES } from "@edgehero/pi-dispatch/receiver-status";
 import { readSubscriptionAuthView, subscriptionAuthForAgent } from "./subscription-auth-view.mjs";
 /** Display-only deployment facts (#751). Raw environment values never leave this reader. */
 import * as nodeFs from "node:fs";
@@ -20,6 +21,7 @@ import { FORGES } from "@edgehero/pi-dispatch/forges";
 import { doctorHostsOf, doctorStale } from "./doctor-view.mjs";
 import { PANEL_SERVICE_KEYS } from "./read-model.mjs";
 import { DOLLAR_ENV_NAMES } from "@edgehero/pi-dispatch/money";
+import { readHookRuns, hookRunsView } from "@edgehero/pi-dispatch/hook-runs";
 
 /** A closed display vocabulary: arbitrary strings, even numeric-looking secrets, are never printed. */
 export const CONNECTION_ENV_TYPES = Object.freeze({
@@ -176,40 +178,63 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   let endpoints = null;
   try { endpoints = (reads.endpoints ?? (() => loadModelEndpoints({ modelEndpointsFile: modelEndpointsFilePath(file), valkeyUrl: file.VALKEY_URL ?? paths.valkeyUrl }, { cwd: deploymentDir, readFileSync: fs.readFileSync, existsSync: fs.existsSync })))(); } catch { /* One refused source must not erase the forges or MCP. */ }
   let owned = null;
+  const publicationClient = (injectedRead) => {
+    if (redis) return redis;
+    if (owned) return owned;
+    // An injected reader needs no connection when its fixture supplies no URL. Real readers share one owner.
+    if (injectedRead && typeof paths.valkeyUrl !== "string") return null;
+    return (owned = redisFn(paths.valkeyUrl));
+  };
   const endpointFleetDeclared = endpointFleetDeclaration(file, environmentUnknown);
   let endpointStatus = { state: "unknown", hosts: [], more: 0, partial: true };
   let shownEndpoints = Array.isArray(endpoints) ? endpoints.map((ep) => ({ ...ep })) : [];
   let endpointsMore = 0;
-  if (publications && (redis || paths.valkeyUrl || reads.endpointStatus)) {
-    try {
-      const client = redis ?? (paths.valkeyUrl ? (owned = redisFn(paths.valkeyUrl)) : {});
-      endpointStatus = await (reads.endpointStatus ?? readEndpointStatus)(client, { hosts: [...(snapshot?.hostBudgets ?? []), ...(snapshot?.hosts ?? [])], now: () => now });
-    } catch { /* Publication failure is unknown, never zero occupancy. */ }
-  }
-  const endpointHosts = (id) => (endpointStatus.hosts ?? []).flatMap((host) => (host.endpoints ?? []).filter((ep) => ep.id === id).map((ep) => ({ name: host.name, at: host.at, ageMs: host.ageMs, slots: ep.slots, used: ep.used, fleet: ep.fleet })));
-  const ids = new Set(shownEndpoints.map((ep) => ep.id));
-  for (const host of endpointStatus.hosts ?? []) for (const ep of host.endpoints ?? []) if (!ids.has(ep.id)) {
-    ids.add(ep.id);
-    shownEndpoints.push({ id: ep.id, host: null, port: null, keyless: null, slots: null });
-  }
-  endpointsMore = Math.max(0, shownEndpoints.length - 64);
-  shownEndpoints = shownEndpoints.slice(0, 64).map((ep) => {
-    const hostCounts = endpointHosts(ep.id);
-    const fleetRows = hostCounts.filter((h) => h.fleet === 1);
-    const counting = fleetRows.length ? "fleet" : ep.host === null ? hostCounts.length ? "host-only" : "unknown" : endpointCounting(ep.host, endpointFleetDeclared);
-    const caps = [...new Set(fleetRows.map((h) => h.slots))];
-    return { ...ep, declaredSlots: ep.slots, slots: caps.length === 1 ? caps[0] : caps.length > 1 ? null : ep.slots, counting, hostCounts, conflict: caps.length > 1, mixedScope: fleetRows.length > 0 && hostCounts.some((h) => h.fleet === 0) };
-  });
-  const fleetEndpoints = shownEndpoints.filter((ep) => ep.counting === "fleet");
   const slots = new Map();
+  let receivers = { hosts: [], complete: false, more: 0 };
+  let hookHistory = hookRunsView(null);
   try {
-    if (publications && fleetEndpoints.length) {
-      const client = redis ?? owned ?? (reads.slots && !paths.valkeyUrl ? {} : (owned = redisFn(paths.valkeyUrl)));
-      const counted = await (reads.slots ?? readEndpointSlots)(client, fleetEndpoints);
-      for (const [index, endpoint] of fleetEndpoints.entries()) slots.set(endpoint.id, Number.isInteger(counted?.[index]) ? counted[index] : null);
+    if (publications && (redis || typeof paths.valkeyUrl === "string" || reads.endpointStatus)) {
+      try {
+        endpointStatus = await (reads.endpointStatus ?? readEndpointStatus)(publicationClient(reads.endpointStatus), { hosts: [...(snapshot?.hostBudgets ?? []), ...(snapshot?.hosts ?? [])], now: () => now });
+      } catch { /* Publication failure is unknown, never zero occupancy. */ }
     }
-  } catch { /* Fleet occupancy is unknown; declarations and host occupancy remain readable. */ }
-  finally { try { owned?.disconnect(); } catch {} }
+    const endpointHosts = (id) => (endpointStatus.hosts ?? []).flatMap((host) => (host.endpoints ?? []).filter((ep) => ep.id === id).map((ep) => ({ name: host.name, at: host.at, ageMs: host.ageMs, slots: ep.slots, used: ep.used, fleet: ep.fleet })));
+    const ids = new Set(shownEndpoints.map((ep) => ep.id));
+    for (const host of endpointStatus.hosts ?? []) for (const ep of host.endpoints ?? []) if (!ids.has(ep.id)) {
+      ids.add(ep.id);
+      shownEndpoints.push({ id: ep.id, host: null, port: null, keyless: null, slots: null });
+    }
+    endpointsMore = Math.max(0, shownEndpoints.length - 64);
+    shownEndpoints = shownEndpoints.slice(0, 64).map((ep) => {
+      const hostCounts = endpointHosts(ep.id);
+      const fleetRows = hostCounts.filter((h) => h.fleet === 1);
+      const counting = fleetRows.length ? "fleet" : ep.host === null ? hostCounts.length ? "host-only" : "unknown" : endpointCounting(ep.host, endpointFleetDeclared);
+      const caps = [...new Set(fleetRows.map((h) => h.slots))];
+      return { ...ep, declaredSlots: ep.slots, slots: caps.length === 1 ? caps[0] : caps.length > 1 ? null : ep.slots, counting, hostCounts, conflict: caps.length > 1, mixedScope: fleetRows.length > 0 && hostCounts.some((h) => h.fleet === 0) };
+    });
+    // Per-machine counts come from each worker's admission map; only shared endpoints have fleet lease keys.
+    const fleetEndpoints = shownEndpoints.filter((ep) => ep.counting === "fleet");
+    if (publications && fleetEndpoints.length) {
+      try {
+        const counted = await (reads.slots ?? readEndpointSlots)(publicationClient(reads.slots), fleetEndpoints);
+        for (const [index, endpoint] of fleetEndpoints.entries()) slots.set(endpoint.id, Number.isInteger(counted?.[index]) ? counted[index] : null);
+      } catch { /* Fleet occupancy is unknown; declarations and host occupancy remain readable. */ }
+    }
+    if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.receivers)) {
+      try {
+        receivers = await (reads.receivers ?? readReceiverStatus)(publicationClient(reads.receivers), { names: (snapshot?.hostBudgets ?? []).map((h) => h.name), now: () => now });
+      } catch { /* Unknown is not an empty, healthy receiver population. */ }
+    }
+    if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.hookRuns)) {
+      try {
+        const names = (snapshot?.hostBudgets ?? []).map((host) => host.name);
+        hookHistory = hookRunsView(await (reads.hookRuns ?? readHookRuns)(publicationClient(reads.hookRuns), { names }));
+      } catch { /* Missing evidence stays unknown; a hook's configuration is independent of its past runs. */ }
+    }
+  } finally {
+    // A borrowed client belongs to the caller; our one client stays open until every publication read finishes.
+    try { owned?.disconnect(); } catch {}
+  }
   const hosts = doctorFacts(snapshot);
   let egressOn = null;
   let egressProblem = null;
@@ -225,7 +250,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   return {
     now, environmentUnknown, environment, subscriptionAuth,
     providerKeys: readProviderInventory({ deploymentDir, env, paths, snapshot, fs, platform, uid, reads: reads.providerInventory ?? { environment: reads.environment } }),
-    receiver: { port: positive(file.RECEIVER_PORT, 3000), unknown: environmentUnknown },
+    receiver: { port: positive(file.RECEIVER_PORT, 3000), unknown: environmentUnknown, ...receivers },
     forges,
     egress: { on: egressOn, problem: egressProblem, allowlist: Array.isArray(allowlist) ? allowlist.slice(0, 8) : null, more: Array.isArray(allowlist) ? Math.max(0, allowlist.length - 8) : 0, hosts },
     endpointFleetDeclared, endpointStatus, endpointsMore,
@@ -237,7 +262,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
       const selectedVariable = providerUnknown ? null : fromEnv[0] ?? null;
       return { name, unknown: providerUnknown, variables, fromEnv, selectedVariable, credentialSource: selectedVariable ? "deployment-env" : providerUnknown || loginFallback === null ? "unknown" : loginFallback ? "pi-login" : "worker-env", loginFallback, fallback: environmentUnknown ? "the deployment’s provider credential fallback is unknown" : loginFallback ? "pi login on each host is the configured fallback; actual credentials are not published here" : "pi login disabled by PI_AUTH_FROM_PI=0; each worker needs its environment key" };
     }),
-    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown },
+    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory },
     mcp, packages, packageOptOuts: Array.isArray(triggers) ? triggers.filter((t) => t.packages === false).length : null,
     problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges), snapshotUnreadable: snapshot === null,
   };
@@ -264,7 +289,9 @@ export function modelConnections(view) {
     return NPM_NAME_RE.test(at > 0 ? p.slice(0, at) : p) && (at <= 0 || EXACT_VERSION_RE.test(p.slice(at + 1)));
   });
   return {
+    hookRuns: hookRunsView(view?.notify?.history),
     subscriptionAuth: subscriptionAuthForAgent(view?.subscriptionAuth),
+    receivers: modelReceivers(view?.receiver, view?.now),
     forges: (view?.forges ?? []).filter((f) => Object.hasOwn(FORGES, f.name)).map((f) => ({ name: f.name, configured: typeof f.enabled === "boolean" ? f.enabled : null, path: ROUTES[f.name], authSource: ["app", "gh", "pat", "gh (default)", "invalid", "shared token"].includes(f.source) ? f.source : "unknown", activationKeys: (f.activationKeys ?? []).filter((k) => FORGE_ACTIVATION_KEYS[f.name].includes(k)), secret: { key: f.name === "github" ? "WEBHOOK_SECRET" : `${f.name.toUpperCase()}_WEBHOOK_SECRET`, set: typeof f.secret?.set === "boolean" ? f.secret.set : null }, triggerCount: (f.triggers ?? []).filter((i) => Number.isSafeInteger(i) && i >= 0).length })),
     egress: { on: typeof view?.egress?.on === "boolean" ? view.egress.on : null, hosts: (view?.egress?.hosts ?? []).filter((h) => name(h.name)).map((h) => ({ name: h.name, state: h.unreadable ? "unknown" : ["ok", "warn", "fail"].includes(h.proxy?.level) ? h.proxy.level : "not-published", stale: h.stale === true })) },
     endpoints: Array.isArray(view?.endpoints) ? view.endpoints.slice(0, 64).filter((ep) => typeof ep.id === "string" && MODEL_ENDPOINT_ID_RE.test(ep.id)).map((ep) => {
@@ -281,4 +308,15 @@ export function modelConnections(view) {
     packages: { names: packages, stagedAt: typeof view?.packages?.stagedAt === "string" && Number.isFinite(Date.parse(view.packages.stagedAt)) ? new Date(view.packages.stagedAt).toISOString() : null, unreadable: !view?.packages || Boolean(view.packages.unreadable) },
     deployment: (view?.environment ?? []).filter((e) => Object.hasOwn(CONNECTION_ENV_TYPES, e.key) || providerKeys.has(e.key)).map((e) => ({ key: e.key, set: typeof e.value === "string" && !e.value.startsWith("not set") && !e.value.startsWith("unknown"), unknown: typeof e.value !== "string" || e.value.startsWith("unknown"), disagrees: e.disagrees === true })),
   };
+}
+
+/** Rebuild again at the model boundary: callers may hand us an untrusted view DTO rather than our own reader. */
+export function modelReceivers(value, now) {
+  const hosts = [];
+  for (const row of Array.isArray(value?.hosts) ? value.hosts.slice(0, 64) : []) {
+    const parsed = parseReceiverStatus(JSON.stringify(row));
+    if (!parsed || !Number.isSafeInteger(now) || now < 0) continue;
+    hosts.push({ name: parsed.name, version: parsed.version, startedAt: parsed.startedAt, at: parsed.at, port: parsed.port, bind: parsed.bind, forges: [...parsed.forges], deliveries: Object.fromEntries(RECEIVER_FORGES.map((forge) => [forge, receiverForgeFacts(parsed, forge, now)])) });
+  }
+  return { complete: value?.complete === true && value?.more === 0 && value?.moreUnknown !== true && hosts.length === (Array.isArray(value?.hosts) ? value.hosts.length : 0), moreUnknown: value?.moreUnknown === true, more: Number.isSafeInteger(value?.more) && value.more >= 0 ? value.more : null, hosts };
 }

@@ -9,6 +9,7 @@ import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs";
 import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inventory.mjs";
+import { hookRunsKey, HOOK_HOSTS } from "../src/hook-runs.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -349,7 +350,7 @@ async function runStart({ env = {}, whileRunning, makeDoctorSpawner, makeAuth, m
 		booted = true;
 		// Some integration assertions must run with the real Valkey client still open. The usual return path
 		// intentionally tears it down first, so job-path tests opt into this awaited lifetime rather than leak a client.
-		if (whileRunning) await whileRunning({ captured: calls[0], deps: calls[0]?.deps });
+		if (whileRunning) await whileRunning({ captured: calls[0], deps: calls[0]?.deps, handlers: registered });
 	} finally {
 		// TEARDOWN RUNS ON A REJECTING BOOT TOO (issue #295). A boot can refuse AFTER `createWorkerFn` has
 		// already been handed the queue, the registry and the redis client -- `reconcileGated` awaits
@@ -414,6 +415,8 @@ async function runStart({ env = {}, whileRunning, makeDoctorSpawner, makeAuth, m
 				if (captured?.name) {
 					await sweeper.del(sandboxInventoryKey(captured.name));
 					await sweeper.srem(SANDBOX_INVENTORY_HOSTS, captured.name);
+					await sweeper.del(hookRunsKey(captured.name));
+					await sweeper.srem(HOOK_HOSTS, captured.name);
 				}
 			} finally {
 				sweeper.disconnect();
@@ -2978,6 +2981,32 @@ test("with PI_ON_FAILURE unset, a terminal failure produces no on_failure line a
 	assert.ok(!lines.some((l) => l.event === "on_failure"), "unset means not constructed: no spawn, no line, byte-identical");
 	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_failed")), ["event", "jobId", "attempt", "reason", "host"]);
 	assert.deepEqual(Object.keys(lines.find((l) => l.event === "job_completed")), ["event", "jobId", "outcome", "reason", "host"]);
+});
+
+test("hook publication follows the worker's existing terminal rules; deleting history and leaving the hook unset changes no result (#775)", { skip }, async () => {
+	for (const enabled of [false, true]) await runStart({
+		env: enabled ? { PI_ON_FAILURE: "/nope/pi-notify-does-not-exist" } : {}, now: () => 1_800_000_000_000,
+		whileRunning: async ({ captured, handlers }) => {
+			const key = hookRunsKey(captured.name);
+			await captured.redis.del(key);
+			for (const id of ["first", "after-delete"]) {
+				const result = { outcome: "policy", reason: "worker-abort", budgetReserved: true };
+				handlers.completed({ id }, result);
+				assert.deepEqual(result, { outcome: "policy", reason: "worker-abort", budgetReserved: true });
+				for (let n = 0; n < 30 && enabled && await captured.redis.llen(key) === 0; n++) await new Promise((resolve) => setImmediate(resolve));
+				if (enabled) {
+					const record = JSON.parse((await captured.redis.lrange(key, 0, 0))[0]);
+					assert.equal(record.jobId, id);
+					assert.equal(record.detail, "unresolvable");
+					assert.equal(record.reason, "worker-abort");
+					assert.equal(record.outcome, "policy");
+					assert.equal(record.at, 1_800_000_000_000);
+				} else assert.equal(await captured.redis.exists(key), 0, "unset creates no hook record");
+				await captured.redis.del(key);
+				await captured.redis.srem(HOOK_HOSTS, captured.name);
+			}
+		},
+	});
 });
 
 // --- a job that finished, then lost its lock (DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK) ---------------------------------

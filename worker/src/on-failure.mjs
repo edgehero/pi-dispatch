@@ -11,7 +11,7 @@
  *     is the right event regardless).
  *   - **No verdict, no fault count, no profile table.** The hook changes NOTHING about the job: it runs
  *     after the outcome is decided, fire and forget, and a hook fault must never flip a result
- *     (CONST-RETRY-INFRA-ONLY). Its exit code is logged and unread -- OQ-027's residual, inherited.
+ *     (CONST-RETRY-INFRA-ONLY). Its exit code is logged and published for display only (#775).
  *   - **The reason is shape-guarded HERE, the single normalizing door.** `InfraRetry.reason` defaults to
  *     the whole message when no token was given, and messages carry things like a library's own words --
  *     so anything that is not a record reason token (`RECORD_REASON_RE`, the run record's own rule, from
@@ -37,16 +37,21 @@ const KILL_GRACE_MS = 2000;
  * command as `cmd <jobId> <outcome> <reason> <host>`, logs one `on_failure` line with the pinned key
  * set { jobId, code, detail }, and never throws, rejects, or delays anything.
  */
-export function makeOnFailure({ command, timeoutMs = 10_000, spawnFn = spawn, realExecutablePath = defaultRealExecutablePath, hostEnv = process.env, host = "", log = () => {} }) {
-	const note = (jobId, code, detail) => {
+export function makeOnFailure({ command, timeoutMs = 10_000, spawnFn = spawn, realExecutablePath = defaultRealExecutablePath, hostEnv = process.env, host = "", log = () => {}, publish = () => {} }) {
+	const note = (jobId, code, detail, outcome, reason) => {
 		try {
 			log("on_failure", { jobId, code, detail });
 		} catch {
 			// an injected sink that throws must not break the fire-and-forget contract
 		}
+		// The log's existing keys and the hook's return value stay unchanged. Independent guards mean a broken log
+		// sink does not silence the display, and a display fault cannot become a job retry or delay another hook.
+		try { void Promise.resolve(publish({ jobId, outcome, reason, detail, code })).catch(() => {}); } catch {}
 	};
 
 	return function fire({ jobId, outcome, reason }) {
+		const safeReason = typeof reason === "string" && RECORD_REASON_RE.test(reason) ? reason : "infra";
+		const finishNote = (code, detail) => note(typeof jobId === "string" ? jobId : null, code, detail, outcome, safeReason);
 		// Resolved at CALL time, not construction (wait-check's rule): realpath + the executable bit,
 		// answering the same question spawn will.
 		let path;
@@ -55,15 +60,14 @@ export function makeOnFailure({ command, timeoutMs = 10_000, spawnFn = spawn, re
 		} catch {
 			path = null;
 		}
-		if (!path) return note(typeof jobId === "string" ? jobId : null, null, "unresolvable");
+		if (!path) return finishNote(null, "unresolvable");
 
 		// A reason rides argv only as a record reason token (the record's own rule), never as a message.
-		const safeReason = typeof reason === "string" && RECORD_REASON_RE.test(reason) ? reason : "infra";
 		// Argv must be non-empty id-only strings, and none may start with a dash -- this is argv where a
 		// dash parses as a flag, and the option parser is the operator's. `host` may honestly be "".
 		const argv = [jobId, outcome, safeReason, host];
 		if (argv.slice(0, 3).some((a) => typeof a !== "string" || a === "") || argv.some((a) => typeof a === "string" && a.startsWith("-"))) {
-			return note(typeof jobId === "string" ? jobId : null, null, "argv-unusable");
+			return finishNote(null, "argv-unusable");
 		}
 
 		let child;
@@ -74,7 +78,7 @@ export function makeOnFailure({ command, timeoutMs = 10_000, spawnFn = spawn, re
 				shell: false,
 			});
 		} catch {
-			return note(jobId, null, "spawn");
+			return finishNote(null, "spawn");
 		}
 
 		let done = false;
@@ -84,7 +88,7 @@ export function makeOnFailure({ command, timeoutMs = 10_000, spawnFn = spawn, re
 			if (done) return;
 			done = true;
 			clearTimeout(timer);
-			note(jobId, code, detail);
+			finishNote(code, detail);
 		};
 		// The kill ladder: SIGTERM, and SIGKILL for a child that ignored it. The escalation timer is
 		// deliberately not cleared by finish -- it still has to land on a stubborn child -- and both
