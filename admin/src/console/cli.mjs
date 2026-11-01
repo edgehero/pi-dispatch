@@ -161,6 +161,20 @@ const RELATIVE_PATH_FIELDS = Object.freeze(["logsDir", "settingsFile", "triggers
 /** The env keys a reserve estimate reads beyond the panel's own (issue #642): `estimateReserve`'s and the endpoint loader's. */
 export const RESERVE_ENV_KEYS = Object.freeze(["PI_ALLOWED_MODELS", "PI_PROVIDER", "PI_MODEL", "PI_MAX_COST_USD", "PI_MODEL_ENDPOINTS_FILE"]);
 
+/** Safe metadata follows the child's host-wired source precedence, without loading provider SDKs. */
+export function setupProviderOf({ m, env, dir, fs = nodeFs, platform = process.platform, uid = process.geteuid?.() }) {
+  try {
+    const keys = ["PI_PROVIDER", "PI_SETTINGS_FILE"];
+    const declared = m.serviceEnv.deploymentServiceEnv({ env: {}, dir, keys, fs, platform, uid });
+    if (declared.untrusted || declared.unreadable || declared.hazardSkipped?.length || declared.unread?.length) return null;
+    const configured = { ...Object.fromEntries(keys.filter(key => typeof env?.[key] === "string").map(key => [key, env[key]])), ...declared.env };
+    const settingsFile = resolvePath(dir, m.workerConfig.settingsFilePath(configured));
+    const loaded = m.readModel.readSettingsView({ settingsFile, fs });
+    if (loaded.invalid) return null;
+    return loaded.overlay?.provider ?? m.workerConfig.providerFrom(configured);
+  } catch { return null; }
+}
+
 /** A start preview cannot price fresh host configuration with a console's stale reserve inputs. */
 export function makeSetupExposureReader({ initial, readSide, readExposure, keys = RESERVE_ENV_KEYS }) {
   const signature = side => JSON.stringify({ env: [...new Set(keys)].sort().map(key => [key, side.env?.[key] ?? null]), paths: Object.entries(side.paths ?? {}).sort(([a], [b]) => a.localeCompare(b)) });
@@ -511,13 +525,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const setupReason = !config.hostSetup ? "host-setup-disabled" : !setupPlatform ? "unsupported" : config.readOnly ? "read-only" : setupEntry?.refusal ?? null;
     if (setupEnabled) setupBroker = m.setupHostClient.makeSetupBroker({ cliPath: setupEntry.entry, deployment: config.dir, env: shellEnv });
     let setupBackends = null;
-    const setupProvider = () => {
-      try {
-        const declared = m.serviceEnv.deploymentServiceEnv({ env: {}, dir: config.dir, keys: ["PI_PROVIDER", "PI_SETTINGS_FILE"], fs, platform: io.platform ?? process.platform, uid }).env;
-        const settingsFile = resolvePath(config.dir, m.workerConfig.settingsFilePath(declared));
-        return m.readModel.readSettingsView({ settingsFile, fs })?.overlay?.provider ?? declared.PI_PROVIDER ?? "anthropic";
-      } catch { return null; }
-    };
+    const setupProvider = () => setupProviderOf({ m, env: shellEnv, dir: config.dir, fs, platform: io.platform ?? process.platform, uid });
     if (config.hostSetup && typeof m.serviceEnv?.deploymentServiceEnv === "function") {
       try {
         const declared = m.serviceEnv.deploymentServiceEnv({ env: {}, dir: config.dir, keys: ["PI_BACKENDS", "PI_PROVIDER"], fs, platform: io.platform ?? process.platform, uid }).env;

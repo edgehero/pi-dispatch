@@ -4,7 +4,7 @@ import { request } from "node:http";
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, USAGE } from "../src/console/cli.mjs";
+import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, setupProviderOf, USAGE } from "../src/console/cli.mjs";
 import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
@@ -930,7 +930,7 @@ test("host setup authority comes only from the serve flag, and production wiring
     modules.serviceEnv = { deploymentServiceEnv };
     modules.readModel.panelEnv = panelEnv;
     modules.readModel.PANEL_SERVICE_KEYS = PANEL_SERVICE_KEYS;
-    modules.workerConfig = { settingsFilePath: () => join(dep.dir, "settings.json") };
+    modules.workerConfig = { ...(await import("@edgehero/pi-dispatch/config")), settingsFilePath: () => join(dep.dir, "settings.json") };
     modules.readModel.readSettingsView = () => ({ overlay: {} });
     let options, pageReads = 0, brokerCalls = 0, exposureContext;
     modules.setupHostClient = { setupWorkerEntry: () => ({ entry: "/installed/worker/src/cli.mjs" }), makeSetupBroker: () => { brokerCalls++; return { close() {} }; } };
@@ -1018,4 +1018,32 @@ test("setup starts refuse stale reserve context while key-only .env edits preser
   assert.equal(reads, 2, "no cached reserve scan runs under changed configuration");
   const broken = makeSetupExposureReader({ initial: before, readSide: () => { throw Error("private detail"); }, readExposure: async () => assert.fail("must refuse") });
   assert.deepEqual(await broken(), { complete: false });
+});
+
+
+test("setup key metadata matches shell/file/overlay precedence and refuses invalid sources without a child", async () => {
+  const dir = tempDir("setup-provider-metadata-");
+  const shellSettings = join(dir, "shell-settings.json"), fileSettings = join(dir, "file-settings.json");
+  const workerConfig = await import("@edgehero/pi-dispatch/config");
+  const serviceEnv = await import("@edgehero/pi-dispatch/service-env");
+  const { readSettingsView } = await import("../src/read-model.mjs");
+  const env = { PI_PROVIDER: "openai", PI_SETTINGS_FILE: shellSettings };
+  const m = { serviceEnv, workerConfig, readModel: { readSettingsView } };
+  const read = () => setupProviderOf({ m, env, dir });
+  writeFileSync(join(dir, ".env"), "", { mode: 0o600 });
+  assert.equal(read(), "openai", "a shell-only provider matches the child rather than labelling Anthropic");
+  writeFileSync(join(dir, ".env"), "PI_PROVIDER=groq\n");
+  assert.equal(read(), "groq", "the deployment file overrides the host shell");
+  writeFileSync(shellSettings, JSON.stringify({ provider: "openrouter" }));
+  assert.equal(read(), "openrouter", "a shell-only settings path is the same source the child reads");
+  writeFileSync(fileSettings, JSON.stringify({ provider: "deepseek" }));
+  writeFileSync(join(dir, ".env"), `PI_PROVIDER=mistral\nPI_SETTINGS_FILE=${fileSettings}\n`);
+  assert.equal(read(), "deepseek", "file-selected overlay overrides both provider defaults");
+  writeFileSync(fileSettings, "{");
+  assert.equal(read(), null, "invalid overlays never invent a supported key slot");
+  writeFileSync(join(dir, ".env"), "PI_PROVIDER=invalid/provider\n");
+  env.PI_SETTINGS_FILE = join(dir, "absent-settings.json");
+  assert.equal(read(), null, "invalid effective provider refuses metadata");
+  chmodSync(join(dir, ".env"), 0o666);
+  assert.equal(read(), null, "unsafe deployment metadata refuses without loading a host executor");
 });
