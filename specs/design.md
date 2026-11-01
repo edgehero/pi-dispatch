@@ -15011,6 +15011,16 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   (forge comment bodies and other untrusted text are not run facts). The remaining security, write, terminal and
   session lifecycle rules are UNCHANGED, checked.
 
+<!-- #775 receiver observation display -->
+**Connections receiver observations (#775).** The Connections-only reader loads `INT-RECEIVER-STATUS-KEY`; Setup
+passes `publications: false` and other pages and `/api/state` load no such keys. Forges retains its configuration
+table and adds receiver sections with host links, actual socket ports, closed bind words and beat ages. Last taken
+and refused times are independent from the current and preceding 23 UTC-hour counters. Native disclosures expose
+all closed outcomes and their hourly counts for both human roles without JavaScript. Unknown/partial reads never
+prove absence or zero; only complete reads permit no-receiver and only-unauthorized warnings. Positive unconfigured
+traffic remains actionable even alongside a partial population. No new chart, mutation, receiver route or decision
+is introduced. The design generator owns the published card before the console uses its hierarchy.
+
 ## DES-LIVE-TRANSCRIPT-STREAM
 
 - **Status**: issue #643 (2026-10-16), resolving `OQ-044`. The worker half (the live file, the tailer, the
@@ -16717,3 +16727,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-10-31 (#771, initial live snapshot) | DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL and DES-OPERATOR-CONSOLE keep a fresh Sandboxes page's cleanup warnings until a fresh live read replaces them. Rejected replaying an old cached empty view and waiting for a later timer tick to repair it. Failed fresh reads retain the rendered panels with stale status. Other-page cache/replay policy, cursor reconnects, shared visual tokens/styles, role guards, actions and all worker/container contracts UNCHANGED, checked. |
 | 2026-10-31 (#766, #772) | `DES-ADMIN-VIA-PI-EXTENSION`, `DES-AI-TRIGGER-FLOW-GATE`, `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` and `DES-ANSWERER-REPLIES-THROUGH-THE-PARKED-ANSWER-PLAN` AMENDED: explicit transition authority, private no-post classifier jobs, evidence-bound drafts and generic external-guidance extension seams. `DES-OPERATOR-CONSOLE` uses the existing ticket/guard/visual system; parent session ownership, approval authority, ordinary queue contracts and all unrelated decisions UNCHANGED, checked. |
 | 2026-10-31 (#772, long-label review) | `DES-OPERATOR-CONSOLE` CORRECTED after the complete browser sweep found a valid long run identifier expanding a phone card: bounded grid tracks and normal code-label whitespace preserve full run/source/standing labels, including the private draft origin on the run page. Generator styles, three rebuilt cards and the console's hashed paste agree. Browser counterexamples verify complete text lines, exact links and keyboard navigation in both themes across phone/intermediate/desktop widths and applicable roles. Shared visual tokens, fonts, privacy/role boundaries, API/session/provenance/ticket contracts and all worker paid gates UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver) | `DES-OPERATOR-CONSOLE` display AMENDED: bounded Connections-only receiver observations, native outcome/hourly disclosures, conservative warnings and no Setup/state reads. `DES-ADMIN-VIA-PI-EXTENSION` authority/tool vocabulary, `DES-HOST-REGISTRY`, pending notification-store rejection and all job/receiver decisions UNCHANGED, checked. |

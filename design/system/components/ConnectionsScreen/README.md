@@ -5,7 +5,8 @@ Where jobs come from and what they may reach: forges and their webhooks, egress 
 - **Forges.**
   - For each armed forge: which triggers arm it, the auth source and per-job token, how deliveries are verified and de-duplicated, polling, and who may fire.
   - An unconfigured forge collapses to one line saying its path answers 404. GitHub is enabled by a trigger or an explicit auth source; each other forge by any of its receiver variables. GitHub's implicit default auth source is shown as such.
-  - One line says delivery health is not published and where to look instead.
+  - Live receivers name their host, socket port, closed bind category and beat age. Each forge has its last taken/refused time and 24 UTC-hour counts by every outcome. Native disclosures show hourly counts. Unserved routes with refusals remain visible.
+  - Warnings name an armed forge without a reported receiver, only-unauthorized traffic and any not-configured refusal; incomplete reads stay unknown.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
 - **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
 - **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
@@ -27,7 +28,7 @@ Viewers read status and provider guides without mutation controls. A read-only o
 - The .env keys the console reads, and any shell-versus-.env disagreement.
 
 **Why it works this way.**
-- **Delivery health.** The receiver has no health check of its own, so the console cannot say whether deliveries arrive. Use the forge's delivery history for 401/404 refusals. The receiver log can help with 503 or enqueue failures; signature, route and early request refusals do not write a log line, and not every 503 is logged.
+- **Delivery health.** Counts, times and fixed words are observed after the existing response. A request adds no Valkey command; one bounded background beat publishes every 15 seconds with a 90-second expiry. No new route or delivery policy is added. The count window is the current UTC hour and the preceding 23; last-event times are retained separately. Missing or unreadable observations never mean healthy.
 - **Endpoint slots.** Fleet leases count endpoints only when PI_WORKER_NAME is declared and the endpoint is not host.docker.internal or host.containers.internal. These aliases use per-machine capacity; without a host queue, the worker takes no fleet lease. Both cases say not counted and retain the declared capacity, rather than claiming zero. A failed lease read remains unknown.
 - **Egress.** With egress on, each local or podman job gets its own internal network and reaches out only through its host's proxy: HTTPS (443) and plain HTTP (80) to listed hosts, plus the declared model endpoints. OpenShell applies its own sandbox policy from the same sources. A leading dot covers subdomains.
 - **Notifications.** pi-dispatch sends none of its own. Forge comments are always on: one fixed sentence on the issue for a paid failure, and one when a run stops to ask. The failure hook runs once per paid failure with "job, outcome, reason, host" and has 10 s to answer; it never runs for completions, free refusals, recovered retries or a cancel.
@@ -35,5 +36,5 @@ Viewers read status and provider guides without mutation controls. A read-only o
 
 **Fixture note.**
 - **From the fixture:** build3's missing proxy, gh-e9a0, the linear MCP server, and the forges named by triggers 1 to 7.
-- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. Receiver location and hook history are not published, so the card says where to look rather than inventing them.
-- **Known repo gaps:** webhook health is not published, and there is no notification setting beyond the hook.
+- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. The receiver on mini1 and its counts are sample observations. Hook history is not published in this slice.
+- **Known repo gaps:** there is no notification setting beyond the hook.

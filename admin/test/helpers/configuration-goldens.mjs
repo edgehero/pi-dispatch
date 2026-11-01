@@ -1,3 +1,4 @@
+import { makeReceiverObservations } from "@edgehero/pi-dispatch/receiver-status";
 import { consoleSubscriptionFixture } from "./subscription-auth-fixture.mjs";
 /** #751 exceptional states, over production read projections and the production page renderer. */
 import assert from "node:assert/strict";
@@ -23,6 +24,13 @@ export function consoleSecretsFixture(now, { env: extra = {}, change = () => {} 
   return secretsView({ snapshot, env, fs: { realpathSync: (path) => path } });
 }
 
+export function receiverFixture(now, { onlyUnauthorized = false, forges = ["github", "gitlab"] } = {}) {
+  const observations = makeReceiverObservations({ now: () => now - 8000 });
+  if (!onlyUnauthorized) observations.observe("github", 202, "queued");
+  observations.observe("github", 401);
+  return { v: 1, name: "mini1", version: "4.3.1", startedAt: now - 60_000, at: now - 8000, port: 3000, bind: "all", forges, deliveries: observations.snapshot(), ageMs: 8000 };
+}
+
 export async function consoleConnectionsFixture(now, { problem = null, unread = false, change = () => {} } = {}) {
   if (!Number.isFinite(now)) throw new TypeError("consoleConnectionsFixture needs the injected page clock");
   const env = { GITHUB_AUTH_SOURCE: "app", WEBHOOK_SECRET: "fixture-only", GITLAB_WEBHOOK_MODE: "signature", GITLAB_WEBHOOK_SECRET: "fixture-only", GITLAB_TOKEN: "fixture-only", RECEIVER_PORT: "3000", PI_WORKER_NAME: "build3", PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "fixture-only", PI_ON_FAILURE: "/srv/hooks/notify", PI_BACKENDS: "local,podman" };
@@ -42,6 +50,7 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
     allowlist: () => ["api.github.com", ".githubusercontent.com", "registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "mcp.example.com", "api.example.com", "gitlab.example.com", "more.example.com"],
     endpoints: () => [{ id: "ollama-mini2", host: "mini2.lan", port: 11434, keyless: true, slots: 2 }, { id: "vllm-build3", host: "10.0.0.5", port: 8000, keyless: true, slots: 4 }],
     slots: async () => [1, 0],
+    receivers: async () => ({ hosts: [receiverFixture(now)], complete: true, more: 0 }),
   };
   reads.providerInventory = {
     environment: options => reads.environment(options),
@@ -90,6 +99,9 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "connections-subscription-reauth.operator": () => connection({ change: s => { s.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].state = "reauth-required"; v.connections[0].expiresAt = NOW - 1; }); } }),
   "connections-subscription-conflict.operator": () => connection({ change: s => { s.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].state = "adapter-unavailable"; v.connections[0].compatibility = "conflicting"; }); } }),
   "connections-subscription-long.operator": () => connection({ change: s => { s.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].id = "a".repeat(64); v.connections[0].ownerHost = "h".repeat(64); v.connections[0].adapter = "@gotgenes/pi-anthropic-auth@3.4.3"; }); } }),
+  "connections-receiver-none.operator": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [], complete: true, more: 0 }); } }),
+  "connections-receiver-unauthorized.viewer": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [receiverFixture(NOW, { onlyUnauthorized: true })], complete: true, more: 0 }); } }, "viewer"),
+  "connections-receiver-unknown.viewer": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [], complete: false, more: 0 }); } }, "viewer"),
   "connections-proxy.operator": () => connection({ problem: "proxy" }),
   "connections-forge.operator": () => connection({ problem: "forge" }),
   "connections-receiver-missing-secret.operator": () => connection({ change: (_, r) => { r.environment = () => ({ env: { GITHUB_AUTH_SOURCE: "gh" } }); } }),
