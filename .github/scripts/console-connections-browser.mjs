@@ -218,6 +218,38 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
       await navigate("/config/connections"); await check(1440, "light", true);
       await capture(`${slice}-not-reported-light-1440`);
     }
+    if (slice === "receiver" || slice === "all") {
+      stage = "unserved lifetime refusal after the count window expires";
+      await fixture.close(); fixture = null;
+      fixture = await startConnectionsBrowserFixture(join(work, "aged-app"), { slice: "receiver", readOnly: true, agedReceiver: true });
+      const published = JSON.parse(await fixture.redis.get("receiver:h:mini1"));
+      assert.equal(published.deliveries.gitlab["not-configured"].lastAt, fixture.agedRefusedAt);
+      assert.equal(published.deliveries.gitlab["not-configured"].hours.reduce((sum, [, n]) => sum + n, 0), 0);
+      const agedPaints = [];
+      for (const [role, theme, width] of [["viewer", "light", 390], ["operator", "dark", 1440]]) {
+        await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width <= 760 });
+        await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
+        await login(role); await navigate("/config/connections");
+        const table = 'table[aria-label="mini1 gitlab delivery outcomes"]';
+        await evaluate(`document.querySelector(${JSON.stringify(table)}).closest('details').querySelector('summary').focus()`);
+        await press("Enter", "Enter", 13);
+        const observed = await evaluate(`(()=>{const table=document.querySelector(${JSON.stringify(table)}),details=table.closest('details'),facts=details.previousElementSibling;return{open:details.open,heading:facts.previousElementSibling.textContent,counts:[...table.tBodies[0].rows].map(row=>[row.cells[0].textContent.trim(),row.cells[1].textContent.trim()]),lastRefused:[...facts.querySelectorAll('.fact')].find(row=>row.querySelector('dt').textContent==='Last refused').querySelector('time').getAttribute('datetime'),emptyUnserved:[...document.querySelectorAll('table')].some(table=>/^mini1 (forgejo|azure) delivery outcomes$/.test(table.getAttribute('aria-label')??''))};})()`);
+        assert.equal(observed.open, true);
+        assert.match(observed.heading, /gitlab.*\(not served\)/);
+        assert.equal(observed.counts.length, 11);
+        assert.ok(observed.counts.every(([, count]) => count === "0"));
+        assert.equal(observed.lastRefused, new Date(fixture.agedRefusedAt).toISOString());
+        assert.equal(observed.emptyUnserved, false);
+        const evidence = await evaluate(EVIDENCE);
+        assert.equal(evidence.fonts, "loaded"); assert.equal(evidence.css, true);
+        assert.equal(evidence.canvas, theme === "light" ? "#edeeec" : "#000000");
+        assert.deepEqual(evidence.csp, []); assert.deepEqual(await evaluate("window.__connectionsErrors??[]"), []);
+        assert.equal(widthVerdict(await evaluate(measureSource(width, EDGE_SLACK)), width).ok, true);
+        agedPaints.push({ role, theme, width, ...observed, fonts: evidence.fonts, css: evidence.css, canvas: evidence.canvas, csp: evidence.csp });
+        await capture(`receiver-aged-refusal-${role}-${theme}-${width}`, "#p-forges");
+      }
+      if (shots) writeFileSync(join(shots, "receiver-aged-refusal-measurements.json"), JSON.stringify(agedPaints, null, 2));
+    }
     writeFileSync(shots ? join(shots, `${slice}-measurements.json`) : join(work, "measurements.json"), JSON.stringify(paints, null, 2));
     return { ok: true, slice, paints: paints.length, interactions: ["keyboard-disclosure", ...(slice === "baseline" ? [] : ["keyboard-host-navigation"]), ...(["hooks", "all"].includes(slice) ? ["keyboard-run-navigation"] : []), ...(["receiver", "all"].includes(slice) ? ["hourly-disclosure-and-sums", "actual-delivery-and-reload"] : []), "theme", "no-script", "CSP-negative-control", "styling-negative-control", ...(["all", "baseline"].includes(slice) ? [] : ["deletion"])] };
   } catch (error) { throw new Error(`Connections browser ${stage}: ${error.message}`, { cause: error }); }

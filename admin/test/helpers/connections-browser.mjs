@@ -15,14 +15,14 @@ export const CONNECTIONS_BROWSER_TOKENS = SETUP_BROWSER_TOKENS;
 export const CONNECTIONS_SLICES = Object.freeze(["receiver", "hooks", "endpoints", "all", "baseline"]);
 
 /** The database belongs to this one CLI invocation, never a running deployment. */
-export async function startConnectionsBrowserFixture(dir, { slice, readOnly = false, url = process.env.VALKEY_TEST_URL } = {}) {
+export async function startConnectionsBrowserFixture(dir, { slice, readOnly = false, agedReceiver = false, url = process.env.VALKEY_TEST_URL } = {}) {
   assert.ok(CONNECTIONS_SLICES.includes(slice), "Choose an explicit Connections slice");
   assert.ok(url, "Connections browser verification needs VALKEY_TEST_URL");
   const address = new URL(url); address.pathname = "/14";
   const redis = makeRedisClient(address.href);
   const closers = [];
   let fixture, edge, ownsDatabase = false;
-  let at = SETUP_AT;
+  let at = agedReceiver ? SETUP_AT - 25 * 3_600_000 : SETUP_AT;
   const now = () => at;
   const drain = async predicate => {
     const end = Date.now() + 5000;
@@ -42,7 +42,7 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
   try {
     assert.equal(await redis.dbsize(), 0, "The dedicated browser database must be empty");
     ownsDatabase = true;
-    fixture = await startSetupBrowserFixture(dir, { readOnly, connectionsOptions: { redis, now: at } });
+    fixture = await startSetupBrowserFixture(dir, { readOnly, connectionsOptions: { redis, now: SETUP_AT } });
     fixture.changeEnv("GITHUB_AUTH_SOURCE=gh\nWEBHOOK_SECRET=fixture-secret\nPI_WORKER_NAME=build3\nPI_PROVIDER=anthropic\nPI_ON_FAILURE=/fixture/notify\n");
     writeFileSync(join(dir, "egress-allowlist.conf"), "api.github.com\nregistry.npmjs.org\n");
     const endpoints = [
@@ -71,11 +71,11 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
       await registry.start({ version: "4.3.1", ...fields }); closers.push(registry);
     }
     let receiverCounter = null, receiverPublisher = null;
-    const send = async (body, authorized = true) => {
+    const send = async (body, authorized = true, path = "/") => {
       const raw = JSON.stringify(body);
       const port = edge.address().port;
       return new Promise((resolve, reject) => {
-        const outgoing = request({ hostname: "127.0.0.1", port, method: "POST", path: "/", headers: {
+        const outgoing = request({ hostname: "127.0.0.1", port, method: "POST", path, headers: {
           "content-type": "application/json", "content-length": Buffer.byteLength(raw), "x-github-event": "issues",
           "x-github-delivery": "fixture-delivery-775", "x-hub-signature-256": authorized ? `sha256=${createHmac("sha256", "fixture-secret").update(raw).digest("hex")}` : "sha256=invalid",
         } }, response => { response.resume(); response.on("end", () => resolve(response.statusCode)); });
@@ -89,11 +89,18 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
       const handler = makeReceiver({ observations: receiverCounter, queue: {}, cfg: { servesGithub: true, webhookSecret: "fixture-secret", triggers: { github: {}, knownFlows: [] } }, selfId: 1, now, watchEnv: {} });
       edge = createServer(handler);
       await new Promise(resolve => edge.listen(0, "127.0.0.1", resolve));
-      assert.equal(await send({}, false), 401);
-      assert.equal(await send({}, false), 401);
+      if (agedReceiver) assert.equal(await send({}, false, "/gitlab"), 404);
+      else {
+        assert.equal(await send({}, false), 401);
+        assert.equal(await send({}, false), 401);
+      }
       receiverPublisher = makeReceiverPublisher({ client: () => redis, name: "mini1", version: "4.3.1", port: edge.address().port, bind: "loopback", forges: ["github"], observations: receiverCounter, now });
       receiverPublisher.start(); closers.push(receiverPublisher);
       await drain(async () => Boolean(await redis.get("receiver:h:mini1")));
+      if (agedReceiver) {
+        at = SETUP_AT;
+        await drain(async () => { receiverPublisher.beat(); return JSON.parse(await redis.get("receiver:h:mini1")).at === at; });
+      }
     }
     if (slice === "hooks" || slice === "all") {
       const { makeHookRunsPublisher } = await import("../../../worker/src/hook-runs.mjs");
@@ -108,7 +115,7 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
       await drain(async () => Number(await redis.llen("hook:h:build3")) >= 2);
     }
     return {
-      ...fixture, slice, redis, now, receiverPort: edge?.address().port ?? null,
+      ...fixture, slice, redis, now, receiverPort: edge?.address().port ?? null, agedRefusedAt: agedReceiver ? SETUP_AT - 25 * 3_600_000 : null,
       async addRefusal() {
         assert.ok(receiverPublisher);
         assert.equal(await send({}, false), 401);

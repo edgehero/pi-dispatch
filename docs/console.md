@@ -2106,7 +2106,8 @@ these extra file/lease reads.
   by many triggers; numeric trigger links retain their full accessible names. Live receivers now name their host, actual listening port, bind category, version and beat age. Each served forge
   shows last taken/refused times and counts by outcome in 24 UTC hours; native disclosures give the hourly counts.
   The receiver start qualifies coverage: earlier hours say not observed, and the first partial hour names its start.
-  Unserved routes with refusals are shown too. Warnings name an armed forge without a reported receiver,
+  Unserved routes retain their last taken/refused times even after their 24-hour counts reach zero; routes without
+  history stay hidden. Warnings name an armed forge without a reported receiver,
   unauthorized-only deliveries (check the webhook secret on both sides), and deliveries reaching an unconfigured
   route. Unknown or incomplete reads never mean zero or healthy. The window is the current UTC hour plus the
   preceding 23; last-event times are kept independently. Queued, deduplicated, held and steered count as taken;

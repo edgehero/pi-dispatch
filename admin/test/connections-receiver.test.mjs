@@ -60,6 +60,44 @@ test("unserved forge refusals remain visible and actionable alongside served for
   assert.match(result, /gitlab: deliveries reached an unconfigured route/); assert.match(result, /gitlab.*not served/s); assert.match(result, /mini1 gitlab delivery outcomes/);
 });
 
+test("an unserved forge keeps lifetime last-event times after every hourly count has expired (#775)", async () => {
+  for (const [status, result, label] of [[404, undefined, "Last refused"], [202, "queued", "Last taken"]]) {
+    let clock = AT - 25 * 3_600_000;
+    const lastAt = clock;
+    const observations = makeReceiverObservations({ now: () => clock });
+    observations.observe("gitlab", status, result);
+    clock = AT;
+    const row = { ...receiver(), startedAt: AT - 26 * 3_600_000, deliveries: observations.snapshot() };
+    for (const role of ["operator", "viewer"]) {
+      const markup = draw(await view({ hosts: [row], complete: true, more: 0 }), role);
+      const doc = parseDocument(`<html><body>${markup}</body></html>`);
+      const table = doc.querySelectorAll("table").find((node) => node.getAttribute("aria-label") === "mini1 gitlab delivery outcomes");
+      assert.ok(table, "an expired window cannot hide retained last-event evidence");
+      assert.match(markup, /gitlab.*\(not served\)/s);
+      const rows = table.querySelectorAll("tbody tr");
+      assert.deepEqual(rows.map((tr) => tr.querySelectorAll("td")[0].textContent.trim()), RECEIVER_OUTCOMES);
+      assert.ok(rows.every((tr) => tr.querySelectorAll("td")[1].textContent === "0"), "all eleven window counts really expired");
+      const fact = doc.querySelectorAll(".fact").find((node) => node.querySelector("dt").textContent === label && node.querySelector("time"));
+      assert.equal(fact.querySelector("time").getAttribute("datetime"), new Date(lastAt).toISOString());
+      assert.doesNotMatch(markup, /gitlab: deliveries reached an unconfigured route|gitlab: only unauthorized/, "lifetime evidence does not invent current-window warnings");
+    }
+  }
+});
+
+test("an unserved route without history stays hidden while a recent filter drop remains visible (#775)", async () => {
+  for (const status of [null, 204]) {
+    const row = receiver({ change: (o) => { if (status !== null) o.observe("gitlab", status); } });
+    const doc = parseDocument(`<html><body>${draw(await view({ hosts: [row], complete: true, more: 0 }))}</body></html>`);
+    const table = doc.querySelectorAll("table").find((node) => node.getAttribute("aria-label") === "mini1 gitlab delivery outcomes");
+    if (status === null) assert.equal(table, undefined, "a configured route row is not fabricated delivery history");
+    else {
+      const counts = Object.fromEntries(table.querySelectorAll("tbody tr").map((tr) => tr.querySelectorAll("td").map((cell) => cell.textContent.trim())));
+      assert.equal(counts.dropped, "1");
+      assert.equal(Object.values(counts).reduce((sum, n) => sum + Number(n), 0), 1);
+    }
+  }
+});
+
 test("the UTC rollover shifts hourly detail and sums consistently while last timestamps survive (#775)", async () => {
   const row = receiver({ at: AT - 10_000, change: (o) => o.observe("github", 202, "queued") });
   const facts = await view({ hosts: [row], complete: true, more: 0 });

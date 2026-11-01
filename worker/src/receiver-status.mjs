@@ -188,7 +188,10 @@ export function receiverForgeFacts(record, forge, now) {
 	const start = hourOf(now) - 23 * HOUR;
 	const end = hourOf(now);
 	const counts = {};
-	const last = (words) => Math.max(0, ...words.map((word) => record.deliveries[forge][word].lastAt ?? 0)) || null;
+	const last = (words) => {
+		const times = words.map((word) => record.deliveries[forge][word].lastAt).filter((at) => at !== null);
+		return times.length ? Math.max(...times) : null;
+	};
 	for (const word of RECEIVER_OUTCOMES) counts[word] = Math.min(Number.MAX_SAFE_INTEGER, record.deliveries[forge][word].hours.reduce((sum, [at, n]) => sum + (at >= start && at <= end ? n : 0), 0));
 	return { counts, lastTaken: last(RECEIVER_TAKEN), lastRefused: last(RECEIVER_REFUSED) };
 }

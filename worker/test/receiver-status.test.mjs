@@ -43,6 +43,27 @@ test("24 UTC-hour buckets roll over, idle away and remain bounded across reversa
 	assert.ok(Object.values(obs.snapshot()).every((forge) => Object.values(forge).every((word) => word.hours.length === 24)));
 });
 
+test("epoch-zero last taken/refused times survive an expired count window; only null means absent (#775)", () => {
+	let at = 0;
+	const observations = makeReceiverObservations({ now: () => at });
+	observations.observe("github", 202, "queued");
+	observations.observe("gitlab", 404);
+	at = 25 * HOUR;
+	const parsed = parseReceiverStatus(JSON.stringify({ ...record("mini1", at), startedAt: 0, deliveries: observations.snapshot() }));
+	assert.ok(parsed, "zero is allowed by the published timestamp contract");
+	const github = receiverForgeFacts(parsed, "github", at);
+	assert.equal(github.counts.queued, 0);
+	assert.equal(github.lastTaken, 0);
+	assert.equal(github.lastRefused, null);
+	const gitlab = receiverForgeFacts(parsed, "gitlab", at);
+	assert.equal(gitlab.counts["not-configured"], 0);
+	assert.equal(gitlab.lastRefused, 0);
+	assert.equal(gitlab.lastTaken, null);
+	const empty = receiverForgeFacts(parsed, "forgejo", at);
+	assert.equal(empty.lastTaken, null);
+	assert.equal(empty.lastRefused, null);
+});
+
 test("the record reader rebuilds all fields and refuses newer versions, bad dates, missing counts and excessive bytes (#775)", () => {
 	const r = record();
 	const parsed = parseReceiverStatus(JSON.stringify({ ...r, address: "PRIVATE_ADDRESS", body: "PRIVATE_BODY" }));
