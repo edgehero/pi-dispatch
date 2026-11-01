@@ -2,7 +2,7 @@
   "issue": 775,
   "revisions": {
     "baseline": "b9279bfada39ea151823b11bbc792592f9db8e4c",
-    "receiver": "c9962d2a6ed67bcb1ac8e19e42a131fc72f3b177",
+    "receiver": "c3f0884c8891762f21804be02bc92b973a9e60d2",
     "hooks": "06732c0f13d161bf681c063e28efed8195db7864",
     "endpoints": "a6d861edfb1f14dece63ba6af1eaf7cd496780ff"
   },
@@ -83,7 +83,9 @@
   "verificationOnlyChanges": {
     "receiver": {
       "files": [
-        ".github/scripts/console-answerer-browser.mjs"
+        ".github/scripts/console-answerer-browser.mjs",
+        ".github/scripts/console-sandboxes-browser.mjs",
+        "admin/test/helpers/sandbox-browser.mjs"
       ],
       "unchangedRenderObjects": {
         "admin/src": "cca74c78cb3d973bdc55f7f1aececdbd1cd2b1f1",

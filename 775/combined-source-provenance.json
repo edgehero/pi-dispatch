@@ -1,0 +1,114 @@
+{
+  "receiver": {
+    "sourceRevision": "c9962d2a6ed67bcb1ac8e19e42a131fc72f3b177",
+    "files": [
+      {
+        "path": "worker/src/receiver-status.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "7f0b3fac486950e70ccd3e62e3aa36b64482b97ccdb4aea0815988b039542ac1"
+      },
+      {
+        "path": "receiver/src/receiver.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "a8e2ddda0fb0ccd802077dd694ebaa65a6dabe46257e31fe50c1a71478735a80"
+      },
+      {
+        "path": "receiver/src/start.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "8b00ef63661cf9aa1bcdf708166a97553d3436b1a1e0f27d597466f5e82d9e6c"
+      },
+      {
+        "path": "worker/test/receiver-status.test.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "20250d47f1015a73a71122050ee6b53fb696683625394e56fff31573a6ccb16c"
+      },
+      {
+        "path": "receiver/test/receiver-status.test.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "28169221703f356636600d8b70eae4862ee90cd5c1297e03736920a715387a9e"
+      }
+    ]
+  },
+  "hooks": {
+    "sourceRevision": "06732c0f13d161bf681c063e28efed8195db7864",
+    "files": [
+      {
+        "path": "worker/src/hook-runs.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "390437a3bc658c5cbf46b1c91c438915692fb782a254388981a52c40e6837622"
+      },
+      {
+        "path": "worker/src/on-failure.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "f86392edd2442f132f979b00fb9b7c5eaf503b28cc5b7bfbecfc6bddb028770b"
+      },
+      {
+        "path": "worker/test/hook-runs.test.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "7491dfe2a97b268bcaef17652e9ae65ba5972f5d09e52acca680dc302a16d7c8"
+      },
+      {
+        "path": "worker/test/hook-runs.integration.test.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "d18c20baa7eca85d8256c7353458187c9d747c65c1bbcb7b74e6e94d3af71400"
+      },
+      {
+        "path": "worker/test/on-failure.test.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "711390322ee9415074b3ed143f4733f009f46249c458f0b6cf3359bd298f1e37"
+      }
+    ]
+  },
+  "endpoints": {
+    "sourceRevision": "a6d861edfb1f14dece63ba6af1eaf7cd496780ff",
+    "files": [
+      {
+        "path": "worker/src/endpoint-status.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "54fc37887ac6d78ae4e22d8b97b3ddf288b6bec7caf967e2f86c46fbbddd32db"
+      },
+      {
+        "path": "worker/src/host-registry.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "cae08669fb6348676fcee0b2a841f27cdf949056a6dd04b8fd0dfc18dae643ed"
+      },
+      {
+        "path": "worker/test/endpoint-status.test.mjs",
+        "matchesFinalAuthor": true,
+        "sha256": "ef4c54e0472222567c4bd89ae5e7aae1dd1ecb6828062b9d2502da5d715c4432"
+      }
+    ]
+  },
+  "unchanged": [
+    {
+      "path": "admin/src/read-model.mjs",
+      "unchangedFromMain": true
+    },
+    {
+      "path": "admin/src/console/live.mjs",
+      "unchangedFromMain": true
+    },
+    {
+      "path": "admin/src/console/server.mjs",
+      "unchangedFromMain": true
+    }
+  ],
+  "sharedFinalVerification": [
+    {
+      "path": ".github/scripts/console-answerer-browser.mjs",
+      "matchesReceiverFinal": true
+    },
+    {
+      "path": ".github/scripts/console-sandboxes-browser.mjs",
+      "matchesReceiverFinal": true
+    },
+    {
+      "path": "image/runner/test/helpers/recover-session.mjs",
+      "matchesReceiverFinal": true
+    },
+    {
+      "path": "image/runner/test/temp-dir-settle.test.mjs",
+      "matchesReceiverFinal": true
+    }
+  ]
+}

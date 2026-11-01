@@ -1,7 +1,7 @@
 {
   "slices": {
     "receiver": {
-      "sourceCommit": "c9962d2a6ed67bcb1ac8e19e42a131fc72f3b177",
+      "sourceCommit": "c3f0884c8891762f21804be02bc92b973a9e60d2",
       "renderedCommit": "57390f856d4c1f92e7b84c9749f76052b38b371d",
       "node": "22.19.0",
       "valkey": "8.0.2",
@@ -20,7 +20,7 @@
       },
       "platform": "macOS arm64",
       "temporaryDirectoryOracle": "No unexpected entries; only jiti and node-compile-cache permitted.",
-      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41317942851"
+      "ciRun": "https://github.com/edgehero/pi-dispatch/actions/runs/41321994339"
     },
     "hooks": {
       "sourceCommit": "06732c0f13d161bf681c063e28efed8195db7864",
@@ -102,5 +102,11 @@
     "modelsSiblingRenders": 144,
     "result": "passed",
     "initialPanelCounterexample": "Controlled initial replacement between pointer press/release loses the native click; waiting for actual applied initial panel preserves click, preview POST and all stale/exact-drop assertions."
+  },
+  "sandboxNativeGetRegression": {
+    "responsiveRenders": 18,
+    "exceptionalRenders": 56,
+    "result": "passed",
+    "counterexample": "Holding the real destination document at its body opening exposes matching URL/loading/no panel; removing only the selector guard deterministically throws. The same exact predicate waits then verifies the reviewed workspace after release, with zero queued or ended work."
   }
 }

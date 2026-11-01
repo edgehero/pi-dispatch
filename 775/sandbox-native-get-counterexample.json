@@ -1,0 +1,19 @@
+{
+  "controlled": "native GET with exact real response bytes streamed at body start",
+  "documentStatus": 200,
+  "actualCspMatches": true,
+  "loading": {
+    "url": "http://127.0.0.1:64489/runs/sandboxes?host=mini1&id=sb-cccccccccccccccccccccccccccccccc",
+    "readyState": "loading",
+    "panel": false,
+    "csp": []
+  },
+  "originalException": "TypeError: Cannot read properties of null (reading 'innerText')\n    at <anonymous>:1:134",
+  "nullSafeBeforeRelease": false,
+  "settled": {
+    "url": "http://127.0.0.1:64489/runs/sandboxes?host=mini1&id=sb-cccccccccccccccccccccccccccccccc",
+    "reviewedImage": true,
+    "csp": []
+  },
+  "queued": 0
+}

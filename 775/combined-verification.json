@@ -1,0 +1,85 @@
+{
+  "resolution": "Manually reconciled union in a detached checkout; shared files still need reconciliation as the independent main-targeted PRs land.",
+  "sourceRevisions": {
+    "receiver": "c9962d2a6ed67bcb1ac8e19e42a131fc72f3b177",
+    "hooks": "06732c0f13d161bf681c063e28efed8195db7864",
+    "endpoints": "a6d861edfb1f14dece63ba6af1eaf7cd496780ff"
+  },
+  "node": "22.19.0",
+  "valkey": "8.0.2",
+  "platform": "macOS arm64",
+  "requiredIntegrationFlags": [
+    "LOADER",
+    "WORKER",
+    "RECEIVER"
+  ],
+  "normalRootSuite": {
+    "tests": 12600,
+    "pass": 12594,
+    "fail": 0,
+    "skipped": 6,
+    "cancelled": 0,
+    "todo": 0
+  },
+  "clockShiftDays": 399,
+  "shiftedRootSuite": {
+    "tests": 12600,
+    "pass": 12594,
+    "fail": 0,
+    "skipped": 6,
+    "cancelled": 0,
+    "todo": 0
+  },
+  "declaredFilesReported": 615,
+  "temporaryDirectoryOracle": "Only the two permitted tooling caches; no leftover test directories.",
+  "connectionsBrowser": {
+    "ok": true,
+    "slice": "all",
+    "paints": 38,
+    "agedPaints": 2,
+    "maxIdentityPaints": 32,
+    "unreadableIdentityPaints": 2,
+    "identityNegativeControl": true,
+    "interactions": [
+      "keyboard-disclosure",
+      "keyboard-host-navigation",
+      "keyboard-run-navigation",
+      "hourly-disclosure-and-sums",
+      "actual-delivery-and-reload",
+      "complete-receiver-identities",
+      "receiver-identity-negative-control",
+      "positive-fleet-leases",
+      "endpoint-keyboard-scroll",
+      "endpoint-port-negative-control",
+      "theme",
+      "no-script",
+      "CSP-negative-control",
+      "styling-negative-control"
+    ]
+  },
+  "completeWidthSweep": {
+    "pageRuns": 4163,
+    "pages": 424,
+    "shellRuns": 2241,
+    "shellPages": 113,
+    "failed": 0,
+    "otherProblems": 0,
+    "seconds": 671.1
+  },
+  "logHashes": {
+    "normal": "c46913d040ab8ec953a973b4870020290743e782b5a5cf9c1a7d3bdc372f5022",
+    "shift": "656dd1be7a27a05bd6bb946c11dcc18fb7f5d8dca2de29f661e853d2185997c2",
+    "count": "361dcfc6cfa920975d6e2c25fa15fe9bc9282743bab4270b8a3e689eab70d195",
+    "browser": "3059d75e1d0008d8c4307c87bdf7baf241f77441b3262b2fed1c015d8141d6e5",
+    "width": "5c3ca42e93e4d75d9d95b34a4439dd9fe8be754f74f472d18651532d311049ed"
+  },
+  "postRunVerificationOnlyChange": {
+    "receiverCommit": "c3f0884c8891762f21804be02bc92b973a9e60d2",
+    "files": [
+      ".github/scripts/console-sandboxes-browser.mjs",
+      "admin/test/helpers/sandbox-browser.mjs"
+    ],
+    "effect": "Deterministic native-GET loading regression and guarded destination wait; production and Connections sources unchanged.",
+    "localVerification": "Final full receiver suite12559pass/0fail/6platformskips; full Sandbox18+56 pass and remove-only-guard negative control."
+  }
+}
