@@ -20,7 +20,7 @@ import { providerCanonicalKey, PROVIDER_SLOT_ALIASES } from "../../src/provider-
 import { updateEnvFile } from "@edgehero/pi-dispatch/env-file";
 
 export const SETUP_BROWSER_TOKENS = Object.freeze({ operator: `pdc_${"o".repeat(43)}`, viewer: `pdc_${"v".repeat(43)}`, agent: `pdc_${"a".repeat(43)}` });
-export async function startSetupBrowserFixture(dir, { readOnly = false, enabled = true } = {}) {
+export async function startSetupBrowserFixture(dir, { readOnly = false, enabled = true, connectionsOptions = {} } = {}) {
   let at = SETUP_AT, ticks = true, delayedKeyPreview = null;
   const now = () => at;
   const paths = { triggersPath: join(dir, "triggers.json"), tokensPath: join(dir, "console-tokens.json"), logsDir: join(dir, "logs") };
@@ -55,7 +55,7 @@ export async function startSetupBrowserFixture(dir, { readOnly = false, enabled 
   };
   const setup = makeSetupActions({ deployment: dir, enabled, broker, provider: "anthropic", tokensPath: paths.tokensPath, sessions, readTokens, now, readExposure: async () => ({ complete: true, at, identity: "fixture-empty", lines: ["Observed now: zero manual queued jobs, zero armed schedules. Future arrivals still pass normal job admission.", "Estimated reserve: 0 USD for jobs currently in line; future work may spend."] }) });
   const fleet = { snapshot: async () => { snapshot.hostsReadAt = at; return snapshot; }, parkedCount: async () => 0 };
-  const connections = snapshot => readConnections({ snapshot, deploymentDir: dir, paths, env: {}, now: at });
+  const connections = snapshot => readConnections({ snapshot, deploymentDir: dir, paths, env: {}, now: at, ...connectionsOptions });
   const pageDeps = { fleet, now, paths, deployment: { folder: "pi-dispatch" }, connections, setup: async ({ role, snapshot }) => ({ ...setup.state(role ?? "operator", snapshot), allowlistCount: 12, providerKeys: (await connections(snapshot)).providerKeys }), triggerEditor: () => ({ forges: ["github"], defaults: { backend: "local" }, backends: [], flows: ["fix", "tidy"] }) };
   const config = { dir, tokensPath: paths.tokensPath, allowedHosts: [], readOnly, maxMs: 43200000, idleMs: 3600000, maxStreams: 4, logsDir: paths.logsDir };
   const hub = makeLiveHub({ timers: { setInterval: (fn, ms) => setInterval(() => { if (ticks) fn(); }, ms), clearInterval }, now, loadPageData: (page, query, who) => pages.loadPageData(page, query, pageDeps, who), pagePanels: pages.pagePanels, queryKeyOf: pages.pageQueryString, dataQueryOf: pages.dataQueryOf, peekSession: (id, file) => sessions.peek(id, file), endedReason: (id, file) => sessions.verdict(id, file).ended ?? null, readTokens, readOnly });

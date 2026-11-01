@@ -779,3 +779,11 @@ test("live Valkey: a run the worker registered takes the comment, a redelivery i
 		await redis.quit().catch(() => {});
 	}
 });
+
+for (const forge of Object.keys(FORGES)) test(`${forge}: a real steered answer increments only its in-memory word (#775)`, async () => {
+	const { handler, res } = await deliver(forge, { redis: fakeRedis({ members: ["run-1"] }) });
+	assert.equal(res.statusCode, 202); assert.equal(JSON.parse(res.body).status, "steered");
+	const counts = handler.observations.snapshot()[forge];
+	assert.equal(counts.steered.hours.reduce((n, r) => n + r[1], 0), 1);
+	assert.equal(counts.queued.hours.reduce((n, r) => n + r[1], 0), 0);
+});

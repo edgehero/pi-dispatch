@@ -10197,6 +10197,88 @@ worker/src/steer-framing.mjs (`encodeFrame`, `keyFrame`, `frameMac`, `steerFrame
 (`readKeyFrame`, `createFrameDecoder`, `isolateStdin`, `openFrameReader`, `FRAME_FD`); image/runner/src/supervise.mjs
 (the fd 3 forwarding).
 
+## INT-RECEIVER-STATUS-KEY
+
+**Receiver → Valkey → Connections only (#775).** A display, never an admission, routing, doctor or
+webhook-authentication input. Removing it changes no receiver behavior. The shared writer and reader are
+`worker/src/receiver-status.mjs`, exported as `@edgehero/pi-dispatch/receiver-status`.
+
+```
+receiver:live       SET of receiver host names; an index, never the liveness claim
+receiver:h:<name>   STRING, one JSON record SET whole with PX 90000, refreshed every 15000 ms
+```
+
+The name is the worker's `workerName`: declared `PI_WORKER_NAME`, else the sanitized hostname. Invalid publication
+identity logs a fixed diagnostic and suppresses observations, without introducing a receiver startup refusal.
+Publication starts only after the listening callback: the socket supplies the actual port and address. Only the
+closed bind word `all`, `loopback` or `address` survives; no address, path or URL is retained. Polling publishes none.
+The unref'd timer joins `closers`, and its close runs before the shared queue client closes. A late write never
+reindexes after close; its already-issued SET may finish and expires naturally.
+
+Version 1 is rebuilt by field name; another version, an oversized value (64 KiB), non-renderable instant, malformed
+bucket, unknown forge or bind, or invalid count is unreadable. The value contains:
+
+```
+{ v: 1, name, version, startedAt, at, port, bind, forges: [<served forge>],
+  deliveries: { <forge>: { <word>: { lastAt: <epoch ms>|null,
+    hours: [[<UTC hour epoch ms>, <nonnegative safe count>], ...24] } } } }
+```
+
+The four forges are `github`, `gitlab`, `forgejo`, `azure`; every record includes all four, including refusals on
+unserved routes. Served forges describe the handlers mounted at boot. A `lastAt` of zero denotes the Unix epoch;
+only `null` means no observation. Last taken/refused projections preserve that distinction after window counts expire.
+The closed outcome vocabulary follows:
+
+<!-- receiver-outcomes:start -->
+| Word | Observation |
+|---|---|
+| queued | 202, queued |
+| deduplicated | 202, semantic duplicate |
+| held | 202, held reply |
+| steered | 202, steered comment |
+| dropped | 204, filter drop |
+| unauthorized | 401 |
+| not-configured | 404 |
+| lookup-failed | 503, access lookup failed |
+| enqueue-failed | 503, queue write failed |
+| malformed | 400, 405, 413 or 415 |
+| error | 500 |
+<!-- receiver-outcomes:end -->
+
+`makeReceiver` observes after `res.end` returns. Only the response status and the server's own closed result tags
+are inspected; no delivery identifier, repository, login, header, body field or request value enters these records.
+Root and unrouted paths count as GitHub; `/watch` and its descendants are excluded. No health or admin route is added.
+A request adds **zero telemetry commands** to Valkey; existing queue and steering operations are unchanged. A repeated
+delivery id remains `queued`, because distinguishing it would add a read per delivery.
+
+The count window is the current UTC hour and its preceding 23, with empty hours represented, rather than an exact
+rolling 24-hour interval. Each word retains its last instant independently for the process lifetime. Connections names the process start,
+marks hours before that start as not observed and labels its first partial hour rather than presenting unmeasured
+zeros; UTC bucket labels remain UTC with JavaScript enabled. The wide hourly table scrolls in a named,
+keyboard-focusable region with whole unwrapped labels and cells, never a column of vertical letters. Advancing an
+idle window expires its buckets; a backward clock cannot resurrect expired counts. Counts saturate at the largest
+safe integer. Readers shift their window to their own current UTC hour. Taken means the four 202 words; refused
+means the refusal/error words; dropped is separate.
+
+Each beat is best effort, never awaited by an answer. One actual flight remains occupied until its underlying client
+operations settle, even after a two-second diagnostic timeout: ioredis's offline queue must not accumulate one write
+per beat. A failure logs one fixed `receiver_status_unavailable` event/reason, never an exception message or value.
+The writer atomically checks/prunes at most 256 members from one rotating SSCAN page per beat, so it cannot erase a peer that just republished; the console never prunes.
+
+`readReceiverStatus` discovers at most four SSCAN pages and 256 names, prioritizes already-known live host names,
+reads at most 64 records, and bounds the entire read (discovery and row commands together) to two seconds. An incomplete discovery, malformed index/record,
+unreadable key or nonexpiring key makes `complete` false. Each record's PTTL is read beside the MGET; its age is
+`90000 - PTTL`, independent of clock skew, and a key that expired between reads is absent. `more` counts known names
+beyond the row cap; `moreUnknown` marks incomplete discovery, so a nonzero omitted count is explicitly a floor. No reader invents zero
+traffic, a healthy receiver or definite receiver absence from an incomplete read. There is no snapshot or
+`/api/state` projection. `dispatch_connections` rebuilds a safe counts/times projection at its own boundary.
+
+**Acceptance**: worker/test/receiver-status.test.mjs and receiver-status.integration.test.mjs;
+receiver/test/receiver-status.test.mjs and receiver-status-start.test.mjs; actual held/steered-response regressions
+in receiver/test/held.test.mjs and steer.test.mjs; admin/test/connections-receiver.test.mjs; actual-CSP browser lane.
+The outcome table is pinned to the exported vocabulary. `CONST-HMAC-OVER-RAW-BODY` and existing routing are
+**UNCHANGED, checked**.
+
 ## INT-ON-FAILURE-HOOK-CONTRACT
 
 **Producer**: the worker's two terminal listeners (start.mjs). **Consumer**: ONE operator-named command
@@ -12477,3 +12559,5 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-10-31 (#766, #772) | NEW `INT-ANSWER-DRAFT-STORE`; `INT-STEER-INBOX-CONTRACT`, `INT-CANCEL-CHANNEL-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`, `INT-CONSOLE-STATE-API` and `INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED: answer rule/standing schemas, agent role, applied receipts, safe projections and digest-bound result. Ordinary exit numbers/MAC, trigger run payloads, parent transcript promotion, approval decisions, global overlay, deploy mirrors and dependency pins UNCHANGED, checked. |
 | 2026-10-31 (#781, local credential custody) | INT-CONTAINER-JOB-INPUTS, INT-RUN-HISTORY-FILE-CONTRACT and INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: every local job refuses a mount containing the private refresh store, including unbound API jobs, future paths, symlink parents and directory aliases, as the fixed path-free local-folder-holds-subscription-auth reason. The free pickup gate precedes token minting and final preparation repeats the check on the resolved mount source before reservation or container start; transient boundary reads remain infrastructure failures. The store path stays in host closures. Container environment and exit protocol, forge contracts, paid meter, hook reasons and other interfaces UNCHANGED, checked. |
 | 2026-10-31 (#781, host filesystem refusals) | INT-SUBSCRIPTION-CREDENTIAL-STORE AMENDED: policy, private-store, OpenAI pinned-source and community-adapter validation classify all filesystem reads by the shared determinate errno allowlist, including outer path checks and descriptor close. Malformed metadata and known path faults refuse; credential-store absence still reads disconnected; EACCES, EIO and unknown faults remain retryable without changing the durable grant. Dependency existence uses strict stat rather than suppressing I/O errors. An explicitly marked read-only adapter preflight failure after the durable refresh marker restores the pre-marker row because no remote rotation began; an error code alone never proves this. Fixed diagnostics carry no path or token. Credential schemas, permission/owner checks, remote refresh rotation and uncertainty, snapshots, container/image transports, adapter source/output pins, public telemetry and all other interfaces UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver) | NEW `INT-RECEIVER-STATUS-KEY`: bounded version-1 receiver location and per-forge delivery observations, post-response in memory, best-effort expiring heartbeat, read-only bounded Connections projection and safe agent read. `INT-CONSOLE-STATE-API`, webhook payload contracts, existing host registry and all hook/endpoint enforcement contracts UNCHANGED, checked. |
+| 2026-11-01 (#775, receiver lifetime visibility) | `INT-RECEIVER-STATUS-KEY` projection CORRECTED: only null denotes no event; the valid epoch-zero timestamp survives last taken/refused aggregation after count expiry. The version-1 shape, field bounds, expiry, privacy, response observation and all decision/transport interfaces UNCHANGED, checked. |

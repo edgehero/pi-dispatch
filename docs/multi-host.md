@@ -511,3 +511,16 @@ The additional registry facts are display telemetry: orphan venue/time, a one-mi
 budget provenance and CPU-reserve state. They contain identifiers and fixed words, never workspace paths or issue
 text. Removing them changes reporting, never admission. Cleanup commands must be run on the affected host; the
 console cannot operate another host's runtime. A host-queue pause still leaves shared jobs available to that host.
+
+## Receiver observations
+
+Connections lists receivers independently from workers. A receiver uses `PI_WORKER_NAME`, else the same sanitized
+hostname as a worker, so a colocated receiver links to that host. Its live socket supplies the port and a closed
+bind category: all interfaces, loopback or a specific address. The address itself is never published.
+
+Each receiver publishes one display record every 15 seconds with a 90-second expiry. It holds only counts, times,
+closed outcomes and the host/version/socket facts, never delivery identifiers or payload values. Counts cover the
+current UTC hour and the preceding 23. Last taken/refused times remain separate. A request updates memory only;
+Valkey outages can remove this display but cannot change an answer or delay enqueueing. Polling publishes none.
+Deleting `receiver:*` changes no routing, authentication or queue behavior. An absent observation is not proof that
+a receiver stopped; the page says what was reported and preserves unknown reads.

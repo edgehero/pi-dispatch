@@ -141,9 +141,13 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
     stage = "live GET drafts";
     const streamReady = browser.event((m) => m.sessionId === tab.sessionId && m.method === "Network.responseReceived" && m.params.response.url.startsWith(fixture.origin + "/api/events?page=sandboxes"), "sandbox live stream connected");
     await navigate(path); await streamReady;
+    const originalImage = fixture.inventory.hosts[0].settings.image;
+    // Response headers precede the first applied panel. Prove that application before retaining field identities.
+    fixture.inventory.hosts[0].settings.image = "pi-job:initial-sse-ready";
+    await fixture.refresh();
+    await until("document.querySelector('#p-sb-new')?.innerText.includes('pi-job:initial-sse-ready')");
     await evaluate("window.__sbRef=document.querySelector('#sb-ref');window.__sbRepo=document.querySelector('#sb-repo')");
     await type("#sb-repo", "acme/draft"); await type("#sb-ref", "feature/draft");
-    const originalImage = fixture.inventory.hosts[0].settings.image;
     fixture.inventory.hosts[0].settings.image = "pi-job:live-refresh";
     await fixture.refresh();
     await until("document.querySelector('#p-sb-new .held')");
@@ -168,8 +172,16 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
     assert.equal(await evaluate("document.querySelector('#sb-workspace').value"), workspace);
     await click("#p-sb-kept h2");
     assert.equal(await evaluate("window.__sbWorkspace===document.querySelector('#sb-workspace')"), true, "unapplied select choice remains held after blur");
-    await click("#p-sb-run form[method=get] button");
-    await until(`new URLSearchParams(location.search).get('id')===${JSON.stringify(workspace)} && document.querySelector('#p-sb-run').innerText.includes('pi-job:reviewed-workspace')`);
+    const reviewedWorkspace = `new URLSearchParams(location.search).get('id')===${JSON.stringify(workspace)} && document.querySelector('#p-sb-run')?.innerText.includes('pi-job:reviewed-workspace')`;
+    const documentGate = fixture.holdWorkspaceDocument(workspace);
+    try {
+      await click("#p-sb-run form[method=get] button");
+      await until(`new URLSearchParams(location.search).get('id')===${JSON.stringify(workspace)} && document.readyState==='loading' && !document.querySelector('#p-sb-run')`);
+      const response = await documentGate.started;
+      assert.equal(response.status, 200); assert.equal(response.csp, SECURITY_HEADERS["content-security-policy"]);
+      assert.equal(await evaluate(`Boolean(${reviewedWorkspace})`), false, "the exact destination predicate waits while its real document is still parsing");
+    } finally { documentGate.release(); }
+    await until(reviewedWorkspace);
     assert.equal(fixture.effects.queued.length, 0, "reviewing GET choices dispatches no host work");
     fixture.inventory.hosts[0].settings.image = originalImage;
     fixture.inventory.hosts[0].rows[0].image = originalWorkspaceImage;
