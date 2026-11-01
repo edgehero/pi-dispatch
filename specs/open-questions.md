@@ -1727,9 +1727,9 @@ adversarial passes did.
 - **Status**: ACCEPTED -- the same residual `OQ-027` (a check's exit codes) and `OQ-030` (a resolver's)
   carry, arriving at the third operator-command seam (issue #288, `PI_ON_FAILURE`).
 - **Position**: the hook's exit code is logged (`on_failure`, key set `{ jobId, code, detail }`) and
-  otherwise unread: there is nothing to map it TO, because nothing flows back -- a hook fault must not be
+  published for display through `INT-HOOK-RUNS-KEY` (#775); nothing decides on it, because nothing flows back -- a hook fault must not be
   able to flip a job's outcome (`CONST-RETRY-INFRA-ONLY`). Consequently a broken script loses
-  notifications silently except for that one log line, and delivery is at-most-once best effort: a
+  notifications with that one log line and best-effort display history as evidence, and delivery is at-most-once best effort: a
   whole-deployment death in the instant between the terminal transition and the listener loses the
   notification (a single crashed worker does not -- the stall path fails its job at the next pickup and
   the observing worker's listener fires). Persisting pending notifications was rejected in
@@ -2720,3 +2720,4 @@ adversarial passes did.
 | 2026-10-28 (#737) | **`OQ-051` AMENDED**, words only: the two sending modes were drawn in the design's first version, and the `ParkedAnswerer` card, now in `design/`, shows sending without a person as one locked step. The question, its position and what would close it are UNCHANGED. |
 | 2026-10-30 (#751) | All open questions UNCHANGED, checked. Three Configuration pages describe current published facts; they add neither the browser shell of `OQ-050` nor unattended answers of `OQ-051`, and do not infer unavailable receiver placement, delivery health or hook history. #766 remains separate policy work. |
 | 2026-10-30 (#771) | OQ-038 AMENDED narrowly by #771: opener commands explicitly load a trusted deployment environment and re-execute with ambient capability overrides rejected; this does not change the TUI panel's own-environment limitation. OQ-050 UNCHANGED, checked: browser terminal remains open and rejected; no gateway, ticket, PTY or WebSocket is added to the console. |
+| 2026-11-01 (#775, hooks) | `OQ-034` AMENDED, stays ACCEPTED: hook results are logged and published for display; no decision reads an exit code. The new bounded display history is no pending notification store, transport, retry or delivery guarantee. Reopen conditions UNCHANGED, checked; `OQ-027` and `OQ-030` UNCHANGED, checked. |

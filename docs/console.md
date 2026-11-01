@@ -2124,7 +2124,7 @@ these extra file/lease reads.
   source at the row's end. Actual per-host credentials remain unpublished.
 - **Subscription authentication:** selected adapter and exact version, owner host, compatibility, credential health, expiry and refresh time. Community adapters are labelled. A recognized package is not a verified installation, and connected means a credential record exists, not that a paid request succeeded. Credentials, profile details and private paths never reach this page. A writable operator may copy `pi-dispatch auth login CONNECTION_ID`, `logout`, `usage` or an offered `trial` command to the owning host's terminal. There is no browser sign-in or credential mutation. Viewers, agents and read-only operators see safe subscription facts only. Other deployment metadata is not published in the agent Connections view.
 - **Notifications:** fixed forge comments, triggers with status comments and the failure hook's last folder.
-  Hook execution history is in the worker log, not collected by this page. Timing, arguments and exclusions
+  Each host's last hook run shows its time, linked run, outcome/reason and hook detail/code, followed by counts over up to 20 retained entries. Nonzero exits, timeout and unresolvable are tinted; no entry says "no hook run published", and unreadable history stays unknown. The list expires seven days after its last append; a zero exit does not prove delivery. Timing, arguments and exclusions
   are in the linked [hook reference](notifications.md).
 - **MCP servers:** transport, location, exposure, on/off and referenced variable names, with refused names and
   reasons. The worker's forge server is described separately; its version belongs to the image. Import with

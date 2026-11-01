@@ -83,7 +83,7 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
         outgoing.once("error", reject); outgoing.end(raw);
       });
     };
-    if (slice === "receiver" || slice === "all") {
+    if (slice === "receiver" || slice === "hooks" || slice === "all") {
       const { makeReceiverObservations, makeReceiverPublisher } = await import("../../../worker/src/receiver-status.mjs");
       const { makeReceiver } = await import("../../../receiver/src/receiver.mjs");
       receiverCounter = makeReceiverObservations({ now });
@@ -126,7 +126,7 @@ export async function startConnectionsBrowserFixture(dir, { slice, readOnly = fa
         });
       },
       async removeTelemetry() {
-        if (receiverPublisher) await receiverPublisher.close();
+        if (slice === "receiver" && receiverPublisher) await receiverPublisher.close();
         // Hold the absent-publication state long enough to inspect it; a normal beat republishes it in 15 seconds.
         if (slice === "endpoints") for (const closer of closers) await closer.close?.();
         const keys = await redis.keys(slice === "receiver" ? "receiver:*" : slice === "hooks" ? "hook:*" : "host:h:*");

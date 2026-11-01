@@ -10,7 +10,7 @@ Where jobs come from and what they may reach: forges and their webhooks, egress 
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
 - **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
 - **Model endpoints.** Each endpoint's host and port, whether it is keyless, its declared slots and fleet occupancy where counted. Per-machine aliases and deployments without a declared PI_WORKER_NAME say not counted; unread metadata or leases stay unknown. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
-- **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Its runs are in the worker's log; their history is not published.
+- **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Each host's last hook run links its time and run, with the hook exit detail and counts over its retained entries. Timeout, an unresolvable script and nonzero exits are tinted; no history says "no hook run published", never healthy.
 - **MCP servers, Deployment environment, Staged pi packages.** All read-only, each with the command or file that changes it. Caps set only in the .env read "unknown (worker env or default)".
 
 Viewers read status and provider guides without mutation controls. A read-only operator keeps the guides and terminal recovery. No-JavaScript users can read native disclosures and external links, while mutation controls stay disabled.
@@ -24,7 +24,7 @@ Viewers read status and provider guides without mutation controls. A read-only o
 - Per host: the egress proxy state and the newest egress doctor lines.
 - The model endpoints file, declared slots and whether fleet leases count that endpoint, and the provider key sources.
 - The overlay MCP servers with their refusals, and the staged packages receipt.
-- The `PI_ON_FAILURE` hook by its last folder, its timeout and the fact that its runs are in the worker's log.
+- The `PI_ON_FAILURE` hook by its last folder, its timeout, and up to 20 safe runs per host from the versioned seven-day-expiring display list. Incomplete reads are unknown; the exit code cannot prove notification delivery.
 - The .env keys the console reads, and any shell-versus-.env disagreement.
 
 **Why it works this way.**
@@ -36,5 +36,5 @@ Viewers read status and provider guides without mutation controls. A read-only o
 
 **Fixture note.**
 - **From the fixture:** build3's missing proxy, gh-e9a0, the linear MCP server, and the forges named by triggers 1 to 7.
-- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. The receiver on mini1 and its counts are sample observations. Hook history is not published in this slice.
+- **Sample:** the receiver port, the allowlist hosts, both model endpoints and mini2's broken copy, the docs and dispatch-notes servers, the two staged packages, the hook path. Receiver observations and hook history are sample display evidence.
 - **Known repo gaps:** there is no notification setting beyond the hook.

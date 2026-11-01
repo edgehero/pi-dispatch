@@ -524,3 +524,7 @@ current UTC hour and the preceding 23. Last taken/refused times remain separate.
 Valkey outages can remove this display but cannot change an answer or delay enqueueing. Polling publishes none.
 Deleting `receiver:*` changes no routing, authentication or queue behavior. An absent observation is not proof that
 a receiver stopped; the page says what was reported and preserves unknown reads.
+
+## Failure hook history
+
+Each firing worker publishes safe results under `hook:h:<name>`, indexed by `hook:hosts`, using the worker's resolved name even without a declared fleet. Connections and `dispatch_connections` read this display history across hosts: up to 20 entries per host, with seven days of inactivity expiry. Counts describe retained hook details, not delivered notifications. Publication is background best effort; missing or unreadable records never mean healthy. Deleting this keyspace changes no hook, job, routing or admission decision.

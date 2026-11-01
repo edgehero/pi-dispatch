@@ -19,6 +19,6 @@
     "by": "Rob",
     "at": "2026-10-30T12:26:23Z",
     "via": "Claude",
-    "note": "The design follows main: the screens built by #747 to #750 show Built, the Parked phone card says where to read the question as the shipped page does, and every planned or proposed card names the issue that builds it (#770 to #776)."
+    "note": "#775 adds bounded per-host failure hook history to Connections, with explicit unknown/absence and no delivery claim. The design follows main: the screens built by #747 to #750 show Built, the Parked phone card says where to read the question as the shipped page does, and every planned or proposed card names the issue that builds it (#770 to #776)."
   }
 }

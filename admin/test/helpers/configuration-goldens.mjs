@@ -8,6 +8,7 @@ import { readConnections } from "../../src/connections-view.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 import { consoleProjectFixture } from "./console-project-fixture.mjs";
 import { projectSizeAction } from "../../src/project-view.mjs";
+import { buildHookRun } from "@edgehero/pi-dispatch/hook-runs";
 
 export function consoleSecretsFixture(now, { env: extra = {}, change = () => {} } = {}) {
   if (!Number.isFinite(now)) throw new TypeError("consoleSecretsFixture needs the injected page clock");
@@ -51,6 +52,7 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
     endpoints: () => [{ id: "ollama-mini2", host: "mini2.lan", port: 11434, keyless: true, slots: 2 }, { id: "vllm-build3", host: "10.0.0.5", port: 8000, keyless: true, slots: 4 }],
     slots: async () => [1, 0],
     receivers: async () => ({ hosts: [receiverFixture(now)], complete: true, more: 0 }),
+    hookRuns: async () => ({ partial: false, more: 0, hosts: [] }),
   };
   reads.providerInventory = {
     environment: options => reads.environment(options),
@@ -104,6 +106,9 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "connections-receiver-unknown.viewer": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [], complete: false, more: 0 }); } }, "viewer"),
   "connections-proxy.operator": () => connection({ problem: "proxy" }),
   "connections-forge.operator": () => connection({ problem: "forge" }),
+  "connections-hook-timeout.operator": () => connection({ change: (_, reads) => { reads.hookRuns = () => ({ partial: false, more: 0, hosts: [{ name: "mini1", runs: [buildHookRun({ jobId: "gh-f0c2", outcome: "failed", reason: "infra", detail: "timeout", code: null }, NOW - 60_000)] }] }); } }),
+  "connections-hook-timeout.viewer": () => connection({ change: (_, reads) => { reads.hookRuns = () => ({ partial: false, more: 0, hosts: [{ name: "mini1", runs: [buildHookRun({ jobId: "gh-f0c2", outcome: "failed", reason: "infra", detail: "timeout", code: null }, NOW - 60_000)] }] }); } }, "viewer"),
+  "connections-hook-unreadable.viewer": () => connection({ change: (_, reads) => { reads.hookRuns = () => ({ partial: true, more: 3, hosts: [{ name: "build3", runs: [], unreadable: true }] }); } }, "viewer"),
   "connections-receiver-missing-secret.operator": () => connection({ change: (_, r) => { r.environment = () => ({ env: { GITHUB_AUTH_SOURCE: "gh" } }); } }),
   "connections-endpoints.operator": () => connection({ problem: "endpoints" }),
   "connections-mcp-compact.viewer": () => connection({ change: (s) => { s.overlayMcp.servers.push({ name: "docs", transport: "stdio", where: "npx docs-mcp", exposure: "deferred", enabled: false, refs: ["DOCS_KEY"] }, { name: "search", transport: "http", where: "search.example.com", exposure: "direct", enabled: true, refs: ["SEARCH_KEY"] }); } }, "viewer"),

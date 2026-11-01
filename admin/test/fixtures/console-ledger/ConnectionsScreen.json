@@ -130,7 +130,7 @@
       "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints"
     },
     {
-      "el": "Fixed comments, status comments, hook timeout/exclusions and unpublished history",
+      "el": "Fixed comments, status comments, last per-host hook result and retained detail counts",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/connections.mjs#connectionsNotify"
@@ -250,6 +250,35 @@
       "shows": [
         "Claude subscription and community compatibility",
         "Official claude setup-token is for Claude Code"
+      ]
+    },
+    {
+      "el": "Hook timeout retains typed outcomes without a delivery claim",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsNotify",
+      "panel": "p-notify",
+      "golden": [
+        "panels/connections-hook-timeout.operator",
+        "panels/connections-hook-timeout.viewer"
+      ],
+      "shows": [
+        "timeout",
+        "An exit code describes the hook, not notification delivery"
+      ]
+    },
+    {
+      "el": "Unreadable hook history stays unknown rather than healthy",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/connections.mjs#connectionsNotify",
+      "panel": "p-notify",
+      "golden": [
+        "panels/connections-hook-unreadable.viewer"
+      ],
+      "shows": [
+        "hook history unavailable",
+        "Retained runs by detail"
       ]
     },
     {

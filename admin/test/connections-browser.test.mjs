@@ -22,7 +22,7 @@ const evidence = () => ({
   forges: "", notify: "", endpoints: "One server, one id", problems: "check the webhook secret on both sides",
   unauthorized: "2", receiverPort: "3000", receiverTimes: 2,
   links: ["/fleet/host?name=mini1", "/run?id=gh-timeout-775"],
-  hookCounts: { exit: 1, timeout: 1 }, hookAttention: ["timeout"], hookTimes: 1,
+  hookCounts: { exit: 1, timeout: 1 }, hookAttention: ["timeout"], hookTimes: 1, hookWordsOk: true, hookScrollOk: true,
   hostSlots: { "local-model:mini1": "1 of 2", "shared-model:mini2": "2 of 3", "shared-model:build3": "1 of 4" }, localScope: true, endpointWordsOk: true,
 });
 const options = { slice: "all", width: 390, theme: "dark", receiverPort: 3000 };
@@ -31,10 +31,21 @@ test("the browser oracle judges observed values, navigation and exception classi
   assert.deepEqual(connectionsEvidenceProblems(evidence(), options), []);
   for (const [field, wrong, message] of [
     ["unauthorized", "0", "actual unauthorized count"], ["receiverPort", "4000", "actual listening port"],
-    ["hookCounts", { exit: 2, timeout: 0 }, "Retained hook detail counts"], ["hookAttention", [], "timeout lost"],
+    ["hookCounts", { exit: 2, timeout: 0 }, "Retained hook detail counts"], ["hookWordsOk", false, "host identities or header words"], ["hookScrollOk", false, "not keyboard accessible"], ["hookAttention", [], "timeout lost"],
     ["hostSlots", { "local-model:mini1": "0 of 2", "shared-model:mini2": "2 of 3", "shared-model:build3": "0 of 4" }, "host usage"],
     ["links", [], "link is wrong"], ["localScope", false, "claims a fleet bound"], ["endpointWordsOk", false, "squeezed into fragments"],
   ]) assert.ok(connectionsEvidenceProblems({ ...evidence(), [field]: wrong }, options).some(problem => problem.includes(message)), field);
+});
+
+test("hook paints require real receiver observations, including after hook-only deletion", () => {
+  const hookOptions = { ...options, slice: "hooks" };
+  for (const absent of [false, true]) {
+    const current = { ...evidence(), ...(absent ? { notify: "no hook run published" } : {}) };
+    assert.deepEqual(connectionsEvidenceProblems(current, { ...hookOptions, absent }), []);
+    for (const [field, wrong, message] of [["unauthorized", "0", "actual unauthorized count"], ["receiverPort", "4000", "actual listening port"], ["receiverTimes", 0, "Receiver times"]]) {
+      assert.ok(connectionsEvidenceProblems({ ...current, [field]: wrong }, { ...hookOptions, absent }).some(problem => problem.includes(message)), `${field}, absent=${absent}`);
+    }
+  }
 });
 
 test("the browser oracle refuses missing shared styles and facts after metadata deletion", () => {
