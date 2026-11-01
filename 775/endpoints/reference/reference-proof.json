@@ -1,0 +1,470 @@
+[
+  {
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 22,
+    "cardDisplay": "block",
+    "width": 320,
+    "head": "Connections",
+    "theme": "light",
+    "viewport": 320,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz200000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 22,
+    "cardDisplay": "block",
+    "width": 375,
+    "head": "Connections",
+    "theme": "light",
+    "viewport": 375,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz200000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 22,
+    "cardDisplay": "block",
+    "width": 390,
+    "head": "Connections",
+    "theme": "light",
+    "viewport": 390,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz200000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 26,
+    "cardDisplay": "block",
+    "width": 800,
+    "head": "Connections",
+    "theme": "light",
+    "viewport": 800,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz2C0000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 26,
+    "cardDisplay": "block",
+    "width": 1024,
+    "head": "Connections",
+    "theme": "light",
+    "viewport": 1024,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz2C0000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#edeeec",
+    "ink": "#131514",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 26,
+    "cardDisplay": "block",
+    "width": 1440,
+    "head": "Connections",
+    "theme": "light",
+    "viewport": 1440,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz2C0000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 22,
+    "cardDisplay": "block",
+    "width": 320,
+    "head": "Connections",
+    "theme": "dark",
+    "viewport": 320,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz200000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 22,
+    "cardDisplay": "block",
+    "width": 375,
+    "head": "Connections",
+    "theme": "dark",
+    "viewport": 375,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz200000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 22,
+    "cardDisplay": "block",
+    "width": 390,
+    "head": "Connections",
+    "theme": "dark",
+    "viewport": 390,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz200000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 26,
+    "cardDisplay": "block",
+    "width": 800,
+    "head": "Connections",
+    "theme": "dark",
+    "viewport": 800,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz2C0000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 26,
+    "cardDisplay": "block",
+    "width": 1024,
+    "head": "Connections",
+    "theme": "dark",
+    "viewport": 1024,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz2C0000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  },
+  {
+    "canvas": "#000000",
+    "ink": "#f3f4f2",
+    "font": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "fonts": "loaded",
+    "sheets": [
+      {
+        "href": "http://127.0.0.1:52681/design/.shots/tokens.css",
+        "rules": 11
+      },
+      {
+        "href": "http://127.0.0.1:52681/design/system/components/bundle.css",
+        "rules": 382
+      },
+      {
+        "href": null,
+        "rules": 151
+      },
+      {
+        "href": null,
+        "rules": 5
+      }
+    ],
+    "cardRadius": 26,
+    "cardDisplay": "block",
+    "width": 1440,
+    "head": "Connections",
+    "theme": "dark",
+    "viewport": 1440,
+    "platformFonts": [
+      {
+        "familyName": ".SF NS",
+        "postScriptName": ".SFNS-Regular_wdth_opsz2C0000_GRAD_wght3200000",
+        "isCustomFont": false,
+        "glyphCount": 11
+      }
+    ],
+    "errors": []
+  }
+]

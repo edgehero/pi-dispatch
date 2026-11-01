@@ -1,0 +1,13 @@
+# Issue #775 review images
+
+This branch holds durable review evidence only. The three implementation PRs target `main`; no image, capture script, planning note or generated admin build is added to those branches.
+
+The `775/` directories contain before/after Connections captures, correctly styled published-source reference cards, and machine-readable browser measurements. Before captures use main at `b9279bfada39ea151823b11bbc792592f9db8e4c`. Each after capture uses its implementation slice with production renderers, authentication, CSP, readers and live Valkey 8.0.2 publishers. Service fixtures use synthetic worker/job data and an injected clock; no paid agent run was made. The images demonstrate observation, not a notification-delivery guarantee.
+
+Chrome for Testing is the repository-pinned `155.0.8059.39`. Its mac-arm64 archive SHA-256 was verified as `529a71bd61aaa2ef266a4d4bd300ae9572ba6a3468a8d55c3023ffeffb5b6b4e`; the extracted executable was also compared with the archive member. Each slice has 38 validated combinations of operator/viewer or read-only operator, light/dark, and phone/intermediate/desktop widths. The measurements include actual values, stylesheet rules, loaded fonts, native glyph fonts, CSP observations, links and content-width checks. The scripts also exercise keyboard interaction, no-JavaScript rendering, unreadable/deleted observations and failing CSP/style controls.
+
+The remote Claude artifact was inaccessible (403/Cloudflare). Reference images therefore come from this repository's generated `design/system/components/ConnectionsScreen` card, served over HTTP with `tokens.css` and `bundle.css`. `reference-proof.json` records successful stylesheet rule loading, token colours, fonts, card geometry and native glyph fonts at 12 width/theme combinations. These are published-source comparisons, not direct remote-artifact comparisons. Different synthetic examples account for different table rows and numbers in reference and application captures.
+
+Receiver screenshots additionally show the 24-hour disclosure. Its wide table has a named, keyboard-scrollable region; pre-start hours explicitly remain unobserved. Endpoint screenshots show three real shared leases and local host usage of 1/1/2, including a conflicting capacity. The desktop endpoint table at 800 pixels intentionally scrolls within its card; phone rows stack. Hook screenshots show distinct retained detail counts, actual exit 3, timeout and an unresolvable attempt.
+
+`775/manifest.json` records implementation revisions and image hashes. Review full-page images at native pixel size when assessing small digits. Section captures are provided for legibility.
