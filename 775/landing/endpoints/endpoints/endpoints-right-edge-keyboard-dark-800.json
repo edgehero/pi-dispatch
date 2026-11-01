@@ -1,0 +1,155 @@
+{
+  "left": 108,
+  "client": 712,
+  "scroll": 820,
+  "clip": {
+    "left": 44,
+    "right": 756
+  },
+  "labels": [
+    {
+      "text": "Slots in use",
+      "left": 476,
+      "right": 756,
+      "top": 278,
+      "bottom": 319
+    },
+    {
+      "text": "Fleet leases: not counted \u00b7 2 declared \u00b7 per-machine endpoint, no fleet bound",
+      "left": 488,
+      "right": 736,
+      "top": 330,
+      "bottom": 366
+    },
+    {
+      "text": "Declared here: 2 slots.",
+      "left": 488,
+      "right": 736,
+      "top": 370,
+      "bottom": 386
+    },
+    {
+      "text": "1 of 2",
+      "left": 557.59375,
+      "right": 589.984375,
+      "top": 395,
+      "bottom": 410
+    },
+    {
+      "text": "host only, no fleet bound \u00b7 beat 0s ago",
+      "left": 488,
+      "right": 736,
+      "top": 412,
+      "bottom": 430
+    },
+    {
+      "text": "1 of 2",
+      "left": 551.265625,
+      "right": 583.65625,
+      "top": 439,
+      "bottom": 454
+    },
+    {
+      "text": "host only, no fleet bound \u00b7 beat 0s ago",
+      "left": 488,
+      "right": 736,
+      "top": 456,
+      "bottom": 474
+    },
+    {
+      "text": "1 of 2",
+      "left": 552.9375,
+      "right": 585.328125,
+      "top": 483,
+      "bottom": 498
+    },
+    {
+      "text": "host only, no fleet bound \u00b7 beat 0s ago",
+      "left": 488,
+      "right": 736,
+      "top": 500,
+      "bottom": 518
+    },
+    {
+      "text": "Fleet leases:  3 in use",
+      "left": 488,
+      "right": 736,
+      "top": 541,
+      "bottom": 559
+    },
+    {
+      "text": "Declared here: 4 slots.",
+      "left": 488,
+      "right": 736,
+      "top": 563,
+      "bottom": 579
+    },
+    {
+      "text": "1 of 4",
+      "left": 581.59375,
+      "right": 614.5,
+      "top": 588,
+      "bottom": 603
+    },
+    {
+      "text": "host only, no fleet bound \u00b7 beat 0s ago",
+      "left": 488,
+      "right": 736,
+      "top": 605,
+      "bottom": 623
+    },
+    {
+      "text": "1 of 4",
+      "left": 575.265625,
+      "right": 608.171875,
+      "top": 632,
+      "bottom": 647
+    },
+    {
+      "text": "shared fleet bound \u00b7 beat 0s ago",
+      "left": 488,
+      "right": 736,
+      "top": 649,
+      "bottom": 667
+    },
+    {
+      "text": "2 of 3",
+      "left": 564.9375,
+      "right": 599.203125,
+      "top": 676,
+      "bottom": 691
+    },
+    {
+      "text": "shared fleet bound \u00b7 beat 0s ago",
+      "left": 488,
+      "right": 736,
+      "top": 693,
+      "bottom": 711
+    }
+  ],
+  "rows": [
+    {
+      "id": "local-model",
+      "slots": "Fleet leases: \nnot counted\n \u00b7 2 declared \u00b7 per-machine endpoint, no fleet bound\nDeclared here: 2 slots.\nbuild3:  1 of 2\nhost only, no fleet bound \u00b7 beat 0s ago\nmini1:  1 of 2\nhost only, no fleet bound \u00b7 beat 0s ago\nmini2:  1 of 2\nhost only, no fleet bound \u00b7 beat 0s ago"
+    },
+    {
+      "id": "shared-model",
+      "slots": "Fleet leases: 3 in use\nDeclared here: 4 slots.\nbuild3:  1 of 4\nhost only, no fleet bound \u00b7 beat 0s ago\nmini1:  1 of 4\nshared fleet bound \u00b7 beat 0s ago\nmini2:  2 of 3\nshared fleet bound \u00b7 beat 0s ago"
+    }
+  ],
+  "warning": "Model endpoints\n\nmodel-endpoints.json; fleet leases first, then each host's own slots and last beat.\n\nEndpoint\tHost and port\tKey\tSlots in use\nlocal-model\thost.docker.internal:11434\tkeyless\t\nFleet leases: \nnot counted\n \u00b7 2 declared \u00b7 per-machine endpoint, no fleet bound\nDeclared here: 2 slots.\nbuild3:  1 of 2\nhost only, no fleet bound \u00b7 beat 0s ago\nmini1:  1 of 2\nhost only, no fleet bound \u00b7 beat 0s ago\nmini2:  1 of 2\nhost only, no fleet bound \u00b7 beat 0s ago\n\nshared-model\tmodels.example.com:443\tkeyless\t\nFleet leases: 3 in use\nDeclared here: 4 slots.\nbuild3:  1 of 4\nhost only, no fleet bound \u00b7 beat 0s ago\nmini1:  1 of 4\nshared fleet bound \u00b7 beat 0s ago\nmini2:  2 of 3\nshared fleet bound \u00b7 beat 0s ago\n\nshared-model: hosts declare different slot bounds\n\nOne server, one id: hosts sharing an endpoint id must declare the same slots. Correct model-endpoints.json on those hosts.\n\nManage provider API keys\nseparately from endpoint declarations.",
+  "canvas": "#000000",
+  "fonts": "loaded",
+  "css": true,
+  "csp": [],
+  "errors": [],
+  "focus": "cn-endpoint-scroll",
+  "afterViewport": {
+    "left": 108,
+    "header": 476
+  },
+  "primaryCapture": "endpoints-right-edge-keyboard-dark-800-viewport.png",
+  "captureMethod": "Actual800pixel browser viewport. Misleading CDP element clip removed.",
+  "lastColumnAccessible": true,
+  "scopeAndCapacityWarningReadable": true
+}

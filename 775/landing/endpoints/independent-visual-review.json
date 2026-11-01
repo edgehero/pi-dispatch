@@ -1,0 +1,36 @@
+{
+  "head": "84fe5f471db7a2127953dfdd76d3e594465da4ec",
+  "tree": "dd60d3cf4df2ece8e96ad820e74bf79a6ba8ce2a",
+  "verdict": "No concrete product visual or behavior finding",
+  "reviewed": [
+    "receiver/receiver-section-operator-dark-1440.png",
+    "receiver/receiver-max-name-operator-light-390.png",
+    "receiver/receiver-max-name-unreadable-operator-dark-390.png",
+    "receiver/receiver-aged-refusal-viewer-light-390.png",
+    "hooks/hooks-section-operator-light-1440.png",
+    "hooks/hooks-section-viewer-dark-390.png",
+    "endpoints/endpoints-section-operator-dark-1440.png",
+    "endpoints/endpoints-section-viewer-light-390.png",
+    "endpoints/endpoints-not-reported-light-1440.png",
+    "endpoints/endpoints-right-edge-keyboard-dark-800-viewport.png",
+    "references/reference-receiver-dark-1440.png",
+    "references/reference-receiver-light-390.png",
+    "references/reference-hooks-light-1440.png",
+    "references/reference-hooks-dark-390.png",
+    "references/reference-endpoints-dark-1440.png",
+    "references/reference-endpoints-light-390.png"
+  ],
+  "facts": [
+    "All3permanent real-CSP slices passed38normal paints each",
+    "Receiver additionally2aged+32maxidentity+2unknown paints and clipping negative control",
+    "Endpoint paints assert receiver+hook observations and3real fleet claims",
+    "Endpoint deletion preserves live identity/expiry through another heartbeat and receiver/hooks/leases",
+    "800native horizontal scrolling reaches108of108 and17lastcolumn count/scope/age labels fit",
+    "Reviewed whole port/key words, colours, hierarchy, slot circles, legends, labels, controls and warnings"
+  ],
+  "limits": [
+    "Remote artifact unavailable; comparisons use repository published-source cards with12loaded-token/style/nativefont proofs",
+    "Reference sample declarations differ from production fixture sample",
+    "800table scrolls horizontally; all columns are not simultaneously visible"
+  ]
+}

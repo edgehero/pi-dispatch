@@ -1,0 +1,27 @@
+Error: Connections browser deleted publications are unknown: Only endpoint observations remain unpublished after the next real host beat
++ actual - expected
+
++ '[{"id":"local-model","slots":2,"used":1,"fleet":0},{"id":"shared-model","slots":4,"used":1,"fleet":1}]'
+- ''
+
+    at checkConnectionsBrowser (file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/missing-gate-runner.mjs:392:27)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/missing-gate-runner.mjs:408:41 {
+  [cause]: AssertionError [ERR_ASSERTION]: Only endpoint observations remain unpublished after the next real host beat
+  + actual - expected
+
+  + '[{"id":"local-model","slots":2,"used":1,"fleet":0},{"id":"shared-model","slots":4,"used":1,"fleet":1}]'
+  - ''
+
+      at assertRetainedHosts (file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/missing-gate-runner.mjs:276:52)
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at async checkConnectionsBrowser (file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/missing-gate-runner.mjs:282:9)
+      at async file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/missing-gate-runner.mjs:408:41 {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: '[{"id":"local-model","slots":2,"used":1,"fleet":0},{"id":"shared-model","slots":4,"used":1,"fleet":1}]',
+    expected: '',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+}

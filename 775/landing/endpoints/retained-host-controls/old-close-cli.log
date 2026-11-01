@@ -1,0 +1,27 @@
+Error: Connections browser deleted publications are unknown: Endpoint-only deletion preserves mini1's name
++ actual - expected
+
++ undefined
+- 'mini1'
+
+    at checkConnectionsBrowser (file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/old-close-runner.mjs:392:27)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/old-close-runner.mjs:408:41 {
+  [cause]: AssertionError [ERR_ASSERTION]: Endpoint-only deletion preserves mini1's name
+  + actual - expected
+
+  + undefined
+  - 'mini1'
+
+      at assertRetainedHosts (file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/old-close-runner.mjs:273:70)
+      at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+      at async checkConnectionsBrowser (file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/old-close-runner.mjs:280:9)
+      at async file:///private/var/folders/4p/jsszrt7d1153_5y6w3ylmjnr0000gn/T/pi-dispatch-775-endpoint-retained-host-4eo08efr/old-close-runner.mjs:408:41 {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: 'mini1',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+}
