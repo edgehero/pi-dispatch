@@ -1,7 +1,7 @@
 # Visual evidence for #753 and #754
 
 Unmodified screenshots from fixture deployments, separate from the implementation branch.
-Implementation: `2b41c3abea7728f2d594d6d3a5fb7008be4be530`.
+Implementation: `1d33530d` (the final commit) for the workbench, watching and run Workspace captures; `2b41c3abea7728f2d594d6d3a5fb7008be4be530` for Zero touch, which has not changed since.
 Before: `deb7dfef867d469e0e90279719b3ecc033c60a27`.
 
 Zero touch before and after use the same six sent-draft runs. Gateway captures use a real existing Docker sandbox, production application handlers and CSPs, distinct TLS sites, Secure/Strict cookies, xterm.js, and actual input/output. The driver follows both rendered Run and Sandboxes new-tab entry points. Its isolated certificate allowlist trusts only the generated fixture certificate; an unrelated self-signed certificate is rejected. No system trust store is changed.
