@@ -350,15 +350,16 @@ try {
       await tab.send("Page.reload");
       await until("(document.querySelector('.wb-pane[data-active=true] [data-terminal-state-title]')||document.getElementById('gateway-state-title'))?.textContent==='This launch has ended'");
       await capture("expired-light-800");
-      // Coming back to a finished launch, by history, reconnects nothing, whether Chrome reloads it or restores it.
-      const connectsBeforeBack = requests.filter(r => r.url === "/api/connect").length;
+      // Coming back to a finished launch, by history, attaches nothing. Chrome may restore the page or reload it, and a
+      // reload asks once and is refused because its grant is spent, so counting requests would say nothing either way.
+      const opensBeforeBack = audits.filter(kind => kind === "open").length;
       const entries = await tab.send("Page.getNavigationHistory");
       await tab.send("Page.navigate", { url: consoleOrigin + "/sandbox/gateway/return" });
       await until(`location.origin===${JSON.stringify(consoleOrigin)}&&document.readyState==='complete'`);
       await tab.send("Page.navigateToHistoryEntry", { entryId: entries.entries[entries.currentIndex].id });
       await until(`location.origin===${JSON.stringify(gatewayOrigin)}&&document.readyState==='complete'&&document.getElementById('gateway-state')?.hidden===false`);
       assert.equal(await evaluate("document.querySelectorAll('.wb-pane[data-state=ready]').length"), 0, "history restores no terminal");
-      assert.equal(requests.filter(r => r.url === "/api/connect").length, connectsBeforeBack, "history redeems nothing");
+      assert.equal(audits.filter(kind => kind === "open").length, opensBeforeBack, "history opens no attachment");
     }
   }
   stage = "hostile output and keyboard"; await launch();

@@ -13,7 +13,7 @@ export function sandboxBrowserLink(view, shell, { kind = null } = {}) {
   const mode = kind ?? (driver?.watching && driver.by !== view.name ? "watch" : "drive");
   if (!["drive", "watch"].includes(mode) || mode === "watch" && !driver?.watching || mode === "drive" && driver && driver.by !== view.name) return null;
   const href = `/sandbox/gateway/launch?${new URLSearchParams({ host: shell.host, id: shell.id, ...(mode === "watch" ? { kind: "watch" } : {}) })}`;
-  const link = html`<a class="btn btn--sm sandbox-browser sandbox-opener${mode === "watch" ? " sandbox-watch" : ""}" data-sandbox-kind="${mode}" href="${href}" target="${view.query?.gatewaySelect ? "_self" : "_blank"}" rel="noopener noreferrer">${ui.icon(mode === "watch" ? "eye" : "terminal", { size: "sm" })}${mode === "watch" ? "Watch" : "Open in browser"}</a>`;
+  const link = html`<a class="btn btn--sm sandbox-browser sandbox-opener${mode === "watch" ? " sandbox-watch" : ""}" data-sandbox-kind="${mode}" href="${href}" target="${view.query?.gatewaySelect ? "_self" : "_blank"}" rel="noopener noreferrer">${ui.icon(mode === "watch" ? "eye" : "globe", { size: "sm" })}${mode === "watch" ? "Watch" : "Open in browser"}</a>`;
   // A token name can own several sign-ins. It cannot tell this cached view whether the driver is this session.
   // Offer both checked paths in that ambiguous case; the broker alone decides self-watch by original session.
   return kind === null && driver?.watching && driver.by === view.name ? html`${link}${sandboxBrowserLink(view, shell, { kind: "watch" })}` : link;

@@ -1660,6 +1660,19 @@ ${FIT_JS}
     for (var i = 0; i < links.length; i++) if (links[i].getAttribute("href") === href) return links[i];
     return null;
   }
+  // A press and its release must land on the same element for the browser to send a click. A panel swapped between them
+  // replaces that element, so the click goes nowhere and a person's button press silently does nothing. Measured in the
+  // gateway's browser flow, where the Sandboxes page's first live update lost its Open in browser click, and any panel
+  // redrawn on a tick can do the same. So an update waits for the release, however brief the press.
+  var pressed = null;
+  function pressEnded() {
+    if (!pressed) return;
+    pressed = null;
+    later(release, 0);
+  }
+  document.addEventListener("pointerdown", function (event) { pressed = event.target || null; }, true);
+  document.addEventListener("pointerup", pressEnded, true);
+  document.addEventListener("pointercancel", pressEnded, true);
   // Every held panel no longer in use takes its newest update.
   function release() {
     for (var id in pending) {
@@ -2290,7 +2303,9 @@ ${FIT_JS}
       if (!el || !el.hasAttribute("data-panel")) return;
       mark("on");
       unnote("retry");
-      if (inUse(el)) hold(el, msg.html);
+      // Waits without the held note: inserting it would move the very thing being pressed.
+      if (pressed && typeof el.contains === "function" && el.contains(pressed)) pending[el.id] = msg.html;
+      else if (inUse(el)) hold(el, msg.html);
       else swapPanel(el, msg.html);
     });
     es.addEventListener("stale", function (ev) {
