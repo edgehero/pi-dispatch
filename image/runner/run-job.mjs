@@ -1,3 +1,4 @@
+import { canaryLoadOf } from "./src/package-canary.mjs";
 import { installSubscriptionCredentials } from "./src/subscription-credentials.mjs";
 // env-internal PI_SUBSCRIPTION_AUTH: host-approved access snapshot metadata, never an operator override.
 import { verifySubscriptionAuthEntries, installSubscriptionRegistrationGuard } from "./src/community-auth-adapter.mjs";
@@ -452,6 +453,12 @@ async function main() {
 	// Read ONCE, unconditionally: the flow check below needs the loaded set whether or not packages
 	// are staged, and the packages diagnostics block reuses the same bindings.
 	for (const entry of subscriptionEntries) if (entry.provider === "anthropic" && (!cfg.packages.includes(entry.root) || !resourceLoader.getExtensions().extensions.some((extension) => extension.path.startsWith(`${entry.root}/`)))) throw configError("the selected subscription adapter did not load");
+	// Issue #796: a failed load only logs and the job carries on, so a canary says on its exit line whether its candidate really loaded.
+	if (cfg.packageCanary) {
+		const canaryLoad = cfg.packages.includes(cfg.packageCanary) ? canaryLoadOf(cfg.packageCanary, resourceLoader) : "failed";
+		exitWriter.note({ canaryLoad });
+		log("package_canary_load", { load: canaryLoad });
+	}
 	const { skills, diagnostics } = resourceLoader.getSkills();
 
 	// REPORT a flow that resolved in NO tier (issue #189). The trigger's run.flow reaches the model

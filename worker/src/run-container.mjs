@@ -10,6 +10,7 @@ import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-
 import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { authenticExitLines } from "./run-history.mjs";
+import { withCanaryPath } from "./package-canary.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { LIVE_FILE_NAME, stageLiveFile } from "./live-transcript.mjs";
 import { steerTargetOf } from "./inbox-relay.mjs";
@@ -312,6 +313,10 @@ export function makeRunContainer({
 				throw error;
 			}
 		};
+		// Issue #796: a canary's candidate in place of the staged copy, by this layout's own `/job` path, so that it means the same on every venue.
+		const canaryPlan = prepared.packageCanary ?? null;
+		const withCanary = (list) => (canaryPlan ? withCanaryPath(list, canaryPlan, paths.job).paths : list);
+		const canaryPathOf = () => (canaryPlan ? withCanaryPath([], canaryPlan, paths.job).candidate : undefined);
 		const env = beforeSpawn(() => buildContainerEnv({
 			size,
 			provider: job.provider,
@@ -341,7 +346,8 @@ export function makeRunContainer({
 			// reason to make the worker read the manifest on its behalf.
 			// Issue #683: the staged packages' container paths are the overlay's, so on the sandbox layout their prefix moves
 			// with it (`/opt/pi-global` to `/sandbox/pi-global`). A path not under the overlay is passed as it was.
-			packagePaths: (job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths).map((p) => (layout !== "mounts" && typeof p === "string" && p.startsWith(`${CONTAINER_GLOBAL_PI_DIR}/`) ? `${paths.global}${p.slice(CONTAINER_GLOBAL_PI_DIR.length)}` : p)),
+			packagePaths: withCanary((job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths).map((p) => (layout !== "mounts" && typeof p === "string" && p.startsWith(`${CONTAINER_GLOBAL_PI_DIR}/`) ? `${paths.global}${p.slice(CONTAINER_GLOBAL_PI_DIR.length)}` : p))),
+			packageCanaryPath: canaryPathOf(),
 			forwardEnv: job.answerDraft || job.watch || job.questionGrouping ? [] : forwardEnv,
 			// REQ-RESUMABLE-SESSION: the fixed container path, emitted only when this job HAS a transcript file, which
 			// since issue #643 is every prepared job (the live file), resume or not. The constant is imported rather than
@@ -854,12 +860,14 @@ export function makeRunContainer({
 				let recovery = null;
 				// Issue #646: a steer-armed runner's inbox counts (parseExitSteer), `{ delivered, pending }`, or null.
 				let steerCounts = null;
+				// Issue #796: what the runner said of a canary's candidate (parseExitCanaryLoad), or null.
+				let canaryLoad = null;
 				try {
 					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
+					({ canaryLoad = null, turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -878,6 +886,7 @@ export function makeRunContainer({
 					exitOomKilled = false;
 					recovery = null;
 					steerCounts = null;
+					canaryLoad = null;
 					// The sink could not say, and a key was issued: nothing it returned was verified.
 					exitAuthResult = exitKey !== null ? "unverified" : null;
 				}
@@ -901,6 +910,7 @@ export function makeRunContainer({
 					exitOomKilled = false;
 					recovery = null;
 					steerCounts = null;
+					canaryLoad = null;
 				}
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
@@ -934,7 +944,7 @@ export function makeRunContainer({
 				const steerShown = steerCounts !== null && typeof steerCounts === "object" ? { delivered: steerCounts.delivered ?? null, pending: steerCounts.pending ?? null } : null;
 				const steered = steerAsked ? { ...(steerArmed && steerShown !== null ? { steer: steerShown } : {}), ...(steerSkipped !== null ? { steerSkipped } : {}) } : {};
 				// Issue #712: the named live-transcript skip, for the record's `liveSkipped`, only when there was one.
-				const liveShown = liveSkipped !== null ? { liveSkipped } : {};
+				const liveShown = { ...(liveSkipped !== null ? { liveSkipped } : {}), ...(canaryLoad !== null ? { canaryLoad } : {}) };
 				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
 			});
 		});

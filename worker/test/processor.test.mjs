@@ -1986,6 +1986,77 @@ test("a job carrying a dollar cap on an image without `costCap` refuses pre-spen
 
 // ---- REQ-PER-TRIGGER-SKILLS: a trigger that named a skills dir the worker cannot see.
 
+// ---- REQ-PACKAGE-UPDATES (issue #796): a canary spends nothing until its candidate is proven installable.
+
+const CANARY = { name: "@a/b", version: "1.1.0" };
+const canaryRuntime = ({ check = { ok: true, canary: CANARY, replaces: "a__b" }, install = { replaces: "a__b", tree: "a__b--1.1.0--abcd1234" }, calls = [] } = {}) => ({
+	check: async () => { calls.push("canary-check"); if (check instanceof Error) throw check; return check; },
+	install: async (_job, jobDir) => { calls.push("canary-install"); if (install instanceof Error) throw install; return install; },
+});
+
+test("a canary refused for free stops before the mint, the clone and the budget, and is not retried", async () => {
+	for (const reason of ["package-canary-invalid", "package-canary-packages-off", "package-canary-not-staged", "package-canary-adapter", "package-canary-version-missing"]) {
+		const redis = fakeRedis();
+		const { deps: d, calls } = deps({ redis, packageCanary: canaryRuntime({ check: { refused: reason } }) });
+		const r = await runJob({ ...ghJob, packageCanary: CANARY }, d);
+		assert.equal(r.outcome, "policy");
+		assert.equal(r.reason, reason);
+		assert.equal(r.budgetReserved, false);
+		assert.equal(redis.incrCalls, 0, "reserveBudget never reached");
+		assert.deepEqual(calls, [], "no mint, no branch check, no clone, no container");
+	}
+});
+
+test("a registry that cannot be asked retries as infrastructure and has spent nothing (CONST-RETRY-INFRA-ONLY)", async () => {
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, packageCanary: canaryRuntime({ check: new Error("ETIMEDOUT") }) });
+	await assert.rejects(runJob({ ...ghJob, packageCanary: CANARY }, d), (error) => error instanceof InfraRetry && error.reason === "container-never-started" && error.budgetReserved === false);
+	assert.equal(redis.incrCalls, 0);
+	assert.deepEqual(calls, []);
+});
+
+test("a candidate that cannot be installed refuses before the reservation, after the prepare that made its directory", async () => {
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis, packageCanary: canaryRuntime({ install: { refused: "package-canary-refused" } }) });
+	const r = await runJob({ ...ghJob, packageCanary: CANARY }, d);
+	assert.equal(r.reason, "package-canary-refused");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(redis.incrCalls, 0, "no slot was taken");
+	assert.ok(calls.includes("prepare"), "the directory exists");
+	assert.ok(calls.at(-1) === "cleanup", "and is removed on the way out");
+	assert.equal(calls.includes("run"), false, "no container started");
+});
+
+test("an install that fails on infrastructure retries, with no slot taken", async () => {
+	const redis = fakeRedis();
+	const { deps: d } = deps({ redis, packageCanary: canaryRuntime({ install: new Error("ENOTFOUND") }) });
+	await assert.rejects(runJob({ ...ghJob, packageCanary: CANARY }, d), (error) => error instanceof InfraRetry && error.budgetReserved === false);
+	assert.equal(redis.incrCalls, 0);
+});
+
+test("the candidate reaches the container, and what the runner said reaches the result whichever way the job ended", async () => {
+	let seen;
+	const completed = deps({ redis: fakeRedis(), packageCanary: canaryRuntime(), runContainer: async ({ prepared }) => { seen = prepared.packageCanary; return { code: 0, aborted: false, turns: 1, tokens: null, canaryLoad: "loaded" }; } });
+	const r = await runJob({ ...ghJob, packageCanary: CANARY }, completed.deps);
+	assert.deepEqual(seen, { replaces: "a__b", tree: "a__b--1.1.0--abcd1234" });
+	assert.equal(r.outcome, "completed");
+	assert.equal(r.canaryLoad, "loaded");
+	const refused = deps({ redis: fakeRedis(), packageCanary: canaryRuntime(), runContainer: async () => ({ code: 2, aborted: false, turns: 1, tokens: null, exitReason: "cost-cap", canaryLoad: "failed" }) });
+	const policy = await runJob({ ...ghJob, packageCanary: CANARY }, refused.deps);
+	assert.equal(policy.outcome, "policy");
+	assert.equal(policy.canaryLoad, "failed");
+	const infra = deps({ redis: fakeRedis(), packageCanary: canaryRuntime(), runContainer: async () => ({ code: 1, aborted: false, turns: 0, tokens: null, canaryLoad: "loaded" }) });
+	await assert.rejects(runJob({ ...ghJob, packageCanary: CANARY }, infra.deps), (error) => error.canaryLoad === "loaded");
+});
+
+test("a job that is not a canary never asks the runtime anything", async () => {
+	const calls = [];
+	const { deps: d } = deps({ packageCanary: canaryRuntime({ calls }), runContainer: async () => ({ code: 0, aborted: false, turns: 1, tokens: null, canaryLoad: "loaded" }) });
+	const r = await runJob(ghJob, d);
+	assert.deepEqual(calls, []);
+	assert.equal(r.canaryLoad, undefined, "and a line claiming a load on a job that is no canary is not carried");
+});
+
 test("an absent run.skillsDir refuses BEFORE the mint, the clone and the budget", async () => {
 	// Free and determinate -- one lstat -- so it belongs among the free gates and strictly before anything
 	// that spends. Without it the job runs its flow WITHOUT the skills it was written against, writes a

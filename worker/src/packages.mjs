@@ -27,6 +27,7 @@
  *     manifest must degrade to "no staged packages", not crash the worker mid-queue.
  */
 
+import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { configError } from "./config.mjs";
@@ -50,9 +51,7 @@ export const STAGE_MANIFEST = "packages.json";
 export const CONTAINER_PACKAGES_ROOT = `${CONTAINER_GLOBAL_PI_DIR}/${PACKAGES_SUBDIR}`;
 
 /** An exact semver -- prerelease and build metadata allowed, ranges/tags/wildcards are not. */
-export const EXACT_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
-/** An npm package name: lowercase, optionally `@scope/`-prefixed. */
-export const NPM_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+export { EXACT_VERSION_RE, NPM_NAME_RE };
 
 /**
  * The pi resource kinds a package may contribute by convention dir, when it carries no `pi` manifest.

@@ -1,3 +1,4 @@
+import { parseCanaryPath } from "./package-canary.mjs";
 import { parseApprovalEnv } from "./request-approval.mjs";
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -49,6 +50,8 @@ export function parseRunnerEnv(env, { steerFrames = false } = {}) {
 		// INT-CONTAINER-JOB-INPUTS: the staged pi packages this job loads, as ABSOLUTE container paths under
 		// /opt/pi-global/packages. Empty when nothing is staged, or when the trigger opted out.
 		packages: parsePackagePaths(env, "PI_PACKAGES"),
+		// INT-UPDATES-KEYS (issue #796): which of those is a canary's candidate. Null on every other job.
+		packageCanary: parseCanaryPath(env),
 		// INT-SESSION-STORE-CONTRACT: the persisted transcript this job runs on, as an ABSOLUTE container
 		// path under the per-job /session mount. `null` when the trigger did not arm run.resume, which is
 		// the default and is byte-identical to every job before the feature existed.

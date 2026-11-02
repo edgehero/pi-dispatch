@@ -195,6 +195,19 @@ async function argvFor(job, packagePaths = STAGED, factory = {}) {
 	return rec.args;
 }
 
+test("a canary's candidate replaces the staged copy for this job, and a job beside it sees the staged set (issue #796)", { skip }, async () => {
+	const rec = {};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, packagePaths: STAGED, spawnFn: fakeSpawn(rec) });
+	const prepared = { ...PREPARED, packageCanary: { replaces: "pi-lint", tree: "pi-lint--2.0.0--abcd1234" } };
+	await runContainer({ job: JOB, prepared, name: "j1", signal: new AbortController().signal });
+	assert.ok(rec.args.includes("PI_PACKAGES=/opt/pi-global/packages/pi-playwright:/job/canary/pi-lint--2.0.0--abcd1234"), "in its place, and the staged copy is gone");
+	assert.ok(rec.args.includes("PI_PACKAGE_CANARY=/job/canary/pi-lint--2.0.0--abcd1234"));
+	// The same factory, the same overlay, and no candidate: this is the concurrent job.
+	const beside = await argvFor(JOB);
+	assert.ok(beside.includes(PI_PACKAGES_ARG));
+	assert.ok(!beside.some((a) => String(a).startsWith("PI_PACKAGE_CANARY")), "a job that is not a canary names none");
+});
+
 test("packages: true passes the boot-staged set through to the container env", { skip }, async () => {
 	const args = await argvFor({ ...JOB, packages: true });
 	assert.ok(args.includes(PI_PACKAGES_ARG), "an explicitly opted-in job must carry the \":\"-joined staged container paths");

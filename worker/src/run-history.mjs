@@ -1,3 +1,4 @@
+import { CANARY_LOADS, recordedPackageCanary } from "./package-canary-record.mjs";
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 import { ANSWER_ID_RE, ANSWER_RUN_RE } from "./answerer.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
@@ -690,6 +691,12 @@ export function steerCounts(s) {
 	return out.delivered === null && out.pending === null && out.deliveredIds === undefined ? null : out;
 }
 
+/** The decisive exit line's `canaryLoad` (issue #796), `loaded` or `failed`, or null for anything else. Never throws. */
+export function parseExitCanaryLoad(text) {
+	const parsed = decisiveExitLine(text);
+	return CANARY_LOADS.includes(parsed?.canaryLoad) ? parsed.canaryLoad : null;
+}
+
 /** The decisive exit line's `steer` block (`steerCounts`), or null. Never throws. */
 export function parseExitSteer(text) {
 	const parsed = decisiveExitLine(text);
@@ -1144,6 +1151,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// carried it: an older image, one whose supervisor died too, or a venue that hides the cgroup. Produced inside the
 		// job's container, so a job can inflate every number: advisory (docs/insights.md).
 		resources: rebuildResources(source.resources),
+		// Issue #796: a canary's candidate and what the runner said of it. An exact name and version, validated, and a closed word: no attacker-chosen string. Absent on every other run.
+		...(recordedPackageCanary(data.packageCanary, source.canaryLoad) ? { packageCanary: recordedPackageCanary(data.packageCanary, source.canaryLoad) } : {}),
 		// The size the job was given (issue #596, INT-RUN-HISTORY-FILE-CONTRACT): `{ memMiB, cpuCenti, source }`, resolved
 		// at the pickup gate from the limits snapshot and passed in beside `project` (start.mjs `recordRun`), so the record
 		// says what the job was promised next to what it used (`resources`). Additive, nullable, an explicit literal REBUILT
@@ -1545,6 +1554,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			const recovery = parseExitRecovery(exitText);
 			// Issue #646: a steer-armed runner's inbox counts, off the same line.
 			const steer = parseExitSteer(exitText);
+			const canaryLoad = parseExitCanaryLoad(exitText);
 			try {
 				if (stream !== null) {
 					const s = stream;
@@ -1572,7 +1582,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			return { ...(canaryLoad !== null ? { canaryLoad } : {}), turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

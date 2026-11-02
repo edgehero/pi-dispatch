@@ -76,7 +76,8 @@ import { startSandboxPrepareWorker } from "./sandbox-prepare-requests.mjs";
 import { makeSandboxInventory } from "./sandbox-inventory.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { makeDoctorSpawner } from "./doctor-spawner.mjs";
-import { hostHasPending, UPDATES_LOOK_EVERY_HOURS } from "./updates.mjs";
+import { hostHasPending, publishCanaryFacts, UPDATES_LOOK_EVERY_HOURS } from "./updates.mjs";
+import { makePackageCanaryRuntime } from "./package-canary.mjs";
 
 /** How often a host asks whether a person wants something of it, and how long applying it may take: several npm installs on a slow link. */
 const UPDATES_RECONCILE_EVERY_MS = 2 * 60 * 1000;
@@ -3076,6 +3077,7 @@ export async function startWorker(
 			// is how a fact ends up dispatched on one path and hardcoded on another.
 			neverStartedExits: backends.neverStartedExits,
 			checkSandboxWorkspace: (job) => checkSandboxWorkspace(job, { sandboxDir: config.sandboxDir }),
+			packageCanary: makePackageCanaryRuntime({ globalPiDir: config.globalPiDir, env, host: config.workerName, log, publishFacts: (facts) => publishCanaryFacts(redis, facts) }),
 			prepareWorkspace: makePrepareWorkspaceFn({
 				jobsDir: config.jobsDir,
 				// Issue #643: with PI_LIVE_TRANSCRIPTS=0 no live file is staged either, so a job without a resume transcript

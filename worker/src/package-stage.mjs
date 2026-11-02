@@ -80,7 +80,7 @@ function findEscapingEntry(value) {
  * this option must be revisited together with them.
  */
 export function npmExecOptions(platform, staging, { timeoutMs, env } = {}) {
-	return { cwd: staging, ...(platform === "win32" ? { shell: true } : {}), ...(timeoutMs ? { timeout: timeoutMs } : {}), ...(env ? { env } : {}) };
+	return { ...(staging ? { cwd: staging } : {}), ...(platform === "win32" ? { shell: true } : {}), ...(timeoutMs ? { timeout: timeoutMs } : {}), ...(env ? { env } : {}) };
 }
 
 /**
