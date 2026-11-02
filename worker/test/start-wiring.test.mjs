@@ -130,7 +130,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, whileRunning, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, durable = {} } = {}) {
+async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, durable = {} } = {}) {
 	// Every real socket in this helper must use the injected test service, including callers that only override other settings.
 	env = { VALKEY_URL, ...env };
 	const secretsResolverCalls = [];
@@ -329,6 +329,7 @@ async function runStart({ env = {}, whileRunning, makeDoctorSpawner, makeAuth, m
 			...(loadConfig ? { loadConfig } : {}),
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
 			// Issue #712: never a real doctor child under test. A spawner that starts nothing unless a test hands its own.
+			makeUpdatesRunner: makeUpdatesRunner ?? (() => ({ start() {}, runOnce: async () => {}, close: async () => {} })),
 			makeDoctorSpawner: makeDoctorSpawner ?? (() => ({ start() {}, runOnce: async () => {}, close: async () => {} })),
 			...(makeHostRegistry ? { makeHostRegistry } : {}),
 			...(makeScopeClaimSweeper ? { makeScopeClaimSweeper } : {}),
@@ -2292,7 +2293,7 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
 		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
 		// 7 since issue #499's projects watch, registered by the same rule; 8 since issue #712's doctor runs.
-		assert.equal(captured.extraClosers.length, 10 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + one closer per armed watch + the retention sweep + the doctor runs");
+		assert.equal(captured.extraClosers.length, 11 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the updates reconcile + one closer per armed watch + the retention sweep + the doctor runs");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
@@ -2720,7 +2721,7 @@ test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it coul
 	assert.equal(constructions.length, 0, "the factory is never called at all");
 	// No watch files in this env, so the list is just the runtime queue and the registry. The point is
 	// the DELTA against the twin test below: the sweep contributes exactly one closer, or none at 0.
-	assert.equal(captured.extraClosers.length, 5 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the doctor runs (issue #712), and nothing from the sweep");
+	assert.equal(captured.extraClosers.length, 6 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the updates reconcile + the doctor runs (issue #712), and nothing from the sweep");
 	assert.equal(logs.filter((l) => l.event === "retention_sweep").length, 0);
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.equal(started.sweepIntervalHours, 0, "the boot line still SAYS the sweep is off, which is the one visible difference");
@@ -2744,11 +2745,32 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// same closure in the same place.
 	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
 	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "session", "recovery_host_lost"], "boot's own order");
-	assert.equal(captured.extraClosers.length, 6 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the sweep + the doctor runs (no watch files in this env)");
+	assert.equal(captured.extraClosers.length, 7 + await sandboxControlClosers(captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the updates reconcile + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
 });
 
 // ── issue #712: the worker's own doctor runs ─────────────────────────────────────────────────────────
+
+test("the look stays off until PI_UPDATES_LOOK=1, and the reconcile asks a free question before it starts anything (issue #796)", async () => {
+	const seen = [];
+	const runner = (args) => {
+		const handle = { args, started: false, start() { handle.started = true; }, runOnce: async () => {}, close: async () => {} };
+		seen.push(handle);
+		return handle;
+	};
+	const off = await runStart({ makeUpdatesRunner: runner });
+	assert.deepEqual(seen.map((h) => h.args.args), [["updates", "reconcile"]], "off by default: no look, and so no request to any registry");
+	const reconcile = seen[0];
+	assert.ok(reconcile.started && off.captured.extraClosers.includes(reconcile), "started, and closed with the worker");
+	assert.equal(typeof reconcile.args.shouldRun, "function", "no child starts until a person has asked for something");
+	assert.match(reconcile.args.cliPath, /[\\/]worker[\\/]src[\\/]cli\.mjs$/);
+	seen.length = 0;
+	const on = await runStart({ env: { PI_UPDATES_LOOK: "1" }, makeUpdatesRunner: runner });
+	assert.deepEqual(seen.map((h) => h.args.args), [["updates", "look"], ["updates", "reconcile"]]);
+	assert.equal(seen[0].args.intervalMs, 24 * 3600000, "once a day");
+	assert.equal(seen[0].args.shouldRun, undefined);
+	assert.ok(on.captured.extraClosers.includes(seen[0]));
+});
 
 test("the default arms the doctor runs daily on the worker's own CLI and registers them as a closer; 0 constructs nothing", { skip }, async () => {
 	const constructions = [];
@@ -2771,7 +2793,7 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	const off = [];
 	const second = await runStart({ env: { PI_DOCTOR_INTERVAL_HOURS: "0" }, makeDoctorSpawner: (args) => (off.push(args), { start() {}, close: async () => {} }) });
 	assert.equal(off.length, 0, "at 0 the factory is never called: no timer, no closer, no child");
-	assert.equal(second.captured.extraClosers.length, 5 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the sweep");
+	assert.equal(second.captured.extraClosers.length, 6 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + watch recovery drainer + answer draft drainer + the updates reconcile + the sweep");
 	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
 });
 

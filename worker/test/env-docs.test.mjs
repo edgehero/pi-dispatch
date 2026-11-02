@@ -563,7 +563,7 @@ test("no assignment in .env.example carries an inline comment, live or commented
 	// PI_SANDBOX_HOSTS_FILE adds the operator-only Fleet opener mapping (#771).
 	// PI_AUTH_CONNECTIONS_FILE and PI_AUTH_STORE_DIR add the host-owned subscription boundary (#781).
 	// PI_SANDBOX_GATEWAYS_FILE adds the hand-owned browser gateway enrollment (#754).
-	assert.equal(scanned, 131, "the scan must actually reach every assignment in the file");
+	assert.equal(scanned, 134, "the scan must actually reach every assignment in the file");
 	assert.match("  PI_X=1 # c", /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses, indented or not");
 
 	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM

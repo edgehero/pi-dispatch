@@ -11497,13 +11497,13 @@ Deleting every `updates:*` key changes no job: a job reads only the stage manife
 updates:hosts                     SET    host names that have published a look; the reader prunes
 updates:h:<host>                  STRING one JSON look record, kept 7 days from its last publish; stale past two intervals
 updates:generation                STRING the newest desired generation (INCR)
-updates:desired                   HASH   package name -> { v, generation, name, version, op: "adopt"|"undo", by, at }
+updates:desired                   HASH   package name -> { v, generation, name, version, op: "adopt"|"undo", by, at, undoOf?, request }
 updates:applied:<host>            HASH   package name -> { v, generation, state, version, reason, digest, at }, kept 90 days from its last write
 updates:canary:<name>@<version>   STRING { v, host, digest, excerpt, at }, kept 30 days; excerpt is at most 2000 characters with control characters removed
 ```
 
 `state` is one of `adopted`, `undone`, `no-change`, `cannot-adopt`. A host with no row at the newest generation is pending, and pending past 24 hours reads as overdue. `reason` is a closed word:
-`overlay-read-only`, `no-overlay`, `no-packages-file`, `adapter`, `not-staged-here`, `version-not-found` or `not-a-pi-package`. A lock held by a peer or a registry that cannot be reached is no state at all: the
+`no-overlay`, `overlay-read-only`, `packages-file-unusable`, `adapter`, `not-staged-here`, `version-not-found` or `stage-refused`. A lock held by a peer or a registry that cannot be reached is no state at all: the
 host stays pending and tries again. A look record's strings are rebuilt on read: names and versions must match `NPM_NAME_RE` and `EXACT_VERSION_RE`, and each state is a closed word
 (`read`: `ok`, `unknown`; `checks`: `passing`, `failing`, `pending`, `unknown`; a host's pi: `same`, `newer`, `older`, `absent`, `unknown`).
 

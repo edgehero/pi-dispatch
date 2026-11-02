@@ -173,6 +173,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		return runImportPi(argv.slice(1), { env });
 	}
 
+	if (cmd === "updates") {
+		const { runUpdatesCli } = await import("./updates-cli.mjs");
+		return runUpdatesCli(argv.slice(1), { env });
+	}
+
 	if (cmd === "sandbox") {
 		const { runSandbox } = await import("./sandbox-cli.mjs");
 		return runSandbox(argv.slice(1), { env });
