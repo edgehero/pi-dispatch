@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { fakeNpm } from "./helpers/fake-npm.mjs";
 import { makePackageCanaryRuntime, parsePackageCanary, readChangelog, recordedPackageCanary, stagedContainerPath, withCanaryPath } from "../src/package-canary.mjs";
 import { buildRecord, parseExitCanaryLoad } from "../src/run-history.mjs";
 import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
@@ -16,25 +17,7 @@ function overlay(packages = [{ name: "@a/b", version: "1.0.0", dir: "a__b--1.0.0
 	fs.writeFileSync(join(globalPiDir, "packages", "packages.json"), JSON.stringify({ stagedAt: "x", packages }));
 	return globalPiDir;
 }
-/** npm: `view` answers from `view`, and `install` writes the package into its working directory. */
-const npm = ({ view = { stdout: '"1.1.0"' }, install = null, files = {} } = {}) => {
-	const calls = [];
-	return { calls, exec: async (_bin, args, options) => {
-		calls.push({ args, options });
-		if (args[0] === "view") {
-			if (view instanceof Error) throw view;
-			return view;
-		}
-		if (install instanceof Error) throw install;
-		const spec = args[1], at = spec.lastIndexOf("@"), name = spec.slice(0, at), version = spec.slice(at + 1);
-		const root = join(options.cwd, "node_modules", name);
-		fs.mkdirSync(root, { recursive: true });
-		fs.writeFileSync(join(root, "package.json"), JSON.stringify({ name, version, pi: { extensions: ["index.js"] }, ...(install ?? {}) }));
-		fs.writeFileSync(join(root, "index.js"), "export default () => {};\n");
-		for (const [file, text] of Object.entries(files)) fs.writeFileSync(join(root, file), text);
-		return { stdout: "" };
-	} };
-};
+const npm = ({ view, install = null, files } = {}) => fakeNpm({ view, files, fail: install ? { "1.1.0": install.stderr ?? install.message } : {} });
 const runtime = (over = {}) => makePackageCanaryRuntime({ globalPiDir: overlay(), env: { PATH: "/bin", GITHUB_TOKEN: "ghp_secret", ANTHROPIC_API_KEY: "k" }, platform: "linux", host: "mini1", now: () => NOW, ...over });
 
 test("the job field is rebuilt: one package at one exact version, or nothing", () => {
@@ -91,6 +74,8 @@ test("an Adopt that moved the manifest since the check still leaves one copy of 
 
 test("a job that manifest no longer holds the package for still loads the candidate", () => {
 	assert.deepEqual(withCanaryPath([], PLAN, "/job").paths, ["/job/canary/a__b--1.1.0--bbbbbbbb"]);
+	const beside = ["/opt/pi-global/packages/foo--bar--1.0.0--aaaaaaaa", "/opt/pi-global/packages/foo--1.0.0--bbbbbbbb"];
+	assert.deepEqual(withCanaryPath(beside, { replaces: "foo--1.0.0--bbbbbbbb", tree: "foo--2.0.0--cccccccc" }, "/job").paths, ["/opt/pi-global/packages/foo--bar--1.0.0--aaaaaaaa", "/job/canary/foo--2.0.0--cccccccc"], "foo--bar is another package, though its name starts the same");
 });
 
 test("each layout's own /job names the candidate", () => {
@@ -106,6 +91,7 @@ test("every free refusal is a closed reason, before npm is asked anything that c
 	assert.deepEqual(await check({ packageCanary: { name: "<b>", version: "1.0.0" } }), { refused: "package-canary-invalid" });
 	assert.deepEqual(await check({ packageCanary: CANARY, packages: false }), { refused: "package-canary-packages-off" });
 	assert.deepEqual(await check({ packageCanary: { name: "pi-anthropic-oauth", version: "0.3.7" } }), { refused: "package-canary-adapter" });
+	assert.deepEqual(await check({ packageCanary: CANARY, resume: true }), { refused: "package-canary-resume" }, "its next run would continue the candidate's work");
 	assert.deepEqual(await check({ packageCanary: { name: "absent", version: "1.0.0" } }), { refused: "package-canary-not-staged" });
 	assert.deepEqual(await check({ packageCanary: CANARY }, { globalPiDir: undefined }), { refused: "package-canary-not-staged" });
 	assert.equal(fake.calls.length, 0, "none of these needed the registry");
@@ -141,6 +127,7 @@ test("the candidate lands under this job's directory, the overlay is untouched, 
 	assert.deepEqual(fs.readdirSync(join(globalPiDir, "packages")), ["packages.json"], "a concurrent job, which mounts the overlay whole, cannot see it");
 	assert.ok(fake.calls[0].args.includes("--ignore-scripts"));
 	assert.deepEqual(Object.keys(fake.calls[0].options.env), ["PATH"]);
+	assert.deepEqual(fake.calls.map((call) => call.args[0]), ["install", "config", "ci"], "resolved and judged before anything is installed");
 	assert.equal(published.length, 1);
 	assert.equal(published[0].name, "@a/b");
 	assert.equal(published[0].host, "mini1");
@@ -158,14 +145,10 @@ test("a failure to publish the facts costs a line on the page, never the job", a
 
 test("an install's failure says which kind it is", async () => {
 	const install = (exec) => runtime({ exec }).install({ packageCanary: CANARY }, tempDir("canary-job-"), { replaces: "x" });
-	assert.deepEqual(await install(npm({ install: Object.assign(new Error("x"), { stderr: "npm error code ETARGET" }) }).exec), { refused: "package-canary-version-missing" });
-	await assert.rejects(install(npm({ install: Object.assign(new Error("x"), { stderr: "npm error code ECONNRESET" }) }).exec), (error) => error.kind === "infra");
-	const notPi = async (_bin, args, options) => {
-		const spec = args[1], at = spec.lastIndexOf("@"), name = spec.slice(0, at), version = spec.slice(at + 1);
-		const root = join(options.cwd, "node_modules", name);
-		fs.mkdirSync(root, { recursive: true });
-		fs.writeFileSync(join(root, "package.json"), JSON.stringify({ name, version }));
-	};
+	assert.deepEqual(await install(npm({ install: { stderr: "npm error code ETARGET" } }).exec), { refused: "package-canary-version-missing" });
+	await assert.rejects(install(npm({ install: { stderr: "npm error code ECONNRESET" } }).exec), (error) => error.kind === "infra");
+	assert.deepEqual(await install(fakeNpm({ resolved: { resolved: "git+https://example.invalid/x.git#abc" } }).exec), { refused: "package-canary-refused" }, "a tree holding a git dependency installs nothing");
+	const notPi = fakeNpm({ materialize: (root, name, version) => fs.writeFileSync(join(root, "package.json"), JSON.stringify({ name, version })) }).exec;
 	assert.deepEqual(await install(notPi), { refused: "package-canary-refused" });
 });
 
@@ -179,15 +162,27 @@ test("a changelog is read as pi finds it, inside its package, and bounded", () =
 	assert.equal(readChangelog(root), "declared");
 	write({}, {});
 	assert.equal(readChangelog(root), "default");
-	write({ pi: { changelogPath: "../../etc/passwd" } });
+	// Real files out there, so that these are refused for where they point and not because they are not found.
+	const outside = tempDir("canary-changelog-outside-");
+	fs.writeFileSync(join(outside, "secret.txt"), "a file of this host");
+	write({ pi: { changelogPath: relative(root, join(outside, "secret.txt")) } });
 	assert.equal(readChangelog(root), null, "a path that leaves the package is ignored");
-	write({ pi: { changelogPath: "/etc/passwd" } });
+	write({ pi: { changelogPath: join(outside, "secret.txt") } });
 	assert.equal(readChangelog(root), null);
 	fs.symlinkSync("/etc/hosts", join(root, "LINK.md"));
 	write({ pi: { changelogPath: "LINK.md" } });
 	assert.equal(readChangelog(root), null, "a link could point anywhere on the host");
+	const elsewhere = tempDir("canary-changelog-elsewhere-");
+	fs.writeFileSync(join(elsewhere, "secret.txt"), "a file of this host");
+	fs.symlinkSync(elsewhere, join(root, "linked-dir"));
+	write({ pi: { changelogPath: "linked-dir/secret.txt" } });
+	assert.equal(readChangelog(root), null, "a link earlier in the path reaches the host just the same");
 	write({ pi: { changelogPath: "BIG.md" } }, { "BIG.md": "x".repeat(1024 * 1024) });
 	assert.equal(readChangelog(root).length, 2000);
+	let asked = 0;
+	const counting = { ...fs, readSync(handle, buffer, offset, length, position) { asked += length; return fs.readSync(handle, buffer, offset, length, position); } };
+	readChangelog(root, counting);
+	assert.ok(asked > 0 && asked <= 64 * 1024, "a huge changelog is not read whole");
 	fs.rmSync(join(root, "package.json"));
 	assert.equal(readChangelog(root), null);
 });

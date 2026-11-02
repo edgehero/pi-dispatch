@@ -77,7 +77,7 @@ function spyJob(data) {
 
 test("a job whose dataVersion is above this build's waits ten minutes for an upgrade, before any gate or spend", { skip }, async () => {
 	const { processor, seen } = harness();
-	const { job, moves } = spyJob({ kind: "github", repo: "acme/web", target: { number: 1 }, flow: "fix", dataVersion: 2, trigger: { deliveryId: "d", sender: { id: 1 } } });
+	const { job, moves } = spyJob({ kind: "github", repo: "acme/web", target: { number: 1 }, flow: "fix", dataVersion: 3, trigger: { deliveryId: "d", sender: { id: 1 } } });
 	await assert.rejects(() => processor(job, "the-token", new AbortController().signal), (err) => err.name === "DelayedError");
 	assert.deepEqual(moves, [{ ts: NOW + mod.NEWER_RELEASE_RECHECK_MS, tok: "the-token" }]);
 	assert.equal(mod.NEWER_RELEASE_RECHECK_MS, 600_000);

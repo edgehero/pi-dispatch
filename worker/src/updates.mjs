@@ -19,7 +19,6 @@ export const updatesAppliedKey = (host) => `updates:applied:${host}`;
 export const updatesCanaryKey = (name, version) => `updates:canary:${name}@${version}`;
 
 export const UPDATES_LOOK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-export const UPDATES_APPLIED_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 export const UPDATES_CANARY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** A host with no row at the newest generation is pending; this long after the request it reads as overdue, never as lost. */
 export const UPDATES_OVERDUE_MS = 24 * 60 * 60 * 1000;
@@ -53,7 +52,7 @@ function bounded(promise, timeoutMs = OP_TIMEOUT_MS) {
 	});
 }
 
-/** A version's order. A pre-release sorts before its release, as semver says. Build metadata does not order. */
+/** A version's order, as semver says: a pre-release sorts before its release, its dot-separated parts compared in turn, numbers as numbers and below words. Build metadata does not order. */
 export function compareVersions(a, b) {
 	const parts = (v) => {
 		const [core, pre = null] = String(v).split("+")[0].split(/-(.*)/s);
@@ -66,7 +65,17 @@ export function compareVersions(a, b) {
 	if (x.pre === y.pre) return 0;
 	if (x.pre === null) return 1;
 	if (y.pre === null) return -1;
-	return x.pre < y.pre ? -1 : 1;
+	const xs = x.pre.split("."), ys = y.pre.split(".");
+	for (let i = 0; i < Math.max(xs.length, ys.length); i += 1) {
+		if (xs[i] === undefined) return -1;
+		if (ys[i] === undefined) return 1;
+		if (xs[i] === ys[i]) continue;
+		const xn = /^\d+$/.test(xs[i]), yn = /^\d+$/.test(ys[i]);
+		if (xn && yn) return Number(xs[i]) < Number(ys[i]) ? -1 : 1;
+		if (xn !== yn) return xn ? -1 : 1;
+		return xs[i] < ys[i] ? -1 : 1;
+	}
+	return 0;
 }
 
 /** One look record, rebuilt from anything: `null` unless its frame is whole, and an unknown word degrades to `unknown`, never to a good state. */
@@ -134,20 +143,27 @@ export function parseDesired(text) {
 }
 
 /**
- * The generation and its row in ONE script. INCR then HSET as two commands would let two concurrent requests land in the wrong order, leaving the older
- * one as the row with the newer one's generation lost, and every host would then reconcile to what nobody last asked for.
+ * The generation and its row in ONE script. INCR then HSET as two commands would let two concurrent requests land in the wrong order, leaving the older one as the row with the
+ * newer one's generation lost, and every host would then reconcile to what nobody last asked for. `expectGeneration` makes it a compare and set: what a person's preview was shown has to
+ * still be the row, or nothing is written and it answers 0 (a racing Undo would otherwise overwrite an Adopt it never saw).
  */
-const SET_DESIRED = `local g = redis.call('INCR', KEYS[1])
+const SET_DESIRED = `if ARGV[3] ~= '' then
+  local current = redis.call('HGET', KEYS[2], ARGV[1])
+  local generation = 0
+  if current then generation = cjson.decode(current).generation end
+  if string.format('%d', generation) ~= ARGV[3] then return 0 end
+end
+local g = redis.call('INCR', KEYS[1])
 local row = cjson.decode(ARGV[2])
 row.generation = g
 redis.call('HSET', KEYS[2], ARGV[1], cjson.encode(row))
 return g`;
 
-/** Record what a person asked for, and return its generation. */
-export async function setDesired(redis, { name: pkg, version: at, op, by, at: when, undoOf = null, from = null }) {
+/** Record what a person asked for, and return its generation, or 0 when `expectGeneration` no longer holds. */
+export async function setDesired(redis, { name: pkg, version: at, op, by, at: when, undoOf = null, from = null, expectGeneration = null }) {
 	const row = { v: 1, generation: 1, name: pkg, version: at, op, by, at: when, ...(undoOf === null ? {} : { undoOf }), ...(from === null ? {} : { from }), request: randomUUID() };
 	if (!parseDesired(row)) throw new Error("not a desired version");
-	return await bounded(redis.eval(SET_DESIRED, 2, UPDATES_GENERATION, UPDATES_DESIRED, pkg, JSON.stringify(row)));
+	return await bounded(redis.eval(SET_DESIRED, 2, UPDATES_GENERATION, UPDATES_DESIRED, pkg, JSON.stringify(row), expectGeneration === null ? "" : String(expectGeneration)));
 }
 
 /** Every desired row, or `null` when Valkey could not answer. An unreadable row is one nobody can act on, so it is left out. */
@@ -177,8 +193,8 @@ export function parseApplied(text) {
 export async function writeApplied(redis, host, pkg, row) {
 	const parsed = parseApplied(row);
 	if (!parsed || !WORKER_NAME_RE.test(host) || !name(pkg)) throw new Error("not an applied row");
+	// No expiry: a row's expiry would have this host read an old desired row as new, with nobody looking. A host holds one small row per package.
 	await bounded(redis.hset(updatesAppliedKey(host), pkg, JSON.stringify(parsed)));
-	await bounded(redis.pexpire(updatesAppliedKey(host), UPDATES_APPLIED_TTL_MS));
 }
 
 /** `{ <package>: row }` for one host, or `null` when Valkey could not answer. */

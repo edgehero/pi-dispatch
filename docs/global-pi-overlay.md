@@ -371,6 +371,8 @@ run **as you, on your host**, at stage time. The honest cost: a package that nee
 optional dependency, is staged **INCOMPLETE** and may fail at run time. `import-pi` prints a `WARN` line
 naming any package that declares one, so you learn it at stage time instead of mid-job.
 
+**One thing `--ignore-scripts` does not stop.** npm runs a **git dependency's** `prepare` script to build it, whatever that flag says, and a dependency given as a tarball URL has npm fetch that URL. `import-pi` is something you run at your own keyboard, so it installs as npm does: read what you stage. The console's [canary and Adopt](console.md#updates) run as a service, so they resolve the tree first without running anything, and refuse a package whose tree holds anything but registry tarballs with a hash.
+
 Two more things worth knowing before you arm one:
 
 - **A staged skill cannot take a repo or overlay skill's name.** The rule on this page holds for packages

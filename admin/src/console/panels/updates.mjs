@@ -63,13 +63,14 @@ function packageCells(row, view) {
 	const canary = row.canary;
 	const facts = row.facts?.excerpt ? html`<details class="up-excerpt"><summary>What changed, from its changelog</summary>${row.facts.excerpt}</details>` : null;
 	const adopt = may && !row.adapter && row.newest ? actForm("package-adopt", { hidden: [["name", row.name], ["version", row.newest]], label: "Adopt" }) : null;
+	const undoToo = (action) => (may && row.desired?.op === "adopt" ? html`${action}${undoForm(row)}` : action);
 	const again = may && !row.adapter && row.newest ? canaryForm(row, view) : null;
 	const openVersion = row.newest ? ui.outLink({ href: packageHref(row.name, row.newest), label: "This version" }) : null;
 	switch (row.state) {
 		case "current": return [versions(row.version), line("ok", "done", "The newest version."), null];
-		case "newer": return [versions(row.version, row.newest), row.adapter ? html`<span class="muted">A reviewed subscription adapter. It moves with a pi-dispatch release.</span>` : html`<span class="muted">Not tried yet. A canary runs one paid job with it, for that job only. ${openVersion}</span>`, again];
-		case "canary-completed": return [versions(row.version, row.newest), html`<p>${line("ok", "done", html`Canary completed, read the run: ${runLink(canary.jobId)}${money(canary.costUsd) ? `, ${money(canary.costUsd)}` : ""}.`)}</p>${facts}`, adopt];
-		case "canary-failed": return [versions(row.version, row.newest), html`<p>${line("failed", "failed", canary.why === "did-not-load" ? html`Canary failed: the candidate did not load. ${runLink(canary.jobId)}` : html`Canary failed: the run did not complete. ${runLink(canary.jobId)}`)}</p>`, again];
+		case "newer": return [versions(row.version, row.newest), row.adapter ? html`<span class="muted">A reviewed subscription adapter. It moves with a pi-dispatch release.</span>` : html`<span class="muted">Not tried yet. A canary runs one paid job with it, for that job only. ${openVersion}</span>`, undoToo(again)];
+		case "canary-completed": return [versions(row.version, row.newest), html`<p>${line("ok", "done", html`Canary completed, read the run: ${runLink(canary.jobId)}${money(canary.costUsd) ? `, ${money(canary.costUsd)}` : ""}.`)}</p>${facts}`, undoToo(adopt)];
+		case "canary-failed": return [versions(row.version, row.newest), html`<p>${line("failed", "failed", canary.why === "did-not-load" ? html`Canary failed: the candidate did not load. ${runLink(canary.jobId)}` : html`Canary failed: the run did not complete. ${runLink(canary.jobId)}`)}</p>`, undoToo(again)];
 		case "adopting": return [versions(row.desired.from ?? row.version, row.desired.version), html`<p>${line("attention", "attention", `Adopting ${row.desired.version}: ${done} of ${row.standings.length} hosts so far.`)}</p>${standingsList(row)}`, may ? undoForm(row) : null];
 		case "adopted": return [versions(row.desired.version), html`<p>${line("ok", "done", `Adopted by ${row.desired.by} on every host.`)}</p>${row.differs ? html`<p class="muted">The adopted tree is not the tree the canary ran: a package's dependencies float, so they can differ. Read the run again if this matters.</p>` : null}`, may ? undoForm(row) : null];
 		case "partial": return [versions(row.desired.from ?? row.version, row.desired.version), html`<p>${line("attention", "attention", `${row.desired.op === "undo" ? "Undoing" : "Adopting"} ${row.desired.version}: ${done} of ${row.standings.length} hosts.`)}</p>${standingsList(row)}`, may && row.desired.op === "adopt" ? undoForm(row) : null];
@@ -108,6 +109,7 @@ export function updatesProblems(view) {
 	if (!v) return ui.banner({ status: "attention", title: "Update facts unavailable", body: "The console could not read this page's sources. Reload to try again." });
 	const shown = [];
 	if (v.state === "unknown") shown.push(ui.banner({ status: "attention", title: "The look could not be read", body: "Valkey did not answer, so what is newest is unknown here. Reload to try again." }));
+	if (v.desiredUnreadable && v.state !== "unknown") shown.push(ui.banner({ status: "attention", title: "What people asked for could not be read", body: "Valkey did not answer that read, so an Adopt in progress may not show here. Reload to try again." }));
 	if (v.pi.state === "checks-failing") shown.push(ui.banner({ status: "attention", title: `pi ${v.pi.newest} is out, and pi-dispatch's checks on it fail`, body: `Jobs stay on pi ${v.pi.pinned}. The bump pull request lists what broke; it ships in a pi-dispatch release once it is green.`, actions: ui.outLink({ href: BUMP_PULL_REQUESTS, label: "Open the bump pull request", btn: [] }) }));
 	const stuck = v.packages.filter((p) => p.state === "partial" || p.standings.some((s) => s.state === "overdue"));
 	for (const p of stuck) shown.push(ui.banner({ status: "attention", title: `${p.name} is not the same on every host`, body: "Each host's state is on its row below. A job on a host that has not adopted keeps the version it had." }));
@@ -149,7 +151,7 @@ export function updatesHosts(view) {
 	if (!v) return ui.card({ title: "pi on each host", body: unreadable() });
 	const rows = v.hosts.map((h) => ({ cells: [what(h.name, "worker host"), h.version ? versions(h.version) : html`<span class="muted">none</span>`, lineCell(hostSentence(h, view))] }));
 	const body = ui.tbl({ label: "pi on each host", heads: ["Host", "pi", { label: "" }], rows, stack: true, empty: v.state === "not-looking" ? "No host has looked yet, so nothing is known about the pi on each host." : "No host's look could be read." });
-	return ui.card({ title: "pi on each host", sub: "where /dispatch and the host files run", body: html`${body}<p class="up-foot">${ui.icon("info", { size: "sm" })}<span>Your own pi is yours to update, for example with <span class="code">pi update --all</span>. pi-dispatch reads its version and whether its host files still hold.</span></p>` });
+	return ui.card({ title: "pi on each host", sub: "where /dispatch and the host files run", body: html`${body}${v.moreHosts > 0 ? html`<p class="note">And ${String(v.moreHosts)} more hosts, past what this page reads.</p>` : null}<p class="up-foot">${ui.icon("info", { size: "sm" })}<span>Your own pi is yours to update, for example with <span class="code">pi update --all</span>. pi-dispatch reads its version and whether its host files still hold.</span></p>` });
 }
 
 export function updatesHow(view) {

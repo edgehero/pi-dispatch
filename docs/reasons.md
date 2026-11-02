@@ -780,6 +780,12 @@ Refused: this trigger sets `run.packages: false`, so it has no staged copy for a
 
 What to do: run the canary as a trigger that loads staged packages.
 
+### package-canary-resume
+
+Refused: this trigger resumes its transcript, so its next run would continue the candidate's work, and a canary is for one job. Nothing was spent.
+
+What to do: run the canary as a trigger that does not resume.
+
 ### package-canary-not-staged
 
 Refused: this package is not staged on the host that took the canary, so there is nothing for the candidate to replace. Nothing was spent.

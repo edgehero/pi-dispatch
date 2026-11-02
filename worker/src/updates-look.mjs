@@ -22,7 +22,7 @@ const MAX_BYTES = 1024 * 1024;
 
 /**
  * The members of pi's extension API the admin extension needs, by the names `USED_API` declares in `admin/src/index.ts`. A dependency points from admin
- * to the worker, so this is a copy, bolted to that list by `admin/test/updates-view.test.mjs`. A look runs no pi and loads no extension, so
+ * to the worker, so this is a copy, bolted to that list by `admin/test/updates-view.test.mjs`. A look starts pi only to ask its version and loads no extension, so
  * it can only say whether the host's pi still defines them: the real probe is the extension's own at load.
  */
 export const ADMIN_USED_API = Object.freeze(["registerCommand", "registerTool", "sendMessage", "on"]);

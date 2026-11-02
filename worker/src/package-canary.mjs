@@ -6,7 +6,7 @@
  *
  * THE SPENDING ORDER, stated exactly because `CONST-BUDGET-BEFORE-TOKENS` is about this. Every free determinate refusal, including that the exact version exists, runs before the
  * token mint (`check`). The install needs the job directory, which on a job with a forge token comes after the mint, so it runs before the budget reservation and not before the
- * mint (`install`). No money is spent before the candidate is proven installable, and the token minted first is revoked with the job as on any refusal after the mint.
+ * mint (`install`). No money is spent before the candidate is proven installable. A token minted first simply expires, as on any refusal after the mint.
  */
 import * as nodeFs from "node:fs";
 import { execFile } from "node:child_process";
@@ -14,13 +14,13 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { CONTAINER_PACKAGES_ROOT, readStageManifest, stagedDirName } from "./packages.mjs";
 import { parsePackageCanary } from "./package-canary-record.mjs";
-import { PackageStageError, SERVICE_NPM_TIMEOUT_MS, npmExecOptions, npmFailureKind, serviceNpmEnv, stagePackageTree, treeDigest } from "./package-stage.mjs";
+import { PackageStageError, SERVICE_NPM_TIMEOUT_MS, npmExecOptions, npmFailureKind, serviceNpmEnv, stagePackageTree, stagedStem, treeDigest } from "./package-stage.mjs";
 import { isSubscriptionAdapter } from "./updates-reconcile.mjs";
 import { changelogExcerpt } from "./updates.mjs";
 
 export { CANARY_LOADS, CANARY_RECORD_LOADS, parsePackageCanary, recordedPackageCanary } from "./package-canary-record.mjs";
 export const PACKAGE_CANARY_SUBDIR = "canary";
-export const PACKAGE_CANARY_REASONS = Object.freeze(["package-canary-invalid", "package-canary-packages-off", "package-canary-not-staged", "package-canary-adapter", "package-canary-version-missing", "package-canary-refused"]);
+export const PACKAGE_CANARY_REASONS = Object.freeze(["package-canary-invalid", "package-canary-packages-off", "package-canary-resume", "package-canary-not-staged", "package-canary-adapter", "package-canary-version-missing", "package-canary-refused"]);
 
 /** The most of a changelog read, so a huge one costs nothing. What is kept of it is `changelogExcerpt`'s. */
 const CHANGELOG_READ_MAX = 64 * 1024;
@@ -30,8 +30,7 @@ const CHANGELOG_READ_MAX = 64 * 1024;
  * manifest on since the free check. A candidate loaded beside the staged copy it was meant to replace is the one thing this must never allow.
  */
 function sameStagedPackage(path, replaces) {
-	const stem = (dir) => dir.replace(/--[^/]*--[0-9a-f]{8}$/, "");
-	return typeof path === "string" && stem(basename(path)) === stem(replaces);
+	return typeof path === "string" && stagedStem(basename(path)) === stagedStem(replaces);
 }
 
 /** The job's package list with the candidate in place of the staged copy. In its place, not appended: package order is pi's load order. */
@@ -57,6 +56,9 @@ export function readChangelog(root, fs = nodeFs) {
 		const declared = typeof pkg?.pi?.changelogPath === "string" ? pkg.pi.changelogPath : "CHANGELOG.md";
 		if (declared.startsWith("/") || declared.split(/[\\/]/).includes("..")) return null;
 		const path = join(root, declared);
+		// Where it really is, not where it says: a link anywhere along the path, not only its last part, could reach any file on this host, and this text goes to every viewer.
+		const real = fs.realpathSync(path);
+		if (!real.startsWith(`${fs.realpathSync(root)}/`) && !real.startsWith(`${fs.realpathSync(root)}\\`)) return null;
 		const stat = fs.lstatSync(path);
 		if (!stat.isFile()) return null;
 		const handle = fs.openSync(path, "r");
@@ -85,6 +87,8 @@ export function makePackageCanaryRuntime({ globalPiDir, env = process.env, exec 
 			if (!canary) return { refused: "package-canary-invalid" };
 			// A trigger that withholds staged packages has no staged copy to replace, and a run of it would prove nothing about the job this package goes into.
 			if (job.packages === false) return { refused: "package-canary-packages-off" };
+			// A resuming trigger's next tick continues the transcript this job writes, with the candidate's work in it, so its effects would outlive the one job a person agreed to.
+			if (job.resume === true) return { refused: "package-canary-resume" };
 			if (isSubscriptionAdapter(canary.name)) return { refused: "package-canary-adapter" };
 			const manifest = globalPiDir ? readStageManifest({ globalPiDir, readFile: (p, e) => fs.readFileSync(p, e), fileExists: (p) => fs.existsSync(p) }) : null;
 			const staged = manifest?.packages.find((p) => p.name === canary.name) ?? null;
@@ -115,7 +119,7 @@ export function makePackageCanaryRuntime({ globalPiDir, env = process.env, exec 
 			const root = join(packagesRoot, tree);
 			try {
 				// The excerpt is a third party's text, so it goes beside the host's facts and never on the run record. Display only: a failure costs the page a line.
-				await publishFacts({ ...canary, host, digest: treeDigest(root, { fs }), excerpt: readChangelog(root, fs), at: now() });
+				await publishFacts({ ...canary, host, digest: await treeDigest(root, { fs }), excerpt: readChangelog(root, fs), at: now() });
 			} catch {
 				log("package_canary_facts_unpublished", {});
 			}

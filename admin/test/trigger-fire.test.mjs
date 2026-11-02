@@ -72,8 +72,9 @@ test("a canary is the same template with one more field, under an identity of it
   assert.equal(res.ok, true, "a fire in the same minute does not swallow it");
   assert.notEqual(res.jobId, fired.jobId);
   assert.match(res.jobId, /^manual:daily:\d+$/, "every reader that attributes a run to its trigger still does");
-  const { enqueueNonce, packageCanary, ...data } = f.adds[1].data;
+  const { enqueueNonce, packageCanary, dataVersion, ...data } = f.adds[1].data;
   assert.deepEqual(packageCanary, canary);
+  assert.equal(dataVersion, 2, "a worker from before canaries waits for an upgrade instead of paying for a plain run");
   assert.deepEqual(data, plan.schedule.data, "nothing else about the job moves");
   assert.equal(f.adds[0].data.packageCanary, undefined, "the plain fire carries none");
   const again = await enqueueTriggerFire(plan, { ...f.options, packageCanary: canary });

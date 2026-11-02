@@ -490,8 +490,6 @@ async function stagePackages({ fs, exec, out, packagesFile, to, platform = proce
 			return { error: error.message };
 		}
 	}
-	const { entries, overrides, dropped } = mergeHostPackages(declared, discovered);
-
 	const packagesRoot = join(to, PACKAGES_SUBDIR);
 	const rootExisted = fs.existsSync(packagesRoot);
 	fs.mkdirSync(packagesRoot, { recursive: true });
@@ -505,8 +503,14 @@ async function stagePackages({ fs, exec, out, packagesFile, to, platform = proce
 
 	// One stage at a time on this overlay, also from another host on a shared home. Staging names are unique and nothing already
 	// staged is touched, so a failure below cannot damage what jobs are loading: the manifest still names the old trees.
-	const staged = await withStageLock({ fs, packagesRoot, holder: "import-pi" }, async () => {
+	let overrides = [], dropped = [];
+	const staged = await withStageLock({ fs, packagesRoot, holder: "import-pi" }, async ({ stillHeld }) => {
 		try {
+			// Read again under the lock: a person's Adopt on this overlay may have just pinned a version in this file, and staging what the file said a moment ago would undo it.
+			const current = haveFile ? parsePackagesFile(fs.readFileSync(packagesFile, "utf8"), packagesFile) : declared;
+			const merged = mergeHostPackages(current, discovered);
+			const entries = merged.entries;
+			({ overrides, dropped } = merged);
 			for (const entry of entries) {
 				const staging = newStagingDir(packagesRoot);
 				stagingDirs.push(staging);
@@ -541,6 +545,7 @@ async function stagePackages({ fs, exec, out, packagesFile, to, platform = proce
 			// `from` and nothing more. This receipt is bind-mounted into every job container, so it must never carry
 			// an install path off the operator's machine -- provenance is the fact doctor needs, the host path is not.
 			const stageManifest = { stagedAt: new Date().toISOString(), packages: landed.map(({ name, version, dir, from }) => ({ name, version, dir, from })) };
+			if (!stillHeld()) throw new Error("another stage took over this overlay's lock while this one ran");
 			writeStageManifest({ fs, packagesRoot, manifest: stageManifest });
 			pruneStagedTrees({ fs, packagesRoot, manifest: stageManifest });
 			// A warning names its package's base directory, which only this stage knows the tree of.

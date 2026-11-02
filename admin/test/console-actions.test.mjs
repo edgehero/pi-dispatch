@@ -2953,6 +2953,8 @@ test("a canary's preview refuses what could prove nothing, for free", async () =
   assert.match((await preview(updatesRow({ adapter: true }))).text, /reviewed subscription adapter/);
   assert.match((await preview(updatesRow({ version: "1.4.3" }))).text, /already staged/);
   assert.match((await preview(updatesRow())).text, /run\.packages to false/);
+  const resuming = await (await start({ paths, a: { rm: { ...RM, planTriggerFire: async () => ({ plan: { ...planned.plan, schedule: { data: { resume: true } } } }) }, updates: updatesDeps(updatesRow()).updates } })).act("package-canary", { index: 0, name: "pi-lint", version: "1.4.3" });
+  assert.match(resuming.text, /resumes its transcript/, "its effects would outlive the one job");
   for (const version of ["^1.4.3", "latest", "1.x"]) assert.equal((await preview(updatesRow(), { index: 0, name: "pi-lint", version })).status, 400, version);
   assert.equal((await preview(updatesRow(), { index: 0, name: "../x", version: "1.4.3" })).status, 400);
 });
@@ -2976,7 +2978,7 @@ test("Adopt needs a canary that completed, is asked again at the confirm, writes
   assert.equal(done.status, 200, done.text);
   assert.equal(u.asked.length, 1);
   const { at, by, ...row } = u.asked[0];
-  assert.deepEqual(row, { name: "pi-lint", version: "1.4.3", op: "adopt", from: "1.4.2" });
+  assert.deepEqual(row, { name: "pi-lint", version: "1.4.3", op: "adopt", from: "1.4.2", expectGeneration: 0 }, "and it says what it was shown, so a racing write stops it");
   assert.equal(typeof by, "string");
   assert.equal(typeof at, "number");
   assert.deepEqual([lastWrite(c).kind, lastWrite(c).target], ["package-adopt", "pi-lint@1.4.3"]);
@@ -2985,6 +2987,16 @@ test("Adopt needs a canary that completed, is asked again at the confirm, writes
     const gated = await (await start({ paths, a: { updates: updatesDeps(row2).updates } })).act("package-adopt", input);
     assert.match(gated.text, why);
   }
+  // Another person's write between the gate and this one: the compare in the write stops it.
+  const raced = updatesDeps();
+  raced.updates.setDesired = async () => 0;
+  const r = await start({ paths, a: { updates: raced.updates } });
+  assert.notEqual((await r.confirm("package-adopt", (await r.act("package-adopt", input)).json().ticket)).status, 200);
+  // Valkey refusing the write is a refusal, never a success.
+  const refused = updatesDeps();
+  refused.updates.setDesired = async () => { throw new Error("READONLY"); };
+  const f = await start({ paths, a: { updates: refused.updates } });
+  assert.notEqual((await f.confirm("package-adopt", (await f.act("package-adopt", input)).json().ticket)).status, 200);
   const stale = updatesDeps();
   const s = await start({ paths, a: { updates: stale.updates } });
   const later = await s.act("package-adopt", input);
@@ -3005,7 +3017,7 @@ test("Undo takes back the adoption it was shown, and only that one", async () =>
   assert.match(p.json().html, /A host that never took the adoption changes nothing/);
   assert.equal((await c.confirm("package-undo", p.json().ticket)).status, 200);
   const { at, by, ...row } = u.asked[0];
-  assert.deepEqual(row, { name: "pi-lint", version: "1.4.2", op: "undo", undoOf: 5 });
+  assert.deepEqual(row, { name: "pi-lint", version: "1.4.2", op: "undo", undoOf: 5, expectGeneration: 5 });
   const moved = updatesDeps(adopted);
   const m = await start({ paths, a: { updates: moved.updates } });
   const q = await m.act("package-undo", { name: "pi-lint" });

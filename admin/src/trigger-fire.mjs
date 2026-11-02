@@ -9,6 +9,7 @@ import { makeQueue, QUEUE, hostQueueName, manualCanaryJobId, manualTriggerJobId,
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
+import { withJobDataVersion } from "@edgehero/pi-dispatch/job-data-version";
 import { checkDispatchRun } from "./read-model.mjs";
 
 const digest = (s) => createHash("sha256").update(s).digest("hex");
@@ -89,7 +90,8 @@ export async function enqueueTriggerFire(plan, options = {}) {
     redis = redisFn(url);
     if (await redis.set(`trigger-fire:${current.queue}:${id}`, "1", "EX", 120, "NX") !== "OK") return { refusal: "This cron trigger was already fired this minute. Nothing was queued.", deduplicated: true };
     queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: current.queue });
-    const schedule = canary ? { ...current.schedule, data: { ...current.schedule.data, packageCanary: canary } } : current.schedule;
+    // Stamped by the same rule as every builder (`DES-STORE-VERSION-WHEN-NEEDED`), so a worker from before canaries waits for an upgrade instead of paying for a plain run.
+    const schedule = canary ? { ...current.schedule, data: withJobDataVersion({ ...current.schedule.data, packageCanary: canary }) } : current.schedule;
     const { id: jobId, existing } = await enqueueTriggerRunReporting(queue, schedule, { now: instant, ...(canary ? { jobId: id } : {}) });
     if (existing === undefined) return { invalid: "Fire now could not verify the queued job. A run may have been queued; check Runs before trying again next minute.", partial: true, jobId, queue: current.queue };
     if (existing) return { refusal: swallowedRunSentence(jobId, existing), deduplicated: true, jobId };

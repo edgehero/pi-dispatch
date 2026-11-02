@@ -10,12 +10,10 @@ import * as nodeFs from "node:fs";
 import { dirname, join } from "node:path";
 import { isSubscriptionAdapter } from "./updates-subscription-adapters.mjs";
 import { EXACT_VERSION_RE, PACKAGES_SUBDIR, parsePackagesFile, readStageManifest, stagedDirName } from "./packages.mjs";
-import { PackageStageError, SERVICE_NPM_TIMEOUT_MS, pruneStagedTrees, serviceNpmEnv, stagePackageTree, treeDigest, withStageLock, writeStageManifest } from "./package-stage.mjs";
-import { readApplied, readDesired, writeApplied } from "./updates.mjs";
+import { PackageStageError, SERVICE_NPM_TIMEOUT_MS, UNDO_DIR, pruneStagedTrees, serviceNpmEnv, stagePackageTree, stagedStem, treeDigest, withStageLock, writeStageManifest } from "./package-stage.mjs";
+import { compareVersions, readApplied, readDesired, writeApplied } from "./updates.mjs";
 
 export { isSubscriptionAdapter };
-
-const UNDO_DIR = ".undo";
 
 const writable = (fs, path) => {
 	try {
@@ -75,28 +73,31 @@ const npmBinFor = (platform) => (platform === "win32" ? "npm.cmd" : "npm");
 export async function applyDesired({ desired, env, cwd, fs = nodeFs, exec, now = Date.now, out = () => {}, platform = process.platform, globalPiDir = env.PI_GLOBAL_PI_DIR }) {
 	const row = (state, fields = {}) => ({ v: 1, generation: desired.generation, state, at: now(), version: null, reason: null, digest: null, ...fields });
 	const refuse = (reason, version = null) => row("cannot-adopt", { reason, version });
-	if (!globalPiDir || !fs.existsSync(globalPiDir)) return refuse("no-overlay");
+	// A host that never took the Adopt being undone has nothing to take back, whichever else is true of it, and that includes having no overlay at all.
+	if (!globalPiDir || !fs.existsSync(globalPiDir)) return desired.op === "undo" ? row("no-change") : refuse("no-overlay");
 	const packagesRoot = join(globalPiDir, PACKAGES_SUBDIR);
 	const manifest = readStageManifest({ globalPiDir, readFile: (p, e) => fs.readFileSync(p, e), fileExists: (p) => fs.existsSync(p) });
 	const current = manifest?.packages.find((p) => p.name === desired.name) ?? null;
 	const undo = desired.op === "undo" ? readUndo(fs, packagesRoot, desired.name) : null;
-	// A host that never took the Adopt being undone has nothing to take back, whichever else is true of it.
 	if (desired.op === "undo" && undo?.generation !== desired.undoOf) return row("no-change", { version: current?.version ?? null });
 	if (!current) return refuse("not-staged-here");
 	if (!writable(fs, packagesRoot)) return refuse("overlay-read-only", current.version);
 	if (desired.op === "adopt" && isSubscriptionAdapter(desired.name)) return refuse("adapter", current.version);
-	if (desired.op === "adopt" && current.version === desired.version) return row("no-change", { version: current.version });
+	// Never to an older version. A person may have moved past this row with `import-pi` since, and a host may read it again for any number of reasons (a new host, a lost applied key),
+	// with nobody looking: "nothing updates by itself" has to hold for a downgrade too. Going back is what Undo is for.
+	if (desired.op === "adopt" && compareVersions(current.version, desired.version) >= 0) return row("no-change", { version: current.version });
 	if (!EXACT_VERSION_RE.test(desired.version)) return refuse("stage-refused", current.version);
 	const packagesFile = env.PI_PACKAGES_FILE ?? join(cwd, "pi-packages.json");
-	let priorEntry;
 	try {
-		priorEntry = readPackagesEntry({ fs, path: packagesFile, name: desired.name });
-		if (!writable(fs, fs.existsSync(packagesFile) ? packagesFile : dirname(packagesFile))) throw new Error("not writable");
+		readPackagesEntry({ fs, path: packagesFile, name: desired.name });
+		// The file is replaced by temp and rename, so what has to be writable is its directory, whether or not the file itself is.
+		if (!writable(fs, dirname(packagesFile)) || (fs.existsSync(packagesFile) && !writable(fs, packagesFile))) throw new Error("not writable");
 	} catch {
 		return refuse("packages-file-unusable", current.version);
 	}
 
-	return await withStageLock({ fs, packagesRoot, now, holder: "updates-reconcile" }, async () => {
+	return await withStageLock({ fs, packagesRoot, now, holder: "updates-reconcile" }, async ({ stillHeld }) => {
+		const committing = () => { if (!stillHeld()) throw new PackageStageError("infra", "another stage took over this overlay's lock"); };
 		// Read again under the lock: a peer on a shared home may have applied this very row while we waited. It shares this manifest, and doing it twice
 		// would lose the record of what to undo.
 		const fresh = readStageManifest({ globalPiDir, readFile: (p, e) => fs.readFileSync(p, e), fileExists: (p) => fs.existsSync(p) });
@@ -118,30 +119,44 @@ export async function applyDesired({ desired, env, cwd, fs = nodeFs, exec, now =
 			let dir = prior.dir;
 			// The old tree is kept for a week, and flipping back to it is what makes Undo instant. Past that it is staged again, at the exact version.
 			if (!fs.existsSync(join(packagesRoot, dir))) {
-				const staged = await stageIt({ name: prior.name, version: prior.version, dir: stagedDirName(prior.name) });
+				const staged = await stageIt({ name: prior.name, version: prior.version, dir: stagedStem(prior.dir) });
 				if (staged.refused) return refuse(staged.refused, here.version);
 				dir = staged.dir;
 			}
 			const manifest2 = replaceManifestEntry(fresh, desired.name, { ...prior, dir });
+			committing();
 			writePackagesEntry({ fs, path: packagesFile, name: desired.name, entry: undo.fileEntry });
 			writeStageManifest({ fs, packagesRoot, manifest: manifest2 });
 			fs.rmSync(undoPath(packagesRoot, desired.name), { force: true });
 			pruneStagedTrees({ fs, packagesRoot, manifest: manifest2, now });
-			return row("undone", { version: prior.version, digest: treeDigest(join(packagesRoot, dir), { fs }) });
+			return row("undone", { version: prior.version, digest: await treeDigest(join(packagesRoot, dir), { fs }) });
 		}
 
-		if (here.version === desired.version) return row("no-change", { version: here.version });
-		const staged = await stageIt({ name: desired.name, version: desired.version, dir: stagedDirName(desired.name) });
+		if (compareVersions(here.version, desired.version) >= 0) return row("no-change", { version: here.version });
+		const staged = await stageIt({ name: desired.name, version: desired.version, dir: stagedStem(here.dir) });
 		if (staged.refused) return refuse(staged.refused, here.version);
-		const digest = treeDigest(join(packagesRoot, staged.dir), { fs });
-		// The undo record first, the pin second and the manifest last, so a crash leaves at worst a pin the next stage honours, and jobs still on the old set.
-		fs.mkdirSync(join(packagesRoot, UNDO_DIR), { recursive: true });
-		fs.writeFileSync(undoPath(packagesRoot, desired.name), `${JSON.stringify({ generation: desired.generation, manifestEntry: here, fileEntry: priorEntry })}\n`);
-		writePackagesEntry({ fs, path: packagesFile, name: desired.name, entry: { ...(priorEntry ?? { name: desired.name }), version: desired.version } });
-		const manifest2 = replaceManifestEntry(fresh, desired.name, { ...here, version: desired.version, dir: staged.dir });
-		writeStageManifest({ fs, packagesRoot, manifest: manifest2 });
-		pruneStagedTrees({ fs, packagesRoot, manifest: manifest2, now });
-		return row("adopted", { version: desired.version, digest });
+		const removeUnnamed = () => { try { fs.rmSync(join(packagesRoot, staged.dir), { recursive: true, force: true }); } catch { /* the prune's, later */ } };
+		try {
+			const digest = await treeDigest(join(packagesRoot, staged.dir), { fs });
+			// Read under the lock, and kept if a previous attempt at this very generation already recorded it: that attempt may have written the pin before its manifest failed, and reading
+			// the file now would record the adopted pin as what came before it, so that Undo restored the wrong thing.
+			const earlier = readUndo(fs, packagesRoot, desired.name);
+			const priorEntry = earlier?.generation === desired.generation ? earlier.fileEntry : readPackagesEntry({ fs, path: packagesFile, name: desired.name });
+			const priorManifest = earlier?.generation === desired.generation ? earlier.manifestEntry : here;
+			committing();
+			// The undo record first, the pin second and the manifest last, so a crash leaves at worst a pin the next stage honours, and jobs still on the old set.
+			fs.mkdirSync(join(packagesRoot, UNDO_DIR), { recursive: true });
+			fs.writeFileSync(undoPath(packagesRoot, desired.name), `${JSON.stringify({ generation: desired.generation, manifestEntry: priorManifest, fileEntry: priorEntry })}\n`);
+			writePackagesEntry({ fs, path: packagesFile, name: desired.name, entry: { ...(priorEntry ?? { name: desired.name }), version: desired.version } });
+			const manifest2 = replaceManifestEntry(fresh, desired.name, { ...here, version: desired.version, dir: staged.dir });
+			writeStageManifest({ fs, packagesRoot, manifest: manifest2 });
+			pruneStagedTrees({ fs, packagesRoot, manifest: manifest2, now });
+			return row("adopted", { version: desired.version, digest });
+		} catch (error) {
+			// Nothing names this tree yet, and each retry would leave one more.
+			removeUnnamed();
+			throw error instanceof PackageStageError ? error : new PackageStageError("infra", "the stage could not commit");
+		}
 	});
 }
 

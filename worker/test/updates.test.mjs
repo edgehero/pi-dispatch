@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeRedisClient } from "../src/connection.mjs";
+import { fakeNpm } from "./helpers/fake-npm.mjs";
 import { readStageManifest, parsePackagesFile } from "../src/packages.mjs";
 import { STAGED_TREE_KEEP_MS, pruneStagedTrees } from "../src/package-stage.mjs";
 import { runUpdatesCli } from "../src/updates-cli.mjs";
@@ -29,6 +30,12 @@ test("versions order as semver says, and a pre-release sorts before its release"
 	assert.equal(compareVersions("1.5.0", "1.5.0"), 0);
 	assert.equal(compareVersions("1.5.0-rc.1", "1.5.0"), -1);
 	assert.equal(compareVersions("1.5.0+build", "1.5.0"), 0, "build metadata does not order");
+	assert.equal(compareVersions("1.5.0-rc.1", "1.5.0-rc.2"), -1);
+	assert.equal(compareVersions("1.5.0-rc.2", "1.5.0-rc.1"), 1);
+	assert.equal(compareVersions("1.5.0-rc.10", "1.5.0-rc.9"), 1, "numbers as numbers");
+	assert.equal(compareVersions("1.5.0-rc.1", "1.5.0-rc"), 1, "more parts sort after fewer");
+	assert.equal(compareVersions("1.5.0-1", "1.5.0-alpha"), -1, "numbers below words");
+	assert.equal(compareVersions("1.5.0-beta", "1.5.0-alpha"), 1);
 });
 
 test("the registry is asked for one small document, the scoped name encoded", async () => {
@@ -53,6 +60,8 @@ test("the bump branch's checks: a failed read or an unproven one is unknown, nev
 	assert.equal(await bumpChecks("1.6.0", { get: bump("chore(pi): run on pi 1.5.1", [PASS]) }), "unknown", "green on another version says nothing about this one");
 	assert.equal(await bumpChecks("1.6.0", { get: bump(subject, [{ status: "completed", conclusion: "weird-new-word" }]) }), "unknown", "a conclusion nobody has judged");
 	await assert.rejects(bumpChecks("1.6.0", { get: table({}) }));
+	for (const conclusion of ["failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale"]) assert.equal(await bumpChecks("1.6.0", { get: bump(subject, [PASS, { status: "completed", conclusion }]) }), "failing", conclusion);
+	for (const conclusion of ["neutral", "skipped"]) assert.equal(await bumpChecks("1.6.0", { get: bump(subject, [PASS, { status: "completed", conclusion }]) }), "passing", conclusion);
 });
 
 const overlayWith = (packages) => {
@@ -126,6 +135,12 @@ test("a host's own pi: same, newer, older, none here, and what cannot be read is
 	const noApi = { ...PI_FILES, "/opt/pi/dist/core/extensions/loader.js": "on(a) {}" };
 	assert.equal(facts("1.5.0", noApi).extension, "drift");
 	assert.equal(facts("1.5.0", { "/elsewhere": "" }).needles, "unknown", "a wrapper that lives elsewhere is unknown, not a failure");
+	const noFile = { ...PI_FILES };
+	delete noFile["/opt/pi/dist/x.js"];
+	assert.equal(facts("1.5.0", noFile).needles, "drift", "a file this pi no longer has is drift, not a pass");
+	const noLoader = { ...PI_FILES };
+	delete noLoader["/opt/pi/dist/core/extensions/loader.js"];
+	assert.equal(facts("1.5.0", noLoader).extension, "drift");
 });
 
 // ---- the records
@@ -145,6 +160,14 @@ test("a look past two intervals is stale", () => {
 	const record = { at: NOW, everyHours: 24 };
 	assert.equal(lookIsStale(record, NOW + 48 * 3_600_000), false);
 	assert.equal(lookIsStale(record, NOW + 48 * 3_600_000 + 1), true);
+});
+
+test("a look past the host bound says how many it did not read", async () => {
+	const names = Array.from({ length: 65 }, (_, i) => `host${String(i).padStart(2, "0")}`);
+	const redis = { smembers: async () => names, mget: async (...keys) => keys.map((key) => JSON.stringify({ v: 1, host: key.slice("updates:h:".length), at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [] })) };
+	const read = await readLooks(redis, { now: clock });
+	assert.equal(read.hosts.length, 64);
+	assert.equal(read.more, 1);
 });
 
 test("desired and applied rows are closed", () => {
@@ -168,18 +191,7 @@ test("an excerpt is third-party text: bounded, its control and direction charact
 
 // ---- a host applying what a person asked for, on real files
 
-const installer = (fail = null) => {
-	const calls = [];
-	return { calls, exec: async (_bin, args, options) => {
-		calls.push({ args, options });
-		const spec = args[1], at = spec.lastIndexOf("@"), name = spec.slice(0, at), version = spec.slice(at + 1);
-		if (fail?.[version]) throw Object.assign(new Error("exit 1"), { stderr: fail[version] });
-		const root = join(options.cwd, "node_modules", name);
-		fs.mkdirSync(root, { recursive: true });
-		fs.writeFileSync(join(root, "package.json"), JSON.stringify({ name, version, pi: { extensions: ["index.js"] } }));
-		fs.writeFileSync(join(root, "index.js"), `// ${version}\n`);
-	} };
-};
+const installer = (fail = null) => fakeNpm({ fail: fail ?? {} });
 /** A host: an overlay holding `@a/b` at 1.0.0 in a kept tree, and a deployment folder that may hold a pin file. */
 function aHost({ file = undefined } = {}) {
 	const globalPiDir = tempDir("updates-host-"), cwd = tempDir("updates-cwd-");
@@ -205,6 +217,7 @@ test("Adopt stages the exact version in a new tree, pins it, and leaves what a r
 	assert.equal(fake.calls[0].args[1], "@a/b@1.1.0");
 	assert.ok(fake.calls[0].args.includes("--ignore-scripts"));
 	assert.equal(fake.calls[0].options.timeout > 0, true, "a service's npm has a timeout");
+	assert.ok(fake.calls.some((call) => call.args[0] === "ci"), "what it installed is what it judged");
 	assert.deepEqual(staged(host).version, "1.1.0");
 	assert.equal(staged(host).from, "host", "where it came from is unchanged");
 	assert.deepEqual(pins(host), [{ name: "@a/b", version: "1.1.0" }]);
@@ -258,6 +271,58 @@ test("Undo after the old tree has gone stages the old version again", async () =
 	assert.ok(fs.existsSync(join(host.globalPiDir, "packages", staged(host).dir, "index.js")));
 });
 
+test("a host never moves to an older version for an Adopt, so a person's later choice stands, whoever reads the row again", async () => {
+	const host = aHost();
+	const manifestPath = join(host.globalPiDir, "packages", "packages.json");
+	const moved = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+	moved.packages[0].version = "3.0.0";
+	fs.writeFileSync(manifestPath, JSON.stringify(moved));
+	const fake = installer();
+	const out = await apply(host, row({ version: "2.0.0" }), fake.exec);
+	assert.equal(out.state, "no-change");
+	assert.equal(out.version, "3.0.0");
+	assert.equal(fake.calls.length, 0);
+	assert.equal(fs.existsSync(join(host.cwd, "pi-packages.json")), false, "no pin written for a version it did not take");
+});
+
+test("Undo still works a long time after the Adopt: its record is not a retired stage", async () => {
+	const host = aHost();
+	await apply(host, row());
+	const root = join(host.globalPiDir, "packages");
+	const manifest = readStageManifest({ globalPiDir: host.globalPiDir });
+	pruneStagedTrees({ fs, packagesRoot: root, manifest, now: () => NOW });
+	pruneStagedTrees({ fs, packagesRoot: root, manifest, now: () => NOW + 3 * STAGED_TREE_KEEP_MS });
+	assert.equal(fs.existsSync(join(root, host.dir)), false, "the old tree has gone by now");
+	const out = await apply(host, row({ generation: 6, op: "undo", version: "1.0.0", undoOf: 5 }));
+	assert.equal(out.state, "undone", "and Undo stages it again rather than silently doing nothing");
+	assert.equal(staged(host).version, "1.0.0");
+});
+
+test("a retried Adopt keeps the true prior state, so Undo restores what was there and not the pin it wrote", async () => {
+	const host = aHost({ file: { packages: [{ name: "@a/b", version: "1.0.0" }] } });
+	// The manifest commit fails after the pin was written.
+	let failNext = true;
+	const flaky = { ...fs, renameSync(from, to) { if (failNext && String(to).endsWith("packages.json") && String(from).includes(".tmp") && String(to).includes(join("packages", "packages.json"))) { failNext = false; throw new Error("EIO"); } return fs.renameSync(from, to); } };
+	await assert.rejects(applyDesired({ desired: row(), env: host.env, cwd: host.cwd, exec: installer().exec, now: clock, fs: flaky, platform: "linux" }));
+	assert.equal(pins(host)[0].version, "1.1.0", "the failure this test is about: the pin landed");
+	assert.equal(staged(host).version, "1.0.0", "and jobs are still on the old set");
+	assert.equal((await apply(host, row())).state, "adopted", "the host tries again");
+	await apply(host, row({ generation: 6, op: "undo", version: "1.0.0", undoOf: 5 }));
+	assert.deepEqual(pins(host), [{ name: "@a/b", version: "1.0.0" }], "back to what the file said before any of it");
+	assert.equal(staged(host).version, "1.0.0");
+});
+
+test("a package staged under its own dir keeps that dir's name, so a canary and an Adopt still recognise each other", async () => {
+	const host = aHost();
+	const manifestPath = join(host.globalPiDir, "packages", "packages.json");
+	const custom = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+	custom.packages[0].dir = "house--1.0.0--aaaaaaaa";
+	fs.renameSync(join(host.globalPiDir, "packages", host.dir), join(host.globalPiDir, "packages", custom.packages[0].dir));
+	fs.writeFileSync(manifestPath, JSON.stringify(custom));
+	await apply(host, row());
+	assert.match(staged(host).dir, /^house--1\.1\.0--[0-9a-f]{8}$/);
+});
+
 test("each refusal is a closed word on the host's row and changes nothing", async () => {
 	const unchanged = async (host, desired, reason, exec) => {
 		const before = fs.readFileSync(join(host.globalPiDir, "packages", "packages.json"), "utf8");
@@ -282,13 +347,30 @@ test("each refusal is a closed word on the host's row and changes nothing", asyn
 	const none = await applyDesired({ desired: row(), env: {}, cwd: tempDir("updates-none-"), exec: installer().exec, now: clock });
 	assert.equal(none.reason, "no-overlay");
 	const assertsFail = aHost();
-	const notPi = async (_bin, args, options) => {
-		const spec = args[1], at = spec.lastIndexOf("@"), name = spec.slice(0, at), version = spec.slice(at + 1);
-		const root = join(options.cwd, "node_modules", name);
-		fs.mkdirSync(root, { recursive: true });
-		fs.writeFileSync(join(root, "package.json"), JSON.stringify({ name, version }));
-	};
+	const notPi = fakeNpm({ materialize: (root, name, version) => fs.writeFileSync(join(root, "package.json"), JSON.stringify({ name, version })) }).exec;
 	await unchanged(assertsFail, row(), "stage-refused", notPi);
+});
+
+test("a writable pins file in a folder that is not writable cannot be replaced, and says so before installing anything", { skip: process.getuid?.() === 0 ? "root ignores file modes" : false }, async () => {
+	const host = aHost({ file: { packages: [] } });
+	const fake = installer();
+	fs.chmodSync(host.cwd, 0o555);
+	try {
+		const out = await apply(host, row(), fake.exec);
+		assert.equal(out.reason, "packages-file-unusable");
+		assert.equal(fake.calls.length, 0);
+	} finally {
+		fs.chmodSync(host.cwd, 0o755);
+	}
+});
+
+test("a commit that fails leaves no tree behind, so a host that keeps trying does not fill its disk", async () => {
+	const host = aHost();
+	const root = join(host.globalPiDir, "packages");
+	const before = fs.readdirSync(root).filter((name) => name.startsWith("a__b--"));
+	const broken = { ...fs, renameSync(from, to) { if (String(to) === join(root, "packages.json")) throw new Error("EIO"); return fs.renameSync(from, to); } };
+	await assert.rejects(applyDesired({ desired: row(), env: host.env, cwd: host.cwd, exec: installer().exec, now: clock, fs: broken, platform: "linux" }), (error) => error.kind === "infra");
+	assert.deepEqual(fs.readdirSync(root).filter((name) => name.startsWith("a__b--")), before);
 });
 
 test("a read-only overlay cannot adopt, and says so", { skip: process.getuid?.() === 0 ? "root ignores file modes" : false }, async () => {
@@ -327,6 +409,14 @@ test("a host that never took an Adopt has nothing to undo: it changes nothing, w
 	assert.equal(fake.calls.length, 0);
 	assert.equal(out.version, "1.0.0");
 	assert.equal(fs.existsSync(join(host.cwd, "pi-packages.json")), false);
+	const undoRow = row({ generation: 6, op: "undo", version: "1.0.0", undoOf: 5 });
+	const none = await applyDesired({ desired: undoRow, env: {}, cwd: tempDir("updates-none-"), exec: fake.exec, now: clock });
+	assert.equal(none.state, "no-change", "no overlay at all");
+	const absent = aHost();
+	assert.equal((await apply(absent, { ...undoRow, name: "not-staged" }, fake.exec)).state, "no-change", "not staged here");
+	const garbage = aHost();
+	fs.writeFileSync(join(garbage.cwd, "pi-packages.json"), "{ not json");
+	assert.equal((await apply(garbage, undoRow, fake.exec)).state, "no-change", "a file it could not have written to anyway");
 });
 
 test("an Undo of an older Adopt than the one this host holds is not this host's to apply", async () => {
@@ -339,11 +429,25 @@ test("an Undo of an older Adopt than the one this host holds is not this host's 
 
 test("on a shared overlay the second host finds the work done and does not lose the record of what to undo", async () => {
 	const host = aHost();
-	await apply(host, row());
 	const fake = installer();
-	const peer = await apply(host, row(), fake.exec);
+	// The peer applies this very row after this host's first read and before it takes the lock, which is the window only the second read closes.
+	let peerRan = false;
+	const racing = { ...fs, mkdirSync(path, options) {
+		if (String(path).endsWith(".stage.lock") && !peerRan) {
+			peerRan = true;
+			const manifestPath = join(host.globalPiDir, "packages", "packages.json");
+			const peerManifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+			peerManifest.packages[0] = { ...peerManifest.packages[0], version: "1.1.0" };
+			fs.writeFileSync(manifestPath, JSON.stringify(peerManifest));
+			fs.mkdirSync(join(host.globalPiDir, "packages", ".undo"), { recursive: true });
+			fs.writeFileSync(join(host.globalPiDir, "packages", ".undo", "a__b.json"), JSON.stringify({ generation: 5, manifestEntry: { name: "@a/b", version: "1.0.0", dir: host.dir, from: "host" }, fileEntry: null }));
+		}
+		return fs.mkdirSync(path, options);
+	} };
+	const peer = await applyDesired({ desired: row(), env: host.env, cwd: host.cwd, exec: fake.exec, now: clock, fs: racing, platform: "linux" });
+	assert.equal(peerRan, true);
 	assert.equal(peer.state, "no-change");
-	assert.equal(fake.calls.length, 0);
+	assert.equal(fake.calls.length, 0, "it installed nothing and wrote no pin");
 	const out = await apply(host, row({ generation: 6, op: "undo", version: "1.0.0", undoOf: 5 }));
 	assert.equal(out.state, "undone", "the first host's undo record survived");
 });
@@ -394,6 +498,20 @@ test("the generation and its row land together, and concurrent requests end on t
 	});
 });
 
+test("what a person was shown has to still be the row, or nothing is written", live, async () => {
+	await withValkey(async (redis) => {
+		const first = await setDesired(redis, { name: "@a/b", version: "1.1.0", op: "adopt", by: "ops", at: NOW, expectGeneration: 0 });
+		assert.equal(first, 1, "no row yet, as expected");
+		assert.equal(await setDesired(redis, { name: "@a/b", version: "1.2.0", op: "adopt", by: "ops", at: NOW, expectGeneration: 0 }), 0, "someone got there first");
+		assert.equal((await readDesired(redis))[0].version, "1.1.0");
+		const second = await setDesired(redis, { name: "@a/b", version: "1.0.0", op: "undo", undoOf: first, by: "ops", at: NOW, expectGeneration: first });
+		assert.ok(second > first);
+		assert.equal(await setDesired(redis, { name: "@a/b", version: "1.0.0", op: "undo", undoOf: first, by: "ops", at: NOW, expectGeneration: first }), 0, "an Undo of what has moved");
+		assert.equal(await redis.get(UPDATES_GENERATION), String(second), "a refused write takes no generation");
+		assert.ok(await setDesired(redis, { name: "other", version: "1.0.0", op: "adopt", by: "ops", at: NOW }), "without an expectation it is plain last-writer");
+	});
+});
+
 test("looks, applied rows and canary facts round trip, each with its expiry, and a read writes nothing", live, async () => {
 	await withValkey(async (redis) => {
 		await publishLook(redis, { v: 1, host: "mini1", at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [] });
@@ -406,7 +524,7 @@ test("looks, applied rows and canary facts round trip, each with its expiry, and
 		assert.equal(read.more, 0);
 		assert.equal((await redis.smembers(UPDATES_HOSTS)).length, 2, "a viewer's read prunes nothing");
 		await writeApplied(redis, "mini1", "@a/b", { v: 1, generation: 2, state: "adopted", version: "1.1.0", at: NOW });
-		assert.ok((await redis.pttl(updatesAppliedKey("mini1"))) > 0);
+		assert.equal(await redis.pttl(updatesAppliedKey("mini1")), -1, "no expiry: an expired row would have this host read an old request as new");
 		assert.equal((await readApplied(redis, "mini1"))["@a/b"].state, "adopted");
 		await publishCanaryFacts(redis, { name: "@a/b", version: "1.1.0", host: "mini1", digest: "a".repeat(64), excerpt: "changes", at: NOW });
 		assert.ok((await redis.pttl(updatesCanaryKey("@a/b", "1.1.0"))) > 0);
@@ -479,6 +597,17 @@ test("the child the worker starts does the work end to end, through a real conne
 		assert.equal(await runUpdatesCli(["look"], { env: { VALKEY_URL: VALKEY, PI_WORKER_NAME: "cli-host", PI_UPDATES_LOOK: "1" }, look, out: () => {} }), 0);
 		assert.equal((await readLooks(redis)).hosts[0].record.host, "cli-host");
 	});
+});
+
+test("the child's look goes through the declared proxy", async () => {
+	const seen = [];
+	const look = async ({ get, host }) => {
+		await get("https://registry.example/x");
+		return { v: 1, host, at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [] };
+	};
+	const code = await runUpdatesCli(["look"], { env: { VALKEY_URL: "redis://x", PI_WORKER_NAME: "h", PI_UPDATES_LOOK: "1", PI_UPDATES_PROXY: "http://proxy:3128" }, look, out: () => {}, fetchJson: async (url, options) => { seen.push([url, options.proxyUrl]); return { value: null }; }, withClient: async (_url, fn) => fn({ set: async () => "OK", sadd: async () => 1 }) });
+	assert.equal(code, 0);
+	assert.deepEqual(seen, [["https://registry.example/x", "http://proxy:3128"]]);
 });
 
 test("the child refuses what it was not asked for, and a look that is off starts nothing", async () => {

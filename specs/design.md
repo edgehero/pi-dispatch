@@ -15817,6 +15817,7 @@ is introduced. The design generator owns the published card before the console u
   - *Undo writes the old pin.* A written pin overrides discovery permanently (`packages.mjs`), so Undo would quietly change what the file meant. It restores the file's prior state.
   - *Load the candidate beside the staged copy.* `run-container.mjs` would load both, and which wins is pi's business. It replaces its manifest `dir`, so a `run.packages: false` trigger is refused for free.
   - *Install the candidate in the overlay.* Every job mounts the overlay whole, so a concurrent job would see it.
+  - *Trust `--ignore-scripts`.* npm runs a git dependency's `prepare` to build it whatever that flag says, as the service account and outside any container, and a tarball URL has npm fetch wherever the package said. So a service resolves first with `--package-lock-only`, which fetches metadata and runs nothing, refuses a tree holding anything but registry tarballs with a hash, and then installs exactly that tree with `npm ci`. An independent review proved this with real npm against a local registry. `import-pi` keeps its plain install, since a person at a keyboard ran it: `docs/global-pi-overlay.md` says what that means.
   - *Trust a clean exit as the canary's proof.* A failed load only logs and the job continues, so the runner reports the load, a validated run-record field says so, and a missing report reads as failed.
     An image too old to report is refused for free, by a new image capability.
   - *Read every changelog daily.* That downloads third-party tarballs on every host every day. The page links to the version, and shows a bounded, escaped excerpt only once a canary has installed that candidate.
@@ -16811,8 +16812,8 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   LOWEST version its content needs, which is nothing at all while that is 1, so a store of today's content stays byte
   for byte what it was, and an older reader is turned away only by content it would misread. The store's own
   `*_VERSION` constant is the highest version this build reads and equals its table's largest value (or 1); a test
-  holds every store to that (`versionTableProblems`). Today every table is empty and every version is 1, so this
-  change writes nothing new into any of these stores (run records gain `v`, below) and only teaches every reader and
+  holds every store to that (`versionTableProblems`). At #761 every table was empty and every version was 1, so that
+  change wrote nothing new into any of these stores (since #796 queued job data is at 2, for `packageCanary` alone: an older worker would otherwise run a plain paid job in a canary's place, and a job with no canary still carries no stamp) (run records gain `v`, below) and only teaches every reader and
   writer what a newer one means. The stores: the settings overlay (`SETTINGS_VERSION`, `SETTINGS_KEY_VERSIONS`, and
   `SETTINGS_VALUE_VERSIONS` for a value a later release allows where this one refuses), the pause windows file
   (`PAUSE_WINDOWS_VERSION`, `PAUSE_WINDOW_FIELD_VERSIONS`), the triggers file (`TRIGGERS_FILE_VERSION`,

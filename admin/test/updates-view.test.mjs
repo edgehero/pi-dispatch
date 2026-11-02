@@ -1,14 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { CANNOT_ADOPT_REASONS, CHECK_STATES, HOST_PI_STATES, UPDATES_OVERDUE_MS } from "@edgehero/pi-dispatch/updates";
 import { ADMIN_USED_API } from "../../worker/src/updates-look.mjs";
 import { CANNOT_ADOPT_WORDS, HOST_STATES_DRAWN, PI_STATES_DRAWN } from "../src/console/panels/updates.mjs";
-import { HOST_ADOPT_STATES, PI_ROW_STATES, UPDATE_ROW_STATES, canaryResultOf, hostStandings, packageRow, piRow, readUpdates } from "../src/updates-view.mjs";
-import { UPDATES_DRAW, updatesFacts } from "./helpers/updates-goldens.mjs";
+import { HOST_ADOPT_STATES, PI_ROW_STATES, UPDATE_ROW_STATES, canaryResultOf, hostStandings, packageRow, piRow, readStaged, readTriggersDocument, readUpdates } from "../src/updates-view.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { UPDATES_DRAW } from "./helpers/updates-goldens.mjs";
 import { USED_API } from "../src/index.ts";
 
 const NOW = 1_800_000_000_000;
+/** A Valkey holding these rows. */
+const fakeValkey = ({ looks = [], desiredRow = null } = {}) => ({
+	smembers: async (key) => (key === "updates:hosts" ? looks.map((l) => l.host) : []),
+	mget: async () => looks.map((l) => JSON.stringify(l)),
+	get: async () => null,
+	hgetall: async (key) => (key === "updates:desired" && desiredRow ? { [desiredRow.name]: JSON.stringify(desiredRow) } : {}),
+});
 const pkg = { name: "pi-lint", version: "1.4.2", from: "pi-packages" };
 const rec = (fields = {}) => ({ jobId: "gh-1", outcome: "completed", endedAt: "2026-11-02T10:00:00.000Z", tokens: { cost: 0.19 }, packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" }, ...fields });
 
@@ -23,8 +32,9 @@ test("a canary reads completed only when the run completed AND the runner said i
 	assert.equal(canaryResultOf([rec()], "pi-lint", "1.4.4"), null, "another version's run says nothing about this one");
 	assert.equal(canaryResultOf([rec()], "other", "1.4.3"), null);
 	assert.equal(canaryResultOf([{ jobId: "x", outcome: "completed" }, null, 7], "pi-lint", "1.4.3"), null);
-	const newest = canaryResultOf([rec({ jobId: "old", outcome: "failed", endedAt: "2026-11-01T10:00:00.000Z" }), rec({ jobId: "new" })], "pi-lint", "1.4.3");
-	assert.equal(newest.jobId, "new", "the newest run is the result, whatever order they were read in");
+	const older = rec({ jobId: "old", outcome: "failed", endedAt: "2026-11-01T10:00:00.000Z" }), newer = rec({ jobId: "new" });
+	assert.equal(canaryResultOf([older, newer], "pi-lint", "1.4.3").jobId, "new");
+	assert.equal(canaryResultOf([newer, older], "pi-lint", "1.4.3").jobId, "new", "the newest run is the result, whatever order they were read in");
 });
 
 test("a host with no row at this generation is pending, past the limit overdue, and an older row does not count", () => {
@@ -57,6 +67,19 @@ test("a package's row: every state, and what a person asked for leads what a reg
 	assert.equal(row({ desired: undo, standings: [{ state: "cannot-adopt" }] }).state, "partial");
 });
 
+test("once something newer appears, an adopted row is about that, and its Undo stays", () => {
+	const after = packageRow({ pkg: { ...pkg, version: "1.4.3" }, look: { state: "ok", newest: "1.5.0" }, desired: adopt, standings: [{ state: "adopted" }], canary: null, facts: null });
+	assert.equal(after.state, "newer", "a person can try the next one");
+	assert.equal(after.desired.op, "adopt", "the panel still offers Undo from this");
+	assert.equal(packageRow({ pkg: { ...pkg, version: "1.4.3" }, look: { state: "ok", newest: "1.4.3" }, desired: adopt, standings: [{ state: "adopted" }], canary: null, facts: null }).state, "adopted");
+});
+
+test("a row's canary is the one for the version it is about, never the version adopted before it", async () => {
+	const read = await readUpdates({ redis: fakeValkey({ looks: [{ v: 1, host: "h", at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [{ name: "pi-lint", version: "1.4.3", newest: "1.5.0", read: "ok" }] }], desiredRow: { v: 1, generation: 5, name: "pi-lint", version: "1.4.3", op: "adopt", from: "1.4.2", by: "ops", at: NOW } }), staged: { packages: [{ ...pkg, version: "1.4.3" }] }, records: [rec()], pinned: "1.5.0", now: NOW });
+	assert.equal(read.packages[0].newest, "1.5.0");
+	assert.equal(read.packages[0].canary, null, "only 1.4.3 has run: nothing says 1.5.0 completed, so Adopt's gate must not think so");
+});
+
 test("the adopted tree is compared with the canaried one, and the difference is said", () => {
 	const facts = { digest: "a".repeat(64) };
 	assert.equal(row({ desired: adopt, facts, standings: [{ state: "adopted", digest: "a".repeat(64) }] }).differs, false);
@@ -87,34 +110,23 @@ test("the look's copy of the admin extension's API list is that list", () => {
 });
 
 test("each row state and each pi state is actually drawn by a golden, so none is unreviewed", async () => {
-	const seen = new Set(), pi = new Set();
-	const sources = { "updates-newer-available": {}, };
-	void sources;
 	for (const key of Object.keys(UPDATES_DRAW)) assert.match(key, /^updates-[a-z-]+\.(operator|viewer)$/);
-	const probe = async (facts) => {
-		const read = await updatesFacts(facts);
-		pi.add(read.pi.state);
-		for (const r of read.packages) seen.add(r.state);
-	};
-	const HOUR = 3_600_000;
-	await probe({});
-	await probe({ records: [rec()] });
-	await probe({ records: [rec({ outcome: "failed" })] });
-	await probe({ redis: { looks: [] } });
-	await probe({ redis: { down: true } });
-	await probe({ now: 1_767_355_200_000 + 400 * 24 * HOUR });
-	assert.ok(seen.has("newer") && seen.has("canary-completed") && seen.has("canary-failed") && seen.has("not-looking") && seen.has("unknown") && seen.has("stale"), [...seen].join());
 	const golden = new Set(readdirSync(new URL("./fixtures/console/panels/", import.meta.url)).filter((f) => f.startsWith("updates-")).map((f) => f.replace(/\.html$/, "")));
 	assert.deepEqual([...golden].sort(), Object.keys(UPDATES_DRAW).sort(), "a golden per drawn state");
 	const text = [...golden].map((name) => readFileSync(new URL(`./fixtures/console/panels/${name}.html`, import.meta.url), "utf8")).join("\n");
-	for (const sentence of ["The newest version.", "Not tried yet.", "Canary completed, read the run", "Canary failed: the candidate did not load", "Canary failed: the run did not complete", "Adopting 1.4.3", "on every host", "Going back to 1.4.2", "Not looking.", "Unknown: the look could not read this", "Checks fail. Jobs stay on 1.5.0", "checks pass on 1.6.0", "still running on it", "Whether pi-dispatch", "Newer than pi-dispatch is tested with", "Older than pi-dispatch is tested with", "No pi on this host", "pi could not be read", "its overlay is read-only here", "is not the tree the canary ran", "overdue"]) {
+	// One sentence for each state on each list, so a state nobody draws, or a word that went missing from one, fails here.
+	const ROW = { current: "The newest version.", newer: "Not tried yet.", "canary-completed": "Canary completed, read the run", "canary-failed": "Canary failed: the candidate did not load", adopting: "Adopting 1.4.3", adopted: "on every host", partial: "its overlay is read-only here", undoing: "Going back to 1.4.2", "not-looking": "Not looking.", stale: "old, so what is newest may have moved", unknown: "Unknown: the look could not read this" };
+	assert.deepEqual(Object.keys(ROW).sort(), [...UPDATE_ROW_STATES].sort());
+	const PI = { current: "The newest version.", "checks-passing": "checks pass on 1.6.0", "checks-failing": "Checks fail. Jobs stay on 1.5.0", "checks-pending": "still running on it", "checks-unknown": "Whether pi-dispatch", "not-looking": "Not looking.", stale: "old, so what is newest may have moved", unknown: "Unknown: the look could not read this" };
+	assert.deepEqual(Object.keys(PI).sort(), [...PI_ROW_STATES].sort());
+	for (const sentence of [...Object.values(ROW), ...Object.values(PI), "Canary failed: the run did not complete", "Newer than pi-dispatch is tested with", "Older than pi-dispatch is tested with", "No pi on this host", "pi could not be read", "is not the tree the canary ran", "overdue", "The stage manifest could not be read", "reviewed subscription adapter"]) {
 		assert.ok(text.includes(sentence), `a golden draws: ${sentence}`);
 	}
 	assert.doesNotMatch(text, /\bpassed\b/i, "a canary never reads passed: a job that completed does not prove the extension is good");
 });
 
 test("a viewer sees versions and results and no button; a read-only console shows none either", async () => {
-	for (const name of ["updates-newer-available.viewer", "updates-canary-completed.viewer", "updates-adopted.viewer", "updates-readonly.operator"]) {
+	for (const name of ["updates-newer-available.viewer", "updates-canary-completed.viewer", "updates-adopted.viewer", "updates-adopting.viewer", "updates-partial.viewer", "updates-readonly.operator"]) {
 		const page = await UPDATES_DRAW[name]();
 		const panels = page.slice(page.indexOf('id="p-up-jobs"'));
 		assert.doesNotMatch(panels, /data-action="package-(canary|adopt|undo)"/, name);
@@ -122,6 +134,54 @@ test("a viewer sees versions and results and no button; a read-only console show
 	assert.match(await UPDATES_DRAW["updates-newer-available.operator"](), /data-action="package-canary"/);
 	assert.match(await UPDATES_DRAW["updates-canary-completed.operator"](), /data-action="package-adopt"/);
 	assert.match(await UPDATES_DRAW["updates-adopted.operator"](), /data-action="package-undo"/);
+});
+
+test("a trigger that resumes its transcript is not offered: its next run would continue the candidate's work", async () => {
+	const read = await readUpdates({ redis: fakeValkey(), staged: { packages: [] }, triggersDocument: { triggers: [{ on: { type: "cron", id: "a" }, run: { resume: true } }, { on: { type: "cron", id: "cmd" }, run: { command: "x" } }, { on: { type: "cron", id: "folio" }, run: { portfolio: true } }, { on: { type: "cron", id: "off" }, run: { packages: false } }, { on: { type: "comment" }, run: {} }, { on: { type: "cron", id: "b" }, run: {} }] }, now: NOW });
+	assert.deepEqual(read.triggers.map((t) => [t.index, t.id]), [[5, "b"]], "and it keeps the file's own index, which is what the preview takes");
+});
+
+test("a reviewed subscription adapter says why it has no button, and an operator gets none either", async () => {
+	const page = await UPDATES_DRAW["updates-adapter.operator"]();
+	assert.match(page, /reviewed subscription adapter/);
+	assert.doesNotMatch(page.slice(page.indexOf('id="p-up-jobs"')), /data-action="package-(canary|adopt)"/);
+});
+
+test("something newer after an Adopt can be tried, and the Adopt can still be undone from there", async () => {
+	const page = await UPDATES_DRAW["updates-newer-after-adopt.operator"]();
+	assert.match(page, /data-action="package-adopt"/);
+	assert.match(page, /data-action="package-undo"/);
+});
+
+test("the page's facts come from what a deployment really holds: its manifest and its triggers file, through the real readers", async () => {
+	const root = tempDir("updates-real-");
+	mkdirSync(join(root, "pi-global", "packages"), { recursive: true });
+	writeFileSync(join(root, "pi-global", "packages", "packages.json"), JSON.stringify({ stagedAt: "x", packages: [{ name: "pi-lint", version: "1.4.2", dir: "pi-lint--1.4.2--aaaaaaaa", from: "host" }] }));
+	writeFileSync(join(root, "triggers.json"), JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 6 * * *" }, run: { kind: "local", folder: "/f", flow: "fix", task: "t", maxCostUsd: 2 } }] }));
+	const look = { v: 1, host: "h", at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [{ name: "pi-lint", version: "1.4.2", newest: "1.4.3", read: "ok" }] };
+	const read = await readUpdates({ redis: fakeValkey({ looks: [look] }), staged: readStaged({ globalPiDir: join(root, "pi-global") }), triggersDocument: readTriggersDocument({ triggersPath: join(root, "triggers.json") }), pinned: "1.5.0", now: NOW });
+	assert.equal(read.packages[0].name, "pi-lint", "a row has the name the actions look it up by");
+	assert.equal(read.packages[0].version, "1.4.2");
+	assert.equal(read.packages[0].state, "newer");
+	assert.deepEqual(read.triggers, [{ index: 0, id: "nightly", capUsd: 2 }]);
+	assert.deepEqual(readStaged({ globalPiDir: join(root, "nowhere") }), { packages: [], unreadable: false }, "nothing staged is not a fault");
+	writeFileSync(join(root, "pi-global", "packages", "packages.json"), "{ not json");
+	assert.deepEqual(readStaged({ globalPiDir: join(root, "pi-global") }), { packages: [], unreadable: true }, "a manifest that cannot be read is said");
+	assert.equal(readTriggersDocument({ triggersPath: join(root, "absent.json") }), null);
+});
+
+test("a look's view: only fresh hosts speak while any is fresh, and the newest version any of them saw leads", async () => {
+	const look = (host, at, newest, pi = "1.5.0") => ({ v: 1, host, at, everyHours: 24, pi: { pinned: "1.5.0", newest: pi, read: "ok", checks: "passing" }, hostPi: {}, packages: [{ name: "pi-lint", version: "1.4.2", newest, read: "ok" }] });
+	const staged = { packages: [{ name: "pi-lint", version: "1.4.2" }] };
+	const old = NOW - 72 * 3_600_000;
+	const mixed = await readUpdates({ redis: fakeValkey({ looks: [look("stale", old, "1.9.9"), look("fresh", NOW, "1.4.3")] }), staged, now: NOW, pinned: "1.5.0" });
+	assert.equal(mixed.packages[0].newest, "1.4.3", "what a stale look saw is not what is newest");
+	assert.equal(mixed.state, "looking");
+	const disagree = await readUpdates({ redis: fakeValkey({ looks: [look("a", NOW, "1.4.3", "1.6.0"), look("b", NOW, "1.4.9", "1.7.0")] }), staged, now: NOW, pinned: "1.5.0" });
+	assert.equal(disagree.packages[0].newest, "1.4.9");
+	assert.equal(disagree.pi.newest, "1.7.0");
+	const reversed = await readUpdates({ redis: fakeValkey({ looks: [look("b", NOW, "1.4.9", "1.7.0"), look("a", NOW, "1.4.3", "1.6.0")] }), staged, now: NOW, pinned: "1.5.0" });
+	assert.equal(reversed.packages[0].newest, "1.4.9", "whichever host answered first");
 });
 
 test("a canary is offered only as a trigger that could run it: cron, serving staged packages", async () => {

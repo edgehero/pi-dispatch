@@ -962,6 +962,10 @@ test("the runner tells a candidate that loaded from one that did not, through pi
 	assert.equal(await loadOf(candidate("skills", { skills: ["skills"] }, { "skills/tidy/SKILL.md": "---\nname: tidy\ndescription: d\n---\nbody\n" })), "loaded", "a package may hold only skills");
 	assert.equal(await loadOf(candidate("empty2", { extensions: [] }, {}), [good]), "failed", "another package's load says nothing about this one");
 	assert.equal(canaryLoadOf(good, { getExtensions() { throw new Error("no"); } }), "failed", "a loader that cannot answer has not shown it loaded");
+	assert.equal(await loadOf(candidate("half", { extensions: ["good.js", "bad.js"] }, { "good.js": commandExtension("canary-half"), "bad.js": 'throw new Error("no");\n' })), "failed", "one entry failing is a candidate that did not load whole, though another did");
+	assert.equal(await loadOf(candidate("prompts", { prompts: ["prompts"] }, { "prompts/tidy.md": "---\ndescription: d\n---\nbody\n" })), "loaded", "a package may hold only prompts");
+	const piTheme = JSON.parse(readFileSync(new URL("dist/modes/interactive/theme/dark.json", new URL("../", import.meta.resolve("@earendil-works/pi-coding-agent").replace(/dist\/index\.js$/, "dist/"))), "utf8"));
+	assert.equal(await loadOf(candidate("themes", { themes: ["themes"] }, { "themes/plain.json": `${JSON.stringify({ ...piTheme, name: "plain-canary" })}\n` })), "loaded", "or only themes");
 });
 
 test("a layout that loaded before issue #544 and is unused now is said once, by part (issue #544)", { skip }, async () => {

@@ -273,7 +273,10 @@ async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, time
           const store = touchStore ?? (redis ? makeTouchStore({ redis, now }) : null);
           return trackTouchAction({ store, outbox: touchOutbox, event: { runId: jobId, cause: touchCause, at: now(), endedAt: entry.finishedOn ?? undefined, scopeId: touchScopeOf(job.data), nonce: `retry:${jobId}:${entry.attemptsMade}:${entry.finishedOn}` }, act: async () => { await act(job); return { ok: true }; } });
         } : act;
-        const res = found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, trackedAct) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
+        // Issue #796: a canary is third-party code a person chose to run once, after a preview that said so. A retry would install it again, its tree resolved again, behind a
+        // dialog about retrying a job, and a model holds the retry tool. A person starts another from the Updates page.
+        const canary = touchCause === "rerun" && found?.job?.data?.packageCanary !== undefined;
+        const res = canary ? { invalid: "This job was a canary of an extension version. Start another from the Updates page rather than retrying it." } : found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, trackedAct) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
         results.push(res.ok ? res : { jobId, invalid: res.invalid });
       } catch (err) {
         // One job's Valkey error is that job's result; a bulk action reports per job and goes on.

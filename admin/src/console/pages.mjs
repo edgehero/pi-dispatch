@@ -817,7 +817,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     catch { data.connections = null; }
   }
   if (reads.includes("updates")) {
-    try { data.updates = typeof deps.updates === "function" ? await deps.updates(data.snapshot) : null; }
+    try { data.updates = typeof deps.updates === "function" ? await deps.updates() : null; }
     catch { data.updates = null; }
   }
   if (reads.includes("project")) {

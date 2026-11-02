@@ -208,6 +208,23 @@ test("the fleet reader's pause/resume go through the kill switch's decision: a d
 
 // ---- failed jobs: retry, remove, bulk ----
 
+test("a failed canary cannot be retried: that would install third-party code again behind a dialog about a job, and a model holds that tool (issue #796)", live, async () => {
+  const v = await freshValkey();
+  try {
+    const host = await makeFailed(v, "pi-jobs@mini1", [{ id: "manual:daily:1", data: { kind: "local", folder: "/f", task: "t", packageCanary: { name: "pi-lint", version: "1.4.3" } } }]);
+    const failed = await host.getJob("manual:daily:1");
+    const expect = { attemptsMade: failed.attemptsMade, finishedOn: failed.finishedOn };
+    assert.match((await retryFailedJob({ url: URL12, jobId: "manual:daily:1", expect })).invalid, /Start another from the Updates page/);
+    assert.equal(await (await host.getJob("manual:daily:1")).getState(), "failed", "still failed, and nothing was installed");
+    const bulk = await retryFailedJobs({ url: URL12, jobs: [{ jobId: "manual:daily:1", ...expect }] });
+    assert.match(bulk.results[0].invalid, /Start another from the Updates page/, "retry all, too");
+    assert.equal(await (await host.getJob("manual:daily:1")).getState(), "failed");
+    assert.equal((await removeFailedJob({ url: URL12, jobId: "manual:daily:1", expect })).ok, true, "removing it is still fine");
+  } finally {
+    await v.done();
+  }
+});
+
 test("retryFailedJob and removeFailedJob act only on a job still failed as previewed, across the fleet", live, async () => {
   const v = await freshValkey();
   try {

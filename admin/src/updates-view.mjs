@@ -4,7 +4,10 @@
  * Writes nothing and decides nothing. A failed read is `unknown`, a look that is off reads `not-looking`, a record past two intervals reads `stale`, and none of them is ever drawn as healthy.
  * The result of a canary is read from the run record it wrote, because that is what the runner signed: a canary that ended well reads "completed", never "passed".
  */
+import * as nodeFs from "node:fs";
+import { join } from "node:path";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
+import { PACKAGES_SUBDIR, STAGE_MANIFEST, readStageManifest } from "@edgehero/pi-dispatch/packages";
 import { DOCTOR_HOSTS } from "@edgehero/pi-dispatch/doctor-results";
 import { compareVersions, readApplied, readCanaryFacts, readDesired, readLooks, UPDATES_OVERDUE_MS } from "@edgehero/pi-dispatch/updates";
 import { parsePackageCanary } from "@edgehero/pi-dispatch/package-canary-record";
@@ -59,8 +62,10 @@ export function packageRow({ pkg, look, desired, standings, canary, facts }) {
 	if (desired) {
 		const waiting = standings.some((s) => s.state === "pending" || s.state === "overdue");
 		const refused = standings.some((s) => s.state === "cannot-adopt");
-		if (desired.op === "adopt") return { ...base, state: refused ? "partial" : waiting ? "adopting" : "adopted", differs: treesDiffer(standings, facts) };
-		if (waiting || refused) return { ...base, state: refused ? "partial" : "undoing", differs: false };
+		if (desired.op === "adopt" && (refused || waiting)) return { ...base, state: refused ? "partial" : "adopting", differs: false };
+		if (desired.op === "undo" && (refused || waiting)) return { ...base, state: refused ? "partial" : "undoing", differs: false };
+		// Adopted everywhere, and nothing newer since: done. Once something newer appears the row is about that, and it keeps its Undo.
+		if (desired.op === "adopt" && !(look.newest && compareVersions(look.newest, desired.version) > 0)) return { ...base, state: "adopted", differs: treesDiffer(standings, facts) };
 	}
 	if (look.state === "not-looking" || look.state === "stale" || look.state === "unknown") return { ...base, state: look.state };
 	if (!look.newest || compareVersions(look.newest, pkg.version) <= 0) return { ...base, state: "current" };
@@ -101,15 +106,35 @@ export function piRow({ pinned, looks }) {
 	return { ...base, newest: top.newest, state: `checks-${checks}` };
 }
 
-/** The cron triggers a canary can run as: on this host's schedule and loading staged packages. A trigger that withholds them is refused at the preview anyway, so it is not offered. */
-function canaryTriggers(snapshot) {
-	const rows = snapshot?.triggers?.triggers;
+/**
+ * The cron triggers a canary can run as: on this deployment's file and loading staged packages. A trigger that withholds them is refused at the preview anyway, so it is not offered, and
+ * neither is one the preview could only refuse. Read from the raw file, as the plan it leads to is: the snapshot's rows are for display, and they carry none of these fields.
+ */
+function canaryTriggers(document) {
+	const rows = document?.triggers;
 	if (!Array.isArray(rows)) return [];
 	return rows.flatMap((trigger, index) => {
 		const on = trigger?.on, run = trigger?.run;
-		if (on?.type !== "cron" || run?.packages === false || run?.command !== undefined || run?.portfolio === true) return [];
+		if (on?.type !== "cron" || run?.packages === false || run?.resume === true || run?.command !== undefined || run?.portfolio === true) return [];
 		return [{ index, id: typeof on.id === "string" ? on.id : null, capUsd: Number.isFinite(run?.maxCostUsd) ? run.maxCostUsd : null }];
 	});
+}
+
+/** The stage manifest, whole: `{ packages, unreadable }`. A manifest that is absent is nothing staged; one that is there and cannot be read is said. */
+export function readStaged({ globalPiDir, fs = nodeFs } = {}) {
+	if (typeof globalPiDir !== "string" || globalPiDir === "") return { packages: [], unreadable: false };
+	const manifest = readStageManifest({ globalPiDir, readFile: (p, e) => fs.readFileSync(p, e), fileExists: (p) => fs.existsSync(p) });
+	if (manifest) return { packages: manifest.packages, unreadable: false };
+	return { packages: [], unreadable: fs.existsSync(join(globalPiDir, PACKAGES_SUBDIR, STAGE_MANIFEST)) };
+}
+
+/** The triggers file as written, or nothing when it cannot be read: the page then offers no canary, and the preview would say why. */
+export function readTriggersDocument({ triggersPath, fs = nodeFs } = {}) {
+	try {
+		return JSON.parse(fs.readFileSync(triggersPath, "utf8"));
+	} catch {
+		return null;
+	}
 }
 
 /** The newest of what people did here, from the audit log. Names and versions only, which is all those rows carry. */
@@ -128,7 +153,7 @@ function recentOf(rows) {
 /**
  * Everything the page draws, from injected sources so that each state is a fixture. `null` when even the stage manifest could not be asked: the page then says so rather than drawing nothing.
  */
-export async function readUpdates({ redis = null, staged, records = [], audit = [], pinned = null, snapshot = null, now = Date.now() } = {}) {
+export async function readUpdates({ redis = null, staged, records = [], audit = [], pinned = null, triggersDocument = null, now = Date.now() } = {}) {
 	const looks = redis ? await readLooks(redis, { now: () => now }) : { unreachable: true };
 	const desired = redis ? await readDesired(redis) : null;
 	let known = looks.unreachable ? [] : looks.hosts.map((h) => h.record.host);
@@ -148,7 +173,9 @@ export async function readUpdates({ redis = null, staged, records = [], audit = 
 	for (const pkg of staged?.packages ?? []) {
 		const row = (desired ?? []).find((d) => d.name === pkg.name) ?? null;
 		const look = lookOf(pkg.name, looks);
-		const target = row?.op === "adopt" ? row.version : look.newest;
+		// What this row is about: the newest once it passes what was adopted, else what was adopted. Adopt's gate reads `canary` for the version it is asked about, so this must never be another version's.
+		const adoptedVersion = row?.op === "adopt" ? row.version : null;
+		const target = adoptedVersion && !(look.newest && compareVersions(look.newest, adoptedVersion) > 0) ? adoptedVersion : look.newest;
 		const canary = target ? canaryResultOf(records, pkg.name, target) : null;
 		const facts = target && redis ? await readCanaryFacts(redis, pkg.name, target) : null;
 		packages.push(packageRow({ pkg, look, desired: row, standings: row ? hostStandings({ desired: row, applied, hosts: hostNames, now }) : [], canary, facts }));
@@ -162,8 +189,9 @@ export async function readUpdates({ redis = null, staged, records = [], audit = 
 		pi: piRow({ pinned, looks }),
 		packages,
 		stagedUnreadable: staged === null || staged === undefined || staged.unreadable === true,
+		moreHosts: looks.unreachable ? 0 : looks.more ?? 0,
 		hosts,
-		triggers: canaryTriggers(snapshot),
+		triggers: canaryTriggers(triggersDocument),
 		recent: recentOf(audit),
 		desiredUnreadable: redis ? desired === null : true,
 	};

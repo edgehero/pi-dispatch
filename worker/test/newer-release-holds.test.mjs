@@ -271,7 +271,7 @@ test("a newer triggers file defers EVERY kind of job at the processor's head, be
 	}
 	// Job data a newer release wrote is asked first, and says so; the triggers gate is the second.
 	const both = harness({ triggersNewer: () => true });
-	const { job } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", dataVersion: 2 });
+	const { job } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", dataVersion: 3 });
 	await assert.rejects(() => both.processor(job, "tok", new AbortController().signal), deferred);
 	assert.deepEqual(both.seen.logs.filter(([event]) => event === "newer_release_hold").map(([, fields]) => fields.what), ["job data"]);
 	// Cleared (the next good reload), the same job runs.

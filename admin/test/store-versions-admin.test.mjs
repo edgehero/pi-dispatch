@@ -205,7 +205,7 @@ test("a re-run of a local or a forge job a newer pi-dispatch queued is refused b
   for (const [jobId, kind, base] of [["local-9f8e7d", "local", LOCAL_DATA], ["gh-acme-web-7", "github", FORGE_DATA]]) {
     const record = { jobId, kind, outcome: "failed", startedAt: "2026-10-14T11:50:00.000Z", endedAt: ENDED };
     // Above this build's version, and a `dataVersion` no release writes (a string, 0): neither is read as this build's.
-    for (const dataVersion of [2, "2", 0]) {
+    for (const dataVersion of [3, "3", 0]) {
       const data = { ...base, dataVersion };
       assert.equal(rerunRefusalOf(record, AFTER, data), rerunNewer(jobId), `${kind} ${JSON.stringify(dataVersion)}`);
       assert.deepEqual(await planRerun({ ...heldJobs([record], data), jobId, now: () => AFTER }), { refusal: rerunNewer(jobId) }, `${kind} ${JSON.stringify(dataVersion)}: the planner asks the same check first`);
@@ -218,13 +218,13 @@ test("a re-run of a local or a forge job a newer pi-dispatch queued is refused b
   }
   // A cron run is rebuilt from its trigger and copies nothing of its data, so a stamp on that data refuses nothing here.
   const cron = { jobId: "repeat:nightly:1760443200000", kind: "local", outcome: "failed", startedAt: "2026-10-14T11:50:00.000Z", endedAt: ENDED };
-  assert.equal(rerunRefusalOf(cron, AFTER, { ...LOCAL_DATA, dataVersion: 2 }), null);
+  assert.equal(rerunRefusalOf(cron, AFTER, { ...LOCAL_DATA, dataVersion: 3 }), null);
 });
 
 test("a parked run whose job a newer pi-dispatch queued is not answered from the console, before the triggers file is read (#761)", async () => {
   const jobId = "gh-acme-web-park";
   const record = { jobId, kind: "github", target: "acme/web#7", outcome: "completed", reason: "awaiting-input", startedAt: "2026-10-14T11:50:00.000Z", endedAt: ENDED };
-  for (const dataVersion of [2, "2"]) {
+  for (const dataVersion of [3, "3"]) {
     const data = { ...FORGE_DATA, dataVersion };
     // Ahead of every check the triggers file decides: a path that names no file is never read.
     assert.deepEqual(parkedAnswerRefusalOf({ jobId, data, triggersPath: "/nonexistent/triggers.json" }), { refusal: answerNewer(jobId) });
@@ -235,11 +235,11 @@ test("a parked run whose job a newer pi-dispatch queued is not answered from the
   // The newer check comes before every check on the job's own fields, which only this build's meaning can judge: a kind
   // this console does not know (a newer release may add a forge, stamped for that reason) is refused as newer, not as
   // "is a <kind> run", and an approval's answer as newer, not for a missing gate declaration.
-  for (const [data, approval] of [[{ ...FORGE_DATA, kind: "bitbucket", dataVersion: 2 }, false], [{ ...FORGE_DATA, kind: "bitbucket", dataVersion: 2 }, true], [{ ...FORGE_DATA, dataVersion: 2 }, true]]) {
+  for (const [data, approval] of [[{ ...FORGE_DATA, kind: "bitbucket", dataVersion: 3 }, false], [{ ...FORGE_DATA, kind: "bitbucket", dataVersion: 3 }, true], [{ ...FORGE_DATA, dataVersion: 3 }, true]]) {
     const said = parkedAnswerRefusalOf({ jobId, data, triggersPath: "/nonexistent/triggers.json", approval });
     assert.deepEqual(said, { refusal: answerNewer(jobId) }, `${data.kind}${approval ? ", an approval" : ""}`);
   }
-  const unknown = { ...FORGE_DATA, kind: "bitbucket", dataVersion: 2 };
+  const unknown = { ...FORGE_DATA, kind: "bitbucket", dataVersion: 3 };
   assert.deepEqual(await planParkedAnswer({ ...heldJobs([{ ...record, kind: "bitbucket" }], unknown), jobId, text: "use the staging db", by: "alice", runsFn: async () => [], now: () => AFTER }), { refusal: answerNewer(jobId) }, "the planner asks the same check in the same order");
   // Unstamped, the same job is refused for what it is, so only the order tells the two apart.
   assert.deepEqual(parkedAnswerRefusalOf({ jobId, data: { ...FORGE_DATA, kind: "bitbucket" }, triggersPath: "/nonexistent/triggers.json" }), { refusal: `${jobId} is a bitbucket run; only a forge issue's parked run is answered this way` });

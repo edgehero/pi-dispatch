@@ -19,7 +19,7 @@ async function defaultWithClient(url, fn) {
 	return await withDoctorClient(url, fn);
 }
 
-export async function runUpdatesCli(argv, { env = process.env, cwd = process.cwd(), out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s), withClient = defaultWithClient, exec = defaultExec, look = null } = {}) {
+export async function runUpdatesCli(argv, { env = process.env, cwd = process.cwd(), out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s), withClient = defaultWithClient, exec = defaultExec, look = null, fetchJson = boundedJson } = {}) {
 	const [what, ...rest] = argv;
 	if (!["look", "reconcile"].includes(what) || rest.length > 0) {
 		err("usage: pi-dispatch updates look|reconcile\n");
@@ -40,7 +40,7 @@ export async function runUpdatesCli(argv, { env = process.env, cwd = process.cwd
 				const proxyUrl = env.PI_UPDATES_PROXY || null;
 				const tested = piAiVersion();
 				const record = await (look ?? buildLook)({
-					env, host, pinned: tested, get: (url) => boundedJson(url, { proxyUrl }),
+					env, host, pinned: tested, get: (url) => fetchJson(url, { proxyUrl }),
 					hostPi: async () => hostPiFacts({ tested, resolvePi: () => resolvePiBinary({ env }), versionOf: (path) => piVersionOf(path, { env }) }),
 				});
 				await publishLook(redis, record);

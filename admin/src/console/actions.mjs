@@ -2258,8 +2258,9 @@ const packageActions = [
       if (!got.plan) return got;
       const p = got.plan;
       if (p.schedule.data?.packages === false) return { refusal: "This trigger sets run.packages to false, so it has no staged copy for a candidate to replace. Choose a trigger that loads staged packages. Nothing was queued." };
+      if (p.schedule.data?.resume === true) return { refusal: "This trigger resumes its transcript, so its next run would continue the candidate's work, and a canary is for one job. Choose a trigger that does not resume. Nothing was queued." };
       return { target: `${canary.name}@${canary.version}`, payload: { plan: p, canary }, reserve: p.reserve, beforeDigest: p.fileDigest,
-        summary: [`Runs one paid job of cron trigger ${p.schedulerId} with ${canary.name} ${canary.version} in place of ${row.version}, for that job only`, "No other job sees it, and nothing stays staged", "This is third-party code in a job that holds that trigger's credentials", "Its result reads completed or failed. A job that completed does not prove the extension is good: read the run"] };
+        summary: [`Runs one paid job of cron trigger ${p.schedulerId} with ${canary.name} ${canary.version} in place of ${row.version}, for that job only`, "No other job loads it, and nothing stays staged", "This is third-party code in a job that holds that trigger's credentials, and what it does to that trigger's own folder or repository stays done", "Its result reads completed or failed. A job that completed does not prove the extension is good: read the run"] };
     },
     async apply(entry, ctx) {
       const res = await ctx.a.rm.enqueueTriggerFire(entry.payload.plan, { triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, packageCanary: entry.payload.canary });
@@ -2282,7 +2283,8 @@ const packageActions = [
       const checked = adoptable(await ctx.a.updates.read(), { name, version });
       if (checked.refusal) return { invalid: checked.refusal };
       try {
-        await ctx.a.updates.setDesired({ name, version, op: "adopt", from, by: ctx.session.name, at: ctx.now() });
+        const written = await ctx.a.updates.setDesired({ name, version, op: "adopt", from, by: ctx.session.name, at: ctx.now(), expectGeneration: checked.row.desired?.generation ?? 0 });
+        if (written === 0) return { invalid: "Someone changed this package since the preview. Preview it again." };
       } catch {
         return { invalid: "Valkey did not take the request. Nothing was changed; preview it again." };
       }
@@ -2304,7 +2306,8 @@ const packageActions = [
       const row = stagedRow(await ctx.a.updates.read(), name);
       if (row?.desired?.generation !== undoOf) return { invalid: "Someone changed this package since the preview. Preview it again." };
       try {
-        await ctx.a.updates.setDesired({ name, version, op: "undo", undoOf, by: ctx.session.name, at: ctx.now() });
+        const written = await ctx.a.updates.setDesired({ name, version, op: "undo", undoOf, by: ctx.session.name, at: ctx.now(), expectGeneration: undoOf });
+        if (written === 0) return { invalid: "Someone changed this package since the preview. Preview it again." };
       } catch {
         return { invalid: "Valkey did not take the request. Nothing was changed; preview it again." };
       }

@@ -38,6 +38,8 @@ export const STAGE_LOCK_STALE_MS = 30 * 60 * 1000;
 const LOCK_DIR = ".stage.lock";
 const RETIRED_FILE = ".retired.json";
 const STAGING_PREFIX = ".staging-";
+/** Each package's way back: what Undo restores. Not a stage, so it is never a retired tree. */
+export const UNDO_DIR = ".undo";
 
 /**
  * The directory of one stage: readable, unique and a plain path segment. The name stays in it because doctor and the admin-name check
@@ -46,6 +48,14 @@ const STAGING_PREFIX = ".staging-";
 export function stagedTreeName(base, version, unique = randomBytes(4).toString("hex")) {
 	const head = `${base}--${String(version).replace(/[^0-9A-Za-z.-]/g, "_")}`;
 	return `${head.slice(0, 118)}--${unique}`;
+}
+
+/**
+ * The base a stage's directory was named from: what stays the same between stages of one package. Read from the right, because a package's own name may hold `--` (npm allows it), and
+ * a directory from before per-stage names is its own base.
+ */
+export function stagedStem(dir) {
+	return /^(.+)--\d+\.\d+\.\d+[^/]*--[0-9a-f]{8}$/.exec(dir)?.[1] ?? dir;
 }
 
 /** The first string anywhere in a `pi` manifest that leaves the package dir, or null when all are contained. */
@@ -84,24 +94,62 @@ export function npmExecOptions(platform, staging, { timeoutMs, env } = {}) {
 }
 
 /**
- * What a service's npm gets of the worker's environment. It holds every token the deployment has, and `--ignore-scripts` means no package
- * code runs, but npm has no reason to see them either. Reaching the registry takes these and nothing else. `import-pi` keeps the operator's
- * whole environment: they run it at their own keyboard, and it is how a private registry's credentials reach npm.
+ * What a service's npm gets of the worker's environment. It holds every token the deployment has, and npm has no reason to see them. Reaching a registry takes these
+ * and nothing else, and a private registry's credentials live in the service account's `.npmrc`, which npm reads for itself. The registry itself is kept, and
+ * `PI_UPDATES_REGISTRY` is honoured here as it is by the look: dropping it would resolve a private name from the public registry, which is dependency confusion. `import-pi` keeps
+ * the operator's whole environment: they run it at their own keyboard.
  */
 export function serviceNpmEnv(env = process.env) {
 	const kept = {};
 	for (const [key, value] of Object.entries(env)) {
-		if (/^(PATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|SYSTEMROOT|TMPDIR|TEMP|TMP|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy)$/.test(key)) kept[key] = value;
+		if (/^(PATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|SYSTEMROOT|TMPDIR|TEMP|TMP|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NPM_CONFIG_REGISTRY|npm_config_registry)$/.test(key)) kept[key] = value;
 	}
+	if (env.PI_UPDATES_REGISTRY) kept.npm_config_registry = env.PI_UPDATES_REGISTRY;
 	return kept;
 }
 
 /** npm said this exact version does not exist, as opposed to could not be asked. `E404` and `ETARGET` are its only two ways of saying so. */
 const npmSaysNotFound = (detail) => /\b(?:E404|ETARGET)\b/.test(detail);
+/** npm said this package can never install as asked, whenever it is asked. Retrying these would repeat the attempt every couple of minutes for ever. */
+const npmSaysNever = (detail) => /\b(?:EUNSUPPORTEDPROTOCOL|ERESOLVE|EINTEGRITY|EINVALIDPACKAGENAME|EINVALIDTAGNAME|ENOVERSIONS)\b/.test(detail);
 
-/** A failed npm call's kind. Anything npm did not name as absent is infrastructure, so that a registry outage is never a verdict on a package. */
+/** A failed npm call's kind. Anything npm did not name is infrastructure, so that a registry outage is never a verdict on a package. */
 export function npmFailureKind(error) {
-	return npmSaysNotFound(String(error?.stderr ?? error?.message ?? "")) ? "not-found" : "infra";
+	const detail = String(error?.stderr ?? error?.message ?? "");
+	return npmSaysNotFound(detail) ? "not-found" : npmSaysNever(detail) ? "policy" : "infra";
+}
+
+/**
+ * Whether a resolved tree holds anything that is not a registry tarball with a hash, as a sentence, else null. THIS IS WHAT MAKES A SERVICE'S INSTALL SAFE, and `--ignore-scripts`
+ * is not: npm runs a git dependency's `prepare` to build it, whatever that flag says, as this account and outside any container, and a tarball URL has npm fetch wherever the package
+ * said. A `file:` dependency links a path on this host into the tree. So a service resolves first with `--package-lock-only`, which fetches metadata and runs nothing, refuses a tree
+ * holding any of these, and only then installs exactly that tree. `.github/scripts/pi-bump.mjs` holds pi's own tree to the same rule.
+ */
+export function lockfileProblem(lock, origins) {
+	const packages = lock?.packages;
+	if (packages === null || typeof packages !== "object") return "npm resolved no tree";
+	for (const [path, entry] of Object.entries(packages)) {
+		if (path === "" || entry?.inBundle === true) continue; // the root, and what a checked tarball carries inside itself
+		const name = path.split("node_modules/").pop();
+		if (entry?.link === true) return `${name} is a link to a path on this host`;
+		let origin = null;
+		try { origin = new URL(entry?.resolved).origin; } catch { /* a git+ssh URL or none at all has no origin we accept */ }
+		if (!origin || !origins.includes(origin)) return `${name} does not come from a configured registry`;
+		if (typeof entry?.integrity !== "string" || !/^sha(?:1|256|384|512)-/.test(entry.integrity)) return `${name} has no integrity hash`;
+	}
+	return null;
+}
+
+/** The origins this account's npm resolves from: its registry and any scoped ones. Read from npm itself, so that an `.npmrc` means what it means to npm. */
+async function registryOrigins({ exec, npmBin, options }) {
+	const { stdout } = await exec(npmBin, ["config", "list", "--json"], options);
+	const config = JSON.parse(String(stdout));
+	const origins = [];
+	for (const [key, value] of Object.entries(config)) {
+		if (key !== "registry" && !/^@[^:]+:registry$/.test(key)) continue;
+		try { origins.push(new URL(value).origin); } catch { /* not a URL: npm could not use it either */ }
+	}
+	return origins;
 }
 
 /**
@@ -110,7 +158,7 @@ export function npmFailureKind(error) {
  * one). Every assertion here is about one property: the staged dir must be SELF-CONTAINED, because at job
  * time it is resolved from a read-only mount with no network and no install step.
  */
-export async function preparePackage({ fs, exec, out = () => {}, entry, staging, npmBin, platform, warnings = [], timeoutMs, env }) {
+export async function preparePackage({ fs, exec, out = () => {}, entry, staging, npmBin, platform, warnings = [], timeoutMs, env, resolveFirst = false }) {
 	fs.mkdirSync(staging, { recursive: true });
 	// A private root package.json pins npm's idea of "the project" to the staging dir, so it cannot
 	// walk up and install into (or read config from) the operator's own checkout.
@@ -130,24 +178,23 @@ export async function preparePackage({ fs, exec, out = () => {}, entry, staging,
 	// --install-strategy=nested asks npm to keep every dependency inside the package dir; step 4 below
 	// ASSERTS the result rather than trusting the flag, whose name and default have moved across npm
 	// versions.
-	const args = [
-		"install",
-		`${entry.name}@${entry.version}`,
-		"--omit=dev",
-		"--omit=peer",
-		"--omit=optional",
-		"--ignore-scripts",
-		"--install-strategy=nested",
-		"--no-audit",
-		"--no-fund",
-		"--loglevel=error",
-	];
-	out(`  staging ${entry.name}@${entry.version} -> packages/${entry.dir}\n`);
+	const flags = ["--omit=dev", "--omit=peer", "--omit=optional", "--ignore-scripts", "--install-strategy=nested", "--no-audit", "--no-fund", "--loglevel=error"];
+	const spec = `${entry.name}@${entry.version}`;
+	out(`  staging ${spec} -> packages/${entry.dir}\n`);
+	const options = npmExecOptions(platform, staging, { timeoutMs, env });
 	try {
-		await exec(npmBin, args, npmExecOptions(platform, staging, { timeoutMs, env }));
+		if (resolveFirst) {
+			await exec(npmBin, ["install", spec, "--package-lock-only", ...flags], options);
+			const problem = lockfileProblem(JSON.parse(fs.readFileSync(join(staging, "package-lock.json"), "utf8")), await registryOrigins({ exec, npmBin, options }));
+			if (problem) throw new PackageStageError("policy", `${spec} cannot be staged by a service: ${problem}. Nothing was installed.`);
+			await exec(npmBin, ["ci", ...flags], options);
+		} else {
+			await exec(npmBin, ["install", spec, ...flags], options);
+		}
 	} catch (error) {
+		if (error instanceof PackageStageError) throw error;
 		const detail = String(error?.stderr ?? error?.message ?? "").trim();
-		throw new PackageStageError(npmFailureKind(error), `npm install failed for ${entry.name}@${entry.version}: ${detail}`);
+		throw new PackageStageError(npmFailureKind(error), `npm install failed for ${spec}: ${detail}`);
 	}
 
 	const source = join(staging, "node_modules", entry.name);
@@ -205,20 +252,32 @@ export async function preparePackage({ fs, exec, out = () => {}, entry, staging,
 /** A staging directory's unique name. A fixed `.staging-<i>` would delete a peer's work on a shared home. */
 export const newStagingDir = (packagesRoot, unique = randomBytes(6).toString("hex")) => join(packagesRoot, `${STAGING_PREFIX}${unique}`);
 
+/** The most files a digest reads. A tree past it has no digest, which the page reads as nothing to compare: no third party's package may hold the worker's loop by size. */
+const DIGEST_FILES_MAX = 200_000;
+
 /**
  * A digest of a resolved tree, so that the page can say when the canaried tree and the adopted tree differ: a package has no lockfile,
- * so its transitive dependencies float. A symlink is hashed by its target and never followed (node_modules/.bin holds them).
+ * so its transitive dependencies float. A symlink is hashed by its target and never followed (node_modules/.bin holds them). It gives way every few hundred files, because a canary's
+ * install runs in the worker that renews paid job locks (`doctor-spawner.mjs` on why a blocked loop fails them). `null` when the tree is past its bound.
  */
-export function treeDigest(root, { fs }) {
+export async function treeDigest(root, { fs }) {
 	const lines = [];
-	const walk = (path) => {
+	let seen = 0;
+	const walk = async (path) => {
+		if (++seen > DIGEST_FILES_MAX) throw new RangeError("tree too large");
+		if (seen % 256 === 0) await new Promise((resolve) => setImmediate(resolve));
 		const stat = fs.lstatSync(path);
 		const rel = relative(root, path).split("\\").join("/");
 		if (stat.isSymbolicLink()) lines.push(`${rel}\0link\0${fs.readlinkSync(path)}\0`);
-		else if (stat.isDirectory()) for (const name of fs.readdirSync(path)) walk(join(path, name));
+		else if (stat.isDirectory()) for (const name of fs.readdirSync(path)) await walk(join(path, name));
 		else if (stat.isFile()) lines.push(`${rel}\0file\0${createHash("sha256").update(fs.readFileSync(path)).digest("hex")}\0`);
 	};
-	walk(root);
+	try {
+		await walk(root);
+	} catch (error) {
+		if (error instanceof RangeError) return null;
+		throw error;
+	}
 	return createHash("sha256").update(lines.sort().join("")).digest("hex");
 }
 
@@ -230,14 +289,15 @@ export async function stagePackageTree({ fs, exec, out, entry, packagesRoot, npm
 	const staging = newStagingDir(packagesRoot);
 	const warnings = [];
 	try {
-		const source = await preparePackage({ fs, exec, out, entry, staging, npmBin, platform, warnings, timeoutMs, env });
+		const source = await preparePackage({ fs, exec, out, entry, staging, npmBin, platform, warnings, timeoutMs, env, resolveFirst: true });
 		const dir = stagedTreeName(entry.dir ?? stagedDirName(entry.name), entry.version, unique);
 		// renameSync, never copyTree: copyTree's symlink guard uses statSync, which FOLLOWS links, so it
 		// would copy the target of every node_modules/.bin symlink instead of skipping it.
 		fs.renameSync(source, join(packagesRoot, dir));
 		return { dir, warnings };
 	} finally {
-		fs.rmSync(staging, { recursive: true, force: true });
+		// Off the loop where the fs offers it: a staging tree can hold every file of a package's dependencies.
+		await (fs.promises?.rm ? fs.promises.rm(staging, { recursive: true, force: true }) : fs.rmSync(staging, { recursive: true, force: true }));
 	}
 }
 
@@ -272,7 +332,7 @@ export function pruneStagedTrees({ fs, packagesRoot, manifest, now = Date.now, k
 	let names = [];
 	try { names = fs.readdirSync(packagesRoot); } catch { return; }
 	for (const name of names) {
-		if (name === STAGE_MANIFEST || name === RETIRED_FILE || name === LOCK_DIR || name.endsWith(".tmp") || named.has(name)) continue;
+		if (name === STAGE_MANIFEST || name === RETIRED_FILE || name === LOCK_DIR || name === UNDO_DIR || name.endsWith(".tmp") || named.has(name)) continue;
 		// A staging directory carries no version and no record: it is a peer's until it is older than any stage could be.
 		const since = name.startsWith(STAGING_PREFIX) ? modifiedAt(fs, join(packagesRoot, name)) ?? at : Number.isFinite(retired[name]) ? retired[name] : at;
 		const limit = name.startsWith(STAGING_PREFIX) ? STAGE_LOCK_STALE_MS : keepMs;
@@ -295,36 +355,62 @@ function writeRetired(fs, path, value) {
 }
 
 /**
- * One stage at a time on one overlay, also across hosts on a shared home (`docs/multi-host.md`). `mkdir` is atomic on NFS too, which `open(O_EXCL)`
- * was not on older clients. A holder older than `STAGE_LOCK_STALE_MS` crashed, and its lock is taken by rename, so that two hosts cannot both think they removed it.
+ * One stage at a time on one overlay, also across hosts on a shared home (`docs/multi-host.md`). `mkdir` is atomic on NFS too, which `open(O_EXCL)` was not on older clients. The holder
+ * renews its time while it works, so a slow install is not taken for a crash, and everything it does to the lock it does under its own token: release removes only its own lock, and
+ * `stillHeld` lets it stop before the commit if it slept past the limit and a peer took over. Taking a stale lock is by rename, so that two hosts cannot both remove it, and the rename
+ * is checked afterwards, since a peer may have taken the lock between the read that judged it stale and the rename: that lock is put back.
  * Returns the callback's result; throws `PackageStageError("infra")` when a live peer holds it, since trying again later can succeed.
  */
-export async function withStageLock({ fs, packagesRoot, now = Date.now, staleMs = STAGE_LOCK_STALE_MS, holder = "" }, callback) {
+export async function withStageLock({ fs, packagesRoot, now = Date.now, staleMs = STAGE_LOCK_STALE_MS, renewMs = staleMs / 3, holder = "" }, callback) {
 	const lock = join(packagesRoot, LOCK_DIR);
+	const holderFile = (dir) => join(dir, "holder.json");
+	const token = randomBytes(8).toString("hex");
+	const stamp = () => {
+		const temp = `${holderFile(lock)}.${token}.tmp`;
+		fs.writeFileSync(temp, `${JSON.stringify({ at: now(), holder, token })}\n`);
+		fs.renameSync(temp, holderFile(lock));
+	};
+	const readHolder = (dir) => {
+		try { return JSON.parse(fs.readFileSync(holderFile(dir), "utf8")); } catch { return null; }
+	};
 	const acquire = () => {
 		fs.mkdirSync(lock);
-		try { fs.writeFileSync(join(lock, "holder.json"), `${JSON.stringify({ at: now(), holder })}\n`); } catch { /* an empty lock still holds */ }
+		try { stamp(); } catch { /* an empty lock still holds, until its age says otherwise */ }
 	};
 	try {
 		acquire();
 	} catch (error) {
 		if (error?.code !== "EEXIST") throw error;
-		let at = null;
-		try { at = JSON.parse(fs.readFileSync(join(lock, "holder.json"), "utf8"))?.at; } catch { at = modifiedAt(fs, lock); }
+		const seen = readHolder(lock);
+		const at = seen?.at ?? modifiedAt(fs, lock);
 		if (!Number.isFinite(at) || now() - at < staleMs) throw new PackageStageError("infra", `another stage holds ${LOCK_DIR} on this overlay`);
 		const stale = `${lock}.${randomBytes(6).toString("hex")}.tmp`;
 		try {
 			fs.renameSync(lock, stale);
-			fs.rmSync(stale, { recursive: true, force: true });
+		} catch {
+			throw new PackageStageError("infra", `another stage took ${LOCK_DIR} on this overlay`);
+		}
+		if (readHolder(stale)?.token !== seen?.token) {
+			try { fs.renameSync(stale, lock); } catch { /* its holder's release finds nothing, and its commit check says so */ }
+			throw new PackageStageError("infra", `another stage took ${LOCK_DIR} on this overlay`);
+		}
+		fs.rmSync(stale, { recursive: true, force: true });
+		try {
 			acquire();
 		} catch {
 			throw new PackageStageError("infra", `another stage took ${LOCK_DIR} on this overlay`);
 		}
 	}
+	const stillHeld = () => readHolder(lock)?.token === token;
+	const renewing = setInterval(() => {
+		try { if (stillHeld()) stamp(); } catch { /* the next tick, or its age says so */ }
+	}, renewMs);
+	renewing.unref?.();
 	try {
-		return await callback();
+		return await callback({ stillHeld });
 	} finally {
-		fs.rmSync(lock, { recursive: true, force: true });
+		clearInterval(renewing);
+		if (stillHeld()) fs.rmSync(lock, { recursive: true, force: true });
 	}
 }
 

@@ -1211,7 +1211,7 @@ Stated openly rather than discovered later:
   package that did not mount is refused before any spend, and a package skill that takes the name of a repo
   or overlay skill loses — the repo's stays in force, and the attempt is logged. Since issue #796 a person can also try
   one exact version on one job, or adopt it fleet-wide, from the console's [Updates](docs/console.md#updates) page: both
-  go through the same staging with `--ignore-scripts`, neither is open to an agent, and a tried version is new third-party
+  go through the same staging with `--ignore-scripts`, refuse a dependency tree holding anything but registry tarballs with a hash (npm runs a git dependency's build script whatever that flag says), neither is open to an agent, and a tried version is new third-party
   code in a job that holds its trigger's credentials, which is why that is a person's call. Two facts to hold on to.
   Staging runs
   `npm install --ignore-scripts`: **without that flag a package's — and every transitive dependency's —
