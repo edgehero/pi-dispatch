@@ -6070,7 +6070,7 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   - the mode, `classify` (shadow: verdicts only, no draft) or `draft`.
 
   Its closed schema is defined in `INT-TRIGGERS-FILE-CONTRACT`. It rests on no dispatcher: the
-  dispatchers discussed with #735 and #743 are not specified, and this rule needs none of them.
+  dispatchers discussed with #735 and #743 remain PROPOSED in `REQ-DISPATCHERS`, and this rule needs none of them.
 - **Never drafted**: product decisions, security, money, scope, an approval (#649), a question none of its sources
   cover, and a run outside its projects. A pass says why, in a closed word, and drafts nothing.
 - **What the draft job reads.**
@@ -8021,10 +8021,132 @@ instead of drifting.
   `DES-HOST-OWNED-SUBSCRIPTION-AUTH`, `INT-AUTH-CONNECTIONS-FILE-CONTRACT`,
   `INT-SUBSCRIPTION-CREDENTIAL-STORE`, `INT-SUBSCRIPTION-QUOTA-KEY`.
 
+## REQ-DISPATCHERS
+
+- **Status**: **PROPOSED, spec only** (2026-11-02, issue #776). Nothing of this entry ships. It specifies the
+  acceptance surface for later builds, not a new console tab, trigger kind, configuration key or doctor check.
+  The cards are `design/system/components/DispatchersScreen` and `DispatcherScreen`, both Proposed. The
+  architecture is `DES-DISPATCHER-ADMISSION`, `DES-DISPATCHER-DECISION-ENGINE`, `DES-DISPATCHER-LLM-ENGINE` and
+  `DES-DISPATCHER-TRIGGER-PROPOSALS`.
+- **Purpose**: An operator may declare several dispatchers, each with a purpose, reviewed inputs and a closed
+  list of jobs it may request. A dispatcher may request one of those jobs or propose a trigger for a person to
+  review. It cannot change its own authority or another dispatcher's. A watch rule remains the right mechanism
+  for one source, one fingerprint policy and one investigation flow, including an optional decision step. A cron
+  triage flow with `previousRunAt` remains sufficient for periodic work on one reviewed target. Dispatchers add
+  selection among listed target/flow/model combinations, several inputs, bounded correlation of facts across
+  events and proposals for new or changed rules. They do not add a more capable host agent.
+- **Inputs and custody**: Reviewed signed findings and the existing file, journald and Loki readers are the
+  collection precedents. Forge issue, comment and pull-request metadata must come through an authenticated,
+  reviewed reader; authentication identifies the delivery, not authority to start a forge job. Pushes, merged
+  commits, deployments, organization discovery, advisories and CloudWatch are proposed input kinds requiring the
+  adapter decisions of `OQ-055`, not capabilities this entry claims already exist. Host readers hold only their
+  declared read credentials, renewed or re-resolved on the host. A classifier receives one event's projected
+  structured fields, never samples, issue text or a previous model's prose. A bounded LLM job may receive reviewed
+  evidence as fenced data. Neither engine receives collection credentials, a console token, Valkey access or a
+  forge write token. Each model credential's injected copy lives only for its fresh job; the deployment's host
+  provider key may itself be long-lived and is not claimed to disappear when that container ends.
+- **Authority is hand-written**: The operator writes the dispatcher declarations in `triggers.json`, like
+  `watchSources` and `secretBundles`. The reviewed declaration fixes input identities, allowed target/flow/model
+  combinations, decision questions/options/thresholds, resource bounds and caps. No event or model supplies a
+  path, endpoint, query, model reference or runnable command. No tool or console form may set or widen the list,
+  models, targets, inputs or caps. Classifier proposals select operator-authored templates with bounded reviewed
+  substitutions; only a separately admitted LLM helper may draft new prose or a diff. Neither path supplies new
+  authority. A human's confirmation of a proposal does not grant it access to fields the
+  ordinary trigger planners deliberately withhold. Later builds must define a closed shared schema; this issue
+  introduces no executable shape.
+- **Two bounded engines**: A deterministic producer lives in the background. For the decision engine it starts
+  one fresh classifier container per admitted event, with the existing guarded classifier API, no chat agent and
+  no resident model client. For the LLM engine it schedules or requests an ordinary fresh, read-only flow job,
+  limited to 30 minutes. Correlation uses bounded host-stored event facts and a fresh job's data, not a reused
+  container, resumed transcript or automatically adopted model hypothesis. A days-long model container, hourly
+  budget renewals and refreshed in-container credentials are not admitted (`OQ-056`).
+- **Every paid start is bounded**: Both engines and requested children pass current configuration validation,
+  pause, allowlist, credential, target and resource checks before any paid operation. Flow opt-in remains
+  `ai-trigger: allow` at a pre-agent SHA. Children are local read-only jobs on listed targets, with explicit
+  per-job dollar caps, trusted read tools and no arbitrary executable discovery, shell, write tool, forge
+  publication, command, role subagent, resume or generic outbox chaining. A dispatcher cannot turn a watch finding
+  into a code-changing job. Each classifier/LLM run and child passes `reserveBudget`, deployment job-count and
+  dollar windows, scoped limits and any applicable ordinary model-trigger rate limits. Separate finite dispatcher
+  day limits bound paid decisions, LLM helper starts, child starts and dollars; per-target cooldown/rate limits
+  apply before spending too. A failed or unknown paid call cannot release its conservative hold and buy another
+  call. Configuration is checked again at worker pickup and immediately before a paid start.
+- **Two different duplicate gates**: Event replay protection prevents a restarted reader from buying the same
+  decision twice. Separately, requests for the same canonical target and flow within ten minutes become one
+  child job across all dispatchers, independent of event ID, requested model and dispatcher ID. A duplicate names
+  the existing job and consumes no second child reservation. A different permitted model is not a way around
+  the duplicate gate. This is proposed dispatcher behavior; ordinary local minute deduplication and forge semantic
+  deduplication remain unchanged.
+- **Human proposals**: Proposals are capped, retained separately from configuration and associated with their
+  dispatcher and source event. Identical compatible changes may share one proposal with bounded provenance;
+  incompatible changes remain distinct. Operators may inspect a diff, adopt through the future person-confirmed
+  `trigger-add` or `trigger-edit` planner, or dismiss. Every adoption revalidates current configuration and records
+  the proposal ID in the audit. A watch proposal needs a future person-only watch planner; today's forms cannot
+  add one. Until that planner exists, the operator edits the reviewed file by hand, and a separate explicit
+  operator confirmation may associate the validated resulting change with the proposal. Merely observing a file
+  change never claims that the proposal was adopted. Applying proposals without a person remains unavailable,
+  including through a hand-written enable switch (`OQ-057`).
+- **Audit, roles and stop controls**: Proposed run provenance `dispatcherId` names only the validated
+  operator-assigned dispatcher ID. Adoption audits `trigger-add` or `trigger-edit` with `proposalId`; proposed
+  future kinds are `dispatcher-proposal-dismiss`, `dispatcher-pause`, `dispatcher-resume` and
+  `dispatcher-proposal-associate` for a confirmed manual-change association. These names require later interface
+  registration; no live schema changes here. Pause prevents new decisions, helper runs and children, including work waiting in a queue; it does not silently cancel a job already running.
+  Existing cancel controls stop an active job. Viewers see reviewed identifiers, counts, choices, probabilities,
+  costs and availability, never event values, private traces or proposal contents and no write controls. Operators
+  alone read bounded private per-event evidence. Known credentials are redacted before any private persistence;
+  logs and ordinary run records contain no raw payload or exception text. Missing, expired or truncated evidence
+  is named, never rendered as a complete empty history.
+- **Restart and runaway**: Fenced source leases, durable cursors and retained event/intent identities separate
+  collection from paid execution. Admission and reservation are recorded before provider dispatch or child
+  creation, and recovery reconciles them instead of issuing a fresh intent. An uncertain paid result is held
+  conservatively and requires review, not automatic replay. Missing required journal/cursor/cap state stops paid
+  work loudly. Dispatcher accounting survives a process restart and UTC midnight; unresolved holds are still
+  liabilities, and queued work is admitted against the day and configuration in which it actually starts. A
+  stable dispatcher identity prevents accidental resets on restart or a display-name edit; an operator who can
+  rewrite the configuration can deliberately replace that identity, so deployment and target limits must still
+  bind independently. Cap exhaustion, source failure, uncertain paid work and unavailable state appear on the
+  operator surface with fixed actionable reasons. Optional existing notification transport may report those
+  facts; no forge comment, issue creation or guaranteed alert delivery is added.
+- **Acceptance for the builds**: These are behavioral obligations for later implementation tests, not claims of
+  executable coverage in this spec-only issue.
+  - A single-source threshold case still uses a watch rule. A reviewed multi-input dispatcher can select among
+    its listed combinations; an event that supplies an unlisted flow/model/target, or text asking to widen the
+    list, creates no child and spends nothing on that request.
+  - Removing a flow opt-in or narrowing configuration after enqueue refuses the queued start before mint,
+    clone, token-cap read or reservation. Loading a repository extension cannot restore a withheld write tool
+    or credential. A symlink retarget, changed execution host or realpath outside reviewed containment roots
+    refuses rather than selecting a different target. A forge target or generic child-chain request refuses
+    even when its flow is listed.
+  - Two dispatchers racing on the same target/flow with different events and models produce one child. A second
+    request just inside ten minutes names that job; one outside the window is eligible only after every current
+    cap and admission check passes. Replaying either event still buys no second decision.
+  - Shadow decisions, invalid output, an uncertain provider call and a probability below its reviewed threshold
+    all create no child and expose a review-needed outcome. No branch falls back to a host model or files an
+    issue. A paid failure retains a conservative hold; it is not a free retry.
+  - Concurrent decisions at the final day slot or dollar allowance cannot both spend. Restart and midnight do
+    not erase outstanding holds. Crashes before reserve, after reserve, during provider dispatch and around child
+    enqueue each reconcile the same identity; an ambiguous outcome stops for review rather than buying work
+    twice. Losing state fails closed and names which state is unavailable.
+  - A changed proposal base, dismissed proposal, changed dispatcher authority or expired evidence refuses stale
+    adoption. Conflicting edits are not combined, and repeated reasons cannot grow storage without bound. A
+    watch proposal cannot reach the existing non-watch add form or smuggle a tool-proof field through it.
+  - Classifier output cannot create prose or a diff: only a reviewed template with validated scalar
+    substitutions may become a proposal. A substitution that changes target/model authority refuses.
+    Audit entries use the proposed fixed kinds and reviewed IDs; an event cannot supply `dispatcherId`.
+  - Viewer HTML and JSON omit private values even if a client asks directly; an operator sees named missing or
+    partial evidence. Known credential values in a hostile event never reach persisted evidence, logs, public
+    projections or audit digests' displayed inputs. Pause racing a queued start prevents its next paid phase;
+    resume cannot override a broader pause or re-arm removed/disabled configuration. Cancelling a running job
+    remains a separate action.
+- **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-MERGE-NEVER-AUTOMATIC`,
+  `REQ-AI-TRIGGERED-RUNS`, `REQ-JOB-TIMEOUT-30M`, `REQ-WATCH-TRIGGER`, `REQ-WATCH-DECISION-STEP`,
+  `INT-WATCH-TRACE-STREAM`, `OQ-055`, `OQ-056`, `OQ-057`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#776) | NEW `REQ-DISPATCHERS`, PROPOSED, spec only: bounded multi-input selection and person-reviewed proposals, deterministic collection, fresh event decisions and read-only LLM jobs and local children. Includes independent event replay and target/flow dedup, pre-spend day/window/scoped limits, conservative crash accounting, private evidence and explicit stop controls. No runtime feature, schema, console tab or doctor check is built. `REQ-PARKED-ANSWERER` AMENDED in words only: dispatchers now have a proposed specification and remain no dependency of answer rules. `REQ-WATCH-TRIGGER`, `REQ-WATCH-DECISION-STEP`, `REQ-JOB-TIMEOUT-30M` and `REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked: existing watch behavior, timeouts and budget mechanics are not widened. To be AMENDED by later builds, not claimed unchanged in their future scope: `REQ-AI-TRIGGERED-RUNS` for a new reviewed producer, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-OPERATOR-CONSOLE-SCREENS` for proposals, controls and views, and `REQ-DURABLE-RUN-HISTORY` for validated dispatcher provenance. Future behavioral acceptance is specified here; no test is claimed to implement the proposed feature. |
 | 2026-11-01 (#774, coverage verification) | `REQ-BROWSER-FIRST-RUN-SETUP` acceptance clarified: exact-pin catalogue and credential-source coverage, exhaustive eligible API-key Add/resolve/Replace tests and explicit authentication/runtime limits. Browser regression checks identify account owner and copy controls independently of preceding help guides, retaining exact destinations, full commands and actual clipboard effects. Runtime/provider authentication capabilities, cloud/custom admission, credential forwarding, spend gates, `REQ-CONSOLE-SECURITY`, `CONST-*`, `DES-*` and `INT-*` contracts UNCHANGED, checked. |
 | 2026-11-01 (#774, provider management) | `REQ-BROWSER-FIRST-RUN-SETUP` and `REQ-CONSOLE-SECURITY` AMENDED: permanent multi-provider inventory and explicit selected-slot Add/Replace, with danger confirmation for replacement, preserved provider/model defaults, derived aliases, source-switch/reload explanations and private cancellation across selection changes. Fixed official provider help includes OpenRouter/DeepSeek; subscription help remains host-only and distinguishes Claude community compatibility from Claude Code tokens. Admission, spend, container isolation, roles, CSP, no-secret projections and subscription credential custody UNCHANGED, checked. |
 | 2026-11-01 (#774, implementation) | `REQ-BROWSER-FIRST-RUN-SETUP`, `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-DEPLOYMENT-BOOTSTRAP` IMPLEMENTED after #783: explicit host grant, live setup, bounded person-only actions, private create-only API keys/viewer links, durable bootstrap and valid wizard webhook choices. Destructive-action enumeration matches the registered rules. Admission, budget reservations, trigger semantics, roles, existing model tools, CSP and side-effect-free GET contracts UNCHANGED, checked. Acceptance includes counterexamples, full integration suite, clock/temp/reporting guards, source-card comparisons and production-CSP interactions. |

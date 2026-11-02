@@ -1,5 +1,5 @@
-"""A dispatcher (#735, generalised): a sandbox that reads git changes and infra streams and only starts jobs and proposes
-triggers, with the right flow and model. Two engines: a Jev loop (stateless decisions, runs continuously) or an LLM flow.
+"""A proposed dispatcher (#776): a service that reads git changes and infra streams and only starts listed local
+read-only jobs and proposes triggers. Two engines: fresh Jev decisions or bounded ordinary LLM jobs.
 Pulse kit."""
 from pulse import *
 from gen_triggers import tabs as trigger_tabs
@@ -19,34 +19,37 @@ KPIS = f"""<div class="cards-4">
 </div>"""
 
 # ---- the boundary: what it reads, what it may do, what it never does ----
-INPUTS = [("infra", "attention", "aws-cloudwatch", "alarms in eu-west-1, pushed through EventBridge, signed"),
+INPUTS = [("infra", "attention", "aws-cloudwatch", "proposed alarm adapter in eu-west-1; not built"),
           ("infra", "queue", "prod-logs", "Vector findings, as #735 describes"),
-          ("infra", "box", "deploys", "deployments from the forges"),
-          ("git", "git", "acme/web, acme/api", "merged commits on the default branch, read for context only")]
+          ("infra", "box", "deploys", "proposed deployment adapter; not built"),
+          ("git", "git", "acme/web, acme/api", "proposed default-branch change adapter; not built")]
 MAY = [("triage-incident", "claude-haiku-5-5", "read-only, on an alarm or finding"),
        ("db-health", "kimi-for-coding", "read-only, when the database looks involved")]
 
 BOUNDARY = card("What it may do", f"""<div class="dp-bound">
   <div class="dp-col"><p class="dp-h">{ic('search', 'ic ic--sm')}It reads</p>
     <ul class="dp-in">{''.join(f'<li><span class="dp-k{" tone-running" if k == "infra" else ""}">{ic(i, "ic ic--sm")}{k}</span><div><b>{E(n)}</b><span>{E(d)}</span></div></li>' for k, i, n, d in INPUTS)}</ul></div>
-  <div class="dp-col"><p class="dp-h">{ic('runs', 'ic ic--sm')}It may start</p>
+  <div class="dp-col"><p class="dp-h">{ic('runs', 'ic ic--sm')}It may start, local read-only jobs only</p>
     <ul class="dp-may">{''.join(f'<li>{flow(f)}<span class="code">{E(m)}</span><span class="dp-why">{E(w)}</span></li>' for f, m, w in MAY)}</ul>
-    <p class="dp-caps"><span>{ic("slot", "ic ic--sm")}10 jobs a day</span><span>{ic("spend", "ic ic--sm")}$3.00 a day</span><span>{ic("clock", "ic ic--sm")}1 per target an hour</span></p>
+    <p class="dp-caps"><span>{ic("slot", "ic ic--sm")}10 jobs a day</span><span>{ic("spend", "ic ic--sm")}$3.00 a day, decisions included</span><span>{ic("clock", "ic ic--sm")}1 per target an hour</span></p>
+    <p class="dp-p">Also bounded by a decision-call cap and a decision dollar cap before every call, including ignore and propose.</p>
     <p class="dp-h dp-h2">{ic('edit', 'ic ic--sm')}It may propose</p>
     <p class="dp-p">New or tuned watch rules, for you to adopt.</p>
-    <p class="dp-off">{ic('pause', 'ic ic--sm')}<span><b>Apply proposals without me: off.</b></span></p></div>
+    <p class="dp-off">{ic('shield', 'ic ic--sm')}<span><b>Apply proposals without me: unavailable.</b> No hand-written switch enables it.</span></p></div>
 </div>""", sub="the sandbox: set by hand in triggers.json, like any trigger", id_="p-dp-bound")
 
 # ---- the two engines ----
-ENGINES = card("Engine", f"""<div class="seg dp-seg" role="group" aria-label="Engine"><button aria-pressed="true">{ic('spend', 'ic ic--sm')}Jev loop</button><button aria-pressed="false">{ic('runs', 'ic ic--sm')}LLM flow</button></div>
+ENGINES = card("Engine", f"""<div class="seg dp-seg" role="group" aria-label="Engine"><button aria-pressed="true">{ic('spend', 'ic ic--sm')}Jev decisions</button><button aria-pressed="false">{ic('runs', 'ic ic--sm')}LLM flow</button></div>
 <div class="dp-eng">
   <div class="dp-e dp-e--on">
-    <p class="dp-e__h"><b>Jev loop</b><span class="badge tone-running">{ic('running')}running for 3d 4h on mini1</span></p>
-    {facts([("Decisions", "186 in 24h, $0.008"), ("Context", "none: each decision sees one event"), ("Cursor", "per input, in Valkey")], 1)}
+    <p class="dp-e__h"><b>Jev decisions</b><span class="badge tone-running">{ic('running')}service up 3d 4h on mini1</span></p>
+    {facts([("Decisions", "186 in 24h, $0.008; fresh container each"), ("Context", "current event's structured fields only"), ("Restart", "durable event receipts and fenced cursors")], 1)}
+    <p class="dp-p">Resident model containers are rejected. Service uptime does not extend a decision's lifetime. A cursor alone cannot prove a paid start.</p>
   </div>
   <div class="dp-e">
     <p class="dp-e__h"><b>LLM flow</b><span class="dp-k">{ic('clock', 'ic ic--sm')}every 10 minutes today</span></p>
-    {facts([("Each run", "at most 30 minutes, from <span class=\"code\">previousRunAt</span>"), ("Tools", "read-only git and streams, Jev's decide tool, an outbox")], 1)}
+    {facts([("Each run", "at most 30 minutes, from <span class=\"code\">previousRunAt</span>"), ("Tools", "read-only inputs and listed local-start requests")], 1)}
+    <p class="dp-p">Long runs, hourly budget renewal and refreshing a job's credentials remain deferred.</p>
   </div>
 </div>""", sub="the same boundary for both", id_="p-dp-engine")
 
@@ -61,7 +64,7 @@ FEED = [
     ("14:50", "infra", "attention", "aws-cloudwatch · alarm CheckoutLatencyHigh is OK", "the alarm cleared",
      [("act", "ignore 0.95")], "nothing", "ignore at 0.90 or more", "$0.00002"),
     ("14:40", "infra", "box", f"deploys · acme/web {code('4a1f')} to production", "touches checkout and the database pool",
-     [("risky_change", "medium 1.4")], "nothing", "kept as a fact for later decisions: 4a1f touched checkout", "$0.00004"),
+     [("risky_change", "medium 0.84")], "nothing", "bounded structured fact for a later LLM job; never Jev's next event", "$0.00004"),
     ("13:58", "git", "git", "acme/api · 3 commits merged to main", "dependency bumps only",
      [("touches_infra", "no 0.91")], "nothing", "read for context; nothing to do", "$0.00003"),
 ]
@@ -100,18 +103,18 @@ PROPS = card("Trigger proposals", f"""<ol class="dp-props">
   <li class="dp-prop">
     <p class="dp-prop__h"><span class="chip tone-parked">{ic('edit')}Proposed</span><span class="dp-k">15:24</span><b>Add a watch rule for payments errors</b></p>
     <p class="dp-prop__why">A new fingerprint, payments/HTTPError/capture, reached 3 in 10 minutes and no watch rule covers it. Jev: needs a watch rule, yes 0.81; flow triage-incident, 0.77.</p>
-    {diff('triggers.json, new row 9', [('gap', '…'), ('add', '{ "on": { "type": "watch", "id": "payments-5xx", "source": "prod-alerts",'), ('add', '          "match": { "severity": ["error", "critical"], "labels": { "service": ["payments"] } },'), ('add', '          "fingerprint": ["service", "error.type", "frame.top"], "minCount": 5, "window": "10m",'), ('add', '          "cooldown": "6h", "maxPerDay": 4 },'), ('add', '  "run": { "kind": "local", "folder": "/srv/shop", "flow": "triage-incident", "mode": "investigate" } }'), ('gap', '…')])}
+    {diff('Illustrative watch proposal, not loadable config', [('gap', '…'), ('add', '{ "on": { "type": "watch", "id": "payments-5xx", "source": "prod-alerts",'), ('add', '          "match": { "severity": ["error", "critical"], "labels": { "service": ["payments"] } },'), ('add', '          "fingerprint": ["service", "error.type", "frame.top"], "minCount": 5, "window": "10m",'), ('add', '          "cooldown": "6h", "maxPerDay": 4 },'), ('add', '  "run": { "kind": "local", "folder": "/srv/shop", "flow": "triage-incident", "mode": "investigate" } }'), ('gap', '…')])}
     <p class="dp-prop__n">{ic('info', 'ic ic--sm')}<span>It copies shop-5xx's caps and read-only mode.</span></p>
     <div class="dp-prop__act">{btn('Adopt', '', 'done')}{btn('Edit first', 'ghost', 'edit')}{btn('Dismiss', 'ghost', 'cancel')}</div>
   </li>
   <li class="dp-prop">
     <p class="dp-prop__h"><span class="chip tone-parked">{ic('edit')}Proposed</span><span class="dp-k">09:40</span><b>Raise shop-5xx's threshold from 5 to 8 in 10 minutes</b></p>
-    <p class="dp-prop__why">36 of its 41 findings in 24 hours were held by cooldown. Over 30 days, a threshold of 8 would have started the same jobs and held 52 fewer findings.</p>
+    <p class="dp-prop__why">36 of its 41 findings in 24 hours were held by cooldown. The proposed threshold needs a person's review; this sample makes no claim about findings beyond the retained window.</p>
     {diff('triggers.json, row 8', [('gap', '…'), ('del', '          "minCount": 5, "window": "10m",'), ('add', '          "minCount": 8, "window": "10m",'), ('gap', '…')])}
     <div class="dp-prop__act">{btn('Adopt', '', 'done')}{btn('Dismiss', 'ghost', 'cancel')}</div>
   </li>
 </ol>
-<p class="dp-foot">Adopt opens a preview with this diff, then Confirm.</p>""",
+<p class="dp-foot">Proposed: Adopt opens a validated diff and a person's Confirm. Watch adoption needs that support first; no watch-add form exists today.</p>""",
     sub="it proposes, a person adopts", id_="p-dp-props-card")
 
 JOBS = card("Jobs it started", f"""<ul class="rows dp-jobs">
@@ -123,9 +126,12 @@ JOBS = card("Jobs it started", f"""<ul class="rows dp-jobs">
     sub="3 in 24h, 1 refused", id_="p-dp-jobs-card")
 
 def page():
-    inner = (trigger_tabs("Dispatchers") + KPIS + BOUNDARY +
+    proposal = banner("attention", "info", "Proposed boundaries, nothing built",
+                      "A deterministic service starts fresh decision containers. Resident model loops and forge starts are rejected. "
+                      "CloudWatch, deployment and git-change adapters remain proposed; adoption always needs a person.").replace("\n  \n", "\n\n")
+    inner = (trigger_tabs("Dispatchers") + proposal + KPIS + BOUNDARY +
              f'<div class="cols"><div class="stack">{LIVE}</div><div class="stack">{ENGINES}{JOBS}</div></div>{PROPS}')
-    end = f'<span class="badge tone-running">{ic("running")}Jev loop, running</span>{btn("Pause", "danger", "pause", sm=False)}'
+    end = f'<span class="badge tone-running">{ic("running")}Jev service, running</span>{btn("Pause", "danger", "pause", sm=False)}'
     return shell("Triggers", inner, "infra-dispatch",
                  sub="Purpose: turn infra alarms and log findings into read-only triage. One of 5 dispatchers; it only starts jobs from its list and proposes watch rules.",
                  end=end, back="Dispatchers")
@@ -199,47 +205,49 @@ CSS = """
 """
 
 if __name__ == "__main__":
-    write("DispatcherScreen", card_marker("Planned for 5.0.0", 2400, 1440, "A dispatcher: reads git changes and infra streams, and only starts jobs and proposes triggers with the right flow and model; a Jev loop or an LLM flow"),
+    write("DispatcherScreen", card_marker("Planned for 5.0.0", 2400, 1440, "Proposed dispatcher service: fresh Jev decisions or bounded ordinary LLM jobs, listed local read-only starts and proposals for a person"),
           "infra-dispatch", page(), CSS)
     readme("DispatcherScreen", """
-One dispatcher in full. A dispatcher is a sandbox with a purpose of its own. It reads git changes and infra streams, and has two powers only: start jobs from its list, and propose triggers. Many can run at once, each for a different purpose (see Dispatchers). This one, `infra-dispatch`, turns infra alarms and log findings into read-only triage, and proposes watch rules. It generalises #735.
+One proposed dispatcher in full. A dispatcher is a service with a purpose of its own. It reads reviewed git changes and infra inputs, and has two powers: start listed local read-only jobs, and propose triggers for a person. Many can run at once, each for a different purpose (see Dispatchers). This one, `infra-dispatch`, turns infra alarms and log findings into read-only triage, and proposes watch rules. It generalises #735.
+
+**PROPOSED, spec only (#776).** Nothing here is built. This card corrects the earlier resident Jev container and configurable proposal-application claims. A long-running deterministic service starts fresh bounded Jev decision containers; LLM runs stay ordinary jobs of at most 30 minutes. All started jobs are local and read-only. Unsupported input adapters and watch adoption support remain proposed. No setting enables adoption without a person.
 
 **How a person uses it.**
 - **The title bar** gives its purpose in one sentence, its engine and state, and Pause.
 - **The numbers.** Events read in 24 hours, decisions and what they cost, jobs started against its day cap, and trigger proposals waiting for a person.
 - **What it may do.** The boundary, set by hand in triggers.json like any trigger:
-  - **It reads:** CloudWatch alarms through EventBridge, Vector findings, deployments, and merged commits for context.
-  - **It may start:** only `triage-incident` and `db-health`, each with a listed model, under its own day caps.
-  - **It may propose:** new or tuned watch rules, for a person to adopt. "Apply proposals without me" shows as off.
+  - **It reads:** reviewed source inputs; CloudWatch, deployments and default-branch git changes shown here are proposed adapters, not current integrations.
+  - **It may start:** only local read-only `triage-incident` and `db-health` jobs, each with a listed model, under its own day caps. It starts no forge job.
+  - **It may propose:** new or tuned watch rules, for a person to adopt. "Apply proposals without me" is unavailable, with no hand-written enable switch.
 - **What it saw and did.** A live feed, newest first. Each event shows its input and the event, with log text as plain text. Then Jev's questions with their answers, probabilities and cost. Last, the one thing it did: started a job, proposed a watch rule, held by a watch rule before any decision, or nothing.
-- **Trigger proposals.** A new watch rule for a new fingerprint, and a tuned threshold for an existing one. Each has its reason and the triggers.json diff. *Adopt* is the usual preview and Confirm, audited with the proposal's id.
-- **Engine.** The same boundary for two engines, each as facts: the Jev loop (this one, on mini1) with its decisions, context and cursor, and the LLM flow with its runs and tools.
+- **Trigger proposals.** A new watch rule for a new fingerprint, and a tuned threshold for an existing one. Each has its reason and an illustrative diff, not a loadable configuration example. Proposed *Adopt* requires a validated preview and a person's Confirm, audited with the proposal's id. The build must add watch adoption validation and preview support; no watch-add form exists today.
+- **Engine.** The same boundary for two engines, each as facts: the deterministic Jev service (this one, on mini1) with fresh per-decision containers and durable receipts, and the ordinary LLM flow with its bounded runs and tools. Uptime describes the service, not a model container.
 - **Jobs it started.** Ordinary jobs; a refusal shows its reason.
 
 **Panels.** `p-dp-events`, `p-dp-decisions`, `p-dp-jobs`, `p-dp-props`, `p-dp-bound`, `p-dp-live`, `p-dp-props-card`, `p-dp-engine`, `p-dp-jobs-card`.
 
 **The server provides.**
-- The dispatcher's rule: purpose, inputs, allowed flows and models, caps, and the auto-apply setting.
-- The engine and its state: host, uptime and cursors for a Jev loop, or the last and next runs for an LLM flow.
-- Per event: its input, its summary fields, each decision (question, options, answer, probability, cost), the action with its job or proposal id, and any fact the loop kept.
+- The dispatcher's rule: purpose, inputs, allowed local read-only flows and models, job caps, decision-call caps and decision dollar caps. No auto-apply setting is admitted.
+- The engine and its state: service host, uptime, fenced cursors and durable admission receipts for Jev decisions, or the last and next ordinary LLM runs.
+- Per event: its input, its projected fields, each decision (question, options, answer, probability, cost), and the action with its job or proposal id. Structured facts are deterministic, bounded and separate from model context.
 - The proposals with their diffs, and the jobs started with their outcomes.
 
 **Who sees what.** Log text and decision state are operator only. A viewer sees the counts, the actions, and the decisions' chosen options and probabilities. Only an operator adopts, dismisses or pauses.
 
 **Why it works this way.**
 - **Two powers only:** start a job from its list, and propose a trigger. It holds no write token, so it cannot change code or the forge.
-- **What it never does:** write code, push or merge, comment or label as a person, start a flow or model outside its list, change caps, secrets or its own rules, or see a secret's value or a write token.
-- **Applying proposals without a person** is off. It can be turned on only by hand in triggers.json, and never for models, caps, secrets or MCP servers. A proposal may not set a model outside its list, a dollar cap, secrets or MCP servers: those stay the person's to write.
-- **Every cost is held first.** Decisions are priced before they are asked (Jev bills input only), and jobs pass every check before spend, inside the dispatcher's own day caps.
+- **What it never does:** write code, push or merge, comment or label as a person, start a flow or model outside its list, or change caps, secrets or its own rules. Its model sandbox receives no collection credential or forge write key. The provider API key is a job-lifetime injected copy of a host-held key that may itself be long-lived; the card does not claim that copy is unreadable inside the sandbox.
+- **Applying proposals without a person is rejected.** Hand-written configuration cannot enable it. A proposal may not widen its allowed flows, models, targets or caps, or change secrets or MCP servers. Those stay the person's to write.
+- **Every cost is held first.** Decisions are priced before they are asked (Jev bills input only), including ignore and propose. Every dispatcher has a decision-call cap and decision dollar cap even if it starts no jobs. Decisions and jobs count against the deployment's dollar windows and applicable scoped limits; every free refusal precedes every paid admission.
 - **The event never picks the flow or model.** Jev picks from options a person wrote. Untrusted text can sway a choice, but not widen it. Log text is untrusted and shown as plain text.
 - **Jev gives no reasons.** The question, its answer and the probability are the why.
-- **No model context lives on in the Jev loop.** Each decision sees one event's fields, so nothing from one log line carries into the next. Facts it keeps, such as a recent deploy, are structured fields the loop holds.
-- **The Jev loop** runs all the time like the GitHub poller, in a plain container whose network reaches only its inputs and the decision API, and loses nothing on restart because its cursors live in Valkey.
-- **The LLM flow** is just a flow: a skill in a job. It reasons across events, such as a deploy, then an alarm, then a log spike. Today it runs at most 30 minutes, every 10 minutes; waiting in its own loop for hours needs long runs first (a timeout per trigger, budget held an hour at a time, tokens that refresh).
-- **Each job it starts is ordinary:** its own container, budget held before it starts, flow and model from this dispatcher's list, never from the event.
+- **No model context lives on across Jev decisions.** Each sees only its current event's structured fields, never raw log or issue text and never a previous event's model output. A deterministic service may retain bounded structured facts for later ordinary LLM jobs, not Jev's next event.
+- **Resident Jev containers are rejected.** A deterministic service reads inputs and starts one fresh metered container per bounded decision. A cursor alone cannot prevent duplicate paid starts: durable event identity, fenced ownership and atomic admission receipts are prerequisites for restart correctness.
+- **The LLM flow** is just a flow: a skill in an ordinary job. It may reason across reviewed bounded inputs and structured facts. Each run lasts at most 30 minutes; long runs, hourly budget renewal and refreshing a job's credentials remain deferred to a separate issue.
+- **Each job it starts is ordinary:** its own container, budget held before it starts, local read-only target, flow and model from this dispatcher's list, never from the event. The same canonical target and flow within 10 minutes become one job regardless of dispatcher, input or chosen model.
 - **Triggers change through a person.** Proposals are adopted as reviewed edits, audited as `trigger-add` or `trigger-edit` with the proposal's id. Models change only this way. These follow #735 and #650's decisions.
 
-**Fixture note.** This is a planned screen, and all of it is sample:
+**Fixture note.** This is a proposed screen, and all of it is sample:
 - the dispatcher, its inputs, the CloudWatch alarm and the payments fingerprint;
 - the jobs `local-8b02`, `local-6c10` and `local-6c3a` (`local-7f21` and the shop-5xx numbers follow the Watch fixture);
 - the decisions and their costs, which follow Jev's input-only price.

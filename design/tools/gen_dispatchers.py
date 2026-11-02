@@ -1,4 +1,4 @@
-"""The Dispatchers tab: many trigger sandboxes at once, each with its own purpose, inputs, list and caps; what each did
+"""The proposed Dispatchers tab: durable services, each with its own purpose, inputs, list and caps; what each did
 today, where they read the same input, and how they stay bounded together. Pulse kit."""
 from pulse import *
 from gen_triggers import tabs as trigger_tabs
@@ -11,19 +11,19 @@ def flow(f): return f'<span class="ds-flow">{ic("skill", "ic ic--sm")}{E(f)}</sp
 
 # name, engine, state, where, purpose, reads, may start, jobs (n, cap), dollars (n, cap), proposals, last
 DISP = [
-    ("infra-dispatch", "jev", "running", "on mini1 for 3d 4h", "Turn infra alarms and log findings into read-only triage.",
+    ("infra-dispatch", "jev", "running", "service on mini1 for 3d 4h", "Turn infra alarms and log findings into read-only triage.",
      ["aws-cloudwatch", "prod-logs", "deploys", "merged commits"], ["triage-incident", "db-health"], (3, 10), (0.42, 3.00), 2, "15:35 started triage-incident"),
-    ("review-router", "jev", "running", "on mini2 for 9d", "Pick which pull requests get a review, and on which model.",
-     ["pull requests"], ["review"], (8, 20), (1.96, 4.00), 1, "15:38 started review on acme/api#540"),
-    ("repo-onboarding", "jev", "running", "on mini1 for 9d", "When a repository joins or adds a skill, propose the triggers it needs.",
-     ["the acme org", "merged commits"], [], (0, 0), (0, 0), 1, "15:31 proposed a label trigger, pi:migrate"),
+    ("review-router", "jev", "running", "service on mini2 for 9d", "Route pull request metadata to a local read-only review flow.",
+     ["pull requests"], ["review"], (8, 20), (1.96, 4.00), 1, "15:38 started local review for acme/api"),
+    ("repo-onboarding", "jev", "running", "service on mini1 for 9d", "When a repository joins or adds a skill, propose the triggers it needs.",
+     ["the acme org", "merged commits"], [], (0, 0), (0.01, 0.50), 1, "15:31 proposed a label trigger, pi:migrate"),
     ("release-watch", "llm", "idle", "for 30 minutes after each deploy", "After a deploy, watch error rates and ask for a rollback check if they rise.",
      ["deploys", "prod-logs"], ["rollback-check"], (1, 4), (0.18, 1.00), 0, "14:40 to 15:10 after 4a1f: no rollback needed"),
-    ("deps-keeper", "llm", "paused", "every 6 hours on mini2", "Keep dependencies current across the projects.",
+    ("deps-keeper", "llm", "paused", "every 6 hours on mini2", "Find stale dependencies and propose read-only checks across the projects.",
      ["merged commits", "advisories"], ["deps-check"], (0, 6), (0, 2.00), 0, "paused by ops at 10:02: waiting for the lockfile fix"),
 ]
 STATE = {"running": ("running", "running", "Running"), "idle": ("ok", "done", "Idle, ready"), "paused": ("attention", "pause", "Paused")}
-ENGINE = {"jev": ("spend", "Jev loop"), "llm": ("runs", "LLM flow")}
+ENGINE = {"jev": ("spend", "Jev decisions"), "llm": ("runs", "LLM flow")}
 
 def meter(label, n, cap, money=False):
     if not cap:
@@ -45,7 +45,7 @@ def dcard(name, eng, state, where, purpose, reads, may, jobs, dollars, props, la
   <p class="ds-eng">{ic(eic, 'ic ic--sm')}<b>{eword}</b><span>{E(where)}</span></p>
   <div class="ds-rows">
     <p class="ds-row"><span class="ds-rk">Reads</span><span class="ds-v">{''.join(f'<span class="vtag">{E(r)}</span>' for r in reads)}</span></p>
-    <p class="ds-row"><span class="ds-rk">May start</span><span class="ds-v">{mays}</span></p>
+    <p class="ds-row"><span class="ds-rk">Local only</span><span class="ds-v">{mays}</span></p>
   </div>
   {meter("Jobs today", *jobs)}{meter("Spend today", *dollars, money=True)}
   <p class="ds-last">{propchip}<span>{ic('clock', 'ic ic--sm')}{E(last)}</span></p>
@@ -110,7 +110,7 @@ MEET = card("Where they meet", f"""{matrix()}
 <ul class="ds-meet">
   <li><span class="ds-mt">14:40</span><div><b>deploys · acme/web {code('4a1f')} to production</b>
     <p>{ic('runs', 'ic ic--sm')}<span><span class="code">release-watch</span> started its 30-minute watch, and asked for no rollback.</span></p>
-    <p>{ic('minus', 'ic ic--sm')}<span><span class="code">infra-dispatch</span> kept it as a fact; 55 minutes later it tied the latency alarm to it.</span></p></div></li>
+    <p>{ic('minus', 'ic ic--sm')}<span><span class="code">infra-dispatch</span> kept a bounded structured fact for a later LLM flow. Each Jev decision sees only its current event's fields.</span></p></div></li>
   <li><span class="ds-mt">13:58</span><div><b>merged commits · acme/api, 3 dependency bumps</b>
     <p>{ic('minus', 'ic ic--sm')}<span><span class="code">infra-dispatch</span> read them for context: nothing touches infra.</span></p>
     <p>{ic('minus', 'ic ic--sm')}<span><span class="code">repo-onboarding</span> found no new skill.</span></p>
@@ -120,9 +120,9 @@ MEET = card("Where they meet", f"""{matrix()}
 </ul>""", sub="different purposes may read the same input", id_="p-ds-meet")
 
 KPIS = f"""<div class="cards-4">
-{card('Dispatchers', '<p class="kpi"><b>5</b><span>each with its own purpose</span></p><p class="ds-kp">3 Jev loops, 2 LLM flows</p>', id_="p-ds-count")}
+{card('Dispatchers', '<p class="kpi"><b>5</b><span>each with its own purpose</span></p><p class="ds-kp">3 Jev services, 2 LLM flows</p>', id_="p-ds-count")}
 {card('Running', f'<p class="kpi"><b>3</b><span>now</span></p><p class="ds-kp">{chip("1 idle until a deploy", "ok", "done")} {chip("1 paused", "attention", "pause")}</p>', id_="p-ds-running")}
-{card('Jobs started today', f'<p class="kpi"><b>12</b><span>of 40 across their caps</span></p>{pbar(12 / 40, "ok", "12 of 40 jobs a day across all dispatchers", 8)}<p class="ds-kp ds-kp--m"><b>$2.56</b> of the deployment\'s $25.00 today</p>{pbar(2.56 / 25, "ok", "$2.56 of the deployment\'s $25.00 today", 8)}', id_="p-ds-jobs")}
+{card('Jobs started today', f'<p class="kpi"><b>12</b><span>of 40 across their caps</span></p>{pbar(12 / 40, "ok", "12 of 40 jobs a day across all dispatchers", 8)}<p class="ds-kp ds-kp--m"><b>$2.57</b> of the deployment\'s $25.00 today</p>{pbar(2.57 / 25, "ok", "$2.57 of the deployment\'s $25.00 today", 8)}<p class="ds-kp">Includes decisions and started jobs.</p>', id_="p-ds-jobs")}
 {card('Proposals waiting', '<p class="kpi"><b>4</b><span>for you</span></p><p class="ds-kp">from 3 dispatchers</p>', id_="p-ds-props")}
 </div>"""
 
@@ -133,11 +133,14 @@ def page():
   <p>Written by hand in triggers.json, with its purpose, inputs, list and caps.</p>
   {btn('How to add one', '', 'info')}
 </section>"""
-    inner = (trigger_tabs("Dispatchers") + KPIS + ACTIVITY + f'<div class="ds-grid">{cards}</div>' +
+    proposal = banner("attention", "info", "Proposed boundaries, nothing built",
+                      "Resident model containers and forge job starts are rejected in #776. All starts are local and read-only. "
+                      "CloudWatch, deployment and git-change adapters remain proposed; long LLM runs are deferred.").replace("\n  \n", "\n\n")
+    inner = (trigger_tabs("Dispatchers") + proposal + KPIS + ACTIVITY + f'<div class="ds-grid">{cards}</div>' +
              MEET)
     end = btn("How to add one", "", "info", sm=False)
     return shell("Triggers", inner, "Dispatchers",
-                 sub="Sandboxes that read git and infra, each for its own purpose. They only start jobs from their own lists and propose triggers.",
+                 sub="Services that read git and infra, each for its own purpose. They only start listed local read-only jobs and propose triggers.",
                  end=end)
 
 CSS = """
@@ -217,8 +220,10 @@ if __name__ == "__main__":
     readme("DispatchersScreen", """
 The Dispatchers tab on Triggers. Many dispatchers can run at once, and most do different jobs, so the page leads with each one's purpose and shows how they share inputs and limits.
 
+**PROPOSED, spec only (#776).** Nothing here is built. This card corrects its earlier resident-container and forge-start claims: service uptime is not a model container's lifetime, each Jev decision runs in a fresh bounded container, and review routing starts only a local read-only job. CloudWatch, deployments, merged-commit, organisation and advisory adapters remain proposed. Long LLM runs are deferred to a separate issue; hourly reserves and token renewal are not granted here.
+
 **How a person uses it.**
-- **The numbers.** How many dispatchers there are and by engine, how many run now (and which are idle or paused), the jobs and spend they started today against their combined caps and the deployment's $25.00, and the trigger proposals waiting.
+- **The numbers.** How many dispatchers there are and by engine, how many run now (and which are idle or paused), the jobs and total spend today against their own caps and the deployment's $25.00, and the trigger proposals waiting. Spend includes decisions, even for a dispatcher that proposes only.
 - **Today.** One lane per dispatcher over the day in UTC:
   - a green dot for each job started;
   - a violet dot for each trigger proposal;
@@ -229,7 +234,7 @@ The Dispatchers tab on Triggers. Many dispatchers can run at once, and most do d
   The person sees at a glance which dispatcher is busy and which is quiet.
 - **One card per dispatcher**, and a last card to add one, which opens the format. Each card shows:
   - its name, state, and its purpose in one sentence;
-  - its engine and where it runs (a Jev loop on a host, or an LLM flow on a schedule or after an event);
+  - its engine and service host or schedule (fresh Jev decision containers, or an ordinary LLM job);
   - what it reads, and what it may start (or "nothing: it proposes only");
   - jobs and spend today against its own caps;
   - proposals waiting, and its last action;
@@ -242,21 +247,23 @@ The Dispatchers tab on Triggers. Many dispatchers can run at once, and most do d
 **Panels.** `p-ds-count`, `p-ds-running`, `p-ds-jobs`, `p-ds-props`, `p-ds-today`, `p-ds-meet`, and one card per dispatcher.
 
 **The server provides.**
-- Per dispatcher: name, purpose, engine, host or schedule, state with who paused it and why, inputs, allowed flows, caps, today's jobs and spend, proposals waiting and the last action.
+- Per dispatcher: name, purpose, engine, service host or schedule, state with who paused it and why, inputs, allowed local read-only flows and models, job and decision caps, today's jobs and total spend, proposals waiting and the last action.
 - Per input: which dispatchers read it.
 - Events acted on by several dispatchers, with each action, plus merged proposals and requests the queue took as duplicates.
 - The deployment's dollar window.
 
 **Who sees what.** A viewer sees purposes, states, counts and actions, without *Pause*, *Resume* or proposals. Dispatchers are written by hand in triggers.json; *How to add one* shows the format.
 
-**Why it works this way.** Five rules keep the dispatchers bounded as a group:
-- **Each has its own caps**, and every job it starts also counts against the deployment's windows and its project's scoped limits, which still bind.
-- **Two requests for the same target and flow** within 10 minutes become one job, whichever dispatcher sent them.
-- **Two proposals for one trigger** become one proposal with both reasons.
+**Why it works this way.** These rules keep the dispatchers bounded as a group:
+- **Each has its own caps**, including a decision-call count and decision dollar cap even if it starts no jobs. Every decision and started job is held first and counts against the deployment's windows and applicable scoped limits.
+- **Two requests for the same canonical local target and flow** within 10 minutes become one job, regardless of dispatcher, input or chosen model. A different model never bypasses deduplication.
+- **Identical proposals for one trigger** become one proposal with both origins. Conflicting edits stay separate for a person to resolve.
 - **None can change another**, start a flow outside its own list, or edit its own rules. Adopting a proposal is a reviewed edit.
-- **Each Jev loop runs in its own container**, reaching only its own inputs and the decision API. LLM flows run as ordinary jobs.
+- **Resident Jev containers are rejected.** A deterministic service reads inputs; a fresh metered container answers each bounded decision using only its current event's projected fields. Bounded deterministic facts may feed later ordinary LLM jobs, never Jev's next event. No model transcript persists between jobs.
+- **A cursor alone is not a paid-start receipt.** Durable event identities, fenced ownership and atomic admission records must survive crashes so a restart cannot repeat a paid start. This is proposed acceptance behaviour, not supplied by the card.
+- **LLM flows remain ordinary jobs**, at most 30 minutes, with no renewable hourly hold or days-long model credential. The longer-lived alternative remains deferred.
 
-**Fixture note.** This is a planned screen, and all of it is sample:
+**Fixture note.** This is a proposed screen, and all of it is sample:
 - the five dispatchers, their purposes, hosts, caps and today's activity;
 - `gh-5c21`, `4a1f` and the shop-5xx proposal follow the Dispatcher and Watch fixtures.
 """)
