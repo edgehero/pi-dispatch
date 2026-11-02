@@ -108,6 +108,7 @@ OTHER_RUNS = {
     "gh-9d14": (None, None, None, None, None, None),     # first drawn on ConfirmStates; fill in when a second card draws it
     "gh-a07c": (None, None, None, None, None, None),     # first drawn on ParkedAnswerer; fill in when a second card draws it
     "gh-c9e1": (None, None, None, None, None, None),     # first drawn on TriggerDetail; fill in when a second card draws it
+    "gh-c0a7": ("15:02", "acme/web#493", "fix", "mini1", "local", "completed"),  # proposed: UpdatesScreen, a canary with pi-lint 1.4.3
 }
 
 PARKED_QUESTION = "Should the export rate limit apply per API key or per account? The issue mentions both."

@@ -1508,7 +1508,7 @@ refactor apart.
   is built (`REQ-ADMIN-VIA-PI-EXTENSION` Scope, trap (j) in `INT-SDK-SESSION-OPTIONS`).
 - **Operator-staged pi packages** reach a job as `PI_PACKAGES` — a `":"`-delimited list of **absolute
   container paths** under `/opt/pi-global/packages/<dir>`, emitted only for a trigger that opted in
-  (`INT-TRIGGERS-FILE-CONTRACT`) — **not** as a `/job` input. They live inside the operator overlay's
+  (`INT-TRIGGERS-FILE-CONTRACT`) — **not** as a `/job` input, the one exception being a canary's single candidate (`INT-UPDATES-KEYS`). They live inside the operator overlay's
   existing `:ro` mount (`REQ-GLOBAL-PI-OVERLAY`, `INT-PI-PACKAGES-FILE-CONTRACT`); `/job` remains the
   per-job, per-repo channel and carries none of them. A relative entry, a `..` segment, or a path that did
   not mount is a **pre-spend** `configError` (exit `2`), because pi **skips** an unresolvable local package
@@ -5446,7 +5446,8 @@ validator rather than a second copy of it.
 - **Contract**:
   ```
   pi-packages.json  (path via `--packages-file <path>`, else PI_PACKAGES_FILE, else <cwd>/pi-packages.json;
-                     read ONLY by `pi-dispatch import-pi --with-packages` — never at job time)
+                     read by `pi-dispatch import-pi --with-packages`, and written by a host applying a person's Adopt or Undo
+                     (`INT-UPDATES-KEYS`) — never at job time)
   { "packages": [
     { "name":    "<npm package name: /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/, <= 214 chars>",
       "version": "<EXACT: MAJOR.MINOR.PATCH[-prerelease][+build] — no range, tag, or wildcard>",
@@ -11487,6 +11488,30 @@ pull request when its container starts, edited as the run goes and a last time w
   no target, `phrase-collision` above).
 - **Acceptance**: `REQ-RUN-PROGRESS` (e).
 
+## INT-UPDATES-KEYS
+
+**Worker host → Valkey → the read model, and person → Valkey → every worker host (issue #796, `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`).**
+Deleting every `updates:*` key changes no job: a job reads only the stage manifest on disk. It loses the page's facts and any Adopt not yet applied.
+
+```
+updates:hosts                     SET    host names that have published a look; the reader prunes
+updates:h:<host>                  STRING one JSON look record, kept 7 days from its last publish; stale past two intervals
+updates:generation                STRING the newest desired generation (INCR)
+updates:desired                   HASH   package name -> { v, generation, name, version, op: "adopt"|"undo", by, at }
+updates:applied:<host>            HASH   package name -> { v, generation, state, version, reason, digest, at }, kept 90 days from its last write
+updates:canary:<name>@<version>   STRING { v, host, digest, excerpt, at }, kept 30 days; excerpt is at most 2000 characters with control characters removed
+```
+
+`state` is one of `adopted`, `undone`, `no-change`, `cannot-adopt`. A host with no row at the newest generation is pending, and pending past 24 hours reads as overdue. `reason` is a closed word:
+`overlay-read-only`, `no-overlay`, `no-packages-file`, `adapter`, `not-staged-here`, `version-not-found` or `not-a-pi-package`. A lock held by a peer or a registry that cannot be reached is no state at all: the
+host stays pending and tries again. A look record's strings are rebuilt on read: names and versions must match `NPM_NAME_RE` and `EXACT_VERSION_RE`, and each state is a closed word
+(`read`: `ok`, `unknown`; `checks`: `passing`, `failing`, `pending`, `unknown`; a host's pi: `same`, `newer`, `older`, `absent`, `unknown`).
+
+**The job field.** `packageCanary: { name, version }`, set only by the console's `package-canary` action and re-validated in the processor. The candidate is installed at `<jobDir>/canary/<tree>` and replaces its manifest
+entry's path in `PI_PACKAGES`; `PI_PACKAGE_CANARY` names that path for the runner. It is deleted from a retained `/job`. The image must declare the capability `package-canary`.
+
+**The record.** `packageCanary: { name, version, load: "loaded"|"failed"|"not-reported" }` on the run record, the first two validated as above and the third closed. The exit line's `canaryLoad` is `loaded` or `failed`; a missing or other value reads as `not-reported`, which the page draws as failed.
+
 ## INT-DOCTOR-RESULTS-KEY
 
 - **Model proposal exception (#773)**: a check explicitly identified as a model proposal may retain a redacted bounded label at level `ok` as well as warn/fail. Its optional typed proposal data is rebuilt from an allowlist of kind, scope/role and validated current/candidate model references. The builder and reader both validate this data; an arbitrary label prefix or unknown extra field grants no publication authority. Generic `ok` checks still carry no label. Existing version-1 records remain readable; absence of typed proposal evidence is not a claim that the host has no proposals. Count, detailed-text and redaction bounds remain authoritative.
@@ -12850,3 +12875,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-02 (#754, #792, implemented) | INT-SANDBOX-GATEWAY-CONTRACT and INT-CONSOLE-AUDIT-LOG: pending markers become IMPLEMENTED. Measured distinction now pinned by test: a console that revokes an operator ends the attachment as `session-ended` (and that operator's watchers as `driver-ended`), while a console that merely stops renewing ends it as `authorization-unavailable`, because silence proves nothing about the operator. `gatewaySelect` for a host with no enabled gateway now says so instead of drawing an empty chooser. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, security review) | INT-SANDBOX-GATEWAY-CONTRACT gains the bootstrap receipt, the same-origin launch gesture and the session heartbeat; refused upgrades close outright; the console stops renewing attachments nobody holds; driver authority is bounded by its room's TTL; a lapsed watcher is no longer told the driver removed it. Found by an independent review of the final diff, each with a regression test. No watcher write path was found. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |
 | 2026-11-02 (#796, pi 1.5.0) | `INT-RUN-HISTORY-FILE-CONTRACT`: each `usage.models` row gains `providerBilled`, the count of its calls whose cost is the provider's billed total (pi-ai 1.5.0's `usage.cost.totalFromProvider`), a count because a row aggregates calls; an older record reads 0, and a present value that is not a non-negative number refuses the block as for every other counter. The exit line's `message` cap moves from 1800 to 1700 serialized characters so that the worst-case line stays under 6 KiB, the same trade as before: the diagnostic gives way, never the label. Trap (g): since 1.5.0 an extension gets a view of pi-ai rather than the compat namespace itself, so the compat half is accepted by identity of the five registry and stream functions, with names still proving nothing. UNCHANGED, checked: the exit line's other keys, `tokens`, the ledger partition rule (rows sum to the totals, and `providerBilled` is not a total), and the child ledger's version, since parent and child always run the same image. |
+| 2026-11-02 (#796) | New `INT-UPDATES-KEYS`: the look, the desired generation and each host's applied state; the `packageCanary` job field and run-record field, `canaryLoad` on the exit line, `PI_PACKAGE_CANARY`, and the image capability `package-canary`. `INT-PI-PACKAGES-FILE-CONTRACT`: a host applying a person's Adopt or Undo also writes the file, and the stage manifest's `dir` now names a directory per stage rather than per package. A manifest from before keeps working: `dir` was always only a plain path segment. `INT-SDK-SESSION-OPTIONS`: staged packages stay off `/job`, with a canary's one candidate as the only exception. |

@@ -15739,6 +15739,32 @@ is introduced. The design generator owns the published card before the console u
   admin/src/index.ts (the `chat` subcommand, `chatIo`, `openDashboard`'s `initialTail`), admin/src/read-model.mjs
   (`PANEL_SERVICE_KEYS`, `PANEL_PATH_KEYS`).
 
+## DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED
+
+- **Status**: issue #796, part 2 (2026-11-02). New. Requirement `REQ-PACKAGE-UPDATES`, contract `INT-UPDATES-KEYS`.
+- **Decision**: pi-dispatch prepares an update and a person applies it. A daily look (off until enabled), a paid canary of one exact version
+  for one job, and a person's Adopt with Undo. A job never updates anything: it stays offline (`PI_OFFLINE=1`).
+- **Reversed, with the reasons they stood:**
+  - *"restage for me"* (`docs/global-pi-overlay.md`) refused an automated restage because `import-pi --with-packages` discovers, so it would import whatever is on
+    the machine. That reason stands against running `import-pi` from a button, and Adopt does not: it stages one named exact version, and it never reads the account's pi setup.
+  - *"not as a `/job` input"* (`INT-SDK-SESSION-OPTIONS`) kept staged packages out of `/job` because `/job` is per-job. A canary's candidate is exactly that, so one candidate for
+    one job lives there. Every other package stays on the overlay's `:ro` mount.
+- **Rejected:**
+  - *Adopt runs `import-pi`.* It reads the account's paths and working directory, rewrites models, MCP and extensions, and reinstalls every package; the service account usually
+    differs from the operator's. Hence the single-package stager (`worker/src/package-stage.mjs`), which `import-pi` now calls too.
+  - *Swap a package's directory in place.* `rename` cannot replace a non-empty directory, and a running job's bind mount would change under it. Each stage gets its own directory,
+    the manifest (temp and rename) is the commit point, and an old tree is removed only after a delay longer than any job. `start.mjs` reading the manifest at each job start then stays correct.
+  - *Copy Adopt requests to each host, like sandbox preparation.* Those expire after 30 minutes, and a queued Adopt then Undo could replay stale. A desired generation per package, with each host
+    reconciling to the newest, has neither problem, and offline hosts stay visible as pending and then overdue.
+  - *Undo writes the old pin.* A written pin overrides discovery permanently (`packages.mjs`), so Undo would quietly change what the file meant. It restores the file's prior state.
+  - *Load the candidate beside the staged copy.* `run-container.mjs` would load both, and which wins is pi's business. It replaces its manifest `dir`, so a `run.packages: false` trigger is refused for free.
+  - *Install the candidate in the overlay.* Every job mounts the overlay whole, so a concurrent job would see it.
+  - *Trust a clean exit as the canary's proof.* A failed load only logs and the job continues, so the runner reports the load, a validated run-record field says so, and a missing report reads as failed.
+    An image too old to report is refused for free, by a new image capability.
+  - *Read every changelog daily.* That downloads third-party tarballs on every host every day. The page links to the version, and shows a bounded, escaped excerpt only once a canary has installed that candidate.
+- **Costs accepted**: transitive dependencies float, so the canaried and adopted trees can differ, and the page says so. On a shared home every host sees one overlay, so a lock serialises staging and a peer's work is never deleted.
+- **Traces to**: `REQ-PACKAGE-UPDATES`, `CONST-PI-VERSION-PINNED`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
+
 ## DES-DOCTOR-RESULTS-PUBLISHED
 
 - **Proposal detail exception (#773)**: explicitly typed model proposal checks may publish their bounded redacted labels even when successful, with allowlisted machine facts for Models and `dispatch_models`. This exception does not retain generic successful labels or trust a text prefix as authority. Existing detailed/check bounds, redaction, TTL, observation age and display-only behavior apply; old records lacking proposal evidence never establish that no proposals exist.
@@ -17146,3 +17172,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-02 (#754, #792, security review) | DES-SANDBOX-GATEWAY-ATTACH-ONLY: nine findings from an independent review are fixed, recorded in INT-SANDBOX-GATEWAY-CONTRACT. Rejected: accepting the launch-link hand-over as an insider-only risk, because the review showed a shell landing in another browser under the operator's name, and a receipt closes it at small cost. Also rejected for the launch gesture: a click on every launch, which would add a step to every ordinary button; only a launch not arriving same-origin waits. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |
 | 2026-11-02 (#754, lost clicks) | DES-OPERATOR-CONSOLE: a live panel update waits while a press is held inside that panel, and lands after the release. A press and its release must land on the same element for the browser to send a click, so a swap between them silently lost the click. Measured in the gateway's browser flow on Linux CI, on the Sandboxes page's first update, and any panel redrawn on a tick could do the same to a person. It waits without the held note, because inserting one would move what is being pressed. The console's CSP, routes, roles and SSE framing: UNCHANGED, checked. |
 | 2026-11-02 (#796, pi 1.5.0) | The design of staged-package discovery records pi's changed fallthrough: since 1.5.0 a `pi` object listing no resource falls through to the convention folders. `readStagedSkills` follows it and is now held to pi's own `DefaultPackageManager`, shape by shape, because it had only agreed by hand; that also fixed two older differences (a mixed `skills` list, a leading BOM). `legacyOverlayLayout` deliberately keeps the older reading, since it names what loaded before #544, not what loads now. `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` UNCHANGED, checked: the compat half still arms pi's own registry, proven by function identity through the 1.5.0 view. Tool argument conversion is met by a raw-argument check in `prepareArguments` for every tool the runner defines; a recheck in `execute` was rejected because it only sees the converted copy, and MCP tools were left as pi converts them because their schemas belong to their servers. |
+| 2026-11-02 (#796) | New `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`. It reverses "restage for me" and "not as a `/job` input", the latter for one canary job only, each with the reason it stood and why that reason does not reach this. `DES-DOCTOR-RESULTS-PUBLISHED` UNCHANGED, checked: the look publishes beside doctor, not through it, and nothing reads either to decide anything. |

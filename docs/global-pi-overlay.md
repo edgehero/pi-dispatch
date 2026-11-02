@@ -359,7 +359,9 @@ failures, because running a narrower set on a deployment than on your laptop is 
 None of them offers to fix itself. Now that `--with-packages` discovers, "restage for me" would stop meaning
 *restore what you declared* and start meaning *import whatever is on your laptop*, which is not a decision
 to make behind a `y/N` prompt. For the same reason `doctor --fix`'s existing restage offer runs
-`import-pi --with-packages --no-host-packages`: the one automated path stays a repair.
+`import-pi --with-packages --no-host-packages`: the one automated path stays a repair. The console's Adopt
+is not that prompt: a person names one exact version of one package on a preview, it never reads your pi setup, and
+it can be undone ([Updates](console.md#updates)).
 
 **`--ignore-scripts` is on, and it cuts both ways.** Staging never runs a package's lifecycle scripts —
 without that flag, the `install`/`postinstall` of the package **and of every transitive dependency** would

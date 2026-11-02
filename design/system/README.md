@@ -29,7 +29,7 @@ Start with **Start here**: the concept map shows how the pieces connect, the glo
 | Fleet | Fleet, Fleet part paused (bulk actions, held, delayed), Host detail (registry row, budget, capacity, doctor), Venue detail (14 properties), Fleet as a viewer |
 | Spend | Spend, Budget split, Capacity, Breakdown, Flows map, as tabs of one page |
 | Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, Add a trigger, Triggers as a viewer |
-| Configuration | Configuration, Secrets, Connections, Project detail |
+| Configuration | Configuration, Secrets, Connections, Project detail, Updates (proposed, #796) |
 | Access and audit | Sign-in, Access states (one-time link, operator, viewer, read-only), Audit, Error |
 | Phone | Overview, Runs, Parked, Spend, Run live, Fleet, Triggers, Parked with a draft, Zero touch |
 | Planned and proposed | Approval request (#649), Fork a run (#648), Models: roles, cooldowns and canary (#716, #717, #693), Watch and a finding (#735, a tab of Triggers), Watch board: why each finding did what it did, every query and decision, Jev in the job and in shadow at the gate, and a board jobs propose and you adopt (#735, #743), Dispatchers (#776, specs only): durable services with fresh Jev decision containers or bounded ordinary LLM jobs, only starting listed local read-only jobs and proposing triggers for a person; resident model containers and forge starts are rejected, long LLM runs deferred |
@@ -87,6 +87,7 @@ Every page, panel, state and write of the console at `ce5338f`, plus the 5.0.0 i
 | `trigger-add` for all five kinds, with the fields only the file can set | Add a trigger |
 | Secret profiles and bundles, resolver roots, add and remove | Secrets |
 | Forges, egress per host, model endpoints, provider keys by name, notifications, MCP, staged packages | Connections |
+| Pinned pi, staged extensions and each host's pi: what is newer, its checks, a canary and Adopt (proposed, #796) | Updates |
 | Projects: members, spend, limits, allocation, size suggestions with the exact call | Project detail |
 | `/audit`: rows, roles, digests, reserve, bulk count, damaged rows | Audit |
 | `/login`, `/login/code`, session ends, roles, read-only console | Sign-in, Access states |

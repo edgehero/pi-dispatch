@@ -2575,6 +2575,10 @@ writes retain their existing interactive confirmation. This adds no unattended p
     absence. Every unset dollar cap uses the actual DOLLAR_ENV_NAMES catalogue and stays unknown.
     Viewers read fixes as sentences, without commands to copy.
     PAGE_READS keeps forge/env/file/lease reads off overview and /api/state; this page changes no configuration.
+  - (g8) **Updates** (`/config/updates`, page `updates`, viewer, not live; #796). UpdatesScreen draws `p-up-problems`, `p-up-jobs`,
+    `p-up-hosts`, `p-up-how` and `p-up-recent`, following `REQ-PACKAGE-UPDATES`. A viewer sees versions and results; Run a canary and Adopt are
+    operator only. A row never reads "passed": a canary that ended well reads "completed, read the run". A failed read reads "unknown", a look
+    that is off reads "not looking", a record past two intervals reads as stale, and none of them is ever drawn as healthy.
   - (g7) **One project** (`/config/project?id=`, page `project`, viewer, not live; #751). ProjectDetail validates
     PROJECT_ID_RE. An unknown id in a successfully read file yields the dedicated no-project 404; an unread file
     yields an unavailable state. Configuration stays current, with its back link and Runs filtered to the id.
@@ -5307,6 +5311,27 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   already holding one is invalid, so jobs refuse as `settings-overlay-invalid`. Given them as `pi-dispatch run
   --model` or `--provider`, the command exits 1 with the sentence and queues nothing.
 
+## REQ-PACKAGE-UPDATES
+
+- **Statement**: pi-dispatch shall tell a person when a newer pi or a newer staged extension exists, shall let that person try
+  one extension version on one paid job, and shall let that person adopt it fleet-wide with a preview and an Undo. **It shall not
+  update anything by itself.** (Issue #796.)
+- **The look (free, changes nothing).** Off until `PI_UPDATES_LOOK=1`. A worker host's child process, a minute after boot and then daily,
+  never a job. It reads the newest versions from the registry and this repository's public check runs on the bump branch. Every request is
+  bounded (five seconds, 1 MiB, no redirects) and goes through `PI_UPDATES_PROXY` when one is declared, with no direct fallback. A failed read is **unknown, never passing**.
+- **The canary (paid, a person, cron triggers).** One job of one cron trigger, with one exact candidate version replacing the staged copy
+  of that package, for that job only. Every free determinate refusal runs before the token mint, including that the exact version exists. The install runs before the
+  budget reservation. The run records whether the candidate loaded, a missing report reads as failed, and the result never reads "passed".
+- **Adopt and Undo (a person).** A desired version per package, reconciled by each host to the newest generation, so a host that was offline
+  adopts on return and never replays a stale request. A job that starts mid-adopt sees a whole tree. Each host pins the exact version in its
+  `pi-packages.json`, so a later `import-pi` does not revert it. Undo restores that file's prior state. Partial is a real state: the page shows each
+  host, including one that cannot adopt and why. Subscription adapters are refused, since re-staging breaks their reviewed identity.
+- **Honest limits.** Transitive dependencies still float, since a package has no lockfile: each resolved tree's digest is recorded and the page
+  says when the canaried and the adopted trees differ, which does not make them the same. A completed canary is not proof the extension is good.
+- **Why**: pi breaks between minors and an extension update is new third-party code in jobs that hold a forge token, so a person decides; but a person
+  cannot decide about what nobody told them, and re-staging by hand on each host is why operators stay behind.
+- **Traces to**: `CONST-PI-VERSION-PINNED`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`, `INT-UPDATES-KEYS`
+
 ## REQ-GLOBAL-PI-OVERLAY
 
 - **Statement**: An operator shall be able to reuse their existing host `pi` setup in every job. A single
@@ -5336,7 +5361,7 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   The overlay additionally carries **operator-staged pi packages** at `packages/<dir>/`, and they are the
   sharpest tier of all — third-party code, so they pass **four** gates, three of which refuse by default
   and the fourth of which is a withdrawal. (1) The operator declares
-  each one in a pinned `pi-packages.json` at an **EXACT** version (`INT-PI-PACKAGES-FILE-CONTRACT`;
+  each one, by hand or by a person's Adopt on the console (`REQ-PACKAGE-UPDATES`), in a pinned `pi-packages.json` at an **EXACT** version (`INT-PI-PACKAGES-FILE-CONTRACT`;
   `CONST-PI-VERSION-PINNED`'s reasoning, since a floating range makes every queued job a silent no-op that
   still reports success). (2) `pi-dispatch import-pi --with-packages` stages each one **on the host** into
   its own self-contained directory (`--omit=dev --omit=peer --omit=optional --ignore-scripts
@@ -8630,3 +8655,4 @@ instead of drifting.
 | 2026-11-02 (#754, fast-browser readiness correction) | Fast verification without screenshot delays exposed a pre-ready resize-observer timer racing the direct ready resize. The implementation cancels pending fit work before that direct resize; the bounded-drag/cleanup regression passes. The browser driver now waits for a fresh completed document and fresh intent, and honors production login/step-up rate limits without weakening authentication policy or assertions. The full fast TLS rerun without screenshots passes all six theme/width renders under the real CSP, roles/no-JavaScript, sustained resize, revocation and external End. `REQ-SANDBOX-BROWSER-GATEWAY` bounds, proofs, native lifecycle and idle contract UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, #793, implemented) | REQ-SANDBOX-BROWSER-GATEWAY, REQ-SANDBOX-FROM-THE-CONSOLE and REQ-OPERATOR-CONSOLE-SCREENS: the workbench, the run Workspace and read-only watching are built, so their pending markers become IMPLEMENTED. One correction: the outcome banner's link to the Workspace row is for a completed run, as #793 and its card say; the unconditional wording was wider than either. The run page offers Prepare from this run past a workspace's window, as #793 asks; the CLI's own `--pin` is unchanged and this entry's clause about it still holds. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, security review) | REQ-SANDBOX-BROWSER-GATEWAY: a launch link opened in another browser can no longer be armed by a step-up elsewhere; a launch from outside the console waits for a click; an unauthenticated reset can no longer end the gateway. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |
+| 2026-11-02 (#796) | New `REQ-PACKAGE-UPDATES`; `REQ-OPERATOR-CONSOLE-SCREENS` gains (g8) Updates. `REQ-GLOBAL-PI-OVERLAY` gate 1: a person's Adopt also declares a package, at the same exact version, in the same file. The other three gates are UNCHANGED, checked: staging still runs through the same assertions with `--ignore-scripts`, the runner still validates each path, and `run.packages` still withdraws per trigger. The console's egress is unchanged; the look is the worker host's, and off until enabled. |
