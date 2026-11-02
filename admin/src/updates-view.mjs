@@ -20,7 +20,8 @@ export const PI_ROW_STATES = Object.freeze(["current", "checks-passing", "checks
 /** Each host's standing against what a person asked for. */
 export const HOST_ADOPT_STATES = Object.freeze(["adopted", "undone", "no-change", "cannot-adopt", "pending", "overdue"]);
 
-const AUDIT_KINDS = Object.freeze(["package-adopt", "package-undo", "package-canary"]);
+/** What "Recently adopted" lists. A canary is not an adoption: its result is on the package's own row. */
+const AUDIT_KINDS = Object.freeze(["package-adopt", "package-undo"]);
 const RECENT_MAX = 5;
 
 /** A canary's result, from the newest run record that ran this exact version. `null` when none is retained. */

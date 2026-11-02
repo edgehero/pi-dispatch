@@ -1031,6 +1031,19 @@ export function projectKpiTextProblems(values = []) {
 }
 
 /** An auto grid track can fit the page while turning a stacked label into one letter per line. */
+/**
+ * Whether each button on the Updates page's rows can be pressed where it is drawn (issue #796): not sitting on its row's sentence, and not cut off by the table's scroll box. An action in a
+ * table is the kind of thing that fits at the widths someone happened to look at, so the sweep measures it at all of them.
+ */
+export function updateActionProblems(actions = []) {
+	const problems = [];
+	for (const action of actions) {
+		if (action.clipped) problems.push(`Updates: the ${JSON.stringify(action.text)} button is cut off by its table`);
+		if (action.overlaps) problems.push(`Updates: the ${JSON.stringify(action.text)} button sits on its row's sentence`);
+	}
+	return problems;
+}
+
 export function stackedLabelProblems(labels = []) {
 	const problems = [];
 	for (const label of labels) {
@@ -1047,7 +1060,7 @@ export function stackedLabelProblems(labels = []) {
  * phone at and below the card breakpoint, desktop above it) and `settled`. Returns `{ failures, notes, width }`.
  */
 export function runVerdict({ csp, errors = [], canvas, want, expect, measured, emulation, settled = true, width = VIEWPORT.width, mobile = width <= PHONE_MAX }) {
-	const failures = [...cspFailures(csp), ...emulationProblems(emulation, mobile), ...activeProgressProblems(measured.activeProgress), ...projectChartTextProblems(measured.projectCharts), ...projectKpiTextProblems(measured.projectKpis), ...stackedLabelProblems(measured.stackedLabels)];
+	const failures = [...cspFailures(csp), ...updateActionProblems(measured.updateActions), ...emulationProblems(emulation, mobile), ...activeProgressProblems(measured.activeProgress), ...projectChartTextProblems(measured.projectCharts), ...projectKpiTextProblems(measured.projectKpis), ...stackedLabelProblems(measured.stackedLabels)];
 	const notes = [];
 	if (!settled) notes.push("the page did not settle within 1.5 s (fonts or frames); measured anyway");
 	for (const e of errors) notes.push(`page error: ${e}`);
@@ -1600,7 +1613,21 @@ export function measureSource(width, slack) {
 			stackedLabels.push({ panel: cell.closest("[data-panel]")?.id ?? "unknown", label, word: widest?.word ?? "", wordPx: widest?.width ?? null, fontPx: parseFloat(prefix.fontSize), available: rect.width - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0) - (parseFloat(style.borderLeftWidth) || 0) - (parseFloat(style.borderRightWidth) || 0) });
 		}
 	}
-	return { scrollWidth: se.scrollWidth, clientWidth: document.documentElement.clientWidth, elements, activeProgress, projectCharts, projectKpis, stackedLabels };
+	const updateActions = [];
+	for (const row of document.querySelectorAll('[data-page="updates"] #p-up-jobs tbody tr')) {
+		const box = row.closest(".tbl-wrap")?.getBoundingClientRect();
+		const line = row.querySelector(".up-line")?.getBoundingClientRect();
+		for (const button of row.querySelectorAll(".up-act .btn")) {
+			const at = button.getBoundingClientRect();
+			if (at.width <= 0) continue;
+			updateActions.push({
+				text: button.textContent.trim(),
+				clipped: Boolean(box) && (at.right > box.right + 0.5 || at.left < box.left - 0.5),
+				overlaps: Boolean(line) && at.left < line.right - 0.5 && at.right > line.left + 0.5 && at.top < line.bottom - 0.5 && at.bottom > line.top + 0.5,
+			});
+		}
+	}
+	return { updateActions, scrollWidth: se.scrollWidth, clientWidth: document.documentElement.clientWidth, elements, activeProgress, projectCharts, projectKpis, stackedLabels };
 })()`;
 }
 

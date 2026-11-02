@@ -215,4 +215,6 @@ test("the recent list is only what was applied, from rows that name a real packa
 		{ action: "write-applied", kind: "package-adopt", outcome: "ok", target: "<script>@1.0.0", actor: { name: "ops", role: "operator", session: null }, at: "2026-10-03T00:00:00.000Z" },
 	] });
 	assert.deepEqual(read.recent.map((r) => `${r.name}@${r.version}`), ["pi-lint@1.4.3"]);
+	const canary = await readUpdates({ redis: null, staged: { packages: [] }, now: NOW, audit: [{ action: "write-applied", kind: "package-canary", outcome: "ok", target: "pi-lint@1.4.3" }] });
+	assert.deepEqual(canary.recent, [], "a canary is not an adoption");
 });

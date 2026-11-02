@@ -98,7 +98,7 @@ import {
 	runVerdict,
 	projectChartTextProblems,
 	projectKpiTextProblems,
-	stackedLabelProblems,
+	stackedLabelProblems, updateActionProblems,
 	sha256Hex,
 	shellContexts,
 	shellDocs,
@@ -1793,6 +1793,13 @@ test("what the workflow's comment, the docs and the specs say the check does is 
 		const text = read(spec);
 		assert.ok(text.includes(listed(DESKTOP_WIDTHS)) && text.includes(`${WORDS[desk]} sentences`) && text.includes(`${WORDS[phone]} sentences`), `${spec} names the desktop widths and each control's sentences`);
 	}
+});
+
+test("an Updates button that is cut off or sits on its sentence fails the sweep, and one that fits does not (issue #796)", () => {
+	assert.deepEqual(updateActionProblems([{ text: "Adopt", clipped: false, overlaps: false }]), []);
+	assert.deepEqual(updateActionProblems(undefined), [], "any other page has none");
+	assert.match(updateActionProblems([{ text: "Undo", clipped: true, overlaps: false }])[0], /"Undo" button is cut off/);
+	assert.match(updateActionProblems([{ text: "Run a canary", clipped: false, overlaps: true }])[0], /sits on its row's sentence/);
 });
 
 test("the workflow: run as GitHub runs it, a bad pin stops it before curl and a bad zip before unzip", () => {

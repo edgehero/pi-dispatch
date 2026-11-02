@@ -163,11 +163,11 @@ export function updatesHow(view) {
 	return ui.card({ title: "How it keeps up", body: ui.facts([["Looks for updates", looks], ["Last look", Number.isFinite(v.at) ? timeHtml(v.at) : "never"], ["A canary runs as", runs], ["Adopting", "always a person, with a preview and Undo"]], { cols: 1 }) });
 }
 
-const RECENT_WORDS = Object.freeze({ "package-adopt": "adopted", "package-undo": "undone", "package-canary": "canary" });
+const RECENT_WORDS = Object.freeze({ "package-adopt": "adopted", "package-undo": "undone" });
 
 export function updatesRecent(view) {
 	const v = data(view);
 	if (!v) return ui.card({ title: "Recently adopted", body: unreadable() });
-	const rows = v.recent.map((r) => html`<li class="rowpill">${ui.icon("done", { size: "sm" })}<span><b class="code">${r.name}</b> ${r.version}, ${RECENT_WORDS[r.kind]}</span><span class="end">${r.by ?? "unknown"}${r.at ? `, ${r.at.slice(0, 10)}` : ""}</span></li>`);
+	const rows = v.recent.map((r) => ui.rowPill({ icon: "done", items: [html`<span class="up-recent"><b class="code">${r.name}</b> ${r.version}, ${RECENT_WORDS[r.kind]}<small>${r.by ?? "unknown"}${r.at ? `, ${r.at.slice(0, 10)}` : ""}</small></span>`] }));
 	return ui.card({ title: "Recently adopted", body: rows.length ? html`<ul class="rows">${rows}</ul>` : html`<p class="note">Nothing adopted yet, in the audit log's window.</p>` });
 }
