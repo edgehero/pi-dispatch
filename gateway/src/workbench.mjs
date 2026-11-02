@@ -95,7 +95,7 @@ export async function mountWorkbench({ window, document, createDockview, mountTe
 			destination.setAttribute("data-groups", groupIds); if (groups.some(g => g.id === chosen)) destination.value = chosen;
 		}
 		const group = groups.find(g => g.id === layout.groupOf(activeId));
-		for (const name of ["split-right", "split-below"]) action(name).disabled = !current || !group || group.panels.length < 2 || groups.length >= 4;
+		for (const name of ["split-right", "split-below"]) { const button = action(name), fits = current && group && group.panels.length >= 2 && groups.length < 4; button.disabled = !fits; if (fits) button.removeAttribute("title"); else button.setAttribute("title", groups.length >= 4 ? "Four groups is the most this workspace holds." : "A split needs two tabs in this group."); }
 		for (const name of ["close", "move-left", "move-right"]) action(name).disabled = !current;
 		for (const name of ["move-group", "narrower", "wider", "shorter", "taller", "merge"]) action(name).disabled = !current || groups.length < 2;
 		el("wb-focus-terminal").disabled = !current || !current.controller?.ready;

@@ -537,7 +537,7 @@ const SANDBOX_CERTAIN = new Set(["retention-off", "swept", "id-mismatch", "no-im
 /** Codes the fork reader returns, in words a person can act on. Anything else it says is already a sentence. */
 const FORK_REFUSAL_WORDS = Object.freeze({
   "fork-source-store-unset": "this host keeps no saved sessions (PI_SESSIONS_DIR is not set)",
-  "fork-source-unavailable": "its saved session could not be read",
+  "fork-source-unavailable": "no saved session is available for this run",
 });
 const forkRefusalWords = (refusal) => FORK_REFUSAL_WORDS[refusal] ?? refusal;
 
@@ -584,7 +584,7 @@ export function runWorkspace(view) {
     : html`${opener}${view.readOnly ? null : " Opening it joins that shell."}`;
   // Watching and joining are different promises: Open in Terminal still shares the driver's prompt, so say so here.
   const below = !state.shell ? null
-    : shared ? html`<p class="sx-open__s">${opener}${view.readOnly ? null : " Open in Terminal joins that shell and its prompt."}${driver.watchers?.length ? ` Watching now: ${driver.watchers.map((w) => w.name).join(", ")}.` : null}</p>`
+    : shared ? html`<p class="sx-open__s">${opener}${view.readOnly ? null : " A native terminal joins that shell and its prompt."}${driver.watchers?.length ? ` Watching now: ${driver.watchers.map((w) => w.name).join(", ")}.` : null}</p>`
     : sandboxDriverLine(view, state.shell);
   const points = view.data?.forkPoints;
   const canFork = points?.ok && points.entries?.some((entry) => entry.positions?.length);

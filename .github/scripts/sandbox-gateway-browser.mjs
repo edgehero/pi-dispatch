@@ -504,27 +504,6 @@ try {
     assert.equal(await evaluate("document.querySelector('.wb-pane[data-active=true] .xterm')===window.__gatewayOriginalTerminal"), true, "existing xterm DOM survives the handoff");
     assert.equal(await evaluate("window.__gatewaySockets.length"), socketsBefore + (kind === "watch" ? 0 : 1), "only a new distinct terminal creates a socket; a duplicate watch focuses its owner");
   };
-  stage = "a helper tab that crashes costs the workspace nothing";
-  {
-    const created = browser.event(m => m.method === "Target.targetCreated" && m.params.targetInfo.type === "page" && m.params.targetInfo.targetId !== owner.targetId, "Add another creates its helper");
-    await click('[data-wb-action="add"]');
-    const helper = await attachTab((await created).params.targetInfo.targetId);
-    // Crash only once it has left the owner's initial blank document: until then it may share the owner's process,
-    // and that would be testing Chrome's process model rather than this workspace.
-    await helper.send("Runtime.enable");
-    for (let attempt = 0; ; attempt++) {
-      const here = await helper.send("Runtime.evaluate", { expression: "location.origin", returnByValue: true }).then(r => r.result.value, () => null);
-      if (here === consoleOrigin) break;
-      assert.ok(attempt < 200, "the helper reaches the console to choose a terminal");
-      await sleep(30);
-    }
-    void helper.send("Page.crash").catch(() => {}); // A crash never answers.
-    await sleep(500); await helper.close().catch(() => {});
-    tab = owner; browser = owner.browser;
-    await type(".wb-pane[data-active=true] .xterm-helper-textarea", "printf 'SURVIVES_HELPER_CRASH\\n'\n");
-    await until("[...document.querySelectorAll('.wb-pane[data-active=true] .xterm-rows>div')].some(e=>e.textContent.trim()==='SURVIVES_HELPER_CRASH')");
-    assert.equal(await evaluate("document.querySelector('[data-wb-action=add]').getAttribute('aria-disabled')"), "false", "a crashed helper leaves no slot behind");
-  }
   stage = "four actual sandbox terminals";
   for (let index = 0; index < additional.length; index++) await admitInto(owner, additional[index].id, { count: index + 2 });
   const ids = [runId, ...additional.map(shell => shell.id)];
@@ -606,6 +585,7 @@ try {
     assert.equal(await evaluate(`document.querySelectorAll(${JSON.stringify(paneSelector(runId) + " .xterm-rows>div")}).length`), driverRows, "a watcher renders exactly the driver's rows");
     assert.ok(await evaluate(`document.querySelector(${JSON.stringify(paneSelector(runId) + " .wb-pane-head")}).textContent.includes(${JSON.stringify(`${driverCols} × ${driverRows}`)})`), "the watcher's tab names the driver's real size");
     assert.equal(await evaluate(`${textOf(runId)}.includes('USABLE_DURING_STEPUP')`), false, "late watchers receive no earlier terminal output");
+    await capture(`watch-${watcher.person}-output-dark-1024`);
   }
   const WATCH_END_MS = 5500; // The contract's five-second bound, plus the frame's trip back to this page.
   const on = (where, person) => { tab = where; browser = where.browser; currentOperator = person; };
@@ -657,6 +637,29 @@ try {
   await until("document.querySelectorAll('.wb-pane').length===3&&document.querySelectorAll('.wb-pane[data-state=ended]').length===0");
   assert.equal(JSON.parse((await exec(bin, ["inspect", additional[2].containerId])).stdout)[0].State.Running, true, "closing a pane only detaches");
   assert.equal(watchCtaLaunches, 2, "Run and Sandboxes both provide a working Watch handoff");
+  // After the last step that opens a new tab: on Linux CI a tab opened right after this crash stayed blank, though it opens
+  // normally on macOS. What this stage proves is the workspace surviving the crash, and that holds on both.
+  stage = "a helper tab that crashes costs the workspace nothing";
+  {
+    const created = browser.event(m => m.method === "Target.targetCreated" && m.params.targetInfo.type === "page" && m.params.targetInfo.targetId !== owner.targetId, "Add another creates its helper");
+    await click('[data-wb-action="add"]');
+    const helper = await attachTab((await created).params.targetInfo.targetId);
+    // Crash only once it has left the owner's initial blank document: until then it may share the owner's process,
+    // and that would be testing Chrome's process model rather than this workspace.
+    await helper.send("Runtime.enable");
+    for (let attempt = 0; ; attempt++) {
+      const here = await helper.send("Runtime.evaluate", { expression: "location.origin", returnByValue: true }).then(r => r.result.value, () => null);
+      if (here === consoleOrigin) break;
+      assert.ok(attempt < 200, "the helper reaches the console to choose a terminal");
+      await sleep(30);
+    }
+    void helper.send("Page.crash").catch(() => {}); // A crash never answers.
+    await sleep(500); await helper.close().catch(() => {});
+    tab = owner; browser = owner.browser;
+    await type(".wb-pane[data-active=true] .xterm-helper-textarea", "printf 'SURVIVES_HELPER_CRASH\\n'\n");
+    await until("[...document.querySelectorAll('.wb-pane[data-active=true] .xterm-rows>div')].some(e=>e.textContent.trim()==='SURVIVES_HELPER_CRASH')");
+    assert.equal(await evaluate("document.querySelector('[data-wb-action=add]').getAttribute('aria-disabled')"), "false", "a crashed helper leaves no slot behind");
+  }
   // Each launch below navigates out first, which detaches the workspace; the original native shells remain.
   const freshDriver = async () => {
     on(owner, "ops"); await launch("dark"); await click("#wb-watch-policy");

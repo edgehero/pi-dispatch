@@ -87,7 +87,7 @@ test("the finding links use the current trigger chooser and the actual retained 
   const markup = String(runWorkspace(f)), actions = String(runActionsPanel(f));
   assert.match(markup, /href="\/triggers"/); assert.doesNotMatch(markup, /trigger\?index=42/);
   assert.match(markup, /href="#run-fork"/); assert.match(actions, /id="run-fork"/); assert.match(actions, /name="message"/);
-  assert.match(text("kept"), /Fork unavailable: its saved session could not be read/);
+  assert.match(text("kept"), /Fork unavailable: no saved session is available for this run/);
 });
 
 test("selector and preparation query state roundtrip canonically without sharing their SSE data keys", () => {

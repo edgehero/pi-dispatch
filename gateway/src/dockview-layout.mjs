@@ -50,7 +50,7 @@ export function createWorkbenchLayout({ window, document, container, createDockv
 			for (const panel of [...api.panels]) if (panel.group !== target) panel.api.moveTo({ group: target, position: "center", skipSetActive: true });
 			active.api.setActive();
 		},
-		get groups() { return api.groups.map((g, i) => ({ id: g.id, label: `Group ${i + 1}`, panels: g.panels.map(p => p.id) })); },
+		get groups() { return api.groups.map((g, i) => ({ id: g.id, label: `To group ${i + 1}`, panels: g.panels.map(p => p.id) })); },
 		groupOf(id) { return api.getPanel(id)?.group.id ?? null; },
 		get active() { return api.activePanel?.id ?? null; },
 		layout() { api.layout(container.clientWidth, container.clientHeight); },
