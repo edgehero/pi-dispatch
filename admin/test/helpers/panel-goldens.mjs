@@ -2,6 +2,7 @@ import { SETUP_DRAW } from "./setup-goldens.mjs";
 import { MODELS_DRAW } from "./models-goldens.mjs";
 import { ANSWERER_DRAW, AGENT_OVERVIEW_DRAW } from "./answerer-goldens.mjs";
 import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
+import { WORKSPACE_DRAW } from "./workspace-goldens.mjs";
 import { ZERO_TOUCH_DRAW } from "./zero-touch-goldens.mjs";
 import { CONFIGURATION_DRAW } from "./configuration-goldens.mjs";
 import { TRIGGER_LIST_DRAW } from "./trigger-list-goldens.mjs";
@@ -803,6 +804,7 @@ const DRAW = {
   ...ANSWERER_DRAW,
   ...AGENT_OVERVIEW_DRAW,
   ...SANDBOX_DRAW,
+  ...WORKSPACE_DRAW,
   ...MODELS_DRAW,
   ...ZERO_TOUCH_DRAW,
   ...CONFIGURATION_DRAW,

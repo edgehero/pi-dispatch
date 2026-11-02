@@ -126,6 +126,82 @@ test("sandbox query refuses duplicate, hostile host/id/ref and unknown fields be
   assert.equal(valid.ref, "pr:42"); assert.equal(valid.pin, true); assert.equal(valid.index, 0);
 });
 
+test("Prepare from run uses validated repository and HEAD, requires deliberate current trigger choice, and never retargets OpenShell", async () => {
+  const s = setup();
+  s.triggers.triggers[0].run.backend = "openshell";
+  s.triggers.triggers.push({ on: { type: "label", any: ["other"] }, run: { kind: "github", flow: "fix", backend: "local" } });
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  s.fleet.runById = async (id) => ({ record: { jobId: id, host: "mini1", kind: "github", target: "acme/web#490", triggerIndex: 0, backend: "openshell", question: "PRIVATE" } });
+  const initial = await s.service.read(parsePageQuery("sandboxes", "fromRun=gh-9575").query);
+  assert.equal(initial.selected.repo, "acme/web"); assert.equal(initial.selected.ref, "HEAD");
+  assert.equal(initial.selected.host, "mini1", "the host is the record's own");
+  const hostless = s.fleet.runById;
+  s.fleet.runById = async (id) => { const got = await hostless(id); delete got.record.host; return got; };
+  assert.equal((await s.service.read(parsePageQuery("sandboxes", "fromRun=gh-9575").query)).selected.host, null, "a record without one is never given the first eligible host");
+  s.fleet.runById = hostless;
+  assert.equal(initial.selected.index, null, "historical array position cannot select a current trigger");
+  assert.equal(initial.sourceRun.historicalIndex, 0); assert.equal(initial.plan, undefined); assert.equal(s.queued.length, 0);
+  const incompatible = await s.service.read({ fromRun: "gh-9575", repo: "acme/web", index: 0, ref: "HEAD", host: "mini1" });
+  assert.equal(incompatible.selected.index, 0); assert.equal(incompatible.plan, undefined); assert.match(incompatible.refusal, /no sandbox shell/);
+  const params = { repo: "acme/web", index: 1, ref: "HEAD", host: "mini1", pin: false };
+  const compatible = await s.service.read({ ...params, fromRun: "gh-9575" });
+  assert.equal(compatible.plan.backend, "local"); assert.equal(s.queued.length, 0);
+  const preview = await s.service.preview("sandbox-prepare", params); assert.equal(s.queued.length, 0);
+  assert.equal((await s.service.apply("sandbox-prepare", preview, "ops")).ok, true);
+  assert.equal(s.queued[0].triggerIndex, 1); assert.equal(s.queued[0].ref, "HEAD");
+  assert.equal(JSON.parse(readFileSync(s.paths.triggersPath, "utf8")).triggers[0].run.backend, "openshell");
+});
+
+test("missing history and same-type trigger reorders cannot silently select the first preparation option", async () => {
+  const s = setup();
+  s.triggers.triggers.push({ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix", instructions: "Different current rule" } });
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  for (const read of [async () => ({ missing: true }), async () => { throw new Error("PRIVATE"); }, async (id) => ({ record: { jobId: id, kind: "github", target: "acme/web#490", triggerIndex: 0 } })]) {
+    s.fleet.runById = read;
+    const view = await s.service.read({ fromRun: "gh-9575" });
+    assert.equal(view.selected.index, null); assert.equal(view.plan, undefined); assert.equal(s.queued.length, 0);
+  }
+});
+
+test("foreign workspace evidence uses exact host/id publications and never calls missing or partial rows swept", async () => {
+  const s = setup(), record = { jobId: "gh-ebd7", host: "build3" };
+  const known = await s.service.workspace(record);
+  assert.equal(known.retained, true); assert.equal(known.until, s.inventory.hosts[1].rows[0].until);
+  assert.equal((await s.service.workspace({ jobId: "gh-9575", host: "mini1" })).shell.by, "ops");
+  s.inventory.hosts[1].stale = true;
+  assert.equal((await s.service.workspace(record)).unknown, true);
+  s.inventory.hosts[1].stale = false; s.inventory.hosts[1].rows = []; s.inventory.hosts[1].more = 1;
+  const partial = await s.service.workspace(record); assert.equal(partial.unknown, true); assert.equal(partial.retained, undefined);
+  s.inventory.hosts[1].more = 0;
+  const absent = await s.service.workspace(record); assert.equal(absent.unknown, true); assert.equal(absent.notPublished, true); assert.equal(absent.retained, undefined);
+  const wrongHost = await s.service.workspace({ jobId: "gh-9575", host: "build3" }); assert.equal(wrongHost.unknown, true); assert.equal(wrongHost.shell, null);
+});
+
+test("with retention off, evidence that is partial or unreadable still never reads as a verdict about this workspace", async () => {
+  const record = { jobId: "gh-ebd7", host: "build3" };
+  const change = async (mutate) => { const s = setup(); s.inventory.hosts[1].rows = []; s.inventory.hosts[1].more = 0; s.inventory.hosts[1].settings = { ...s.inventory.hosts[1].settings, sandboxRetentionHours: 0 }; const read = s.fleet.sandboxInventory; s.fleet.sandboxInventory = async () => { const value = await read(); mutate(value, value.hosts[1]); return value; }; return s.service.workspace(record); };
+  // The counterexample: all evidence in, the host says retention is off. Each case below only removes evidence from this.
+  assert.equal((await change(() => {})).why, "retention-off");
+  for (const [name, mutate] of [["truncated host list", (_all, host) => { host.more = 1; }], ["truncated publication", (all) => { all.more = 1; }], ["unreadable host", (_all, host) => { host.unreadable = true; }], ["stale host", (_all, host) => { host.stale = true; }], ["unreachable inventory", (all) => { all.unreachable = true; }]]) {
+    const evidence = await change(mutate);
+    assert.equal(evidence.unknown, true, name); assert.equal(evidence.retained, undefined, name); assert.equal(evidence.why, undefined, `${name} must not read as retention off`);
+  }
+});
+
+test("gateway selector preserves only matching host browser links and cannot prepare, pin or End", async () => {
+  const s = setup(), shell = s.inventory.sessions[0];
+  s.inventory.sessions.push({ ...shell, id: "gh-other", host: "build3", nonce: "d".repeat(32), containerId: "e".repeat(64) });
+  const query = parsePageQuery("sandboxes", "gatewaySelect=1&host=mini1").query;
+  const deps = { now: () => NOW, fleet: { parkedCount: async () => 0 }, sandboxes: s.service, gatewayView: async () => ({ enabledHosts: ["mini1", "build3"], sessions: s.inventory.sessions }) };
+  const data = await loadPageData("sandboxes", query, deps, { role: "operator" });
+  const markup = String((await renderPage("sandboxes", { data, query, session: { role: "operator", name: "ops" } })).html);
+  assert.match(markup, /data-query="gatewaySelect=1&amp;host=mini1"/);
+  const browser = markup.match(/<a[^>]+data-sandbox-kind="drive"[^>]+>/)?.[0];
+  assert.match(browser, /host=mini1&amp;id=gh-9575/); assert.match(browser, /target="_self"/);
+  assert.doesNotMatch(markup, /gh-other|sandbox-prepare|sandbox-pin|sandbox-end|name="repo"|#p-sb-new/);
+  assert.equal(s.queued.length, 0); assert.equal(s.ended.length, 0);
+});
+
 test("preparation reads refuse inaccessible limits and a configured missing projects file, while an unconfigured absent optional limit remains optional", async () => {
   const s = setup(), params = { repo: "acme/web", index: 0, ref: "HEAD", host: "mini1", pin: false };
   const fs = { ...nodeFs, readFileSync(path, ...args) { if (path === s.paths.scopedLimitsPath) throw Object.assign(new Error("not for the log"), { code: "EACCES" }); return nodeFs.readFileSync(path, ...args); } };

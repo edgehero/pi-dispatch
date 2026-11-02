@@ -516,7 +516,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const gatewayRegistry = () => config.sandboxGatewaysFile ? readSandboxGateways(config.sandboxGatewaysFile, { fs, uid, platform: io.platform ?? process.platform }) : { disabled: true };
     const gatewayEnrollment = gatewayRegistry();
     if (gatewayEnrollment.refusal) io.err(`pi-dispatch-console: ${gatewayEnrollment.refusal}`);
-    if (redis) gateway = makeGatewayBroker({ redis, sessions, readTokens, findToken: m.tokens.findToken, readRegistry: gatewayRegistry, audit, readOnly: () => config.readOnly, now, ...(random ? { random } : {}), readSessions: () => fleet.sandboxSessions() });
+    if (redis) gateway = makeGatewayBroker({ redis, sessions, readTokens, findToken: m.tokens.findToken, readRegistry: gatewayRegistry, audit, readOnly: () => config.readOnly, now, ...(random ? { random } : {}), readSessions: () => fleet.sandboxSessions(), readRun: (id) => fleet.runById(id) });
     const answerer = makeAnswererService({ paths: side.paths, env: side.env, fs, now });
     const pricing = pricingOf(m.pricing);
     const modelsView = m.modelsView ? (snapshot = null) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, fleet, fs, redis }) : null;
@@ -556,6 +556,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       fleet,
       sandboxes,
       gatewayView: async () => {
+        if (gateway) return gateway.view();
         const read = gatewayRegistry();
         if (!read.config) return { enabledHosts: [], sessions: [], ...(read.refusal ? { problem: read.refusal } : {}) };
         const shells = await fleet.sandboxSessions();

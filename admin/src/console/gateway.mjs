@@ -3,15 +3,16 @@ import { html } from "./html.mjs";
 import { frameHtml } from "./shell.mjs";
 import * as ui from "./kit.mjs";
 
-export function gatewayLanding({ mode = "launch", theme = null } = {}) {
+export function gatewayLanding({ mode = "launch", theme = null, gesture = true } = {}) {
   const stepUp = mode === "authorize";
-  const body = html`<section class="gw-stepup" data-sandbox-gateway-mode="${["launch", "authorize", "return"].includes(mode) ? mode : "return"}">
+  const body = html`<section class="gw-stepup" data-sandbox-gateway-mode="${["launch", "authorize", "return", "select"].includes(mode) ? mode : "return"}" data-sandbox-gateway-gesture="${mode === "launch" && gesture ? "1" : "0"}">
 ${ui.card({ title: stepUp ? "Verify this terminal opening" : "Browser terminal", sub: "a separate gateway, attached to an already-open sandbox", body: html`
 <p id="gateway-status" role="status" aria-live="polite">Checking your original console sign-in.</p>
 <div id="gateway-details" hidden><h2 id="gateway-target">Sandbox</h2><p id="gateway-person"></p><p>The gateway attaches to this existing shell. It cannot start a sandbox. Closing its tab disconnects and keeps the shell; End remains a separate confirmed action.</p></div>
 <form id="gateway-step-up" method="post" action="/api/sandbox-gateway/authorize" hidden autocomplete="off">
 ${ui.field({ label: "Your current operator token", id: "gateway-token", control: ui.input({ id: "gateway-token", type: "password", autocomplete: "off", spellcheck: false, disabled: true }), hint: "Enter the token used for this sign-in. It stays on the console origin and is not saved." })}
 ${ui.btn({ id: "gateway-authorize", type: "submit", label: "Verify and open terminal", kind: "primary", disabled: true })}</form>
+<div id="gateway-gesture" hidden><p>This opening did not start from a console page. Continue only if you meant to open this terminal.</p>${ui.btn({ id: "gateway-continue", type: "button", label: "Continue", kind: "primary" })}</div>
 <p id="gateway-phone" hidden>Browser terminals require a window wider than 760 pixels. On a phone, open Sandboxes and copy the command for your terminal.</p>
 <p><a class="link" href="/runs/sandboxes">Return to Sandboxes</a></p>
 <noscript><p>Browser terminals need JavaScript for the original-tab and browser checks. No terminal was authorized. Open Sandboxes to use Open in Terminal or copy the command.</p></noscript>` })}</section>`;

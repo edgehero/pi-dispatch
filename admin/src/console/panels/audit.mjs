@@ -19,7 +19,7 @@
  * such a row says.
  */
 import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_OUTCOMES } from "@edgehero/pi-dispatch/console-audit";
-import { AUDIT_ACTOR_ROLES, AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_Q_MAX, auditFiltered, auditQueryString, isAuditRow } from "../audit-view.mjs";
+import { AUDIT_ACTOR_ROLES, AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_Q_MAX, auditDriver, auditFiltered, auditQueryString, isAuditRow } from "../audit-view.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { msOf, timeHtml, usdText } from "./common.mjs";
@@ -144,7 +144,8 @@ function rowOf({ entry, pos, state }, chain, used) {
   }
   const none = state === "damaged" ? NONE_ON_TINT : NONE;
   const actor = entry.actor && typeof entry.actor === "object" ? entry.actor : null;
-  const who = actor ? html`<span class="au-who">${actor.name ?? "-"}<small>${actor.role ?? "-"}</small></span>` : none;
+  const driver = auditDriver(entry);
+  const who = actor ? html`<span class="au-who">${actor.name ?? "-"}<small>${actor.role ?? "-"}</small>${driver ? html`<small>driver: ${driver.name}</small>` : null}</span>` : none;
   // The cells beside the reason are bounded (`page-css.mjs` `AUDIT_LAYOUT`): a long name, write kind or target wraps
   // inside its own width instead of taking the reason's.
   const action = html`<span class="code">${entry.action ?? "-"}</span>${typeof entry.kind === "string" ? html`<span class="reason au-kind">${entry.kind}</span>` : null}`;

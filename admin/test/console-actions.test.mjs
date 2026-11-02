@@ -25,7 +25,7 @@ import { fieldNamed, UNNAMED_FIELD } from "../src/words.mjs";
 import { FLASH_MAX_BYTES, makeSessionStore } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
 import { readJobsData } from "../src/console/job-data.mjs";
-import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parkedQuestions, runSummary, runActionsPanel } from "../src/console/panels.mjs";
+import { fleetActive, fleetFailed, fleetHeld, fleetQueues, configTriggers, parkedQuestions, runSummary, runActionsPanel, runWorkspace } from "../src/console/panels.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as WP from "../src/write-plans.mjs";
@@ -2525,7 +2525,10 @@ test("the controls: drawn for an operator, never for a viewer or on a read-only 
     assert.ok(!String(render(view("viewer"))).includes("data-action"), "none for a viewer");
     assert.ok(!String(render(view("operator", true))).includes("data-action"), "none on a read-only console");
   }
-  const run = (jobId, role = "operator", readOnly = false) => String(runActionsPanel({ data: { run: { record: { jobId, startedAt: null } } }, role, readOnly, env: {}, now: 0, query: {} })).replace(/<\/?span[^>]*>/g, "");
+  const context = (jobId, role = "operator", readOnly = false) => ({ data: { run: { record: { jobId, startedAt: null } } }, role, readOnly, env: {}, now: 0, query: {} });
+  const run = (jobId, role = "operator", readOnly = false) => [runActionsPanel(context(jobId, role, readOnly)), runWorkspace(context(jobId, role, readOnly))].map(String).join("").replace(/<\/?span[^>]*>/g, "");
+  assert.match(String(runWorkspace(context("gh-1"))).replace(/<\/?span[^>]*>/g, ""), /<code>pi-dispatch sandbox gh-1<\/code>/, "the selectable command lives in Workspace");
+  assert.doesNotMatch(String(runActionsPanel(context("gh-1"))), /pi-dispatch sandbox/, "Actions does not duplicate the workspace handoff");
   assert.match(run("repeat:nightly:1760500000000"), /<code>pi-dispatch sandbox repeat:nightly:1760500000000<\/code>/);
   assert.match(run("gh-1"), /data-action="rerun"/);
   const hostile = run(`gh-<script>"x`);

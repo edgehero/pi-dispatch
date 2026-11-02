@@ -71,6 +71,19 @@ test("browser attachment is offered only for the exact live incarnation on an en
   assert.match(SANDBOX_CSS, /@media \(max-width: 760px\) \{ \.sandbox-opener, \.sandbox-browser \{ display: none !important; \} \}/);
 });
 
+test("an enabled same-name driver offers both checked modes because names do not identify sign-ins", () => {
+  const shell = { host: "mini1", id: "gh-9575", containerId: "a".repeat(64), nonce: "b".repeat(32) };
+  const driver = { ...shell, by: "ops", watching: true, watchers: [] };
+  const view = { role: "operator", name: "ops", data: { browserGateways: { enabledHosts: ["mini1"], sessions: [shell], drivers: [driver] } } };
+  const ambiguous = String(sandboxBrowserLink(view, shell));
+  assert.match(ambiguous, /data-sandbox-kind="drive"/); assert.match(ambiguous, /data-sandbox-kind="watch"/);
+  assert.equal((ambiguous.match(/target="_blank"/g) ?? []).length, 2);
+  assert.match(ambiguous, /kind=watch/); assert.doesNotMatch(ambiguous, /sessionKey|driverIntentId|connectionId|epoch/);
+  const anotherName = String(sandboxBrowserLink({ ...view, name: "sam" }, shell));
+  assert.match(anotherName, /data-sandbox-kind="watch"/); assert.doesNotMatch(anotherName, /data-sandbox-kind="drive"/);
+  assert.equal(sandboxBrowserLink({ ...view, readOnly: true }, shell), null);
+});
+
 test("host-derived windows are shown dynamically, failed reads stay unknown, unsupported venues never offer a shell", async () => {
   const filled = await SANDBOX_DRAW["sandboxes-populated.operator"]();
   assert.match(filled, /Kept for 24 hours/);

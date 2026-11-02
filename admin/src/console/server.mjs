@@ -643,7 +643,7 @@ export const ROUTES = Object.freeze([
   // unreadable tokens file cannot keep a browser signed in that asked to sign out.
   { method: "POST", path: "/logout", auth: "none", write: true, readOnlyExempt: true, handler: postLogout },
   // Public generic shells recover the Strict cookie with a same-origin request, without replacing the sign-in.
-  ...["launch", "authorize", "return"].map((mode) => ({ method: "GET", path: `/sandbox/gateway/${mode}`, auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, gatewayLanding({ mode, theme: themeOf(ctx.req.headers.cookie) })) })),
+  ...["launch", "authorize", "return", "select"].map((mode) => ({ method: "GET", path: `/sandbox/gateway/${mode}`, auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, gatewayLanding({ mode, theme: themeOf(ctx.req.headers.cookie), gesture: ctx.req.headers["sec-fetch-site"] !== "same-origin" })) })),
   ...["launch", "context", "authorize"].map((method) => ({ method: "POST", path: `/api/sandbox-gateway/${method}`, auth: "operator", write: true, handler: (ctx) => { ctx.gatewayTheme = themeOf(ctx.req.headers.cookie); return gatewayApi(ctx, method); } })),
   ...pageRoutes(realPages.PAGES),
   { method: "GET", path: "/api/whoami", auth: "viewer", write: false, handler: (ctx) => sendJson(ctx.res, 200, { name: ctx.session.name, role: ctx.session.role, readOnly: Boolean(ctx.deps.config.readOnly) }) },

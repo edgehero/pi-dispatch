@@ -42,16 +42,31 @@ export const GATEWAY_CONSOLE_SCRIPT = String.raw`
   }
   async function start() {
     // Same-origin fetch receives a Strict cookie withheld on the cross-site landing GET. Normal login would replace it.
-    var allowed = mode === "launch" ? ["host", "id"] : mode === "authorize" ? ["intent"] : [];
+    var allowed = mode === "launch" ? ["host", "id", "kind"] : mode === "authorize" ? ["intent"] : mode === "select" ? ["host"] : ["run"];
     if ([...params.keys()].some(function (name) { return !allowed.includes(name) || params.getAll(name).length !== 1; })) throw refusal("This launch address is not usable. Restart from Sandboxes.");
+    if (mode === "return" && params.has("run") && !/^[A-Za-z0-9._:-]{1,200}$/.test(params.get("run"))) throw refusal("This return address is not usable. Restart from Sandboxes.");
+    if (["select", "launch"].includes(mode) && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(params.get("host") || "")) throw refusal("This host is not usable. Restart from Sandboxes.");
+    if (mode === "launch" && (params.has("kind") && !["drive", "watch"].includes(params.get("kind")) || !/^[A-Za-z0-9._:-]{1,200}$/.test(params.get("id") || ""))) throw refusal("This launch address is not usable. Restart from Sandboxes.");
     person = await request("/api/whoami", {});
-    if (mode === "return") { location.replace("/runs/sandboxes"); return; }
+    if (mode === "return") { location.replace(params.has("run") ? "/run?" + new URLSearchParams({ id: params.get("run") }) : "/runs/sandboxes"); return; }
     if (person.role !== "operator" || person.readOnly) throw refusal("Browser terminals need an operator on a writable console. Use the native terminal route.");
     if (!wide()) { phone(); return; }
+    if (mode === "select") { location.replace("/runs/sandboxes?" + new URLSearchParams({ gatewaySelect: "1", host: params.get("host") })); return; }
     // Check storage BEFORE creating authority; private browsing/storage refusal must leave a truthful fallback.
     sessionStorage.setItem("sandbox-gateway-check", "1"); sessionStorage.removeItem("sandbox-gateway-check");
     if (mode === "launch") {
-      var data = await post("launch", { host: params.get("host"), id: params.get("id"), width: window.innerWidth });
+      // Our own buttons arrive same-origin and go straight on. Anything else (a link on another site, a bookmark) must not
+      // spend this sign-in's launch slots or write audit rows without a person asking for it.
+      if (root.getAttribute("data-sandbox-gateway-gesture") === "1") {
+        say("Open this terminal? Nothing has been authorized yet.");
+        await new Promise(function (resolve) {
+          var ask = root.querySelector("#gateway-gesture"), go = root.querySelector("#gateway-continue");
+          ask.hidden = false; go.focus();
+          go.addEventListener("click", function () { ask.hidden = true; resolve(); }, { once: true });
+        });
+        if (!wide()) { phone(); return; }
+      }
+      var data = await post("launch", { host: params.get("host"), id: params.get("id"), width: window.innerWidth, ...(params.has("kind") ? { kind: params.get("kind") } : {}) });
       intent = data.intentId; key = "sandbox-gateway:" + intent;
       sessionStorage.setItem(key, JSON.stringify({ proof: data.tabProof, at: Date.now(), gateway: new URL(data.launchUrl).origin }));
       navigate(data.launchUrl, new URL(data.launchUrl).origin, true);
@@ -59,11 +74,17 @@ export const GATEWAY_CONSOLE_SCRIPT = String.raw`
     }
     if (!intent || !/^[A-Za-z0-9_-]{43}$/.test(intent)) throw refusal("This opening has no original-tab proof. Restart from Sandboxes.");
     var saved = JSON.parse(sessionStorage.getItem(key) || "null");
-    if (!saved || Object.keys(saved).sort().join() !== "at,gateway,proof" || !/^[A-Za-z0-9_-]{43}$/.test(saved.proof) || !Number.isSafeInteger(saved.at) || typeof saved.gateway !== "string" || new URL(saved.gateway).origin !== saved.gateway || !/^https?:/.test(saved.gateway) || Date.now() - saved.at >= 300000 || Date.now() < saved.at) { forget(); throw refusal("This opening expired or belongs to another tab. Restart from Sandboxes."); }
-    var context = await post("context", { intentId: intent, tabProof: saved.proof });
+    if (!saved || !["at,gateway,proof", "at,gateway,proof,receipt"].includes(Object.keys(saved).sort().join()) || !/^[A-Za-z0-9_-]{43}$/.test(saved.proof) || !Number.isSafeInteger(saved.at) || typeof saved.gateway !== "string" || new URL(saved.gateway).origin !== saved.gateway || !/^https?:/.test(saved.gateway) || Date.now() - saved.at >= 300000 || Date.now() < saved.at) { forget(); throw refusal("This opening expired or belongs to another tab. Restart from Sandboxes."); }
+    // The gateway hands this to the browser that bound the intent. Kept with the proof so a reload still works, and
+    // scrubbed from the address so it is not left where it could be copied.
+    var arrived = /^#receipt=([A-Za-z0-9_-]{43})$/.exec(location.hash || "");
+    if (arrived) { saved.receipt = arrived[1]; sessionStorage.setItem(key, JSON.stringify(saved)); history.replaceState(null, "", location.pathname + location.search); }
+    if (!/^[A-Za-z0-9_-]{43}$/.test(saved.receipt || "")) { forget(); throw refusal("This opening has no original-tab proof. Restart from Sandboxes."); }
+    var context = await post("context", { intentId: intent, tabProof: saved.proof, receipt: saved.receipt });
     if (context.gatewayOrigin !== saved.gateway) { forget(); throw refusal("Gateway enrollment changed. Restart from Sandboxes."); }
     root.querySelector("#gateway-target").textContent = context.id + " on " + context.host;
-    root.querySelector("#gateway-person").textContent = "Verify as " + context.by + " before attaching through " + context.gatewayOrigin + ".";
+    root.querySelector("#gateway-person").textContent = "Verify as " + context.by + (context.kind === "watch" ? " to watch " + context.driverName + "’s shell, read only, through " : " before attaching through ") + context.gatewayOrigin + ".";
+    submit.textContent = context.kind === "watch" ? "Verify and watch" : "Verify and open terminal";
     root.querySelector("#gateway-details").hidden = false;
     form.hidden = false; token.disabled = false; submit.disabled = false;
     say("Enter this sign-in's current operator token. The one-use attachment grant lasts 60 seconds.");
@@ -75,7 +96,7 @@ export const GATEWAY_CONSOLE_SCRIPT = String.raw`
       say("Verifying this sign-in and sandbox. Nothing opens until the check succeeds.");
       var value = token.value; token.value = "";
       try {
-        var result = await post("authorize", { intentId: intent, tabProof: saved.proof, token: value, width: window.innerWidth });
+        var result = await post("authorize", { intentId: intent, tabProof: saved.proof, receipt: saved.receipt, token: value, width: window.innerWidth });
         value = ""; forget(); saved.proof = "";
         navigate(result.returnUrl, saved.gateway, false);
       } catch (error) { value = ""; say(safeError(error)); submit.disabled = false; token.focus(); }

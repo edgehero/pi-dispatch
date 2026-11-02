@@ -107,6 +107,7 @@ import {
   runCostPanel,
   runInbox,
   runOutcome,
+  runWorkspace,
   runProgress,
   runResources,
   runSession,
@@ -186,7 +187,7 @@ const PAGE_PANELS = Object.freeze({
   // swapping panels; on a phone, where the layout is one column, Needs you comes first once the checklist is gone.
   overview: [["p-setup", overviewSetup], ["p-setup-pi", overviewSetupPi], ["p-setup-empty", overviewSetupEmpty], ["p-needs", overviewNeeds], ["p-waiting", overviewWaiting], ["p-active", overviewActive], ["p-spend", overviewSpend], ["p-agent-writes", overviewAgentWrites], ["p-timeline", overviewTimeline], ["p-caps", overviewCaps], ["p-waitlists", overviewWaitlists], ["p-hosts", overviewHosts]],
   runs: [["p-filters", runsFilters], ["p-summary", runsSummary], ["p-runs", runsTable]],
-  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-answer-draft", runAnswerDraft], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
+  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-workspace", runWorkspace], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-answer-draft", runAnswerDraft], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
   parked: [["p-questions", parkedQuestions]],
   "answer-rules": [["p-questions", parkedQuestions]],
   ...SPEND_PANELS,
@@ -247,7 +248,7 @@ const PAGE_LAYOUT = Object.freeze({
   fleet: [{ cls: "stack", items: ["p-fleetbar", "p-active"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-queues", "p-held", "p-failed", "p-delayed", "p-schedules"] }, { cls: "stack", items: ["p-hosts", "p-doctor"] }] }, { cls: "stack", items: ["p-venues"] }],
   host: [{ cls: "stack", items: ["p-hoststate"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-hostjobs", "p-hostsandboxes", "p-hostbudget", "p-hostcap"] }, { cls: "stack", items: ["p-hostrow", "p-hostdoctor"] }] }],
   venue: [{ cls: "cols", items: [{ cls: "stack", items: ["p-venue-props"] }, { cls: "stack", items: ["p-venue", "p-venue-serves", "p-venue-hosts", "p-venue-fix"] }] }, { cls: "stack", items: ["p-venue-compare"] }],
-  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-answer-draft", "p-terminal", "p-inbox", "p-run", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
+  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-workspace", "p-run", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-answer-draft", "p-terminal", "p-inbox", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
   overview: Object.freeze([
     Object.freeze({ cls: "cols", items: Object.freeze(["p-setup", Object.freeze({ cls: "stack", items: Object.freeze(["p-setup-pi", "p-setup-empty"]) })]) }),
     Object.freeze({ cls: "cards-4", slotAfter: true, items: Object.freeze(["p-needs", "p-waiting", "p-active", "p-spend"]) }),
@@ -284,7 +285,7 @@ export function panelIds(name) {
 /** The parameters each screen takes; any other refuses the request. */
 const PAGE_PARAMS = Object.freeze({
   setup: [],
-  sandboxes: ["id", "repo", "index", "ref", "host", "pin", "request"],
+  sandboxes: ["id", "repo", "index", "ref", "host", "pin", "request", "gatewaySelect", "fromRun"],
   overview: ["rows", "zoom", "project"],
   runs: [...RUN_FILTER_FIELDS, "before", "touched", "days", "scope"],
   "zero-touch": ["days", "project", "scope"],
@@ -381,7 +382,13 @@ export function parsePageQuery(name, searchParams) {
   };
   switch (name) {
     case "sandboxes": {
+      if (params.has("gatewaySelect")) {
+        if (params.get("gatewaySelect") !== "1" || !WORKER_NAME_RE.test(params.get("host") ?? "") || [...params.keys()].some((key) => !["gatewaySelect", "host"].includes(key))) return { refusal: "gatewaySelect must be 1 with one valid host and no other fields" };
+        return { query: Object.freeze({ gatewaySelect: true, host: params.get("host") }) };
+      }
       const id = one("id"), repo = one("repo"), rawIndex = one("index"), ref = one("ref") ?? "HEAD", host = one("host"), pin = one("pin") ?? "0", request = one("request");
+      const fromRun = one("fromRun");
+      if (params.has("fromRun") && (fromRun === null || !RUN_ID_RE.test(fromRun))) return { refusal: "fromRun must name one run id" };
       if (id !== null && !RUN_ID_RE.test(id)) return { refusal: "id must be a sandbox or run id" };
       if (repo !== null && (!/^[A-Za-z0-9._/-]{1,200}$/.test(repo) || repo.split("/").some((part) => !part || part === "." || part === ".."))) return { refusal: "repo must be a repository path" };
       if (rawIndex !== null && !/^(?:0|[1-9]\d{0,5})$/.test(rawIndex)) return { refusal: "index must be a triggers-file index" };
@@ -389,7 +396,7 @@ export function parsePageQuery(name, searchParams) {
       if (!ref || ref.length > 200 || /[\x00-\x20\x7f]/.test(ref) || ref.startsWith("-")) return { refusal: "ref must be a branch, tag, full SHA or pr:number without spaces or control bytes" };
       if (!["0", "1"].includes(pin)) return { refusal: "pin must be 0 or 1" };
       if (request !== null && !/^sb-[0-9a-f]{32}$/.test(request)) return { refusal: "request must be a sandbox preparation id" };
-      return { query: Object.freeze({ id, repo, index: rawIndex === null ? null : Number(rawIndex), ref, host, pin: pin === "1", request }) };
+      return { query: Object.freeze({ id, repo, index: rawIndex === null ? null : Number(rawIndex), ref, host, pin: pin === "1", request, ...(fromRun ? { fromRun } : {}) }) };
     }
     case "triggers": {
       const kind = one("kind") ?? "all";
@@ -522,6 +529,8 @@ export function pageQueryString(name, query) {
   if (name === "trigger-add" && q.recipe) p.set("recipe", q.recipe);
   if (name === "trigger" && Number.isSafeInteger(q.index)) p.set("index", String(q.index));
   if (name === "sandboxes") {
+    if (q.gatewaySelect) return new URLSearchParams({ gatewaySelect: "1", host: q.host }).toString();
+    if (q.fromRun) p.set("fromRun", q.fromRun);
     for (const k of ["id", "repo", "index", "ref", "host", "request"]) if (q[k] !== null && q[k] !== undefined) p.set(k, String(q[k]));
     if (q.pin) p.set("pin", "1");
   }
@@ -934,6 +943,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     if (!refusedBeforeStart(record)) data.sandboxCheck = await sandboxCheckOf(deps.fleet, q.id, record, { now: () => now });
   };
   await Promise.all([reads.includes("chat") ? chatRead() : null, reads.includes("actions") && data.run?.record ? actionsRead() : null]);
+  if (name === "run" && data.run?.record && (who?.role === "operator" || who?.live === true && who?.role === undefined) && typeof deps.sandboxes?.workspace === "function") {
+    try { data.workspace = await deps.sandboxes.workspace(data.run.record); } catch { data.workspace = { unknown: true, sessionsUnknown: true }; }
+  }
   if (name === "run" && data.run?.record) {
     const record = data.run.record;
     // These lookups are bounded by the worker's own replica/recovery caps, never a history scan. A related record
@@ -1025,7 +1037,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
  */
 function viewOf(name, ctx) {
   const data = ctx?.data ?? {};
-  return { page: name, data, role: ctx?.session?.role ?? null, readOnly: Boolean(ctx?.readOnly), query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now, pages: PAGES };
+  return { page: name, data, role: ctx?.session?.role ?? null, name: ctx?.session?.name ?? null, readOnly: Boolean(ctx?.readOnly), query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now, pages: PAGES };
 }
 
 /** The viewer card's fixed visible panels. The other ids remain empty for live state swaps. */
@@ -1119,7 +1131,7 @@ export async function renderPage(name, ctx) {
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
   const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
-  const titleOptions = configOptions ?? triggerListOptions ?? (name === "setup" ? { description: SETUP_DESCRIPTION } : name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
+  const titleOptions = configOptions ?? triggerListOptions ?? (name === "setup" ? { description: SETUP_DESCRIPTION } : name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: ctx?.query?.gatewaySelect ? "Choose an already-open shell on the workspace host. No sandbox starts here." : "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: ctx?.query?.gatewaySelect ? null : html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   const body = shellHtml(name, ctx, html`${["runs", "zero-touch", "sandboxes"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.
   const status = name === "project" && ctx?.data?.projectView?.state !== "ready" || places !== null && !runPlaces(places).shown ? 503 : 200;

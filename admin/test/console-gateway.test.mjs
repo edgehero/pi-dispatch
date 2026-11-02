@@ -27,7 +27,7 @@ async function fixture(t, { readOnly = false, canonical = null } = {}) {
 }
 test("generic gateway landings reveal no sandbox data and carry unchanged console CSP", async (t) => {
   const f = await fixture(t);
-  for (const mode of ["launch", "authorize", "return"]) {
+  for (const mode of ["launch", "authorize", "return", "select"]) {
     const out = await f.send(`/sandbox/gateway/${mode}?host=PRIVATE_HOST&id=PRIVATE_RUN&intent=PUBLIC`, { role: null, method: "GET", person: null });
     assert.equal(out.status, 200); assert.ok(!out.text.includes("PRIVATE_HOST")); assert.ok(!out.text.includes("PRIVATE_RUN"));
     assert.match(out.text, /id="gateway-token"[^>]*disabled/); assert.ok(!out.text.includes('name="token"'));

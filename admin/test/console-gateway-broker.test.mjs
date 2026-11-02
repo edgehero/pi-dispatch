@@ -4,11 +4,13 @@ import { test } from "node:test";
 import { makeGatewayBroker } from "../src/console/gateway-broker.mjs";
 import { makeSessionStore, sessionDigest } from "../src/console/sessions.mjs";
 import { findToken } from "../../worker/src/console-tokens.mjs";
+import { gatewayHash } from "../../worker/src/sandbox-gateway-protocol.mjs";
 
 const AT = Date.UTC(2026, 10, 2, 12);
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 const TOKEN = "pdc_" + "x".repeat(43), OTHER = "pdc_" + "y".repeat(43);
-function fixture() {
+const RECEIPT = "r".repeat(43);
+function fixture({ readRun = async () => null } = {}) {
   let at = AT, readOnly = false, tokenRead = true;
   const file = { version: 1, generation: 0, tokens: [{ name: "ops", role: "operator", sha256: sha(TOKEN) }, { name: "other", role: "operator", sha256: sha(OTHER) }] };
   const sessions = makeSessionStore({ now: () => at, idleMs: 1000, maxMs: 3600000 });
@@ -22,6 +24,7 @@ function fixture() {
   const registry = { config: { consoleOrigin: "http://localhost:4790", hosts: { mini1: { origin: "http://127.0.0.1:4791" } } }, digest: "r1" };
   const values = new Map(), audit = [], renews = [], revokes = [];
   const store = {
+    async readRoom() { return null; },
     async observeTime() { return { ok: true, nowMs: at }; },
     async createIntent(input) { values.set(input.intentId, { ...structuredClone(input), state: "pending" }); return { ok: true }; },
     async readIntent(id) { return values.get(id) ?? null; },
@@ -29,12 +32,12 @@ function fixture() {
     async renewAuthorization(input) { renews.push(input); return { ok: true }; },
     async revoke(input) { revokes.push(input); values.get(input.intentId).state = "revoked"; return { ok: true }; },
   };
-  const broker = makeGatewayBroker({ store, sessions, readTokens: () => tokenRead ? { file } : { refusal: "unreadable" }, findToken, readRegistry: () => registry, readSessions: async () => registrations, readOnly: () => readOnly, audit: { append: (row) => audit.push(row) }, now: () => at, schedule: false });
+  const broker = makeGatewayBroker({ store, sessions, readTokens: () => tokenRead ? { file } : { refusal: "unreadable" }, findToken, readRegistry: () => registry, readSessions: async () => registrations, readRun, readOnly: () => readOnly, audit: { append: (row) => audit.push(row) }, now: () => at, schedule: false });
   const origin = registry.config.consoleOrigin;
   const launch = (body = { host: target.host, id: target.id, width: 1440 }, as = session) => broker.launch({ session: as, body, origin, actor });
-  const bind = (out) => { values.get(out.intentId).state = "bound"; };
-  const context = (out, as = session, proof = out.tabProof) => broker.context({ session: as, origin, body: { intentId: out.intentId, tabProof: proof } });
-  const authorize = (out, token = TOKEN, as = session) => broker.authorize({ session: as, origin, actor, body: { intentId: out.intentId, tabProof: out.tabProof, token, width: 1440 } });
+  const bind = (out) => { Object.assign(values.get(out.intentId), { state: "bound", receiptHash: gatewayHash(RECEIPT) }); };
+  const context = (out, as = session, proof = out.tabProof, receipt = RECEIPT) => broker.context({ session: as, origin, body: { intentId: out.intentId, tabProof: proof, receipt } });
+  const authorize = (out, token = TOKEN, as = session, receipt = RECEIPT) => broker.authorize({ session: as, origin, actor, body: { intentId: out.intentId, tabProof: out.tabProof, receipt, token, width: 1440 } });
   return { broker, store, session, sessions, file, registry, values, actor, target, audit, renews, revokes, launch, bind, context, authorize, create,
     advance: (ms) => at += ms, readonly: () => readOnly = true, unreadable: () => tokenRead = false, registrations: (next) => registrations = next };
 }
@@ -145,4 +148,103 @@ test("an unreadable or invalid Redis clock cannot mint or refresh authority", as
     const active = fixture(), opened = await active.launch(); active.bind(opened); assert.equal((await active.authorize(opened)).ok, true);
     active.store.observeTime = async () => value; await active.broker.tick(); assert.equal(active.renews.length, 0); await active.broker.close();
   }
+});
+
+function watchingRoom() {
+  return { driverIntentId: randomBytes(32).toString("base64url"), driverConnectionId: randomBytes(32).toString("base64url"), driverActor: { name: "lee", role: "operator", session: "d".repeat(12) }, enabled: true, epoch: randomBytes(32).toString("base64url"), watchers: {} };
+}
+
+test("v2 intent session binding is stable for one sign-in, different after same-name login, and never a browser credential", async () => {
+  const f = fixture(), first = await f.launch(), second = await f.launch();
+  const a = f.values.get(first.intentId), b = f.values.get(second.intentId);
+  assert.equal(a.kind, "drive"); assert.equal(a.runFacts, null); assert.equal(Object.hasOwn(a, "driver"), false);
+  assert.equal(a.sessionKey, sha("sandbox-workbench-session\0" + f.session.id)); assert.equal(a.sessionKey, b.sessionKey);
+  const other = await f.launch(undefined, f.create());
+  assert.notEqual(f.values.get(other.intentId).sessionKey, a.sessionKey);
+  for (const value of [first, second, f.audit]) assert.equal(JSON.stringify(value).includes(a.sessionKey), false);
+  await f.broker.close();
+});
+
+test("broker puts only exact six record facts into its private intent; lookup failure never invents context", async () => {
+  const f = fixture({ readRun: async (id) => ({ record: { jobId: id, host: "mini1", outcome: "completed", reason: "awaiting-input", project: "web", target: "acme/web#42", flow: "fix", endedAt: new Date(AT).toISOString(), question: "PRIVATE_QUESTION", token: TOKEN } }) });
+  const opened = await f.launch(), facts = f.values.get(opened.intentId).runFacts;
+  assert.deepEqual(facts, { id: "gh-42", outcome: "awaiting-input", project: "web", target: "acme/web#42", flow: "fix", endedAt: new Date(AT).toISOString() });
+  assert.doesNotMatch(JSON.stringify(facts), /PRIVATE|token|question/);
+  assert.equal(JSON.stringify(opened).includes("acme/web"), false);
+  await f.broker.close();
+  const failed = fixture({ readRun: async () => { throw new Error("PRIVATE"); } });
+  const fallback = await failed.launch(); assert.equal(fallback.ok, true); assert.equal(failed.values.get(fallback.intentId).runFacts, null); await failed.broker.close();
+});
+
+test("watch launch derives exact driver/consent from trusted room and still requires its own tab/session/token", async () => {
+  const f = fixture(), room = watchingRoom();
+  assert.equal((await f.launch({ host: "mini1", id: "gh-42", kind: "watch", width: 1440 })).refused, "watch");
+  f.store.readRoom = async (target) => { assert.equal(target.containerId, f.target.containerId); return room; };
+  assert.equal((await f.launch({ host: "mini1", id: "gh-42", kind: "watch", width: 1440, driver: room })).refused, "target");
+  const out = await f.launch({ host: "mini1", id: "gh-42", kind: "watch", width: 1440 });
+  const stored = f.values.get(out.intentId);
+  assert.equal(stored.kind, "watch"); assert.deepEqual(stored.driver, { intentId: room.driverIntentId, connectionId: room.driverConnectionId, epoch: room.epoch });
+  f.bind(out);
+  assert.equal((await f.context(out)).driverName, "lee"); assert.equal((await f.context(out)).kind, "watch");
+  assert.equal((await f.context(out, f.create())).refused, "changed");
+  assert.equal((await f.authorize(out, OTHER)).refused, "token");
+  assert.equal((await f.authorize(out)).ok, true);
+  assert.equal(f.sessions.peek(f.session.id, f.file).id, f.session.id);
+  await f.broker.close();
+});
+
+test("watch consent/driver changes and full slots return their own actionable refusal without consuming a bound opening", async () => {
+  for (const why of ["watch-limit", "watch-disabled", "watch-removed", "driver-ended", "self-watch"]) {
+    const f = fixture(), room = watchingRoom(); f.store.readRoom = async () => room;
+    const out = await f.launch({ host: "mini1", id: "gh-42", kind: "watch", width: 1440 }); f.bind(out);
+    f.store.authorizeIntent = async () => ({ refused: why });
+    const result = await f.authorize(out);
+    assert.equal(result.refused, why); assert.doesNotMatch(result.error, /another tab or sign-in/); assert.equal(f.values.get(out.intentId).state, "bound");
+    if (why === "watch-limit") assert.match(result.error, /Three watch slots/);
+    await f.broker.close();
+  }
+  for (const change of [(room) => room.enabled = false, (room) => room.epoch = randomBytes(32).toString("base64url"), (room) => room.driverConnectionId = randomBytes(32).toString("base64url")]) {
+    const f = fixture(), room = watchingRoom(); f.store.readRoom = async () => room;
+    const out = await f.launch({ host: "mini1", id: "gh-42", kind: "watch", width: 1440 }); f.bind(out); change(room);
+    assert.ok(["watch-disabled", "driver-ended"].includes((await f.context(out)).refused)); await f.broker.close();
+  }
+});
+
+test("self-watch refuses the exact driving sign-in before minting, while same-name distinct sign-in may watch", async () => {
+  const f = fixture(), room = watchingRoom(); room.driverActor.name = f.session.name; room.sessionKey = sha("sandbox-workbench-session\0" + f.session.id);
+  f.store.readRoom = async () => room;
+  const body = { host: "mini1", id: "gh-42", kind: "watch", width: 1440 };
+  const denied = await f.launch(body);
+  assert.equal(denied.refused, "self-watch"); assert.match(denied.error, /existing workspace/);
+  assert.equal(f.values.size, 0); assert.equal(f.audit.length, 0);
+  const other = f.create(); assert.equal(other.name, f.session.name); assert.notEqual(other.id, f.session.id);
+  const opening = await f.launch(body, other); assert.equal(opening.ok, true); f.bind(opening);
+  assert.equal((await f.context(opening, other)).kind, "watch");
+  const result = await f.broker.authorize({ session: other, origin: f.registry.config.consoleOrigin, actor: { name: other.name, role: other.role, session: sessionDigest(other.id) }, body: { intentId: opening.intentId, tabProof: opening.tabProof, receipt: RECEIPT, token: TOKEN, width: 1440 } });
+  assert.equal(result.ok, true); await f.broker.close();
+});
+
+test("operator presentation separates native opener from driver and strips room secrets; unavailable is never empty", async () => {
+  const f = fixture(), room = watchingRoom(); room.watchers.one = { actor: { name: "sam", role: "operator", session: "e".repeat(12) }, state: "pending", connectionId: randomBytes(32).toString("base64url") };
+  f.store.readRoom = async () => room;
+  const first = await f.broker.view();
+  assert.equal(first.sessions[0].by, "terminal"); assert.equal(first.drivers[0].by, "lee"); assert.deepEqual(first.drivers[0].watchers, [{ name: "sam", state: "pending" }]);
+  for (const value of [room.driverIntentId, room.driverConnectionId, room.epoch, room.driverActor.session, room.watchers.one.connectionId, f.session.id]) assert.equal(JSON.stringify(first).includes(value), false);
+  f.advance(1001); f.store.readRoom = async () => { throw new Error("PRIVATE"); };
+  const unavailable = await f.broker.view(); assert.equal(unavailable.partial, true); assert.equal(unavailable.drivers.length, 0);
+  await f.broker.close();
+});
+
+test("a step-up from a tab that never followed its own link arms nobody", async () => {
+  // The attack: an operator keeps the launch's tab proof, sends its link to someone else, whose browser binds the intent, then steps
+  // up from their own tab. That browser would hold a shell in the operator's name. Only the browser that bound it has the receipt.
+  const f = fixture(), out = await f.launch(); f.bind(out);
+  let authorized = 0; const real = f.store.authorizeIntent; f.store.authorizeIntent = async (...values) => { authorized++; return real(...values); };
+  for (const receipt of ["x".repeat(43), "", undefined]) {
+    assert.equal((await f.context(out, f.session, out.tabProof, receipt ?? null)).ok, undefined, "the context is refused");
+    assert.equal((await f.authorize(out, TOKEN, f.session, receipt ?? null)).ok, undefined, "and so is the step-up");
+  }
+  assert.equal(authorized, 0);
+  assert.equal((await f.authorize(out)).ok, true, "the browser that holds it goes on");
+  assert.equal(authorized, 1);
 });

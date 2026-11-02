@@ -1,5 +1,6 @@
 import { MODELS_PANEL_STATES } from "./helpers/models-goldens.mjs";
 import { ZERO_TOUCH_PANEL_STATES } from "./helpers/zero-touch-goldens.mjs";
+import { WORKSPACE_PANEL_STATES } from "./helpers/workspace-goldens.mjs";
 import { CONFIGURATION_PANEL_STATES } from "./helpers/configuration-goldens.mjs";
 import { TRIGGER_LIST_PANEL_STATES } from "./helpers/trigger-list-goldens.mjs";
 import assert from "node:assert/strict";
@@ -50,6 +51,7 @@ const IN_SCOPE_CARDS = Object.freeze({
   ModelsScreen: 780,
   ParkedAnswerer: 779, ParkedDraftViewer: 779, ParkedDraftPhone: 779,
   SandboxesScreen: 771,
+  RunWorkspace: 790, RunWorkspaceStates: 790,
   ZeroTouchScreen: 777, ZeroTouchViewer: 777, ZeroTouchPhone: 777,
   SecretsScreen: 751, ConnectionsScreen: 784, ProjectDetail: 751,
   TriggersScreen: 750, TriggersViewer: 750, TriggersPhone: 750,
@@ -95,6 +97,7 @@ const ISSUE_OWNED_CARDS = Object.freeze({
  * alike.
  */
 const REVERSE_CHECKED = Object.freeze([
+  ...WORKSPACE_PANEL_STATES.map((key) => `panels/${key}`),
   "models.operator", "models.viewer", ...MODELS_PANEL_STATES.map((key) => `panels/${key}`),
   "sandboxes.operator", "panels/sandboxes-populated.operator",
   ...ZERO_TOUCH_PANEL_STATES.map((key) => `panels/${key}`),
