@@ -141,8 +141,41 @@ try {
   };
   const click = async (selector) => {
     await tab.send("Page.bringToFront");
-    const box = await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing control');e.scrollIntoView({block:'center'});const b=e.getBoundingClientRect();return{x:b.x+b.width/2,y:b.y+b.height/2}})()`);
+    const measure = () => evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing control');e.scrollIntoView({block:'center'});const b=e.getBoundingClientRect();return{x:b.x+b.width/2,y:b.y+b.height/2}})()`);
+    // A live update can redraw a panel and move this control between measuring and pressing, faster on a slow runner than
+    // anywhere else. Press where it has held still, as a person would. A timer rather than an animation frame, because a
+    // page left hidden by the frozen-driver stage draws no frames.
+    let box = await measure();
+    for (let reads = 0; reads < 40; reads++) {
+      await sleep(25);
+      const next = await measure();
+      const still = next.x === box.x && next.y === box.y;
+      box = next;
+      if (still) break;
+    }
     for (const type of ["mousePressed", "mouseReleased"]) await tab.send("Input.dispatchMouseEvent", { type, ...box, button: "left", clickCount: 1 });
+  };
+  // For a click whose proof is what it causes. A press that landed where the control just was causes nothing and can do no
+  // harm, so aim again. That a press held across a redraw still clicks is the console's own rule, in console-client-states.test.mjs.
+  const clickUntil = async (selector, done, { attempts = 4, ms = 4000 } = {}) => {
+    for (let attempt = 1; ; attempt++) {
+      await click(selector);
+      try { await until(done, ms); return; }
+      catch (error) {
+        if (attempt >= attempts) throw error;
+        // The control has gone, so that press worked and the next page is only slow. Keep waiting, with no second press.
+        if (!await evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`)) { await until(done); return; }
+      }
+    }
+  };
+  // The same, for a click that opens a tab: the wait for the new tab outlives each press, so it is only ever opened once.
+  const clickForTab = async (selector, created, { attempts = 4, ms = 4000 } = {}) => {
+    const opened = created.then(value => ({ value }));
+    for (let attempt = 1; ; attempt++) {
+      await click(selector);
+      const result = await (attempt < attempts ? Promise.race([opened, sleep(ms).then(() => null)]) : opened);
+      if (result) return result.value;
+    }
   };
   const type = async (selector, text) => {
     await tab.send("Page.bringToFront");
@@ -238,8 +271,7 @@ try {
       assert.deepEqual(await evaluate("window.__gatewayCsp"), []);
       sourceTab = tab;
       const created = browser.event((m) => m.method === "Target.targetCreated" && m.params.targetInfo.type === "page" && m.params.targetInfo.targetId !== sourceTab.targetId, "rendered browser CTA creates its own tab");
-      await click(ctaSelector);
-      const { targetId } = (await created).params.targetInfo;
+      const { targetId } = (await clickForTab(ctaSelector, created)).params.targetInfo;
       tab = await attachTab(targetId);
       await initializeTab();
       await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1400, deviceScaleFactor: 1, mobile: false });
@@ -254,7 +286,7 @@ try {
       await tab.send("Page.navigate", { url: launchUrl(id, kind) });
       // Typed or bookmarked, so not from a console page: nothing is spent until a person says so.
       await until("document.querySelector('#gateway-continue')?.getClientRects().length");
-      await click("#gateway-continue");
+      await clickUntil("#gateway-continue", freshAuthorize());
     }
     await until(freshAuthorize());
     previousIntent = await evaluate("new URLSearchParams(location.search).get('intent')");
@@ -472,14 +504,13 @@ try {
     const repliesBefore = await evaluate("window.__gatewayReplies.filter(r=>r.path==='/api/connect').length");
     await evaluate("window.__gatewayOriginalTerminal=document.querySelector('.wb-pane[data-active=true] .xterm')");
     const created = browser.event(m => m.method === "Target.targetCreated" && m.params.targetInfo.type === "page" && m.params.targetInfo.targetId !== workspaceTab.targetId, "Add another creates its selector helper");
-    await click('[data-wb-action="add"]');
-    tab = await attachTab((await created).params.targetInfo.targetId); await initializeTab();
+    tab = await attachTab((await clickForTab('[data-wb-action="add"]', created)).params.targetInfo.targetId); await initializeTab();
     await until(`location.origin===${JSON.stringify(consoleOrigin)}&&location.pathname==='/runs/sandboxes'&&new URLSearchParams(location.search).get('gatewaySelect')==='1'`);
     const pickUrl = new URL(launchUrl(targetId, kind));
     const chosen = `.sandbox-browser[href="${pickUrl.pathname}${pickUrl.search}"]`;
     await until(`document.querySelector(${JSON.stringify(chosen)})?.getClientRects().length`);
     assert.equal(await evaluate(`document.querySelector(${JSON.stringify(chosen)}).target`), "_self", "selection continues in the proof-owning helper");
-    await click(chosen); await until(freshAuthorize());
+    await clickUntil(chosen, freshAuthorize());
     const helper = tab;
     tab = workspaceTab; browser = workspaceTab.browser;
     if (kind === "drive") {
