@@ -5,7 +5,7 @@
  */
 import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
-import { makeQueue, QUEUE, hostQueueName, manualTriggerJobId, enqueueTriggerRunReporting, swallowedRunSentence } from "@edgehero/pi-dispatch/queue";
+import { makeQueue, QUEUE, hostQueueName, manualCanaryJobId, manualTriggerJobId, enqueueTriggerRunReporting, swallowedRunSentence } from "@edgehero/pi-dispatch/queue";
 import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
@@ -83,11 +83,14 @@ export async function enqueueTriggerFire(plan, options = {}) {
     // two console/tool fires from racing even after a person cancels/removes the first job. Keep the
     // latch on infrastructure failure: releasing it could double-start an enqueue whose reply was lost.
     const instant = new Date(now());
-    const id = manualTriggerJobId({ triggerId: current.schedulerId, now: instant });
+    // A canary (issue #796) has an identity of its own, so a hand fire in the same minute cannot swallow it, nor it the fire: they are different jobs with different code.
+    const canary = options.packageCanary ?? null;
+    const id = (canary ? manualCanaryJobId : manualTriggerJobId)({ triggerId: current.schedulerId, now: instant });
     redis = redisFn(url);
     if (await redis.set(`trigger-fire:${current.queue}:${id}`, "1", "EX", 120, "NX") !== "OK") return { refusal: "This cron trigger was already fired this minute. Nothing was queued.", deduplicated: true };
     queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: current.queue });
-    const { id: jobId, existing } = await enqueueTriggerRunReporting(queue, current.schedule, { now: instant });
+    const schedule = canary ? { ...current.schedule, data: { ...current.schedule.data, packageCanary: canary } } : current.schedule;
+    const { id: jobId, existing } = await enqueueTriggerRunReporting(queue, schedule, { now: instant, ...(canary ? { jobId: id } : {}) });
     if (existing === undefined) return { invalid: "Fire now could not verify the queued job. A run may have been queued; check Runs before trying again next minute.", partial: true, jobId, queue: current.queue };
     if (existing) return { refusal: swallowedRunSentence(jobId, existing), deduplicated: true, jobId };
     return { ok: true, jobId, queue: current.queue };

@@ -66,6 +66,9 @@ export const ACTION_AGENT_POLICIES = Object.freeze({
   "board-clear": rule("person", "Board authority has no model tool."),
   "board-revert": rule("person", "Board authority has no model tool."),
   "board-adopt": rule("person", "A person adopts a model's proposed board."),
+  "package-canary": rule("person", "Running third-party code a person has not reviewed yet, on a paid job, is a person's decision. Fire now's grant does not reach it."),
+  "package-adopt": rule("person", "New third-party code in every job is a person's decision."),
+  "package-undo": rule("person", "A person owns what was adopted."),
 });
 
 export function actionAgentPolicy(name) {

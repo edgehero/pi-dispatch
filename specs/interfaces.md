@@ -10519,6 +10519,7 @@ repeating attachment or ending the sandbox. Neither audit nor its Valkey mirror 
 values, reauthentication tokens, request bodies or terminal input/output. The build pins its added kind vocabulary
 to these semantics; existing kinds and chain/mirror formats are UNCHANGED, checked.
 
+- **AMENDED 2026-11-02 (#796)**: A canary is kind `package-canary`, a person's Adopt `package-adopt` and its Undo `package-undo`. Each carries the package's exact name and version as its target and nothing more; `package-canary` is paid and audited before it is queued like `trigger-fire`, with the job it queued as its way back.
 - **AMENDED 2026-10-30 (#750)**: The paid manual cron fire is kind `trigger-fire`, audited before enqueue and carrying only safe
   identity/outcome metadata. It uses the same confirmation and compensating failure-row rules as other paid actions.
 
@@ -11497,7 +11498,7 @@ Deleting every `updates:*` key changes no job: a job reads only the stage manife
 updates:hosts                     SET    host names that have published a look; the reader prunes
 updates:h:<host>                  STRING one JSON look record, kept 7 days from its last publish; stale past two intervals
 updates:generation                STRING the newest desired generation (INCR)
-updates:desired                   HASH   package name -> { v, generation, name, version, op: "adopt"|"undo", by, at, undoOf?, request }
+updates:desired                   HASH   package name -> { v, generation, name, version, op: "adopt"|"undo", by, at, undoOf?, from?, request }
 updates:applied:<host>            HASH   package name -> { v, generation, state, version, reason, digest, at }, kept 90 days from its last write
 updates:canary:<name>@<version>   STRING { v, host, digest, excerpt, at }, kept 30 days; excerpt is at most 2000 characters with control characters removed
 ```

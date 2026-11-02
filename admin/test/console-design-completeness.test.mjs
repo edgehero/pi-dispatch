@@ -13,7 +13,6 @@ const OUTSIDE_LEDGERS = Object.freeze({
   SampleStory: "The sample deployment's story, not an application route.",
   JourneyAnswer: "A storyboard joining existing screens, not an application route.",
   JourneyFailure: "A storyboard joining existing screens, not an application route.",
-  UpdatesScreen: "#796: the Updates page is built by this issue, and its ledger arrives with it.",
   JourneySetup: "A storyboard; browser setup remains proposed in SetupScreen under #774.",
   FleetPhone: "The built FleetScreen route at phone width (#748), covered by its family ledger and browser sweep.",
   FleetViewer: "The built FleetScreen route as a viewer (#748), covered by its family ledger and role tests.",
@@ -49,6 +48,7 @@ const CARDS = Object.freeze({
   ZeroTouchViewer: { page: "zero-touch", path: "/runs/zero-touch" },
   SecretsScreen: { page: "secrets", path: "/config/secrets" },
   ConnectionsScreen: { page: "connections", path: "/config/connections" },
+  UpdatesScreen: { page: "updates", path: "/config/updates" },
   ProjectDetail: { page: "project", path: "/config/project" },
 });
 

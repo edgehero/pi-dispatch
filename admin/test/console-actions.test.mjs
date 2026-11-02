@@ -360,8 +360,9 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "allocation-revert": "allocation-revert",
     "zero-touch-group": "zero-touch-group", "zero-touch-name": "zero-touch-name", "zero-touch-instruction": "zero-touch-instruction", "zero-touch-undo": "zero-touch-undo",
     "board-freeze": "board-freeze", "board-unfreeze": "board-unfreeze", "board-clear": "board-clear", "board-revert": "board-revert", "board-adopt": "board-adopt",
+    "package-canary": "package-canary", "package-adopt": "package-adopt", "package-undo": "package-undo",
   });
-  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-enqueue", "run-fork", "steer", "trigger-fire", "zero-touch-group"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.paid).map((a) => a.name).sort(), ["fleet-resume", "package-canary", "parked-answer", "queue-resume", "rerun", "retry-all-failed", "retry-failed", "run-enqueue", "run-fork", "steer", "trigger-fire", "zero-touch-group"]);
   assert.deepEqual(ACTIONS.filter((a) => a.bulk).map((a) => a.name).sort(), ["cancel-all-held", "remove-all-failed", "retry-all-failed"]);
   assert.equal(BULK_MAX, RM.BULK_MAX, "the console's bulk bound is job-actions' own");
 });
@@ -378,6 +379,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
     "run-fork": ["jobId", "entry", "position", "point", "provider", "model", "thinking", "message"],
     "trigger-fire": ["index"],
+    "package-canary": ["index", "name", "version"], "package-adopt": ["name", "version"], "package-undo": ["name"],
     rerun: ["jobId"], "parked-answer": ["jobId", "text", "decision", "draftRunId", "draftDigest"], steer: ["jobId", "mode", "text"], "steer-withdraw": ["jobId", "id"],
     "fleet-pause": [], "fleet-resume": [], "queue-pause": ["queue"], "queue-resume": ["queue"],
     "pause-windows": ["windows"], "trigger-add": ["trigger"], "trigger-edit": ["index", "flow", "backend", "provider", "model", "maxTurns", "progress", "statusComment", "recover", "steer"], "trigger-delete": ["index"],
@@ -391,7 +393,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
   Object.assign(FIELDS, Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, name.startsWith("setup-provider-key") ? ["provider", "value"] : name === "setup-viewer-add" ? ["name"] : name === "setup-viewer-revoke" ? ["name", "identity"] : []])));
-  assert.equal(ACTIONS.length, 57 + SETUP_ACTION_NAMES.length);
+  assert.equal(ACTIONS.length, 60 + SETUP_ACTION_NAMES.length);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -490,6 +492,9 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["remove-all-failed", bulk([null, null], { queue: "pi-jobs" }), twice(U.removed), null, "Remove 2 jobs", "Removed failed jobs in pi-jobs: 1 of 2 done", { done: 1, count: 2 }],
     ["remove-all-failed", bulk([null]), twice(U.removed), null, "Remove 1 job", "Removed 1 failed job", { done: 1, count: 1 }],
     ["trigger-fire", { target: "daily", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Fire now for up to $2.00", "Fired cron trigger daily once"],
+    ["package-canary", { target: "pi-lint@1.4.3", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Run the canary for up to $2.00", "Queued a canary of pi-lint@1.4.3"],
+    ["package-adopt", { target: "pi-lint@1.4.3", payload: { name: "pi-lint", from: "1.4.2" } }, twice("Undo puts each host back as it was, to 1.4.2"), { action: "package-undo", body: { name: "pi-lint" } }, "Adopt pi-lint@1.4.3", "Asked every host to adopt pi-lint@1.4.3"],
+    ["package-undo", { target: "pi-lint@1.4.2" }, twice("Adopt it again from the Updates page, while its canary's run is retained"), null, "Undo", "Asked every host to go back to pi-lint@1.4.2"],
     ["rerun", { target: "gh-r", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Re-run for up to $2.00", "Queued a re-run of gh-r"],
     ["rerun", { target: "gh-r", reserve: zero }, twice(U.rerunBefore), null, "Re-run (zero-rated)", "Queued a re-run of gh-r"],
     ["parked-answer", { target: "gh-p", reserve: r(2_000_000) }, twice(U.answer), null, "Answer for up to $2.00", "Answered parked run gh-p"],
@@ -563,7 +568,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
   }
   // A re-run's way back is the cancel of the job it queued, asked again at the confirm with the apply's answer
   // (`atConfirm`); no other rule is, and no bulk one can be (a bulk confirm asks no rule again).
-  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-enqueue", "run-fork", "trigger-fire", "rerun", "zero-touch-instruction", "setup-viewer-add"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.atConfirm).map((a) => a.name), ["run-enqueue", "run-fork", "trigger-fire", "rerun", "zero-touch-instruction", "package-canary", "setup-viewer-add"]);
   assert.ok(ACTIONS.every((a) => typeof a.atConfirm === "boolean" && !(a.atConfirm && a.bulk)), "atConfirm is a single act's, and a boolean on every action");
   const rerun = ACTIONS.find((a) => a.name === "rerun");
   const landed = { ok: true, jobId: "cron:t0:1760000000000", queue: "pi-jobs@build3" };
@@ -2898,6 +2903,124 @@ test("envelope-set: the preview lists each field it changes, through the worker'
   assert.ok(p.summary.some((l) => l.startsWith("minIntervalHours: 24")), JSON.stringify(p.summary));
   assert.deepEqual([p.undo, p.confirmLabel, typeof p.ticket], [UNDO_SENTENCES.envelope, "Confirm", "string"]);
   assert.equal(read(paths.envelopeFile), envelope, "the preview wrote nothing");
+});
+
+// ---- Updates (issue #796): third-party code, so a person, a preview, a gate on what a canary showed, and a way back.
+
+const updatesRow = (fields = {}) => ({ name: "pi-lint", version: "1.4.2", newest: "1.4.3", adapter: false, canary: { state: "completed", jobId: "gh-c0a7" }, desired: null, standings: [], ...fields });
+function updatesDeps(row = updatesRow()) {
+  const asked = [];
+  let facts = { packages: row ? [row] : [] };
+  return { asked, set: (next) => { facts = { packages: [next] }; }, updates: { read: async () => facts, setDesired: async (desired) => { asked.push(desired); } } };
+}
+
+test("a canary is a paid single-use Fire now that carries one exact version, and asks nothing of the trigger's own schedule", async () => {
+  const { paths } = deployment();
+  const enqueued = [];
+  const rm = { ...RM,
+    planTriggerFire: async ({ index }) => ({ plan: { index, schedulerId: "daily", queue: "pi-jobs", fileDigest: "a".repeat(64), schedule: { data: {} }, reserve: { slots: 1, dollarsMicros: 2_000_000, capMicros: 2_000_000, zeroRated: false } } }),
+    enqueueTriggerFire: async (plan, options) => { enqueued.push(options.packageCanary); return { ok: true, jobId: "manual:daily:1:canary", queue: "pi-jobs" }; },
+  };
+  const u = updatesDeps(updatesRow({ canary: null }));
+  const c = await start({ paths, a: { rm, updates: u.updates } });
+  const input = { index: 2, name: "pi-lint", version: "1.4.3" };
+  const viewer = await c.cookieFor(VIEW_TOKEN);
+  assert.equal((await c.act("package-canary", input, viewer)).status, 403, "operator only");
+  const p = await c.act("package-canary", input);
+  assert.equal(p.status, 200, p.text);
+  assert.equal(p.json().paid, true);
+  assert.equal(p.json().confirmLabel, "Run the canary for up to $2.00");
+  assert.match(p.json().html, /A job that completed does not prove the extension is good/);
+  assert.deepEqual(enqueued, [], "a preview queues nothing");
+  assert.equal((await c.confirm("package-canary", p.json().ticket)).status, 200);
+  assert.deepEqual(enqueued, [{ name: "pi-lint", version: "1.4.3" }]);
+  assert.deepEqual([lastWrite(c).kind, lastWrite(c).target], ["package-canary", "pi-lint@1.4.3"]);
+  assert.equal((await c.confirm("package-canary", p.json().ticket)).status, 409, "single use");
+  const blocked = await c.act("package-canary", input);
+  c.audit.failNext = 1;
+  assert.equal((await c.confirm("package-canary", blocked.json().ticket)).status, 500);
+  assert.equal(enqueued.length, 1, "audit failure queues nothing");
+  const ro = await start({ paths, a: { rm, updates: u.updates }, readOnly: true });
+  assert.equal((await ro.act("package-canary", input)).status, 403);
+});
+
+test("a canary's preview refuses what could prove nothing, for free", async () => {
+  const { paths } = deployment();
+  const planned = { plan: { index: 0, schedulerId: "daily", queue: "pi-jobs", fileDigest: "a".repeat(64), schedule: { data: { packages: false } }, reserve: { slots: 1, dollarsMicros: 0, capMicros: 0, zeroRated: true } } };
+  const rm = { ...RM, planTriggerFire: async () => planned };
+  const preview = async (row, input = { index: 0, name: "pi-lint", version: "1.4.3" }) => (await (await start({ paths, a: { rm, updates: updatesDeps(row).updates } })).act("package-canary", input));
+  assert.match((await preview(null)).text, /not staged on this host/);
+  assert.match((await preview(updatesRow({ adapter: true }))).text, /reviewed subscription adapter/);
+  assert.match((await preview(updatesRow({ version: "1.4.3" }))).text, /already staged/);
+  assert.match((await preview(updatesRow())).text, /run\.packages to false/);
+  for (const version of ["^1.4.3", "latest", "1.x"]) assert.equal((await preview(updatesRow(), { index: 0, name: "pi-lint", version })).status, 400, version);
+  assert.equal((await preview(updatesRow(), { index: 0, name: "../x", version: "1.4.3" })).status, 400);
+});
+
+test("Adopt needs a canary that completed, is asked again at the confirm, writes one desired row, and offers Undo", async () => {
+  const { paths } = deployment();
+  const u = updatesDeps();
+  const c = await start({ paths, a: { updates: u.updates } });
+  const input = { name: "pi-lint", version: "1.4.3" };
+  const viewer = await c.cookieFor(VIEW_TOKEN);
+  assert.equal((await c.act("package-adopt", input, viewer)).status, 403);
+  const p = await c.act("package-adopt", input);
+  assert.equal(p.status, 200, p.text);
+  assert.equal(p.json().paid, false, "spends nothing itself");
+  assert.match(p.json().html, /exactly 1\.4\.3/);
+  assert.match(p.json().html, /running jobs keep 1\.4\.2/);
+  assert.match(p.json().html, /offline adopts it when it returns/);
+  assert.match(p.json().html, /can differ from the one the canary ran/, "the limit is said before the person agrees to it");
+  assert.deepEqual(u.asked, []);
+  const done = await c.confirm("package-adopt", p.json().ticket);
+  assert.equal(done.status, 200, done.text);
+  assert.equal(u.asked.length, 1);
+  const { at, by, ...row } = u.asked[0];
+  assert.deepEqual(row, { name: "pi-lint", version: "1.4.3", op: "adopt", from: "1.4.2" });
+  assert.equal(typeof by, "string");
+  assert.equal(typeof at, "number");
+  assert.deepEqual([lastWrite(c).kind, lastWrite(c).target], ["package-adopt", "pi-lint@1.4.3"]);
+  // The gate, at the preview and again at the confirm: the run record is what says so, not the page a person opened an hour ago.
+  for (const [row2, why] of [[updatesRow({ canary: null }), /Run a canary/], [updatesRow({ canary: { state: "failed" } }), /Run a canary/], [updatesRow({ newest: "1.4.4" }), /Run a canary/], [updatesRow({ version: "1.4.3" }), /already staged/], [updatesRow({ adapter: true }), /subscription adapter/], [updatesRow({ desired: { op: "adopt", version: "1.4.3" } }), /already adopted/]]) {
+    const gated = await (await start({ paths, a: { updates: updatesDeps(row2).updates } })).act("package-adopt", input);
+    assert.match(gated.text, why);
+  }
+  const stale = updatesDeps();
+  const s = await start({ paths, a: { updates: stale.updates } });
+  const later = await s.act("package-adopt", input);
+  stale.set(updatesRow({ canary: null }));
+  assert.notEqual((await s.confirm("package-adopt", later.json().ticket)).status, 200, "a gate that stopped holding since the preview stops the confirm");
+  assert.deepEqual(stale.asked, []);
+});
+
+test("Undo takes back the adoption it was shown, and only that one", async () => {
+  const { paths } = deployment();
+  const adopted = updatesRow({ version: "1.4.3", desired: { op: "adopt", generation: 5, version: "1.4.3", from: "1.4.2" } });
+  const u = updatesDeps(adopted);
+  const c = await start({ paths, a: { updates: u.updates } });
+  const viewer = await c.cookieFor(VIEW_TOKEN);
+  assert.equal((await c.act("package-undo", { name: "pi-lint" }, viewer)).status, 403);
+  const p = await c.act("package-undo", { name: "pi-lint" });
+  assert.equal(p.status, 200, p.text);
+  assert.match(p.json().html, /A host that never took the adoption changes nothing/);
+  assert.equal((await c.confirm("package-undo", p.json().ticket)).status, 200);
+  const { at, by, ...row } = u.asked[0];
+  assert.deepEqual(row, { name: "pi-lint", version: "1.4.2", op: "undo", undoOf: 5 });
+  const moved = updatesDeps(adopted);
+  const m = await start({ paths, a: { updates: moved.updates } });
+  const q = await m.act("package-undo", { name: "pi-lint" });
+  moved.set({ ...adopted, desired: { ...adopted.desired, generation: 6 } });
+  assert.notEqual((await m.confirm("package-undo", q.json().ticket)).status, 200, "someone else moved it since the preview");
+  assert.deepEqual(moved.asked, []);
+  assert.match((await (await start({ paths, a: { updates: updatesDeps(updatesRow()).updates } })).act("package-undo", { name: "pi-lint" })).text, /no adoption/);
+});
+
+test("an agent can do none of this, whatever grant it holds", async () => {
+  const { ACTION_AGENT_POLICIES } = await import("../src/action-policy.mjs");
+  for (const name of ["package-canary", "package-adopt", "package-undo"]) {
+    assert.equal(ACTION_AGENT_POLICIES[name].mode, "person", name);
+    assert.deepEqual(ACTION_AGENT_POLICIES[name].tools, [], `${name} has no tool`);
+  }
 });
 
 test("board adoption is previewed, confirmed once, audited without proposal text, and refused when audit fails", async () => {

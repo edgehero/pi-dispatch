@@ -105,7 +105,7 @@ export function actForm(
     )}${fields}${ui.btn({
       type: "submit",
       label,
-      kind: danger || action.endsWith("delete") ? ["danger", "sm"] : action === "trigger-fire" ? ["paid", "sm"] : ["primary", "sm"],
+      kind: danger || action.endsWith("delete") ? ["danger", "sm"] : action === "trigger-fire" || action === "package-canary" ? ["paid", "sm"] : ["primary", "sm"],
     })}
     </fieldset>
     <noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>

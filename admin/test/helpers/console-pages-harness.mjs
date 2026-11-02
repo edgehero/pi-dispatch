@@ -1,3 +1,4 @@
+import { readUpdates } from "../../src/updates-view.mjs";
 import { parseSandboxOpenUrl } from "@edgehero/pi-dispatch/opener-protocol";
 import { zeroTouchFixture } from "./zero-touch-goldens.mjs";
 import assert from "node:assert/strict";
@@ -431,6 +432,7 @@ async function renderInChild() {
     const deps = {
       secretsView: (snapshot) => secretsView({ snapshot, env }),
       connections: (snapshot) => readConnections({ snapshot, env, deploymentDir: deployment, paths: fleetPaths, now: NOW, redis: admin }),
+      updates: (snapshot) => readUpdates({ redis: admin, staged: snapshot?.stagedPackages ?? null, records: snapshot?.runs ?? [], audit: [], pinned: pricing.piAiVersion(), snapshot, now: NOW }),
       projectView: (id, snapshot) => readProjectView({ id, snapshot, env, paths: fleetPaths, now: NOW, fleet: reader, pricing }),
       paths: fleetPaths,
       // Registry fixture workers all publish UTC. Use the actual read snapshot and bounded record payloads,

@@ -129,7 +129,8 @@ export function parseDesired(text) {
 	if (!pkg || !at || !op || !by || !when) return null;
 	const undoOf = op === "undo" && Number.isSafeInteger(raw.undoOf) && raw.undoOf > 0 ? raw.undoOf : null;
 	if (op === "undo" && undoOf === null) return null;
-	return { v: 1, generation: raw.generation, name: pkg, version: at, op, by, at: when, ...(undoOf === null ? {} : { undoOf }), request: typeof raw.request === "string" && raw.request.length <= 64 ? raw.request : null };
+	const from = version(raw.from);
+	return { v: 1, generation: raw.generation, name: pkg, version: at, op, by, at: when, ...(undoOf === null ? {} : { undoOf }), ...(from === null ? {} : { from }), request: typeof raw.request === "string" && raw.request.length <= 64 ? raw.request : null };
 }
 
 /**
@@ -143,8 +144,8 @@ redis.call('HSET', KEYS[2], ARGV[1], cjson.encode(row))
 return g`;
 
 /** Record what a person asked for, and return its generation. */
-export async function setDesired(redis, { name: pkg, version: at, op, by, at: when, undoOf = null }) {
-	const row = { v: 1, generation: 1, name: pkg, version: at, op, by, at: when, ...(undoOf === null ? {} : { undoOf }), request: randomUUID() };
+export async function setDesired(redis, { name: pkg, version: at, op, by, at: when, undoOf = null, from = null }) {
+	const row = { v: 1, generation: 1, name: pkg, version: at, op, by, at: when, ...(undoOf === null ? {} : { undoOf }), ...(from === null ? {} : { from }), request: randomUUID() };
 	if (!parseDesired(row)) throw new Error("not a desired version");
 	return await bounded(redis.eval(SET_DESIRED, 2, UPDATES_GENERATION, UPDATES_DESIRED, pkg, JSON.stringify(row)));
 }

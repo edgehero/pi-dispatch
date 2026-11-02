@@ -11,6 +11,7 @@ import { specificity } from "./helpers/css-specificity.mjs";
 import { TRIGGERS_CSS } from "../src/console/triggers-css.mjs";
 import { SECRETS_CSS } from "../src/console/secrets-css.mjs";
 import { CONNECTIONS_CSS } from "../src/console/connections-css.mjs";
+import { UPDATES_CSS } from "../src/console/updates-css.mjs";
 import { PROJECT_CSS } from "../src/console/project-css.mjs";
 import { CONFIG_CSS } from "../src/console/config-css.mjs";
 import { AUDIT_LAYOUT, OVERVIEW_LAYOUT, PAGE_CSS, SECONDARY_BTN, SHELL_CSS, TOP_BAR, cssBlocks, pageCss, scopeCss, selectorsOf, splitSelectors, stackRules } from "../src/console/page-css.mjs";
@@ -46,10 +47,10 @@ test("bundle.css and tokens.json are pasted verbatim: each module's text hashes 
 });
 
 test("the stylesheet is the tokens, then bundle.css, the shell and pages, and it fetches nothing", () => {
-  assert.equal(CONSOLE_CSS, [tokenCss(), PULSE_CSS, SHELL_CSS, AGENT_POLICY_CSS, pageCss(), CONFIG_CSS, TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, PROJECT_CSS, MODELS_CSS, SUBSCRIPTION_AUTH_CSS, PROVIDER_KEYS_CSS].join("\n"));
+  assert.equal(CONSOLE_CSS, [tokenCss(), PULSE_CSS, SHELL_CSS, AGENT_POLICY_CSS, pageCss(), CONFIG_CSS, TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, UPDATES_CSS, PROJECT_CSS, MODELS_CSS, SUBSCRIPTION_AUTH_CSS, PROVIDER_KEYS_CSS].join("\n"));
   assert.ok(CONSOLE_CSS.startsWith(tokenCss()), "the tokens come first, so every later rule reads them");
   assert.ok(CONSOLE_CSS.indexOf(PULSE_CSS) > tokenCss().length - 1, "bundle.css after the tokens");
-  assert.ok(CONSOLE_CSS.endsWith([TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, PROJECT_CSS, MODELS_CSS, SUBSCRIPTION_AUTH_CSS, PROVIDER_KEYS_CSS].join("\n")), "the page rules follow the configuration, bundle and shell in their declared order");
+  assert.ok(CONSOLE_CSS.endsWith([TRIGGERS_CSS, SECRETS_CSS, CONNECTIONS_CSS, UPDATES_CSS, PROJECT_CSS, MODELS_CSS, SUBSCRIPTION_AUTH_CSS, PROVIDER_KEYS_CSS].join("\n")), "the page rules follow the configuration, bundle and shell in their declared order");
   assert.doesNotMatch(CONSOLE_CSS, /--pd-|\.legacy/);
   // Plain rules: no element a page could be broken out by, nothing loaded, no remote font or image.
   for (const needle of ["<", "@import", "url(", "expression(", "@font-face", "javascript:"]) assert.ok(!CONSOLE_CSS.includes(needle), `no ${needle}`);

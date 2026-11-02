@@ -57,7 +57,9 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
+  const [updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
+    import("../updates-view.mjs"),
+    import("@edgehero/pi-dispatch/updates"),
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -93,7 +95,7 @@ export async function loadModules() {
     import("../setup-host-client.mjs"),
     import("./actions.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
+  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -552,6 +554,13 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       }),
     }) ?? null;
     const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
+    // The page's and the actions' one read, so an Adopt's gate reads what the page drew.
+    const readUpdatesFacts = async (snapshot = null) => m.updatesView.readUpdates({
+      redis, now: now(), pinned: m.pricing.piAiVersion?.() ?? null, snapshot,
+      staged: m.readModel.readStagedPackages({ globalPiDir: side.paths.globalPiDir, fs }),
+      records: await triggerHistory().catch(() => []),
+      audit: await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => read?.rows ?? []).catch(() => []),
+    });
     const pageDeps = {
       fleet,
       sandboxes,
@@ -580,6 +589,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
       secretsView: (snapshot) => m.secretsView.secretsView({ snapshot, env: side.env, fs }),
+      updates: (snapshot) => readUpdatesFacts(snapshot),
       connections: (snapshot) => m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid }),
       projectView: (id, snapshot) => m.projectView.readProjectView({ id, snapshot, paths: side.paths, env: side.env, deploymentDir: config.dir, pricing, fleet, fs, now: now(), platform: io.platform ?? process.platform, uid }),
       triggerCheck: (input) => m.triggerCheck.checkTriggerEvent({ input, triggersPath: side.paths.triggersPath, fs }),
@@ -648,6 +658,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       log,
     });
     actionDeps = {
+      updates: { read: readUpdatesFacts, setDesired: (row) => m.updates.setDesired(redis, row) },
     modelRoles,
     watch: fleet.watch,
     zeroTouch,

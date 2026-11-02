@@ -3,7 +3,7 @@ import { validateFork } from "./fork-job.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
-import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualTriggerJobId } from "./job-id.mjs";
+import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
 import { consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
@@ -89,7 +89,7 @@ export function fleetQueueNames(hosts) {
 /** The name charset, duplicated from `config.mjs` deliberately: this module imports nothing. */
 const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualTriggerJobId };
+export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId };
 
 /**
  * A queue handle. `name` defaults to the shared queue, so every existing caller is unchanged and a
@@ -161,8 +161,7 @@ export async function enqueueLocalJobReporting(queue, fields) {
  * job is not retried, as a scheduled tick is not (a scheduler job carries no `attempts`). The id is
  * `manualTriggerJobId`'s, so `localEventContext` reports `source: "cron"` with `scheduledFor: null`.
  */
-export async function enqueueTriggerRunReporting(queue, schedule, { now = new Date() } = {}) {
-	const jobId = manualTriggerJobId({ triggerId: schedule.schedulerId, now });
+export async function enqueueTriggerRunReporting(queue, schedule, { now = new Date(), jobId = manualTriggerJobId({ triggerId: schedule.schedulerId, now }) } = {}) {
 	return addReporting(queue, async (enqueueNonce) => {
 		await queue.add(schedule.name, { ...schedule.data, enqueueNonce }, { ...schedule.opts, jobId });
 		return { id: jobId };

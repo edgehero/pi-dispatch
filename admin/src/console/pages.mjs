@@ -37,6 +37,7 @@ import { triggerOn, triggerRuns, triggerRun, triggerEdit, triggerTrust, triggerK
 import { configNavigation, configFiles, configUnset, configDescription } from "./panels/config.mjs";
 import { secretsView } from "../secrets-view.mjs";
 import { secretsHeadline, secretsProblems, secretsProfiles, secretsBundles, secretsAdd, secretsHelp } from "./panels/secrets.mjs";
+import { updatesDescription, updatesHosts, updatesHow, updatesJobs, updatesProblems, updatesRecent } from "./panels/updates.mjs";
 import { connectionsDescription, connectionsProblems, connectionsForges, connectionsEgress, connectionsEndpoints, connectionsNotify, connectionsMcp, connectionsEnvironment, connectionsPackages } from "./panels/connections.mjs";
 import { projectTitle, projectDescription, projectSpend, projectRuns, projectSize, projectMembers, projectSizing, projectRecent, projectAllocation, projectLimits, projectBundle, projectTriggers, projectDelete } from "./panels/project.mjs";
 import { triggersNavigation, triggersViewer, triggersCount, triggersNext, triggersSpend, triggersFilters, triggersWeek, triggersSchedules, triggersGithub, triggersGitlab, triggersForgejo, triggersAzure, triggersUnknown, triggersCheck, triggerCheckPage, triggersDescription } from "./panels/triggers.mjs";
@@ -164,6 +165,7 @@ export const PAGES = Object.freeze({
   config: Object.freeze({ path: "/config", auth: "viewer", live: false, title: "Configuration", nav: "Configuration", icon: "config" }),
   secrets: Object.freeze({ path: "/config/secrets", auth: "viewer", live: false, title: "Secrets", nav: null, icon: "config" }),
   connections: Object.freeze({ path: "/config/connections", auth: "viewer", live: false, title: "Connections", nav: null, icon: "config" }),
+  updates: Object.freeze({ path: "/config/updates", auth: "viewer", live: false, title: "Updates", nav: null, icon: "config" }),
   project: Object.freeze({ path: "/config/project", auth: "viewer", live: false, title: "Project", nav: null, icon: "config" }),
   watch: Object.freeze({ path: "/watch", auth: "viewer", live: false, title: "Watch", nav: null, icon: "bolt" }),
   "watch-board": Object.freeze({ path: "/watch/board", auth: "viewer", live: false, title: "Watch board", nav: null, icon: "bolt" }),
@@ -177,6 +179,7 @@ const PAGE_PANELS = Object.freeze({
   sandboxes: SANDBOX_PANELS,
   "zero-touch": ZERO_TOUCH_PANELS,
   secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
+  updates: [["p-up-problems", updatesProblems], ["p-up-jobs", updatesJobs], ["p-up-hosts", updatesHosts], ["p-up-how", updatesHow], ["p-up-recent", updatesRecent]],
   connections: [["p-connection-problems", connectionsProblems], ["p-provider-keys", connectionsProviderKeys], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-subscription-auth", connectionsSubscriptionAuth], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
   project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
   triggers: [["p-tr-tabs", triggersNavigation], ["p-tr-viewer", triggersViewer], ["p-tr-count", triggersCount], ["p-tr-next", triggersNext], ["p-tr-spend", triggersSpend], ["p-tr-filters", triggersFilters], ["p-tr-week", triggersWeek], ["p-tr-schedule", triggersSchedules], ["p-tr-github", triggersGithub], ["p-tr-gitlab", triggersGitlab], ["p-tr-forgejo", triggersForgejo], ["p-tr-azure", triggersAzure], ["p-tr-unknown", triggersUnknown], ["p-tr-check", triggersCheck]],
@@ -238,6 +241,7 @@ const PAGE_LAYOUT = Object.freeze({
   models: [{ cls: "stack", items: ["p-model-problems"] }, { cls: "cols models-layout", items: [{ cls: "stack", items: ["p-roles"] }, { cls: "stack", items: ["p-cooldowns", "p-models"] }] }, { cls: "stack", items: ["p-subscription-quota", "p-proposals"] }],
   sandboxes: [{ cls: "cols", items: [{ cls: "stack", items: ["p-sb-run", "p-sb-new"] }, { cls: "stack", items: ["p-sb-open", "p-sb-kept", "p-sb-browser"] }] }],
   "zero-touch": [{ cls: "cards-4 zt-kpis", items: ["p-zt-rate", "p-zt-streak", "p-zt-wait", "p-zt-handled"] }, { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions"] }, { cls: "stack zt-side", items: ["p-zt-causes", "p-zt-fixes"] }] }],
+  updates: [{ cls: "stack", items: ["p-up-problems"] }, { cls: "cols updates-layout", items: [{ cls: "stack", items: ["p-up-jobs", "p-up-hosts"] }, { cls: "stack", items: ["p-up-how", "p-up-recent"] }] }],
   connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-provider-keys", "p-forges", "p-egress", "p-endpoints", "p-subscription-auth"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
   project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
   triggers: [{ cls: "stack", items: ["p-tr-tabs", "p-tr-viewer"] }, { cls: "cards-3 triggers-kpis", items: ["p-tr-count", "p-tr-next", "p-tr-spend"] }, { cls: "cols triggers-layout", items: [{ cls: "stack triggers-rules", items: ["p-tr-filters", "p-tr-week", "p-tr-schedule", "p-tr-github", "p-tr-gitlab", "p-tr-forgejo", "p-tr-azure", "p-tr-unknown"] }, { cls: "stack triggers-check-side", items: ["p-tr-check"] }] }],
@@ -304,6 +308,7 @@ const PAGE_PARAMS = Object.freeze({
   config: [],
   secrets: [],
   connections: [],
+  updates: [],
   project: ["id"],
   trigger: ["index"],
   triggers: ["kind"],
@@ -359,7 +364,7 @@ export function parsePageQuery(name, searchParams) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) return { refusal: "there is no such page on this console" };
   const params = asParams(searchParams);
   if (params === null) return { refusal: "the query is not readable" };
-  if (["config", "trigger", "trigger-add", "secrets", "connections", "project"].includes(name) && params.has("becauseRun")) {
+  if (["config", "trigger", "trigger-add", "secrets", "connections", "updates", "project"].includes(name) && params.has("becauseRun")) {
     const source = params.get("becauseRun");
     if (params.getAll("becauseRun").length !== 1 || !/^[A-Za-z0-9._:-]{1,200}$/.test(source ?? "")) return { refusal: "becauseRun must be one retained run id" };
     const rest = new URLSearchParams(params); rest.delete("becauseRun");
@@ -625,6 +630,7 @@ const PAGE_READS = Object.freeze({
   config: ["snapshot"],
   secrets: ["snapshot", "secrets"],
   connections: ["snapshot", "connections", "setup"],
+  updates: ["snapshot", "updates"],
   project: ["snapshot", "waiting", "project"],
   trigger: ["snapshot", "waiting"],
   triggers: ["snapshot", "waiting"],
@@ -808,6 +814,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (reads.includes("connections")) {
     try { data.connections = typeof deps.connections === "function" ? await deps.connections(data.snapshot) : null; }
     catch { data.connections = null; }
+  }
+  if (reads.includes("updates")) {
+    try { data.updates = typeof deps.updates === "function" ? await deps.updates(data.snapshot) : null; }
+    catch { data.updates = null; }
   }
   if (reads.includes("project")) {
     try { data.projectView = typeof deps.projectView === "function" ? await deps.projectView(q.id, data.snapshot) : { id: q.id, state: "unreadable" }; }
@@ -1130,7 +1140,7 @@ export async function renderPage(name, ctx) {
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : name === "zero-touch" ? zeroTouchLayout(role) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
-  const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
+  const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "updates" ? { description: updatesDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
   const titleOptions = configOptions ?? triggerListOptions ?? (name === "setup" ? { description: SETUP_DESCRIPTION } : name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: ctx?.query?.gatewaySelect ? "Choose an already-open shell on the workspace host. No sandbox starts here." : "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: ctx?.query?.gatewaySelect ? null : html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   const body = shellHtml(name, ctx, html`${["runs", "zero-touch", "sandboxes"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.

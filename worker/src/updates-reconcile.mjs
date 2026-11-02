@@ -8,17 +8,14 @@
  */
 import * as nodeFs from "node:fs";
 import { dirname, join } from "node:path";
-import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
+import { isSubscriptionAdapter } from "./updates-subscription-adapters.mjs";
 import { EXACT_VERSION_RE, PACKAGES_SUBDIR, parsePackagesFile, readStageManifest, stagedDirName } from "./packages.mjs";
 import { PackageStageError, SERVICE_NPM_TIMEOUT_MS, pruneStagedTrees, serviceNpmEnv, stagePackageTree, treeDigest, withStageLock, writeStageManifest } from "./package-stage.mjs";
 import { readApplied, readDesired, writeApplied } from "./updates.mjs";
 
-const UNDO_DIR = ".undo";
+export { isSubscriptionAdapter };
 
-/** Whether a package carries a reviewed subscription adapter's identity, which re-staging would break (`docs/global-pi-overlay.md`). */
-export function isSubscriptionAdapter(name) {
-	return Object.values(COMMUNITY_AUTH_ADAPTERS).some((adapter) => adapter.package === name);
-}
+const UNDO_DIR = ".undo";
 
 const writable = (fs, path) => {
 	try {
