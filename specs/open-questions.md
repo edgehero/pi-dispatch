@@ -2493,9 +2493,12 @@ adversarial passes did.
   `DES-SANDBOX-GATEWAY-ATTACH-ONLY` and `INT-SANDBOX-GATEWAY-CONTRACT`. It has its own process, hostname and tab;
   the console keeps its CSP and gains no pty, WebSocket or runtime socket. Only a human operator may attach to an
   existing tracked local/Podman sandbox after fresh same-token step-up. The native opener and command-copy route stay.
-- **The accepted limits**: one browser connection per immutable sandbox incarnation; a single-use 60-second grant
+- **The accepted limits (AMENDED #792, approved 2026-11-02, implementation pending)**: one writing browser
+  driver plus at most three read-only watchers per immutable sandbox incarnation, opt-in per exact driver/epoch; a single-use 60-second grant
   bound to that operator's live console session, initiating tab and gateway browser cookie; no phone terminal; input
-  idle expiry from `PI_SANDBOX_IDLE_MINUTES`; audited opens/ends without input or output capture. Closing the browser
+  idle expiry from `PI_SANDBOX_IDLE_MINUTES` for drivers; watches use their own console lease plus driver
+  lifetime. Watch output can reveal echoed sensitive input, so the driver always sees a persistent named roster
+  with Remove, and new output waits for its rendered revision acknowledgement. Audited opens/ends retain no bytes. Closing the browser
   detaches; it never starts or ends the sandbox. The existing confirmed End action remains separate.
 - **Threat model recorded before the build**: the new design entry enumerates hostile pages, guessed/public intent
   IDs, another tab/browser, stolen sessions, revoked authority, hostile terminal output, replaced containers,
@@ -2663,6 +2666,7 @@ adversarial passes did.
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#754, #792, #793; approved extension) | OQ-050 amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-02 (#776) | NEW PROPOSED OPEN `OQ-055` (input adapters and exact host-held read-credential/replay contracts), `OQ-056` (long LLM jobs, a separate lifetime/reservation/credential decision) and `OQ-057` (machine-started forge/code-changing jobs or autonomous rule adoption, separate authority decisions). No question grants a runtime feature. `OQ-008` and `OQ-009` UNCHANGED, checked: dispatcher pause state adds only a denial to current file authority, resume cannot re-arm removed/disabled configuration, and the reviewed producer does not widen generic same-folder/local-parent outbox chaining. `OQ-053` UNCHANGED, checked: first decisions remain fresh metered containers, no host model client or resident decision agent; its board/probability/retention residuals stand. `OQ-052` UNCHANGED, checked: authenticated findings still have no human author and source/cardinality limits still bind. `OQ-051` UNCHANGED, checked: autonomous parked answers are not admitted by dispatcher proposals; #766's bounded delegation is not broadened. `OQ-054` UNCHANGED, checked: console GitHub App setup remains its own open CSP/callback question, which is why numbering starts at 055. |
 | 2026-11-01 (#774, implementation) | `OQ-054` remains OPEN, checked after #774 implementation: browser GitHub App creation still needs a separate CSP/state/side-effect decision. The setup page shows valid terminal webhook/polling instructions and Connections status; it offers no manifest or credential-writing GET. Other open questions UNCHANGED, checked. |
 | 2026-10-31 (#774, prerequisite specs) | NEW `OQ-054` (OPEN): GitHub App manifest submission and credential-writing callback from the browser need a separate origin/state/confirmation/CSP decision; #774 keeps the complete terminal setup command and webhook-shape choice. The local host, provider-key and viewer-invitation authority questions are decided in `DES-BROWSER-FIRST-RUN-SETUP`, not blocked by this question. Existing open questions and current CSP/side-effect-free GET contracts UNCHANGED, checked. |

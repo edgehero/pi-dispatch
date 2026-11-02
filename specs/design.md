@@ -4206,6 +4206,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY
 
+- **Approved compatibility correction, implementation pending (2026-11-02, #754)**: The published pi 1.5.0
+  extension view re-exports compat through a distinct namespace. Retain exact namespace identity at the 1.4.0
+  production pin, and additionally admit a facade only when all five callable exports are identical to the
+  resolved compat candidate: registerApiProvider, getApiProvider, getApiProviders, resetApiProviders and
+  createAssistantMessageEventStream. Names or matching shape alone never establish a shared registry. Missing,
+  noncallable or separately closed functions refuse the facade. Pricing/version/provider discovery remains
+  relative to the proven candidate. Test actual calls, reset/re-arm, cap braking, wrong-copy counterexamples and
+  both exact published artifacts. This explicitly approved narrow fix stays in #790 despite the normal pi-bump
+  branch routing; production pins, policy ceilings, accounting and refusal-before-paid-call stay unchanged.
+
 - **Decision**: Meter token usage **process-wide**, at pi-ai's **module-level api-provider registry** — not
   on an `AgentSession`'s event bus. The runner wraps every registered api id with a `{ streamSimple }` that
   dispatches exactly as compat would and then *observes* the returned stream (`stream.result()` is a
@@ -12081,6 +12091,15 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **AMENDED 2026-11-02 (#792, #793; approved, implementation pending)**: Workspace reuses existing native links,
+  copy, exact-incarnation End and preparation/fork/instruction confirmation flows. The separate full-viewport
+  gateway workbench integrates RunWorkspace, RunWorkspaceStates, SandboxTerminalRun and SandboxWatch semantics.
+  Context follows each pane; canonical return uses the generic Strict-cookie bridge. Missing/prepared records
+  keep generic context. Original trigger/created-PR identity is never guessed. Generators precede rebuilt cards;
+  complete implementation precedes Built status. Final captures verify loaded tokens/styles/fonts and complete
+  sections; inaccessible remote artifacts are disclosed, with published-source comparison identified accurately.
+  Console CSP, process separation and runtime authority remain unchanged.
+
 **AMENDED 2026-11-01 (#775, hooks)**: Connections reads `INT-HOOK-RUNS-KEY` only in its page-specific reader,
 with Setup's shared metadata call opting out. Its Notifications table shows the last run and retained-detail counts
 per host, visible tinted error words, explicit absence and unknown, and no delivery-success claim. Host identities use the table id treatment with enough column space; header words remain whole. Unusually long identities scroll in a named keyboard-focusable region inside the card. Both human roles
@@ -16015,6 +16034,33 @@ is introduced. The design generator owns the published card before the console u
 
 ## DES-SANDBOX-GATEWAY-ATTACH-ONLY
 
+- **Approved extension, implementation pending (2026-11-02, #792, #793)**: The earlier one-browser limit becomes
+  one writing driver plus three consented watches. This intentionally discloses potentially sensitive echoed
+  terminal content to other operators. Consent starts off per driver, changes epoch on re-enable and cannot
+  survive replacement. A watch is its own session-bound attachment, never part of another operator's workbench
+  or a route to driver authority. Its runtime path has no stdin/writable channel and no PTY resize; frontend
+  disabling is supplementary. Every output path is bounded by watch AUTH, driver AUTH (not its longer window
+  lease), exact owner/epoch and reservation. Local off/removal stops local watches immediately. Control failure
+  ceases driver renewal/detaches as needed for the five-second bound, with no optimistic success. The persistent
+  roster renders before acknowledging its bounded revision under the same live owner/epoch; that orders rendering,
+  not human attention. Missing acknowledgements time out. Shared owner-fenced roster/geometry revisions support
+  two processes without sticky routing: poll at most once per second and apply observed geometry before later
+  output. Each watch forwards its own read-only stream once, no history/fanout duplication; slow watches drop alone.
+  Opening/open-receipt compensation and safe two-actor watch audit remain mandatory. These clauses supersede
+  older exclusive-connection and universal input-idle wording below.
+
+- **Workbench**: xterm 6.0.0/FitAddon 0.11.0 and community Dockview 8.8.3 (core also exact-pinned) own rendering and
+  layout. Up to four held drive/watch panes share one original session digest, at most two incoming admissions.
+  Layout never owns transport: move preserves DOM/socket; explicit close disposes exactly its target. A public-ID
+  only BroadcastChannel plus lifetime owner Web Lock transfers helper launches, without proof/cookie/run/session
+  facts. First provisional admission has one 15-second budget through ready, with abort/owner epochs fencing every
+  await; failed transfer never redeems or reconnects automatically. Session binding is immutable after first ready.
+  Duplicate focus requires matching mode, local READY target and winner, plus driver/epoch for watches. Hidden
+  drivers retain automatic terminal replies but no human focus/activity; watches forward neither. Useful driver
+  geometry is 40 by 10 cells: collapse rail then splits to tabs, preserve last geometry while too short, never
+  reconnect or automatically restore old splits. At widths at/below 760 detach and retain the native route.
+  Application keyboard controls use community layout APIs. Protocol minimum dimensions remain unchanged.
+
 - **Status**: **IMPLEMENTED** (2026-11-02, issue #754). The maintainer approved adoption and the independently
   reviewed plan before the prerequisite spec-only decision commit. Runtime/browser measurements below establish
   the implemented route; final-commit CI and rendered-reference review remain separate acceptance gates.
@@ -16667,6 +16713,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#754, #792, #793; approved extension) | DES-SANDBOX-GATEWAY-ATTACH-ONLY and DES-OPERATOR-CONSOLE amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-02 (#776) | Four NEW PROPOSED entries, spec only: `DES-DISPATCHER-ADMISSION` bounds new producers, caps, semantic duplicates and crash reconciliation; `DES-DISPATCHER-DECISION-ENGINE` selects deterministic collection and fresh per-event classifier containers; `DES-DISPATCHER-LLM-ENGINE` keeps correlation in fresh read-only jobs of at most thirty minutes; `DES-DISPATCHER-TRIGGER-PROPOSALS` keeps bounded private proposals and validated adoption with a person. `DES-WATCH-DETERMINISTIC-PRODUCER`, `DES-DECISION-MODEL-BEFORE-THE-JOB` and `OQ-053` UNCHANGED, checked: their resident-agent rejections stand; the alternative explicitly offered by #776 is selected, and contrary card claims are marked through generators. `DES-JOB-OUTBOX-CHAINING`, `DES-DOLLAR-RESERVE-AND-SETTLE` and `DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: generic chains, existing holds and #766 delegation are not widened. To be AMENDED by later builds: `DES-AI-TRIGGER-FLOW-GATE` for the new producer and current-list revalidation, and `DES-OPERATOR-CONSOLE` for the new screens and audited person actions. No runtime code or executable interface is added. |
 | 2026-11-01 (#774, subscription guide review) | `DES-HOST-OWNED-SUBSCRIPTION-AUTH` corrects the local OpenAI callback mirror to pinned pi's explicit `127.0.0.1` redirect, with authorization/exchange and callback counterexamples. Provider-key guidance revealed the former `localhost` drift; the upstream whole-file hash alone did not compare local semantics. Connection-policy validation is moved without schema changes into an SDK-free leaf for safe console metadata. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, refresh/custody, billing routes and public snapshots UNCHANGED, checked; no live sign-in is claimed by offline verification. |
 | 2026-11-01 (#774, provider management) | `DES-BROWSER-FIRST-RUN-SETUP` AMENDED: Connections owns a permanent Provider API keys editor with complete safe inventory, explicit provider/mode binding, separate Add/Replace preconditions, derived shared-slot warnings and no retained old credential. Setup keeps a compact link after readiness. Reviewed static official help and separate host subscription guides include OpenRouter/DeepSeek, OpenAI callback recovery and honest Claude community/Claude Code distinctions. Host grant, no browser OAuth, selected job credential forwarding, default/model routing, budgets, CSP and all other console/setup decisions UNCHANGED, checked. |

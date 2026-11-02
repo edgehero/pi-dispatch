@@ -10486,6 +10486,13 @@ in.
 
 ## INT-CONSOLE-AUDIT-LOG
 
+- **AMENDED 2026-11-02 (#792; approved, implementation pending)**: Fixed sandbox-watch-start/end kinds use
+  actor=watcher plus a strict optional driver actor object (safe operator name/role/session digest), required
+  on watch rows. Old rows without it remain verifiable. Writer, chain verification, mirrors and readers/rendering
+  preserve the bounded field. Crash journals hold mode, safe actors, immutable target and PID only. Opening/open
+  receipt failure refuses or compensates before ready/output; recovered endings retain kind and both actors.
+  No run facts, terminal bytes, session association, consent epoch, proof, cookie or credential is retained.
+
 - **Implemented (#774)**: setup preserves audit-before-apply and compensating failed rows.
   `INT-CONSOLE-SETUP-HOST` adds only safe operation/effect metadata through the existing row schema. Provider
   values, secret-derived input digests, raw child diagnostics, token/code bodies and private ticket payloads never
@@ -12092,6 +12099,36 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 
 ## INT-SANDBOX-GATEWAY-CONTRACT
 
+- **Approved extension, implementation pending (2026-11-02, #792, #793)**: Private intent v2 requires
+  `sessionKey` (domain-separated SHA-256 of original S, never raw S), immutable `kind` drive/watch and
+  `runFacts` null or exactly id/outcome/project/target/flow/endedAt rebuilt from the matching host/run record.
+  Prepared/no-record targets omit facts. No raw record, why, question, transcript, instructions or queue payload.
+  Watch-only `driver` binds intentId/connectionId/epoch. Existing enrollment remains v1. Old/incomplete private
+  state fails closed. Connect expects null or the workspace sessionKey and compares before consumption/inspection;
+  first association is adopted through serialized admission/ready and never resets when the last pane ends.
+  `readRoom` distinguishes absence from unreadability. Driver room operations `startDriver`, `setWatching`,
+  `removeWatcher`, `acknowledgeRoster`, `updateGeometry` compare authenticated intent/connection/cookie ownership.
+  Authorization atomically reserves one of three watch slots through connection. Expiry/removal releases it.
+  Existing per-session four/global32/broker256 bounds apply; duplicate requests get no cap exemption. Effective
+  watch I/O authority is the minimum of own AUTH, driver AUTH/window ownership, epoch and live reservation, using
+  the existing explicit Redis observedAt/absolute-expiry and monotonic response-deadline discipline. No stale
+  renewal or delayed acknowledgement revives an expired epoch/owner. Authenticated busy projection exposes only
+  canonical hashed target/winner context, never raw foreign socket ID. Watch dedup also matches mode and driver
+  incarnation, creates no second attach and cannot promote authority.
+  Driver-only control changes consent, removes an exact reservation or acknowledges its rendered roster. Every
+  reservation has a join revision; acknowledgement must be at least it and no higher than published revision,
+  under the same driver owner/epoch. Unknown/regressing metadata is unavailable, never empty. Shared owner-fenced
+  geometry/roster revisions propagate across processes with healthy polling bounded to one second. Apply newly
+  observed driver size before subsequent watch bytes. The watch runtime request has stdin false, logs false,
+  no writable transport and no resize. Watch frames never reach input/activity/resize/driver control handling.
+  Only watches omit additional input-idle expiry; both console leases and driver lifetime remain. Off/removal
+  never reports completion before acknowledgement, with all affected output cut within five seconds.
+  Safe operator-only summaries distinguish native opener from browser driver; proofs/session association/epochs
+  remain absent from generic state/SSE/audit/rendezvous. Generic return/select bridges carry validated public
+  run/host fields and resolve fixed own-relative routes after same-origin session checks. Strict Sandboxes
+  fromRun resolves run facts server-side and requires explicit trigger choice when attribution is unproven;
+  gatewaySelect is valid only with its enrolled host and cannot combine with preparation selectors.
+
 - **Status**: **IMPLEMENTED** (2026-11-02, issue #754), after the approved prerequisite decision. The source-owned
   bounds and behavioral/live verification below define the implemented contract; final-commit CI and visual
   evidence remain separate release acceptance gates.
@@ -12402,6 +12439,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#754, #792, #793; approved extension) | INT-SANDBOX-GATEWAY-CONTRACT and INT-CONSOLE-AUDIT-LOG amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-02 (#776) | PROPOSED dispatcher requirements/design only; no new executable `INT-` entry or runtime shape. `INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked now: this issue adds no key or loader vocabulary; later builds must define reviewed dispatcher declarations and limits. `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-OUTBOX-CONTRACT` UNCHANGED, checked now: no mount, marker, output file, custody rule or generic same-folder chain authority changes; future restricted engine/input/intent contracts must be specified before use. `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked now: no dispatcher/proposal field or action is registered; later builds must define validated dispatcher provenance and proposal-linked adopt/dismiss/pause/resume/manual-association audit semantics. `INT-WATCH-EVENT-CONTRACT`, `INT-WATCH-FINDINGS-FILE`, `INT-WATCH-TRACE-STREAM` and `INT-WATCH-BOARD-FILE` UNCHANGED, checked: existing watch collection, fresh decisions, private/public projections and person-adopted boards remain their own contracts. Future dispatcher cursor/journal/cap/coalescer/proposal/private-trace contracts need atomic identities, finite byte/count/age limits, known-credential redaction before persistence, conservative unresolved holds, role projections and explicit unavailable/partial states; none is promised by borrowing a watch key or current local dedup. `INT-CONSOLE-STATE-API` and `INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked now: no tab, API, token role or #766 authority changes. This row identifies future amendments distinctly from today's checked unchanged interfaces. |
 | 2026-11-01 (#774, shared auth metadata) | Subscription adapter descriptors move to an SDK-free metadata leaf, mirrored byte-identically into the runner and added to its mirror guard. Policy parsing moves without changing validation or schemas. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, adapter transformation/output/source pins and container credential capabilities UNCHANGED, checked. Private setup lifetime now starts at input receipt, including a pending planner; abort, navigation and sign-in changes cannot restart it or mint a late usable ticket. |
 | 2026-11-01 (#774, provider management) | `INT-CONSOLE-SETUP-HOST` AMENDED: separate selected-provider Add/Replace operations and private mode/alias/source metadata; one pending key across both operations, unchanged private lifetime and descriptor-bound expected-input rename. Add requires absent/blank, Replace requires nonblank, and default changes never retarget a selected key. Public state/SSE/audit schemas, token files, subscription policy/store schemas, refresh ownership, job credential forwarding, trigger/pointer/run-record/container contracts and deploy mirrors UNCHANGED, checked. |

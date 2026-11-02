@@ -1571,6 +1571,11 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
+- **AMENDED 2026-11-02 (#792, #793)**: Run Workspace and the separate gateway workbench/observer surface follow
+  `REQ-SANDBOX-FROM-THE-CONSOLE` and `REQ-SANDBOX-BROWSER-GATEWAY`. Verify every outcome/exception, both themes,
+  phone/intermediate/desktop widths, roles, keyboard/accessibility, no-script fallback and actual CSP. Loaded
+  styled-reference full-section comparisons supplement behavior and authority tests, never replace them.
+
 - **Implemented (#774)**: the live `/setup` destination and overview link specified by
   `REQ-BROWSER-FIRST-RUN-SETUP` use the existing role-separated panel/event machinery. Its observer views,
   terminal alternatives, themes, responsive layouts, no-script reads and exceptional-state acceptance are
@@ -6758,6 +6763,22 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-SANDBOX-BROWSER-GATEWAY
 
+- **Approved extension, implementation pending (2026-11-02, #754, #792, #793)**: A maintained-library terminal
+  workbench admits up to four original-session-bound drive/watch panes, with tabs, splits, keyboard layout controls
+  and connection-preserving moves. Each pane attaches to an existing shell; native opening remains independent.
+  One writing driver and at most three consented read-only watches supersede the older one-browser limit below.
+  Consent starts off per driver; watch grants bind the exact driver and a fresh consent epoch. Each watcher has
+  their own fresh same-token/tab/cookie/session authorization. The driver sees names and Remove in a persistent
+  roster even for hidden panes; new output waits for the live driver's rendered-roster acknowledgement. Watchers
+  never become drivers, supply runtime input or resize the PTY, including through hostile frames or automatic
+  terminal-query replies. They see only new output at observed driver geometry. Reserved and connecting watches
+  count toward three. Off, exact-watch Remove, driver loss or either party's lost authority ends affected output
+  within five seconds; failed control writes never report success. Watches use their own untouched console lease
+  and driver lifetime, without the driver's additional input-idle timer. The existing driver timer remains.
+  `INT-SANDBOX-GATEWAY-CONTRACT` defines the bounds and private v2 facts. Acceptance requires live Docker/rootless
+  Podman read-only wire/lifecycle evidence, independent browsers, two processes, hostile frames, epoch/lease races,
+  frozen roster acknowledgements and complete themed responsive/keyboard/role/actual-CSP verification.
+
 - **Status**: **IMPLEMENTED** (2026-11-02, issue #754), after the approved adoption/threat-model commit. Source
   and behavioral evidence are named below; final-commit repository checks and rendered-reference review remain
   release acceptance gates, not claims supplied by this status alone.
@@ -6848,6 +6869,19 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-RESURRECTABLE-SANDBOX`, `OQ-050`.
 
 ## REQ-SANDBOX-FROM-THE-CONSOLE
+
+- **Approved extension, implementation pending (2026-11-02, #793)**: Operator-only `p-workspace` precedes run
+  facts: completed try, failed reproduce, parked inspect before answering, unreopenable/swept/expired prepare,
+  running steer, and nothing for a container never started. Current running/recovery and parked facts take
+  precedence over historical completion. Show kept deadline and open-shell identity; fold command copy and
+  confirmed End. Browser/Watch needs a current eligible tracked shell and enrollment. Distinguish native opener
+  from authenticated browser driver. Viewer gets no row; read-only retains safe command copy. The outcome banner
+  links to the row. Stale/unreadable/truncated inventory never proves a workspace swept. Findings reuse current
+  instruction-edit and exact-point fork/message Preview/Confirm/refusal gates. An index alone cannot prove the
+  original trigger after reordering: unproven attribution requires explicit current-trigger choice. Preparation
+  fills trustworthy repository/ref facts then revalidates current trigger and eligible-host policy. No created-PR
+  record field exists, so default ref is HEAD. Unsupported original triggers remain visibly incompatible until a
+  person deliberately chooses a compatible current one. No GET, workspace link or gateway action starts a shell.
 
 - **As built (#771)**: Fleet exports a credential-free host mapping; the person explicitly imports it with `pi-dispatch opener install --config <file>`. A fired link never enrolls a host or changes its mapping. The terminal helper displays the complete constructed command and accepts Enter; it never evaluates entered text. Deployment-aware invocations re-execute with a clean trusted deployment environment, so ambient capability overrides cannot widen the sandbox. Preparation accepts an optional pin and writes it before reporting ready, with durations from the selected host. A dedicated host-bound control queue transports prepare/pin requests outside the paid processor. A detached CLI monitor keeps the shell lease alive until its immutable container disappears. Unknown tracking is never proof that a shell ended. The separate gateway is adopted under `REQ-SANDBOX-BROWSER-GATEWAY`; it does not replace this native route.
 
@@ -8266,6 +8300,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#754, #792, #793; approved extension) | REQ-SANDBOX-BROWSER-GATEWAY, REQ-SANDBOX-FROM-THE-CONSOLE and REQ-OPERATOR-CONSOLE-SCREENS amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-02 (#776) | NEW `REQ-DISPATCHERS`, PROPOSED, spec only: bounded multi-input selection and person-reviewed proposals, deterministic collection, fresh event decisions and read-only LLM jobs and local children. Includes independent event replay and target/flow dedup, pre-spend day/window/scoped limits, conservative crash accounting, private evidence and explicit stop controls. No runtime feature, schema, console tab or doctor check is built. `REQ-PARKED-ANSWERER` AMENDED in words only: dispatchers now have a proposed specification and remain no dependency of answer rules. `REQ-WATCH-TRIGGER`, `REQ-WATCH-DECISION-STEP`, `REQ-JOB-TIMEOUT-30M` and `REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked: existing watch behavior, timeouts and budget mechanics are not widened. To be AMENDED by later builds, not claimed unchanged in their future scope: `REQ-AI-TRIGGERED-RUNS` for a new reviewed producer, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-OPERATOR-CONSOLE-SCREENS` for proposals, controls and views, and `REQ-DURABLE-RUN-HISTORY` for validated dispatcher provenance. Future behavioral acceptance is specified here; no test is claimed to implement the proposed feature. |
 | 2026-11-01 (#774, coverage verification) | `REQ-BROWSER-FIRST-RUN-SETUP` acceptance clarified: exact-pin catalogue and credential-source coverage, exhaustive eligible API-key Add/resolve/Replace tests and explicit authentication/runtime limits. Browser regression checks identify account owner and copy controls independently of preceding help guides, retaining exact destinations, full commands and actual clipboard effects. Runtime/provider authentication capabilities, cloud/custom admission, credential forwarding, spend gates, `REQ-CONSOLE-SECURITY`, `CONST-*`, `DES-*` and `INT-*` contracts UNCHANGED, checked. |
 | 2026-11-01 (#774, provider management) | `REQ-BROWSER-FIRST-RUN-SETUP` and `REQ-CONSOLE-SECURITY` AMENDED: permanent multi-provider inventory and explicit selected-slot Add/Replace, with danger confirmation for replacement, preserved provider/model defaults, derived aliases, source-switch/reload explanations and private cancellation across selection changes. Fixed official provider help includes OpenRouter/DeepSeek; subscription help remains host-only and distinguishes Claude community compatibility from Claude Code tokens. Admission, spend, container isolation, roles, CSP, no-secret projections and subscription credential custody UNCHANGED, checked. |
