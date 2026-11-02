@@ -1,19 +1,40 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { runGatewaySession } from "../src/session.mjs";
+import { runGatewaySession, GATEWAY_LIMITS } from "../src/session.mjs";
 
-function fixture({ idleMinutes = 30, renew = async () => ({ ok: true, authRemainingMs: 5000 }), inspect = async () => ({ ok: true }), resize = async () => {} } = {}) {
+function fixture({ kind = "drive", room = null, controls = {}, idleMinutes = 30, renew = async () => ({ ok: true, authRemainingMs: 5000 }), inspect = async () => ({ ok: true }), resize = async () => {} } = {}) {
 	let at = 0, timer; const sends = [], input = [], audits = [], ends = [], resized = []; let detaches = 0;
 	const ws = Object.assign(new EventEmitter(), { readyState: 1, bufferedAmount: 0, send: (data, _opts, callback) => { sends.push(data); callback?.(); }, close() { this.readyState = 3; }, terminate() { this.readyState = 3; } });
 	const stream = Object.assign(new EventEmitter(), { writableLength: 0, write: s => { input.push(s); return true; } });
-	const session = runGatewaySession({ ws, channel: { stream, detach: () => { detaches++; }, resize: async geometry => { resized.push(geometry); await resize(geometry); } }, store: { renewAttachment: renew, release: async () => ({ ok: true }) }, intent: { intentId: "intent", target: {} }, connectionId: "connection", browserHash: "browser", authRemainingMs: 5000, idleMinutes, runtime: { inspect }, audit: async (...a) => { audits.push(a); }, now: () => at, setTimer: fn => (timer = fn, {}), clearTimer: () => {}, onEnd: result => { ends.push(result); } });
+	const session = runGatewaySession({ ws, channel: { stream, detach: () => { detaches++; }, resize: async geometry => { resized.push(geometry); await resize(geometry); } }, store: { renewAttachment: renew, release: async () => ({ ok: true }), ...controls }, intent: { intentId: "intent", kind, ...(kind === "watch" ? { driver: { connectionId: "driver" } } : {}), target: {} }, room, connectionId: "connection", browserHash: "browser", authRemainingMs: 5000, idleMinutes, runtime: { inspect }, audit: async (...a) => { audits.push(a); }, now: () => at, setTimer: fn => (timer = fn, {}), clearTimer: () => {}, onEnd: result => { ends.push(result); } });
 	return { ws, stream, session, sends, input, audits, ends, resized, setAt: value => { at = value; }, timer: () => timer(), get detaches() { return detaches; } };
 }
 test("input, control characters and binary output cross the live lease without being logged or interpreted", async () => {
 	const f = fixture(); f.ws.emit("message", Buffer.from(JSON.stringify({ type: "input", data: "echo PRIVATE\r\u0003" })), false); f.stream.emit("data", Buffer.from("\x1b[31mPRIVATE\x1b[0m"));
 	assert.deepEqual(f.input, ["echo PRIVATE\r\u0003"]); assert.equal(f.sends[0].toString(), "\x1b[31mPRIVATE\x1b[0m");
 	await f.session.finish(); assert.doesNotMatch(JSON.stringify(f.audits), /PRIVATE/); assert.equal(f.detaches, 1);
+});
+test("a watch cannot write, resize, claim activity or reset an input idle timer, and observes geometry before subsequent bytes", async () => {
+	const room = { driverConnectionId: "driver", geometry: { cols: 120, rows: 36, revision: 1 } };
+	const f = fixture({ kind: "watch", room, idleMinutes: 1, renew: async () => ({ ok: true, room, authRemainingMs: 5000 }) });
+	assert.deepEqual(JSON.parse(f.sends[0]), { type: "geometry", cols: 120, rows: 36, revision: 1 });
+	for (const message of [{ type: "input", data: "echo HOSTILE\r\u001b[1;1R" }, { type: "resize", cols: 500, rows: 200, width: 1 }, { type: "activity" }]) f.ws.emit("message", Buffer.from(JSON.stringify(message)), false);
+	for (let at = 1000; at <= 60000; at += 1000) { f.setAt(at); await f.session.tick(); }
+	assert.deepEqual(f.input, []); assert.deepEqual(f.resized, []); assert.equal(f.detaches, 0, "a watcher has no input timer it could possibly satisfy");
+	room.geometry = { cols: 91, rows: 23, revision: 2 }; await f.session.tick();
+	f.stream.emit("data", Buffer.from("WATCH_ONCE_✓_界"));
+	assert.deepEqual(JSON.parse(f.sends.at(-2)), { type: "geometry", cols: 91, rows: 23, revision: 2 });
+	assert.equal(f.sends.at(-1).toString(), "WATCH_ONCE_✓_界"); assert.equal(f.sends.filter(Buffer.isBuffer).length, 1);
+	await f.session.finish();
+});
+
+test("a watch uses the shorter driver authority receipt and cannot forward bytes after it expires", async () => {
+	const room = { driverConnectionId: "driver", geometry: { cols: 80, rows: 24, revision: 1 } };
+	const f = fixture({ kind: "watch", room, renew: async () => ({ ok: true, room, authRemainingMs: 700 }) });
+	f.setAt(1000); await f.session.tick(); f.setAt(1700); f.timer();
+	f.stream.emit("data", Buffer.from("PRIVATE_AFTER_EXPIRY"));
+	assert.equal(f.sends.filter(Buffer.isBuffer).length, 0); assert.equal(f.detaches, 1);
 });
 test("large daemon output is losslessly partitioned into the browser's bounded binary frames", async () => {
 	const f = fixture(), bytes = Buffer.alloc(65536 * 2 + 17, 0x42);
@@ -67,4 +88,67 @@ test("valid resize events coalesce behind a slow daemon and never replay after a
 	expired.ws.emit("message", frame(80), false); expired.ws.emit("message", frame(82), false);
 	expired.setAt(5000); expired.timer(); done(); await new Promise(resolve => setImmediate(resolve));
 	assert.deepEqual(expired.resized.map(g => g.cols), [80]); assert.equal(expired.detaches, 1);
+});
+
+test("revocation or control-store failure during a successful pending resize cannot masquerade as runtime failure", async () => {
+	for (const result of [{ refused: "authorization-expired" }, { refused: "control-unavailable" }]) {
+		let finishResize, entered; const resizing = new Promise(resolve => { entered = resolve; });
+		const room = { driverConnectionId: "connection", enabled: false, rosterRevision: 0, watchers: {}, geometry: { cols: 80, rows: 24, revision: 1 } };
+		const f = fixture({ room, controls: { updateGeometry: async () => result }, resize: () => { entered(); return new Promise(resolve => { finishResize = resolve; }); } });
+		f.ws.emit("message", Buffer.from('{"type":"resize","cols":90,"rows":30,"width":1200}'), false); await resizing;
+		finishResize(); await new Promise(resolve => setImmediate(resolve));
+		const reason = result.refused === "authorization-expired" ? "session-ended" : "authorization-unavailable";
+		assert.equal(f.detaches, 1); assert.deepEqual(f.resized.map(g => [g.cols, g.rows]), [[90, 30]]);
+		assert.deepEqual(JSON.parse(f.sends.at(-1)), { type: "ended", reason }); assert.equal(f.audits.at(-1)[3], reason);
+	}
+	const room = { driverConnectionId: "connection", enabled: false, rosterRevision: 0, watchers: {}, geometry: { cols: 80, rows: 24, revision: 1 } };
+	let published = false;
+	const badRuntime = fixture({ room, resize: async () => { throw new Error("daemon unavailable"); }, controls: { updateGeometry: async () => { published = true; return { ok: true, room }; } } });
+	badRuntime.ws.emit("message", Buffer.from('{"type":"resize","cols":90,"rows":30,"width":1200}'), false); await new Promise(resolve => setImmediate(resolve));
+	assert.equal(published, false); assert.deepEqual(JSON.parse(badRuntime.sends.at(-1)), { type: "ended", reason: "runtime-unavailable" });
+});
+
+test("a watcher too slow for its output is dropped by itself, with no other session touched", async () => {
+	const room = { driverConnectionId: "driver", geometry: { cols: 120, rows: 36, revision: 1 } };
+	const f = fixture({ kind: "watch", room, renew: async () => ({ ok: true, room, authRemainingMs: 5000 }) });
+	f.ws.bufferedAmount = GATEWAY_LIMITS.bufferedBytes;
+	const sent = f.sends.length;
+	f.stream.emit("data", Buffer.from("MORE_OUTPUT"));
+	for (let turn = 0; turn < 50 && !f.ends.length; turn++) await Promise.resolve();
+	assert.equal(f.ends[0].reason, "backpressure");
+	assert.equal(f.sends.slice(sent).some(s => String(s).includes("MORE_OUTPUT")), false, "nothing more is queued for a reader that cannot keep up");
+	assert.equal(f.detaches, 1, "only this watch's own read-only transport closes");
+});
+
+test("a stalled watcher told to stop is cut, not left draining its queue; a driver is still told why", async () => {
+	const room = { driverConnectionId: "driver", geometry: { cols: 120, rows: 36, revision: 1 } };
+	const stalled = fixture({ kind: "watch", room, renew: async () => ({ ok: true, room, authRemainingMs: 5000 }) });
+	let terminated = 0; stalled.ws.terminate = () => { terminated++; stalled.ws.readyState = 3; };
+	stalled.ws.bufferedAmount = 1024; const before = stalled.sends.length;
+	await stalled.session.finish("watch-removed");
+	assert.equal(terminated, 1); assert.equal(stalled.sends.length, before, "close() would have kept sending that queue for up to 30 seconds");
+	const driver = fixture(); driver.ws.bufferedAmount = 1024;
+	await driver.session.finish("disconnected");
+	assert.equal(JSON.parse(driver.sends.at(-1)).reason, "disconnected");
+});
+
+test("a peer that stops answering pings is let go; one that answers stays, and its pings spend the frame budget", async () => {
+	const walk = async (f, from, to) => { for (let at = from; at <= to; at += 1000) { f.setAt(at); await f.session.tick(); } };
+	const silent = fixture(); let pings = 0; silent.ws.ping = () => { pings++; };
+	await walk(silent, 1000, GATEWAY_LIMITS.pingMs); silent.timer();
+	assert.equal(pings, 1); assert.equal(silent.ends.length, 0);
+	await walk(silent, GATEWAY_LIMITS.pingMs + 1000, 2 * GATEWAY_LIMITS.pingMs); silent.timer();
+	for (let turn = 0; turn < 50 && !silent.ends.length; turn++) await Promise.resolve();
+	assert.equal(silent.ends[0]?.reason, "disconnected");
+
+	const answering = fixture(); answering.ws.ping = () => { answering.ws.emit("pong"); };
+	await walk(answering, 1000, GATEWAY_LIMITS.pingMs); answering.timer();
+	await walk(answering, GATEWAY_LIMITS.pingMs + 1000, 2 * GATEWAY_LIMITS.pingMs); answering.timer();
+	await Promise.resolve();
+	assert.equal(answering.ends.length, 0);
+
+	const flooding = fixture();
+	for (let n = 0; n <= GATEWAY_LIMITS.framesPerSecond; n++) flooding.ws.emit("ping");
+	for (let turn = 0; turn < 50 && !flooding.ends.length; turn++) await Promise.resolve();
+	assert.equal(flooding.ends[0]?.reason, "protocol-error");
 });

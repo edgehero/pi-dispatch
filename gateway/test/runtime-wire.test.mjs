@@ -9,6 +9,35 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { GATEWAY_AMBIENT_RUNTIME_KEYS } from "../src/runtime.mjs";
 
 const execute = promisify(execFile);
+test("the pinned output-only attach ends its zero-byte request, never upgrades stdin or resizes, and exposes no write capability", async () => {
+	const target = { host: "host-a", id: "run:one", nonce: "a".repeat(32), containerId: "b".repeat(64), venue: "local" };
+	const socketPath = join(tempDir("gw-watch-wire-"), "engine.sock"), sockets = new Set(), requests = [];
+	let attachHeaders, body = Buffer.alloc(0), upgrades = 0;
+	const server = createServer((req, res) => {
+		requests.push([req.method, req.url]);
+		if (req.url.endsWith("/json")) {
+			res.setHeader("content-type", "application/json");
+			res.end(JSON.stringify({ Id: target.containerId, Name: "/pi-sandbox-run_one", Config: { Tty: true, OpenStdin: true, Labels: { "org.pi-dispatch.sandbox-session": target.nonce } }, State: { Running: true } }));
+		} else {
+			attachHeaders = req.headers; req.on("data", chunk => { body = Buffer.concat([body, chunk]); });
+			req.once("end", () => { res.writeHead(200, { "content-type": "application/vnd.docker.raw-stream" }); res.end("READ_ONLY_✓_界\n"); });
+		}
+	});
+	server.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
+	server.on("upgrade", (_req, socket) => { upgrades++; socket.destroy(); });
+	await new Promise(resolve => server.listen(socketPath, resolve));
+	const source = `import assert from 'node:assert/strict'; import {makeGatewayRuntime} from ${JSON.stringify(new URL("../src/runtime.mjs", import.meta.url).href)}; const c=await makeGatewayRuntime({sockets:{local:${JSON.stringify(socketPath)}}}).attachWatch(${JSON.stringify(target)}); assert.equal(c.stream.write,undefined); assert.equal(c.resize,undefined); const chunks=[]; for await(const b of c.stream)chunks.push(b); assert.equal(Buffer.concat(chunks).toString(),'READ_ONLY_✓_界\\n'); c.detach();`;
+	try {
+		const env = { ...process.env }; for (const key of GATEWAY_AMBIENT_RUNTIME_KEYS) delete env[key];
+		await execute(process.execPath, ["--input-type=module", "-e", source], { env, timeout: 10000 });
+		assert.equal(upgrades, 0); assert.equal(body.length, 0); assert.equal(attachHeaders["content-length"], "0"); assert.equal(attachHeaders["transfer-encoding"], undefined);
+		assert.equal(requests.length, 2);
+		const params = new URL(requests[1][1], "http://engine").searchParams;
+		assert.equal(params.get("stdin"), "false"); assert.equal(params.get("logs"), "false");
+		assert.equal(params.get("stdout"), "true"); assert.equal(params.get("stderr"), "true");
+		assert.equal(requests.some(([, path]) => path.includes("/resize")), false);
+	} finally { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); }
+});
 test("the exact maintained modem sends an empty attach request and the first stdin is only operator input", async () => {
 	const require = createRequire(import.meta.url);
 	assert.equal(require("docker-modem/package.json").version, "5.0.7");

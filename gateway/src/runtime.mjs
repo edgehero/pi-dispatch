@@ -1,5 +1,6 @@
 import Docker from "dockerode";
 import Modem from "docker-modem";
+import { Readable } from "node:stream";
 import { sandboxContainerName } from "@edgehero/pi-dispatch/sandbox";
 import { SANDBOX_SESSION_LABEL } from "@edgehero/pi-dispatch/sandbox-sessions";
 import { cleanGatewayTarget } from "@edgehero/pi-dispatch/sandbox-gateway-protocol";
@@ -39,39 +40,48 @@ export function makeGatewayRuntime({ sockets, clientFactory = reviewedClient, ti
 			return { ok: true };
 		} catch (error) { return { refused: error?.code === "GATEWAY_RUNTIME_ENV" ? "runtime-environment" : error?.statusCode === 404 ? "sandbox-ended" : "runtime-unavailable" }; }
 	}
+	async function attach(target, { cols, rows, signal = null } = {}, watch = false) {
+		if (!watch && !gatewayDimensions(cols, rows)) throw new Error("protocol-error");
+		if (!(await inspect(target)).ok) throw new Error("runtime-unavailable");
+		const container = client(target.venue).getContainer(target.containerId);
+		// docker-modem 5.0.7 otherwise serializes POST query options as a JSON body. An
+		// Engine upgrade can leave that body in the PTY's input (measured: "stream:trueexit").
+		// An empty _body instead selects chunked framing without ending that request, which
+		// waits forever on this endpoint. The maintained modem's empty file/body slot emits
+		// Content-Length: 0 and performs the same maintained HTTP upgrade, without stdin bytes.
+		const stream = await operation((abortSignal) => new Promise((resolve, reject) => client(target.venue).modem.dial({ path: `/containers/${target.containerId}/attach?`, method: "POST", options: { stream: true, stdin: !watch, stdout: true, stderr: true, logs: false, ...(!watch ? { detachKeys: "ctrl-p,ctrl-q" } : {}) }, file: Buffer.alloc(0), headers: { "Content-Type": "application/octet-stream" }, isStream: true, hijack: !watch, openStdin: !watch, abortSignal, statusCodes: { 200: true, 404: "no such container", 500: "server error" } }, (error, socket) => { if (abortSignal.aborted) { socket?.destroy(); reject(new Error("runtime-unavailable")); } else if (error) reject(error); else resolve(socket); })), signal);
+		// Expose only a Readable, even if a future SDK returns a Duplex on the output-only
+		// endpoint. The watcher capability has no write or resize member to misuse.
+		const output = watch ? Readable.from(stream, { objectMode: false, highWaterMark: 65536 }) : stream;
+		// Destroying that wrapper does not reach its source while the source is idle: the wrapper's iterator is parked
+		// on a next chunk that never comes. Close the transport from here, or an idle watch keeps a daemon socket open.
+		if (output !== stream) output.once("close", () => stream.destroy());
+		let streamFailed = false;
+		// A daemon can disappear while the first resize is still awaited, before the session's
+		// listeners exist. Record that loss immediately rather than crashing on an unhandled event.
+		stream.on("error", () => { streamFailed = true; });
+		let detached = false;
+		const detach = () => {
+			if (detached) return;
+			detached = true;
+			// Only close this transport. A control-key detach sequence passed through Podman's
+			// compatible API into readline and recalled an old command (measured). Raw close
+			// preserves the existing shell on both measured runtimes, including StdinOnce=true.
+			stream.destroy();
+			if (output !== stream) output.destroy();
+		};
+		if (signal) { if (signal.aborted) { detach(); throw new Error("runtime-unavailable"); } signal.addEventListener("abort", detach, { once: true }); stream.once("close", () => signal.removeEventListener("abort", detach)); }
+		try { if (!watch) await operation((abortSignal) => container.resize({ w: cols, h: rows, abortSignal }), signal); }
+		catch { detach(); throw new Error("runtime-unavailable"); }
+		if (streamFailed || stream.destroyed) { detach(); throw new Error("runtime-unavailable"); }
+		return { stream: output, detach, ...(!watch ? { resize: async ({ cols: w, rows: h }) => {
+			if (detached || !gatewayDimensions(w, h)) throw new Error("protocol-error");
+			await operation((signal) => container.resize({ w, h, abortSignal: signal }));
+		} } : {}) };
+	}
 	return {
 		inspect,
-		async attach(target, { cols, rows, signal = null } = {}) {
-			if (!gatewayDimensions(cols, rows)) throw new Error("protocol-error");
-			if (!(await inspect(target)).ok) throw new Error("runtime-unavailable");
-			const container = client(target.venue).getContainer(target.containerId);
-			// docker-modem 5.0.7 otherwise serializes POST query options as a JSON body. An
-			// Engine upgrade can leave that body in the PTY's input (measured: "stream:trueexit").
-			// An empty _body instead selects chunked framing without ending that request, which
-			// waits forever on this endpoint. The maintained modem's empty file/body slot emits
-			// Content-Length: 0 and performs the same maintained HTTP upgrade, without stdin bytes.
-			const stream = await operation((abortSignal) => new Promise((resolve, reject) => client(target.venue).modem.dial({ path: `/containers/${target.containerId}/attach?`, method: "POST", options: { stream: true, stdin: true, stdout: true, stderr: true, logs: false, detachKeys: "ctrl-p,ctrl-q" }, file: Buffer.alloc(0), headers: { "Content-Type": "application/octet-stream" }, isStream: true, hijack: true, openStdin: true, abortSignal, statusCodes: { 200: true, 404: "no such container", 500: "server error" } }, (error, socket) => { if (abortSignal.aborted) { socket?.destroy(); reject(new Error("runtime-unavailable")); } else if (error) reject(error); else resolve(socket); })), signal);
-			let streamFailed = false;
-			// A daemon can disappear while the first resize is still awaited, before the session's
-			// listeners exist. Record that loss immediately rather than crashing on an unhandled event.
-			stream.on("error", () => { streamFailed = true; });
-			let detached = false;
-			const detach = () => {
-				if (detached) return;
-				detached = true;
-				// Only close this transport. A control-key detach sequence passed through Podman's
-				// compatible API into readline and recalled an old command (measured). Raw close
-				// preserves the existing shell on both measured runtimes, including StdinOnce=true.
-				stream.destroy();
-			};
-			if (signal) { if (signal.aborted) { detach(); throw new Error("runtime-unavailable"); } signal.addEventListener("abort", detach, { once: true }); stream.once("close", () => signal.removeEventListener("abort", detach)); }
-			try { await operation((abortSignal) => container.resize({ w: cols, h: rows, abortSignal }), signal); }
-			catch { detach(); throw new Error("runtime-unavailable"); }
-			if (streamFailed || stream.destroyed) { detach(); throw new Error("runtime-unavailable"); }
-			return { stream, detach, resize: async ({ cols: w, rows: h }) => {
-				if (detached || !gatewayDimensions(w, h)) throw new Error("protocol-error");
-				await operation((signal) => container.resize({ w, h, abortSignal: signal }));
-			} };
-		},
+		attach: (target, options) => attach(target, options, false),
+		attachWatch: (target, options) => attach(target, options, true),
 	};
 }

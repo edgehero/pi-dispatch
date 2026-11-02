@@ -44,3 +44,16 @@ test("a cancelled pending upgrade destroys a late socket rather than resurrectin
 	const opening = runtime.attach(target, { cols: 80, rows: 24, signal: controller.signal }); await dialing; controller.abort();
 	await assert.rejects(opening, /runtime-unavailable/); reply(null, stream); assert.equal(stream.destroyed, true);
 });
+
+test("destroying a watch's read-only stream closes its transport, even while the daemon is silent", async () => {
+	// An idle source parks the wrapper's iterator, so destroy() alone never reached the socket: an idle watch held a daemon
+	// connection open and kept a process alive. Measured on real Docker before this was fixed.
+	const stream = new PassThrough();
+	const runtime = makeGatewayRuntime({ sockets: { podman: "/s.sock" }, clientFactory: () => ({ modem: { dial: (_options, callback) => callback(null, stream) }, getContainer: () => ({ inspect: async () => inspected() }) }) });
+	const watch = await runtime.attachWatch(target);
+	assert.equal(typeof watch.stream.write, "undefined", "a watch still exposes no way to write");
+	watch.stream.on("error", () => {});
+	watch.stream.destroy();
+	for (let turn = 0; turn < 50 && !stream.destroyed; turn++) await new Promise(resolve => setImmediate(resolve));
+	assert.equal(stream.destroyed, true);
+});
