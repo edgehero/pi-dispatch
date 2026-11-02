@@ -34,8 +34,8 @@ function valkey({ looks = [look("mini1"), look("mini2"), look("build3", { hostPi
 	};
 }
 
-export async function updatesFacts({ redis = {}, records = [], audit = [], staged = STAGED, now = NOW } = {}) {
-	return await readUpdates({ redis: valkey(redis), staged, records, audit, pinned: PINNED, triggersDocument: TRIGGERS, now });
+export async function updatesFacts({ redis = {}, records = [], recordsPartial = false, audit = [], staged = STAGED, now = NOW } = {}) {
+	return await readUpdates({ redis: valkey(redis), staged, records, recordsPartial, audit, pinned: PINNED, triggersDocument: TRIGGERS, now });
 }
 
 async function draw({ role = "operator", readOnly = false, facts = {}, unavailable = false } = {}) {
@@ -82,6 +82,7 @@ export const UPDATES_DRAW = Object.freeze({
 	"updates-adapter.operator": () => draw({ facts: { staged: { packages: [{ name: "pi-anthropic-oauth", version: "0.3.6", dir: "oauth", from: "host" }] }, redis: { looks: [look("mini1", { packages: [row("pi-anthropic-oauth", "0.3.6", "0.3.7")] })] } } }),
 	"updates-newer-after-adopt.operator": () => draw({ facts: { staged: { packages: [{ name: "pi-lint", version: "1.4.3", dir: "pi-lint--1.4.3--cccccccc", from: "pi-packages" }] }, records: [canaryRecord({ packageCanary: { name: "pi-lint", version: "1.4.4", load: "loaded" } })], redis: { looks: [look("mini1", { packages: [row("pi-lint", "1.4.3", "1.4.4")] })], desiredRows: { "pi-lint": desired() }, appliedRows: { mini1: { "pi-lint": applied() } } } } }),
 	"updates-staged-unreadable.operator": () => draw({ facts: { staged: { packages: [], unreadable: true } } }),
+	"updates-records-partial.operator": () => draw({ facts: { recordsPartial: true } }),
 });
 /** Every golden of this page, the two previews included: `panel-goldens.mjs` draws those, through the real action and the real confirm. */
 export const UPDATES_PANEL_STATES = Object.freeze([...Object.keys(UPDATES_DRAW)]);

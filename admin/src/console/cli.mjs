@@ -554,12 +554,17 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       }),
     }) ?? null;
     const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
+    // The fleet's records and not this host's: a canary runs on whichever host took the job, and Adopt's gate reads its record.
+    const updatesHistory = cachedFor(() => m.readModel.scanFleetRunRecords({ redis, logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
     // The page's and the actions' one read, so an Adopt's gate reads what the page drew.
-    const readUpdatesFacts = async () => m.updatesView.readDeploymentUpdates({
-      redis, now: now(), pinned: m.pricing.piAiVersion?.() ?? null, paths: side.paths, fs,
-      records: await triggerHistory().catch(() => []),
-      audit: await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => read?.rows ?? []).catch(() => []),
-    });
+    const readUpdatesFacts = async () => {
+      const history = await updatesHistory().catch(() => ({ records: [], partial: true }));
+      return await m.updatesView.readDeploymentUpdates({
+        redis, now: now(), pinned: m.pricing.piAiVersion?.() ?? null, paths: side.paths, fs,
+        records: history.records, recordsPartial: history.partial,
+        audit: await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => read?.rows ?? []).catch(() => []),
+      });
+    };
     const pageDeps = {
       fleet,
       sandboxes,

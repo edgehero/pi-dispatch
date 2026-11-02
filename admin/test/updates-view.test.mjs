@@ -4,10 +4,11 @@ import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CANNOT_ADOPT_REASONS, CHECK_STATES, HOST_PI_STATES, UPDATES_OVERDUE_MS } from "@edgehero/pi-dispatch/updates";
 import { ADMIN_USED_API } from "../../worker/src/updates-look.mjs";
-import { CANNOT_ADOPT_WORDS, HOST_STATES_DRAWN, PI_STATES_DRAWN } from "../src/console/panels/updates.mjs";
+import { CANNOT_ADOPT_WORDS, HOST_STATES_DRAWN, PI_STATES_DRAWN, updatesProblems } from "../src/console/panels/updates.mjs";
+import { scanFleetRunRecords } from "../src/read-model.mjs";
 import { HOST_ADOPT_STATES, PI_ROW_STATES, UPDATE_ROW_STATES, canaryResultOf, hostStandings, packageRow, piRow, readDeploymentUpdates, readStaged, readTriggersDocument, readUpdates } from "../src/updates-view.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { UPDATES_CONFIRM_STATES, UPDATES_DRAW } from "./helpers/updates-goldens.mjs";
+import { UPDATES_CANARY_RECORD, UPDATES_CONFIRM_STATES, UPDATES_DRAW, updatesFacts } from "./helpers/updates-goldens.mjs";
 import { USED_API } from "../src/index.ts";
 
 const NOW = 1_800_000_000_000;
@@ -195,10 +196,59 @@ test("the page's facts come from what a deployment really holds: its manifest an
 	assert.equal(readTriggersDocument({ triggersPath: join(root, "absent.json") }), null);
 });
 
+test("a canary that ran on another host is found: its record is in the run mirror, not on this host's disk", async () => {
+	const logsDir = tempDir("updates-fleet-records-");
+	const sinceMs = NOW - 30 * 86400_000;
+	const far = { jobId: "gh-far", host: "mini2", outcome: "completed", endedAt: new Date(NOW - 3600_000).toISOString(), tokens: { cost: 0.19 }, packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" } };
+	const mirrorOf = (rows, calls = {}) => ({
+		zrevrangebyscore: async (...args) => { calls.range = args; return rows.map((r) => r?.jobId ?? "gh-expired"); },
+		mget: async () => rows.map((r) => (r ? JSON.stringify(r) : null)),
+		eval: async () => { calls.wrote = true; },
+	});
+	const calls = {};
+	const read = await scanFleetRunRecords({ redis: mirrorOf([far, null], calls), logsDir, sinceMs, nowMs: NOW });
+	assert.equal(canaryResultOf(read.records, "pi-lint", "1.4.3")?.state, "completed", "the record survives the read that shows it, with the word Adopt's gate asks for");
+	assert.equal(read.partial, false);
+	assert.equal(calls.range[2], `(${sinceMs}`, "the mirror is asked for the window, not for its newest whatever their age");
+	assert.equal(calls.wrote, undefined, "a console page's read writes nothing, even past an expired row");
+
+	const row = (records) => readUpdates({ redis: fakeValkey({ looks: [{ v: 1, host: "h", at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [{ name: "pi-lint", version: "1.4.2", newest: "1.4.3", read: "ok" }] }] }), staged: { packages: [{ name: "pi-lint", version: "1.4.2", dir: "d", from: "pi-packages" }] }, records, now: NOW }).then((r) => r.packages[0].state);
+	assert.equal(await row(read.records), "canary-completed", "so the row, and Adopt's gate reading the same row, see it");
+	assert.equal(await row((await scanFleetRunRecords({ redis: null, logsDir, sinceMs, nowMs: NOW })).records), "newer", "the same deployment with this host's files alone: the defect, a canary that finished reading as never tried");
+
+	// Both sources hold a run this host ran and mirrored, and it counts once.
+	writeFileSync(join(logsDir, "gh-far.json"), JSON.stringify(far));
+	writeFileSync(join(logsDir, "gh-near.json"), JSON.stringify({ jobId: "gh-near", endedAt: new Date(NOW - 7200_000).toISOString() }));
+	const both = await scanFleetRunRecords({ redis: mirrorOf([far]), logsDir, sinceMs, nowMs: NOW });
+	assert.deepEqual(both.records.map((r) => r.jobId), ["gh-far", "gh-near"]);
+
+	// One host, no mirror: its own files are the whole answer, and nothing is in doubt.
+	assert.deepEqual(await scanFleetRunRecords({ redis: mirrorOf([]), logsDir, sinceMs, nowMs: NOW }).then((r) => [r.records.length, r.partial]), [2, false]);
+	assert.deepEqual(await scanFleetRunRecords({ redis: null, logsDir, sinceMs, nowMs: NOW }).then((r) => [r.records.length, r.partial]), [2, false]);
+
+	// Each way a side goes missing is said, and keeps what the other side holds.
+	const down = { zrevrangebyscore: async () => { throw new Error("down"); } };
+	assert.deepEqual(await scanFleetRunRecords({ redis: down, logsDir, sinceMs, nowMs: NOW }).then((r) => [r.records.length, r.partial]), [2, true], "a mirror that did not answer");
+	assert.deepEqual(await scanFleetRunRecords({ redis: mirrorOf([far]), logsDir, sinceMs, nowMs: NOW, limit: 1 }).then((r) => r.partial), true, "more in the window than the bound: the oldest are cut");
+	const noFiles = { readdirSync: () => { throw Object.assign(new Error("no"), { code: "EACCES" }); } };
+	assert.deepEqual(await scanFleetRunRecords({ redis: mirrorOf([far]), logsDir, sinceMs, nowMs: NOW, fs: noFiles }).then((r) => [r.records.map((x) => x.jobId), r.partial]), [["gh-far"], true], "this host's files unreadable");
+});
+
+test("a partial read of the runs is said only beside a row it could be wrong about", async () => {
+	const said = async (facts) => String(updatesProblems({ data: { updates: await updatesFacts(facts) } })).includes("Some recent runs could not be read");
+	assert.equal(await said({ recordsPartial: true }), true, "a row that reads not tried may have a canary behind it");
+	assert.equal(await said({ recordsPartial: false }), false);
+	const lintOnly = { packages: [{ name: "pi-lint", version: "1.4.2", dir: "d", from: "pi-packages" }] };
+	assert.equal(await said({ recordsPartial: true, records: [UPDATES_CANARY_RECORD], staged: lintOnly }), false, "a canary on record is not in doubt");
+	assert.equal(await said({ recordsPartial: true, redis: { down: true } }), false, "Valkey down has its own banner, and rows carry no newest to doubt");
+});
+
 test("the console reads Updates through that one composed read, with its own paths, and both of its actions use it", () => {
 	const cli = readFileSync(new URL("../src/console/cli.mjs", import.meta.url), "utf8");
 	assert.match(cli, /m\.updatesView\.readDeploymentUpdates\(\{[^}]*paths: side\.paths/s, "an actions' lookup and the page must read the same shapes");
 	assert.match(cli, /updates: \(\) => readUpdatesFacts\(\)/, "the page");
+	assert.match(cli, /m\.readModel\.scanFleetRunRecords\(\{ redis,/, "a canary runs on whichever host took the job: this host's scan alone reads one on another host as never tried");
+	assert.match(cli.slice(cli.indexOf("const readUpdatesFacts"), cli.indexOf("const pageDeps")), /records: history\.records, recordsPartial: history\.partial/, "the page must be told when that read was partial");
 	assert.match(cli, /updates: \{ read: readUpdatesFacts,/, "the actions");
 	assert.doesNotMatch(cli.slice(cli.indexOf("const readUpdatesFacts"), cli.indexOf("const pageDeps")), /readStagedPackages/, "that one is for display, and hands back strings");
 });

@@ -155,14 +155,14 @@ function recentOf(rows) {
  * What a deployment holds, read from where it really lives: its stage manifest and its triggers file. The console calls this, so that the shapes it hands `readUpdates` are the ones the
  * actions look rows up by. The read model's own `readStagedPackages` and the snapshot's trigger rows are for display, and they carry neither the fields nor the shapes this needs.
  */
-export async function readDeploymentUpdates({ redis = null, paths = {}, records = [], audit = [], pinned = null, now = Date.now(), fs = nodeFs } = {}) {
-	return await readUpdates({ redis, records, audit, pinned, now, staged: readStaged({ globalPiDir: paths.globalPiDir, fs }), triggersDocument: readTriggersDocument({ triggersPath: paths.triggersPath, fs }) });
+export async function readDeploymentUpdates({ redis = null, paths = {}, records = [], recordsPartial = false, audit = [], pinned = null, now = Date.now(), fs = nodeFs } = {}) {
+	return await readUpdates({ redis, records, recordsPartial, audit, pinned, now, staged: readStaged({ globalPiDir: paths.globalPiDir, fs }), triggersDocument: readTriggersDocument({ triggersPath: paths.triggersPath, fs }) });
 }
 
 /**
  * Everything the page draws, from injected sources so that each state is a fixture. `null` when even the stage manifest could not be asked: the page then says so rather than drawing nothing.
  */
-export async function readUpdates({ redis = null, staged, records = [], audit = [], pinned = null, triggersDocument = null, now = Date.now() } = {}) {
+export async function readUpdates({ redis = null, staged, records = [], recordsPartial = false, audit = [], pinned = null, triggersDocument = null, now = Date.now() } = {}) {
 	const looks = redis ? await readLooks(redis, { now: () => now }) : { unreachable: true };
 	const desired = redis ? await readDesired(redis) : null;
 	let known = looks.unreachable ? [] : looks.hosts.map((h) => h.record.host);
@@ -198,6 +198,7 @@ export async function readUpdates({ redis = null, staged, records = [], audit = 
 		pi: piRow({ pinned, looks }),
 		packages,
 		stagedUnreadable: staged === null || staged === undefined || staged.unreadable === true,
+		recordsPartial: recordsPartial === true,
 		moreHosts: looks.unreachable ? 0 : looks.more ?? 0,
 		hosts,
 		triggers: canaryTriggers(triggersDocument),
