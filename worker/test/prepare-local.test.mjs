@@ -395,7 +395,7 @@ test("prepare-local's host-side git spreads the shared hardening, not a copy of 
  */
 test("every host-side git invocation begins with the shared hardening flags", () => {
 	const offenders = [];
-	for (const root of ["worker/src", "admin/src"]) {
+	for (const root of ["worker/src", "admin/src", "gateway/src"]) {
 		const dir = fileURLToPath(new URL(`../../${root}`, import.meta.url));
 		for (const name of readdirSync(dir)) {
 			if (!/\.(mjs|ts)$/.test(name) || name === "git-hardening.mjs") continue;

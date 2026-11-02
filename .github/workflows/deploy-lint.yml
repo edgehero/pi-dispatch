@@ -5,7 +5,7 @@
 # plist ships silently and only fails on the operator's box. This workflow is the cheap gate: it checks
 # STRUCTURE, not runtime behaviour.
 #
-#   - worker.service / receiver.service / console.service : `systemd-analyze verify` parses the units. The PLACEHOLDER
+#   - worker.service / receiver.service / console.service / sandbox-gateway.service : `systemd-analyze verify` parses the units. The PLACEHOLDER
 #     paths (/opt/pi-dispatch, /usr/bin/node) do not exist on the runner, so path-existence warnings are
 #     EXPECTED and ignored; only genuine syntax errors (unknown directives, parse failures) fail.
 #   - com.pi-dispatch.worker.plist : `xmllint --noout` proves the plist is well-formed XML. plutil is
@@ -61,7 +61,7 @@ jobs:
           # verify exits non-zero for the missing PLACEHOLDER exec paths, which is expected -- so gate on
           # the CONTENT of the diagnostics, not the exit code. A real defect is an unknown directive or a
           # parse failure; a missing /opt/pi-dispatch or /usr/bin/node is not.
-          systemd-analyze verify --no-pager deploy/worker.service deploy/receiver.service deploy/console.service > verify.log 2>&1 || true
+          systemd-analyze verify --no-pager deploy/worker.service deploy/receiver.service deploy/console.service deploy/sandbox-gateway.service > verify.log 2>&1 || true
           cat verify.log
           if grep -Eiq 'Unknown (key name|lvalue|section)|Failed to parse|Invalid setting|not a valid|expected ' verify.log; then
             echo "::error::systemd-analyze found a syntax error in a unit file. See the log above."

@@ -325,7 +325,7 @@ jobs:
           # Every entry point takes an injected `write`, so there is no legitimate reason left to reassign
           # the global and this grep carries no allowlist. stderr is deliberately not matched: it is not the
           # channel the runner reports on.
-          if grep -rnE '^[^/]*process\.stdout\.write *=' worker/test receiver/test admin/test image/runner/test; then
+          if grep -rnE '^[^/]*process\.stdout\.write *=' worker/test receiver/test admin/test image/runner/test gateway/test; then
             echo "::error::A test reassigns process.stdout.write. Inject the code under test's own `write` seam instead (issue #266)."
             exit 1
           fi

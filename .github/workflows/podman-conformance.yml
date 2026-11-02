@@ -26,7 +26,7 @@ on:
     paths:
       - "worker/src/**"
       - "gateway/**"
-      - "admin/src/console/gateway*.mjs"
+      - "admin/**"
       - "image/**"
       - "deploy/egress-proxy.conf"
       - "deploy/pi-dispatch-netns-keeper.container"
@@ -35,6 +35,9 @@ on:
       - ".github/scripts/sandbox-gateway-browser.mjs"
       - ".github/scripts/sandbox-gateway-tls-fixture.mjs"
       - ".github/scripts/sandbox-gateway-runtime-smoke.mjs"
+      - ".github/scripts/console-width-check.mjs"
+      - ".github/chrome-for-testing.json"
+      - "launch/chrome-pipe.mjs"
       - ".github/workflows/podman-conformance.yml"
   pull_request:
   workflow_dispatch:

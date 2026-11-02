@@ -95,7 +95,7 @@ try {
   browser = await openChrome({ chrome: chrome.path, work, children, env: { HOME: process.env.HOME }, extraArgs: [...chromeLaunchArgs({ sandbox: process.env.GITHUB_ACTIONS !== "true" }), "--window-size=1600,1600", ...(tls ? [`--ignore-certificate-errors-spki-list=${certificate.spki}`] : [])], resolverRules: tls ? `MAP ${TLS_CONSOLE_HOST} 127.0.0.1, MAP ${TLS_GATEWAY_HOST} 127.0.0.1, MAP ${TLS_UNTRUSTED_HOST} 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1` : "MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1", captureStderr: true });
   let tab = await browser.openTarget();
   const initializeTab = async () => { await tab.send("Page.enable"); await tab.send("Runtime.enable"); await tab.send("Network.enable");
-  await tab.send("Page.addScriptToEvaluateOnNewDocument", { source: "window.__gatewayResizes=[];addEventListener('resize',()=>window.__gatewayResizes.push({width:innerWidth,height:innerHeight,at:performance.now()}));window.__gatewayCsp=[];addEventListener('securitypolicyviolation',e=>window.__gatewayCsp.push(e.violatedDirective+':'+e.blockedURI));" }); };
+  await tab.send("Page.addScriptToEvaluateOnNewDocument", { source: "window.__gatewaySavedState=null;const originalGet=Storage.prototype.getItem,originalRemove=Storage.prototype.removeItem;Storage.prototype.removeItem=function(key){const raw=originalGet.call(this,key);if(this===sessionStorage&&String(key).startsWith('sandbox-gateway:')){let saved;try{saved=JSON.parse(raw||'null')}catch{}let gatewayValid=false;try{gatewayValid=typeof saved?.gateway==='string'&&new URL(saved.gateway).origin===saved.gateway&&/^https?:/.test(saved.gateway)}catch{}window.__gatewaySavedState={present:raw!==null,parsed:!!saved,keys:saved&&typeof saved==='object'?Object.keys(saved).sort().join():null,proofValid:/^[A-Za-z0-9_-]{43}$/.test(saved?.proof||''),atValid:Number.isSafeInteger(saved?.at),ageMs:Number.isSafeInteger(saved?.at)?Date.now()-saved.at:null,gatewayValid};}return originalRemove.call(this,key);};window.__gatewayResizes=[];addEventListener('resize',()=>window.__gatewayResizes.push({width:innerWidth,height:innerHeight,at:performance.now()}));window.__gatewayCsp=[];addEventListener('securitypolicyviolation',e=>window.__gatewayCsp.push(e.violatedDirective+':'+e.blockedURI));" }); };
   await initializeTab();
   await browser.send("Target.setDiscoverTargets", { discover: true });
   const evaluate = async (expression) => {
@@ -108,11 +108,18 @@ try {
     const end = performance.now() + ms;
     while (performance.now() < end) { if (await evaluate(`Boolean(${expression})`)) return; await sleep(30); }
     // Capture can itself resize a headless surface. Preserve the failure facts before collecting pixels.
-    const diagnostic = await evaluate("JSON.stringify({url:location.origin+location.pathname,status:document.getElementById('gateway-status')?.textContent,state:document.getElementById('gateway-state-text')?.textContent,width:innerWidth,resizes:window.__gatewayResizes,terminal:[...document.querySelectorAll('.xterm-rows>div')].map(e=>e.textContent).join(' / ').slice(-1000)})");
+    const diagnostic = await evaluate("JSON.stringify({url:location.origin+location.pathname,status:document.getElementById('gateway-status')?.textContent,state:document.getElementById('gateway-state-text')?.textContent,width:innerWidth,resizes:window.__gatewayResizes,ready:document.readyState,mode:document.querySelector('[data-sandbox-gateway-mode]')?.getAttribute('data-sandbox-gateway-mode'),savedState:window.__gatewaySavedState,terminal:[...document.querySelectorAll('.xterm-rows>div')].map(e=>e.textContent).join(' / ').slice(-1000)})");
     if (shots) { fs.mkdirSync(shots, { recursive: true }); const debug = await tab.send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false }); fs.writeFileSync(join(shots, "debug-failure.png"), Buffer.from(debug.data, "base64")); }
     throw new Error(`${stage}: timed out waiting for ${expression}; ` + diagnostic);
   };
-  const navigate = async (url) => { await tab.send("Page.navigate", { url }); await until(`document.readyState==='complete'&&location.href===${JSON.stringify(url)}`); };
+  const navigate = async (url) => {
+    // The URL commits before the new document parses, and a same-URL reload can otherwise
+    // satisfy readyState with its predecessor. This marker belongs only to that predecessor.
+    const marker = randomBytes(16).toString("hex");
+    await evaluate(`document.__gatewayNavigationMarker=${JSON.stringify(marker)}`);
+    await tab.send("Page.navigate", { url });
+    await until(`document.__gatewayNavigationMarker!==${JSON.stringify(marker)}&&document.readyState==='complete'&&location.href===${JSON.stringify(url)}`);
+  };
   const click = async (selector) => {
     const box = await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing control');e.scrollIntoView({block:'center'});const b=e.getBoundingClientRect();return{x:b.x+b.width/2,y:b.y+b.height/2}})()`);
     for (const type of ["mousePressed", "mouseReleased"]) await tab.send("Input.dispatchMouseEvent", { type, ...box, button: "left", clickCount: 1 });
@@ -142,16 +149,27 @@ try {
     fs.writeFileSync(join(shots, name + ".probe.json"), JSON.stringify(await evaluate("({width:innerWidth,height:innerHeight,canvas:getComputedStyle(document.body).getPropertyValue('--canvas').trim(),fontStatus:document.fonts.status,font:getComputedStyle(document.body).fontFamily,sheets:[...document.styleSheets].map(s=>({href:s.href,rules:s.cssRules.length})),boxes:Object.fromEntries(['.gw-terminal','.xterm','.xterm-screen','.xterm-scrollable-element','.gw-terminal-foot'].map(q=>{const e=document.querySelector(q),r=e?.getBoundingClientRect(),c=e&&getComputedStyle(e);return[q,r?{x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,box:c.boxSizing,padding:c.padding,scroll:e.scrollHeight}:null]})),formHidden:document.getElementById('gateway-step-up')?.hidden,resizes:window.__gatewayResizes})"), null, 2));
   };
   async function login(role = "operator") {
-    await navigate(consoleOrigin + "/login"); await until("document.querySelector('#login-form')&&!document.querySelector('#login-form').hidden");
-    await type("#token", role === "operator" ? token : role); await click("#login-form button"); await until(`location.origin===${JSON.stringify(consoleOrigin)}&&location.pathname==='/'`);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await navigate(consoleOrigin + "/login"); await until("document.querySelector('#login-form')?.hidden===false");
+      await type("#token", role === "operator" ? token : role); await click("#login-form button");
+      await until(`location.origin===${JSON.stringify(consoleOrigin)}&&location.pathname==='/'&&document.readyState==='complete'||document.querySelector('[data-notice="rate"]')?.hidden===false`);
+      if (await evaluate("location.pathname==='/'")) return;
+      assert.equal(await evaluate("document.getElementById('token').value"), "");
+      // Login and step-up share the production bucket. The no-screenshot lane reaches its
+      // limit sooner, so honor the actual retry interval before a fresh explicit submission.
+      await sleep(limiter.retryAfterSec() * 1000 + 100);
+    }
+    assert.fail("The production sign-in limiter did not admit a fresh attempt after its retry interval");
   }
+
   const launchUrl = () => `${consoleOrigin}/sandbox/gateway/launch?${new URLSearchParams({ host, id: runId })}`;
-  let ctaLaunches = 0;
+  let ctaLaunches = 0, previousIntent = null;
+  const freshAuthorize = () => `document.readyState==='complete'&&location.origin===${JSON.stringify(consoleOrigin)}&&location.pathname==='/sandbox/gateway/authorize'&&document.querySelector('[data-sandbox-gateway-mode]')?.getAttribute('data-sandbox-gateway-mode')==='authorize'&&/^[A-Za-z0-9_-]{43}$/.test(new URLSearchParams(location.search).get('intent')||'')&&new URLSearchParams(location.search).get('intent')!==${JSON.stringify(previousIntent)}&&document.getElementById('gateway-step-up')?.hidden===false`;
   async function launch(theme = "light", width = 1440) {
     await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1400, deviceScaleFactor: 1, mobile: false });
     await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
     await tab.send("Page.navigate", { url: consoleOrigin + "/sandbox/gateway/return" });
-    await until(`location.origin===${JSON.stringify(consoleOrigin)}&&location.pathname==='/runs/sandboxes'`);
+    await until(`location.origin===${JSON.stringify(consoleOrigin)}&&location.pathname==='/runs/sandboxes'&&document.readyState==='complete'&&document.body.getAttribute('data-page')==='sandboxes'`);
     await evaluate(`document.cookie='pd_theme=${theme}; Path=/; SameSite=Lax'`);
     let sourceTab = null, sourcePath = null, nativeBefore = null;
     if (ctaLaunches < 2) {
@@ -176,13 +194,14 @@ try {
       await tab.send("Emulation.setDeviceMetricsOverride", { width, height: 1400, deviceScaleFactor: 1, mobile: false });
       await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
       ctaLaunches++;
-      await until("location.pathname==='/sandbox/gateway/authorize'&&document.getElementById('gateway-step-up')&&!document.getElementById('gateway-step-up').hidden");
+      await until(freshAuthorize());
       assert.equal(await evaluate("window.opener"), null, "the terminal tab cannot control its console opener");
       const original = await sourceTab.send("Runtime.evaluate", { expression: nativeSnapshot, returnByValue: true });
       assert.equal(original.result.value, nativeBefore, "opening the browser leaves the source page and every native opener/command unchanged");
       await sourceTab.close();
     } else await tab.send("Page.navigate", { url: launchUrl() });
-    await until(`location.origin===${JSON.stringify(consoleOrigin)}&&location.pathname==='/sandbox/gateway/authorize'&&!document.getElementById('gateway-step-up').hidden`);
+    await until(freshAuthorize());
+    previousIntent = await evaluate("new URLSearchParams(location.search).get('intent')");
     assert.ok(await evaluate(`document.getElementById('gateway-target').textContent.includes(${JSON.stringify(runId)})&&document.getElementById('gateway-target').textContent.includes(${JSON.stringify(host)})`));
     assert.deepEqual(await evaluate("window.__gatewayCsp"), []);
     const consoleHeaders = await evaluate("fetch(location.href,{cache:'no-store'}).then(r=>Object.fromEntries(r.headers))");
@@ -191,14 +210,14 @@ try {
     assert.equal(await evaluate("innerWidth"), width, "Capture must preserve the real browser viewport");
     for (let attempt = 0; attempt < 3; attempt++) {
       await type("#gateway-token", token); await click("#gateway-authorize");
-      await until(`location.origin===${JSON.stringify(gatewayOrigin)}&&document.getElementById('gateway-connection')?.textContent==='Connected'||document.getElementById('gateway-status')?.textContent.includes('Too many verification attempts')`);
+      await until(`location.origin===${JSON.stringify(gatewayOrigin)}&&document.getElementById('gateway-terminal-card')?.hidden===false&&document.getElementById('gateway-connection')?.textContent==='Connected'||document.getElementById('gateway-status')?.textContent.includes('Too many verification attempts')`);
       if (await evaluate(`location.origin===${JSON.stringify(gatewayOrigin)}`)) break;
       assert.equal(await evaluate("document.getElementById('gateway-token').value"), "");
       await capture(`rate-limited-${theme}`);
       // Respect the real production token bucket; do not replace its limiter or move its clock for the paint matrix.
       await sleep(limiter.retryAfterSec() * 1000 + 100);
     }
-    assert.equal(await evaluate(`location.origin===${JSON.stringify(gatewayOrigin)}&&document.getElementById('gateway-connection')?.textContent==='Connected'`), true);
+    assert.equal(await evaluate(`location.origin===${JSON.stringify(gatewayOrigin)}&&document.getElementById('gateway-terminal-card')?.hidden===false&&document.getElementById('gateway-connection')?.textContent==='Connected'`), true);
     assert.equal(await evaluate("location.hash"), "");
   }
   if (tls) {

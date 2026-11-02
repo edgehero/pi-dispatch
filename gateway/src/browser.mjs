@@ -116,6 +116,9 @@ export async function mountGateway(options = {}) {
 	disposables.push(terminal.onKey((event) => { if (event.domEvent.isTrusted) userActivity(); }));
 	for (const type of ["paste", "compositionend"]) on(terminal.element ?? elements.terminal, type, (event) => { if (event.isTrusted) userActivity(); }, true);
 	const resize = () => {
+		// Admission can force a fit before an observer's queued fit fires. Cancel that timer
+		// before forgetting its handle, or subsequent drag events create parallel resize loops.
+		if (resizeTimer !== null) window.clearTimeout(resizeTimer);
 		resizeTimer = null;
 		if (ended) return;
 		if (phone.matches || window.innerWidth < GATEWAY_LIMITS.minimumWidth) { finish("phone"); return; }

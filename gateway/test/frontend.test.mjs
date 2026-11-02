@@ -251,6 +251,22 @@ test("continuous desktop resizing stays inside the server's rate limit while pre
 	assert.equal(ctl.ended, false); ctl.disconnect();
 });
 
+test("ready cancels an earlier observer fit instead of orphaning a second resize timer during a drag", async () => {
+	const w = world(); let observed;
+	w.window.ResizeObserver = class { constructor(callback) { observed = callback; } observe() {} disconnect() {} };
+	const ctl = await mountGateway({ ...w, connection: admitted() }); const socket = w.sockets[0];
+	observed(); w.advance(20); socket.ready();
+	assert.equal(w.tasks.size, 0, "the forced admission fit cancels the pending observer fit, as well as the ready deadline");
+	for (let i = 0; i < 220; i++) { w.window.innerWidth = 1000 + i; w.window.emit("resize"); w.advance(10); }
+	w.flushTimers();
+	for (const lower of [0, 1000]) {
+		const frames = socket.sentAt.filter((row) => row.message.type === "resize" && row.at >= lower && row.at < lower + 1000);
+		assert.ok(frames.length <= GATEWAY_LIMITS.resizesPerSecond, `an observer-before-ready drag produced ${frames.length} frames`);
+		assert.ok(frames.length > 1);
+	}
+	ctl.disconnect(); assert.equal(w.tasks.size, 0);
+});
+
 test("device-query replies and synthetic DOM events cannot report human activity; real key and paste activity is bounded", async () => {
 	const w = world(); const ctl = await mountGateway({ ...w, connection: admitted() }); const socket = w.sockets[0], term = w.terminals[0]; socket.ready();
 	term.input("\u001b[12;40R");
