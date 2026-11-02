@@ -18,7 +18,7 @@ def routes():
 
 def from_run():
     picker = '<div class="sx-picker"><div class="field"><label for="sx-workspace">Kept workspace</label><select class="select" id="sx-workspace"><option>gh-9575 on mini1</option><option>gh-ebd7 on build3</option></select></div>' + btn('Show workspace') + '</div>'
-    head = f'<div class="sx-run"><span class="tile tone-ok">{ic("box")}</span><div><p class="sx-run__t">{code("gh-9575")}</p><p class="sx-run__s">mini1 {venue("local")}. Kept until 14:39 UTC tomorrow, 23h left.</p></div></div>'
+    head = f'<div class="sx-run"><span class="tile tone-ok">{ic("box")}</span><div><p class="sx-run__t">{code("gh-9575")}</p><p class="sx-run__s">mini1 {venue("local")}. Kept until 15:12 UTC tomorrow, 23h left.</p></div></div>'
     what = facts([('Image', 'pi-job:4.3.1, as its manifest records it'), ('/workspace', 'its retained clone'), ('/job', 'read only, with retained job inputs'), ('Processes', 'none until you start them'), ('Credentials', 'none, on purpose'), ('Network', "the host’s current job egress policy")], 3)
     foot = f'<div class="sx-foot"><p>{ic("info", "ic ic--sm")}<span>The shell uses a job’s isolation and network. A published host port is refused while egress is on. Pinning uses this host’s configured pin window.</span></p>{btn("Preview pin", "", "clock")}</div>'
     return card('From a run', picker + head + '<h3 class="sx-h3">What opens</h3>' + what + '<h3 class="sx-h3">How it opens</h3>' + routes() + foot, sub='the same image, workspace and isolation as the run', id_='p-sb-run')
@@ -40,7 +40,7 @@ def open_now():
     return card('Open now', body, end=badge('running', '1 open'), id_='p-sb-open')
 
 def kept():
-    rows = [('gh-9575','web','mini1','local','Kept until 14:39 UTC tomorrow, 23h left'), ('gh-ebd7','billing','build3','podman','Pinned until 15:39 UTC in 13 days'), ('billing-sweep','billing','mini2','openshell-bind','This venue has no sandbox shell')]
+    rows = [('gh-9575','web','mini1','local','Kept until 15:12 UTC tomorrow, 23h left'), ('gh-ebd7','billing','build3','podman','Pinned until 15:39 UTC in 13 days'), ('billing-sweep','billing','mini2','openshell-bind','This venue has no sandbox shell')]
     lis=[]
     for job,project,host,v,left in rows:
       controls = f'<div class="sx-kept__actions"><span class="sandbox-opener">{btn("Open in Terminal", "", "terminal")}</span><details><summary>Copy the command</summary>{command(job,host)}</details>{btn("Preview pin", "", "clock")}</div>' if v != 'openshell-bind' else ''

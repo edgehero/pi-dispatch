@@ -9,7 +9,7 @@ from paths import COMPONENTS as ROOT
 GROUPS = {
     "Start here": ["ConceptMap", "Glossary", "SampleStory", "JourneyAnswer", "JourneyFailure", "JourneySetup"],
     "Overview": ["OverviewScreen", "OverviewAllClear", "SetupScreen"],
-    "Runs": ["SandboxesScreen", "SandboxTerminal", "SandboxGatewaySignIn", "SandboxGatewayStates", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
+    "Runs": ["SandboxesScreen", "SandboxTerminal", "SandboxGatewaySignIn", "SandboxGatewayStates", "RunWorkspace", "RunWorkspaceStates", "SandboxTerminalRun", "SandboxWatch", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
     "Fleet": ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail", "FleetViewer"],
     "Spend": ["ModelsScreen", "SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen"],
     "Triggers": ["TriggersScreen", "TriggerDetail", "TriggerEditor", "TriggersViewer", "WatchScreen", "WatchBoard"],
@@ -51,6 +51,9 @@ STATUS = {
     "DispatcherScreen": (PROPOSED, "#776, specs only. Fresh decision containers and local read-only starts; adopting proposals always needs a person."),
     "SandboxesScreen": (BUILT, "Built by #771. Separate gateway attachment added by #754, off by default."),
     "SandboxTerminal": (BUILT, "Built by #754, on its own gateway hostname. Attaches to an existing shell only."),
+    **{n: (PROPOSED, "#793, after the browser gateway (#754, PR #790). It starts nothing from the browser.") for n in ["RunWorkspace", "RunWorkspaceStates"]},
+    "SandboxTerminalRun": (PROPOSED, "#793; its Let operators watch switch is #792."),
+    "SandboxWatch": (PROPOSED, "#792, observer mode. It lifts #754’s one-browser limit for read-only watchers (OQ-050)."),
     "SandboxGatewaySignIn": (BUILT, "Built by #754. Same-session fresh operator sign-in, one attachment, 60 seconds."),
     "SandboxGatewayStates": (BUILT, "Built by #754. Refusals, session and connection loss, and native fallback."),
     "ZeroTouchScreen": (BUILT, "Built by #777, fleet-wide touch accounting and cause-linked fixes."), "ZeroTouchViewer": (BUILT, "Built by #777, as a viewer sees it."),
