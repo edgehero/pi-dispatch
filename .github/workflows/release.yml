@@ -1,10 +1,11 @@
 # Publish the pi-dispatch npm packages and cut each one's GitHub Release when its workspace's version
 # changes on main: @edgehero/pi-dispatch (worker/, tagged worker-v*), @edgehero/pi-dispatch-receiver
-# (receiver/, tagged receiver-v*) and @edgehero/pi-dispatch-admin (admin/, tagged admin-v*). The whole
+# (receiver/, tagged receiver-v*), @edgehero/pi-dispatch-admin (admin/, tagged admin-v*) and the optional
+# @edgehero/pi-dispatch-sandbox-gateway (gateway/, tagged gateway-v*). The whole
 # TOOL's releases (v*) are cut by repo-release.yml off the ROOT package.json version — no workflow shares
 # a tag namespace with another.
 #
-# One job, three sequenced step-groups, in publish ORDER worker → receiver → admin. The order is load-
+# One job, four sequenced step-groups, in publish ORDER worker → receiver → admin → gateway. The order is load-
 # bearing: receiver depends on the worker package being on the registry, and a matrix — even with
 # max-parallel: 1 — promises serialization, not order. Steps in one job run top to bottom, and a failure
 # in an earlier group stops the later ones, which is what you want when the later package depends on the
@@ -15,7 +16,7 @@
 # workflow (consistent with CONST-MERGE-NEVER-AUTOMATIC: nothing here merges anything). Publishing is
 # idempotent PER PACKAGE: each group fires only when its workspace's version
 # is not already on npm, so re-runs, reverts, and pushes that touch only one workspace are no-ops for the
-# other two. Bump a workspace's version in your PR to ship that package.
+# other packages. Bump a workspace's version in your PR to ship that package.
 #
 # Required repo secret: NPM_TOKEN — an npm *automation* (or granular, "bypass 2FA") token that can publish to
 #   the @edgehero scope. Interactive 2FA cannot run in CI; the token is how publishing works here.
@@ -31,6 +32,7 @@ on:
       - "worker/**"
       - "receiver/**"
       - "admin/**"
+      - "gateway/**"
       - ".github/workflows/release.yml"
       - ".github/scripts/release-notes.mjs"
   # Manual re-run (available once this file is on the default branch): re-runs are safe — publish/release
@@ -46,6 +48,8 @@ concurrency:
 
 jobs:
   release:
+    # Manual dispatch may select a branch; publishing still belongs only to the protected main ref.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +65,7 @@ jobs:
         run: npm ci
 
       # The whole suite once, up front, rather than each workspace's tests just before its publish. Simpler —
-      # one step instead of three — and stricter: a worker change that breaks receiver's tests should block
+      # one step instead of four — and stricter: a worker change that breaks receiver's tests should block
       # worker's publish too, and per-workspace gating would have let it through.
       - name: Test everything being shipped
         run: npm test
@@ -288,3 +292,71 @@ jobs:
           gh release create "admin-v${{ steps.admin.outputs.version }}" \
             --title "${{ steps.admin.outputs.name }} v${{ steps.admin.outputs.version }}" \
             --notes-file /tmp/notes-admin.md
+
+      # The gateway bundles shared worker facts and serves its own terminal assets; it has no console runtime authority.
+      - name: "gateway: resolve version + decide publish/release"
+        id: gateway
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(node -p "require('./gateway/package.json').version")
+          NAME=$(node -p "require('./gateway/package.json').name")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          CODE=0; VIEW=$(npm view "$NAME@$V" version 2>&1) || CODE=$?
+          if [ "$CODE" -eq 0 ]; then
+            echo "publish=no" >> "$GITHUB_OUTPUT"; echo "$NAME@$V already on npm — skip publish"
+          elif printf '%s' "$VIEW" | grep -q "E404"; then
+            echo "publish=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm view $NAME@$V failed for a reason other than 404 — refusing to guess:"
+            printf '%s\n' "$VIEW"; exit 1
+          fi
+          if gh release view "gateway-v$V" >/dev/null 2>&1; then
+            echo "release=no" >> "$GITHUB_OUTPUT"; echo "release gateway-v$V already exists — skip release"
+          else
+            echo "release=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "gateway: publish to npm"
+        if: steps.gateway.outputs.publish == 'yes'
+        run: npm publish --workspace gateway --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: "gateway: build release notes"
+        if: steps.gateway.outputs.release == 'yes'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RELEASE_MODEL: ${{ vars.RELEASE_MODEL }}
+          PRODUCT: ${{ steps.gateway.outputs.name }}
+          PRODUCT_DESC: the optional browser gateway for attaching to existing pi-dispatch sandbox shells
+        run: |
+          PREV=$(git tag --list 'gateway-v*' --sort=-v:refname | head -n1)
+          RANGE=${PREV:+$PREV..HEAD}
+          COMMITS=$(git log $RANGE --no-merges --pretty=format:'- %s' -- gateway/ | head -n 60)
+          if [ -n "$ANTHROPIC_API_KEY" ] && COMMITS="$COMMITS" VERSION="v${{ steps.gateway.outputs.version }}" \
+               node .github/scripts/release-notes.mjs > /tmp/notes-gateway.md 2>/tmp/notes-gateway.err; then
+            echo "release notes: AI-written"
+          else
+            echo "release notes: AI unavailable ($(head -n1 /tmp/notes-gateway.err 2>/dev/null)) — using commit list"
+            TOTAL=$(printf '%s\n' "$COMMITS" | wc -l | tr -d ' ')
+            {
+              echo "### Changes"; echo
+              printf '%s\n' "$COMMITS" | head -n 12
+              if [ "$TOTAL" -gt 12 ]; then printf -- '- …and %s more\n' "$((TOTAL - 12))"; fi
+            } > /tmp/notes-gateway.md
+          fi
+          if [ -n "$PREV" ]; then
+            printf '\n**Full changelog**: %s/%s/compare/%s...gateway-v%s\n' \
+              "${{ github.server_url }}" "${{ github.repository }}" "$PREV" "${{ steps.gateway.outputs.version }}" >> /tmp/notes-gateway.md
+          fi
+
+      - name: "gateway: create GitHub Release"
+        if: steps.gateway.outputs.release == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "gateway-v${{ steps.gateway.outputs.version }}" \
+            --title "${{ steps.gateway.outputs.name }} v${{ steps.gateway.outputs.version }}" \
+            --notes-file /tmp/notes-gateway.md

@@ -156,6 +156,7 @@
     "./sandbox-policy": "./src/sandbox-policy.mjs",
     "./openshell-cli": "./src/openshell-cli.mjs",
     "./sandbox-store": "./src/sandbox-store.mjs",
+    "./sandbox-gateway-protocol": "./src/sandbox-gateway-protocol.mjs",
     "./opener-protocol": "./src/opener-protocol.mjs",
     "./sandbox-hosts": "./src/sandbox-hosts.mjs",
     "./sandbox-prepare": "./src/sandbox-prepare.mjs",

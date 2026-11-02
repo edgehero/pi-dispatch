@@ -106,7 +106,7 @@
       "reason": "Values are the published cards sample, not asserted deployment totals. Behavioral tests independently check the fold and counterexamples."
     },
     {
-      "el": "Standing answers, drafting and sent-draft counts",
+      "el": "Standing answers and drafting controls on this page",
       "kind": "readme",
       "status": "absent",
       "sentence": "admin/src/console/panels/zero-touch.mjs#ZERO_TOUCH_WORDS.drafts",
@@ -116,7 +116,7 @@
       "golden": [
         "panels/zero-touch-populated.operator"
       ],
-      "reason": "#772 builds answer rules. #770 keeps the future sent-draft touch contract and an honest coming-next tile."
+      "reason": "Answer-rule and standing-answer controls live on Parked. This page reads the confirmed-draft source-run count without exposing private draft text or adding send controls."
     },
     {
       "el": "Semantic question groups named by a person, run links and exact confirmed instruction diff",
@@ -157,6 +157,35 @@
         "panels/zero-touch-populated.operator"
       ],
       "reason": "The phone keeps group actions compact, the group title opens its source run, and Open observations reveals full fix evidence and guarded Undo without JavaScript."
+    },
+    {
+      "el": "Confirmed draft answers, edited or as drafted, remain human touches and count once per retained source run",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchRate",
+      "panel": "p-zt-rate",
+      "golden": [
+        "panels/zero-touch-populated.operator",
+        "panels/zero-touch-no-drafts.viewer",
+        "panels/zero-touch-partial.operator"
+      ],
+      "shows": [
+        "Sent by a person, edited or as drafted. Each run still counts as a touch."
+      ],
+      "reason": "#753 connects the existing fleet recount/projection to desktop and phone; behavior tests cover successful actual worker provenance, duplicates, scopes, intervals, partial and unavailable history."
+    },
+    {
+      "el": "Unavailable draft-answer history is unknown rather than zero",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchHandled",
+      "panel": "p-zt-handled",
+      "golden": [
+        "panels/zero-touch-unavailable.operator"
+      ],
+      "shows": [
+        "Zero touch could not be read. Reload to try again; missing history is never counted as zero touches."
+      ]
     }
   ]
 }

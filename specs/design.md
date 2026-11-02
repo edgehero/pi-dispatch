@@ -12494,14 +12494,15 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   judging liveness by the lock's pid (an alive pid is not an answering listener, and a recycled pid is not the
   console); and probing a configured non-loopback address (a read-only command would send a request across a
   network).
-- **The cookie's attributes**: `Secure` and the `__Host-` prefix are set only if Chrome, Firefox and Safari keep such
-  a cookie on `http://127.0.0.1` and `http://localhost`, where the console is served without TLS; a browser that
-  drops it would make login silently fail. Measured on 2026-10-14 with a server setting three cookies over plain
+- **The cookie's attributes**: the HTTP-loopback route omits `Secure` and the `__Host-` prefix, because a browser that
+  drops such cookies would make login silently fail. Measured on 2026-10-14 with a server setting three cookies over plain
   http: Chrome 155 (headless, macOS 15.7) sent back all three on both hosts, but WebKit (a `WKWebView`, the engine of
   Safari 18.6) sent back only the plain one and dropped both the `Secure` cookie and the `__Host-` one. So the
-  cookie is the plain name `pdc_session`, `HttpOnly; SameSite=Strict; Path=/`, without `Secure`: with it, a Safari
-  operator could never log in. Firefox is unmeasured. Nothing is lost on the wire, where the cookie never leaves the
-  loopback hop or the tunnel.
+  HTTP-loopback cookie is the plain name `pdc_session`, `HttpOnly; SameSite=Strict; Path=/`, without `Secure`: with it,
+  a Safari operator could never log in. Firefox is unmeasured. The protected canonical HTTPS console origin introduced
+  for the optional gateway adds `Secure`; that decision comes from the exact enrollment already judged by the write
+  guard, never `Forwarded`/`X-Forwarded-*` or a second file read during login. Name, host-only scope and `Path=/` stay
+  the same, so the existing expiry clears either cookie. The console still terminates no TLS itself.
 - **The screens** (issue #641, `REQ-OPERATOR-CONSOLE-SCREENS`): eight read pages, each an exact path with a bounded
   query string, so the route table stays a table of exact paths and the #640 tests that iterate it cover every page
   without a hand list. `/` is the overview (since #737 PR 3b with the timeline's `rows`, `zoom` and `project`),
@@ -14882,8 +14883,9 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     token is 256 random bits, which no guessing reaches, so sha256 is enough; a KDF would only add a per-login cost
     that a local attacker could use to slow the operator's logins further. The code says so beside the hash, so it
     is not later "fixed".
-  - **A cookie with `Secure` or the `__Host-` prefix.** WebKit drops both on plain-http loopback (measured, see the
-    cookie's attributes above), so either would lock Safari operators out.
+  - **A cookie with `Secure` or the `__Host-` prefix on plain-http loopback.** WebKit drops both there (measured, see
+    the cookie's attributes above), so either would lock Safari operators out. Protected HTTPS enrollment instead
+    requires `Secure`, while retaining the existing name and host-only scope.
   - **The token in a URL** (`?token=`, or a token login link). A query string reaches the server's request log, the
     browser's history and a `Referer`. The one-time link instead carries a code in the **fragment**, which the browser
     never sends to the server; a same-origin script POSTs it, it is single use, lives 60 seconds, and is never the
@@ -16013,8 +16015,9 @@ is introduced. The design generator owns the published card before the console u
 
 ## DES-SANDBOX-GATEWAY-ATTACH-ONLY
 
-- **Status**: **ADOPTED, implementation pending** (2026-11-02, issue #754). The maintainer approved adoption and
-  the independently reviewed plan before this spec-only decision. No runtime or browser acceptance is claimed yet.
+- **Status**: **IMPLEMENTED** (2026-11-02, issue #754). The maintainer approved adoption and the independently
+  reviewed plan before the prerequisite spec-only decision commit. Runtime/browser measurements below establish
+  the implemented route; final-commit CI and rendered-reference review remain separate acceptance gates.
 - **Decision**: An optional sandbox gateway runs on the host that owns a sandbox, in its own process and tab. It
   attaches only to the already running TTY of a tracked `pi-sandbox-*` container on `local` or `podman`. It cannot
   create, start, restart, exec into or stop a container, choose an image, or select an untracked runtime object.
@@ -16029,6 +16032,9 @@ is introduced. The design generator owns the published card before the console u
   existing request guards, session/person checks and role-separated reads. It gains bounded launch/step-up/broker
   operations, never a terminal renderer, pty, runtime socket or WebSocket. No CORS or cross-origin form exception is
   added. The gateway serves its own exact-pinned maintained terminal library, assets and strictly guarded WebSocket.
+  A protected enrolled console origin supplies the exact scheme/host/port expected by login and every write;
+  absent enrollment retains the existing `http://<Host>` rule. Host must match that canonical origin and no
+  forwarded header is trusted. This lets a public HTTPS console work without a request-chosen scheme exception.
 - **Fresh authority, in two distinct browser contexts**:
   - A new same-origin console launch tab makes a guarded operator POST. The console owns the original live session,
     exact immutable target and a bounded random public intent ID. A random tab proof stays in that tab's console
@@ -16050,6 +16056,13 @@ is introduced. The design generator owns the published card before the console u
   change, read-only, changed enrollment, console restart or unreadable control authority stops input/output and
   detaches within that lease. One browser lease covers each immutable sandbox incarnation across tabs/processes;
   stale cleanup cannot release a newer owner. There is no automatic reconnect or input replay.
+  The broker samples Redis time before each current registration/session/token/enrollment judgment and immediately
+  captures its primitive `observedAt` for that operation. `authorizeIntent` uses Redis `SET ... PXAT` and
+  `renewAuthorization` uses `PEXPIREAT` at `observedAt + authMs`, capped by the exported `GATEWAY_AUTH_MS`. The Lua
+  command refuses future or already-expired observations and renewal requires the existing owner key. A successful
+  write arriving after an RPC timeout cannot buy five fresh seconds; an overlapping observation cannot replace the
+  original operation's instant. Gateway receipt deadlines additionally subtract control latency using monotonic
+  request-start time, so a delayed remaining-TTL response cannot revive expired I/O.
   `PI_SANDBOX_IDLE_MINUTES` additionally bounds browser time without input, with zero retaining its disabled meaning.
   This is stronger than bash's prompt-only `TMOUT`; output and heartbeat do not count as input. Closing a browser
   terminal only detaches. The existing monitor, retained workspace and separately confirmed End action own lifecycle.
@@ -16075,13 +16088,18 @@ is introduced. The design generator owns the published card before the console u
   and retain the native command. The gateway supports keyboard focus, readable status/labels, the maintained
   terminal's accessibility mode, both themes and full exceptional-state guidance. No JavaScript leaves a truthful
   fallback and never consumes authority. It does not expose terminal bytes to console live panels.
-- **Evidence required before claiming built**: first measure detach, abrupt loss, `StdinOnce`, native simultaneous
-  attachment, Ctrl-D/exit and external End on live Docker and rootless Podman. Prove the two-origin round trip under
-  actual Strict cookies, COOP and both CSPs. The terminal library's pinned release must render under its actual
-  gateway CSP; a narrow gateway-only inline-style allowance may be used for verified renderer-generated styles,
-  never inline scripts, eval, a CDN or changes to console CSP. Exercise terminal editing/control/resize/Unicode and
-  alternate-screen behavior, hostile output, all admission counterexamples, and final styled reference-versus-live
-  screenshots across themes/roles/widths after the last change. Unit tests alone cannot establish runtime detach.
+- **Measured evidence**: `.github/scripts/sandbox-gateway-runtime-smoke.mjs` verifies detach, abrupt loss,
+  `StdinOnce`, native simultaneous PTY attachment, Ctrl-D/exit, idle and external End on live Docker and rootless
+  Podman. `.github/scripts/sandbox-gateway-browser.mjs --tls` proves the distinct-site round trip with actual Secure
+  Strict cookies, COOP and both CSPs. Its test-only TLS fronts preserve the application Host/Origin guards, trust
+  only a freshly generated certificate's SPKI and reject an unrelated certificate; system trust is untouched.
+  The exact-pinned renderer and fit addon are the gateway manifest's development dependencies, bundled locally by
+  `buildGatewayAssets`, never console dependencies. The released xterm artifact generates inline styles, so only
+  gateway `style-src` has that narrow allowance; scripts still require self and no eval/CDN. The browser oracle
+  executes shell editing/control/resize/Unicode, alternate-screen restoration, hostile output, themes/widths,
+  roles/no-script/phone and live revocation. Final styled published-source reference comparisons and screenshot
+  inspection remain mandatory after the last relevant change; the remote artifact was inaccessible, so no direct
+  remote comparison is claimed. Unit tests alone cannot establish runtime detach or visual agreement.
 - **Accepted residuals**: the runtime socket retains root or rootless-account authority if the gateway is
   compromised; a second listener and terminal parser add attack surface. The bootstrap fragment has a brief secret
   lifetime in browser history/extensions before removal. A fully compromised browser/operator credential or shared
@@ -16123,7 +16141,7 @@ is introduced. The design generator owns the published card before the console u
     - The remote command must carry the deployment's sandbox settings. `pi-dispatch sandbox` reads them from its own
       environment for ordinary invocations, with the explicit trusted deployment-aware path added in #771 (`OQ-038`), and a non-interactive SSH command usually has
       neither the settings nor the CLI on its `PATH`.
-    - How the remote command loads them is the build's to decide and measure, on a podman run as well as a local one.
+    - The opener uses absolute Node/CLI paths and the explicit trusted `--deployment` loader implemented and measured by #771, on local and Podman runs.
   - **A prepared sandbox is a kept workspace with no run.**
     - The worker clones on the host, with its git hardening, as it clones for a job. It then drops the credential and
       keeps the directory beside retained runs under an `sb-` id, with a manifest naming the image of the trigger it
@@ -17063,3 +17081,8 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-01 (#775, endpoint occupancy) | `DES-OPERATOR-CONSOLE` AMENDED: versioned host observations display the shared in-process endpoint map and last-good file, through bounded page-only reads and existing Pulse slot marks. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-ADMIN-VIA-PI-EXTENSION`, admission, release, CSP, shared tokens and stylesheet are UNCHANGED, checked. |
 | 2026-11-01 (#775, three publication channels) | `DES-OPERATOR-CONSOLE` reviewed with all three bounded publication channels together, preserving receiver disclosures and identities, hook history and endpoint fleet/host scopes with explicit unknown states. `DES-ADMIN-VIA-PI-EXTENSION`, shared tokens/styles, pending-notification-store rejection, fleet lease enforcement and all runtime decisions UNCHANGED, checked. |
 | 2026-11-02 (#753, #754, decision before implementation) | NEW `DES-SANDBOX-GATEWAY-ATTACH-ONLY`, ADOPTED with written pre-build threat model and counterexamples. `DES-OPERATOR-CONSOLE` and `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL` narrowly AMENDED for a separate-origin gateway; native opener remains supported. Records corrected public-intent/tab-proof/one-use-handoff/cookie-bound grant protocol, same-token step-up, existing-TTY attach only, exclusive ownership, bounded live authorization, idle/detach, maintained renderer/CSP and runtime/browser evidence required before Built. Console CSP/pty/WebSocket/runtime exclusion, `DES-SANDBOX-IS-A-FRESH-CONTAINER`, paid job/session/recovery/outbox decisions, zero-touch causes and all named constitutional constraints UNCHANGED, checked. No gateway code or fresh acceptance is claimed. |
+| 2026-11-02 (#753, retained draft-answer count) | `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` implemented view now renders its retained confirmed-draft count on desktop and phone, including edited answers and explicit partial/unavailable states; published-source generator/cards and ledgers reconcile to shipped #772. `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL` future loader prose reconciled to #771. Shared visual tokens/styles, human-touch semantics, privacy/roles, native opener/preparation, gateway decision/threat model and all paid/container contracts UNCHANGED, checked. |
+| 2026-11-02 (#754, canonical HTTPS origin review) | Gateway enrollment also supplies the exact canonical console origin to login/write guards, so public HTTPS enrollment cannot silently become unusable behind a TLS proxy. Host must match, same-origin fetch-site remains required, and no forwarded/request-selected origin is trusted. Absent enrollment retains the existing HTTP-Host rule. Console CSP, cookie shape, role/person/read-only/JSON guards and all unrelated contracts UNCHANGED, checked. |
+| 2026-11-02 (#754, HTTPS session-cookie review) | `DES-OPERATOR-CONSOLE` narrows its measured WebKit plain-cookie exception to HTTP-loopback and adds Secure under protected canonical HTTPS enrollment. Reusing the exact origin already judged for this request avoids a second configuration read during login and trusts no forwarding header. Cookie name/host/path and expiry identity, console CSP/process boundary, loopback behavior, gateway authority and native/paid/container decisions UNCHANGED, checked. |
+| 2026-11-02 (#754, measured implementation) | `DES-SANDBOX-GATEWAY-ATTACH-ONLY` is IMPLEMENTED with source evidence for live Docker/rootless-Podman PTY/detach/lifecycle measurements and genuine-HTTPS distinct-site browser controls, Secure cookies, themes/widths/roles/no-script and hostile-output refusals. The renderer-only gateway style allowance follows the exact released artifact; final published-source screenshot comparisons remain required, with no claim of direct inaccessible remote-artifact comparison. Console CSP/process separation, native opener, accepted runtime/browser/Valkey residuals, zero-touch and all paid/container decisions UNCHANGED, checked. |
+| 2026-11-02 (#754, delayed-authorization correction) | `DES-SANDBOX-GATEWAY-ATTACH-ONLY` records operation-local primitive Redis observations before current identity/registration judgment, explicit observedAt protocol arguments and absolute PXAT/PEXPIREAT authority expiry. A timed-out command executing late cannot turn an old judgment into five fresh seconds, and concurrent time reads cannot shift another operation forward. Future/expired observations refuse and missing owner authority stays absent. Gateway monotonic receipt deadlines, grant/window ownership, console idle/CSP and all native/paid/container decisions UNCHANGED, checked. |

@@ -88,7 +88,7 @@
       "shows": "What opens"
     },
     {
-      "el": "Under **Without a run**, enter a repository, select a trigger and host, and enter HEAD (the default branch), a branch, tag, commit SHA or `pr:42`. Choose that host\u2019s retention or pin window, then Review settings.",
+      "el": "Under **Without a run**, enter a repository, select a trigger and host, and enter HEAD (the default branch), a branch, tag, commit SHA or `pr:42`. Choose that host’s retention or pin window, then Review settings.",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/sandboxes.mjs#sandboxNew",
@@ -132,7 +132,7 @@
       "shows": "Open now"
     },
     {
-      "el": "**Kept workspaces** shows each host\u2019s published list, pin and deadline. Pin previews the host\u2019s configured pin window. Stale, missing, unreadable and truncated publications are stated; none means an empty fleet.",
+      "el": "**Kept workspaces** shows each host’s published list, pin and deadline. Pin previews the host’s configured pin window. Stale, missing, unreadable and truncated publications are stated; none means an empty fleet.",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/sandboxes.mjs#sandboxKept",
@@ -143,7 +143,7 @@
       "shows": "Kept workspaces"
     },
     {
-      "el": "Fleet\u2019s host page edits a credential-free SSH target and explicit executable/deployment paths. Download and inspect the file, then import it into the opener on the person\u2019s computer. A link cannot enroll a host or change this config.",
+      "el": "Fleet’s host page edits a credential-free SSH target and explicit executable/deployment paths. Download and inspect the file, then import it into the opener on the person’s computer. A link cannot enroll a host or change this config.",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/sandbox-host-editor.mjs#sandboxHostEditor",
@@ -154,15 +154,15 @@
       "shows": "Kept workspaces"
     },
     {
-      "el": "**In this browser** is an off/proposed note linking #754. It opens no terminal, pty or WebSocket.",
+      "el": "**In this browser** explains the optional separate gateway, off by default and enrolled per host. **Open in browser** is offered only for an existing shell on an enrolled host, to a writable operator session above phone width. Sign in again with the same token for each attachment; the terminal opens at the gateway’s own hostname. The console opens no shell or WebSocket.",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/sandboxes.mjs#sandboxBrowser",
       "panel": "p-sb-browser",
       "golden": [
-        "panels/sandboxes-populated.operator"
+        "panels/sandboxes-browser-enabled.operator"
       ],
-      "shows": "needs a decision"
+      "shows": "separate gateway"
     },
     {
       "el": "Host-published kept workspaces with their identity, venue, deadline, pin, manifest generation and shell capability; a separate, credential-free host settings projection supports exact previews.",
@@ -209,7 +209,7 @@
       "shows": "Without a run"
     },
     {
-      "el": "The container boundary is the existing sandbox launcher, with read-only `/job`, a non-root user, no capabilities, no new privileges, resource limits and the host\u2019s job network. The original run venue must support reopening; openshell and openshell-bind do not.",
+      "el": "The container boundary is the existing sandbox launcher, with read-only `/job`, a non-root user, no capabilities, no new privileges, resource limits and the host’s job network. The original run venue must support reopening; openshell and openshell-bind do not.",
       "kind": "readme",
       "status": "real",
       "source": "worker/src/sandbox.mjs#buildSandboxRunArgs",
@@ -220,7 +220,7 @@
       "shows": "Without a run"
     },
     {
-      "el": "A kept workspace holds issue text and stays on its host. Sweeping, pinning and idle logout keep their existing lifecycle rules. Retention defaults to 24 hours, pinning to seven days and idle logout to 30 minutes, but the screen reads the selected host\u2019s actual configuration.",
+      "el": "A kept workspace holds issue text and stays on its host. Sweeping, pinning and idle logout keep their existing lifecycle rules. Retention defaults to 24 hours, pinning to seven days and idle logout to 30 minutes, but the screen reads the selected host’s actual configuration.",
       "kind": "readme",
       "status": "real",
       "source": "worker/src/sandbox-store.mjs#sandboxDeadline",
@@ -242,21 +242,21 @@
       "shows": "What opens"
     },
     {
-      "el": "The browser-terminal rejection remains while #754 / OQ-050 is open.",
+      "el": "#754 / OQ-050 admits only the separately hosted, ticketed attachment. The gateway cannot start a container, choose a command or attach elsewhere. Its single-use 60-second grant stays server side; one browser attachment is admitted per sandbox incarnation, and terminal bytes are never recorded.",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/console/panels/sandboxes.mjs#sandboxBrowser",
       "panel": "p-sb-browser",
       "golden": [
-        "panels/sandboxes-populated.operator"
+        "panels/sandboxes-browser-enabled.operator"
       ],
-      "shows": "needs a decision"
+      "shows": "one browser window"
     },
     {
       "el": "The pictured hosts, runs, paths, image tag and times are sample data.",
       "kind": "sample",
       "status": "illustrative",
-      "reason": "The card fixture is invented; production reads each host\u2019s actual publication and manifest. The browser terminal is a separate #754 proposal and stays an inert note."
+      "reason": "The card fixture is invented; production reads each host’s actual publication and manifest. Browser enrollment is off by default, with one sample enrolled host in this reference."
     }
   ]
 }

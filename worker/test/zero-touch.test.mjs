@@ -24,6 +24,32 @@ test("independent distinct-run recount, exclusive earliest causes and duplicate 
 	assert.equal(result.projects[0].repositories[0].touched, 2);
 });
 
+test("draft answers recount distinct answered workloads within the selected project, repository and covered window", () => {
+	const otherScope = "b".repeat(64);
+	const drafted = (runId, daysAgo = 1, extra = {}) => event(runId, "question-answer", daysAgo, { answerSource: "draft", draftRunId: `helper-${runId}`, ...extra });
+	const asDrafted = drafted("as-drafted");
+	const records = [
+		record("as-drafted", 1, { touches: [asDrafted] }), record("as-drafted"), record("edited", 12),
+		record("offered"), record("queued-unsent"), record("send-refused"), record("manual"), record("wrong-cause"),
+		record("other-repository", 1, { touchScopeId: otherScope }), record("other-project", 1, { project: "web", touchScopeId: otherScope }), record("old-source", 40),
+		buildRecord({ job: { id: "helper", data: { kind: "github", purpose: "answer-draft", answerDraft: { runId: "offered", ruleId: "help" } } }, result: { outcome: "completed" }, endedAt: new Date(NOW - DAY).toISOString(), touchTracking: true }),
+	];
+	const events = [asDrafted, asDrafted, drafted("edited", 11), drafted("other-repository", 1, { scopeId: otherScope }), drafted("other-project", 1, { scopeId: otherScope, project: "web" }), drafted("old-source"), drafted("helper"),
+		event("manual", "question-answer", 1, { answerSource: "console" }), event("wrong-cause", "steer", 1, { answerSource: "draft" })];
+	const options = { records, events };
+	const all = compute(options);
+	assert.deepEqual([all.totals.runs, all.totals.touched, all.totals.draftAnswers], [9, 6, 4]);
+	assert.equal(all.totals.rate, 6 / 9 * 100, "draft assistance does not remove a person's confirmation from the touch rate");
+	assert.deepEqual(compute({ ...options, project: "api" }).totals.draftAnswers, 3);
+	assert.deepEqual(compute({ ...options, project: "api", scopeId: SCOPE }).totals.draftAnswers, 2);
+	assert.equal(compute({ ...options, windowDays: 7 }).totals.draftAnswers, 3, "the denominator's source-run end, not a later answer's date, selects the window");
+	const retained = compute({ ...options, coverage: { fromMs: NOW - 3 * DAY } });
+	assert.equal(retained.coverage.partial, true);
+	assert.equal(retained.totals.draftAnswers, 3, "only the covered suffix is counted, never the missing older history");
+	assert.equal(compute({ records: [record("offered"), record("queued-unsent"), record("send-refused")], events: [] }).totals.draftAnswers, 0, "offering or attempting a send is no evidence that the source run was answered");
+	assert.equal(compute({ records: [record("wrong-cause")], events: [event("wrong-cause", "steer", 1, { answerSource: "draft" })] }).totals.draftAnswers, 0, "an unrelated intervention cannot manufacture an answered draft");
+});
+
 test("a real project named unassigned cannot absorb runs without a project", () => {
 	const records = [record("missing", 1, { project: null }), record("named", 1, { project: "unassigned", touchScopeId: "b".repeat(64) })];
 	const events = [event("missing", "steer"), event("named", "rerun", 1, { project: "unassigned" })];

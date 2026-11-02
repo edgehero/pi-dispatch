@@ -547,8 +547,49 @@ The threat model, and what answers each part:
   row after the one they changed. Nothing vouches for the newest row, and an edit to it is never seen: the next row
   the console writes links to the newest row as it then is on disk, edit included. A last line cut short by a crash
   leaves the row before it not verified.
-- **No terminal in the browser.** The run page shows the `pi-dispatch sandbox <job>` command to copy; the console
-  never starts a container or a shell.
+- **No terminal in the console process.** The native opener and `pi-dispatch sandbox <job>` command remain available.
+  An optional, separately enrolled [sandbox browser gateway](#the-sandbox-browser-gateway) may attach to an existing
+  sandbox through its own process and hostname. The console gains no runtime socket, pty or WebSocket and never starts
+  a container or shell; its CSP remains unchanged.
+
+## The sandbox browser gateway
+
+The optional [gateway](docs/sandbox-gateway.md) is disabled until an operator enrolls and starts it on the sandbox
+host. It uses a separate hostname and tab; another port on the console hostname would receive the host-only console
+cookie and is refused. Public origins require HTTPS. The explicit local development exception uses distinct
+loopback hosts. Protected enrollment supplies the exact canonical console Origin for login and writes, matching
+Host and the existing same-origin fetch-site policy. Protected HTTPS enrollment also adds Secure to the host-only
+console session cookie; the named HTTP-loopback exception retains its measured compatibility. No forwarded header
+or request-selected origin can select either authority or cookie security.
+
+Only a person in the original operator session and console tab can authorize an opening, after freshly presenting
+that session's same operator token. A one-use handoff verifier binds the gateway's own HttpOnly browser cookie;
+public request IDs cannot prebind another browser. The subsequent attachment grant stays server-side, lives at most
+60 seconds, and binds that browser, gateway, host and immutable tracked container/nonce. Viewer, agent, tool and
+read-only access cannot mint it. The gateway receives neither a console session ID nor the operator token.
+
+The gateway's runtime methods inspect, attach and resize that exact existing local/Podman sandbox TTY. They cannot
+start/create/restart/exec/stop containers or proxy arbitrary runtime operations. One browser connection is admitted
+per sandbox incarnation, with bounded protocol/input/output/rates/backpressure and no automatic reconnect or replay.
+The console rechecks live authority without extending idle time; revoke, sign-out, generation/role/enrollment changes,
+restart or unreadable authority stops terminal I/O within its authorization lease of at most five seconds. Browser
+input-idle expiry follows `PI_SANDBOX_IDLE_MINUTES`, zero disabling it; shell prompt `TMOUT` remains separate.
+Close and failures detach, leaving the shell/workspace. The existing separately confirmed End action owns stopping it.
+
+The maintained terminal renderer and assets are served by the gateway, under its own CSP. Only renderer-generated
+styles receive its narrow inline-style allowance; scripts remain self-hosted without inline/eval/CDN authority.
+Terminal output grants no clipboard-write, title, link-navigation, HTML or file-transfer capability. Terminal input
+and output are not recorded or sent to console panels, history, logs or audit. Lifecycle audit distinguishes an
+opening intent, a successful attachment and its ending; interrupted processes can leave explicitly recovered,
+unproven endings rather than a false claim that a sandbox stopped. Phones retain the native-command route; the
+width policy is a supported layout, not cryptographic device identification.
+
+These limits do not narrow the runtime socket's permissions. A compromised Docker gateway still has root-equivalent
+host reach, and rootless Podman still grants the runtime account's reach. Shared Valkey control remains trusted.
+A complete browser compromise or stolen operator credential can defeat step-up, and revocation is bounded rather
+than instantaneous. The bootstrap verifier briefly traverses a URL fragment before removal; it cannot attach by
+itself, but browser history/extensions may observe it during that interval. Enrollment explicitly accepts these
+residuals. The native opener, job isolation/credentials, paid admission and person-confirmed answer boundary remain.
 
 ## What is NOT defended (v1)
 

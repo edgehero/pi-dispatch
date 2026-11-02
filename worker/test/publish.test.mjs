@@ -46,6 +46,7 @@ const MIRRORED_DEPLOY = [
 	"pi-dispatch-valkey.container",
 	"pi-dispatch-valkey.network",
 	"receiver.service",
+	"sandbox-gateway.service",
 	"worker-env-wrapper.cmd",
 	"worker-env-wrapper.sh",
 	"worker.service",
@@ -155,7 +156,7 @@ test("receiver's caret worker range actually SATISFIES the in-repo worker versio
 	}
 });
 
-test("every worker subpath the receiver and the console import EXISTS in the worker's exports map", () => {
+test("every worker subpath the receiver, console and gateway import EXISTS in the worker's exports map", () => {
 	// The workspaces are symlinked, so in this repo a subpath import resolves against the on-disk worker
 	// and a missing exports entry can never fail a test here: it fails on the first REAL npm install of a
 	// published receiver, at module load, on the operator's machine. The map is hand-kept and the imports
@@ -165,7 +166,7 @@ test("every worker subpath the receiver and the console import EXISTS in the wor
 	const exportsMap = JSON.parse(readFileSync(join(WORKER_DIR, "package.json"), "utf8")).exports;
 	const importRe = /@edgehero\/pi-dispatch\/([A-Za-z0-9-]+)/g;
 	const used = new Map(); // subpath -> first file seen importing it
-	for (const dir of [join(RECEIVER_DIR, "src"), join(REPO_ROOT, "admin", "src")]) {
+	for (const dir of [join(RECEIVER_DIR, "src"), join(REPO_ROOT, "admin", "src"), join(REPO_ROOT, "gateway", "src")]) {
 		// Recursive, so the scan keeps protecting the day either src/ grows a subdirectory.
 		for (const name of readdirSync(dir, { recursive: true })) {
 			if (!/\.(mjs|ts)$/.test(name)) continue;
@@ -231,7 +232,7 @@ test("npm pack (receiver): ships src (cli.mjs included) — and never test/", PA
 
 test("drift: the old @pi-dispatch/worker specifier appears nowhere in receiver/src or admin/src", () => {
 	const offenders = [];
-	for (const dir of [join(RECEIVER_DIR, "src"), join(REPO_ROOT, "admin", "src")]) {
+	for (const dir of [join(RECEIVER_DIR, "src"), join(REPO_ROOT, "admin", "src"), join(REPO_ROOT, "gateway", "src")]) {
 		for (const rel of readdirSync(dir, { recursive: true })) {
 			if (!/\.(mjs|ts)$/.test(rel)) continue;
 			if (readFileSync(join(dir, rel), "utf8").includes("@pi-dispatch/worker")) offenders.push(join(dir, rel));

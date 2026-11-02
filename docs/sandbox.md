@@ -392,4 +392,4 @@ The CLI starts a private detached monitor. Its short-lived Valkey lease publishe
 
 Return with `pi-dispatch sandbox <id> --attach`. A shell opened before tracking was installed names the raw Docker/Podman attach remedy. Missing or expired tracking does not prove a container disappeared. Kept inventories show their publication time and distinguish offline, stale, incomplete and unreadable hosts from hosts reporting no workspace.
 
-The browser terminal remains off and is decided separately in #754. No gateway, browser PTY or WebSocket is installed by this feature.
+The optional [browser gateway](sandbox-gateway.md), adopted in #754, attaches to an already-open shell through a separate hostname and process. It is off until enrolled and started by hand. The native opener and sandbox preparation install no gateway or browser transport; Open in Terminal and copyable commands remain supported.

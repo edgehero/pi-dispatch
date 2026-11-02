@@ -12,10 +12,11 @@
     "image/runner",
     "worker",
     "receiver",
-    "admin"
+    "admin",
+    "gateway"
   ],
   "scripts": {
-    "test": "node --test \"image/runner/test/*.test.mjs\" \"worker/test/*.test.mjs\" \"receiver/test/*.test.mjs\" \"admin/test/*.test.mjs\""
+    "test": "node --test \"image/runner/test/*.test.mjs\" \"worker/test/*.test.mjs\" \"receiver/test/*.test.mjs\" \"admin/test/*.test.mjs\" \"gateway/test/*.test.mjs\""
   },
   "overrides": {
     "@earendil-works/pi-agent-core": "1.4.0",

@@ -16,7 +16,7 @@ export function zeroTouchFixture(now = NOW) {
     { scopeId: digest(2), name: "acme/api", target: "acme/api", project: "api", runs: 39, touched: 12, rate: 12 / 39 * 100, previousRate: 42, deltaPoints: -11, streakDays: 0, waitingNow: 1, topCause: "question-answer", causes: cs([9, 2, 1, 0, 0, 0]) },
     { scopeId: digest(22), name: "acme/api-docs", target: "acme/api-docs", project: "api", runs: 25, touched: 1, rate: 4, previousRate: 9, deltaPoints: -5, streakDays: 12, waitingNow: 0, topCause: "rerun", causes: cs([0, 0, 1, 0, 0, 0]) },
   ];
-  return { nowMs: now, windowDays: 30, coverage: { fromMs: now - 90 * DAY, requestedFromMs: now - 30 * DAY, partial: false, reasons: [] }, totals: { runs: 214, touched: 38, rate: 38 / 214 * 100, stopped: 2, waitingHours: 41, medianWaitMs: 34 * 60000, pending: 1, waitingNow: [{ runId: "gh-2f6a", parkedAt: now - 26 * 60000 }], draftAnswers: 0, deltaPoints: -6 },
+  return { nowMs: now, windowDays: 30, coverage: { fromMs: now - 90 * DAY, requestedFromMs: now - 30 * DAY, partial: false, reasons: [] }, totals: { runs: 214, touched: 38, rate: 38 / 214 * 100, stopped: 2, waitingHours: 41, medianWaitMs: 34 * 60000, pending: 1, waitingNow: [{ runId: "gh-2f6a", parkedAt: now - 26 * 60000 }], draftAnswers: 6, deltaPoints: -6 },
     trend: [31, 30, 28, 24, 23, 21, 19, 18].map((rate, i) => ({ atMs: now - (7 - i) * 7 * DAY, rate, runs: 214, touched: Math.round(rate / 100 * 214), partial: false })), projects, causes: cs([17, 5, 7, 5, 3, 1]), touchedRunIds: projects.flatMap((p) => p.touchedRunIds),
     grouping: { enabled: true, pending: 0, unassigned: 1, state: "ready" }, ungroupedRunIds: ["gh-ungrouped"], groups: [
       { id: "a".repeat(31) + "1", name: "Test command", repo: "acme/api", project: "api", count: 6, runIds: ["gh-71c2", "gh-6a0e", "gh-5d19"], status: "open", triggerIndex: 2 },
@@ -38,6 +38,7 @@ export const ZERO_TOUCH_DRAW = Object.freeze({
   "zero-touch-populated.viewer": () => draw({ role: "viewer" }),
   "zero-touch-readonly.operator": () => draw({ readOnly: true }),
   "zero-touch-empty.viewer": () => draw({ role: "viewer", change: (r) => { r.projects = []; r.groups = []; r.fixes = []; r.totals = { runs: 0, touched: 0, rate: null, waitingHours: 0 }; r.causes = cs([0, 0, 0, 0, 0, 0]); r.trend = []; } }),
+  "zero-touch-no-drafts.viewer": () => draw({ role: "viewer", change: (r) => { r.totals.draftAnswers = 0; } }),
   "zero-touch-unavailable.operator": () => draw({ raw: null }),
   "zero-touch-partial.operator": () => draw({ query: "days=90", change: (r) => { r.windowDays = 90; r.coverage = { fromMs: NOW - 20 * DAY, partial: true, reasons: ["touch-tracking-started"] }; r.totals.deltaPoints = null; r.trend = r.trend.map((v, i) => ({ ...v, partial: i < 5 })); } }),
   "zero-touch-observing.operator": () => draw({ change: (r) => { r.grouping = { enabled: true, state: "pending", pending: 1, unassigned: 2 }; r.groups[0].name = null; r.fixes[0].partial = true; r.fixes[0].subsequentRuns = 0; } }),

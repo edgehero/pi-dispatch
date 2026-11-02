@@ -758,6 +758,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   // Private workspace and opener configuration reads never join /api/state or a viewer's shared load.
   if ((who?.role === "operator" || who?.live === true && who?.role === undefined) && ["sandboxes", "run", "host", "trigger"].includes(name) && deps.sandboxes) {
+    if (["sandboxes", "run"].includes(name) && typeof deps.gatewayView === "function") {
+      try { data.browserGateways = await deps.gatewayView(); } catch { data.browserGateways = { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." }; }
+    }
     try { const hosts = deps.sandboxes.hosts(); data.sandboxHosts = hosts.config ?? null; data.sandboxHostsProblem = hosts.refusal ?? null; } catch { data.sandboxHosts = null; data.sandboxHostsProblem = "Terminal host configuration could not be read. Inspect its owner, permissions and format."; }
     if (name === "sandboxes") {
       try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }

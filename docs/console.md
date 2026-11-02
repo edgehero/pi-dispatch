@@ -247,7 +247,10 @@ install --console` ([above](#keep-it-running-as-a-service)).
 
 ## Sessions
 
-Signing in sets one cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`). The theme button sets a second one,
+Signing in sets one host-only cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`, `Path=/`). A protected HTTPS console
+origin in [gateway enrollment](sandbox-gateway.md) adds `Secure`; HTTP-loopback keeps its existing browser
+compatibility. Proxy headers alone cannot change this setting. Sign-out expires the same cookie in either case.
+The theme button sets a second one,
 `pd_theme`, which holds only your theme choice and is no part of a session ([Look and theme](#look-and-theme)). A
 session ends:
 
@@ -1719,8 +1722,18 @@ container and shell nonce; the terminal process closes it and acknowledges. The 
 acknowledgement is explicitly ambiguous and asks you to refresh before retrying. The short shell registration expires
 if its terminal stops answering; expiry alone does not prove the container stopped. Runtime-read failures and kept-network/cleanup failures appear as actionable host inspection notices, with an explicit warning if those notices could not be read. The console neither asks Docker for its list nor observes what is typed.
 
-The browser-terminal panel is an off/proposed note linking [#754](https://github.com/edgehero/pi-dispatch/issues/754).
-The console obtains no pty or WebSocket and never starts a shell or container itself.
+**Open in browser** is an additional route for an already running, registered shell when its host's separate gateway
+is enrolled. It opens a new tab and asks for this sign-in's same operator token again on the console origin. The
+single-use attachment grant lasts 60 seconds and is bound to the original tab, operator session, gateway browser
+cookie and exact sandbox incarnation. Viewers, agents and read-only consoles cannot authorize it; windows 760 pixels
+wide or narrower retain the native command. Closing the browser detaches and keeps the sandbox. **End this shell**
+remains a separate confirmed action.
+
+Gateway enrollment is hand-owned, off by default, and separate from the native opener's host import. It requires a
+different hostname, rather than another port on the console hostname, and HTTPS for public origins. The console
+obtains no pty, runtime socket or WebSocket and retains its CSP; the gateway serves its own terminal library and
+attaches to the existing TTY. It never starts a shell/container. See [Sandbox browser gateway](sandbox-gateway.md)
+for installation, configuration, revocation/idle behavior and the accepted runtime-socket and bootstrap-fragment risks.
 
 ## Live updates
 
@@ -1937,6 +1950,12 @@ through the same code, so the two never disagree about what is waiting.
 | `PI_CONSOLE_IDLE_MINUTES` | 60 | Idle limit of a session, 5 to 1440. |
 | `PI_CONSOLE_MAX_HOURS` | 12 | Absolute limit of a session, 1 to 168. |
 | `PI_CONSOLE_MAX_STREAMS` | 4 | Live pages one token may hold open across its sign-ins, 1 to 32. The whole console holds at most 32, 8 of them kept for operators. |
+
+`PI_SANDBOX_GATEWAYS_FILE` selects the protected hand-owned gateway enrollment file (default
+`<deployment>/sandbox-gateways.json`); an absent file disables browser attachment. This file is not the native opener's
+`PI_SANDBOX_HOSTS_FILE`. Its canonical console origin is also the exact Origin required for login and writes,
+with matching Host and the existing same-origin fetch-site policy. No forwarded header establishes that authority.
+Without enrollment, the existing `http://<Host>` rule remains. See the [gateway reference](sandbox-gateway.md).
 
 The console also reads, from the same deployment, `VALKEY_URL` (the queues, hosts and run mirror), `PI_LOGS_DIR`
 (this host's run records and the audit log), `PI_PAUSE_WINDOWS_FILE`, the files the configuration page shows and

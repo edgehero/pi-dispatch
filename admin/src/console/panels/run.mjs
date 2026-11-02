@@ -1,5 +1,5 @@
 import { answererRun, standingAnswerEditor, offeredAnswerDraft } from "./answerer.mjs";
-import { sandboxLinks } from "../sandbox-links.mjs";
+import { sandboxLinks, sandboxBrowserLink } from "../sandbox-links.mjs";
 import { modelRolesTelemetryOf } from "@edgehero/pi-dispatch/run-history";
 import { modelChoiceSentence, providerFailureSentence } from "../../model-words.mjs";
 /**
@@ -518,7 +518,7 @@ function chatDrawsSteer(view) {
 
 /**
  * The run detail's operator actions (issue #642): the command that reopens the run's retained workspace on the host
- * (`pi-dispatch sandbox <jobId>`, shown to copy and never run: a browser terminal was rejected, DES-OPERATOR-CONSOLE),
+ * (`pi-dispatch sandbox <jobId>`, shown to copy; an enrolled separate gateway may attach to an existing shell, #754),
  * and the re-run form, whose preview shows the reserve the worker will hold. A job id outside the run-id charset gets
  * neither: it could not be typed back as one argument.
  *
@@ -571,7 +571,8 @@ function sandboxLine(r, view) {
       if (typeof check.reason === "string") return html`<p class="note">Its workspace is ${check.reason}.</p>`;
     }
   }
-  return html`<p>Open its retained workspace on the host.</p>${view.role === "operator" && r.host ? sandboxLinks({ id: r.jobId, host: r.host, config: view.data?.sandboxHosts }) : ui.cmd(["pi-dispatch", "sandbox", r.jobId], { host: `Run it on ${r.host ?? "its host"}.` })}<a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ id: r.jobId, ...(r.host ? { host: r.host } : {}) })}`}">Open Sandboxes</a>`;
+  const liveShell = view.data?.browserGateways?.sessions?.find((s) => s.id === r.jobId && s.host === r.host);
+  return html`<p>Open its retained workspace on the host.</p>${liveShell ? sandboxBrowserLink(view, liveShell) : null}${view.role === "operator" && r.host ? sandboxLinks({ id: r.jobId, host: r.host, config: view.data?.sandboxHosts }) : ui.cmd(["pi-dispatch", "sandbox", r.jobId], { host: `Run it on ${r.host ?? "its host"}.` })}<a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ id: r.jobId, ...(r.host ? { host: r.host } : {}) })}`}">Open Sandboxes</a>`;
 }
 
 /**

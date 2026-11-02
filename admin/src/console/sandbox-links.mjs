@@ -4,6 +4,14 @@ import { sandboxCommand } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
 
+/** Only already-registered shells on hand-enrolled hosts get a browser route; unopened workspaces never do. */
+export function sandboxBrowserLink(view, shell) {
+  if (view.role !== "operator" || view.readOnly || !view.data?.browserGateways?.enabledHosts?.includes(shell?.host)) return null;
+  if (!view.data.browserGateways.sessions?.some((s) => s.host === shell.host && s.id === shell.id && s.containerId === shell.containerId && s.nonce === shell.nonce)) return null;
+  const href = `/sandbox/gateway/launch?${new URLSearchParams({ host: shell.host, id: shell.id })}`;
+  return html`<a class="btn btn--sm sandbox-browser sandbox-opener" href="${href}" target="_blank" rel="noopener noreferrer">${ui.icon("terminal", { size: "sm" })}Open in browser</a>`;
+}
+
 export function sandboxLinks({ id, host, verb = "open", config = null, compact = false } = {}) {
   let href;
   try { href = buildSandboxOpenUrl({ verb, id, host }); } catch { return html`<p class="card__sub">The sandbox id or host is not usable. Inspect this workspace on its host.</p>`; }

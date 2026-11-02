@@ -10,6 +10,7 @@ import { SANDBOX_CSS } from "../src/console/sandbox-css.mjs";
 import { PAGES } from "../src/console/pages.mjs";
 import { PAGE_CSS, pageCss } from "../src/console/page-css.mjs";
 import { chromeLaunchArgs } from "../../.github/scripts/console-width-check.mjs";
+import { sandboxBrowserLink } from "../src/console/sandbox-links.mjs";
 
 test("both console browser checks keep the local Chrome sandbox and use the established CI startup flags without bypassing document security", () => {
   assert.deepEqual(chromeLaunchArgs(), ["--use-mock-keychain"]);
@@ -51,6 +52,23 @@ test("read-only operators keep terminal commands, but no server write forms; vie
   assert.doesNotMatch(readonly, /data-action=/); assert.match(readonly, /pi-dispatch-open:/);
   const viewer = await SANDBOX_DRAW["sandboxes-denied.viewer"]();
   for (const secret of ["gh-9575", "pi-dispatch-open:", "sandbox-hosts.json", "ops@mini1", "nodePath", "nonce"]) assert.equal(viewer.includes(secret), false, secret);
+});
+
+test("browser attachment is offered only for the exact live incarnation on an enrolled host; native routes remain", async () => {
+  const filled = await SANDBOX_DRAW["sandboxes-browser-enabled.operator"]();
+  const document = filled.split('id="p-sb-open" data-panel>')[1].split('</section>')[0];
+  assert.match(document, /href="\/sandbox\/gateway\/launch\?host=mini1&amp;id=gh-9575"/);
+  assert.match(document, /Open in browser/); assert.match(document, /pi-dispatch-open:/); assert.match(document, /Copy the command/);
+  for (const panel of ["p-sb-run", "p-sb-new", "p-sb-kept"]) assert.doesNotMatch(filled.split(`id="${panel}" data-panel>`)[1].split('</section>')[0], /sandbox\/gateway\/launch/, `${panel}: unopened workspace has no browser attach`);
+  for (const state of ["sandboxes-populated.operator", "sandboxes-browser-readonly.operator", "sandboxes-browser-unavailable.operator"]) assert.doesNotMatch(await SANDBOX_DRAW[state](), /href="\/sandbox\/gateway\/launch/);
+  const shell = { host: "mini1", id: "gh-9575", containerId: "a".repeat(64), nonce: "b".repeat(32) };
+  const view = { role: "operator", data: { browserGateways: { enabledHosts: ["mini1"], sessions: [shell] } } };
+  assert.match(String(sandboxBrowserLink(view, shell)), /noopener noreferrer/);
+  for (const changed of [{ ...shell, nonce: "c".repeat(32) }, { ...shell, containerId: "d".repeat(64) }, { ...shell, host: "build3" }]) assert.equal(sandboxBrowserLink(view, changed), null);
+  assert.equal(sandboxBrowserLink({ ...view, role: "viewer" }, shell), null);
+  assert.equal(sandboxBrowserLink({ ...view, role: "agent" }, shell), null);
+  assert.equal(sandboxBrowserLink({ ...view, readOnly: true }, shell), null);
+  assert.match(SANDBOX_CSS, /@media \(max-width: 760px\) \{ \.sandbox-opener, \.sandbox-browser \{ display: none !important; \} \}/);
 });
 
 test("host-derived windows are shown dynamically, failed reads stay unknown, unsupported venues never offer a shell", async () => {

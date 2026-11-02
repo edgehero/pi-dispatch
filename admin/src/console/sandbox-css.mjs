@@ -16,7 +16,7 @@ export const SANDBOX_CSS = `
 .sx-open__a { align-items: start; }
 .sx-ch > .cmd { margin-top: 8px; }
 .sx-ch details summary { cursor: pointer; }
-@media (max-width: 760px) { .sandbox-opener { display: none !important; } }
+@media (max-width: 760px) { .sandbox-opener, .sandbox-browser { display: none !important; } }
 
 .sx-tabs { margin: 0 0 var(--space-4); }
 .sx-tabs .count { background: var(--surface-3); color: var(--ink-muted); }

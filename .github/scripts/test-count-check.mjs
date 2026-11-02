@@ -24,7 +24,7 @@ import { spawn } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
-const DIRS = ["image/runner/test", "worker/test", "receiver/test", "admin/test"];
+const DIRS = ["image/runner/test", "worker/test", "receiver/test", "admin/test", "gateway/test"];
 
 /**
  * `worker/test/wiring.test.mjs` leaves a handle alive for ~30s, so at a 30s cap its FILE wrapper trips and

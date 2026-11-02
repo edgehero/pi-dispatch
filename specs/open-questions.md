@@ -2484,9 +2484,10 @@ adversarial passes did.
 
 ## OQ-050: A terminal in the browser for sandboxes, through a separate gateway
 
-- **Status**: **ADOPTED** (2026-11-02, issue #754), by the maintainer's explicit decision and approval of the reviewed
-  implementation plan. This records the answer before gateway code; it does not claim the gateway is built. The
-  decision issue's earlier hold is superseded by that approval; GitHub closure remains the final pull request's.
+- **Status**: **ADOPTED and IMPLEMENTED** (2026-11-02, issue #754), by the maintainer's explicit decision and approval
+  of the reviewed implementation plan. The answer/threat model was committed before gateway code; subsequent live
+  Docker/rootless-Podman and genuine-HTTPS browser evidence is recorded in `DES-SANDBOX-GATEWAY-ATTACH-ONLY`.
+  The decision issue's earlier hold is superseded by that approval; GitHub closure remains the final pull request's.
 - **Question**: Should a sandbox shell open inside the browser, through a process other than the console?
 - **Answer**: Adopt the separate, opt-in, attach-only gateway specified by `REQ-SANDBOX-BROWSER-GATEWAY`,
   `DES-SANDBOX-GATEWAY-ATTACH-ONLY` and `INT-SANDBOX-GATEWAY-CONTRACT`. It has its own process, hostname and tab;
@@ -2520,9 +2521,8 @@ adversarial passes did.
 
 ## OQ-051: Whether a model may answer a parked question with no person's confirm
 
-- **Status**: **OPEN** (2026-10-27, issue #753). Recorded with the proposal, before anything is built, so neither half
-  is decided by a build.
-- **Position today**: `REQ-PARKED-ANSWERER` proposes a draft only: a draft job classifies and drafts, and a person
+- **Status**: **OPEN** (2026-10-27, issue #753). Recorded before implementation; #772 implements drafting only. Unattended sending remains undecided and is not inferred from that build.
+- **Position today**: `REQ-PARKED-ANSWERER` implements draft-only assistance: a draft job classifies and drafts, and a person
   sends through the console's answer action. Two further modes were drawn in the design's first version and are
   **not** proposed (the `ParkedAnswerer` card in `design/` now shows sending without a person as one locked step, "Send without me"):
   - sending after a wait unless a person steps in;
@@ -2799,3 +2799,5 @@ adversarial passes did.
 | 2026-10-30 (#771) | OQ-038 AMENDED narrowly by #771: opener commands explicitly load a trusted deployment environment and re-execute with ambient capability overrides rejected; this does not change the TUI panel's own-environment limitation. OQ-050 UNCHANGED, checked: browser terminal remains open and rejected; no gateway, ticket, PTY or WebSocket is added to the console. |
 | 2026-11-01 (#775, hooks) | `OQ-034` AMENDED, stays ACCEPTED: hook results are logged and published for display; no decision reads an exit code. The new bounded display history is no pending notification store, transport, retry or delivery guarantee. Reopen conditions UNCHANGED, checked; `OQ-027` and `OQ-030` UNCHANGED, checked. |
 | 2026-11-02 (#753, #754, decision before implementation) | `OQ-050` ADOPTED by the maintainer and approved reviewed plan before gateway code. Records the separate-process/hostname attach-only decision, independent tab/handoff/browser-cookie proofs, fresh same-token step-up, 60-second one-use server-side grant, bounded revocation, native-opener preservation and accepted runtime-socket/bootstrap-fragment risks. GitHub closure remains the final pull request; no implementation acceptance is claimed. `OQ-051`, its person-confirmed answer boundary and every other open question UNCHANGED, checked. |
+| 2026-11-02 (#753, shipped-scope reconciliation) | `OQ-051` position reconciled to #772 already implementing draft-only assistance. Its OPEN status, requirements for unattended sending and person-confirmed answer boundary UNCHANGED, checked. `OQ-050` gateway adoption is unchanged by displaying already retained draft-answer counts. |
+| 2026-11-02 (#754, measured implementation) | `OQ-050` is ADOPTED and IMPLEMENTED: the recorded decision/threat model preceded gateway code, and subsequent live runtime and genuine-HTTPS distinct-site browser evidence is linked by permanent spec IDs. Final PR closure and final-commit checks remain separate from the adoption answer. Native opener, console CSP/process isolation, socket/renderer/browser/Valkey residuals, zero-touch causes and `OQ-051` human confirmation UNCHANGED, checked. |

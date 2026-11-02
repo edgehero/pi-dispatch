@@ -198,7 +198,7 @@ def spark():
 <p class="zt-spark__ax"><span>8 weeks ago, 31%</span><span>goal, dashed</span><span>now</span></p>"""
 
 def kpis(role="operator"):
-    """The four numbers. A viewer reads the same counts; the draft card does not call the answers the viewer's."""
+    """The same four counts for every human role; no draft or actor text is disclosed."""
     k = KPIS
     if role != "operator":
         k = k.replace("<span>of 17 answers you sent</span>", "<span>of 17 answers sent</span>").replace(
@@ -209,7 +209,7 @@ KPIS = f"""<div class="cards-4">
 {card('Touch rate, 30 days', f'<p class="kpi"><b>18%</b><span>38 of 214 runs needed a person</span></p>{spark()}<p class="zt-kp"><span class="zt-kt">{ic("flag", "ic ic--sm")}goal under 5%</span><span class="zt-kt zt-kt--ok">{ic("done", "ic ic--sm")}down 6 points</span></p>', id_="p-zt-rate")}
 {card('Zero-touch streak', f'<p class="kpi"><b>9 days</b><span>ops, the longest now</span></p><p class="zt-kp"><span class="zt-kt">shop 4 days</span><span class="zt-kt">web 2 days</span>{chip("api waiting now", "parked", "parked")}</p>', id_="p-zt-streak")}
 {card('Waiting for a person', f'<p class="kpi"><b>41h</b><span>runs waited on a person in 30 days</span></p><p class="zt-kps">Median wait for an answer <b>34m</b></p><p class="zt-kp">{chip("waiting: gh-2f6a, 26m", "parked", "parked")}</p>', id_="p-zt-wait")}
-{card('Answered from a draft', '<p class="kpi"><b>Coming next</b><span>Answer rules, #772</span></p><p class="zt-kps">Answer-rule drafts arrive with #772. A draft sent by a person will still count as a touch.</p>', id_="p-zt-handled")}
+{card('Answered from a draft', '<p class="kpi"><b>6</b><span>runs answered in the covered interval</span></p><p class="zt-kps">Sent by a person, edited or as drafted. Each run still counts as a touch.</p>', id_="p-zt-handled")}
 </div>"""
 
 def fix(date, who, what, metric, before, after, span):
@@ -273,7 +273,7 @@ def phone_rate():
 <ul class="ztp-now">
   <li><span>{ic("flag", "ic ic--sm")}Longest streak</span><b>ops, 9 days</b></li>
   <li><span>{ic("clock", "ic ic--sm")}Waited on a person</span><b>41h, median 34m</b></li>
-  <li><span>{ic("edit", "ic ic--sm")}Answered from a draft</span><b>Available with #772</b></li>
+  <li><span>{ic("edit", "ic ic--sm")}Answered from a draft</span><b>6 runs</b><span>Sent by a person, edited or as drafted. Each run still counts as a touch.</span></li>
   <li class="ztp-now--wait"><span>{ic("parked", "ic ic--sm")}Waiting now</span>{chip("gh-2f6a, 26m", "parked", "parked")}</li>
 </ul>""", id_="p-zt-rate")
 
@@ -532,7 +532,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
   - *Touch rate*: runs that needed a person out of runs that ended, over the window (7, 30 or 90 days), with a sparkline of the rolling rate each week, a dashed goal line, and the change against the window before in words.
   - *Zero-touch streak*: the project that has gone longest without a touch, and the others.
   - *Waiting for a person*: the hours runs waited on a person, the median wait for an answer, and what waits now.
-  - *Answered from a draft*: an explicit coming-next state for #772. A draft the person sends will be a touch; #770 does not draft or send answers.
+  - *Answered from a draft*: six distinct source runs answered from person-confirmed drafts in the covered interval, edited or as drafted. They still count as touches. Offered, unsent and refused drafts and internal helper jobs add none; partial coverage is named.
 - **By project.** One row per project:
   - the rate as a meter, with the goal tick at 5% and a word beside it (*Under goal*, *Above goal*, *High* from 30%), so colour never carries it alone;
   - the change against the 30 days before, as an arrow and words ("down 8 points, from 24%");
@@ -544,7 +544,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
 - **What needed a person** (side). One stacked bar per project on one scale that contains the complete stack, each with its counts in words under it. Under the bars, the six causes with what the record says for each and their counts (17, 5, 7, 5, 3 and 1, which make 38), and one line: merging is never a touch, with a link to how touches are counted.
 - **Questions it keeps asking** (operator only). Questions with the same meaning, grouped by a decision model, per repository. A person names each group (an unnamed one says how many similar questions it holds and offers *Name this group*), and the page shows the name, the count and links to the runs, never the questions. Each group offers the fix that removes it:
   - *Add to instructions*: shown open, a preview with the diff of `triggers.json` and *Add to trigger 3*. The undo is to remove the sentence.
-  - Standing answers and drafting arrive with #772; #770 offers no inactive draft or standing-answer control. Product-decision sample wording is illustrative.
+  - Standing answers and drafting are managed in Parked, not through controls on this page. Product-decision sample wording is illustrative.
   - A fixed group stays listed, with when it was fixed and *none since*.
 - **Fixes that worked** (side). Each change a person made against a cause, with before and after bars over equal spans: the pnpm sentence on trigger 3 (package manager questions 5 to 0), and the vault reference fix (`secret-unresolved` refusals 4 to 0).
   Green means an established reduction. More occurrences use the failure colour and say so; unchanged, partial, unexposed and reverted observations never claim effectiveness.
@@ -562,7 +562,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
   - approvals decided (with ApprovalRequest);
   - linking a configuration change to the refusal it answered;
   - question groups from a decision model over the question text, named by a person;
-  - standing answers and sent drafts remain #772;
+  - confirmed draft-answer provenance from #772, counted once per source run; standing-answer text remains on the Parked rules page;
   - the fixes log, each change with the cause it targets and counts before and after.
 - The rate is an on-demand read over retained records and fleet-wide touch facts. Grouping starts a capped job; naming a group and appending an instruction are operator-only writes through preview and Confirm. Private question context never enters this page.
 
@@ -585,7 +585,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
 - the question groups and their wording, the trigger 3 instructions line (from `triggers.example.json`) and the sentence added to it;
 - the two fixes.
 
-Projects, repositories, trigger 3 and `gh-2f6a` follow the fixture.
+Projects, repositories, trigger 3 and `gh-2f6a` follow the fixture. Six of the 17 question answers came from drafts; every value is sample data.
 """)
     write("ZeroTouchViewer", card_marker("Planned and proposed", 1640, 1440, "Zero touch as a viewer sees it: rates, counts, causes, streaks and fixes, with no question groups and no actions"),
           "Zero touch, as a viewer", page("viewer"), CSS)
@@ -593,7 +593,7 @@ Projects, repositories, trigger 3 and `gh-2f6a` follow the fixture.
 The Zero touch tab as a viewer sees it. The same numbers as the operator's page, so a viewer can follow a project towards zero touch; nothing on it acts, and nothing on it quotes a run.
 
 **How a person uses it.**
-- **The numbers.** Touch rate, the zero-touch streak, the time runs waited for a person and the answers sent from a draft, as on the operator's page. The waiting run is named by its id. The draft tile says it arrives with #772.
+- **The numbers.** Touch rate, the zero-touch streak, the time runs waited for a person and the answers sent from a draft, as on the operator's page. The waiting run is named by its id. The draft tile shows the same six answered source runs, including edited answers, still counted as human touches.
 - **By project.** The same rows and meters, opening to repositories. There is no *Open as runs* link: it leads to the Runs tab's actions.
 - **What needed a person.** The same bars and the six causes with their counts.
 - **Fixes that worked.** What changed and what it did, before and after. Who made the change is left out (that is the audit log's, which a viewer never sees), and so is the text of an instruction: "Trigger 3's instructions gained a sentence".

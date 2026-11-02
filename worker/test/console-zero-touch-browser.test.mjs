@@ -17,7 +17,8 @@ function measured(width = 1440, role = "operator") {
 		phoneProjects: phone, desktopProjects: !phone, phoneSummary: phone, project: { left: 24 }, fixes: { left: role === "viewer" ? 24 : 920, height: phone ? 150 : 400 },
 		groups: role === "operator" ? Array.from({ length: 4 }, () => ({ actions: 1 })) : [], writeControls: role === "operator" ? 5 : 0,
 		questionsText: role === "viewer" ? "Questions are for operators" : "Test command", actions: role === "operator" ? ["zero-touch-name"] : [],
-		text: "Median wait for an answer34m; gh-2f6a; Answer rules #772",
+		draft: { value: phone ? "6 runs" : "6", font: phone ? 13 : 40, height: 18, color: "#111111", text: "Sent by a person, edited or as drafted. Each run still counts as a touch." },
+		text: "Median wait for an answer34m; gh-2f6a",
 	};
 }
 
@@ -34,6 +35,9 @@ test("visual counterexamples fail for chart labels, scale, colors, data, roles a
 		[(m) => m.spark.dashed = "none", "The rolling trend, its text equivalent or dashed goal is wrong"],
 		[(m) => m.meters[0].goal = "5%", "Project meters lost their 40-percent scale or 5-percent goal tick"],
 		[(m) => m.rate = "0%", "The rate's value, denominator or primary hierarchy changed"],
+		[(m) => m.draft.value = "38", "The visible draft-answer count, hierarchy or human-touch explanation is wrong"],
+		[(m) => m.draft.text = "All answers were automatic", "The visible draft-answer count, hierarchy or human-touch explanation is wrong"],
+		[(m) => m.draft = null, "The visible draft-answer count, hierarchy or human-touch explanation is wrong"],
 	];
 	for (const [change, expected] of cases) { const m = measured(); change(m); assert.ok(zeroTouchProblems(m, { width: 1440, role: "operator" }).includes(expected), expected); }
 	const phone = measured(390); phone.groups[0].actions = 2; phone.fixes.height = 800; [phone.sections[2], phone.sections[3]] = [phone.sections[3], phone.sections[2]]; phone.sections.forEach((r, i) => r.top = i * 150);

@@ -25,11 +25,16 @@ on:
     branches: [main]
     paths:
       - "worker/src/**"
+      - "gateway/**"
+      - "admin/src/console/gateway*.mjs"
       - "image/**"
       - "deploy/egress-proxy.conf"
       - "deploy/pi-dispatch-netns-keeper.container"
       - "deploy/pi-dispatch-netns-keeper.network"
       - ".github/scripts/podman-conformance.mjs"
+      - ".github/scripts/sandbox-gateway-browser.mjs"
+      - ".github/scripts/sandbox-gateway-tls-fixture.mjs"
+      - ".github/scripts/sandbox-gateway-runtime-smoke.mjs"
       - ".github/workflows/podman-conformance.yml"
   pull_request:
   workflow_dispatch:
@@ -46,6 +51,13 @@ jobs:
     name: the rootless podman venue holds its declarations
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    services:
+      gateway-valkey:
+        image: valkey/valkey:8.0.2
+        ports:
+          - 16389:6379
+        options: >-
+          --health-cmd "valkey-cli ping" --health-interval 10s --health-timeout 3s --health-retries 5
     env:
       PDJOB: pdjob
       PDJOB_UID: "1234"
@@ -206,3 +218,33 @@ jobs:
 
       - name: "Sandbox SSH uses this account's rootless store and holds detach, attach and End (#771)"
         run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" PI_EGRESS=1 PI_SANDBOX_SMOKE_VENUE=podman node .github/scripts/sandbox-ssh-smoke.mjs
+
+      - name: "Verify and install pinned Chrome for the worker account's sandbox gateway (#754)"
+        timeout-minutes: 3
+        run: |
+          zip="$RUNNER_TEMP/gateway-chrome-linux64.zip"
+          url="$(node .github/scripts/console-width-check.mjs --check-pin --platform linux64)"
+          curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$zip" "$url"
+          node .github/scripts/console-width-check.mjs --verify-zip "$zip" --platform linux64
+          # The account cannot enter the runner's private home. This one measured browser lives in an
+          # explicitly traversable temporary directory, while its writable profile belongs to pdjob.
+          cftdir="$(mktemp -d /tmp/pi-dispatch-gateway-cft.XXXXXX)"
+          chmod 0755 "$cftdir"
+          unzip -q "$zip" -d "$cftdir"
+          echo "GATEWAY_CHROME_DIR=$cftdir" >> "$GITHUB_ENV"
+
+      - name: "Browser gateway holds the real rootless Podman shell and both CSPs (#753, #754)"
+        timeout-minutes: 8
+        run: |
+          as-pdjob systemctl --user start podman.socket
+          as-pdjob env GITHUB_ACTIONS=true PI_JOB_IMAGE="$PI_JOB_IMAGE" \
+            PI_SANDBOX_GATEWAY_VENUE=podman PI_SANDBOX_GATEWAY_SOCKET="/run/user/$PDJOB_UID/podman/podman.sock" \
+            VALKEY_TEST_URL=redis://127.0.0.1:16389 CHROME="$GATEWAY_CHROME_DIR/chrome-linux64/chrome" \
+            node .github/scripts/sandbox-gateway-browser.mjs --tls
+
+      - name: "Gateway and native rootless Podman attachments preserve input, detach and sandbox lifecycle (#754)"
+        timeout-minutes: 5
+        run: |
+          as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" PI_SANDBOX_GATEWAY_VENUE=podman \
+            PI_SANDBOX_GATEWAY_SOCKET="/run/user/$PDJOB_UID/podman/podman.sock" \
+            node .github/scripts/sandbox-gateway-runtime-smoke.mjs

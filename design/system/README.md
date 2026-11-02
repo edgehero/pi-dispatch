@@ -25,14 +25,14 @@ Start with **Start here**: the concept map shows how the pieces connect, the glo
 |---|---|
 | Start here | How pi-dispatch fits together (concept map), Glossary, The sample deployment, Journeys: a run asks a question, a run fails, set up a new deployment |
 | Overview | Overview, Overview all clear, First run setup (in the browser, after one command) |
-| Runs | Runs, Sandboxes (#771, operator only), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
+| Runs | Runs, Sandboxes (#771, operator only; optional separate gateway #754), Sandbox terminal, Sandbox gateway sign-in and states, Zero touch with its viewer view (#770), Parked with answer rules and its viewer view (#772), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
 | Fleet | Fleet, Fleet part paused (bulk actions, held, delayed), Host detail (registry row, budget, capacity, doctor), Venue detail (14 properties), Fleet as a viewer |
 | Spend | Spend, Budget split, Capacity, Breakdown, Flows map, as tabs of one page |
 | Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, Add a trigger, Triggers as a viewer |
 | Configuration | Configuration, Secrets, Connections, Project detail |
 | Access and audit | Sign-in, Access states (one-time link, operator, viewer, read-only), Audit, Error |
 | Phone | Overview, Runs, Parked, Spend, Run live, Fleet, Triggers, Parked with a draft, Zero touch |
-| Planned and proposed | Approval request (#649), Fork a run (#648), Models: roles, cooldowns and canary (#716, #717, #693), Watch and a finding (#735, a tab of Triggers), Watch board: why each finding did what it did, every query and decision, Jev in the job and in shadow at the gate, and a board jobs propose and you adopt (#735, #743), Dispatchers (#776, specs only): durable services with fresh Jev decision containers or bounded ordinary LLM jobs, only starting listed local read-only jobs and proposing triggers for a person; resident model containers and forge starts are rejected, long LLM runs deferred; Zero touch: how often runs needed a person, per project and repository, why, the questions they keep asking and the fixes that worked; Parked with an answer rule: a draft job per parked question that drafts from what a person already decided, for the person to send; Zero touch and Parked with a draft as a viewer sees them |
+| Planned and proposed | Approval request (#649), Fork a run (#648), Models: roles, cooldowns and canary (#716, #717, #693), Watch and a finding (#735, a tab of Triggers), Watch board: why each finding did what it did, every query and decision, Jev in the job and in shadow at the gate, and a board jobs propose and you adopt (#735, #743), Dispatchers (#776, specs only): durable services with fresh Jev decision containers or bounded ordinary LLM jobs, only starting listed local read-only jobs and proposing triggers for a person; resident model containers and forge starts are rejected, long LLM runs deferred |
 | Components | Shell, Status, Actions and confirm, Cards and banners, Data table, Facts and levels, Timeline and waitlists, Transcript, Fields, diff and command, Confirm states, Live states |
 
 Each screen is built only from `components/bundle.css`, the page kit's helpers and a small page style. Its README says how a person uses it, which panels it has, what the server provides, what a viewer sees, and which data is sample.
@@ -68,9 +68,10 @@ Every page, panel, state and write of the console at `ce5338f`, plus the 5.0.0 i
 | `/run` on OpenShell: sandbox policy, rule hosts, secret bundle variables, shadowed names, bundle skipped, cost floor and settled basis, per-model usage, resources, chain | Run in a sandbox |
 | `/run` for a viewer: numbers and tool names only, the operator-only sentences | Run as a viewer, Access states |
 | `/parked`: waiting, being answered, unknown, the answer and its reserve | Run parked, Parked on a phone, Approval request, Parked with an answer rule |
-| `/runs/sandboxes` (#771): operator-only kept workspaces and live shells, local terminal handoff, fresh preparation, pin and End with preview/Confirm, Fleet target settings | Sandboxes |
+| `/runs/sandboxes` (#771, #754): operator-only kept workspaces and live shells, native terminal handoff, fresh preparation, pin and End with preview/Confirm, Fleet target settings, and separately enrolled browser attachment | Sandboxes |
+| Separate gateway `/s/<intent>` and console `/sandbox/gateway/authorize` (#754): fresh same-session sign-in, existing-container attachment, phone/no-script fallback and exceptional states | Sandbox terminal, Sandbox gateway sign-in, Sandbox gateway states |
 | `pi-dispatch sandbox`: kept runs and their deadline, `--list`, `--pin`, the `--publish` refusal, one sandbox per run, venues that cannot reopen | Sandboxes |
-| Run records: outcomes, reasons, awaiting input, operator cancels, steers, re-runs | Zero touch |
+| `/runs/zero-touch` (#770, #753): ended workload records, fleet-wide human causes, deduplicated sent-draft source runs, partial windows, private question groups and cause-linked fixes | Zero touch, Zero touch as a viewer, Zero touch on a phone |
 | `/insights`: windows, tiles, budget and soft hold, job sizes, what-if | Spend |
 | `/insights`: envelope, plan, allocation against spend, floors, history and revert, priorities, refusal counts | Budget split |
 | `/insights`: capacity per host, busy, idle and no data, peak and slots, waits, coverage | Capacity |
@@ -106,12 +107,10 @@ What this design asks the repo for, because the repo cannot do it yet:
 - dispatchers: a trigger whose job reads git changes and infra streams and may only start listed jobs and propose triggers, with wider outbox chaining than today (other folders and repositories, more than 2 requests) and a Jev loop engine that runs like the GitHub poller;
 - Triggers as a page of its own, with Watch as its second tab;
 - delivery health for webhooks, which the receiver does not publish;
-- a touch record per run (who touched it and why), with question themes and standing answers, for Zero touch;
-- answer rules: a hand-written rule that starts a draft job when a run parks, which classifies the question and drafts an answer from cited sources for a person to send;
 
-The original proposals are issue #753. Sandboxes shipped under #771 (`REQ-SANDBOX-FROM-THE-CONSOLE`); the browser-terminal proposal remains #754. The other entries keep their own issue status.
+The original #753 proposals are implemented by #770 (Zero touch), #771 (native sandbox handoff and preparation) and #772 (cited answer drafts a person sends). Their integration counts a confirmed draft, including an edited one, once on its source workload run in the selected covered interval. Unsent drafts and helper runs add none.
 
-Proposed only, not asked for: a browser terminal through a separate sandbox gateway. It reverses a recorded decision (specs/design.md, #642 and #641), so issue #754 decides it first, recorded as `OQ-050`.
+#754 resolves `OQ-050` by admitting a separate gateway, off by default and enrolled by hand, with its own hostname and tab. It attaches only to an existing registered shell after the same operator signs in again. The console keeps its current CSP and gains no PTY or WebSocket. The gateway’s own generated-style allowance is explained and pinned to its xterm release; no browser library or runtime credential enters the console.
 
 ## Sample data
 
@@ -141,7 +140,7 @@ Proposed only, not asked for: a browser terminal through a separate sandbox gate
 
 ## Zero touch and sandboxes
 
-- Runs gets two more tabs: *Zero touch* and *Sandboxes*.
+- Runs has *All runs*, *Zero touch* and the operator-only *Sandboxes* tabs.
 - **Zero touch.** A project's touch rate is the share of its ended runs that needed a person:
   - a person answered a question, decided an approval, re-ran after a failure or a refusal, changed config because of a refusal, steered, or cancelled;
   - a run counts once, however often a person stepped in;
@@ -151,7 +150,7 @@ Proposed only, not asked for: a browser terminal through a separate sandbox gate
 - A parked question, and a draft, are the run's own text, so they show on the run page and nowhere else, as the shipped Parked page already does. Zero touch groups questions by meaning, a person names each group, and the page links to the runs.
 - **Answer rules.** When a run of a listed project parks, a draft job classifies the question and drafts an answer from cited sources, only in the categories the person allowed. The person sends it through the usual preview and Confirm, edits it, or answers otherwise. Product decisions, security, money, scope and approvals are never drafted.
 - A draft the person sends is still a touch, shown apart as a quicker one. Nothing answers a run without a person: the repo's constitution has no door for that, so it is an open question (`OQ-051`), not a design.
-- **Sandboxes.** The console opens a run's kept workspace, or a fresh one with no run, in the person's own terminal. The command is always there to copy. A terminal inside the browser is shown only as a proposal, off by default, because the repo's design rejected it.
+- **Sandboxes.** Open a run's kept workspace, or prepare a fresh one with no run, in the person's own terminal. The command is always there to copy. An enrolled separate gateway can attach to an already-open shell in its own browser tab after fresh operator sign-in, with one attachment per sandbox incarnation. It never starts a container. Phone, no-script and unavailable-browser states retain the native route.
 
 ## Triggers
 

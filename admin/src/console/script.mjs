@@ -197,6 +197,7 @@ import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, STREAM_EN
 import { SEARCH_ID } from "./kit.mjs";
 import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF } from "./shell.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "./theme.mjs";
+import { GATEWAY_CONSOLE_SCRIPT } from "./gateway-console-script.mjs";
 
 /**
  * How long the page waits before it asks again, when the console did not answer (a sign-in post, a one-time link's
@@ -2473,4 +2474,5 @@ ${FIT_JS}
     filterTranscript();
   }
 })();
+${GATEWAY_CONSOLE_SCRIPT}
 `;

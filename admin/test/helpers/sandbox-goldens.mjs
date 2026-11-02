@@ -19,16 +19,20 @@ export function sandboxFixture(now = NOW) {
     plan: { host: "mini1", repo: "acme/web", ref: "HEAD", triggerIndex: 2, image: "pi-job:4.3.1", backend: "local", size: { memMiB: 2048, cpuCenti: 100, source: "default" }, egress: { armed: true, proxy: "pi-dispatch-egress-proxy" }, retentionHours: 24, pin: false, pinDays: 7, project: "web" },
   };
 }
-async function draw({ role = "operator", readOnly = false, change = () => {}, unavailable = false, query = "id=gh-9575&host=mini1" } = {}) {
+async function draw({ role = "operator", readOnly = false, change = () => {}, unavailable = false, browser = false, query = "id=gh-9575&host=mini1" } = {}) {
   const parsed = parsePageQuery("sandboxes", query);
   if (parsed.refusal) throw new Error(parsed.refusal);
   const report = sandboxFixture(); change(report);
   const deps = { now: () => NOW, fleet: { parkedCount: async () => 1 }, sandboxes: { hosts: () => ({ config: SANDBOX_HOSTS_FIXTURE }), read: async () => unavailable ? null : report } };
+  if (browser) deps.gatewayView = async () => browser === "unavailable" ? { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." } : { enabledHosts: ["mini1"], sessions: report.sessions };
   const data = await loadPageData("sandboxes", parsed.query, deps, { role, readOnly });
   return String((await renderPage("sandboxes", { data, query: parsed.query, session: { role, name: role === "operator" ? "ops" : "watcher" }, readOnly })).html);
 }
 export const SANDBOX_DRAW = Object.freeze({
   "sandboxes-populated.operator": () => draw(),
+  "sandboxes-browser-enabled.operator": () => draw({ browser: true }),
+  "sandboxes-browser-readonly.operator": () => draw({ browser: true, readOnly: true }),
+  "sandboxes-browser-unavailable.operator": () => draw({ browser: "unavailable" }),
   "sandboxes-denied.viewer": () => draw({ role: "viewer" }),
   "sandboxes-readonly.operator": () => draw({ readOnly: true }),
   "sandboxes-empty.operator": () => draw({ change: (r) => { r.hosts = []; r.sessions = []; r.plan = null; } }),

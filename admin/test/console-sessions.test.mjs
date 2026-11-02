@@ -187,6 +187,8 @@ test("sessionCookie sets HttpOnly, SameSite=Strict and Path=/, and refuses an id
   assert.equal(sessionCookie(id, { maxAgeSec: 43200 }), `pdc_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);
   assert.equal(sessionCookie(id), `pdc_session=${id}; HttpOnly; SameSite=Strict; Path=/`);
   assert.equal(sessionCookie(id, { maxAgeSec: 0 }), `pdc_session=${id}; HttpOnly; SameSite=Strict; Path=/`);
+  assert.equal(sessionCookie(id, { maxAgeSec: 43200, secure: true }), `pdc_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200; Secure`);
+  assert.equal(sessionCookie(id, { secure: false }), sessionCookie(id));
   assert.throws(() => sessionCookie(`${id.slice(0, 40)}; a`), /43 base64url/);
   assert.throws(() => sessionCookie(undefined), /43 base64url/);
   assert.equal(clearSessionCookie(), "pdc_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");

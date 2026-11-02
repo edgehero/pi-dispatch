@@ -15,7 +15,7 @@ import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { sandboxFixture, SANDBOX_HOSTS_FIXTURE } from "./sandbox-goldens.mjs";
 import { FLEET_CARD_SNAPSHOT } from "./fleet-goldens.mjs";
 export const SANDBOX_BROWSER_TOKENS = Object.freeze({ operator: `pdc_${"o".repeat(43)}`, viewer: `pdc_${"v".repeat(43)}` });
-export async function startSandboxBrowserFixture(dir, { readOnly = false } = {}) {
+export async function startSandboxBrowserFixture(dir, { readOnly = false, browser = false } = {}) {
   let clock = NOW;
   let automaticTicks = true;
   const now = () => clock, logsDir = join(dir, "logs"); mkdirSync(logsDir, { recursive: true });
@@ -43,7 +43,8 @@ export async function startSandboxBrowserFixture(dir, { readOnly = false } = {})
   const file = { version: 1, generation: 0, tokens: Object.entries(SANDBOX_BROWSER_TOKENS).map(([role, token]) => ({ name: role === "operator" ? "ops" : "watcher", role, sha256: createHash("sha256").update(token).digest("hex"), createdAt: new Date(NOW).toISOString() })) };
   const config = { dir, allowedHosts: [], readOnly, maxMs: 43200000, idleMs: 3600000, maxStreams: 4, logsDir };
   const sessions = cookies.makeSessionStore({ now });
-  const pageDeps = { now, fleet, sandboxes: service };
+  const browserView = { enabledHosts: ["mini1"] };
+  const pageDeps = { now, fleet, sandboxes: service, ...(browser ? { gatewayView: async () => ({ ...browserView, sessions: structuredClone(inventory.sessions) }) } : {}) };
   const timers = { setInterval: (fn, ms) => setInterval(() => { if (automaticTicks) fn(); }, ms), clearInterval };
   const hub = makeLiveHub({ timers, loadPageData: (page, query, who) => pages.loadPageData(page, query, pageDeps, who), pagePanels: (page, ctx) => pages.pagePanels(page, ctx), queryKeyOf: pages.pageQueryString, dataQueryOf: pages.dataQueryOf, peekSession: (id, file) => sessions.peek(id, file), endedReason: (id, file) => sessions.verdict(id, file).ended ?? null, readTokens: () => ({ file }), readOnly, now });
   const server = createConsoleServer({ config, now, sessions, cookies, tickets: makeConfirmTickets({ now }), limiter: makeLoginLimiter({ now }), audit: makeConsoleAudit({ logsDir, now }), readTokens: () => ({ file }), findToken,
@@ -84,5 +85,5 @@ export async function startSandboxBrowserFixture(dir, { readOnly = false } = {})
     return { started, release };
   };
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, config, service, effects, inventory, requests, holdWorkspaceDocument, advance: () => { clock += 6000; }, liveSize: hub.size, refresh: async () => { clock += 6000; await hub.tick(); }, pauseTicks: async () => { automaticTicks = false; await hub.tick(); }, origin: `http://127.0.0.1:${server.address().port}`, async close() { for (const release of responseGates) release(); hub.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } };
+  return { server, config, service, effects, inventory, requests, browserView, holdWorkspaceDocument, advance: () => { clock += 6000; }, liveSize: hub.size, refresh: async () => { clock += 6000; await hub.tick(); }, pauseTicks: async () => { automaticTicks = false; await hub.tick(); }, origin: `http://127.0.0.1:${server.address().port}`, async close() { for (const release of responseGates) release(); hub.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); } };
 }

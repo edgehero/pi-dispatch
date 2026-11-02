@@ -1,0 +1,55 @@
+{
+  "card": "SandboxGatewaySignIn",
+  "issue": 754,
+  "panels": [
+    "p-gateway-signin"
+  ],
+  "elements": [
+    {
+      "el": "p-gateway-signin",
+      "kind": "panel",
+      "source": "admin/src/console/gateway-broker.mjs#makeGatewayBroker",
+      "verification": [
+        "admin/test/console-gateway-broker.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "Check the sandbox, host, operator identity and enrolled gateway destination. Enter the same operator token used by the current session, then authorize this terminal or cancel.",
+      "kind": "readme",
+      "source": "admin/src/console/gateway-broker.mjs#makeGatewayBroker",
+      "verification": [
+        "admin/test/console-gateway-broker.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "The console validates the token without replacing the session. A different operator token, changed session, missing launch proof or expired intent refuses with a reason.",
+      "kind": "readme",
+      "source": "admin/src/console/gateway-broker.mjs#makeGatewayBroker",
+      "verification": [
+        "admin/test/console-gateway-broker.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "Authorization lasts 60 seconds, works once, and remains server side. Public request ids in navigation confer no authority. Browser and console proofs never become URLs.",
+      "kind": "readme",
+      "source": "admin/src/console/gateway-broker.mjs#makeGatewayBroker",
+      "verification": [
+        "admin/test/console-gateway-broker.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "With JavaScript unavailable, token submission is disabled and the page explains how to return to Sandboxes and copy the command.",
+      "kind": "readme",
+      "source": "admin/src/console/gateway-broker.mjs#makeGatewayBroker",
+      "verification": [
+        "admin/test/console-gateway-broker.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    }
+  ],
+  "fixture": "The pictured account, host, id and terminal text are illustrative. Behavior is tested against the actual gateway/controller and console broker."
+}

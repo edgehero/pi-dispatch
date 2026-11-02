@@ -52,7 +52,7 @@
  *   - `Date.UTC(…)` and bare epoch integers: neither looks like a date to a reader either.
  *   - One finding per block, so a block with two violations reports the first; the second surfaces on the
  *     next run.
- *   - Only the four test directories, non-recursively, matching what `package.json`'s own test script
+ *   - Only the workspace test directories, non-recursively, matching what `package.json`'s own test script
  *     globs. A nested or new test directory is invisible to BOTH, which is why they should move together.
  *
  * esbuild is used the way `worker/test/env-docs.test.mjs` uses it: as a COMMENT STRIPPER and a
@@ -64,8 +64,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Where tests live, and where the factories they construct are defined. */
-const TEST_DIRS = ["image/runner/test", "worker/test", "receiver/test", "admin/test"];
-const SRC_DIRS = ["worker/src", "receiver/src", "admin/src", "image/runner/src"];
+const TEST_DIRS = ["image/runner/test", "worker/test", "receiver/test", "admin/test", "gateway/test"];
+const SRC_DIRS = ["worker/src", "receiver/src", "admin/src", "image/runner/src", "gateway/src"];
 
 /**
  * What starts a test block. Not `/^test\(/`: `test.only(`, `await test(` and a test indented inside a

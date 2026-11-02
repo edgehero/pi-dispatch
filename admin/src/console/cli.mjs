@@ -33,6 +33,8 @@ import { listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
 import { makeAnswererService } from "../answerer-data.mjs";
 import { readAgentWritesToday } from "../agent-write-count.mjs";
+import { readSandboxGateways } from "../sandbox-gateways.mjs";
+import { makeGatewayBroker } from "./gateway-broker.mjs";
 
 export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
 
@@ -462,6 +464,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
   let hub = null;
   let setup = null;
   let setupBroker = null;
+  let gateway = null;
   try {
     // Every Valkey client of this process (the audit copy's, the fleet reader's) takes its password and its facts
     // about the deployment's Valkey from THIS deployment's `.env`, through the panel's one reader, as the pi extension
@@ -510,6 +513,10 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: () => log("console: Zero touch accounting needs repair") });
     const sandboxes = m.sandboxData?.makeSandboxService({ paths: side.paths, env: { ...side.env, ...(config.sandboxHostsFile ? { PI_SANDBOX_HOSTS_FILE: config.sandboxHostsFile } : {}) }, deploymentDir: config.dir, fleet, fs, now });
+    const gatewayRegistry = () => config.sandboxGatewaysFile ? readSandboxGateways(config.sandboxGatewaysFile, { fs, uid, platform: io.platform ?? process.platform }) : { disabled: true };
+    const gatewayEnrollment = gatewayRegistry();
+    if (gatewayEnrollment.refusal) io.err(`pi-dispatch-console: ${gatewayEnrollment.refusal}`);
+    if (redis) gateway = makeGatewayBroker({ redis, sessions, readTokens, findToken: m.tokens.findToken, readRegistry: gatewayRegistry, audit, readOnly: () => config.readOnly, now, ...(random ? { random } : {}), readSessions: () => fleet.sandboxSessions() });
     const answerer = makeAnswererService({ paths: side.paths, env: side.env, fs, now });
     const pricing = pricingOf(m.pricing);
     const modelsView = m.modelsView ? (snapshot = null) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, fleet, fs, redis }) : null;
@@ -548,6 +555,12 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const pageDeps = {
       fleet,
       sandboxes,
+      gatewayView: async () => {
+        const read = gatewayRegistry();
+        if (!read.config) return { enabledHosts: [], sessions: [], ...(read.refusal ? { problem: read.refusal } : {}) };
+        const shells = await fleet.sandboxSessions();
+        return { enabledHosts: Object.keys(read.config.hosts), sessions: shells?.sessions ?? [], partial: Boolean(shells?.unreachable || shells?.more || shells?.unreadable) };
+      },
       answerer,
       modelsView,
       setup: async ({ role, snapshot } = {}) => {
@@ -679,6 +692,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       pageDeps,
       hub,
       stateOf: m.live.stateOf,
+      gateway,
+      consoleOrigin: () => { const read = gatewayRegistry(); return read.refusal ? false : read.config?.consoleOrigin ?? null; },
     });
     const bound = await listenOn(server, config.listen, { fs, uid });
     if (bound.refusal) throw new Refusal(bound.refusal);
@@ -708,6 +723,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     // The streams first, so closing the server is not held open by them; then the listener, the reader, the copy.
     setup?.close();
     setupBroker?.close();
+    await gateway?.close();
     hub?.close();
     if (server?.listening) {
       await new Promise((resolve) => {
