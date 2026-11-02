@@ -162,6 +162,13 @@ test("a look past two intervals is stale", () => {
 	assert.equal(lookIsStale(record, NOW + 48 * 3_600_000 + 1), true);
 });
 
+test("a desired row filed under another package's key is nobody's to act on", async () => {
+	const row1 = { v: 1, generation: 1, name: "@a/b", version: "1.1.0", op: "adopt", by: "ops", at: NOW };
+	const redis = { hgetall: async () => ({ "other": JSON.stringify(row1), "@a/b": JSON.stringify(row1) }) };
+	assert.deepEqual((await readDesired(redis)).map((r) => r.name), ["@a/b"]);
+	assert.equal((await readDesired({ hgetall: async () => ({ other: JSON.stringify(row1) }) })).length, 0);
+});
+
 test("a look past the host bound says how many it did not read", async () => {
 	const names = Array.from({ length: 65 }, (_, i) => `host${String(i).padStart(2, "0")}`);
 	const redis = { smembers: async () => names, mget: async (...keys) => keys.map((key) => JSON.stringify({ v: 1, host: key.slice("updates:h:".length), at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [] })) };
@@ -298,6 +305,30 @@ test("Undo still works a long time after the Adopt: its record is not a retired 
 	assert.equal(staged(host).version, "1.0.0");
 });
 
+test("Undo whose old version can no longer be had says so, and leaves what jobs load and the pin alone", async () => {
+	const host = aHost();
+	await apply(host, row());
+	fs.rmSync(join(host.globalPiDir, "packages", host.dir), { recursive: true });
+	const manifestBefore = fs.readFileSync(join(host.globalPiDir, "packages", "packages.json"), "utf8");
+	const pinsBefore = fs.readFileSync(join(host.cwd, "pi-packages.json"), "utf8");
+	const out = await apply(host, row({ generation: 6, op: "undo", version: "1.0.0", undoOf: 5 }), installer({ "1.0.0": "npm error code E404" }).exec);
+	assert.equal(out.state, "cannot-adopt");
+	assert.equal(out.reason, "version-not-found");
+	assert.equal(fs.readFileSync(join(host.globalPiDir, "packages", "packages.json"), "utf8"), manifestBefore, "an empty or half manifest would take every staged package from every job");
+	assert.equal(fs.readFileSync(join(host.cwd, "pi-packages.json"), "utf8"), pinsBefore);
+});
+
+test("Adopt's npm sees none of the worker's tokens, and a host's Adopt retires the tree it replaced", async () => {
+	const host = aHost();
+	const fake = installer();
+	host.env = { ...host.env, PATH: "/bin", GITHUB_TOKEN: "ghp_notreal", ANTHROPIC_API_KEY: "k" };
+	await apply(host, row(), fake.exec);
+	for (const call of fake.calls) assert.deepEqual(Object.keys(call.options.env), ["PATH"], call.args[0]);
+	const retired = JSON.parse(fs.readFileSync(join(host.globalPiDir, "packages", ".retired.json"), "utf8"));
+	assert.ok(Object.hasOwn(retired, host.dir), "its delay has started");
+	assert.equal(retired[host.dir], NOW);
+});
+
 test("a retried Adopt keeps the true prior state, so Undo restores what was there and not the pin it wrote", async () => {
 	const host = aHost({ file: { packages: [{ name: "@a/b", version: "1.0.0" }] } });
 	// The manifest commit fails after the pin was written.
@@ -324,12 +355,17 @@ test("a package staged under its own dir keeps that dir's name, so a canary and 
 });
 
 test("each refusal is a closed word on the host's row and changes nothing", async () => {
+	const pinsOf = (host) => {
+		try { return fs.readFileSync(join(host.cwd, "pi-packages.json"), "utf8"); } catch { return null; }
+	};
 	const unchanged = async (host, desired, reason, exec) => {
 		const before = fs.readFileSync(join(host.globalPiDir, "packages", "packages.json"), "utf8");
+		const pinsBefore = pinsOf(host);
 		const out = await apply(host, desired, exec);
 		assert.equal(out.state, "cannot-adopt");
 		assert.equal(out.reason, reason);
 		assert.equal(fs.readFileSync(join(host.globalPiDir, "packages", "packages.json"), "utf8"), before);
+		assert.equal(pinsOf(host), pinsBefore, "and no pin was written for a version it did not take");
 		assert.ok(CANNOT_ADOPT_REASONS.includes(reason));
 	};
 	await unchanged(aHost(), row({ name: "absent-here" }), "not-staged-here");

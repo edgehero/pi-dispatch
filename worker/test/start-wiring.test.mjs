@@ -1,3 +1,4 @@
+import { setDesired } from "../src/updates.mjs";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -581,6 +582,8 @@ test("github configured: real mintToken and the host's isDefaultBranchProtected 
 	assert.equal(await d2.isDefaultBranchProtected(ghJob, "tok"), true);
 	assert.equal(asked, "o/r", "the github host must be asked about the job's own repo");
 	assert.equal(typeof deps.prepareWorkspace, "function");
+	assert.equal(typeof deps.packageCanary?.check, "function", "issue #796: without it every canary is refused");
+	assert.equal(typeof deps.packageCanary?.install, "function");
 	assert.ok(
 		logs.some((l) => l.event === "self_identity" && l.id === 123 && l.source === "gh"),
 		"a self_identity log carrying { id, source } must be emitted",
@@ -2758,11 +2761,21 @@ test("the look stays off until PI_UPDATES_LOOK=1, and the reconcile asks a free 
 		seen.push(handle);
 		return handle;
 	};
-	const off = await runStart({ makeUpdatesRunner: runner });
-	assert.deepEqual(seen.map((h) => h.args.args), [["updates", "reconcile"]], "off by default: no look, and so no request to any registry");
-	const reconcile = seen[0];
+	let reconcile = null;
+	const off = await runStart({ makeUpdatesRunner: runner, whileRunning: async ({ captured }) => {
+		assert.deepEqual(seen.map((h) => h.args.args), [["updates", "reconcile"]], "off by default: no look, and so no request to any registry");
+		reconcile = seen[0];
+		await captured.redis.hdel("updates:desired", "wiring-pkg");
+		await captured.redis.del(`updates:applied:${captured.name}`);
+		assert.equal(await reconcile.args.shouldRun(), false, "no child starts until a person has asked for something");
+		await setDesired(captured.redis, { name: "wiring-pkg", version: "1.0.0", op: "adopt", by: "ops", at: 1 });
+		try {
+			assert.equal(await reconcile.args.shouldRun(), true, "and one does once a person has, asked of this worker's own Valkey");
+		} finally {
+			await captured.redis.hdel("updates:desired", "wiring-pkg");
+		}
+	} });
 	assert.ok(reconcile.started && off.captured.extraClosers.includes(reconcile), "started, and closed with the worker");
-	assert.equal(typeof reconcile.args.shouldRun, "function", "no child starts until a person has asked for something");
 	assert.match(reconcile.args.cliPath, /[\\/]worker[\\/]src[\\/]cli\.mjs$/);
 	seen.length = 0;
 	const on = await runStart({ env: { PI_UPDATES_LOOK: "1" }, makeUpdatesRunner: runner });

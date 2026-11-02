@@ -2007,6 +2007,15 @@ test("a canary refused for free stops before the mint, the clone and the budget,
 	}
 });
 
+test("a canary with no runtime is refused, never run as the trigger's plain paid job", async () => {
+	const redis = fakeRedis();
+	const { deps: d, calls } = deps({ redis });
+	const r = await runJob({ ...ghJob, packageCanary: CANARY }, d);
+	assert.equal(r.reason, "package-canary-invalid");
+	assert.equal(redis.incrCalls, 0);
+	assert.deepEqual(calls, []);
+});
+
 test("a registry that cannot be asked retries as infrastructure and has spent nothing (CONST-RETRY-INFRA-ONLY)", async () => {
 	const redis = fakeRedis();
 	const { deps: d, calls } = deps({ redis, packageCanary: canaryRuntime({ check: new Error("ETIMEDOUT") }) });

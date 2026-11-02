@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { CANNOT_ADOPT_REASONS, CHECK_STATES, HOST_PI_STATES, UPDATES_OVERDUE_MS } from "@edgehero/pi-dispatch/updates";
 import { ADMIN_USED_API } from "../../worker/src/updates-look.mjs";
 import { CANNOT_ADOPT_WORDS, HOST_STATES_DRAWN, PI_STATES_DRAWN } from "../src/console/panels/updates.mjs";
-import { HOST_ADOPT_STATES, PI_ROW_STATES, UPDATE_ROW_STATES, canaryResultOf, hostStandings, packageRow, piRow, readStaged, readTriggersDocument, readUpdates } from "../src/updates-view.mjs";
+import { HOST_ADOPT_STATES, PI_ROW_STATES, UPDATE_ROW_STATES, canaryResultOf, hostStandings, packageRow, piRow, readDeploymentUpdates, readStaged, readTriggersDocument, readUpdates } from "../src/updates-view.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { UPDATES_DRAW } from "./helpers/updates-goldens.mjs";
 import { USED_API } from "../src/index.ts";
@@ -159,7 +159,7 @@ test("the page's facts come from what a deployment really holds: its manifest an
 	writeFileSync(join(root, "pi-global", "packages", "packages.json"), JSON.stringify({ stagedAt: "x", packages: [{ name: "pi-lint", version: "1.4.2", dir: "pi-lint--1.4.2--aaaaaaaa", from: "host" }] }));
 	writeFileSync(join(root, "triggers.json"), JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 6 * * *" }, run: { kind: "local", folder: "/f", flow: "fix", task: "t", maxCostUsd: 2 } }] }));
 	const look = { v: 1, host: "h", at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [{ name: "pi-lint", version: "1.4.2", newest: "1.4.3", read: "ok" }] };
-	const read = await readUpdates({ redis: fakeValkey({ looks: [look] }), staged: readStaged({ globalPiDir: join(root, "pi-global") }), triggersDocument: readTriggersDocument({ triggersPath: join(root, "triggers.json") }), pinned: "1.5.0", now: NOW });
+	const read = await readDeploymentUpdates({ redis: fakeValkey({ looks: [look] }), paths: { globalPiDir: join(root, "pi-global"), triggersPath: join(root, "triggers.json") }, pinned: "1.5.0", now: NOW });
 	assert.equal(read.packages[0].name, "pi-lint", "a row has the name the actions look it up by");
 	assert.equal(read.packages[0].version, "1.4.2");
 	assert.equal(read.packages[0].state, "newer");
@@ -168,6 +168,29 @@ test("the page's facts come from what a deployment really holds: its manifest an
 	writeFileSync(join(root, "pi-global", "packages", "packages.json"), "{ not json");
 	assert.deepEqual(readStaged({ globalPiDir: join(root, "pi-global") }), { packages: [], unreadable: true }, "a manifest that cannot be read is said");
 	assert.equal(readTriggersDocument({ triggersPath: join(root, "absent.json") }), null);
+});
+
+test("the console reads Updates through that one composed read, with its own paths, and both of its actions use it", () => {
+	const cli = readFileSync(new URL("../src/console/cli.mjs", import.meta.url), "utf8");
+	assert.match(cli, /m\.updatesView\.readDeploymentUpdates\(\{[^}]*paths: side\.paths/s, "an actions' lookup and the page must read the same shapes");
+	assert.match(cli, /updates: \(\) => readUpdatesFacts\(\)/, "the page");
+	assert.match(cli, /updates: \{ read: readUpdatesFacts,/, "the actions");
+	assert.doesNotMatch(cli.slice(cli.indexOf("const readUpdatesFacts"), cli.indexOf("const pageDeps")), /readStagedPackages/, "that one is for display, and hands back strings");
+});
+
+test("pi's row: a stale host's word does not count beside a fresh one", () => {
+	const stale = { stale: true, record: { pi: { read: "ok", newest: "1.6.0", checks: "passing" } } };
+	const fresh = { stale: false, record: { pi: { read: "ok", newest: "1.5.0", checks: null } } };
+	assert.equal(piRow({ pinned: "1.5.0", looks: { hosts: [stale, fresh] } }).state, "current");
+});
+
+test("an adopted row keeps its own canary and facts when nothing newer has been seen, whether or not anything is known", async () => {
+	const adopted = { v: 1, generation: 5, name: "pi-lint", version: "1.4.3", op: "adopt", from: "1.4.2", by: "ops", at: NOW };
+	for (const newest of ["1.4.3", "1.4.1", null]) {
+		const look = { v: 1, host: "h", at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [{ name: "pi-lint", version: "1.4.3", newest, read: newest ? "ok" : "unknown" }] };
+		const read = await readUpdates({ redis: fakeValkey({ looks: [look], desiredRow: adopted }), staged: { packages: [{ ...pkg, version: "1.4.3" }] }, records: [rec()], pinned: "1.5.0", now: NOW });
+		assert.equal(read.packages[0].canary?.jobId, "gh-1", String(newest));
+	}
 });
 
 test("a look's view: only fresh hosts speak while any is fresh, and the newest version any of them saw leads", async () => {

@@ -213,8 +213,11 @@ test("the lock serialises stages, also across hosts, and a crashed holder does n
 
 test("a fresh lock with no holder file yet is a peer that has just taken it, not a crash", async () => {
 	const { packagesRoot } = overlay();
-	fs.mkdirSync(join(packagesRoot, ".stage.lock"));
-	await assert.rejects(withStageLock({ fs, packagesRoot }, async () => assert.fail("taken from a peer mid-acquire")), (error) => error.kind === "infra");
+	const lock = join(packagesRoot, ".stage.lock");
+	fs.mkdirSync(lock);
+	const born = fs.statSync(lock).mtimeMs;
+	await assert.rejects(withStageLock({ fs, packagesRoot, now: () => born + 1 }, async () => assert.fail("taken from a peer mid-acquire")), (error) => error.kind === "infra");
+	assert.equal(await withStageLock({ fs, packagesRoot, now: () => born + STAGE_LOCK_STALE_MS + 1 }, async () => "taken"), "taken", "and past the limit it is a crash after all");
 });
 
 test("a holder that slept past the limit finds out, and does not remove its successor's lock", async () => {

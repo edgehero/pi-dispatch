@@ -600,6 +600,20 @@ test("providerBilled keeps its count, an older record reads 0, and a wrong value
 	assert.equal(read({ providerBilled: null }), null);
 });
 
+test("with a key, what a job printed cannot change what the runner signed about a canary (issue #796)", async () => {
+	const KEY = "0".repeat(64);
+	const { signExitLine } = await import("../../image/runner/src/exit-line.mjs");
+	const body = (canaryLoad) => JSON.stringify({ event: "exit", jobId: "j", code: 0, reason: "completed", canaryLoad });
+	const close = async (text) => {
+		const log = makeLogSink({ logsDir: "/logs", enabled: false, fs: makeFakeFs({ stream: makeFakeStream() }) })("j", { exitKey: KEY });
+		log.write(Buffer.from(text));
+		return await log.close();
+	};
+	assert.equal((await close(`${signExitLine(body("loaded"), KEY)}\n`)).canaryLoad, "loaded");
+	assert.equal((await close(`${signExitLine(body("failed"), KEY)}\n${body("loaded")}\n`)).canaryLoad, "failed", "a signed failed followed by a printed loaded is failed");
+	assert.equal(Object.hasOwn(await close(`${body("loaded")}\n`), "canaryLoad"), false, "and a printed line alone says nothing: this word opens Adopt");
+});
+
 test("parseExitUsage numerics: absent rebuilds as 0, but a negative, a null, or an Infinity nulls the block", () => {
 	// Absent is an honest zero, which is how a record from before providerBilled reads, and the 13-key row shape stays stable regardless of what was emitted.
 	const bare = parseExitUsage(usageLine({ v: 1, models: [{ provider: "a", model: "m" }] }));

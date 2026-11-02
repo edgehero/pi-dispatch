@@ -219,6 +219,21 @@ test("Windows: no process group, so the plain kill, and no detached spawn; a gro
 	assert.deepEqual(gone.children[0].kills, ["SIGKILL"]);
 });
 
+test("a free question first: no answer of yes starts no child, and a question that fails starts none either (issue #796)", async () => {
+	const answers = [false, new Error("valkey down"), true];
+	const made = build({ args: ["updates", "reconcile"], shouldRun: async () => { const next = answers.shift(); if (next instanceof Error) throw next; return next; } });
+	await made.spawner.runOnce();
+	assert.equal(made.children.length, 0, "nothing to do");
+	await made.spawner.runOnce();
+	assert.equal(made.children.length, 0, "could not ask: the next tick");
+	const running = made.spawner.runOnce();
+	await flush();
+	assert.equal(made.children.length, 1, "asked for, and started");
+	assert.deepEqual(made.children[0].args.slice(1), ["updates", "reconcile"]);
+	made.children[0].emit("close", 0, null);
+	await running;
+});
+
 test("the not-published line is found at the END of a long stderr, which a kept head would have cut off", async () => {
 	const { spawner, children, logs } = build();
 	const run = spawner.runOnce();
