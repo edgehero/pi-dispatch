@@ -17,8 +17,8 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-11-02T07:27:42Z",
-    "via": "Codex",
-    "note": "#776, specs only: Dispatcher and Dispatchers remain Proposed. Their cards distinguish durable services from fresh decision containers, admit only listed local read-only starts, require a person to adopt proposals, and mark unsupported adapters and long LLM runs as proposed or deferred. Resident model containers and forge starts are rejected. Shared tokens, styles and shipped console screens are unchanged."
+    "at": "2026-11-02T18:52:23Z",
+    "via": "Claude",
+    "note": "Proposed: an Updates page (#796). pi-dispatch looks daily for a newer pi and newer staged extensions, shows the checks, runs a canary when asked, and a person adopts each update."
   }
 }
