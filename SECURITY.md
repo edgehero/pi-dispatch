@@ -567,22 +567,50 @@ that session's same operator token. A one-use handoff verifier binds the gateway
 public request IDs cannot prebind another browser. The subsequent attachment grant stays server-side, lives at most
 60 seconds, and binds that browser, gateway, host and immutable tracked container/nonce. Viewer, agent, tool and
 read-only access cannot mint it. The gateway receives neither a console session ID nor the operator token.
+HTTPS browser binding uses only `__Host-pdg_browser` with Secure, HttpOnly, Path=/ and no Domain. Browsers reject
+sibling-domain attempts to set that prefixed cookie; an unprefixed preseed is never adopted. The explicit local
+HTTP development cookie is a separate compatibility exception. A host-only response alone would not establish
+that an incoming cookie had not been planted by a sibling domain.
 
 The gateway's runtime methods inspect, attach and resize that exact existing local/Podman sandbox TTY. They cannot
-start/create/restart/exec/stop containers or proxy arbitrary runtime operations. One browser connection is admitted
+start/create/restart/exec/stop containers or proxy arbitrary runtime operations. One writing driver is admitted
 per sandbox incarnation, with bounded protocol/input/output/rates/backpressure and no automatic reconnect or replay.
 The console rechecks live authority without extending idle time; revoke, sign-out, generation/role/enrollment changes,
 restart or unreadable authority stops terminal I/O within its authorization lease of at most five seconds. Browser
-input-idle expiry follows `PI_SANDBOX_IDLE_MINUTES`, zero disabling it; shell prompt `TMOUT` remains separate.
+driver input-idle expiry follows `PI_SANDBOX_IDLE_MINUTES`, zero disabling it; shell prompt `TMOUT` remains separate.
 Close and failures detach, leaving the shell/workspace. The existing separately confirmed End action owns stopping it.
 
-The maintained terminal renderer and assets are served by the gateway, under its own CSP. Only renderer-generated
-styles receive its narrow inline-style allowance; scripts remain self-hosted without inline/eval/CDN authority.
-Terminal output grants no clipboard-write, title, link-navigation, HTML or file-transfer capability. Terminal input
+The per-host workbench holds at most four original-session-bound drive/watch panes. Each additional attachment
+still requires its own fresh authorization. Layout moves preserve attachments; closing one pane detaches only it.
+Public-ID-only tab rendezvous conveys no proof, session association or run facts. A different console sign-in cannot
+be adopted into an established workspace. Optional run context is a closed six-fact projection from the matching
+run record, shown after authorization; prepared shells without that record retain generic context.
+
+The driver may explicitly permit at most three read-only watches, including pending reservations. This disclosure
+is off by default: echoed tokens and other sensitive output can be visible to watchers. Each watcher has their own
+fresh same-token authorization and a grant bound to the exact driver owner and consent epoch. The driver's persistent
+named roster remains visible for inactive panes. Before a new watch receives output, that live driver must acknowledge
+its rendered roster revision; this orders rendering, not physical attention. Stale or unavailable metadata cannot
+be treated as an empty roster. Re-enabling consent cannot revive an earlier grant or removed attachment.
+
+Watch runtime attachments use `stdin:false`, expose a readable-only response and make no PTY resize call. Client
+input, resize, activity and automatic renderer replies never reach the runtime. Driver geometry is relayed through
+owner-fenced revisions across gateway processes. Slow watchers are dropped individually. Watch authority is bounded
+by both original console leases, the driver's live authorization and ownership, consent epoch and reservation.
+It has no additional input-idle timer. Off, exact-watch Remove, driver loss and either party's authority loss stop
+affected output within five seconds. Failed control writes do not claim success and fail closed. Watches never
+become drivers; native-only shells cannot be watched through this route.
+
+The maintained terminal renderer, layout library and assets are served by the gateway, under its own CSP. Only styles
+those two libraries generate receive its narrow inline-style allowance; scripts remain self-hosted without inline/eval/CDN authority.
+A launch link sent to someone else cannot be armed from the sender's tab: stepping up needs a receipt only the browser that
+bound the launch holds. A launch that did not start from a console page waits for a click. Terminal output grants no clipboard-write, title, link-navigation, HTML or file-transfer capability. Terminal input
 and output are not recorded or sent to console panels, history, logs or audit. Lifecycle audit distinguishes an
 opening intent, a successful attachment and its ending; interrupted processes can leave explicitly recovered,
 unproven endings rather than a false claim that a sandbox stopped. Phones retain the native-command route; the
 width policy is a supported layout, not cryptographic device identification.
+Watch lifecycle records identify both safe operator actors and the reason, never bytes. Consent/removal records
+distinguish requested changes from applied receipts; audit failure cannot enable sharing.
 
 These limits do not narrow the runtime socket's permissions. A compromised Docker gateway still has root-equivalent
 host reach, and rootless Podman still grants the runtime account's reach. Shared Valkey control remains trusted.

@@ -17,8 +17,8 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-11-02T12:47:53Z",
-    "via": "Claude",
-    "note": "Proposed: a run's workspace as one line and one button on each run page (#793), and observer mode (#792): the person typing lets other operators watch a browser shell, read only, and sees who watches."
+    "at": "2026-11-02T14:19:13Z",
+    "via": "Codex",
+    "note": "Built #754/#792/#793: maintained-library terminal workbench with tabs and splits, one driver and consented read-only watches, run Workspace states and closed per-terminal run context."
   }
 }

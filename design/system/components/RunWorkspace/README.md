@@ -3,7 +3,7 @@ A completed run's page with a shell open on its kept workspace. One rule keeps i
 **How a person uses it.**
 - **The outcome** offers *Try it in its workspace* beside the pull request, since trying a change before merging it is the main reason to open a run's workspace.
 - **Workspace** (`p-workspace`) is one row: where it is kept and until when, who has a shell open (opening it joins that shell), and Open in browser or Open in Terminal. Copying the command and End fold under one line.
-- **Found something?** One line with two links: add it to trigger 3's instructions (the usual trigger edit, with its preview and Confirm), or fork it with a message (#648).
+- **Found something?** One line with two links: choose its trigger and add it to the instructions (the usual trigger edit, with its preview and Confirm; a historical index never silently selects a current rule), or fork it with a message (#648).
 - The run's facts, Actions and the side column are RunEnded's.
 
 With no shell open, the row offers Open in Terminal; RunWorkspaceStates draws each outcome's row. On a phone the open buttons hide and the command is there to copy.

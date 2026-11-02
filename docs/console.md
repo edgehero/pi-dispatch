@@ -506,13 +506,17 @@ and a line that is not a row at all is shown as damaged in its place, never skip
 so the page reuses it for 30 seconds, and **About this log** says when it last ran, the verified range, the damaged
 line and what is not verified.
 
-The filters are a search over targets and reasons (at most 64 characters) and three lists: who, the action and the
+The filters are a search over targets, reasons and a watch's driver name (at most 64 characters) and three lists: who, the action and the
 outcome; the search matches in any case. A filtered view is a plain link. It searches 500 rows at a time and stops
 after 2,000, saying once how many rows matched among how many it searched ("20 rows match among the 2,000 rows
 searched", "from here" on an Older page); its Older link searches on from there, so a search never claims "no match"
 for rows it did not read. A damaged line or row is shown under every filter, in its place, and is not counted as a
 match: the chain does not vouch for what it says, and a filtered view that hid it would look clean. A filter value
 outside its list or its characters is refused by the parameter's name, never repeated back.
+
+Watch opening and ending rows name the watcher as actor and the browser driver separately. The **Who** filter
+matches either person on these rows. Ordinary audit rows retain their existing fields and meaning. Terminal input,
+output, tokens, proofs and cookies never enter an audit row.
 
 `/audit?seq=<n>` opens the page that holds row n, at the row (`/audit?seq=41#seq-41`), however many rows were written
 since: the banner after a write links its row this way. The page finds the row by its number, from where the last check
@@ -1700,12 +1704,28 @@ pi-dispatch opener install --config sandbox-hosts.json
 Re-running this command explicitly replaces the opener's approved hosts. A link cannot enroll or change a host. The
 console never sends its own host configuration to the local handler automatically.
 
-A run page and the Fleet host page offer the same Open/Copy handoff. Only `local` and `podman` support reopening;
-`openshell` and `openshell-bind` say that their venue has no sandbox shell. A run refused before it started has no
-workspace. For the console's own host, its run page still reads the retained manifest at most every 15 seconds,
-hiding an impossible command and adding `--pin` when the workspace is past its window. For other hosts, the terminal
-CLI makes the final decision. The Sandboxes tab uses each host's published deadline, pin window and capabilities,
-and says when a publication is stale, missing, unreadable or truncated.
+A run page has one operator-only **Workspace** row above its facts. A completed run says **Try it before you merge**,
+a failed run with a kept workspace says **Reproduce it**, and a parked run says **Look before you answer**. A shell
+edit does not reach the job that an answer starts, so put the finding in the answer. A running or recovering run
+says **Opens when it ends** and links to steering; a refused run or a container that never started has nothing to open.
+The completed outcome banner's **Try it in its workspace** scrolls to this row; it starts nothing.
+
+The row names the host and known kept deadline, and who opened an existing shell. Its native opener remains available;
+**Copy the command, or end the shell** folds the command and confirmed End control beneath it. A native opener's
+reported account is separate from the authenticated browser driver and watchers. Viewers get no Workspace facts or
+controls. On a read-only console the row retains selectable commands only.
+
+Only `local` and `podman` support reopening. A known missing, expired or unsupported workspace offers **Prepare from
+this run**. This opens the ordinary preparation form with a validated repository and `HEAD`: records currently hold
+no created pull request to prefill. A historical trigger row is a suggestion, never proof of the current rule. Choose
+the current trigger explicitly. An OpenShell trigger remains incompatible until you deliberately select a compatible
+local or podman trigger; the console never changes its venue or silently chooses another rule. The owning worker still
+validates the final preview and request. Local retained manifests and fresh host publications supply evidence; stale,
+unreadable or truncated publications and missing rows remain unknown, rather than being called swept.
+
+**Found something?** leads to the current trigger chooser and its existing instruction editor, preview and Confirm.
+Its fork link focuses the existing exact-point fork/message form when a retained source is available, and otherwise
+says why a fork cannot be offered. Shell text is never copied into either action automatically.
 
 To prepare a fresh workspace, enter its repository, choose a forge trigger and an eligible host, and choose a ref:
 `HEAD` means the remote default branch; branches, tags, full commit SHAs and `pr:42` are accepted. **Review settings**
@@ -1728,6 +1748,27 @@ single-use attachment grant lasts 60 seconds and is bound to the original tab, o
 cookie and exact sandbox incarnation. Viewers, agents and read-only consoles cannot authorize it; windows 760 pixels
 wide or narrower retain the native command. Closing the browser detaches and keeps the sandbox. **End this shell**
 remains a separate confirmed action.
+
+The gateway workbench holds up to four distinct drive or watch panes on one enrolled host, under one original sign-in.
+Tabs, splits and keyboard layout controls preserve each attachment. Adding a terminal opens a host-bound chooser in
+a helper tab; choosing its shell still requires fresh same-token verification. The chooser carries only a checked
+host, has no preparation, pin or End controls, and returns the authorized opening to the existing workbench.
+
+A browser driver can enable **Let operators watch**, off by default. Other operators then get **Watch** on the run
+page and in Sandboxes. They verify with their own original sign-in and token. At most three pending or active watches
+may join one driver, and each is read only at the driver's size. The driver sees a persistent named roster, including
+watchers of hidden panes, and may remove a current watch or turn watching off. A native-only shell cannot be watched.
+Watcher input and resize never reach the runtime; Stop watching does not disconnect the driver. Losing the driver's
+authority or consent ends its watches within the five-second lease. Each watcher also keeps their own independently
+checked console session; watching does not extend anybody's console idle time.
+
+An operator name may belong to several sign-ins. When the name matches the driver, both browser actions remain
+available: **Open in browser** can focus the existing drive pane, while **Watch** uses a separate sign-in. The exact
+sign-in already driving cannot watch itself and is directed to its existing workspace.
+
+After authorization the active pane can show six record facts: run id, normalized outcome, project, target, flow and
+end time. The target is text, and **Back to `<run id>`** goes through the console's Strict-cookie bridge. Prepared or
+unavailable records use the generic return; no transcript, question or issue text crosses in this context.
 
 Gateway enrollment is hand-owned, off by default, and separate from the native opener's host import. It requires a
 different hostname, rather than another port on the console hostname, and HTTPS for public origins. The console

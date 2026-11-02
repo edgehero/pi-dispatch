@@ -1,9 +1,9 @@
 Observer mode (#792): another operator watches a browser shell, read only, when the person typing allows it. For pairing, review and teaching.
 
 **How a person uses it.**
-- On the run page or in Sandboxes, an operator sees *ops is in it, and lets operators watch* and **Watch**. It asks for their own token again, as opening does, and opens this tab.
+- On the run page or in Sandboxes, an operator sees *lee is driving, and lets operators watch* and **Watch**. It asks for their own token again, as opening does, and opens this tab.
 - **The title** says whose shell and which run: Watching gh-9575, with the run's line under it.
-- **The terminal** shows the same new output as the driver's, at the driver's size (120 × 36 here). The toolbar says *Read only: you cannot type*. There is no Tab-focus switch and no Disconnect; **Stop watching** closes the tab's watch.
+- **The terminal** shows the same new output as the driver's, at the driver's size (120 × 36 here), with an internal scroll viewport when it does not fit. The toolbar says *Read only: you cannot type*. There is no Tab-focus switch and no Disconnect; **Stop watching** closes the tab's watch.
 - Watching ends when the driver disconnects, turns watching off or removes the watcher, when the shell ends, or when the watcher's own session ends.
 - On a phone, no terminal opens.
 

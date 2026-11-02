@@ -9,7 +9,7 @@ from paths import COMPONENTS as ROOT
 GROUPS = {
     "Start here": ["ConceptMap", "Glossary", "SampleStory", "JourneyAnswer", "JourneyFailure", "JourneySetup"],
     "Overview": ["OverviewScreen", "OverviewAllClear", "SetupScreen"],
-    "Runs": ["SandboxesScreen", "SandboxTerminal", "SandboxGatewaySignIn", "SandboxGatewayStates", "RunWorkspace", "RunWorkspaceStates", "SandboxTerminalRun", "SandboxWatch", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
+    "Runs": ["SandboxesScreen", "SandboxTerminal", "SandboxGatewaySignIn", "SandboxGatewayStates", "SandboxWorkbench", "RunWorkspace", "RunWorkspaceStates", "SandboxTerminalRun", "SandboxWatch", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
     "Fleet": ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail", "FleetViewer"],
     "Spend": ["ModelsScreen", "SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen"],
     "Triggers": ["TriggersScreen", "TriggerDetail", "TriggerEditor", "TriggersViewer", "WatchScreen", "WatchBoard"],
@@ -50,10 +50,11 @@ STATUS = {
     "DispatchersScreen": (PROPOSED, "#776, specs only. Resident model containers and forge starts are rejected; long LLM runs are deferred."),
     "DispatcherScreen": (PROPOSED, "#776, specs only. Fresh decision containers and local read-only starts; adopting proposals always needs a person."),
     "SandboxesScreen": (BUILT, "Built by #771. Separate gateway attachment added by #754, off by default."),
+    "SandboxWorkbench": (BUILT, "Built by #754, #792 and #793. Maintained-library tabs, splits and read-only watches."),
     "SandboxTerminal": (BUILT, "Built by #754, on its own gateway hostname. Attaches to an existing shell only."),
-    **{n: (PROPOSED, "#793, after the browser gateway (#754, PR #790). It starts nothing from the browser.") for n in ["RunWorkspace", "RunWorkspaceStates"]},
-    "SandboxTerminalRun": (PROPOSED, "#793; its Let operators watch switch is #792."),
-    "SandboxWatch": (PROPOSED, "#792, observer mode. It lifts #754’s one-browser limit for read-only watchers (OQ-050)."),
+    **{n: (BUILT, "Built by #793 in PR #790. Run workspace states and confirmed next steps; no browser container start.") for n in ["RunWorkspace", "RunWorkspaceStates"]},
+    "SandboxTerminalRun": (BUILT, "Built by #793 and #792, per-pane run context and consent in the workbench."),
+    "SandboxWatch": (BUILT, "Built by #792, one driver and at most three consented read-only watchers."),
     "SandboxGatewaySignIn": (BUILT, "Built by #754. Same-session fresh operator sign-in, one attachment, 60 seconds."),
     "SandboxGatewayStates": (BUILT, "Built by #754. Refusals, session and connection loss, and native fallback."),
     "ZeroTouchScreen": (BUILT, "Built by #777, fleet-wide touch accounting and cause-linked fixes."), "ZeroTouchViewer": (BUILT, "Built by #777, as a viewer sees it."),
@@ -87,8 +88,11 @@ def ribbon(name):
 
 def put_ribbon(name, text):
     text = RIBBON_CSS_RE.sub("", RIBBON_RE.sub("", text))
-    if name not in STATUS or '<a class="skip"' not in text:
+    if name not in STATUS:
         return text
+    # A status is a claim about this repository. Failing here beats a card that quietly stops making it.
+    if '<a class="skip"' not in text:
+        raise SystemExit(f"{name}: has a status but no skip link for its ribbon to sit before")
     text = text.replace("</head>", RIBBON_CSS + "</head>", 1)
     return text.replace('<a class="skip"', ribbon(name) + '<a class="skip"', 1)
 found = sorted(d.name for d in ROOT.iterdir() if d.is_dir() and d.name != "Cover")

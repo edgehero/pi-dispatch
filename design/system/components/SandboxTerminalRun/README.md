@@ -2,10 +2,10 @@ The gateway's terminal tab when it knows its run: the run in one line under the 
 
 **How a person uses it.**
 - **The title** names the sandbox and its host; the line under it says the run's outcome, project, target, flow and when it ended.
-- **The terminal** is SandboxTerminal's: one attachment, idle logout, Disconnect, nothing recorded, only new output.
+- **The terminal** uses the shared workbench: tabs and splits preserve the same attachment, driver idle logout, Disconnect, nothing recorded and only new output.
 - **Back to gh-9575** in the header replaces the generic return, and the line under the terminal says where a finding goes: the run's page, where the next run sees it.
 - **Let operators watch** (observer mode, #792), off by default. On, other operators can watch from the run page or Sandboxes. A line under the toolbar names each watcher with **Remove**, and says they see what is typed. Turning it off ends every watch at once.
-- On a phone, no terminal opens, as on SandboxTerminal; the tab sends the person back to gh-9575 to copy the command.
+- On a phone, no terminal opens. The console provides the native command; a generic arrival exposes no private run context.
 
 **Panels.** `p-gateway-run`, `p-gateway-terminal`.
 

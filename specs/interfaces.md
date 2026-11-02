@@ -10486,12 +10486,15 @@ in.
 
 ## INT-CONSOLE-AUDIT-LOG
 
-- **AMENDED 2026-11-02 (#792; approved, implementation pending)**: Fixed sandbox-watch-start/end kinds use
+- **AMENDED AND IMPLEMENTED 2026-11-02 (#792)**: Fixed sandbox-watch-opening/start/end kinds use
   actor=watcher plus a strict optional driver actor object (safe operator name/role/session digest), required
   on watch rows. Old rows without it remain verifiable. Writer, chain verification, mirrors and readers/rendering
   preserve the bounded field. Crash journals hold mode, safe actors, immutable target and PID only. Opening/open
   receipt failure refuses or compensates before ready/output; recovered endings retain kind and both actors.
   No run facts, terminal bytes, session association, consent epoch, proof, cookie or credential is retained.
+  Fixed sandbox-watch-policy/remove control kinds use the driver actor and closed requested/applied reasons.
+  Enabling refuses on unavailable audit; off/removal still revoke on accounting failure and report incomplete
+  accounting. An intent is never an applied receipt and no failed control is silently retried.
 
 - **Implemented (#774)**: setup preserves audit-before-apply and compensating failed rows.
   `INT-CONSOLE-SETUP-HOST` adds only safe operation/effect metadata through the existing row schema. Provider
@@ -10504,7 +10507,7 @@ in.
 
 **Extension (#771).** Sandbox preparation, pin, End and Fleet mapping writes use the existing preview/confirm audit funnel. End names an exact session incarnation. No credential, command body, repository payload or terminal input is added to audit rows.
 
-**Adopted extension (#754, implementation pending).** Gateway step-up/attachment lifecycle uses the same hardened
+**Adopted extension, IMPLEMENTED (#754).** Gateway step-up/attachment lifecycle uses the same hardened
 audit writer and safe actor/session-digest representation. Fixed kinds distinguish authorization intent, actual
 successful attachment, refusal/failure and detach with a closed reason. An intent is not an opened receipt. Opening
 audit failure refuses before runtime attachment; an ending-audit failure reports incomplete accounting without
@@ -12085,7 +12088,7 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 
 ## INT-SANDBOX-SESSIONS-CONTRACT
 
-- **Adopted extension (#754, implementation pending)**: `INT-SANDBOX-GATEWAY-CONTRACT` adds a separate exclusive
+- **Adopted extension, IMPLEMENTED (#754)**: `INT-SANDBOX-GATEWAY-CONTRACT` adds a separate exclusive
   browser-attachment lease bound to this record's exact host, ID, venue, container ID and nonce. It neither replaces
   nor renews this native monitor's lease. A browser detach does not write End, remove the container or clean its
   network. The existing confirmed End request retains its full incarnation checks and terminates any attachment
@@ -12099,7 +12102,26 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 
 ## INT-SANDBOX-GATEWAY-CONTRACT
 
-- **Approved extension, implementation pending (2026-11-02, #792, #793)**: Private intent v2 requires
+- **Cookie-fixation correction (2026-11-02, independent review)**: HTTPS reads and sets only
+  `__Host-pdg_browser`, with Secure, HttpOnly, Path=/ and no Domain. An unprefixed/domain-scoped cookie never
+  seeds or migrates production browser binding. The browser-enforced prefix stops sibling-domain cookie tossing
+  before the victim's first handoff. Explicit HTTP-loopback development keeps `pdg_browser`; it is a named local
+  compatibility exception, not a public-origin fallback. Duplicate expected-name cookies still refuse. Actual TLS
+  tests must prove an HTTP sibling cannot set the prefixed Domain cookie, a legacy preseed is ignored, and a fresh
+  legitimate binding remains unknown to that sibling. Console cookie name/scope and enrollment are unchanged.
+
+- **Added by security review (2026-11-02, #754, #792)**: `/api/bootstrap` also binds a fresh one-use receipt, stored only as a
+  hash on the intent and returned to the browser that ran it, which carries it to the console in the authorize page's
+  fragment. `context` and `authorize` refuse without it, so a tab holding a launch's proof that did not follow its own link
+  cannot arm whichever browser did. `GET /sandbox/gateway/launch` not arriving same-origin (`Sec-Fetch-Site`) waits for a
+  click before it spends a launch slot or writes an audit row. A refused upgrade is closed outright, and a reset before
+  `handleUpgrade` is handled, because it would otherwise end the process. The console stops renewing an attachment whose
+  window lease has lapsed. A driver's remaining authority is also bounded by its room's TTL. A watcher whose slot lapsed is
+  told its authority ended, and only an intent marked `removed` reads as the driver's Remove. A stalled watcher told to stop
+  is terminated rather than left draining its queue. Sessions ping every 15 seconds, end a peer that stops answering, and
+  charge received pings to the frame budget.
+
+- **IMPLEMENTED (2026-11-02, #792, #793)**: Private intent v2 requires
   `sessionKey` (domain-separated SHA-256 of original S, never raw S), immutable `kind` drive/watch and
   `runFacts` null or exactly id/outcome/project/target/flow/endedAt rebuilt from the matching host/run record.
   Prepared/no-record targets omit facts. No raw record, why, question, transcript, instructions or queue payload.
@@ -12109,7 +12131,7 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   `readRoom` distinguishes absence from unreadability. Driver room operations `startDriver`, `setWatching`,
   `removeWatcher`, `acknowledgeRoster`, `updateGeometry` compare authenticated intent/connection/cookie ownership.
   Authorization atomically reserves one of three watch slots through connection. Expiry/removal releases it.
-  Existing per-session four/global32/broker256 bounds apply; duplicate requests get no cap exemption. Effective
+  Existing per-session four, per-gateway-process 32 and shared-store/broker 256 bounds apply; duplicate requests get no cap exemption. Effective
   watch I/O authority is the minimum of own AUTH, driver AUTH/window ownership, epoch and live reservation, using
   the existing explicit Redis observedAt/absolute-expiry and monotonic response-deadline discipline. No stale
   renewal or delayed acknowledgement revives an expired epoch/owner. Authenticated busy projection exposes only
@@ -12118,7 +12140,10 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   Driver-only control changes consent, removes an exact reservation or acknowledges its rendered roster. Every
   reservation has a join revision; acknowledgement must be at least it and no higher than published revision,
   under the same driver owner/epoch. Unknown/regressing metadata is unavailable, never empty. Shared owner-fenced
-  geometry/roster revisions propagate across processes with healthy polling bounded to one second. Apply newly
+  geometry/roster revisions propagate across processes with healthy polling bounded to one second. HTTP connect
+  reservations and the following WebSocket upgrade remain local to the admitting process; a proxy balancing
+  processes must route that pair consistently, otherwise it refuses before audit/runtime with no automatic retry.
+  Shared room metadata does not require that transport affinity. Apply newly
   observed driver size before subsequent watch bytes. The watch runtime request has stdin false, logs false,
   no writable transport and no resize. Watch frames never reach input/activity/resize/driver control handling.
   Only watches omit additional input-idle expiry; both console leases and driver lifetime remain. Off/removal
@@ -12439,6 +12464,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#754, #792; independent security review) | INT-SANDBOX-GATEWAY-CONTRACT tightens HTTPS browser binding to the __Host- cookie prefix and rejects legacy/domain-cookie migration. Sibling-cookie fixation is tested before first bootstrap. Explicit loopback compatibility, console cookies, grant/tab/token proof, expiry and native/container/budget contracts UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, #793; approved extension) | INT-SANDBOX-GATEWAY-CONTRACT and INT-CONSOLE-AUDIT-LOG amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-02 (#776) | PROPOSED dispatcher requirements/design only; no new executable `INT-` entry or runtime shape. `INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked now: this issue adds no key or loader vocabulary; later builds must define reviewed dispatcher declarations and limits. `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-OUTBOX-CONTRACT` UNCHANGED, checked now: no mount, marker, output file, custody rule or generic same-folder chain authority changes; future restricted engine/input/intent contracts must be specified before use. `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked now: no dispatcher/proposal field or action is registered; later builds must define validated dispatcher provenance and proposal-linked adopt/dismiss/pause/resume/manual-association audit semantics. `INT-WATCH-EVENT-CONTRACT`, `INT-WATCH-FINDINGS-FILE`, `INT-WATCH-TRACE-STREAM` and `INT-WATCH-BOARD-FILE` UNCHANGED, checked: existing watch collection, fresh decisions, private/public projections and person-adopted boards remain their own contracts. Future dispatcher cursor/journal/cap/coalescer/proposal/private-trace contracts need atomic identities, finite byte/count/age limits, known-credential redaction before persistence, conservative unresolved holds, role projections and explicit unavailable/partial states; none is promised by borrowing a watch key or current local dedup. `INT-CONSOLE-STATE-API` and `INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked now: no tab, API, token role or #766 authority changes. This row identifies future amendments distinctly from today's checked unchanged interfaces. |
 | 2026-11-01 (#774, shared auth metadata) | Subscription adapter descriptors move to an SDK-free metadata leaf, mirrored byte-identically into the runner and added to its mirror guard. Policy parsing moves without changing validation or schemas. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, adapter transformation/output/source pins and container credential capabilities UNCHANGED, checked. Private setup lifetime now starts at input receipt, including a pending planner; abort, navigation and sign-in changes cannot restart it or mint a late usable ticket. |
@@ -12818,3 +12844,5 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-02 (#754, HTTPS session-cookie review) | `INT-SANDBOX-GATEWAY-CONTRACT` records protected HTTPS enrollment selecting Secure for console sign-in cookies, with one captured origin declaration per request. Default/enrolled loopback HTTP remains compatible, and expiry matches the same cookie identity. `INT-CONSOLE-TOKENS-FILE-CONTRACT`, cookie name/host/path/HttpOnly/SameSite, console CSP/state/SSE, native opener and all paid/run/container interfaces UNCHANGED, checked. |
 | 2026-11-02 (#754, measured implementation) | `INT-SANDBOX-GATEWAY-CONTRACT` is IMPLEMENTED and binds bounds/vocabularies to exported protocol/terminal constants and behavioral suites rather than a second handwritten table. Records input/resize/activity versus ready/ended framing, no pre-ready input/output, trusted UI activity excluding terminal query replies, derived gateway-cookie Max-Age, audit-unavailable compensation before ready and PID-owned crash journal. Genuine-HTTPS browser and live Docker/rootless-Podman evidence are named. Cookie scope, console CSP/state/SSE, native lifecycle interfaces and all run/paid/container formats UNCHANGED, checked. |
 | 2026-11-02 (#754, delayed-authorization correction) | `INT-SANDBOX-GATEWAY-CONTRACT` makes observeTime and explicit immutable observedAt mandatory for authorizeIntent/renewAuthorization. Redis absolute expiry is observedAt plus bounded authMs; future/expired observations refuse, renewal requires the existing owner, and a late successful RPC never gains a fresh relative TTL. Real-Valkey regressions inspect exact PEXPIRETIME after timed-out successful authorize/renew commands, including another observation in between. Monotonic gateway I/O deadlines, grant lifetime/window fencing, cookie/console/native/run/paid/container interfaces UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, implemented) | INT-SANDBOX-GATEWAY-CONTRACT and INT-CONSOLE-AUDIT-LOG: pending markers become IMPLEMENTED. Measured distinction now pinned by test: a console that revokes an operator ends the attachment as `session-ended` (and that operator's watchers as `driver-ended`), while a console that merely stops renewing ends it as `authorization-unavailable`, because silence proves nothing about the operator. `gatewaySelect` for a host with no enabled gateway now says so instead of drawing an empty chooser. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, security review) | INT-SANDBOX-GATEWAY-CONTRACT gains the bootstrap receipt, the same-origin launch gesture and the session heartbeat; refused upgrades close outright; the console stops renewing attachments nobody holds; driver authority is bounded by its room's TTL; a lapsed watcher is no longer told the driver removed it. Found by an independent review of the final diff, each with a regression test. No watcher write path was found. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |

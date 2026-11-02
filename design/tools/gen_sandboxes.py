@@ -50,7 +50,7 @@ def kept():
 def browser_card():
     body = '<p class="sx-p">A separate gateway can attach to an already-open sandbox. It is off by default and enabled by hand per host. Open in Terminal and copy-command support remain available.</p>'
     body += '<p class="sx-p">1 host is enrolled.<span class="sandbox-opener"> Choose Open in browser beside a registered shell in Open now.</span></p>'
-    body += '<p class="sx-p">Each opening needs your current operator token again. Only one browser window attaches at a time. Closing it keeps the original sandbox; what you type is not recorded.</p>'
+    body += '<p class="sx-p">Each opening needs your current operator token again. One browser window types at a time, and others can watch only if the person typing allows it. Closing it keeps the original sandbox; what you type is not recorded.</p>'
     body += '<p class="sx-p">First open a kept or prepared workspace in your own terminal. The browser never starts a container.</p>'
     body += '<p class="sx-p">Browser terminals require a window wider than 760 pixels. On a phone, copy the command for your own terminal.</p>'
     return card('In this browser', body, sub='optional, separate gateway', end=chip('Enabled per host','ok','shield'), id_='p-sb-browser')

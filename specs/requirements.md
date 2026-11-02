@@ -1102,7 +1102,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-CONSOLE-SECURITY
 
-- **ADOPTED 2026-11-02 (#754, implementation pending)**: `REQ-SANDBOX-BROWSER-GATEWAY` permits only a separate
+- **ADOPTED AND IMPLEMENTED 2026-11-02 (#754)**: `REQ-SANDBOX-BROWSER-GATEWAY` permits only a separate
   process, hostname and tab for an existing sandbox's terminal. Console launch/step-up actions are person-only,
   require the original live operator session and fresh same-token authentication, and disclose no durable token,
   console session ID or terminal bytes. The attachment grant stays server-side and binds the separate gateway's
@@ -3080,7 +3080,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
 
-- **ADOPTED 2026-11-02 (#754, implementation pending)**: sandbox browser launch and step-up are person-only
+- **ADOPTED AND IMPLEMENTED 2026-11-02 (#754)**: sandbox browser launch and step-up are person-only
   actions under `REQ-SANDBOX-BROWSER-GATEWAY`. They cannot enable a gateway, start a container or bypass fresh
   same-session, same-token authentication. Ordinary confirmation tickets are not attachment grants. Viewers,
   agents, tools, read-only consoles and cross-origin requests refuse before private target/control dependencies.
@@ -6763,7 +6763,7 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-SANDBOX-BROWSER-GATEWAY
 
-- **Approved extension, implementation pending (2026-11-02, #754, #792, #793)**: A maintained-library terminal
+- **IMPLEMENTED (2026-11-02, #754, #792, #793)**: A maintained-library terminal
   workbench admits up to four original-session-bound drive/watch panes, with tabs, splits, keyboard layout controls
   and connection-preserving moves. Each pane attaches to an existing shell; native opening remains independent.
   One writing driver and at most three consented read-only watches supersede the older one-browser limit below.
@@ -6870,13 +6870,13 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 ## REQ-SANDBOX-FROM-THE-CONSOLE
 
-- **Approved extension, implementation pending (2026-11-02, #793)**: Operator-only `p-workspace` precedes run
+- **IMPLEMENTED (2026-11-02, #793)**: Operator-only `p-workspace` precedes run
   facts: completed try, failed reproduce, parked inspect before answering, unreopenable/swept/expired prepare,
   running steer, and nothing for a container never started. Current running/recovery and parked facts take
   precedence over historical completion. Show kept deadline and open-shell identity; fold command copy and
   confirmed End. Browser/Watch needs a current eligible tracked shell and enrollment. Distinguish native opener
-  from authenticated browser driver. Viewer gets no row; read-only retains safe command copy. The outcome banner
-  links to the row. Stale/unreadable/truncated inventory never proves a workspace swept. Findings reuse current
+  from authenticated browser driver. Viewer gets no row; read-only retains safe command copy. A completed
+  run's outcome banner links to the row, as #793 and the RunWorkspace card say. Stale/unreadable/truncated inventory never proves a workspace swept. Findings reuse current
   instruction-edit and exact-point fork/message Preview/Confirm/refusal gates. An index alone cannot prove the
   original trigger after reordering: unproven attribution requires explicit current-trigger choice. Preparation
   fills trustworthy repository/ref facts then revalidates current trigger and eligible-host policy. No created-PR
@@ -8628,3 +8628,5 @@ instead of drifting.
 | 2026-11-02 (#754, delayed-authorization correction) | `REQ-SANDBOX-BROWSER-GATEWAY` closes a late-command counterexample to its five-second authorization limit: a relative TTL set when a delayed RPC finally executed could extend an old judgment while its previous AUTH key was still live. Each write now carries an immutable Redis-time observation from before current authority judgment and uses that original absolute deadline. Independent live-Valkey checks and permanent delayed-success/future/expired/concurrent-clock regressions verify exact expiry and no resurrection. Grant lifetime, ownership, console idle/CSP, native lifecycle, budget/container/run/queue and all other contracts UNCHANGED, checked. |
 | 2026-11-02 (#754, complete workspace guard census) | `REQ-UPSTREAM-CONTRACT-TESTS` includes the optional gateway in every applicable repository-wide source/test inventory: judged Valkey construction and credential routing, stdout-result protection, retired insights source/docs, host git hardening and compose command environment. Non-vacuity and planted gateway constructor regressions prove the Valkey scan reaches the real executable; deployment syntax verification includes its mirrored service example, and the rootless main-push filter covers the browser's admin and pinned-Chrome dependencies. AGENTS documents the new workspace and existing merge-scan scope. Product behavior, authorization/expiry, console CSP/state/SSE, native routes, paid/container/run/queue/exit and all other contracts UNCHANGED, checked. |
 | 2026-11-02 (#754, fast-browser readiness correction) | Fast verification without screenshot delays exposed a pre-ready resize-observer timer racing the direct ready resize. The implementation cancels pending fit work before that direct resize; the bounded-drag/cleanup regression passes. The browser driver now waits for a fresh completed document and fresh intent, and honors production login/step-up rate limits without weakening authentication policy or assertions. The full fast TLS rerun without screenshots passes all six theme/width renders under the real CSP, roles/no-JavaScript, sustained resize, revocation and external End. `REQ-SANDBOX-BROWSER-GATEWAY` bounds, proofs, native lifecycle and idle contract UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, #793, implemented) | REQ-SANDBOX-BROWSER-GATEWAY, REQ-SANDBOX-FROM-THE-CONSOLE and REQ-OPERATOR-CONSOLE-SCREENS: the workbench, the run Workspace and read-only watching are built, so their pending markers become IMPLEMENTED. One correction: the outcome banner's link to the Workspace row is for a completed run, as #793 and its card say; the unconditional wording was wider than either. The run page offers Prepare from this run past a workspace's window, as #793 asks; the CLI's own `--pin` is unchanged and this entry's clause about it still holds. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, security review) | REQ-SANDBOX-BROWSER-GATEWAY: a launch link opened in another browser can no longer be armed by a step-up elsewhere; a launch from outside the console waits for a click; an unauthenticated reset can no longer end the gateway. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |

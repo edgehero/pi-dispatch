@@ -4206,7 +4206,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY
 
-- **Approved compatibility correction, implementation pending (2026-11-02, #754)**: The published pi 1.5.0
+- **Compatibility correction, IMPLEMENTED (2026-11-02, #754)**: The published pi 1.5.0
   extension view re-exports compat through a distinct namespace. Retain exact namespace identity at the 1.4.0
   production pin, and additionally admit a facade only when all five callable exports are identical to the
   resolved compat candidate: registerApiProvider, getApiProvider, getApiProviders, resetApiProviders and
@@ -12091,7 +12091,7 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
-- **AMENDED 2026-11-02 (#792, #793; approved, implementation pending)**: Workspace reuses existing native links,
+- **AMENDED AND IMPLEMENTED 2026-11-02 (#792, #793)**: Workspace reuses existing native links,
   copy, exact-incarnation End and preparation/fork/instruction confirmation flows. The separate full-viewport
   gateway workbench integrates RunWorkspace, RunWorkspaceStates, SandboxTerminalRun and SandboxWatch semantics.
   Context follows each pane; canonical return uses the generic Strict-cookie bridge. Missing/prepared records
@@ -16034,7 +16034,15 @@ is introduced. The design generator owns the published card before the console u
 
 ## DES-SANDBOX-GATEWAY-ATTACH-ONLY
 
-- **Approved extension, implementation pending (2026-11-02, #792, #793)**: The earlier one-browser limit becomes
+- **Independent-review correction (2026-11-02)**: A merely host-only Set-Cookie response does not prove the
+  incoming nonce was host-only: a sibling may preseed a Domain cookie with the same name before first bootstrap.
+  HTTPS therefore uses only the browser-enforced __Host-pdg_browser name and never adopts the legacy unprefixed
+  cookie. The explicit local HTTP compatibility case is separate. Real TLS sibling Set-Cookie counterexamples
+  supplement server tests. Pre-attach deadlines are checked synchronously after awaits as well as by timers;
+  an expired callback cannot attach during a delayed timer turn. Queued driver controls have a finite source-owned
+  pending bound across rate windows and cannot apply effects after end.
+
+- **IMPLEMENTED (2026-11-02, #792, #793)**: The earlier one-browser limit becomes
   one writing driver plus three consented watches. This intentionally discloses potentially sensitive echoed
   terminal content to other operators. Consent starts off per driver, changes epoch on re-enable and cannot
   survive replacement. A watch is its own session-bound attachment, never part of another operator's workbench
@@ -16044,7 +16052,7 @@ is introduced. The design generator owns the published card before the console u
   ceases driver renewal/detaches as needed for the five-second bound, with no optimistic success. The persistent
   roster renders before acknowledging its bounded revision under the same live owner/epoch; that orders rendering,
   not human attention. Missing acknowledgements time out. Shared owner-fenced roster/geometry revisions support
-  two processes without sticky routing: poll at most once per second and apply observed geometry before later
+  two processes without room-metadata routing affinity: poll at most once per second and apply observed geometry before later
   output. Each watch forwards its own read-only stream once, no history/fanout duplication; slow watches drop alone.
   Opening/open-receipt compensation and safe two-actor watch audit remain mandatory. These clauses supersede
   older exclusive-connection and universal input-idle wording below.
@@ -16713,6 +16721,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#754, #792; independent implementation review) | DES-SANDBOX-GATEWAY-ATTACH-ONLY records the sibling-cookie fixation counterexample, HTTPS prefix-only binding, synchronous pre-attach deadline checks and bounded pending control queue. DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY also records the explicitly approved five-callable-identity facade correction verified against exact pi 1.4.0 and 1.5.0 artifacts. Production pi pins, policy/brake behavior, console CSP/cookies, native lifecycle and paid admission UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, #793; approved extension) | DES-SANDBOX-GATEWAY-ATTACH-ONLY and DES-OPERATOR-CONSOLE amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-02 (#776) | Four NEW PROPOSED entries, spec only: `DES-DISPATCHER-ADMISSION` bounds new producers, caps, semantic duplicates and crash reconciliation; `DES-DISPATCHER-DECISION-ENGINE` selects deterministic collection and fresh per-event classifier containers; `DES-DISPATCHER-LLM-ENGINE` keeps correlation in fresh read-only jobs of at most thirty minutes; `DES-DISPATCHER-TRIGGER-PROPOSALS` keeps bounded private proposals and validated adoption with a person. `DES-WATCH-DETERMINISTIC-PRODUCER`, `DES-DECISION-MODEL-BEFORE-THE-JOB` and `OQ-053` UNCHANGED, checked: their resident-agent rejections stand; the alternative explicitly offered by #776 is selected, and contrary card claims are marked through generators. `DES-JOB-OUTBOX-CHAINING`, `DES-DOLLAR-RESERVE-AND-SETTLE` and `DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: generic chains, existing holds and #766 delegation are not widened. To be AMENDED by later builds: `DES-AI-TRIGGER-FLOW-GATE` for the new producer and current-list revalidation, and `DES-OPERATOR-CONSOLE` for the new screens and audited person actions. No runtime code or executable interface is added. |
 | 2026-11-01 (#774, subscription guide review) | `DES-HOST-OWNED-SUBSCRIPTION-AUTH` corrects the local OpenAI callback mirror to pinned pi's explicit `127.0.0.1` redirect, with authorization/exchange and callback counterexamples. Provider-key guidance revealed the former `localhost` drift; the upstream whole-file hash alone did not compare local semantics. Connection-policy validation is moved without schema changes into an SDK-free leaf for safe console metadata. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, refresh/custody, billing routes and public snapshots UNCHANGED, checked; no live sign-in is claimed by offline verification. |
@@ -17133,3 +17142,5 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-02 (#754, HTTPS session-cookie review) | `DES-OPERATOR-CONSOLE` narrows its measured WebKit plain-cookie exception to HTTP-loopback and adds Secure under protected canonical HTTPS enrollment. Reusing the exact origin already judged for this request avoids a second configuration read during login and trusts no forwarding header. Cookie name/host/path and expiry identity, console CSP/process boundary, loopback behavior, gateway authority and native/paid/container decisions UNCHANGED, checked. |
 | 2026-11-02 (#754, measured implementation) | `DES-SANDBOX-GATEWAY-ATTACH-ONLY` is IMPLEMENTED with source evidence for live Docker/rootless-Podman PTY/detach/lifecycle measurements and genuine-HTTPS distinct-site browser controls, Secure cookies, themes/widths/roles/no-script and hostile-output refusals. The renderer-only gateway style allowance follows the exact released artifact; final published-source screenshot comparisons remain required, with no claim of direct inaccessible remote-artifact comparison. Console CSP/process separation, native opener, accepted runtime/browser/Valkey residuals, zero-touch and all paid/container decisions UNCHANGED, checked. |
 | 2026-11-02 (#754, delayed-authorization correction) | `DES-SANDBOX-GATEWAY-ATTACH-ONLY` records operation-local primitive Redis observations before current identity/registration judgment, explicit observedAt protocol arguments and absolute PXAT/PEXPIREAT authority expiry. A timed-out command executing late cannot turn an old judgment into five fresh seconds, and concurrent time reads cannot shift another operation forward. Future/expired observations refuse and missing owner authority stays absent. Gateway monotonic receipt deadlines, grant/window ownership, console idle/CSP and all native/paid/container decisions UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, #793, implemented) | DES-SANDBOX-GATEWAY-ATTACH-ONLY, DES-OPERATOR-CONSOLE and DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY: pending markers become IMPLEMENTED. Two corrections found while verifying: a focus request now survives until it lands, because Dockview raises a pane's visibility event before it unhides the overlay that holds it and a hidden element refuses focus without an error; and watch admission polls at the contract's once a second, where it had polled every 50 ms. Measured: a CDP-frozen driver stays hidden after thawing, which correctly withholds its roster acknowledgement, so no watcher is admitted to a tab nobody can see. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, security review) | DES-SANDBOX-GATEWAY-ATTACH-ONLY: nine findings from an independent review are fixed, recorded in INT-SANDBOX-GATEWAY-CONTRACT. Rejected: accepting the launch-link hand-over as an insider-only risk, because the review showed a shell landing in another browser under the operator's name, and a receipt closes it at small cost. Also rejected for the launch gesture: a click on every launch, which would add a step to every ordinary button; only a launch not arriving same-origin waits. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |
