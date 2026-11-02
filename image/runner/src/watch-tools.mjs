@@ -2,6 +2,7 @@ import { appendFileSync, lstatSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 import { configError } from "./outcome.mjs";
 import { LAYOUT } from "./layout.mjs";
+import { exactArguments } from "./exact-arguments.mjs";
 const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const only = (v, keys) => object(v) && Object.keys(v).every((k) => keys.includes(k));
 const name = (v) => typeof v === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(v) && !["constructor", "prototype", "__proto__"].includes(v);
@@ -90,5 +91,6 @@ export function createWatchTools({ config, runtime, outbox = LAYOUT.outbox, fetc
 		if (Buffer.byteLength(raw) > 16384) return reply({ reason: "watch-board-oversize" }, true);
 		try { begin({ kind: "board", callId }); fs.writeFileSync(join(outbox, "board.json"), raw, { mode: 0o600 }); trace({ kind: "board", callId, status: "proposed", blocks: args.board.blocks.length }); return reply({ status: "proposed" }); } catch { return reply({ reason: "watch-board-write-failed" }, true); }
 	} });
-	return { tools, names: tools.map((tool) => tool.name), factories: [{ name: "job-watch-tools", factory(api) { for (const tool of tools) api.registerTool(tool); } }] };
+	const exact = tools.map((tool) => exactArguments(tool));
+	return { tools: exact, names: exact.map((tool) => tool.name), factories: [{ name: "job-watch-tools", factory(api) { for (const tool of exact) api.registerTool(tool); } }] };
 }

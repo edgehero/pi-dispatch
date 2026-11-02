@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { configError } from "./outcome.mjs";
 import { RUN_JOB_PATH } from "./child-route.mjs";
 import { LAYOUT } from "./layout.mjs";
+import { registerExact } from "./exact-arguments.mjs";
 
 export const ROLE_SUBAGENT_TOOL = "subagent";
 export const ROLE_SUBAGENT_FACTORY = "job-role-subagent";
@@ -124,7 +125,7 @@ export function createRoleSubagents(inputs, { runChild = runRoleChild } = {}) {
 	return {
 		snapshot: () => ({ refusals: structuredClone(refusals) }),
 		factories: [{ name: ROLE_SUBAGENT_FACTORY, factory: (api) => {
-			api.registerTool({
+			registerExact(api, {
 				name: ROLE_SUBAGENT_TOOL, label: "subagent", description: `Delegate to a reviewed agent snapshot. Available agents: ${agents.map((agent) => `${agent.name}: ${agent.description}`).join("; ")}`,
 				parameters: { type: "object", properties: { agent: { type: "string" }, task: { type: "string", minLength: 1, maxLength: 131072 }, tasks: { type: "array", minItems: 1, maxItems: 4, items: { type: "object", properties: { agent: { type: "string" }, task: { type: "string" } }, required: ["agent", "task"], additionalProperties: false } }, chain: { type: "array", minItems: 1, maxItems: 16, items: { type: "object", properties: { agent: { type: "string" }, task: { type: "string" } }, required: ["agent", "task"], additionalProperties: false } } }, additionalProperties: false },
 				async execute(_id, args, signal, _update, ctx) {

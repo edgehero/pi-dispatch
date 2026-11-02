@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { configError } from "./outcome.mjs";
+import { registerExact } from "./exact-arguments.mjs";
 
 export const APPROVAL_TOOL = "request_approval";
 export const APPROVAL_FACTORY = "job-request-approval";
@@ -26,7 +27,7 @@ export function parseApprovalEnv(env) {
 export function createRequestApproval(gates) {
 	const state = { called: false, approval: null };
 	return { state, factories: [{ name: APPROVAL_FACTORY, factory(api) {
-		api.registerTool({
+		registerExact(api, {
 			name: APPROVAL_TOOL,
 			label: "request approval",
 			description: "Ask a person to approve a declared action. First post the summary on the issue. Call this tool alone; the run ends and resumes with the person's decision as this tool's result. External actions remain advisory to your skill.",

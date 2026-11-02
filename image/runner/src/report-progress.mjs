@@ -1,3 +1,4 @@
+import { registerExact } from "./exact-arguments.mjs";
 /**
  * Issue #644: the tool a job armed with `run.progress` reports its plan's progress with.
  *
@@ -70,7 +71,7 @@ export function createReportProgress() {
 		{
 			name: REPORT_PROGRESS_FACTORY,
 			factory: (api) => {
-				api.registerTool({
+				registerExact(api, {
 					name: REPORT_PROGRESS_TOOL,
 					label: "report progress",
 					description: DESCRIPTION,

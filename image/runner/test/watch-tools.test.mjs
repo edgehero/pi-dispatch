@@ -52,3 +52,10 @@ test("trace cap refuses more queries before fetch and caps file entries", async 
 	for (let i = 0; i < 100; i++) await f.tool("query_logs").execute(`q${i}`, { name: "errors" });
 	assert.ok(calls <= 63); assert.ok(f.lines.length <= 128);
 });
+
+test("query_logs with a null or numeric name is refused, not sent as the word null (#796)", () => {
+	const f = fixture();
+	for (const tool of f.tools) assert.equal(typeof tool.prepareArguments, "function", `${tool.name} goes through the rule`);
+	for (const args of [{ name: null }, { name: 7 }]) assert.throws(() => f.tool("query_logs").prepareArguments(args), Error, JSON.stringify(args));
+	assert.deepEqual(f.tool("query_logs").prepareArguments({ name: "errors" }), { name: "errors" });
+});

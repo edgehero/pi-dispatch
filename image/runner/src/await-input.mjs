@@ -20,6 +20,7 @@
 import { dirname, join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { registerExact } from "./exact-arguments.mjs";
 
 export const AWAIT_INPUT_TOOL = "await_human_input";
 export const AWAIT_INPUT_FACTORY = "job-await-input";
@@ -47,7 +48,7 @@ export function createAwaitInput({ sessionFile = null, writeFile = writeFileSync
 		{
 			name: AWAIT_INPUT_FACTORY,
 			factory: (api) => {
-				api.registerTool({
+				registerExact(api, {
 					name: AWAIT_INPUT_TOOL,
 					label: "await human input",
 					description: DESCRIPTION,
