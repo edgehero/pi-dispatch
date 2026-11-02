@@ -35,6 +35,10 @@ and naming `pi-dispatch up` as the way to start it: loud, free (no budget slot, 
 as a Quadlet unit that comes back at boot: [`podman.md`](podman.md)), and `doctor` fails
 until it is running, so both commands you already run say it before a single job does.
 
+## What the worker host itself reaches for updates
+
+`PI_UPDATES_LOOK=1` (off by default) has each worker host read `registry.npmjs.org` and `api.github.com` once a day, from the host and never from a job. This policy governs jobs, so it does not cover those requests: `PI_UPDATES_PROXY` is what sends them through a proxy, with no direct fallback. Each is bounded to five seconds and 1 MiB and follows no redirect. See [Updates](console.md#updates).
+
 ## Inspect connections in the console
 
 `/config/connections` shows the deployment's egress posture and first allowlisted hosts, per-host doctor proxy
@@ -85,7 +89,7 @@ everything else. Earlier versions of this document said otherwise; the correctio
 
 Two things that look like they belong on that list and do not. **Staged pi packages need no network at
 all**: `import-pi` installs them on the host and mounts them read-only, and `PI_OFFLINE=1` is set on every
-job, so pi's resolver cannot shell out to `npm` even if a path were missed. **Playwright downloads
+job, so pi's resolver cannot shell out to `npm` even if a path were missed. A person's Adopt and canary install on the worker host too, never in a job, with `npm` under the host's own network and with none of the worker's tokens in its environment. **Playwright downloads
 nothing**: Chromium is baked into the image at build time.
 
 And one that does, which nobody can list for you: **whatever your flows reach**. A job that browses, or

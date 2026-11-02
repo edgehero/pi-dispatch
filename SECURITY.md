@@ -1209,7 +1209,10 @@ Stated openly rather than discovered later:
   so once staged they load for every job and `"packages": false` on a trigger is how one flow declines
   them; there is deliberately no env flag deciding it fleet-wide — and runner-side validation: a
   package that did not mount is refused before any spend, and a package skill that takes the name of a repo
-  or overlay skill loses — the repo's stays in force, and the attempt is logged. Two facts to hold on to.
+  or overlay skill loses — the repo's stays in force, and the attempt is logged. Since issue #796 a person can also try
+  one exact version on one job, or adopt it fleet-wide, from the console's [Updates](docs/console.md#updates) page: both
+  go through the same staging with `--ignore-scripts`, neither is open to an agent, and a tried version is new third-party
+  code in a job that holds its trigger's credentials, which is why that is a person's call. Two facts to hold on to.
   Staging runs
   `npm install --ignore-scripts`: **without that flag a package's — and every transitive dependency's —
   lifecycle scripts would run AS YOU, ON YOUR HOST**, at stage time, which is a host compromise and not a

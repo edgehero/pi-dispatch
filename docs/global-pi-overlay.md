@@ -262,6 +262,8 @@ is doing the work here. The container's network is **not** cut off (egress is op
 [`SECURITY.md`](../SECURITY.md) says so plainly); offline mode is the thing that closes the job-time
 install, and the worker sets it on every job while the runner re-asserts it before the loader is built.
 
+**A stage never touches what jobs are loading.** Each one lands in a folder of its own (`packages/<name>--<version>--<id>`) and the manifest, written whole, is what commits it. A job started at any moment reads the old set or the new one, a stage that fails leaves the old set exactly as it was, and a tree that left the manifest stays a week for any job that has it mounted. To try or adopt one version from the console rather than here, see [Updates](console.md#updates).
+
 **What you installed in pi is staged too.** If you ran `pi install npm:@acme/pi-house-skills`, you do not
 declare it a second time: `--with-packages` reads pi's own settings, finds it, and stages it **at the exact
 version your host has on disk**. `pi-packages.json` is the override-and-addition layer — an explicit entry

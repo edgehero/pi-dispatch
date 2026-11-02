@@ -1,4 +1,4 @@
-"""Updates (proposed): pi and the extensions jobs run, prepared for the person, adopted by the person.
+"""Updates: pi and the extensions jobs run, prepared for the person, adopted by the person.
 
 pi-dispatch pins every version a job runs (CONST-PI-VERSION-PINNED), so nothing here updates by itself. What it does
 by itself, once enabled, is look: it finds a newer pi or a newer staged extension and whether the checks hold, and
@@ -96,7 +96,7 @@ def page():
 
 
 README = """
-Updates (proposed): pi and the extensions jobs run, prepared for the person and adopted by the person. pi-dispatch pins every version a job runs, so nothing updates by itself; what pi-dispatch does by itself, once `PI_UPDATES_LOOK=1` is set, is look: it finds a newer pi or a newer staged extension and whether the checks hold. Trying a new extension is a paid canary, and adopting it is a person.
+Updates: pi and the extensions jobs run, prepared for the person and adopted by the person. pi-dispatch pins every version a job runs, so nothing updates by itself; what pi-dispatch does by itself, once `PI_UPDATES_LOOK=1` is set, is look: it finds a newer pi or a newer staged extension and whether the checks hold. Trying a new extension is a paid canary, and adopting it is a person.
 
 **How a person uses it.**
 - **The banner** says when a new pi is out and pi-dispatch's checks on it fail, so jobs stay on the pinned pi. It links to the bump pull request, which lists what broke.

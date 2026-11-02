@@ -604,6 +604,7 @@ readers ([Live updates](#live-updates)).
 | `/fleet/host?name=build3` | One host's heartbeat, running and waiting jobs, orphan cleanup guidance, retained workspaces, slots and budgets, seven-day capacity, registry and doctor. The host facts update live; capacity is read when the page opens. |
 | `/fleet/venue?name=podman` | One venue's capabilities, all fourteen isolation declarations and asserters, every published applicable floor, host observations, credential custody and four-venue comparison. Read once, with no runtime probes. |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
+| `/config/updates` | Which pi and which extensions jobs run, what is newer, a canary and Adopt ([Updates](#updates)). |
 | `/models` | Scoped model roles and ordered fallbacks, actionable policy banners, observed cooldowns and model windows, published proposals and retained canary comparisons. Not live; Reload reads again. Operators review role-map changes through preview, diff and confirm. No page action starts a run. |
 | `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. How far its hash chain is verified, which rows it does not vouch for, filters and a search ([The audit log](#the-audit-log)). A line that is not a valid row is shown as damaged in its place, never skipped. |
 
@@ -1674,6 +1675,24 @@ answered by a later run, being answered, finished or unknown) and offers the cha
 The running and parked modes show `pi-dispatch chat <job id>` too, which opens the same chat in a terminal. A viewer sees the run's
 state only, never a form or a command, and a read-only console draws no form for anyone. When the queue cannot be
 read the panel says so rather than guess.
+
+### Updates
+
+**Updates** (`/config/updates`, linked from Configuration) says which pi and which extensions your jobs run, what is newer, and what you can do about it. pi-dispatch pins every version a job runs, so nothing here updates by itself. Viewers see versions and results; the buttons are an operator's, and no agent can press them, whatever grant it holds.
+
+**The look is off until you turn it on.** Set `PI_UPDATES_LOOK=1` on a worker host, and it looks a minute after it starts and then once a day: the newest pi and the newest version of each staged extension from the npm registry, and this project's public checks on its bump pull request. It runs on the host and never in a job, changes nothing and spends nothing. It does send your staged package names to the registry, so set `PI_UPDATES_REGISTRY` to a private mirror if those names are private, and `PI_UPDATES_PROXY` to send its requests through a proxy with no direct fallback. A read that fails says **unknown**, never that all is well, and a look older than two days says so.
+
+**pi** arrives in a pi-dispatch release, so its row only tells you where it stands and links to the bump pull request. **pi on each host** is the pi where `/dispatch` runs. That one is yours to update, for example with `pi update --all`, and the page says when it is newer or older than pi-dispatch is tested with.
+
+**Run a canary** tries one exact version of one extension on one paid job. Pick a cron trigger that loads staged packages; the preview shows the reserve. The version replaces the staged copy for that job only, installed under that job's own folder, so a job running beside it never sees it, and it is deleted from a kept workspace. It is refused for free, before anything is spent, if the trigger sets `run.packages: false`, the package is a reviewed subscription adapter, it is not staged on that host, the version does not exist, or the image is too old to report the result.
+
+The result reads **completed, read the run** or **failed**, and never "passed". Completed means the job finished and the runner saw the extension load. It does not prove the extension is good, so read the run. A candidate that did not load, or a run that did not say, reads as failed: a failed load only logs, and the job carries on without it.
+
+**Adopt** needs a canary of that exact version that completed, on a run still retained. Each host stages the version in a folder of its own and pins it in its `pi-packages.json`, so a later `import-pi` does not put it back. Jobs that start afterwards load it, and running jobs keep what they have. A host that is offline adopts when it returns: the page shows it as pending, and as overdue after a day. A host that cannot adopt says why, for example a read-only overlay, and the row reads as partial until you fix that or undo.
+
+**Undo** puts each host back as it was, including its `pi-packages.json`. The old version's folder is kept for a week, so going back is instant; after that it is staged again. A host that never took the adoption changes nothing.
+
+Two limits, so that you can judge them. A package has no lockfile, so its dependencies are resolved again on each host and a tree can differ from the one the canary ran; each tree's digest is recorded and the page says when they differ, which does not make them the same. And Adopt is one host's overlay at a time unless your hosts share one, in which case a lock serialises them.
 
 ### Opening a sandbox
 
