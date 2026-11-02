@@ -172,6 +172,52 @@ Four deployment notes:
 - A symlinked `triggers.json` is replaced by a real file on the first disarm. Keep the real file at
   the served path and symlink the other direction.
 
+## The file's version
+
+`triggers.json` may carry a top-level `version` (issue #761). Absent means `1`. You never need to write it: every
+writer (the panel, the console and the trigger tools) writes it, first in the file, only when an entry uses a `run`
+field, a top-level block or a value (a new `on.type`, a new `waitFor` condition, a new `run.kind`) that an older
+release would misread (a field whose absence would let a job run wider than the file says, or a value it would refuse
+as broken). Nothing needs one yet, so today's files have none and every write leaves them byte for byte as before. A
+file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
+
+**A file written by a newer pi-dispatch** names the versions in its refusal ("triggers file written by a newer
+pi-dispatch (version 2; this build understands 1)"):
+
+- A worker or receiver refuses to start on it, as on any file that does not load.
+- A running worker keeps its schedules and logs `triggers_reload_newer`, and from then on defers EVERY job, cron runs
+  included, with "Queued or configured by a newer pi-dispatch: waits for this host's upgrade" (`newer-release`,
+  re-checked every ten minutes), until it is upgraded or the file loads again. Its schedules are no longer what you
+  wrote, and many checks read this file while a job runs.
+- A job whose one-shot, `waitFor`, narrowing field, approval check, answer draft or question grouping reads such a
+  file waits the same way, also on a worker that does not watch the file: a one-shot is never fired because this
+  release could not read its disarm.
+- The panel, the console and the trigger tools refuse to write over it ("nothing was written and nothing in it was
+  lost; change it with that release"), and the console's lists show it as unreadable.
+- The worker still spends a one-shot that ran: its disarm adds `on.disarmed` to the entry and keeps every other key of
+  the file, `version` included, so a one-shot whose file turned newer while it ran is not fired again by the release
+  that reads the file next. Like every write of this file, it writes the values back as JSON reads them: a number
+  beyond 2^53 loses precision, `1e400` becomes `null`, `-0` becomes `0`, and keys named by an integer move to the
+  front of their object.
+
+Upgrade the hosts that refuse it; do not edit the `version` away, which would hide fields this release drops. The one
+exception is a `version` you wrote yourself (below): no release wrote that file, so remove the key. `pi-dispatch
+doctor` says so in its fix ("unless you added `version` to it yourself: then remove that key"). A file that is merely
+broken (bad JSON, a bad entry, `version` written twice) is handled as it always was: the services refuse it, and an
+unparseable one is rebuilt from empty by the next panel write. No reader, the console's triggers view included,
+reads a `version` written twice as newer: the services refuse the file as broken, and the console's view calls it
+broken when its last value reads newer and otherwise shows the file as it did before.
+
+**Upgrading.** Earlier releases ignored a top-level `version` in this file; since issue #761 it is read. If you put one
+there yourself, remove it before you upgrade: one that is not a whole number of 1 or more makes the file broken, so the
+worker and the receiver refuse to start on it (a running worker keeps its schedules, and the next panel write drops
+it), and one above 1 reads as a file a newer release wrote, so every job waits.
+
+Every top-level key beside `triggers`, and every `run` key of an entry, including ones this release does not know, is
+kept by every write of a release with issue #704 or later. A panel, console or worker from before it (4.3.1 included)
+writes `triggers` alone, dropping `version` and every other top-level block, `secretBundles` among them, so upgrade
+them first.
+
 ## Optional `run` fields
 
 Each one is a deliberate edit to the file: neither the panel nor any AI tool can set it, because each one

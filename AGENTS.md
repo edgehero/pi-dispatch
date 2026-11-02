@@ -174,7 +174,33 @@ Two consequences worth internalising before you design anything:
   reason table, fields block and bucket lists against `worker/src/defer-reasons.mjs`, both ways, in
   `worker/test/defer-reasons.test.mjs`; and the design folder's `tokens.json` and `components/bundle.css` against
   the console's pasted copies (`admin/test/design-folder.test.mjs`: the tokens equal, the stylesheet equal or exactly
-  the version recorded as waiting to be pasted).
+  the version recorded as waiting to be pasted); and the record shape each release's `buildRecord` makes from the
+  shared cases, `worker/test/fixtures/run-records/` (`INT-RUN-HISTORY-FILE-CONTRACT`), which `buildRecord` must equal
+  for every case (`worker/test/run-record-fixtures.test.mjs`): when `buildRecord` changes, run
+  `node .github/scripts/run-record-fixtures.mjs --next-only` and commit the `next.*` files with the change, and after a
+  release run `--write` from a clone that has the release tags, so that release's shape gets its tag's name; and the
+  store version tables (`DES-STORE-VERSION-WHEN-NEEDED`: `SETTINGS_KEY_VERSIONS`,
+  `PAUSE_WINDOW_FIELD_VERSIONS`, `TRIGGER_RUN_FIELD_VERSIONS`, `TRIGGERS_BLOCK_VERSIONS`, `JOB_DATA_FIELD_VERSIONS`,
+  `SANDBOX_MANIFEST_FIELD_VERSIONS`, `PROJECTS_FIELD_VERSIONS`), each held to its store's known fields and to its
+  `*_VERSION` by `versionTableProblems`, and the value tables beside them (`SETTINGS_VALUE_VERSIONS`,
+  `JOB_DATA_VALUE_VERSIONS`, `PAUSE_WINDOW_VALUE_VERSIONS`, `TRIGGER_VALUE_VERSIONS`, `TRIGGER_RUN_VALUE_VERSIONS`,
+  `TRIGGERS_BLOCK_VALUE_VERSIONS`), each held to its store's known fields by `valueTableProblems`, with
+  `PAUSE_WINDOW_FIELDS` held to the normalizer's own reads, any `AUTHORED_NARROWING_FIELDS` row added after issue #761
+  to an entry in both the trigger-run and the job-data table, each exported closed list whose new member an older
+  build refuses pinned at its issue #761 members, a new member needing a value rule in every store that carries it
+  (`WAIT_CONDITION_KEYS`: `waitFor` in the trigger-run and job-data value tables; `FORGE_KINDS` as a pause scope's
+  prefix and `DAYS`: `scope` and `days` in the pause window value table; `RUN_KINDS`: `kind` in the trigger-run and
+  job-data value tables; `ON_TYPES`, `PR_ACTIONS`, `ISSUE_ACTIONS` and `REVIEW_STATES`: `on` in the trigger value
+  table; `EXCLUDABLE_TOOL_NAMES` and `MCP_EXCLUDABLE_TOOL_NAMES`: `excludeTools` in the trigger-run value table;
+  `BACKEND_NAMES`: `backend` in the trigger-run and job-data value tables; `FORGE_MCP_KINDS`: `run` in the trigger
+  value table and `mcp` in the job-data value table; `ANSWER_CATEGORIES`: `answerRules` and `WATCH_SEVERITIES`:
+  `watchSources` in the triggers block value table, `WATCH_SEVERITIES` also `on` in the trigger value table;
+  `FORK_THINKING_LEVELS`: `thinkingLevel` in the job-data value table; `BUNDLE_FORMATS`: `secretBundles` in the
+  settings value table), a list written inline being a residual of `DES-STORE-VERSION-WHEN-NEEDED`, and doctor's
+  `STORE_FLEET_LINES` to the four version fields a worker publishes (`worker/test/store-version.test.mjs`,
+  `store-versions-files.test.mjs`, `start-wiring.test.mjs`, `admin/test/store-versions-admin.test.mjs`). The first
+  row in any of those tables, field or value, ships only once every host and every panel and console runs issue #761's
+  release or later.
   Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.
@@ -212,6 +238,9 @@ and merges it.
     `node .github/scripts/provider-key-names.mjs --write`. The console's generated data-only table carries that
     whole-file source hash and every provider's candidate order, so re-generation follows verification, never
     replaces it. Keep provider SDKs out of the console; its bundle guard checks that boundary.
+  - If `worker/test/store-versions-files.test.mjs` is red because `EXCLUDABLE_TOOL_NAMES` gained a tool, add a
+    `TRIGGER_RUN_VALUE_VERSIONS.excludeTools` rule answering 2 for a trigger that excludes it: an older loader refuses
+    such a file as broken.
   - Read the linked pi releases (linked, never pasted). Check the human-judged copies their tests name (steering
     variables, pricing pins, the width table).
   - Every other red test is a pinned assumption that no longer holds: fix the code or the copy against the new

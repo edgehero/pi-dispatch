@@ -71,6 +71,12 @@ is the keep-forever `0`), and the screen says which window it shows. Plan prorat
 window you asked about, not on when the runs happened to land: a quiet fortnight does not shrink a
 plan's share of the month, and verdicts do not read SAVING just because the deployment is young.
 
+A run record written by a newer pi-dispatch (one whose `v` is above what this release reads, or is not a version at
+all, issue #761) is left out of every number here: its tokens, usage and dollars may mean something else in that
+release, and a misread one would be a wrong dollar on every total. The page and `dispatch_costs` say how many were left
+out ("2 records from a newer pi-dispatch not read: the totals leave them out", `newerSkipped`), so a total is never
+silently short. Upgrade the console to count them.
+
 ## Declaring subscriptions
 
 Explicit [subscription authentication](subscription-auth.md) is configured separately. Its connection policy
@@ -102,6 +108,11 @@ over the pointer). The file feeds arithmetic only — it never touches execution
   computed against what those runs actually cost you today.
 - Editing the file re-classifies history retroactively — classification happens when the screen folds,
   not when the run was recorded.
+- A write from the panel or a tool needs a file it can read whole (issue #761). Only a missing file is started from
+  empty. A file that cannot be read or parsed, does not validate, or was written by a newer pi-dispatch is refused,
+  saying which of these it is without quoting the file, and left as it is: rebuilding it, as writes used to, dropped
+  every plan you had declared. Fix the file (or upgrade, for a newer one) and write again. With
+  `PI_SUBSCRIPTIONS_FILE` unset nothing is written.
 
 ## The what-if
 
@@ -308,7 +319,12 @@ change what the windows are charged.
   shows no deployment row.
 - **`dispatch_costs`** returns the same windows under `dollars.windows`, and each run's `dollars` under
   `dollars.runs`. Amounts are integer micro-dollars (1 USD is 1000000). `dollars.windows` lists the operator's
-  caps only. With no dollar cap set it is empty, even while a budget split governs the jobs.
+  caps only. With no dollar cap set it is empty, even while a budget split governs the jobs. `dollars.newerSkipped`,
+  present only above 0, counts the records a newer pi-dispatch wrote, which `dollars.runs` leaves out. The `project`
+  filter narrows it, since a record's project is one of the fields every release reads the same way; the `flow` and
+  `repo` filters do not, since such a record's flow and target are not read, so under either it counts the window's
+  newer records (the project's, when one is given). It counts records up to now only. `fold.newerSkipped` is the same
+  count.
 - **`dispatch_limits`** gives each scoped-limits row its caps in words and, for a dollar row, each window's cap
   and counter.
 

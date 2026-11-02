@@ -62,6 +62,10 @@ Where to see them:
   cores used (the p95 is the value 95 of every 100 runs stay at or below, so one odd run does not move it).
 - **`pi-dispatch doctor`**: one line per project with its size and what its runs suggest.
 
+A run record written by a newer pi-dispatch (issue #761) counts toward no suggestion, since its numbers may mean
+something else in that release. Doctor and the panel's PROJECTS view say how many they left out ("2 records from a newer
+pi-dispatch not read"); the insights page's job sizes section does not say so yet.
+
 Only runs that carry both `size` and `resources` count, which means runs of an upgraded worker with an upgraded job
 image: the count starts when you upgrade, not before. Only runs at the current size or larger decide, so after a
 change the count starts again: "not enough runs at 4g (0; 20 at smaller sizes)" says how many it counted and how many

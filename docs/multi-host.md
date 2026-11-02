@@ -181,8 +181,10 @@ point `FORGEJO_URL` at two different Forgejo instances: the scope names the forg
 instance per forge kind across hosts that share a Valkey.
 
 Upgrade every host before you write a forge-qualified scope. In `scoped-limits.json` a qualified row makes the file
-version 2, which an older worker refuses loudly (at boot, or by keeping its last good file on a live edit and logging why). `pause-windows.json` has no version: an
-older worker reads a qualified window as a name no job has and pauses nothing, without saying so.
+version 2, which an older worker refuses loudly (at boot, or by keeping its last good file on a live edit and logging why). In `pause-windows.json` it does not: that file
+carries a `version` only when a window uses a field or a value an older worker would misread (issue #761), and a
+worker old enough not to know prefixes also ignores `version`, so it reads a qualified window as a name no job has and
+pauses nothing, without saying so.
 
 `projects.json` is per host too. Each host decides which project a job belongs to from its own copy and writes that
 id into the run record, so give every host the same file, or one repo is recorded under two projects depending on
@@ -384,6 +386,25 @@ on the shared Valkey counts as in use, best effort: an older capped host with a 
 a host with only a per-job cap leaves none.
 It never refuses a job over it. Set the same values on every host. An `.env` change needs a restart; an
 overlay or scoped-limits edit shows within fifteen seconds.
+
+**Mixed releases during an upgrade** (issue #761). The settings overlay, `pause-windows.json`, `triggers.json` and the
+jobs in the queue may carry a version, written only when they use something an older release would misread, and each
+worker publishes the highest version of the four it reads (`settingsVersion`, `pauseWindowsVersion`,
+`triggersVersion`, `jobDataVersion`). A worker that meets a newer one waits rather than guess, and nothing is spent or
+lost: with a newer settings file it defers every job; with a newer `triggers.json` it defers every job from its next
+reload of that file, and with a newer `pause-windows.json` every job that reaches its pause check (a job an earlier
+check ends spends nothing), and it refuses either file at its next start; a job queued by a newer release waits on its
+own, and so does a retry whose model has to be chosen again from a run record a newer release wrote. Each is
+deferred with "Queued or configured by a newer pi-dispatch: waits for this host's upgrade" and looked at again every
+ten minutes, so it runs on an upgraded host or after this one is upgraded. Doctor warns
+(`fleet.store-versions`) when this host's own file needs a version above 1 and a peer reads only a lower one, or
+publishes none at all (a worker from before these fields, which would read the file without its version and drop
+what it does not know). Its fix names who to upgrade: "upgrade and restart the workers named, and every panel and
+console that writes the triggers file (one from before issue #761 drops a key it does not know when it writes), to a
+release that reads version 2", or, for the jobs, "every receiver and every console that queues these jobs (a receiver
+publishes no registry row, so doctor cannot see which receivers are older)". Upgrade them before you use what needs
+it. Today no file needs more than version 1, so the line never shows. A run record written by a newer worker is shown
+by its core facts only (id, attempt, outcome, times, host, kind and project), and left out of totals, which say so.
 
 **Each host's budget is its own.** Doctor shows this machine's [host budget](#the-host-budget), which of it and
 `PI_CONCURRENCY` binds first, and warns about a project size it can never hold and about `minJobs` it cannot keep.
