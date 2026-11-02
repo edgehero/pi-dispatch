@@ -296,9 +296,9 @@ test("lands every call on its (provider, model) row and keeps the rows a partiti
 	assert.equal(snap.piAi, null, "no installer ran, so the pricing provenance is unknown -- and says so");
 	assert.equal(snap.truncated, 0, "model-less calls are not truncation; no named row was folded");
 	assert.deepEqual(snap.models, [
-		{ provider: "anthropic", model: "claude-x", calls: 2, input: 11, output: 7, cacheRead: 80, cacheWrite: 4, cacheWrite1h: 2, reasoning: 3, total: 150, cost: 0.75, unpriced: 0 },
-		{ provider: "openai", model: "gpt-y", calls: 1, input: 3, output: 4, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 30, cost: 0.125, unpriced: 0 },
-		{ provider: "other", model: "other", calls: 2, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 12, cost: 0, unpriced: 0 },
+		{ provider: "anthropic", model: "claude-x", calls: 2, input: 11, output: 7, cacheRead: 80, cacheWrite: 4, cacheWrite1h: 2, reasoning: 3, total: 150, cost: 0.75, unpriced: 0, providerBilled: 0 },
+		{ provider: "openai", model: "gpt-y", calls: 1, input: 3, output: 4, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 30, cost: 0.125, unpriced: 0, providerBilled: 0 },
+		{ provider: "other", model: "other", calls: 2, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 12, cost: 0, unpriced: 0, providerBilled: 0 },
 	]);
 	// THE invariant the worker's reader leans on: every record lands on exactly one row, so the rows
 	// partition the billed total -- same shape of claim as the root/other/loose split above.
@@ -1528,6 +1528,35 @@ test("the brake is armed by ANY policy: a cost cap alone, or a list alone, arms 
 	assert.equal(handle.brake, false);
 });
 
+test("providerBilled counts the calls whose cost is the provider's billed total, on their own row (issue #796)", async () => {
+	const meter = createUsageMeter();
+	const billed = (fields) => {
+		const u = usage({ input: 1, cost: 0.5 });
+		u.cost = { ...u.cost, ...fields };
+		return u;
+	};
+	const on = { provider: "openrouter", modelId: "anthropic/claude" };
+	meter.observe(streamOf(billed({ totalFromProvider: true })), on);
+	meter.observe(streamOf(billed({ totalFromProvider: true })), on);
+	meter.observe(streamOf(billed({ totalFromProvider: false })), on);
+	meter.observe(streamOf(billed({})), on);
+	// Only the boolean pi writes counts: this field reaches the run record.
+	meter.observe(streamOf(billed({ totalFromProvider: "true" })), { provider: "anthropic", modelId: "claude" });
+	// A call with no price billed nothing, whatever it claims.
+	const noPrice = usage({ input: 1 });
+	noPrice.cost = { totalFromProvider: true };
+	meter.observe(streamOf(noPrice), { provider: "anthropic", modelId: "claude" });
+	// A model-less call lands in the bucket, like every other number on it.
+	meter.observe(streamOf(billed({ totalFromProvider: true })));
+	await flush();
+	const rows = Object.fromEntries(meter.usageSnapshot().models.map((row) => [row.provider, row]));
+	assert.equal(rows.openrouter.calls, 4);
+	assert.equal(rows.openrouter.providerBilled, 2);
+	assert.equal(rows.anthropic.providerBilled, 0);
+	assert.equal(rows.anthropic.unpriced, 1);
+	assert.equal(rows.other.providerBilled, 1);
+});
+
 test("assertPoliciesEnforceable: a cap or a list the runner cannot enforce before a call is refused, the list first", () => {
 	const healthy = { meterOk: true, brake: true, enforces: [COST_CAP, MODEL_NOT_ALLOWED] };
 	const list = [{ provider: "anthropic", model: "claude-x" }];
@@ -1572,7 +1601,7 @@ function childFold({ totals = {}, rows = [], processes = 1, unmetered = 0 } = {}
 	};
 }
 /** A ledger row with the ten numerics, zero unless given. */
-const ledgerRow = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, ...fields });
+const ledgerRow = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, providerBilled: 0, ...fields });
 
 test("onChange fires when a call is observed and again when it settles, for streams and for promises", async () => {
 	const seen = [];

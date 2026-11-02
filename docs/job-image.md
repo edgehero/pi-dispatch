@@ -167,9 +167,33 @@ Managed forks require the `fork` image capability. The worker refuses an older i
 
 `approvalGates` declares the terminating `request_approval` tool and persisted decision replay. Gate jobs also require `exitAuth` so only authenticated runner metadata can park an approval. See [approval gates](approval-gates.md).
 
+## pi 1.5.0 upgrade (issue #796)
+
+This image pins pi 1.5.0. Deploy a job image built with pi 1.5.0 together with the updated worker; updating host pi
+alone does not change queued jobs' image. The release notes must name pi 1.5.0 and say these three things:
+
+- **Tool arguments are converted.** pi 1.5.0 validates a plain JSON Schema tool with TypeBox's full conversion, so a wrong
+  type is quietly changed: `2.7` to `2`, `null` to `"null"`, one object to a one-item array. Every tool the runner defines
+  refuses a wrong type before that happens and tells the model, so it can try again (`image/runner/src/exact-arguments.mjs`).
+  **MCP tools are not guarded:** their schemas belong to their servers, so a job's MCP tool now receives the converted value.
+- **OpenRouter costs are billed totals.** See [costs](costs.md#how-to-read-the-numbers). A job on a BYOK key now counts its
+  upstream inference against the cost cap.
+- **59 catalog models are gone and 58 are new.** A trigger whose `watch.decide` names a removed model now refuses the
+  triggers file, and a job asking for one fails as for any unknown model. Check triggers and agents naming: Radius `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`; OpenRouter
+  `openai/o1`, `openai/o3-mini`, `openai/o4-mini`, their `-high` variants, `openai/gpt-3.5-turbo` and `openai/gpt-4-turbo`.
+  The rest are on Azure, Google, Hugging Face, Mistral, NVIDIA, OpenAI (`gpt-realtime-2.1`), OpenCode, the Vercel AI Gateway
+  and other OpenRouter entries. `pi --list-models` on the image lists what is left.
+
+A staged package whose `pi` object holds only metadata (`changelogPath`, a gallery image) now loads its `extensions/`,
+`skills/`, `prompts/` and `themes/` folders; before 1.5.0 it loaded nothing. Doctor's skill lines follow the same rule.
+
+A person who opens pi by hand in a sandbox runs it without `PI_OFFLINE`, as on 1.4.0: pi's model catalog refresh, version
+and package checks and install ping are attempted, inside whatever the sandbox's [egress](sandbox.md#egress) allows. Set
+`PI_OFFLINE=1` in that shell to turn them off. Jobs always run with it set, so nothing in a job installs or updates anything.
+
 ## pi 1.4.0 upgrade (issue #693)
 
-This image pins pi 1.4.0. Deploy a job image built with pi 1.4.0 together with the updated worker;
+Deploy a job image built with pi 1.4.0 together with the updated worker;
 updating host pi alone does not change queued jobs' image. Verify the image digest and its conformance
 checks before replacing your deployment's pinned image. The release notes must name pi 1.4.0.
 

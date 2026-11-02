@@ -297,7 +297,9 @@ Evidence convention as in `constitution.md`.
   compat half (legacy extension calls, see (h)) still needs pi's own pi-ai copy, and a runtime IDENTITY check
   decides it: a candidate is accepted only when it IS the module pi hands an extension for
   `@earendil-works/pi-ai` (`VIRTUAL_MODULES` in pi-coding-agent's core/extensions/virtual-modules.js, read by
-  file URL). The 0.80.7 mutation probe through `modelRegistry.registerProvider` cannot work any more, because
+  file URL), or since pi 1.5.0 a view of it (`pi-ai-extension-view.js`, compat plus TypeBox's `Type` and a `StringEnum`) whose
+  five registry and stream functions (`PI_AI_REGISTRY_FUNCTIONS`) are each the candidate's own. Names alone prove nothing:
+  a second copy exports the same names and closes over another registry. The 0.80.7 mutation probe through `modelRegistry.registerProvider` cannot work any more, because
   the ModelRegistry no longer writes to that registry. Path inspection cannot settle the dual case and has
   nothing to inspect in the single one. This is why `run-job.mjs` carries **no pi-ai specifier at all** (a test guards
   the file for that string), why the meter loads its candidate by dynamic import in a proved order (nested
@@ -780,12 +782,12 @@ refactor apart.
     cheap direction, on purpose. Measured in review against random request ids alone, the share of genuine refusals
     that read as transient is 0.048% for Anthropic `req_` ids, 4.3% for 32-hex ids and 3.2% for UUIDs.
 
-  **One mitigation beside them, which is not a residual:** the exit line's `message` is capped at 1800
-  characters AS SERIALIZED (2000 until issue #596's `swapPeak` grew the worst-case line past the budget, then 1900 until the test was made to measure the signed line at the longest runner policy reason) (a quote or newline costs two, a control byte six), cut on whole code points,
+  **One mitigation beside them, which is not a residual:** the exit line's `message` is capped at 1700
+  characters AS SERIALIZED (2000 until issue #596's `swapPeak` grew the worst-case line past the budget, then 1900 until the test was made to measure the signed line at the longest runner policy reason, then 1800 until issue #796's `providerBilled` grew every ledger row) (a quote or newline costs two, a control byte six), cut on whole code points,
   with a `... [truncated N chars]` marker, on both exit-line paths. An HTML error page therefore cannot
   push the line's `code` and `reason` out of the worker's 8 KiB tail: the worst-case line (the maximal
   ledger, `context`, the longest session reason, every `resources` key at its largest, the longest runner policy reason, the `auth` signature and a capped message) is held
-  under 6 KiB by a test that pins the 1800 literal.
+  under 6 KiB by a test that pins the 1700 literal.
 
   **The job user cannot read its own inputs (issue #341)** is a named reason under the EXISTING policy code,
   for every job, prompt or command:
@@ -5649,7 +5651,8 @@ validator rather than a second copy of it.
                                  "calls": <int>, "input": <int>, "output": <int>,
                                  "cacheRead": <int>, "cacheWrite": <int>, "cacheWrite1h": <int>,
                                  "reasoning": <int>, "total": <int>,                            // billed total, same convention as tokens.total; rows sum to it
-                                 "cost": <number>, "unpriced": <int> } ] } | null,              // null: fallback meter, pre-ledger runner, died before exit line, or malformed
+                                 "cost": <number>, "unpriced": <int>,                           // cost: pi's own number for the call, see providerBilled
+                                 "providerBilled": <int> } ] } | null,                          // issue #796: calls whose cost is the provider's billed total (OpenRouter, a BYOK key's upstream cost included), the rest a rate-card estimate; 0 on an older record. null block: fallback meter, pre-ledger runner, died before exit line, or malformed
     "provider":  "<host-effective provider>" | null,                                            // what the HOST dispatched with (job.data > overlay > env), never a container string; always an id RUN_PROVIDER_RE accepts (issue #673)
     "model":     "<host-effective model id>" | null,                                           // as written, case kept; always an id RUN_MODEL_RE accepts (issue #673)
     "budgetReserved": <bool> | null,
@@ -12846,3 +12849,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-02 (#754, delayed-authorization correction) | `INT-SANDBOX-GATEWAY-CONTRACT` makes observeTime and explicit immutable observedAt mandatory for authorizeIntent/renewAuthorization. Redis absolute expiry is observedAt plus bounded authMs; future/expired observations refuse, renewal requires the existing owner, and a late successful RPC never gains a fresh relative TTL. Real-Valkey regressions inspect exact PEXPIRETIME after timed-out successful authorize/renew commands, including another observation in between. Monotonic gateway I/O deadlines, grant lifetime/window fencing, cookie/console/native/run/paid/container interfaces UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, implemented) | INT-SANDBOX-GATEWAY-CONTRACT and INT-CONSOLE-AUDIT-LOG: pending markers become IMPLEMENTED. Measured distinction now pinned by test: a console that revokes an operator ends the attachment as `session-ended` (and that operator's watchers as `driver-ended`), while a console that merely stops renewing ends it as `authorization-unavailable`, because silence proves nothing about the operator. `gatewaySelect` for a host with no enabled gateway now says so instead of drawing an empty chooser. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, security review) | INT-SANDBOX-GATEWAY-CONTRACT gains the bootstrap receipt, the same-origin launch gesture and the session heartbeat; refused upgrades close outright; the console stops renewing attachments nobody holds; driver authority is bounded by its room's TTL; a lapsed watcher is no longer told the driver removed it. Found by an independent review of the final diff, each with a regression test. No watcher write path was found. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |
+| 2026-11-02 (#796, pi 1.5.0) | `INT-RUN-HISTORY-FILE-CONTRACT`: each `usage.models` row gains `providerBilled`, the count of its calls whose cost is the provider's billed total (pi-ai 1.5.0's `usage.cost.totalFromProvider`), a count because a row aggregates calls; an older record reads 0, and a present value that is not a non-negative number refuses the block as for every other counter. The exit line's `message` cap moves from 1800 to 1700 serialized characters so that the worst-case line stays under 6 KiB, the same trade as before: the diagnostic gives way, never the label. Trap (g): since 1.5.0 an extension gets a view of pi-ai rather than the compat namespace itself, so the compat half is accepted by identity of the five registry and stream functions, with names still proving nothing. UNCHANGED, checked: the exit line's other keys, `tokens`, the ledger partition rule (rows sum to the totals, and `providerBilled` is not a total), and the child ledger's version, since parent and child always run the same image. |

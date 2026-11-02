@@ -521,7 +521,7 @@ test("parseExitContext returns the LAST exit line's context and never throws", (
 // ---- parseExitUsage (usage ledger): mirrors parseExitTokens, but REBUILDS the per-model ledger off the exit line ----
 
 /** A fully-populated valid row, in the rebuilt 12-key shape. Tests spread over it to inject one bad field. */
-const GOOD_ROW = { provider: "anthropic", model: "claude-sonnet-4", calls: 2, input: 100, output: 50, cacheRead: 10, cacheWrite: 5, cacheWrite1h: 0, reasoning: 3, total: 168, cost: 0.02, unpriced: 0 };
+const GOOD_ROW = { provider: "anthropic", model: "claude-sonnet-4", calls: 2, input: 100, output: 50, cacheRead: 10, cacheWrite: 5, cacheWrite1h: 0, reasoning: 3, total: 168, cost: 0.02, unpriced: 0, providerBilled: 0 };
 const usageLine = (usage) => `{"event":"exit","code":0,"usage":${JSON.stringify(usage)}}`;
 
 test("parseExitUsage reads the usage block off the success exit line and REBUILDS it", () => {
@@ -572,12 +572,22 @@ test("parseExitUsage charset: the id allowlist rejects length, symbols and a lea
 	assert.notEqual(parseExitUsage(withModel("qwen2.5:0.5b-instruct-q4_K_M")), null, "an Ollama tag's underscore, lowercased first");
 });
 
+test("providerBilled keeps its count, an older record reads 0, and a wrong value refuses the block (issue #796)", () => {
+	const read = (fields) => parseExitUsage(usageLine({ v: 1, models: [{ ...GOOD_ROW, ...fields }] }));
+	assert.equal(read({ providerBilled: 2 }).models[0].providerBilled, 2);
+	const { providerBilled: _, ...older } = GOOD_ROW;
+	assert.equal(parseExitUsage(usageLine({ v: 1, models: [older] })).models[0].providerBilled, 0);
+	assert.equal(read({ providerBilled: -1 }), null);
+	assert.equal(read({ providerBilled: true }), null, "the runner writes a count; a flag is not one");
+	assert.equal(read({ providerBilled: null }), null);
+});
+
 test("parseExitUsage numerics: absent rebuilds as 0, but a negative, a null, or an Infinity nulls the block", () => {
-	// Absent is an honest zero and the 12-key row shape stays stable regardless of what was emitted.
+	// Absent is an honest zero, which is how a record from before providerBilled reads, and the 13-key row shape stays stable regardless of what was emitted.
 	const bare = parseExitUsage(usageLine({ v: 1, models: [{ provider: "a", model: "m" }] }));
 	// ...but an absent `truncated` is null, not 0 (PR #549's review): nobody measured it, and the model dollar
 	// windows floor on it.
-	assert.deepEqual(bare, { v: 1, piAi: null, truncated: null, models: [{ provider: "a", model: "m", calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0 }] });
+	assert.deepEqual(bare, { v: 1, piAi: null, truncated: null, models: [{ provider: "a", model: "m", calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, providerBilled: 0 }] });
 	assert.equal(parseExitUsage(usageLine({ v: 1, models: [{ ...GOOD_ROW, input: -1 }] })), null, "a negative count nulls the block");
 	assert.equal(parseExitUsage(usageLine({ v: 1, models: [{ ...GOOD_ROW, cost: null }] })), null, "null is present-and-wrong, not absent");
 	// JSON.parse cannot produce NaN, but it CAN produce Infinity -- 1e999 overflows to it -- so the
@@ -1683,7 +1693,7 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	// runner's own capExitMessage is imported here (outcome.mjs has no imports of its own), so this test
 	// exercises the function run-job.mjs calls, through the real sink.
 	const { capExitMessage, EXIT_MESSAGE_MAX_CHARS } = await import("../../image/runner/src/outcome.mjs");
-	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1800, "the literal is pinned here too: this test's margin is measured against it");
+	assert.equal(EXIT_MESSAGE_MAX_CHARS, 1700, "the literal is pinned here too: this test's margin is measured against it");
 
 	// The rest of the line as run-job.mjs builds it, at its WORST CASE, so the budget is not flattered:
 	// the maximal ledger usage-meter.test.mjs builds (8 named rows of 64-character provider and model ids
@@ -1692,7 +1702,7 @@ test("a 16 KB provider error body keeps the exit-2 label: the runner caps the ex
 	// the child keys and the policy counters included (issue #571 added one).
 	const wide = (prefix, i) => `${prefix}-${i}`.padEnd(64, "x");
 	const N = 99_999_999;
-	const row = (provider, model) => ({ provider, model, calls: N, input: N, output: N, cacheRead: N, cacheWrite: N, cacheWrite1h: N, reasoning: N, total: N, cost: 99_999.99, unpriced: N });
+	const row = (provider, model) => ({ provider, model, calls: N, input: N, output: N, cacheRead: N, cacheWrite: N, cacheWrite1h: N, reasoning: N, total: N, cost: 99_999.99, unpriced: N, providerBilled: 0 });
 	const rest = {
 		turns: 4096,
 		retryTurns: 4096,

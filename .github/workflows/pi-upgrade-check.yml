@@ -1027,7 +1027,8 @@ jobs:
       # nested pi-ai under it; pi 1.0.1 dropped the shrinkwrap, and at the 1.0.3 pin (issue #587) pi-ai sits at
       # /app/node_modules beside it. resolvePiAiCompat finds pi's copy by pi-coding-agent's own node_modules
       # lookup (piOwnPackageDir), whatever the layout, and image/runner/test/pinned-api.test.mjs pins that the
-      # first candidate IS the module pi's VIRTUAL_MODULES hands an extension.
+      # first candidate is what pi's VIRTUAL_MODULES hands an extension: since pi 1.5.0 a view of it, whose
+      # registry functions are the candidate's own.
       #
       # So assert what IS load-bearing here, and assert it by running OUR OWN resolver inside the built
       # image rather than re-deriving the layout in shell -- a shell re-derivation encodes a rule the

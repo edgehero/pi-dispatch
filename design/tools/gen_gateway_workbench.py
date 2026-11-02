@@ -78,7 +78,7 @@ CSS = """
 
 def workbench():
     rows = ''.join(f'<button type="button" class="wb-terminal-row"' + (' aria-current="true"' if i == 0 else '') + f'><b>{jid}</b><small>{label}</small></button>' for i, (jid, label) in enumerate([('gh-9575', 'Connected, ops'), ('gh-4add', 'Watching, lee'), ('gh-d40e', 'Connected, ops'), ('sb-3c1f', 'Connected, ops')]))
-    pi = 'pi 1.4.0, illustrative offline terminal\n\nescape interrupt · ctrl+c/ctrl+d clear/exit\n\nNo model request was submitted.\n\n/workspace\n\nInspect this repository. (Unsent draft)\n────────────────────────────────────\n0.0%/0 (auto)'
+    pi = 'pi 1.5.0, illustrative offline terminal\n\nescape interrupt · ctrl+c/ctrl+d clear/exit\n\nNo model request was submitted.\n\n/workspace\n\nInspect this repository. (Unsent draft)\n────────────────────────────────────\n0.0%/0 (auto)'
     def pane(jid, output, main=False):
         return f'<section class="wb-example-pane' + (' wb-example-main' if main else '') + '"><div class="wb-example-tabs">' + jid + (' <span>sb-3c1f</span>' if main else '') + '</div><div class="wb-pane-head">mini1 · ' + ('Watching ops, read only, 120 × 36' if jid == 'gh-4add' else 'ops · existing shell') + '</div><pre class="wb-example-output">' + E(output) + '</pre></section>'
     grid = pane('gh-9575', pi, True) + pane('gh-4add', 'pi@gh-4add:/workspace$ git status --short\n M src/routes.mjs\n\nOnly new output is shown.') + pane('gh-d40e', 'pi@gh-d40e:/workspace$ pwd\n/workspace\n\npi@gh-d40e:/workspace$ ')

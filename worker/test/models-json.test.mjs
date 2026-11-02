@@ -177,12 +177,14 @@ function corpus() {
 // changing acceptance; compat adds System One image fields. provider-composer now merges
 // classifier compat, which changes no chat-model existence verdict in overlayProviderProblem.
 const MIRRORED_PI_FILES = Object.freeze({
-	"dist/core/model-config.js": "b4ecb1165c328fdb5f8b767519f2b632c31737f86d0ce1d7a05959e7c8354d93",
+	"dist/core/model-config.js": "f03200776dbefa9171da850724e2e2eb20d865768feb0cb3f5b9e5f3260d13fe",
+	// Since 1.5.0 model-config.js reads its schemas through this file, so it is part of what the mirror transcribes.
+	"dist/core/pi-ai-schemas.js": "1bb7c31c57b5af6282b406679c5bc2b10f1d5009b62491fb72f3c069cec98874",
 	"dist/core/provider-composer.js": "7ec4af06726158fa34377bed34fbb378d2d39c5c9d51ae5640ac459a4c78bec4",
 	// Since 1.2.0 model-config.js imports its compat, cost, prompt-cache, input-limit and thinking-map schemas from
 	// pi-ai, so the two files they live in are part of what the mirror transcribes. Relative to PI: the hoisted pi-ai.
-	"../pi-ai/dist/providers/compat-schema.js": "c1f0ee32fd1fb32a003d38b38e5b369bb4088e596050b0fce4b25fe1173cea8f",
-	"../pi-ai/dist/providers/model-schema.js": "cab7de29fa76728a436979e228c41e8c6abce999477f2c98fa7e2c97b6ef3cf7",
+	"../pi-ai/dist/providers/compat-schema.js": "2e9a7bd4652d319bc524b81e2babbeabf6b8b5aa334f4b2d51dd98fceb5be341",
+	"../pi-ai/dist/providers/model-schema.js": "a8013ceaedd0105cbd2af886779d62f2691fbe202b16588ef2a977f35fa5270e",
 });
 
 test("System One image compat accepts every transport and rejects malformed values before spend", () => {

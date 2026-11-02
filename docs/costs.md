@@ -50,6 +50,12 @@ Every dollar carries its class, rendered by one shared formatter — these marke
 | `~~$4 seeded`    | seeded from no history — a band, never a point |
 | `—`              | there is no number behind this cell: a null typed value, such as a flow with no plan-covered rows (no api-equivalent) or a plan with no attributed runs (no amortized figure) |
 
+Since pi 1.5.0 OpenRouter's `cost` is what OpenRouter billed, not a rate-card estimate, and a call on your own provider
+key (BYOK) includes that provider's upstream cost, so such a job now counts its upstream inference against the cost cap.
+Each `usage.models` row on the run record carries `providerBilled`, the number of its calls priced this way; every other
+priced call is pi's estimate, and a record from before pi 1.5.0 reads 0. The rendering above does not change: both are the
+stream-time price of the run.
+
 A run whose container died before reporting tokens contributes no row of its own: it makes its bucket a
 floor and demotes it to `est.` with coverage, so nothing renders as an unclassified dollar.
 

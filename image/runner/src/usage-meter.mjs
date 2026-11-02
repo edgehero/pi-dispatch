@@ -202,9 +202,15 @@ function finite(value) {
  */
 const MAX_NAMED_ROWS = 8;
 
-/** The ten numerics a ledger row accumulates, zeroed. One shape for named rows and the fold bucket. */
+/**
+ * The eleven numerics a ledger row accumulates, zeroed. One shape for named rows and the fold bucket.
+ *
+ * `providerBilled` counts the calls whose `cost` is the provider's own billed total rather than pi's rate-card
+ * estimate (pi-ai 1.5.0's `usage.cost.totalFromProvider`, OpenRouter today, with a BYOK key's upstream cost included).
+ * A count and not a flag, because a row aggregates many calls and a folded one aggregates many models.
+ */
 function emptyRow() {
-	return { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0 };
+	return { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, providerBilled: 0 };
 }
 
 /**
@@ -223,6 +229,7 @@ function foldRow(into, row) {
 	into.total += row.total;
 	into.cost += row.cost;
 	into.unpriced += row.unpriced;
+	into.providerBilled += row.providerBilled;
 }
 
 /**
@@ -415,6 +422,7 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			total: billed,
 			cost: priced ? price : 0,
 			unpriced: priced ? 0 : 1,
+			providerBilled: priced && u.cost.totalFromProvider === true ? 1 : 0,
 		});
 
 		if (cap !== null && combinedTotal() > cap) stop(TOKEN_BUDGET, combinedTotal());
@@ -1228,6 +1236,14 @@ function defaultExists(url) {
 }
 
 /**
+ * What makes a module "the pi-ai an extension gets". Since pi 1.5.0 extensions import a view, `pi-ai-extension-view.js`,
+ * which re-exports pi-ai's compat entry and adds TypeBox's `Type` and a `StringEnum`, so it is a different namespace
+ * object with the same functions. Those functions close over the one registry, so they are what must be identical. Two
+ * copies of pi-ai export the same names, which is why a match on names proves nothing.
+ */
+export const PI_AI_REGISTRY_FUNCTIONS = Object.freeze(["registerApiProvider", "getApiProvider", "getApiProviders", "resetApiProviders", "createAssistantMessageEventStream"]);
+
+/**
  * The module map pi hands its extensions, read from pi-coding-agent's own dist by FILE URL: the exports map
  * constrains bare specifiers only, and this file is not exported (the tools.mjs allToolNames trick). At the
  * 0.99.1 pin `VIRTUAL_MODULES["@earendil-works/pi-ai"]` IS the compat namespace pi's own code imports
@@ -1298,8 +1314,10 @@ function reasonOf(error) {
  * class run-job imported is not the one the instance was built from, the wrong-copy failure trap #1 names.
  * A class with no streamSimple/stream is refused outright (ok:false, reason `no-runtime-methods`).
  *
- * The compat half. Each candidate from resolvePiAiCompat is loaded and accepted only when it IS, by object
- * identity, the module pi hands an extension for `@earendil-works/pi-ai` (defaultLoadExtensionModules).
+ * The compat half. Each candidate from resolvePiAiCompat is loaded and accepted only when it IS, by object identity,
+ * the module pi hands an extension for `@earendil-works/pi-ai` (defaultLoadExtensionModules), or a view of it whose
+ * PI_AI_REGISTRY_FUNCTIONS are all identical to the candidate's. pi 1.5.0 hands a view, so a capped job is refused
+ * unless this holds.
  * The accepted module also supplies the brake's stream factory and the ledger's pricing provenance (the
  * `version` in the package.json above its dist/), because it is the copy whose providers priced the calls.
  * Registration goes straight through the accepted compat's own `registerApiProvider` (at 0.99.1 the
@@ -1370,7 +1388,7 @@ export async function installProcessUsageMeter({
 		// pinned copy; a view must share every registry/reset/stream function by identity.
 		// Matching names (or two absent exports) cannot prove shared module-level state.
 		const extensionView = extensionModules["@earendil-works/pi-ai"];
-		if (extensionView !== mod && !["registerApiProvider", "getApiProvider", "getApiProviders", "resetApiProviders", "createAssistantMessageEventStream"].every((name) => typeof mod[name] === "function" && extensionView?.[name] === mod[name])) continue;
+		if (extensionView !== mod && !PI_AI_REGISTRY_FUNCTIONS.every((name) => typeof mod[name] === "function" && extensionView?.[name] === mod[name])) continue;
 		accepted = { candidate, mod };
 		break;
 	}
@@ -2903,7 +2921,7 @@ const LEDGER_GUARD_COUNTS = Object.freeze(["spentMicros", "inflightMicros", "cos
 /** The floor counters a ledger carries (version 3), the exit line's names: the cost guard's four and the meter's `costUnreported`. */
 export const CHILD_FLOOR_COUNTERS = Object.freeze(["boundExceeded", "costUnanswered", "costUnreported", "longContext", "costUnjudged"]);
 const ROW_AMOUNTS = Object.freeze(["input", "output", "cacheRead", "cacheWrite", "cacheWrite1h", "reasoning", "total", "cost"]);
-const ROW_COUNTS = Object.freeze(["calls", "unpriced"]);
+const ROW_COUNTS = Object.freeze(["calls", "unpriced", "providerBilled"]);
 /** What only ever grows in a live child: everything but `unresolved` and `inflightMicros`. */
 const MONOTONE_TOTALS = Object.freeze(["input", "output", "total", "cost", "calls", "unpriced", "sessions"]);
 const MONOTONE_GUARD = Object.freeze(["spentMicros", "costRefused", "modelRefused", ...CHILD_FLOOR_COUNTERS]);

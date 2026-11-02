@@ -12,7 +12,7 @@
  * unknown keys, lengths and patterns stay with the validator and with each tool's `execute`.
  *
  * MCP tools are deliberately not wrapped. Their schemas belong to their servers, and converting is what pi does for
- * them: a caller's `"1"` for a boolean is that server's contract to judge. docs/costs.md and the release notes say so.
+ * them: a caller's `"1"` for a boolean is that server's contract to judge. docs/job-image.md and the release notes say so.
  */
 const TYPE_OF = Object.freeze({
 	string: (value) => typeof value === "string",

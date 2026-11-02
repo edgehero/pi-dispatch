@@ -32,7 +32,7 @@ const NAME_A = "101.0123456789abcdef.json";
 const NAME_B = "202.fedcba9876543210.json";
 
 /** A ledger row with the ten numerics, zero unless given. */
-const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, ...fields });
+const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, providerBilled: 0, ...fields });
 
 /** A well-formed ledger whose rows partition its totals: `calls` settled calls of `each` tokens on one model. */
 function ledger({ calls = 1, each = 10, cost = 0.5, unresolved = 0, state = "running", metered = true, extra = {} } = {}) {

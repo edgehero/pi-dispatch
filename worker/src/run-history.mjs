@@ -860,9 +860,9 @@ export function parseExitTokens(text) {
 	return null;
 }
 
-/** The ten per-row counters, in the row's serialisation order. Absent is an honest zero; anything
- *  present must be a finite non-negative number or the whole block is refused. */
-const USAGE_ROW_NUMERIC_KEYS = ["calls", "input", "output", "cacheRead", "cacheWrite", "cacheWrite1h", "reasoning", "total", "cost", "unpriced"];
+/** The eleven per-row counters, in the row's serialisation order. Absent is an honest zero, which is how a record from
+ *  before `providerBilled` reads; anything present must be a finite non-negative number or the whole block is refused. */
+const USAGE_ROW_NUMERIC_KEYS = ["calls", "input", "output", "cacheRead", "cacheWrite", "cacheWrite1h", "reasoning", "total", "cost", "unpriced", "providerBilled"];
 
 /**
  * The runner's per-(provider,model) usage ledger off the exit line -- `{ v, piAi, truncated, models }`
@@ -934,7 +934,7 @@ function rebuildUsage(u) {
 			if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
 			nums[key] = value;
 		}
-		// The explicit 12-key literal: an unknown key on the emitted row is dropped HERE, by never
+		// The explicit 13-key literal: an unknown key on the emitted row is dropped HERE, by never
 		// being read -- the buildRecord no-spread posture, applied one level down.
 		models.push({
 			provider,
@@ -949,6 +949,7 @@ function rebuildUsage(u) {
 			total: nums.total,
 			cost: nums.cost,
 			unpriced: nums.unpriced,
+			providerBilled: nums.providerBilled,
 		});
 	}
 	return { v: u.v, piAi, truncated, models };

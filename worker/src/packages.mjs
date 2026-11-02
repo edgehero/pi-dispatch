@@ -61,8 +61,8 @@ export const NPM_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
  * would add an edge to the import-pi <-> packages cycle that only survives because both sides use their
  * bindings at call time.
  *
- * This list is pi's, not ours: at the 0.99.1 pin (as at 0.80.7) `collectPackageResources` falls through to exactly these
- * four directory names when `readPiManifest` returns null, so a package with no `pi` key and a `skills/`
+ * This list is pi's, not ours: at the pin `collectPackageResources` falls through to exactly these four directory
+ * names when `readPiManifest` returns null or lists no resource (1.5.0), so a package with no `pi` key and a `skills/`
  * dir IS a pi package. See host-pi.mjs's PINNED_PI_NEEDLES for the assertion that keeps that true.
  */
 export const RESOURCE_DIRS = ["extensions", "skills", "prompts", "themes"];
@@ -281,12 +281,14 @@ export function readStageManifest({ globalPiDir, readFile = readFileSync, fileEx
  * readStageManifest's policy, because the consumers are advisory (doctor's per-trigger flow lines,
  * and issue #188's topology) and a half-staged tree must degrade to "nothing visible", not a crash.
  *
- * The semantics mirror pi's collectPackageResources at the 0.99.1 pin EXACTLY (unchanged since 0.80.7), because an enumerator
- * that agrees with pi by hand is how doctor comes to report a tier pi then ignores:
- *   - a `pi` manifest object means its `skills` entries are the ONLY sources -- a manifest WITHOUT a
- *     `skills` key contributes NO skills and gets NO convention fallback (readPiManifest short-circuits
- *     before the dir walk);
- *   - no `pi` key at all falls through to the convention `skills/` dir (RESOURCE_DIRS);
+ * The semantics mirror pi's collectPackageResources at the pin EXACTLY, and worker/test/packages.test.mjs holds them to
+ * pi's own package manager, because an enumerator that agrees with pi by hand is how doctor comes to report a tier pi then
+ * ignores:
+ *   - a `pi` object that lists a resource (a field that is an array of strings, which is all readPiManifest keeps) means
+ *     its `skills` entries are the ONLY sources -- one listing other resources but no `skills` contributes NO skills and
+ *     gets NO convention fallback;
+ *   - no `pi` key, or since 1.5.0 a `pi` object holding only metadata such as `changelogPath`, falls through to the
+ *     convention `skills/` dir (RESOURCE_DIRS);
  *   - a manifest entry may be a SKILL.md file, a skill dir, or a dir of skill dirs -- pi walks
  *     recursively, so this walks the same shape (bounded, it is host-advisory);
  *   - a glob (`*`/`?`) or override (`!`/`+`/`-` prefix) entry makes the whole package UNENUMERABLE
@@ -307,10 +309,11 @@ export function readStagedSkills({ globalPiDir, readFile = readFileSync, fileExi
 		const root = join(globalPiDir, PACKAGES_SUBDIR, pkg.dir);
 		let sources;
 		try {
-			const parsed = JSON.parse(readFile(join(root, "package.json"), "utf8"));
-			const pi = parsed !== null && typeof parsed === "object" && parsed.pi !== null && typeof parsed.pi === "object" ? parsed.pi : null;
-			if (pi) {
-				const entries = Array.isArray(pi.skills) ? pi.skills.filter((e) => typeof e === "string") : [];
+			const parsed = JSON.parse(readFile(join(root, "package.json"), "utf8").replace(/^\uFEFF/, ""));
+			const pi = parsed !== null && typeof parsed === "object" && parsed.pi !== null && typeof parsed.pi === "object" && !Array.isArray(parsed.pi) ? parsed.pi : null;
+			const listed = (field) => Array.isArray(pi?.[field]) && pi[field].every((e) => typeof e === "string");
+			if (RESOURCE_DIRS.some(listed)) {
+				const entries = listed("skills") ? pi.skills : [];
 				if (entries.some((e) => e.startsWith("!") || e.startsWith("+") || e.startsWith("-") || e.includes("*") || e.includes("?"))) {
 					out.unenumerable.push(pkg.name);
 					continue;

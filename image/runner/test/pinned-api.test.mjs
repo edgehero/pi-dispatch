@@ -9,7 +9,7 @@ import { test } from "node:test";
 // Pure -- no static pi import in its module graph -- so it needs none of the gating below. Importing
 // the runner's OWN candidate resolver is deliberate: the layout fact it encodes is the thing that
 // breaks silently, so pin the function the runner actually calls rather than a copy of its reasoning.
-import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, completionsOwnServer, IMAGE_RESIZE_MAX, piOwnPackageDir, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
+import { BOUND_OVERHEAD_TOKENS, callCostBound, COMPLETIONS_CATALOG_HOSTS, COMPLETIONS_EXTRA_HOSTS, completionsOwnServer, IMAGE_RESIZE_MAX, PI_AI_REGISTRY_FUNCTIONS, piOwnPackageDir, PRICED_APIS, resolvePiAiCompat, RUNTIME_RESULT_METHODS, RUNTIME_STREAM_METHODS, VIRTUAL_MODEL_API } from "../src/usage-meter.mjs";
 import * as catalogModels from "./helpers/catalog-models.mjs";
 import { captureTerminal, classifyPromptRejection, classifyStopReason, decideExit, loadRetryPredicate, STOP_REASONS } from "../src/outcome.mjs";
 import { jobSettings, THINKING_LEVELS } from "../src/config.mjs";
@@ -643,7 +643,14 @@ test("the runner's first pi-ai candidate IS the copy pi hands its extensions, wh
 	assert.equal(candidates[0].tag, "pi", "pi's OWN copy must be tried first -- it is the one pi mutates");
 	assert.ok(existsSync(fileURLToPath(candidates[0].url)), "pi's own pi-ai/dist/compat.js must exist");
 	const { VIRTUAL_MODULES } = await import(new URL("./core/extensions/virtual-modules.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
-	assert.equal(await import(candidates[0].url), VIRTUAL_MODULES["@earendil-works/pi-ai"], "the first candidate is not the module pi hands its extensions");
+	// Since 1.5.0 what pi hands is a view of the candidate, a different namespace with the same functions. The registry those
+	// functions close over is what the meter needs, so that is what is pinned. Names alone would match a second copy too.
+	const firstCandidate = await import(candidates[0].url), handed = VIRTUAL_MODULES["@earendil-works/pi-ai"];
+	assert.notEqual(handed, firstCandidate, "pi hands the compat namespace itself again: the view branch in installProcessUsageMeter can go");
+	for (const name of PI_AI_REGISTRY_FUNCTIONS) {
+		assert.equal(typeof firstCandidate[name], "function", `the candidate exports ${name}`);
+		assert.equal(handed[name], firstCandidate[name], `the view pi hands its extensions has another ${name}: not the registry the meter's compat half arms`);
+	}
 	// And pi-agent-core, the other package pinned facts are read from, is found the same way and is the version pi declares.
 	const agentDeps = JSON.parse(readFileSync(join(agentPackageDir(), "package.json"), "utf8")).dependencies;
 	for (const name of ["pi-ai", "pi-agent-core"]) {
@@ -728,8 +735,11 @@ test("pi hands extensions ITS OWN pi-ai and pi-coding-agent, not a second copy",
 	assert.match(loader, /: \{ alias: getAliases\(\) \};/, "the Node build no longer resolves extensions through the aliases");
 	// Bundled and source runtimes use virtual modules instead, moved into their own file at 0.99.1.
 	const virtual = agentDistFile("core", "extensions", "virtual-modules.js");
-	assert.match(virtual, /import \* as bundledPiAiCompat from "@earendil-works\/pi-ai\/compat";/, "the virtual pi-ai is no longer pi's own compat import");
-	assert.match(virtual, /"@earendil-works\/pi-ai": bundledPiAiCompat,/, "the virtual-module mapping for pi-ai is gone");
+	assert.match(virtual, /import \* as bundledPiAiExtensionView from "\.\/pi-ai-extension-view\.js";/, "the virtual pi-ai is no longer pi's extension view");
+	assert.match(virtual, /"@earendil-works\/pi-ai": bundledPiAiExtensionView,/, "the virtual-module mapping for pi-ai is gone");
+	// The one line the identity below rests on: the view re-exports pi's own compat, and the jiti alias points at the same view.
+	assert.match(agentDistFile("core", "extensions", "pi-ai-extension-view.js"), /export \* from "@earendil-works\/pi-ai\/compat";/, "the view no longer re-exports pi's own compat");
+	assert.match(loader, /const piAiCompatEntry = path\.resolve\(__dirname, "pi-ai-extension-view\.js"\);/, "the Node build's alias no longer names the view");
 	assert.match(virtual, /import \* as bundledPiCodingAgent from "\.\.\/\.\.\/index\.js";/, "the virtual pi-coding-agent is no longer pi's own index");
 	assert.match(virtual, /"@earendil-works\/pi-coding-agent": bundledPiCodingAgent,/, "the virtual-module mapping for pi-coding-agent is gone");
 
@@ -739,7 +749,7 @@ test("pi hands extensions ITS OWN pi-ai and pi-coding-agent, not a second copy",
 	const { VIRTUAL_MODULES } = await import(pathToFileURL(join(dist, "core", "extensions", "virtual-modules.js")).href);
 	assert.equal(VIRTUAL_MODULES["@earendil-works/pi-coding-agent"].ModelRuntime, mod.ModelRuntime, "an extension's ModelRuntime is not the class run-job.mjs wraps");
 	const nestedCompat = await import(resolvePiAiCompat()[0].url);
-	assert.equal(VIRTUAL_MODULES["@earendil-works/pi-ai"], nestedCompat, "the pi-ai an extension gets is not the nested compat the meter's compat half arms");
+	for (const name of PI_AI_REGISTRY_FUNCTIONS) assert.equal(VIRTUAL_MODULES["@earendil-works/pi-ai"][name], nestedCompat[name], `the ${name} an extension gets is not the one the meter's compat half arms`);
 });
 
 test("an extension factory runs inside the resource loader's reload(), with no ctx, and that reload never resets the api registry (issue #543)", { skip }, () => {
@@ -816,7 +826,8 @@ test("pi's extension discovery rule is the one discoverExtensionEntries restates
 			resolveExtensionEntries: "e2c7c741df8de29a3320a2ea9fc5698db51754c279d07d0688218753af74b3bd",
 			prefixIgnorePattern: "279c9086c694d7d6d5afcb80e04d2e650d1a04898753fcbcbe3784e4e7d978ad",
 			addIgnoreRules: "ea9a382bddaebd6a1e4a86ca9bc2386d6aa80b2abee946cdf0a100f96524b333",
-			readPiManifest: "487feb8648a9bcd9a12351b1d8021bd784ebeaeb079de1b7c5325eb4c73bb3bb",
+			// 1.5.0 also keeps pi.changelogPath. The runner reads only extensions, so the rule holds.
+			readPiManifest: "ff1a912b55b245aca1525058121e91a21557d05c6692b6f92eab8ffc0dbdbf65",
 		},
 		"a function discoverExtensionEntries restates changed at this pin: re-read it and re-port the rule",
 	);
@@ -827,7 +838,11 @@ test("pi's extension discovery rule is the one discoverExtensionEntries restates
 	// four resource subfolders. MANIFEST_FIELDS restates both lists.
 	assert.match(agentDistFile("core", "pi-manifest.js"), /const RESOURCE_FIELDS = \["extensions", "skills", "prompts", "themes"\];/);
 	assert.match(pm, /const RESOURCE_TYPES = \["extensions", "skills", "prompts", "themes"\];/);
-	assert.match(pm, /const manifest = readPiManifest\(join\(packageRoot, "package\.json"\)\);\n\s*if \(manifest\) \{/, "a root manifest no longer decides the package's resources");
+	// Since 1.5.0 a `pi` object decides only when it lists a resource, and one holding only metadata falls through to the
+	// subfolders. legacyOverlayLayout keeps the older reading on purpose, since it names what loaded before #544. The live
+	// copy of this rule, readStagedSkills, is held to pi's own package manager in worker/test/packages.test.mjs.
+	assert.match(pm, /const manifest = readPiManifest\(join\(packageRoot, "package\.json"\)\);[\s\S]{0,2000}?\n\s*if \(manifest && hasManifestResourceFields\(manifest\)\) \{/, "a root manifest that lists resources no longer decides the package's resources");
+	assert.match(pm, /function hasManifestResourceFields\(manifest\) \{\n\s*return RESOURCE_TYPES\.some\(\(resourceType\) => manifest\[resourceType\] !== undefined\);\n\}/);
 	// MANIFEST_PATTERN_RE restates what the package reading expanded in a manifest's entries: globs and overrides.
 	assert.match(pm, /function isOverridePattern\(s\) \{\n\s*return s\.startsWith\("!"\) \|\| s\.startsWith\("\+"\) \|\| s\.startsWith\("-"\);\n\}/);
 	assert.match(pm, /function hasGlobPattern\(s\) \{\n\s*return s\.includes\("\*"\) \|\| s\.includes\("\?"\);\n\}/);
@@ -1636,6 +1651,13 @@ test("calculateCost: one table per call, the highest tier the input passes, and 
 	assert.deepEqual(withFallbacks, ["anthropic-messages.js"]);
 });
 
+test("pi says a cost is the provider's billed total on the one field the ledger counts (issue #796)", () => {
+	const reported = nestedPiAi("utils", "openrouter-cost.js");
+	assert.match(reported, /usage\.cost\.total = reported\.cost;\n\s*usage\.cost\.totalFromProvider = true;/, "OpenRouter's billed total no longer sets totalFromProvider");
+	assert.match(reported, /usage\.cost\.total = reported\.cost \+ upstreamCost;\n\s*usage\.cost\.totalFromProvider = true;/, "a BYOK key's billed total no longer sets totalFromProvider");
+	assert.match(nestedPiAi("models.js"), /usage\.cost\.totalFromProvider = false;/, "calculateCost no longer resets the flag: a retried message could read as billed");
+});
+
 test("a server-side fallback is a responseModel from the requested model's allowedFallbackModels; a completions responseModel is an alias (issue #502)", { skip }, () => {
 	// The model guard's model_fallback line (createModelGuard's bind) matches a settled message's responseModel against
 	// the REQUESTED model's compat.allowedFallbackModels, by provider and id, exactly as pi prices a fallback answer.
@@ -1646,10 +1668,11 @@ test("a server-side fallback is a responseModel from the requested model's allow
 	// openai-completions sets responseModel for ANY chunk model other than the requested id: a provider's alias for the
 	// model asked for (a dated snapshot), which is why the guard does not log every responseModel as a fallback.
 	assert.match(nestedPiAi("api", "openai-completions.js"), /if \(typeof chunk\.model === "string" && chunk\.model\.length > 0 && chunk\.model !== model\.id\) \{\s*output\.responseModel \|\|= chunk\.model;/, "openai-completions' alias rule moved");
-	// Exactly these two api modules write responseModel; a third would need the same reading.
+	// Exactly these api modules write responseModel; another would need the same reading. pi-messages copies it from the
+	// model behind a Radius virtual model (1.5.0). fallbackOf reads it on anthropic-messages only, so that changes nothing here.
 	const apiDir = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
 	const writing = readdirSync(apiDir).filter((name) => name.endsWith(".js") && !name.endsWith(".lazy.js") && /\.responseModel (?:\|\|)?= /.test(readFileSync(join(apiDir, name), "utf8"))).sort();
-	assert.deepEqual(writing, ["anthropic-messages.js", "openai-completions.js"]);
+	assert.deepEqual(writing, ["anthropic-messages.js", "openai-completions.js", "pi-messages.js"]);
 });
 
 test("what else picks the model that answers, as the model guard reads it (issue #502, PR #538's review)", { skip }, () => {
@@ -1827,9 +1850,10 @@ test("review of #534: the samplingParams merge comes after the output cap, and p
 	// PR #534's review: the box pi fits an image into before it enters the conversation, the per-image ceiling's input.
 	const resize = agentDistFile("utils", "image-resize-core.js");
 	assert.match(resize, new RegExp(`maxWidth: ${IMAGE_RESIZE_MAX.width},\\s*maxHeight: ${IMAGE_RESIZE_MAX.height},`), "pi's default image resize box moved -- IMAGE_RESIZE_MAX must follow it");
-	// And a model may declare its own box, which callCostBound reads off the model object. Since 1.2.0 the type is a
-	// TypeBox schema in providers/model-schema, and the two sides are integers, a subset of what callCostBound accepts.
-	assert.match(nestedPiAi("providers", "model-schema.d.ts"), /export declare const ModelImageResizeOptionsSchema: Type\.TObject<\{\s*maxWidth: Type\.TOptional<Type\.TInteger>;\s*maxHeight: Type\.TOptional<Type\.TInteger>;/);
+	// And a model may declare its own box, which callCostBound reads off the model object. Since 1.5.0 the declaration is a
+	// pi-schema type that says nothing, so the needle reads the builder: both sides are integers of at least 1, a subset of
+	// what callCostBound accepts.
+	assert.match(nestedPiAi("providers", "model-schema.js"), /const ModelImageResizeProperties = \{[^}]*maxWidth: opt\(int\(\{ minimum: 1[^}]*\}\)\)[^}]*maxHeight: opt\(int\(\{ minimum: 1/, "a model's own image box is no longer integers of at least 1");
 });
 
 // ── Issue #500: the seams subprocess metering needs ──────────────────────────────────────────────────────────
@@ -1858,7 +1882,7 @@ test("compaction and branch summaries reuse the session's streamFunction, under 
 	// The call site alone cannot see an id that arrives through the auth spread, so pin the receiving side: the branch
 	// summary builds its request options from four named fields (no session id or maxTokens) and hands its streamFn on.
 	const branchSummary = agentDistFile("core", "compaction", "branch-summarization.js");
-	assert.match(branchSummary, /\n {4}const requestOptions = \{ apiKey, headers, env, signal \};\n {4}const response = await completeSummarization\(model, context, requestOptions, streamFn, retry, callbacks\);/, "a branch summary now sends a session id or drops the session's streamFn");
+	assert.match(branchSummary, /\n {4}const requestOptions = \{ apiKey, headers, env, signal \};\n {4}if \(model\.reasoning && thinkingLevel && thinkingLevel !== "off"\) \{\n {8}requestOptions\.reasoning = thinkingLevel;\n {4}\}\n {4}const response = await completeSummarization\(model, context, requestOptions, streamFn, retry, callbacks\);/, "a branch summary now sends a session id or drops the session's streamFn");
 	// 3. The one summarisation choke point: a missing id becomes a fresh uuidv7 (one new `sessions` id per call), and
 	//    pi-ai's compat completeSimple is reached only when no streamFn is given at all.
 	const compaction = agentDistFile("core", "compaction", "compaction.js");
