@@ -76,6 +76,12 @@ const MAX_NAME_LENGTH = 214;
 /** The staged dir name doubles as a path segment in the container, so it stays short and flat. */
 const MAX_DIR_LENGTH = 64;
 
+/**
+ * A `dir` on the stage manifest: a plain path segment. Since issue #796 it names one stage (`package-stage.mjs`, name, version and a unique
+ * suffix) and may be longer than the package's own directory name, which `MAX_DIR_LENGTH` still bounds. A receipt from before is still valid.
+ */
+const STAGED_TREE_RE = /^[a-z0-9](?:[a-z0-9_.-]{0,142}[a-z0-9])?$/i;
+
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
 }
@@ -266,7 +272,7 @@ export function readStageManifest({ globalPiDir, readFile = readFileSync, fileEx
 			if (entry === null || typeof entry !== "object") return null;
 			const { name, version, dir } = entry;
 			if (!isNonEmptyString(name) || !isNonEmptyString(version) || !isNonEmptyString(dir)) return null;
-			if (!ENTRY_NAME_RE.test(dir) || dir.length > MAX_DIR_LENGTH) return null;
+			if (!STAGED_TREE_RE.test(dir)) return null;
 			packages.push({ name, version, dir, from: entry.from === FROM_HOST ? FROM_HOST : FROM_DECLARED });
 		}
 		return { stagedAt: typeof parsed.stagedAt === "string" ? parsed.stagedAt : null, packages };
