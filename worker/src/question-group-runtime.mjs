@@ -17,8 +17,14 @@ export function makeQuestionGroupRuntime({ store, triggersPath, getSettings = ()
 			// Admission deferrals can persist the resolved, text-free local wrapper. Rebuild it from the same narrow
 			// reference on every pickup; no queued execution setting or lost private property is reused.
 			if (!(data?.kind === "question-grouping" || data?.kind === "local" && data?.purpose === "zero-touch-grouping") || !ref || Object.keys(ref).sort().join() !== "configDigest,digest,runId" || !QUESTION_RUN_RE.test(ref.runId ?? "") || !/^[a-f0-9]{64}$/.test(ref.digest ?? "") || !/^[a-f0-9]{64}$/.test(ref.configDigest ?? "")) return { result: policy("question-group-refused") };
+			// Issue #761: a file a newer pi-dispatch wrote is `{ newer: <the store> }`, never a refusal, and is answered
+			// BEFORE any status is set: the processor defers the job (`newer-release`), and the grouping, queued with one
+			// attempt, is neither refused nor lost. The settings are read here, once, for that reason; a broken overlay is
+			// still refused below, where it always was.
+			const settings = getSettings();
+			if (settings?.invalid && settings.newer === true) return { newer: "the settings file" };
 			let current;
-			try { current = config(); } catch { return { result: policy("question-group-config-changed") }; }
+			try { current = config(); } catch (error) { if (error?.newer === true) return { newer: "the triggers file" }; return { result: policy("question-group-config-changed") }; }
 			if (!current?.capture || questionGroupConfigDigest(current) !== ref.configDigest) return { result: policy("question-group-config-changed") };
 			const source = await store.privateInput(ref.runId);
 			if (source.status !== "ready") {
@@ -27,7 +33,6 @@ export function makeQuestionGroupRuntime({ store, triggersPath, getSettings = ()
 				return { result: policy(reason) };
 			}
 			if (source.meta.digest !== ref.digest) return { result: policy("question-group-stale") };
-			const settings = getSettings();
 			if (settings.invalid || typeof settings.provider !== "string" || typeof settings.model !== "string") return { result: policy("question-group-refused") };
 			const classifier = modelRef(current.model);
 			let selected;

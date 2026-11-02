@@ -632,8 +632,10 @@ function registerTools(pi: ExtensionAPI): void {
       "scoped-limits dollar row), with `counterMicros` (spent and held, the Valkey counter the next job is admitted " +
       "against, null when unreadable) beside the records' side (settled micro-dollars, how many runs settled metered, " +
       "floor, refunded or unreserved, and the boundExceeded count; null for a folder or model row, which a run record " +
-      "cannot name); `runs` lists the per-run `dollars` of this window's records, newest first. All amounts are " +
-      "integer micro-dollars (1 USD = 1000000).",
+      "cannot name); `runs` lists the per-run `dollars` of this window's records, newest first, and `newerSkipped`, when " +
+      "present, counts the records a newer pi-dispatch wrote, which neither the fold nor `runs` reads: the project " +
+      "filter narrows it, the flow and repo filters do not, since this build cannot read such a record's flow or target. " +
+      "All amounts are integer micro-dollars (1 USD = 1000000).",
     parameters: Type.Object({ window: Type.Optional(Type.String()), flow: Type.Optional(Type.String()), repo: Type.Optional(Type.String()), project: Type.Optional(Type.String()), whatif: Type.Optional(Type.String()), runs: Type.Optional(Type.String()) }),
     async execute(_toolCallId, params) {
       const window = params.window ?? "mtd";
@@ -652,8 +654,12 @@ function registerTools(pi: ExtensionAPI): void {
       // `window` asked for (that is what a cap counts), each counter read under the worker's own keys; the runs are
       // this window's records, filtered like the fold. Integers and fixed tokens, so nothing a job chose rides along.
       const windows = await readDollarWindows({ paths, env: deploymentEnv() });
+      // Issue #761: `res.records` are the records the fold read, so a newer pi-dispatch's record never reaches
+      // `runDollars` here and its own count stays empty; the scan's count rides beside the list instead, so a list that
+      // leaves such a run out says so.
       const runs = runDollars(res.records);
-      const dollars = { ...windows, ...runs };
+      const newerSkipped = res.fold?.newerSkipped;
+      const dollars = { ...windows, ...runs, ...(Number.isSafeInteger(newerSkipped) && newerSkipped > 0 ? { newerSkipped } : {}) };
       const nowMs = Date.now();
       const held = await readHeldForAgent({ paths, env: deploymentEnv(), nowMs, project: params.project ?? null });
       let whatif;
@@ -2256,9 +2262,10 @@ export async function editScopedLimitViaDialogs(paths: any, ui: any, notify: Not
  * the insights page: the worker's own `suggestSize` over this host's run records, read once for every project, each
  * raise capped by the live hosts' budgets judged per host (`hostBudgets`, `hostBudgetsOf`; null where no budget was read,
  * and a raise then offers no call). `projectIds` defaults to every project in the projects file. `{ projects, hosts,
- * skipped }` (`hosts` how many budgets were judged against, null for none read), or `{ unreachable }` when the records
- * or the scoped-limits file cannot be read: a size resolved without the file would be the default, which is not the
- * project's.
+ * skipped, newerSkipped? }` (`hosts` how many budgets were judged against, null for none read; `newerSkipped` the
+ * records a newer pi-dispatch wrote, which no suggestion reads, only when there were any), or `{ unreachable }` when the
+ * records or the scoped-limits file cannot be read: a size resolved without the file would be the default, which is not
+ * the project's.
  */
 export function projectSizing(paths: any, opts: { hostBudgets?: any[] | null; projectIds?: string[] | null; nowMs: number; withSeries?: boolean }): any {
   return projectSizingOf(paths, { envFn: deploymentEnv, ...opts });

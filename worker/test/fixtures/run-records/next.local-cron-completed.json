@@ -1,0 +1,69 @@
+{
+  "jobId": "repeat:nightly-docs:1789354800000",
+  "kind": "local",
+  "target": "local:blog",
+  "flow": "docs",
+  "startedAt": "2026-09-14T03:00:02.000Z",
+  "endedAt": "2026-09-14T03:04:12.000Z",
+  "outcome": "completed",
+  "reason": null,
+  "exitCode": 0,
+  "turns": 5,
+  "tokens": {
+    "input": 9000,
+    "output": 1100,
+    "total": 10100,
+    "cost": 0.061
+  },
+  "usage": null,
+  "provider": "openai",
+  "model": "gpt-5.5",
+  "budgetReserved": true,
+  "attempt": 1,
+  "parentJobId": null,
+  "chainDepth": null,
+  "chainRefused": null,
+  "replica": null,
+  "replicas": null,
+  "triggerIndex": null,
+  "triggerType": null,
+  "session": null,
+  "host": "mini-1",
+  "backend": "docker",
+  "dollars": {
+    "reservedMicros": 1000000,
+    "settledMicros": 61000,
+    "basis": "metered",
+    "modelBasis": null
+  },
+  "why": null,
+  "project": "docs",
+  "plan": null,
+  "resources": {
+    "memPeak": 402653184,
+    "swapPeak": 0,
+    "oomKills": 0,
+    "memSomeUsec": 0,
+    "memFullUsec": 0,
+    "cpuUsec": 41000000,
+    "throttledUsec": 0,
+    "throttled": 0,
+    "pidsPeak": 17
+  },
+  "size": {
+    "memMiB": 1024,
+    "cpuCenti": 100,
+    "source": "default"
+  },
+  "hostBudget": null,
+  "queuedAt": "2026-09-14T03:00:00.000Z",
+  "capacity": {
+    "slots": 3,
+    "memMiB": 8192,
+    "cpuCenti": 400,
+    "cpus": 8
+  },
+  "earlier": null,
+  "stalledRepick": false,
+  "v": 1
+}

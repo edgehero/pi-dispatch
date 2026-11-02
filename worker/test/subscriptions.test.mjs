@@ -86,6 +86,18 @@ test("a version HIGHER than this build's is refused loudly, naming both versions
 	);
 });
 
+test("the newer refusal alone is marked newer, a whole number past the safe range included; a broken version is not (#761)", () => {
+	// The admin's writer refuses by this flag, so it says "newer" for exactly the files this parser calls newer.
+	for (const raw of ["2", "1e300", "9007199254740994", "2.0"]) {
+		assert.throws(() => parseSubscriptions(`{"version":${raw},"subscriptions":[]}`, PATH), (e) => isConfigError(e) && e.newer === true && /newer pi-dispatch/.test(e.message), raw);
+	}
+	for (const raw of ["1.5", "0", "-1", '"2"', "null", "true", "1e-300", "[2]"]) {
+		assert.throws(() => parseSubscriptions(`{"version":${raw},"subscriptions":[]}`, PATH), (e) => isConfigError(e) && e.newer === undefined, raw);
+	}
+	// Any other refusal of a readable version is not newer either.
+	assert.throws(() => parseSubscriptions(JSON.stringify({ version: 1 }), PATH), (e) => isConfigError(e) && e.newer === undefined);
+});
+
 // ── file-shape refusals ─────────────────────────────────────────────────────────────────────────────────
 
 test("non-JSON text and a non-object top level are config errors naming the path", () => {

@@ -3,7 +3,7 @@
  * `readSandboxInfo` (index.ts), and the console's run page, through the fleet reader's `sandboxCheck`.
  */
 import { SANDBOX_LAUNCHERS, sandboxLauncher, sandboxSyncRefusal, sandboxVenueOf, sandboxVenuePolicy, sandboxWindowRefusal } from "@edgehero/pi-dispatch/sandbox-policy";
-import { readManifest, sandboxDeadline } from "@edgehero/pi-dispatch/sandbox-store";
+import { readManifest, sandboxDeadline, sandboxManifestNewer } from "@edgehero/pi-dispatch/sandbox-store";
 import { sandboxShellRefusal } from "./read-model.mjs";
 
 /**
@@ -18,9 +18,16 @@ import { sandboxShellRefusal } from "./read-model.mjs";
  * MB through this one import; admin/test/console-bundle.test.mjs holds it).
  *
  * `{ retained: false, why, reason }` or `{ retained: true, launcher, until, source, at }`. `why` is a closed word for the
- * surface's own sentence (`retention-off`, `swept`, `id-mismatch`, `policy-unreadable`, `no-image`, `workspace-gone`,
- * `unblessed`, `venue`, `no-venue`, `past-window`, `no-launcher`); `reason` is the panel pane's words, kept byte for
- * byte. `env` is the environment the venue policy is read from (the panel's own process), `now` the clock.
+ * surface's own sentence (`retention-off`, `swept`, `id-mismatch`, `policy-unreadable`, `manifest-newer`,
+ * `manifest-unreadable`, `no-image`, `workspace-gone`, `unblessed`, `venue`, `no-venue`, `past-window`, `no-launcher`);
+ * `reason` is the panel pane's words, kept byte for byte. `env` is the environment the venue policy is read from (the
+ * panel's own process), `now` the clock.
+ *
+ * A manifest a NEWER pi-dispatch wrote (issue #761, the opener's `manifest-newer`, checked before the venue: that
+ * release may have redefined it) is `manifest-newer`, "kept by a newer pi-dispatch", which no shell of this release can
+ * change. A `version` that is not an integer of 1 or more, which the opener refuses under the same word, is
+ * `manifest-unreadable` here: no release wrote it, so "newer" would be a guess, and like a policy this page cannot read,
+ * it is a word the run page does not treat as certain.
  *
  * `venuePolicy: "unknown"` (review round 1 of issue #710) is the console's: it never sees the PI_BACKENDS the operator's
  * shell will open the sandbox under (`OQ-038`: not a key it takes from the deployment's `.env`, and the shell that runs
@@ -81,6 +88,11 @@ export function sandboxRetentionOf(paths, jobId, { now = Date.now, env = {}, ven
     return { retained: false, why: "policy-unreadable", reason: "not reopenable (PI_BACKENDS or PI_BACKEND_FLOOR unreadable here)" };
   }
   const refusal = sandboxSyncRefusal({ jobId, manifest, blessed: policy.blessed });
+  if (refusal?.refused === "manifest-newer") {
+    return sandboxManifestNewer(manifest)?.version === null
+      ? { retained: false, why: "manifest-unreadable", reason: "not reopenable (its manifest's version is unreadable)" }
+      : { retained: false, why: "manifest-newer", reason: "not reopenable here: kept by a newer pi-dispatch" };
+  }
   if (refusal) {
     // The venue the refusal itself read: a manifest with no `backend` key is a `local` run from before attribution,
     // so in a shell whose PI_BACKENDS leaves `local` out its cause is that variable, not a missing record.

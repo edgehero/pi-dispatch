@@ -25,7 +25,13 @@ export function approvalConfigDigest(run) {
 	return hash(JSON.stringify({ gates: run.gates, gateTimeout: run.gateTimeout ?? null, gateBudgetRaiseUsd: run.gateBudgetRaiseUsd ?? null, maxCostUsd: run.maxCostUsd ?? null }));
 }
 
-/** Free live-file check: a queued decision cannot keep a declaration an operator removed. */
+/**
+ * Free live-file check: a queued decision cannot keep a declaration an operator removed. `{ ok, digest }`, a
+ * `{ refused }` reason, or `{ newer: true }` when the file was written by a newer pi-dispatch (issue #761): the
+ * loader's `parseTriggers` throws a configError marked `.newer` then, and the caller defers the job for an upgrade
+ * rather than refuse a decision over a file this build cannot read. Read through the injected loader, not a second
+ * version check here, so the rule stays the loader's one (and this leaf stays free of an import cycle with it).
+ */
 export function makeCheckApprovalPolicy({ triggersPath, parseTriggers, fs = nodeFs }) {
 	return (job) => {
 		try {
@@ -34,7 +40,10 @@ export function makeCheckApprovalPolicy({ triggersPath, parseTriggers, fs = node
 			const entry = entries[index];
 			if (!entry || entry.run.kind !== job.kind || entry.on.type !== job.trigger.matched.type || !entry.run.gates || entry.run.resume !== true || approvalConfigDigest(entry.run) !== approvalConfigDigest(job)) return { refused: "approval-policy-changed" };
 			return { ok: true, digest: approvalConfigDigest(entry.run) };
-		} catch { return { refused: "approval-policy-unavailable" }; }
+		} catch (error) {
+			if (error?.newer === true) return { newer: true };
+			return { refused: "approval-policy-unavailable" };
+		}
 	};
 }
 

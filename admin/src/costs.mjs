@@ -22,6 +22,7 @@
  */
 
 import { dayKey } from "@edgehero/pi-dispatch/budget";
+import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
 
 /** Every class a typed dollar can carry. Note what is NOT here: "free". A $0 is always "zero-rated"
  * (a rate table said zero) or "plan" (prepaid) -- the fold has no way to assert that anything is free. */
@@ -321,11 +322,16 @@ function repriceRows(rows, counterfactual, pricing, { extraExcluded = 0 } = {}) 
  * Fold scanned run records against declared subscriptions and the injected pricing facade into the one
  * read-model the costs view renders. Everything below is derived per call and thrown away -- nothing
  * classified here is ever written anywhere.
+ *
+ * A record from a NEWER pi-dispatch is not folded (issue #761, `readableRecords`): its tokens, usage and dollars may
+ * mean something else in that release, and a misread one is a wrong dollar on every aggregate. It is counted in
+ * `newerSkipped`, present only when there were any, so the view can say its totals leave them out.
  */
 export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = null, sinceMs = null, triggerJoin = null }) {
   const subs = Array.isArray(subscriptions) ? subscriptions : [];
   const runs = [];
-  for (const record of Array.isArray(records) ? records : []) {
+  const { records: readable, newerSkipped } = readableRecords(records);
+  for (const record of readable) {
     if (!record || typeof record !== "object") continue;
     const at = recordMs(record);
     if (at === null) continue;
@@ -365,6 +371,7 @@ export function foldCosts({ records, subscriptions, pricing, nowMs, piAiPin = nu
     byProject: buildByProject(runs),
     plans: buildPlans(runs, subs, pricing, days),
     provenance: buildProvenance(runs, piAiPin),
+    ...(newerSkipped > 0 ? { newerSkipped } : {}),
   };
 }
 
@@ -666,7 +673,8 @@ export function foldTriggerCosts({ records, subscriptions, pricing, triggerJoin 
   const subs = Array.isArray(subscriptions) ? subscriptions : [];
   const byJobId = triggerJoin?.byJobId && typeof triggerJoin.byJobId === "object" ? triggerJoin.byJobId : {};
   const groups = new Map();
-  for (const record of Array.isArray(records) ? records : []) {
+  // A newer release's record is left out, as `foldCosts` leaves it out (issue #761); the map has no place to count it.
+  for (const record of readableRecords(records).records) {
     if (!record || typeof record !== "object") continue;
     if (recordMs(record) === null) continue; // the fold's own bucketing rule: unplaceable records are dropped
     const entry = typeof record.jobId === "string" ? byJobId[record.jobId] : undefined;
@@ -911,14 +919,18 @@ function buildProvenance(runs, piAiPin) {
  */
 export function whatIfFlow({ records, flow, target, pricing }) {
   // A refusal before any spend (issue #507) is no run of the flow: it would be extrapolated at the flow's per-run cost
-  // and counted as an unmeasured run in `excluded` and `coverage`.
-  const members = (Array.isArray(records) ? records : []).filter((r) => r && typeof r === "object" && (r.flow ?? null) === flow && !refusedBeforeSpend(r));
+  // and counted as an unmeasured run in `excluded` and `coverage`. A newer release's record is not read at all (issue
+  // #761): its `flow` and `usage` are past the stable core, so it is counted in `newerSkipped`, never as a member.
+  const { records: readable, newerSkipped } = readableRecords(records);
+  const skipped = newerSkipped > 0 ? { newerSkipped } : {};
+  const members = readable.filter((r) => r && typeof r === "object" && (r.flow ?? null) === flow && !refusedBeforeSpend(r));
   const ledgered = members.filter((r) => r.usage && Array.isArray(r.usage.models) && r.usage.models.length > 0);
-  if (ledgered.length === 0) return seededBand(members.length);
+  if (ledgered.length === 0) return { ...seededBand(members.length), ...skipped };
   const quads = ledgered.map((r) => sumQuads(r.usage.models));
   const priced = pricing.reprice(medianQuad(quads), target);
-  if (priced === null || priced === undefined) return seededBand(members.length);
+  if (priced === null || priced === undefined) return { ...seededBand(members.length), ...skipped };
   return {
+    ...skipped,
     class: "estimated",
     // The per-run estimate times ALL observed runs of the flow -- the un-ledgered ones presumably cost
     // something too; `coverage`/`excluded` say how much of that extrapolation is measured.
@@ -971,7 +983,9 @@ export function whatIfRuns({ records, target, pricing, subscriptions = [] }) {
   let runs = 0;
   let excluded = 0;
   let ratesVersion = null;
-  for (const record of Array.isArray(records) ? records : []) {
+  // A newer release's record is not re-priced (issue #761): its usage rows may mean something else there.
+  const { records: readable, newerSkipped } = readableRecords(records);
+  for (const record of readable) {
     if (refusedBeforeSpend(record)) continue;
     const usage = record?.usage;
     const rows = usage?.models;
@@ -991,11 +1005,12 @@ export function whatIfRuns({ records, target, pricing, subscriptions = [] }) {
     runs++;
   }
   const plan = coveringSubscription(target.provider, target.id, subscriptions);
-  return { class: "estimated", usd, originalUsd, runs, excluded, coverage: runs + excluded > 0 ? runs / (runs + excluded) : 0, ratesVersion, planId: plan?.id ?? null };
+  return { class: "estimated", usd, originalUsd, runs, excluded, coverage: runs + excluded > 0 ? runs / (runs + excluded) : 0, ratesVersion, planId: plan?.id ?? null, ...(newerSkipped > 0 ? { newerSkipped } : {}) };
 }
 
 /** A metered-only run's cost, using the same row classification as every cost chart; mixed plan runs are excluded. */
 export function meteredRunMicros(record, { subscriptions = [], pricing = { getPricedModel: () => null, isZeroRated: () => false } } = {}) {
+  if (fromNewerRelease(record)) return null; // a newer release's record: its cost is past the stable core (issue #761)
   if (record?.tokens?.metered !== true) return null;
   const contribution = runContribution(record, subscriptions, pricing);
   if (contribution.refused || contribution.floor || contribution.rows.length === 0 || !contribution.rows.every((r) => r.class === "metered" || r.class === "zero-rated")) return null;

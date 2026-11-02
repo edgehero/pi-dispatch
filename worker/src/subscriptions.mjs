@@ -92,7 +92,13 @@ export function parseSubscriptions(text, path) {
 		throw configError(`subscriptions file must declare an integer "version" >= 1 (got ${JSON.stringify(version)}): ${path}`);
 	}
 	if (version > SUBSCRIPTIONS_VERSION) {
-		throw configError(`subscriptions file written by a newer pi-dispatch (version ${version}; this build understands ${SUBSCRIPTIONS_VERSION}): ${path}`);
+		// Marked `newer`, as `parseTriggersDocument` marks its own (issue #761), so the admin's writer refuses this
+		// file for the reason the views give by this flag alone: a reading of `version` of its own can disagree at an
+		// edge such as 1e300 (`Number.isSafeInteger` against the `Number.isInteger` above), and a match on these words
+		// would break the day they are reworded.
+		const error = configError(`subscriptions file written by a newer pi-dispatch (version ${version}; this build understands ${SUBSCRIPTIONS_VERSION}): ${path}`);
+		error.newer = true;
+		throw error;
 	}
 
 	const entries = parsed.subscriptions;

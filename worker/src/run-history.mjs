@@ -2,7 +2,7 @@ import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 import { ANSWER_ID_RE, ANSWER_RUN_RE } from "./answerer.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
 import { forkArchiveFact, recordedFork } from "./fork-job.mjs";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { scrubCredentials } from "./redact.mjs";
 import { basename, join } from "node:path";
@@ -42,7 +42,7 @@ export function recordedCanary(value) {
  * with a fake and no disk. `makeLogSink` streams a job's raw output to a per-job `.log` and recovers the
  * turn count from a bounded tail; `makeRecordWriter` serialises a finished run to a JSON sidecar;
  * `makeFindPreviousRun` reads a scheduler's most recent prior sidecar back; `makeLogReaper` sweeps aged
- * `.log`/`.json` files at boot and on the retention timer (issue #292).
+ * `.log`/`.json` files at boot and on the retention timer (issue #292), and the writer's leftover temporary files.
  */
 
 /**
@@ -955,6 +955,48 @@ function rebuildUsage(u) {
 }
 
 /**
+ * The run record's version (issue #761, INT-RUN-HISTORY-FILE-CONTRACT): `v`, the LAST key `buildRecord` writes. It
+ * rises only when an EXISTING field changes its meaning, unit or type. A new field never raises it: every addition is
+ * additive and nullable or a conditional key, which every reader already skips when it does not know it, so a version
+ * for one would only make older readers drop records they can read. A record written before `v` existed reads as 1.
+ */
+export const RUN_RECORD_VERSION = 1;
+
+/**
+ * The stable core: the fields that keep their meaning in EVERY version, so a reader that meets a record from a newer
+ * pi-dispatch can still say which job and attempt it is about, how it ended, when, where and for which project it ran.
+ * Everything else in such a record may mean something this build does not know, so a fold that adds up anything beyond
+ * these (money, slot time, sizes) skips the record and says how many it skipped. A change to one of these cannot be
+ * expressed by `v`, since every older reader reads the core of any version: it would need a record of another name.
+ *
+ * One historical exception the core cannot repair: `attempt` counted from 0 in every release before v2.0.0 (BullMQ's
+ * `attemptsMade` as it was), and those records carry no `v`. A reader comparing attempts against such a record sees
+ * another attempt, which fails toward the queue's own verdict.
+ */
+export const RECORD_CORE_FIELDS = Object.freeze(["jobId", "attempt", "outcome", "startedAt", "endedAt", "host", "kind", "project"]);
+
+/**
+ * A record's version: 1 when it carries no `v` (every record before issue #761), the value itself when it is a positive
+ * safe integer, and null for anything else (not a record, or a `v` no release writes). Pure; never throws.
+ */
+export function recordVersionOf(record) {
+	if (record === null || typeof record !== "object" || Array.isArray(record)) return null;
+	if (!Object.hasOwn(record, "v") || record.v === undefined) return 1;
+	return Number.isSafeInteger(record.v) && record.v >= 1 ? record.v : null;
+}
+
+/**
+ * Whether this build can read every field of `record`: its version is 1 up to `supported` (this build's own,
+ * `RUN_RECORD_VERSION`, unless a test passes another). A record that is not readable still has its core
+ * (`RECORD_CORE_FIELDS`); a malformed `v` is not readable either, since no release wrote it and nothing says what its
+ * other fields mean.
+ */
+export function recordReadable(record, { supported = RUN_RECORD_VERSION } = {}) {
+	const version = recordVersionOf(record);
+	return version !== null && version <= supported;
+}
+
+/**
  * Build the durable run record from the full BullMQ job wrapper and the run's outcome.
  *
  * The record is id-only by construction: an EXPLICIT object literal that reads exactly the stable,
@@ -1247,6 +1289,10 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(touchTracking ? { touchTrackingVersion: 1, touchScopeId: touchScopeOf(data, host) } : {}),
 		...(Array.isArray(source.touches) ? { touches: source.touches.slice(0, 16).map(cleanTouch).filter(Boolean) } : {}),
 		...(source.touchLineageSkipped === "source-unavailable" ? { touchLineageSkipped: "source-unavailable" } : {}),
+		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
+		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
+		// asks one key, and a missing one reads as 1.
+		v: RUN_RECORD_VERSION,
 	};
 }
 
@@ -1272,9 +1318,16 @@ export function newerRecord(a, b) {
 /**
  * What a retry's record carries forward from the record it is about to replace: that record's own `earlier`, then its
  * own slot interval when it held a slot (`capacity` an object), each rebuilt; null when there is nothing.
+ *
+ * A record from a NEWER pi-dispatch (`recordReadable` false: a stalled job a newer host ran, picked up here) is read
+ * by its core alone (`RECORD_CORE_FIELDS`): its own interval from `host`, `startedAt` and `endedAt`, sizes unknown, and
+ * no `earlier` chain or `capacity`, whose meaning may have changed. Without `capacity` there is no telling whether it
+ * held a slot, and the interval is kept anyway: a refusal before a slot is recorded as starting and ending at the moment
+ * it refused, so it adds next to no slot time, while dropping the interval would lose the whole run of one that did.
  */
 export function earlierFrom(previous) {
 	if (previous === null || typeof previous !== "object" || Array.isArray(previous)) return null;
+	if (!recordReadable(previous)) return recordedEarlier([{ host: previous.host, startedAt: previous.startedAt, endedAt: previous.endedAt }]);
 	const carried = Array.isArray(previous.earlier) ? previous.earlier : [];
 	const own = previous.capacity !== null && typeof previous.capacity === "object" && !Array.isArray(previous.capacity) ? [{ host: previous.host, startedAt: previous.startedAt, endedAt: previous.endedAt, memMiB: previous.size?.memMiB, cpuCenti: previous.size?.cpuCenti }] : [];
 	return recordedEarlier([...carried, ...own]);
@@ -1579,6 +1632,36 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 }
 
 /**
+ * The name of a record's temporary file (`makeRecordWriter`): `<sanitized id>.json.<pid>.<12 hex>.tmp`, beside the
+ * record it becomes. It never ends in `.json`, so no reader of the history (each lists `*.json` or opens `<id>.json`)
+ * can take one for a record, and the reaper knows a crash's leftover by this pattern (`RECORD_TMP_MAX_AGE_MS`). A test
+ * holds the writer's own name, made with its real `random`, to it.
+ *
+ * It is not this writer's alone: it is the temporary-name shape the other atomic JSON writers use too
+ * (`<name>.<pid>.<12 hex>.tmp`: `writeOverlay`, the console tokens writer, the admin's pause windows writer and its
+ * `replaceFile`), so their temporary file matches it if one of their files is kept in `PI_LOGS_DIR`. That is harmless:
+ * the reaper removes only a temporary file older than `RECORD_TMP_MAX_AGE_MS`, and every writer of this shape is
+ * synchronous, so its temporary file lives for milliseconds. One an hour old was left by a process that died between
+ * its write and its rename, and nothing can still be using it.
+ */
+export const RECORD_TMP_RE = /^[A-Za-z0-9._-]+\.json\.\d+\.[0-9a-f]{12}\.tmp$/;
+
+/**
+ * How old a record's temporary file must be before the reaper removes it: one hour. A write lives for milliseconds
+ * (it is synchronous), so a file this old was left by a process that died between the write and the rename, and no
+ * write can still be using it. Its own age rather than the retention window, which may be days or forever (0).
+ */
+export const RECORD_TMP_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * The in-place fallback's open flags (`makeRecordWriter`): today's `"w"` (`O_WRONLY | O_CREAT | O_TRUNC`, the same
+ * default mode) plus `O_NOFOLLOW`, so a symbolic link at the record's name fails the open with ELOOP instead of being
+ * written through. Windows has no `O_NOFOLLOW` (`?? 0`, as this repo's other `O_NOFOLLOW` opens read it): there it
+ * opens as before.
+ */
+const IN_PLACE_FLAGS = nodeFs.constants.O_WRONLY | nodeFs.constants.O_CREAT | nodeFs.constants.O_TRUNC | (nodeFs.constants.O_NOFOLLOW ?? 0);
+
+/**
  * The durable record writer: serialises a finished run's `buildRecord` output to a per-job JSON sidecar.
  *
  * Fault isolation is the contract. The processor wrapper calls `writeRecord` on the money path, so a
@@ -1587,15 +1670,35 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
  * mirroring `makeLogSink`.
  *
  * The write is SYNCHRONOUS by design: it must complete before `process.exit(0)` on shutdown
- * (`index.mjs:83`), and an async write loses that race. `fs.writeFileSync` truncates by default, so a
- * re-run of the same job id overwrites -- last write wins.
+ * (`index.mjs:83`), and an async write loses that race.
+ *
+ * WRITTEN BESIDE, THEN RENAMED OVER (issue #761). The bytes go to a temporary file of this write's own in the same
+ * folder (`RECORD_TMP_RE`, created exclusively with `wx`, so a name already taken is never written through), and a
+ * rename puts it in place. A rename within one folder replaces the name in one step, so a worker that dies mid-write, or
+ * a backup copy taken then, finds the previous record or the new one, never a cut one. The in-place write it replaced
+ * truncated the file first, so a death between the truncate and the last byte left a record no reader could parse, or
+ * none. There is no fsync: a power cut can still lose a write the disk had not flushed, as it always could. A re-run of
+ * the same job id still replaces the record: the last write wins, as before.
+ *
+ * The rename is retried once on EPERM, as `writeOverlay` does: on Windows an antivirus scanner or the indexer can hold
+ * the destination for a moment. If the temporary file cannot be written or still cannot be renamed, the record is
+ * written IN PLACE, the way it always was, and the temporary file is removed: the safer path never loses a record that
+ * the old one would have kept (a job id long enough that the longer temporary name is refused, a folder that takes no
+ * new file, a disk too full for a second copy). Only a write that takes the fallback keeps the old exposure to a crash
+ * mid-write, and it is logged as `run_record_in_place { jobId, reason }`, the reason an error code, so a host that lost
+ * the crash safety says so; `run_record_failed` is logged when nothing could be written for any other reason.
+ *
+ * The fallback opens the record's name with `O_NOFOLLOW` (`IN_PLACE_FLAGS`): a symbolic link planted at that name is
+ * never written through, so a folder that refuses the rename cannot be made to overwrite a file outside it. The rename
+ * replaces a link rather than following it, so the safe path never could. Such a write writes nothing and is logged as
+ * `run_record_in_place` with the reason `ELOOP`, the code the open refused it with.
  *
  * The failure log carries only `jobId` and `reason`; never the record object or its serialized JSON,
  * which embed target/flow fields (`no-pii-in-logs`). `sanitizeJobId` is applied only at the filename
- * boundary; the record body keeps the raw id. `fs` is injectable so the writer is testable with a fake
- * and no disk.
+ * boundary; the record body keeps the raw id. `fs` and `random` are injectable so the writer is testable with a
+ * fake and no disk, and a test can aim at the temporary name.
  */
-export function makeRecordWriter({ logsDir, fs = nodeFs, log = () => {} }) {
+export function makeRecordWriter({ logsDir, fs = nodeFs, log = () => {}, random = randomBytes }) {
 	try {
 		fs.mkdirSync(logsDir, { recursive: true });
 	} catch (err) {
@@ -1603,15 +1706,57 @@ export function makeRecordWriter({ logsDir, fs = nodeFs, log = () => {} }) {
 	}
 
 	return function writeRecord(record) {
+		let path;
+		let data;
 		try {
 			// Custom: flat JSON sidecar per job over a DB/logging lib -- records are immutable, filename-keyed
 			// by jobId, no cross-record queries; DES-RUN-HISTORY-FLAT-FILES-NO-DB; specs/interfaces.md:11
 			// (there is deliberately no database).
-			const path = join(logsDir, `${sanitizeJobId(record.jobId)}.json`);
-			const data = `${JSON.stringify(record)}\n`;
-			fs.writeFileSync(path, data);
+			path = join(logsDir, `${sanitizeJobId(record.jobId)}.json`);
+			data = `${JSON.stringify(record)}\n`;
 		} catch (err) {
 			log("run_record_failed", { jobId: record?.jobId, reason: err?.message });
+			return;
+		}
+		let tmp = null;
+		const drop = () => {
+			try {
+				fs.unlinkSync(tmp);
+			} catch {
+				// already gone, or never made
+			}
+		};
+		let why = null;
+		try {
+			tmp = `${path}.${process.pid}.${random(6).toString("hex")}.tmp`;
+			fs.writeFileSync(tmp, data, { flag: "wx" });
+		} catch (err) {
+			// EEXIST: the name belongs to someone else (the exclusive create is what makes it this write's), so it is left
+			// alone. Any other failure after the create (a full disk) left a file of this write's own, which goes.
+			if (tmp !== null && err?.code !== "EEXIST") drop();
+			why = err?.code ?? "write-error";
+		}
+		if (why === null) {
+			try {
+				try {
+					fs.renameSync(tmp, path);
+				} catch (err) {
+					if (err?.code !== "EPERM") throw err;
+					fs.renameSync(tmp, path); // single retry: a Windows AV/indexer lock is transient
+				}
+				return;
+			} catch (err) {
+				drop();
+				why = err?.code ?? "rename-error";
+			}
+		}
+		try {
+			fs.writeFileSync(path, data, { flag: IN_PLACE_FLAGS });
+			log("run_record_in_place", { jobId: record.jobId, reason: why });
+		} catch (err) {
+			// A link at the record's name, refused by `O_NOFOLLOW`: nothing was written, and the log says why by its code.
+			if (err?.code === "ELOOP") log("run_record_in_place", { jobId: record.jobId, reason: "ELOOP" });
+			else log("run_record_failed", { jobId: record.jobId, reason: err?.message });
 		}
 	};
 }
@@ -1689,6 +1834,11 @@ export const UNREADABLE_RECORD = Object.freeze({ unreadable: true });
  *
  * The id inside is NOT checked here: `sanitizeJobId` maps `a:b` and `a_b` to one name, and `recordVerdict` refuses
  * the other job's record as `id-mismatch`, which is the one place that can also say so. NEVER throws.
+ *
+ * A record from a newer pi-dispatch (a `v` above `RUN_RECORD_VERSION`) is returned as it is, not refused: the worker's
+ * verdicts on it (`recordVerdict`, a recovery's settled check in processor.mjs) read only the stable core
+ * (`RECORD_CORE_FIELDS`), which keeps its meaning in every version, and `earlierFrom` reads no more than that core of
+ * one (issue #761).
  */
 export function makeReadRecord({ logsDir, fs = nodeFs }) {
 	return function readRecord(jobId) {
@@ -1722,9 +1872,9 @@ export function makeReadRecord({ logsDir, fs = nodeFs }) {
 export const RECORD_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 /**
- * Does this record say that THIS attempt of THIS job finished without failing? Returns `null` when it does,
- * `"absent"` when there is no record, and otherwise the reason it does not, from a fixed set:
- * `unreadable`, `id-mismatch`, `other-attempt`, `failed`, `older-than-job`. Pure; never throws.
+ * Why `record` is not THIS job's record of `attempt`, from a fixed set (`unreadable`, `id-mismatch`, `other-attempt`,
+ * `older-than-job`), or null when it is. The one rule for "this attempt's record" (`recordOfThisJob`, `recordVerdict`).
+ * Pure; never throws.
  *
  * `attempt` is the 1-based attempt number the record would carry, which is BullMQ's `attemptsMade + 1` while the
  * job is processing (see `buildRecord`) and `attemptsMade` after BullMQ failed it (its moveToFailed adds one
@@ -1732,19 +1882,63 @@ export const RECORD_CLOCK_SKEW_MS = 5 * 60 * 1000;
  *
  * `since` is the job's creation time in millis (BullMQ's `job.timestamp`). A job id can be used again once the
  * old job is gone (a fixed `--trigger` id, a redelivered webhook), while its record lives for the retention
- * window; a record that started before this job existed (less `RECORD_CLOCK_SKEW_MS`) belongs to the old one. A
- * missing or unparseable `startedAt` is not trusted for the same reason.
+ * window; a record from before this job existed (less `RECORD_CLOCK_SKEW_MS`) belongs to the old one. The record's
+ * time is its `startedAt`, or its `endedAt` when it has no start: the stall listener writes a crashed attempt's
+ * record with `startedAt: null` when it cannot tell that attempt's start (start.mjs `recoverStall`), and that record
+ * is this job's all the same, written after the job existed. A time that does not parse is not trusted. With no
+ * `since` (not a finite number) the age is not judged.
+ *
+ * Every field it reads is in the stable core (`RECORD_CORE_FIELDS`: `jobId`, `attempt`, `startedAt`, `endedAt`), so
+ * a record from a NEWER pi-dispatch is judged like any other (issue #761). Keep it to the core.
+ */
+function whyNotThisJob(record, { jobId, attempt, since }) {
+	if (record === UNREADABLE_RECORD || record === null || typeof record !== "object" || Array.isArray(record)) return "unreadable";
+	if (record.jobId !== jobId) return "id-mismatch";
+	if (!Number.isInteger(attempt) || record.attempt !== attempt) return "other-attempt";
+	if (Number.isFinite(since)) {
+		const at = Date.parse(record.startedAt ?? record.endedAt ?? "");
+		if (!Number.isFinite(at) || at < since - RECORD_CLOCK_SKEW_MS) return "older-than-job";
+	}
+	return null;
+}
+
+/**
+ * Is `record` THIS job's record of `attempt` (`whyNotThisJob` says what that takes: the id, the attempt, and not
+ * older than the job)? Whatever its outcome. Every place that asks whether a record is a job's own asks this, so a
+ * record an older job left under a reused id answers for nobody anywhere. Pure; never throws.
+ */
+export function recordOfThisJob(record, { jobId, attempt, since } = {}) {
+	try {
+		return whyNotThisJob(record, { jobId, attempt, since }) === null;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Does this record say that THIS attempt of THIS job finished without failing? Returns `null` when it does,
+ * `"absent"` when there is no record, and otherwise the reason it does not, from a fixed set:
+ * `unreadable`, `id-mismatch`, `other-attempt`, `failed`, `older-than-job`. Pure; never throws.
+ *
+ * Whose record it is goes by `whyNotThisJob`, the rule `recordOfThisJob` shares; the answers keep their order, so a
+ * record of another job or attempt is named as that before its outcome is looked at, and its age after, judged by its
+ * start alone.
  *
  * `failed` (an outcome of `failed`, or none) is refused on purpose: a record written by the catch path says the run
  * threw, and the queue's verdict (failed, or run again) is then the right one.
+ *
+ * Every field it reads is in the stable core (`RECORD_CORE_FIELDS`: `jobId`, `attempt`, `outcome`, `startedAt`,
+ * `endedAt`), so a record from a NEWER pi-dispatch is judged like any other (issue #761): a host that finished the run
+ * on a newer release still settles it for an older host that meets the stalled job. Keep it to the core.
  */
 export function recordVerdict(record, { jobId, attempt, since } = {}) {
 	try {
 		if (record === null || record === undefined) return "absent";
-		if (record === UNREADABLE_RECORD || typeof record !== "object" || Array.isArray(record)) return "unreadable";
-		if (record.jobId !== jobId) return "id-mismatch";
-		if (!Number.isInteger(attempt) || record.attempt !== attempt) return "other-attempt";
+		const whose = whyNotThisJob(record, { jobId, attempt, since });
+		if (whose === "unreadable" || whose === "id-mismatch" || whose === "other-attempt") return whose;
 		if (typeof record.outcome !== "string" || record.outcome === "failed") return "failed";
+		// A record that settles an attempt is judged by its START alone, as `CONST-RETRY-INFRA-ONLY` states the gate: the
+		// end fallback in `whyNotThisJob` is for the stall listener's own `failed` record, which never settles anything.
 		if (Number.isFinite(since)) {
 			const started = Date.parse(record.startedAt ?? "");
 			if (!Number.isFinite(started) || started < since - RECORD_CLOCK_SKEW_MS) return "older-than-job";
@@ -1809,23 +2003,33 @@ export function makeSettledRecord({ readRecord, readMirrored = null }) {
  * unlink failure is caught -- logged as `log_reaper_skipped` -- and boot continues. The per-file
  * try/catch is what keeps one bad entry from aborting the whole sweep.
  *
- * `retentionDays === 0` is the documented keep-forever sentinel: the sweep returns early and touches no
- * file. Age comes from the file's `mtimeMs`, never from any date parsed out of the filename -- the
+ * `retentionDays === 0` is the documented keep-forever sentinel: no `.log` or `.json` file is touched. Age comes
+ * from the file's `mtimeMs`, never from any date parsed out of the filename -- the
  * on-disk mtime is the authority. The `isFile()` guard skips a stray `foo.log/` directory so a
  * mis-shaped entry raises no EISDIR/EPERM. `fs` and `now` are injectable so the reaper is testable with
  * a fake and no disk.
+ *
+ * A record's TEMPORARY file (issue #761, `RECORD_TMP_RE`) that a crash left between the write and the rename is swept
+ * by its own age, `RECORD_TMP_MAX_AGE_MS`, and ALSO under keep-forever: the retention window is a promise about
+ * records, and this file is none (no reader reads it), so keeping it forever would only let crashes pile up. A `.tmp`
+ * of any other shape is never touched. One of this shape that another atomic writer left here matches too, and goes by
+ * the same rule, which is harmless: every writer of that shape is synchronous, so a temporary file an hour old belongs
+ * to a write that died (`RECORD_TMP_RE`).
  */
 export function makeLogReaper({ logsDir, retentionDays, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
 	return function reapLogs() {
-		if (retentionDays === 0) return; // keep-forever sentinel: no sweep
+		const keepForever = retentionDays === 0; // keep-forever sentinel: no record or log is swept
 		try {
 			const names = fs.readdirSync(logsDir);
-			const cutoff = now() - retentionDays * 86400000;
+			const at = now();
+			const cutoff = at - retentionDays * 86400000;
+			const tmpCutoff = at - RECORD_TMP_MAX_AGE_MS;
 			for (const name of names) {
-				if (!name.endsWith(".log") && !name.endsWith(".json")) continue;
+				const tmp = RECORD_TMP_RE.test(name);
+				if (!tmp && (keepForever || (!name.endsWith(".log") && !name.endsWith(".json")))) continue;
 				try {
 					const st = fs.statSync(join(logsDir, name));
-					if (st.isFile() && st.mtimeMs < cutoff) {
+					if (st.isFile() && st.mtimeMs < (tmp ? tmpCutoff : cutoff)) {
 						fs.unlinkSync(join(logsDir, name));
 						log("reaped_log", { file: name });
 					}

@@ -45,7 +45,7 @@
  */
 
 import nodeFs from "node:fs";
-import { parseTriggers, parseTriggersDocument } from "./triggers.mjs";
+import { parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionFor, triggersFileVersionProblem } from "./triggers.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { expectRefusal } from "./file-expect.mjs";
 
@@ -145,10 +145,20 @@ function releaseLock(fd, triggersPath, fs, log) {
  * that rebuilt the file as `{ triggers }` deleted them on every console edit and every one-shot disarm,
  * silently. `triggers` keeps its position when the document had it, and leads when it did not (the
  * repair-from-empty shape, which is the historical file). A file whose only key is `triggers` comes
- * out byte-identical to what this function always wrote. */
-function serialize(triggersArray, doc = null) {
+ * out byte-identical to what this function always wrote.
+ *
+ * `version` (issue #761): when given, the writer OWNS the file's `version` and sets it to this value, in place when
+ * the document had one and first when it is added, and deletes it at 1 (version 1 is written as nothing). When not
+ * given (the disarm, whose whole write authority is one added key), `version` rides along like any other key. */
+function serialize(triggersArray, doc = null, { version = null } = {}) {
 	const rest = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
-	const next = Object.hasOwn(rest, "triggers") ? { ...rest, triggers: triggersArray } : { triggers: triggersArray, ...rest };
+	let next = Object.hasOwn(rest, "triggers") ? { ...rest, triggers: triggersArray } : { triggers: triggersArray, ...rest };
+	if (version !== null) {
+		const { version: _owned, ...without } = next;
+		if (version <= 1) next = without;
+		else if (Object.hasOwn(next, "version")) next = { ...next, version };
+		else next = { version, ...without };
+	}
 	return `${JSON.stringify(next, null, 2)}\n`;
 }
 
@@ -209,8 +219,17 @@ function discardTmp(fs, tmp) {
  * re-check and the rename are one critical section against every other writer of this file (the disarm included): a
  * difference refuses with nothing written. Without it the write is byte-identical to what it always was; the lock
  * already serialises a single read-modify-write, and `expect` widens that to the whole preview-to-confirm dialog.
+ *
+ * A file written by a newer pi-dispatch (issue #761) is refused BEFORE `mutate` and `mutateDocument` run, with
+ * `{ invalid, newer: true }` and the file untouched: this build cannot know what the newer one's fields mean, and the
+ * writer's own stamp (the lowest version the content needs) would otherwise LOWER the version under content it does
+ * not understand, after which the final validation would pass. Judged on the RAW `version` only, never the full
+ * parser, so a file with one bad entry can still be fixed; a broken `version` is repaired like any broken file. Then
+ * the writer owns `version`: it writes `triggersFileVersionFor` of the result (`serialize`). `supported`, `runTable`,
+ * `blockTable`, `entryValueTable`, `runValueTable` and `blockValueTable` are the version rules, injectable for tests.
  */
-export function writeTriggers({ triggersPath, mutate, mutateDocument = null, expect = null, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
+export function writeTriggers({ triggersPath, mutate, mutateDocument = null, expect = null, fs = nodeFs, log = () => {}, now = () => Date.now(), supported = undefined, runTable = undefined, blockTable = undefined, entryValueTable = undefined, runValueTable = undefined, blockValueTable = undefined }) {
+	const versions = { supported, runTable, blockTable, entryValueTable, runValueTable, blockValueTable };
 	const fd = takeLock(triggersPath, fs, log, now);
 	if (fd === null) {
 		// Immediate, not retried: the callers sit on the pi TUI event loop, and the holder is a write
@@ -246,11 +265,14 @@ export function writeTriggers({ triggersPath, mutate, mutateDocument = null, exp
 				return { invalid: `triggers file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}; refusing to rewrite a file whose reviewed value and running value differ: ${triggersPath}` };
 			}
 		}
+		const newer = triggersFileVersionProblem(doc, { supported: versions.supported });
+		if (newer?.newer) return { invalid: `${newer.message}, so nothing was written and nothing in it was lost; change it with that release: ${triggersPath}`, newer: true };
 		const next = mutate(current.map((t) => ({ ...t })));
 		const nextDocument = typeof mutateDocument === "function" ? mutateDocument(JSON.parse(JSON.stringify(doc ?? { triggers: current }))) : doc;
-		const text = serialize(next, nextDocument);
+		const rest = nextDocument !== null && typeof nextDocument === "object" && !Array.isArray(nextDocument) ? nextDocument : {};
+		const text = serialize(next, nextDocument, { version: triggersFileVersionFor({ ...rest, triggers: next }, versions) });
 		try {
-			parseTriggers(text, triggersPath); // the loaders' own validator -- never write a file they would reject
+			parseTriggers(text, triggersPath, versions); // the loaders' own validator -- never write a file they would reject
 		} catch (e) {
 			return { invalid: e?.message ?? String(e) };
 		}
@@ -354,11 +376,20 @@ export async function disarmTrigger({ triggersPath, index, number, flow, command
 				return { already: true };
 			}
 			entry.on.disarmed = { at, ...(jobId !== undefined && { jobId }) };
-			const text = serialize(entries, raw); // every other top-level key rides along unchanged (issue #704)
+			// Every other top-level key rides along unchanged (issue #704), `version` included (issue #761): the disarm adds
+			// one key to one entry and owns nothing else. `serialize` over the RAW document keeps every top-level block,
+			// every key inside an entry and inside its `run`, and `version`, as they were read.
+			const text = serialize(entries, raw);
 			try {
 				parseTriggers(text, triggersPath); // the shared validator, same rule as every write
 			} catch (e) {
-				return { invalid: e?.message ?? String(e) };
+				// A file written by a newer pi-dispatch is the one refusal the disarm does NOT take (issue #761): the validator
+				// stops at its `version` and judges nothing below it, and the identity checks above have already found an armed
+				// one-shot at this index for this job. Refused, the one-shot would stay armed, and an upgraded worker or
+				// receiver would fire it again: a second paid run. Writing the one key this writer owns, with everything else
+				// as it was read, loses nothing the newer release wrote, which is the whole of why other writers refuse such a
+				// file. Any other refusal (a malformed file) is the validator's, as before.
+				if (e?.newer !== true) return { invalid: e?.message ?? String(e) };
 			}
 			const tmp = tmpPathFor(triggersPath);
 			try {
@@ -432,7 +463,7 @@ export function makeDisarmOnce({ triggersPath, fs = nodeFs, log = () => {}, disa
 }
 
 /**
- * The pre-spend check's factory (issue #231): `(job, { queueJobId }) => { ok } | { refused, at, jobId }`.
+ * The pre-spend check's factory (issue #231): `(job, { queueJobId }) => { ok } | { refused, at, jobId } | { newer }`.
  * Refuses ONLY on positive FOREIGN disarmed evidence -- a mark whose jobId is this very queue job
  * means BullMQ's second attempt of the delivery that spent the trigger, which must still run
  * (without the exception, a disarm on attempt one's failure record silently turns attempts:2 into
@@ -441,6 +472,7 @@ export function makeDisarmOnce({ triggersPath, fs = nodeFs, log = () => {}, disa
  * gone, entry changed -- is "run": fail-open, the disarm writer owns the loud refusals, and in the
  * compose topology (single-file :ro bind mount pinned to a dead inode, so the receiver never sees
  * the disarm until restart) this check IS the once-enforcement layer, which is why it exists at all.
+ * The one exception to fail-open is a file written by a newer pi-dispatch (issue #761): `{ newer: true }`, below.
  */
 export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
 	return async function checkOnceSpent(job, { queueJobId } = {}) {
@@ -454,6 +486,10 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
 			command: job?.command,
 			fs,
 		});
+		// Issue #761: NOT fail-open. A file written by a newer pi-dispatch may hold this one-shot's disarm in a shape this
+		// build cannot read (a renamed key, a mark this build would not see as one), so "run" could fire a spent one-shot
+		// again. The caller defers the job until a build that reads it.
+		if (state.state === "newer") return { newer: true };
 		if (state.state !== "disarmed") return { ok: true };
 		if (state.jobId !== null && state.jobId === queueJobId) return { ok: true }; // our own earlier attempt
 		return { refused: true, at: state.at, jobId: state.jobId };
@@ -482,7 +518,8 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
  *
  * FAIL-OPEN throughout, `readDisarmState`'s posture and for its reason: an unreadable or changed file means
  * "run", because a broken read must never wedge every job. Only a positive, identity-confirmed mismatch --
- * this entry authored conditions, this job carries none -- refuses.
+ * this entry authored conditions, this job carries none -- refuses. The one answer that is neither is a file written by
+ * a newer pi-dispatch (issue #761): `{ newer: true }`, which the caller turns into a deferral, never a refusal.
  */
 /**
  * The authored NARROWING fields the skew check covers besides `waitFor` (issues #502, #501): a `run` key whose absence
@@ -536,18 +573,23 @@ export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {
 	// stat replaces a read-and-parse on the hot path. The residual is millisecond mtime granularity: two
 	// writes inside one millisecond would serve a stale parse for one job, which fails OPEN like every other
 	// uncertainty here.
-	let cache = null; // { mtimeMs, size, triggers }
+	let cache = null; // { mtimeMs, size, triggers, newer }
+	// `{ triggers, newer }`: the raw entries (null when unreadable), and whether the file was written by a newer
+	// pi-dispatch (issue #761), judged by the loader's one rule (`triggersFileNewer`).
 	const read = () => {
 		try {
 			const st = fs.statSync?.(triggersPath);
-			if (cache && st && cache.mtimeMs === st.mtimeMs && cache.size === st.size) return cache.triggers;
-			const raw = JSON.parse(fs.readFileSync(triggersPath, "utf8"));
+			if (cache && st && cache.mtimeMs === st.mtimeMs && cache.size === st.size) return cache;
+			const text = fs.readFileSync(triggersPath, "utf8");
+			const raw = JSON.parse(text);
 			const triggers = Array.isArray(raw?.triggers) ? raw.triggers : null;
-			if (st) cache = { mtimeMs: st.mtimeMs, size: st.size, triggers };
-			return triggers;
+			// The TEXT, so a duplicate `version` is broken here as it is to the loader, never newer.
+			const newer = triggersFileNewer(text);
+			if (st) cache = { mtimeMs: st.mtimeMs, size: st.size, triggers, newer };
+			return { triggers, newer };
 		} catch {
 			cache = null;
-			return null;
+			return { triggers: null, newer: false };
 		}
 	};
 
@@ -561,12 +603,17 @@ export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {
 		// Cron and CLI jobs carry no matched index, and cannot carry `waitFor` at all.
 		const index = job?.trigger?.matched?.index;
 		if (!Number.isInteger(index)) return { ok: true };
+		// Issue #761: read BEFORE the arrived-everything shortcut below, because a file written by a newer pi-dispatch may
+		// author a narrowing field this build has no row for, which no job field can show missing. Not fail-open: the
+		// caller defers the job (`{ newer: true }`) until a build that reads the file. The read is the cached stat.
+		const file = read();
+		if (file.newer) return { newer: true };
 		// The field arrived. Whether its conditions are SATISFIED is the gate's business, not this check's.
 		const waitArrived = Array.isArray(job?.waitFor) && job.waitFor.length > 0;
 		const missing = AUTHORED_NARROWING_FIELDS.filter((row) => job?.[row.key] === undefined || job[row.key] === null);
 		if (waitArrived && missing.length === 0) return { ok: true };
 
-		const triggers = read();
+		const triggers = file.triggers;
 		if (triggers === null) return { ok: true };
 		const entry = triggers[index];
 		const authored = entry?.run?.waitFor;
@@ -754,11 +801,16 @@ export function makeFindSecretBundle({ triggersPath, fs = nodeFs, log = () => {}
 
 export function readDisarmState({ triggersPath, index, number, flow, command, fs = nodeFs }) {
 	let raw;
+	let text;
 	try {
-		raw = JSON.parse(fs.readFileSync(triggersPath, "utf8"));
+		text = fs.readFileSync(triggersPath, "utf8");
+		raw = JSON.parse(text);
 	} catch (err) {
 		return { state: "unknown", reason: err?.code ?? "parse-error" };
 	}
+	// Before any entry is read (issue #761): a newer file's entries may mean something else, so nothing in it is evidence.
+	// Judged on the TEXT, so a duplicate `version` reads as the loader reads it: broken, not newer.
+	if (triggersFileNewer(text)) return { state: "newer" };
 	const entry = Array.isArray(raw?.triggers) ? raw.triggers[index] : undefined;
 	if (!entry || typeof entry !== "object" || entry.on?.once !== true || entry.on?.number !== number) {
 		return { state: "unknown", reason: "entry-changed" };

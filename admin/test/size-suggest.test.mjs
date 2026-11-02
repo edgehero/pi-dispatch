@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { stripAnsi } from "../src/style.mjs";
 import { hostBudgetsOf, readSizeSuggestions } from "../src/read-model.mjs";
+import { projectSizing } from "../src/insights-assembly.mjs";
 import { PAGE_THEME } from "../src/graph-html.mjs";
 import { insightsBody } from "../src/console/panels.mjs";
 import { INSIGHTS_CAP_MISSING, INSIGHTS_CPU_REASONS, INSIGHTS_MEMORY_HELD, SIZING_NO_CAP_WORDS, INSIGHTS_MEMORY_REASONS, INSIGHTS_SIZE_FACTS, layoutSizingChart, sizeCoresText, sizeCpuText, sizeMemText } from "../src/insights-html.mjs";
@@ -154,6 +155,19 @@ test("the PROJECTS view shows each project's size, p95 peaks and verdict, then t
   const none = (await projectsAt(140, { ...bare, projects: { ...bare.projects, shop: shop.projects.shop } })).lines.map(content).join("\n");
   assert.match(none, /^sizes: p95 of 30 days' runs · no host budget read$/m);
   assert.match(none, /^4g, 2 CPUs · p95 4g, 1 core · suggest\nmemory wants 6g \(oom-killed, no host budget read as a\nnumber: no call\)\ngithub:acme\/web$/m);
+});
+
+test("the size suggestions say how many of the window's records a newer pi-dispatch wrote, which none of them reads (#761)", async () => {
+  // The read the insights page, the PROJECTS view and the edit preview share passes the worker reader's count through.
+  const logsDir = logsWith([rec({ reason: "oom-killed", peakMiB: 4096 }), { ...rec({ i: 1, peakMiB: 9000 }), v: 2 }]);
+  const paths = { logsDir, scopedLimitsPath: null, projectsFile: null };
+  const read = projectSizing(paths, { projectIds: ["shop"], nowMs: NOW, envFn: () => ({}) });
+  assert.equal(read.newerSkipped, 1);
+  assert.equal(read.projects.shop.runs, 1, "the newer run's peak is not one of the runs read");
+  assert.equal(Object.hasOwn(projectSizing({ ...paths, logsDir: logsWith([rec()]) }, { projectIds: ["shop"], nowMs: NOW, envFn: () => ({}) }), "newerSkipped"), false, "absent when there were none");
+  // The PROJECTS view says it beside the oversize count, in the worker's words.
+  const { lines } = await projectsAt(140, { ...sizingInfo(), skipped: 2, newerSkipped: 3 });
+  assert.match(lines.map(content).join("\n"), /^2 run records over 256 KiB skipped\n3 records from a newer pi-dispatch not read$/m);
 });
 
 /** True when `text` ends outside every JSON string (an even count of unescaped quotes). */

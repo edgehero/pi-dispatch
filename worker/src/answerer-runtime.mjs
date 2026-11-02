@@ -91,7 +91,11 @@ export function makeAnswerDraftRuntime({ store, triggersPath, enqueue, identity 
 			const ref = data?.answerDraft;
 			if (!ref || Object.keys(ref).sort().join() !== "ruleId,runId" || !ANSWER_RUN_RE.test(ref.runId ?? "") || !ANSWER_ID_RE.test(ref.ruleId ?? "")) return { result: policy("answer-draft-refused") };
 			let doc, input;
-			try { doc = document(); input = await store.privateInput(ref.runId); } catch { throw new Error("answer draft inputs could not be read"); }
+			// Issue #761: a triggers file a newer pi-dispatch wrote is `{ newer: "the triggers file" }`, answered before any
+			// write: the processor defers the job (`newer-release`). The throw below is an infrastructure retry, which uses
+			// up an attempt, and nothing about this read would come right by retrying it on this build.
+			try { doc = document(); } catch (error) { if (error?.newer === true) return { newer: "the triggers file" }; throw new Error("answer draft inputs could not be read"); }
+			try { input = await store.privateInput(ref.runId); } catch { throw new Error("answer draft inputs could not be read"); }
 			const rule = (doc.answerRules ?? []).find(r => r.id === ref.ruleId);
 			if (!rule || !input || input.ruleId !== rule.id || input.runId !== ref.runId || !rule.projects.includes(input.project) || input.configDigest !== answerRuleConfigDigest(doc, rule)) { await store.update(ref.runId, { status: "passed", passReason: "config-changed" }); return { result: policy("answer-draft-config-changed") }; }
 			const meta = await store.readMeta(ref.runId);

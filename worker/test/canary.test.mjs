@@ -48,6 +48,34 @@ test("source selection binds flow and main-session role, excludes canaries/futur
 	assert.deepEqual(selectCanarySources([good, original("other-role", { modelRole: "planner" }), original("other-flow", { flow: "plan" }), original("canary", { canary: {} }), original("future", { endedAt: new Date(instant + 1).toISOString() }), original("old", { endedAt: new Date(instant - 8 * 86400_000).toISOString() }), original("failed", { outcome: "failed" })], options, { now: instant }), [good]);
 });
 
+// Issue #761: a record a newer pi-dispatch wrote keeps only its core fields' meaning, and the role and flow a canary is
+// chosen by are not core, so it is never a source; neither is a sandbox a newer pi-dispatch kept.
+test("a run record from a newer pi-dispatch is never a canary source", () => {
+	const current = original("current", { v: 1 });
+	const unversioned = original("unversioned");
+	assert.deepEqual(selectCanarySources([original("newer", { v: 2, endedAt: new Date(instant - 10).toISOString() }), current, unversioned], options, { now: instant }).map((r) => r.jobId).sort(), ["current", "unversioned"]);
+});
+
+test("a source sandbox a newer pi-dispatch kept refuses before any of its fields is read, and before Docker", async () => {
+	const root = tempDir("canary-newer-"), retained = join(root, "sandboxes", "one"), logs = join(root, "logs"), jobs = join(root, "jobs");
+	mkdirSync(retained, { recursive: true }); mkdirSync(logs);
+	const model = builtinChatModels("anthropic").find((m) => new URL(m.baseUrl).hostname === "api.anthropic.com").id;
+	const candidate = `anthropic/${model}`;
+	writeFileSync(join(retained, "manifest.json"), JSON.stringify({ version: 2, jobId: "one", backend: "local", baseSha: "a".repeat(40), workspace: join(root, "absent"), createdAt: new Date(instant - 1000).toISOString(), retainUntil: new Date(instant + 86400_000).toISOString() }));
+	writeFileSync(join(logs, "one.json"), JSON.stringify(original("one")));
+	writeFileSync(join(logs, "newer.json"), JSON.stringify(original("newer", { v: 2 })));
+	writeFileSync(join(root, "triggers.json"), JSON.stringify({ triggers: [], modelRoles: { default: { editor: candidate } } }));
+	const counters = new Map(), dockerCalls = [];
+	const redis = { on() {}, async ping() {}, disconnect() {}, async scan() { return ["0", []]; }, async set(k, v) { if (counters.has(k)) return null; counters.set(k, v); return "OK"; }, async eval(script, _n, key, token) { if (counters.get(key) !== token) return 0; if (script.includes("DEL")) counters.delete(key); return 1; }, async get(k) { return counters.get(k) ?? null; }, async expire() {} };
+	const runtime = await createCanaryRuntime({ env: { PI_LOGS_DIR: logs, PI_JOBS_DIR: jobs, PI_SANDBOX_DIR: join(root, "sandboxes"), PI_TRIGGERS_FILE: join(root, "triggers.json"), PI_SETTINGS_FILE: join(root, "settings.json"), PI_MAX_COST_USD: "1", ANTHROPIC_API_KEY: "provider-only", PI_AUTH_FROM_PI: "0" }, options: { ...options, model: candidate }, now, execCommand: async (_bin, args) => { dockerCalls.push(args); return { stdout: "", stderr: "" }; }, redisFactory: () => redis, queueFactory: () => ({ async getJobCounts() { return { active: 0 }; }, async isPaused() { return false; }, async close() {} }), imagePreflightFactory: () => async () => ({ ok: true, capabilities: ["costCap", "modelPolicy", "modelRoles", "exitAuth", "anyUid"] }), containerFactory: () => async () => { throw new Error("no container may start"); } });
+	try {
+		assert.deepEqual(runtime.records.map((r) => r.jobId), ["one"], "the newer record is not read");
+		const before = dockerCalls.length;
+		await assert.rejects(executeCanary({ ...options, model: candidate }, { ...runtime, now, id: () => "canary-one" }), /kept by a newer pi-dispatch; run the canary with that release/);
+		assert.equal(dockerCalls.length, before, "refused before Docker");
+	} finally { await runtime.close(); }
+});
+
 test("all sources are verified before paying; aggregate cap never recycles an unreported cost", async () => {
 	const records = [original("one"), original("two"), original("three")], snapshot = JSON.stringify(records), events = [];
 	let next = 0;

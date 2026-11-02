@@ -79,6 +79,7 @@ export const DEFER_WHYS = Object.freeze({
 	"wait-unclear": Object.freeze({ bucket: "check", sentence: "Its wait check answered in a way the worker cannot read; asks again at {until}" }),
 	"podman-restart": Object.freeze({ bucket: "ready", sentence: "Waits for rootful Podman's service on {host} to restart" }),
 	"netns-keeper": Object.freeze({ bucket: "ready", sentence: "Waits for the network keeper on {host} to settle" }),
+	"newer-release": Object.freeze({ bucket: "ready", sentence: "Queued or configured by a newer pi-dispatch: waits for this host's upgrade" }),
 	retry: Object.freeze({ bucket: "retry", sentence: "Attempt {attempt} of {attempts} at {until}" }),
 });
 

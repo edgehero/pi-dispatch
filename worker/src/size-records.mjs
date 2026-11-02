@@ -11,7 +11,10 @@
  *   - only a record that carries measurements (an object `resources` and a `size`) is kept, and of those the NEWEST
  *     `SUGGEST_WINDOW_RUNS` per project (by `endedAt`), since no suggestion reads more. The filter runs BEFORE the
  *     cut: a run refused before its container started (a budget or policy refusal) writes a record with neither, and
- *     cut first, fifty such refusals would crowd every measured run out of the window.
+ *     cut first, fifty such refusals would crowd every measured run out of the window;
+ *   - a record from a NEWER pi-dispatch (issue #761, run-history.mjs `recordReadable`) is skipped and COUNTED
+ *     (`newerSkipped`): a suggestion reads `resources` and `size`, which that release may have given another meaning,
+ *     and a misread measurement would size a project wrong. Only one of a project and the window is counted.
  *
  * Never throws: an absent directory holds no records; another unreadable one is `unreachable` (doctor reads that as
  * none, the panel says it).
@@ -19,6 +22,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { recordReadable } from "./run-history.mjs";
 import { SUGGEST_WINDOW_DAYS, SUGGEST_WINDOW_RUNS } from "./size-suggest.mjs";
 
 /** The largest run record a size suggestion parses: 256 KiB. A larger one is skipped and counted. */
@@ -33,7 +37,8 @@ const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
  * `{ records, skipped, unreachable }`: the parsed records (at most SUGGEST_WINDOW_RUNS per project, newest first by
  * `endedAt`; a record with no string `project`, no readable `endedAt`, no object `resources` or no `size` is dropped,
  * since no suggestion could read it), how many files were skipped for their size, and null or a reason when the
- * directory itself could not be listed.
+ * directory itself could not be listed; plus `newerSkipped`, how many records of a project and the window from a newer
+ * pi-dispatch were left out, only when there were any.
  * `fs` is `{ readdirSync, statSync, readFileSync }`.
  */
 export function readSizingRecords(logsDir, { nowMs, fs = { readdirSync, readFileSync, statSync } } = {}) {
@@ -46,6 +51,7 @@ export function readSizingRecords(logsDir, { nowMs, fs = { readdirSync, readFile
 	}
 	const byProject = new Map();
 	let skipped = 0;
+	let newerSkipped = 0;
 	for (const name of names) {
 		if (typeof name !== "string" || !name.endsWith(".json")) continue;
 		try {
@@ -64,6 +70,12 @@ export function readSizingRecords(logsDir, { nowMs, fs = { readdirSync, readFile
 			const record = JSON.parse(buf.toString("utf8"));
 			const at = typeof record?.endedAt === "string" ? Date.parse(record.endedAt) : NaN;
 			if (typeof record?.project !== "string" || !Number.isFinite(at)) continue;
+			// `project` and `endedAt` are in the stable core, `resources` and `size` are not: a newer record is counted on the
+			// core alone, before its measurements are looked at.
+			if (!recordReadable(record)) {
+				newerSkipped++;
+				continue;
+			}
 			if (!isObject(record.resources) || !isObject(record.size)) continue; // no measurements: never counts toward the 50
 			if (!byProject.has(record.project)) byProject.set(record.project, []);
 			byProject.get(record.project).push({ at, record });
@@ -76,5 +88,5 @@ export function readSizingRecords(logsDir, { nowMs, fs = { readdirSync, readFile
 		list.sort((a, b) => b.at - a.at);
 		for (const { record } of list.slice(0, SUGGEST_WINDOW_RUNS)) records.push(record);
 	}
-	return { records, skipped, unreachable: null };
+	return { records, skipped, unreachable: null, ...(newerSkipped > 0 ? { newerSkipped } : {}) };
 }

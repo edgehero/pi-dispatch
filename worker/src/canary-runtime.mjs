@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { loadConfig, ensureJobsDir } from "./config.mjs";
 import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
-import { readManifest, sandboxExpiry } from "./sandbox-store.mjs";
+import { readManifest, sandboxExpiry, sandboxManifestNewer } from "./sandbox-store.mjs";
 import { builtinModel, isBuiltinModel } from "./model-catalog.mjs";
 import { resolveProviderCredential } from "./env-allowlist.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { makeRunContainer } from "./run-container.mjs";
-import { makeLogSink, makeRecordWriter, buildRecord } from "./run-history.mjs";
+import { makeLogSink, makeRecordWriter, buildRecord, recordReadable } from "./run-history.mjs";
 import { materializePiDir } from "./materialize.mjs";
 import { runJob } from "./processor.mjs";
 import { dollarWindowCaps } from "./dollar-budget.mjs";
@@ -72,6 +72,9 @@ export function copyCanaryObjects(source, destination) {
 function sourceFor(record, config, now) {
 	const source = readManifest({ sandboxDir: config.sandboxDir, jobId: record.jobId });
 	if (!source || source.jobId !== record.jobId || sandboxExpiry(source, { at: now(), retentionHours: config.sandboxRetentionHours }).expired) fail("a selected source sandbox is absent or expired; enable retention and run the flow again");
+	// Issue #761: a manifest a newer pi-dispatch kept may have reshaped the fields read below (its venue, its base commit,
+	// its workspace), the reason `sandboxSyncRefusal` refuses to reopen one. Before any of them is read.
+	if (sandboxManifestNewer(source)) fail("a selected source sandbox was kept by a newer pi-dispatch; run the canary with that release");
 	if (source.backend !== "local" || !SHA.test(source.baseSha ?? "")) fail("a selected source has no retained base commit on the local venue; run the flow again with this version");
 	if (!source.workspace || !fs.lstatSync(source.workspace).isDirectory() || !fs.lstatSync(join(source.workspace, ".git")).isDirectory()) fail("a selected source has no self-contained retained git repository");
 	// These files were mounted read-only to the original job. Never reconstruct a task from its PII-free record.
@@ -108,7 +111,9 @@ export async function createCanaryRuntime({ env, options, now = Date.now, execCo
 	if (!credential || !Object.values(credential).some(Boolean)) fail("canary provider credential is missing; configure the first-party provider key");
 	const providerEnv = credential;
 	let records;
-	try { records = fs.readdirSync(config.logsDir).filter((n) => /^[A-Za-z0-9._-]+\.json$/.test(n)).flatMap((n) => { try { return [JSON.parse(regular(join(config.logsDir, n), 256 * 1024))]; } catch { return []; } }); }
+	// A record a newer pi-dispatch wrote is left out here (issue #761, `recordReadable`): the role and flow a source is chosen
+	// by are not core fields, so they may mean something else in it. `selectCanarySources` asks again, for any caller.
+	try { records = fs.readdirSync(config.logsDir).filter((n) => /^[A-Za-z0-9._-]+\.json$/.test(n)).flatMap((n) => { try { return [JSON.parse(regular(join(config.logsDir, n), 256 * 1024))]; } catch { return []; } }).filter((record) => recordReadable(record)); }
 	catch { fail("canary run history cannot be read; run this command on the host retaining the originals"); }
 	ensureJobsDir(config.jobsDir, { env });
 	const root = fs.mkdtempSync(join(config.jobsDir, "canary-"));

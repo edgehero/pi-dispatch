@@ -29,22 +29,25 @@ import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:p
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
-import { settingsFilePath, readOverlay, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
+import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
-import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
+import { parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
+// What this console says and skips for state a newer pi-dispatch wrote (issue #761): one leaf, shared with the console.
+import { coreRecordOf, fromNewerRelease, NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE, newerSkippedSentence, pauseWindowsNewerRefusal, readableRecords, shownRecord } from "./newer-release.mjs";
+export { coreRecordOf, fromNewerRelease, NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE, newerSkippedSentence, pauseWindowsNewerRefusal, readableRecords, shownRecord };
 // The scoped-limits validator is shared for the anti-drift reason the pause/subscriptions ones are: the
 // write goes through the exact parser the worker boot-loads, so the sides cannot disagree on the schema.
 import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, parseScopedLimits, scopeDollarKeyPrefix, scopedLimitsVersionFor, scopeKeyPrefix, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
 // The projects parser, for the same anti-drift reason: a `project:<id>` row is written only when the id is a project the
 // worker would load (issue #499 part B).
-import { PROJECT_ID_RE, parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
+import { PROJECT_ID_RE, parseProjects, projectOf, projectsVersionFor } from "@edgehero/pi-dispatch/projects";
 import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
 import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, effectiveWord, meets, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
-import { CRON_ID_MAX, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { CRON_ID_MAX, parseTriggersDocument, triggersFileNewer, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
 // `revert`, so the ladder, the step and the compare-and-set are one implementation.
@@ -774,6 +777,12 @@ function hourKey(nowMs) {
  * the result through the worker's own atomic `writeOverlay`. Validation stays in `writeOverlay`; a rejected candidate
  * returns `{ invalid }`. Returns `{ ok: true, overlay }`.
  *
+ * Every key the file holds that this build does not know (a key a later release added) is written back as it was read,
+ * in its place (issue #761): the read is `readOverlayDocument`'s, whose `carry` goes to `writeOverlay`. `mutate` still
+ * sees the known keys only, so no caller can set or see a carried key, and `overlay` in the result is unchanged in
+ * shape. A file written by a NEWER pi-dispatch is refused with the upgrade to name (`overlayInvalidRefusal`): this build
+ * cannot say what such a file's keys mean, and its write would drop the version that says so.
+ *
  * A present-but-INVALID current file is REFUSED, never rebuilt (issue #501). It used to be rebuilt from `{}` with a
  * loud notice, which turned any later `set` into an eraser: a hand-edited file that is invalid only for a duplicate
  * key still carries its `maxCostUsd` and `secretProfiles`, and the rebuild dropped both, so jobs went from refused
@@ -784,17 +793,26 @@ function hourKey(nowMs) {
  *
  * `expect` (issue #642), as for `writePauseWindows`: the `writeInputs` snapshots the change was built from (the console's
  * preview). `writeOverlay` re-reads them right before its rename and refuses, with nothing written, when one changed.
- * Without it the write is what it always was.
+ * Without it the re-check is against this call's own read (issue #761), encoded as `fileSnapshot` encodes it (null for a
+ * missing file), so a write never refuses itself and a second session's write between the read and the rename is a
+ * refusal rather than a lost update. That matters more now that the write carries what it read: a carried key is
+ * written back as it was at the read, so a write landing in between would otherwise be rolled back silently.
  */
 export function writeSettings({ settingsFile, mutate, expect = null, fs = nodeFs, dollarEnv = undefined, deploymentDir = null }) {
-  const res = readOverlay(settingsFile, { fs });
-  if (res.invalid && !blankSettingsFile(settingsFile, fs)) return { invalid: overlayInvalidRefusal(res.invalid) };
+  const res = readOverlayDocument(settingsFile, { fs });
+  // The text this call judged, for the default re-check: the read's own for a readable or missing file, and the file's
+  // snapshot for a blank one (its read is invalid, and a blank file is written over like a missing one).
+  let read = res.text;
+  if (res.invalid) {
+    read = fileSnapshot(fs, settingsFile);
+    if (!blankSettingsText(read)) return { invalid: overlayInvalidRefusal(res.invalid, { newer: res.newer === true }) };
+  }
   const next = mutate({ ...(res.overlay ?? {}) });
   // Issue #501 (PR #542's review): a write that touches a dollar key is judged on the MERGED values when the caller
   // passes the env, and the answer is a WARNING returned beside the result, never a refusal: the worker's cap may come
   // from a source not visible here (`mergedDollarProblem`). Other keys are not judged.
   const warning = dollarEnv === undefined ? undefined : mergedDollarProblem(next, dollarEnv, { deploymentDir })?.warning;
-  const w = writeOverlay(settingsFile, next, { fs, expect });
+  const w = writeOverlay(settingsFile, next, { fs, expect: Array.isArray(expect) ? expect : [{ path: settingsFile, text: read }], carry: res.carry ?? null });
   if (w.invalid) return { invalid: w.invalid };
   return { ok: true, overlay: next, ...(warning ? { warning } : {}) };
 }
@@ -806,14 +824,27 @@ export function writeSettings({ settingsFile, mutate, expect = null, fs = nodeFs
  */
 export function blankSettingsFile(path, fs = nodeFs) {
   try {
-    return String(fs.readFileSync(path, "utf8")).replace(/^\uFEFF/, "").trim() === "";
+    return blankSettingsText(String(fs.readFileSync(path, "utf8")));
   } catch {
     return false;
   }
 }
 
-/** The words for a write refused over an invalid settings file (issue #501). `reason` is `readOverlay`'s, key-only. */
-export function overlayInvalidRefusal(reason) {
+/** `blankSettingsFile`'s rule over a `fileSnapshot`: a missing (null) or unreadable file is not blank. */
+function blankSettingsText(text) {
+  return typeof text === "string" && !isUnreadable(text) && text.replace(/^\uFEFF/, "").trim() === "";
+}
+
+/**
+ * The words for a write refused over an invalid settings file (issue #501). `reason` is `readOverlay`'s, key-only.
+ * `newer` (issue #761) is a file written by a newer pi-dispatch: not broken, so the way out is the release that wrote it,
+ * never an edit or a delete, either of which would lose what that release wrote.
+ */
+export function overlayInvalidRefusal(reason, { newer = false } = {}) {
+  if (newer) {
+    const said = String(reason).startsWith("settings file ") ? `the settings file was ${String(reason).slice("settings file ".length)}` : `the settings file is newer than this build (${reason})`;
+    return `${said}, so nothing was written and no key in it was lost. Upgrade this panel or console to the release that wrote it`;
+  }
   return `the settings file is invalid (${reason}), so nothing was written and no key in it was lost. Fix the file, or delete it to start from an empty overlay, then set again`;
 }
 
@@ -928,19 +959,28 @@ export function readPauseWindows({ pauseWindowsPath, fs = nodeFs }) {
  * With no `expect` the re-check is against this call's own read, which only narrows the window a concurrent write
  * could be lost in. Deliberately NOT `replaceFile`: that one refuses a symlink and keeps the file's mode and owner,
  * each a behaviour change for the extension's existing callers, which this change does not make.
+ *
+ * Every other top-level key of the file is carried in its place (issue #761, `pauseWindowsText`, the one serializer the
+ * console's whole-list action shares), so a block a later release added survives a write from this one; a file holding
+ * only `windows` is written byte for byte as it always was. A file written by a NEWER pi-dispatch is refused with
+ * `{ invalid, newer: true }` and nothing written, judged on its raw `version` alone: a file with one bad window is still
+ * fixed here, and an unparseable one is still rebuilt from empty, the recorded posture.
  */
 export function writePauseWindows({ pauseWindowsPath, mutate, expect = null, fs = nodeFs }) {
   let current = [];
+  let doc = null;
   // The text as read, which is also the snapshot the re-check compares against when there is no `expect`.
   const read = fileSnapshot(fs, pauseWindowsPath);
   try {
-    const raw = JSON.parse(read);
-    if (Array.isArray(raw?.windows)) current = raw.windows;
+    doc = JSON.parse(read);
+    if (Array.isArray(doc?.windows)) current = doc.windows;
   } catch {
     // Missing/invalid file: start from empty; the validated atomic write below repairs it.
   }
+  const newer = pauseWindowsNewerRefusal(doc, pauseWindowsPath);
+  if (newer) return { invalid: newer, newer: true };
   const next = mutate(current.map((w) => ({ ...w })));
-  const text = `${JSON.stringify({ windows: next }, null, 2)}\n`;
+  const text = pauseWindowsText(doc, next);
   try {
     parsePauseWindows(text, pauseWindowsPath); // the loader's own validator -- never write a file it would reject
   } catch (e) {
@@ -989,7 +1029,7 @@ export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
  * the read goes THROUGH the shared parser, so an existing file with a missing or NEWER `version`
  * refuses the write (`{ invalid }`) instead of being silently re-stamped v1 with its unknown fields
  * dropped — that re-stamp is exactly the cap-widening the version field exists to prevent, and it is
- * why this money file refuses where the analytics twin (`writeSubscriptions`) repairs. Only a MISSING
+ * why this money file refuses; the analytics twin (`writeSubscriptions`) refuses the same way since issue #761. Only a MISSING
  * file starts from the empty v1 shape. The result is re-serialized (absent windows omitted, not
  * null-padded — the committed example's shape), re-validated fail-closed, and written tmp + rename.
  * Returns `{ ok }` (with `pending` when the worker will not take it live, below) or `{ invalid }`.
@@ -1087,7 +1127,8 @@ function symlinkRefusal(fs, path, envName) {
 }
 
 /**
- * Replace the file at `path` with `text`, ATOMICALLY, for the two money-file writers (scoped limits and projects).
+ * Replace the file at `path` with `text`, ATOMICALLY, for the two money-file writers (scoped limits and projects) and
+ * the subscriptions writer (issue #761).
  *
  *   - A SYMLINK is refused (`symlinkRefusal`), never written through or replaced.
  *   - The tmp file has a name of its own (`<file>.<pid>.<random>.tmp`, created exclusively), so two writers never share
@@ -1288,7 +1329,9 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, trigg
   const next = mutate(current.map((p) => ({ ...p, members: [...p.members] })));
   // The stored shape: `name` only when there is one, the committed example's shape.
   const rows = next.map((p) => (p?.name === null || p?.name === undefined ? { id: p?.id, members: p?.members } : { id: p.id, name: p.name, members: p.members }));
-  const text = `${JSON.stringify({ version: 1, projects: rows }, null, 2)}\n`;
+  // The LOWEST version the rows need (issue #761, `projectsVersionFor`), never a literal: both are 1 today, and a literal
+  // would either stamp every file with a version older builds refuse or fail to stamp the field that needs it.
+  const text = `${JSON.stringify({ version: projectsVersionFor(rows), projects: rows }, null, 2)}\n`;
   let written;
   try {
     written = parseProjects(text, projectsPath); // the loader's own validator -- never write a file it would refuse
@@ -1298,7 +1341,7 @@ export function planProjectsWrite({ projectsPath, scopedLimitsPath = null, trigg
   // Written in the STORED spelling the loader just produced (members resolved and qualified as `projectOf` matches
   // them, the name trimmed), so the file says what the worker will read rather than what was typed.
   const stored = written.map((p) => (p.name === null ? { id: p.id, members: p.members } : { id: p.id, name: p.name, members: p.members }));
-  const finalText = `${JSON.stringify({ version: 1, projects: stored }, null, 2)}\n`;
+  const finalText = `${JSON.stringify({ version: projectsVersionFor(stored), projects: stored }, null, 2)}\n`;
   const kept = new Set(written.map((p) => p.id));
   const removed = current.map((p) => p.id).filter((id) => !kept.has(id));
   let limits = [];
@@ -2269,18 +2312,57 @@ export function readSubscriptions({ subscriptionsPath, fs = nodeFs }) {
 }
 
 /**
- * Read-modify-write the subscriptions file (mirrors `writePauseWindows`): `mutate(subscriptions)` receives
- * a copy of the current normalized entry array and returns the new array; the result is re-serialized to
- * the versioned file shape, VALIDATED through the SHARED `parseSubscriptions` (fail-closed — a rejected
- * result is NEVER written), and written ATOMICALLY (tmp + rename). A missing or unparseable existing file
- * starts from the empty v1 shape, so a validated write REPAIRS it. Returns `{ ok }` or `{ invalid }`.
+ * What a subscriptions write says of a file it refuses to rebuild (issue #761), in its own words: the shared parser's
+ * message quotes the file (the JSON engine's excerpt of the text, a `got` value), and a write's refusal goes to whoever
+ * asked for the write, who never needed the file's contents; `readSubscriptions` keeps the parser's message for the
+ * views that show the file. A file a newer pi-dispatch wrote names only the two versions, both integers, as the triggers
+ * and pause windows writers do; any other refusal says which of two things is wrong, never where or what.
  */
-export function writeSubscriptions({ subscriptionsPath, mutate, fs = nodeFs }) {
-  let current = [];
+function subscriptionsFileRefusal(text, path, error) {
+  let parsed;
   try {
-    current = parseSubscriptions(fs.readFileSync(subscriptionsPath, "utf8"), subscriptionsPath).subscriptions;
+    parsed = JSON.parse(text);
   } catch {
-    // Missing/invalid file: start from the empty v1 shape; the validated atomic write below repairs it.
+    return `the subscriptions file ${path} is not valid JSON, so its subscriptions cannot be kept; nothing was written`;
+  }
+  // Newer exactly when the shared parser refused the file as newer (`error.newer`, the flag `parseSubscriptions` sets on
+  // that refusal alone), never by a reading of `version` of this writer's own: one of its own (`Number.isSafeInteger`)
+  // disagreed with the parser's `Number.isInteger` on a version such as 1e300, which the views called newer and this
+  // write called invalid. The version named is then a whole number the JSON engine built from the text, so the refusal
+  // still repeats nothing the file says.
+  if (error?.newer === true) {
+    const version = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed.version : undefined;
+    return `subscriptions file written by a newer pi-dispatch (version ${version}; this build understands ${SUBSCRIPTIONS_VERSION}), so nothing was written and nothing in it was lost; change it with that release: ${path}`;
+  }
+  return `the subscriptions file ${path} is not a valid subscriptions file, so its subscriptions cannot be kept; nothing was written`;
+}
+
+/** What a subscriptions write says when PI_SUBSCRIPTIONS_FILE names no file. */
+const SUBSCRIPTIONS_UNSET = "PI_SUBSCRIPTIONS_FILE is unset, so there is no subscriptions file to write. Set it in the deployment's .env. Nothing was written";
+
+/**
+ * Read-modify-write the subscriptions file, on `planProjectsWrite`'s rule (issue #761): `mutate(subscriptions)`
+ * receives a copy of the current normalized entry array and returns the new array; the result is re-serialized to the
+ * versioned file shape, VALIDATED through the SHARED `parseSubscriptions` (fail-closed: a rejected result is NEVER
+ * written), and written through `replaceFile` (a tmp file of its own, a symbolic link refused, the file's mode and owner
+ * kept, the re-check against `expect` or this call's own read right before the rename). Returns `{ ok }` or `{ invalid }`.
+ *
+ * Only a MISSING file starts from the empty v1 shape. A file that cannot be read, does not parse or was written by a
+ * NEWER pi-dispatch is refused with nothing written. It used to be rebuilt from empty, a repair that read as harmless
+ * for an analytics file; but the rebuild dropped every subscription the operator declared, and for a newer file every
+ * field that release added, on the next unrelated edit, which is the loss the scoped-limits and projects writers refuse.
+ */
+export function writeSubscriptions({ subscriptionsPath, mutate, expect = null, fs = nodeFs }) {
+  if (subscriptionsPath === null || subscriptionsPath === undefined) return { invalid: SUBSCRIPTIONS_UNSET };
+  let current = [];
+  const existing = fileSnapshot(fs, subscriptionsPath);
+  if (isUnreadable(existing)) return { invalid: `the subscriptions file ${subscriptionsPath} could not be read (${unreadableCode(existing)}), so its subscriptions cannot be kept; nothing was written` };
+  if (existing !== null) {
+    try {
+      current = parseSubscriptions(existing, subscriptionsPath).subscriptions;
+    } catch (error) {
+      return { invalid: subscriptionsFileRefusal(existing, subscriptionsPath, error) };
+    }
   }
   const next = mutate(current.map((s) => ({ ...s })));
   const text = `${JSON.stringify({ version: SUBSCRIPTIONS_VERSION, subscriptions: next }, null, 2)}\n`;
@@ -2289,10 +2371,7 @@ export function writeSubscriptions({ subscriptionsPath, mutate, fs = nodeFs }) {
   } catch (e) {
     return { invalid: e?.message ?? String(e) };
   }
-  const tmp = `${subscriptionsPath}.tmp`;
-  fs.writeFileSync(tmp, text, { mode: 0o644 });
-  fs.renameSync(tmp, subscriptionsPath);
-  return { ok: true };
+  return replaceFile({ path: subscriptionsPath, text, inputs: [{ path: subscriptionsPath, text: existing }], expect, envName: "PI_SUBSCRIPTIONS_FILE", fs });
 }
 
 async function readWorkerCount(queue) {
@@ -2474,7 +2553,8 @@ export async function mergedRunsOn(redis, { logsDir, limit = 10, fs = nodeFs, ti
     // Asked for MORE than the display cap, because the merge dedups and the two sources overlap on every
     // run this host both wrote and mirrored: cutting each source at the cap first would let a duplicate
     // pair squeeze a real run off the end.
-    const { runs: mirrored, degraded } = await readMirroredRuns(redis, { limit: Math.max(limit * 2, 50), timeoutMs, prune });
+    const { runs: fromMirror, degraded } = await readMirroredRuns(redis, { limit: Math.max(limit * 2, 50), timeoutMs, prune });
+    const mirrored = Array.isArray(fromMirror) ? fromMirror.map(shownRecord) : fromMirror;
     const runs = mergeRuns(local, mirrored, { limit });
     return { runs, hosts: hostsIn(runs), mirror: degraded };
   } catch (err) {
@@ -2524,7 +2604,7 @@ export function listRuns({ logsDir, limit = 10, fs = nodeFs }) {
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
     const record = readJsonFile(join(logsDir, name), fs);
-    if (record && typeof record === "object") records.push(record);
+    if (record && typeof record === "object") records.push(shownRecord(record));
   }
   records.sort(byEndedAtDesc);
   return records.slice(0, cap);
@@ -2546,7 +2626,9 @@ const SCAN_WINDOW_MAX_DAYS = 92;
  * `nowMs`, so even a keep-forever deployment folds at most a quarter. Records come back in directory
  * order -- bucketing and sorting are the fold's business, not the scan's. A missing logs dir is a normal
  * empty history `[]`; any other readdir error is `{ unreachable }`; an unparseable or mid-read-deleted
- * entry (the boot reaper may unlink between scan and read) is skipped, exactly as in `listRuns`.
+ * entry (the boot reaper may unlink between scan and read) is skipped, exactly as in `listRuns`. A record a newer
+ * pi-dispatch wrote comes back cut to its stable core (`shownRecord`, issue #761), as every read here hands one out, and
+ * every fold leaves it out by its `v` (`readableRecords`) and says how many.
  */
 export function scanRunRecords({ logsDir, sinceMs, nowMs = Date.now(), fs = nodeFs }) {
   const oldestMs = nowMs - SCAN_WINDOW_MAX_DAYS * 24 * 60 * 60 * 1000;
@@ -2566,7 +2648,7 @@ export function scanRunRecords({ logsDir, sinceMs, nowMs = Date.now(), fs = node
     if (!record || typeof record !== "object") continue;
     const at = Date.parse(record.endedAt ?? record.startedAt ?? "");
     if (!Number.isFinite(at) || at < cutoffMs) continue; // no usable timestamp, or outside the window
-    records.push(record);
+    records.push(shownRecord(record));
   }
   return records;
 }
@@ -2609,7 +2691,8 @@ export function readSizeSuggestions({ logsDir, projectIds = [], limits = [], env
     const refusal = call === null ? null : sizeRefusal({ memMiB: s.memory.suggested ?? current.memMiB, cpuCenti: s.cpu.suggested ?? current.cpuCenti }, hostBudgets, share);
     projects[id] = { ...s, call: refusal === null ? call : null, refusal, words: { ...suggestionEvidence(s), refusal: refusalWords(refusal, s, share) }, ...(withSeries ? { series: peakSeries({ project: id, records, now: nowMs }) } : {}) };
   }
-  return { projects, skipped: read.skipped };
+  // Issue #761: how many records of the window a newer pi-dispatch wrote, which the worker's reader left out, when any.
+  return { projects, skipped: read.skipped, ...(read.newerSkipped > 0 ? { newerSkipped: read.newerSkipped } : {}) };
 }
 
 /**
@@ -2621,9 +2704,12 @@ export function hostBudgetsOf(hosts) {
   return (Array.isArray(hosts) ? hosts : []).map((h) => publishedBudget(h));
 }
 
-/** Read one run record by (raw) job id via its sanitized filename, or `null` when absent/unreadable. */
+/**
+ * Read one run record by (raw) job id via its sanitized filename, or `null` when absent/unreadable. A record a newer
+ * pi-dispatch wrote is its stable core alone (`shownRecord`, issue #761).
+ */
 export function readRun({ logsDir, jobId, fs = nodeFs }) {
-  return readJsonFile(join(logsDir, `${sanitizeJobId(jobId)}.json`), fs);
+  return shownRecord(readJsonFile(join(logsDir, `${sanitizeJobId(jobId)}.json`), fs));
 }
 
 /**
@@ -2665,10 +2751,14 @@ export function withoutOperatorOnly(view) {
   return { ...view, overlay };
 }
 
-/** Read the settings overlay via the worker's own validator. Returns `{ path, overlay }` or `{ path, invalid }`. */
+/**
+ * Read the settings overlay via the worker's own validator. Returns `{ path, overlay }` or `{ path, invalid }`, plus
+ * `newer: true` on an invalid read of a file written by a newer pi-dispatch (issue #761), so a writer's refusal can name
+ * the upgrade rather than ask for a fix.
+ */
 export function readSettingsView({ settingsFile, fs = nodeFs }) {
   const result = readOverlay(settingsFile, { fs });
-  if (result.invalid) return { path: settingsFile, invalid: result.invalid };
+  if (result.invalid) return { path: settingsFile, invalid: result.invalid, ...(result.newer === true ? { newer: true } : {}) };
   return { path: settingsFile, overlay: result.overlay };
 }
 
@@ -2695,6 +2785,19 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
     parsed = JSON.parse(text);
   } catch {
     return { invalid: "triggers file is not valid JSON" };
+  }
+  // A file written by a newer pi-dispatch (issue #761) is `{ invalid, newer: true }`, as `readScopedLimits` reads a newer
+  // file: its entries may use fields this build cannot read, so a view of them would show triggers that run otherwise.
+  // Judged by the loader's own rule on the raw `version`; the message names the versions, never the path.
+  const version = triggersFileVersionProblem(parsed);
+  if (version?.newer === true) {
+    // In the loader's order: a duplicate key is refused BEFORE the version is read. `JSON.parse` keeps the last value,
+    // so `{"version": 1, "version": 2}` reads as newer here while every loader calls the file broken, and "upgrade"
+    // would send the operator to a release that refuses it too. `triggersFileNewer` judges the TEXT, so it is false
+    // for exactly that case (the text parses, and its version alone reads newer). Only a file that reads newer pays
+    // for the scan; any other keeps this view's lenient reading.
+    if (!triggersFileNewer(text)) return { invalid: "triggers file has a duplicate key, so it is broken, not newer: JSON keeps the last value, so the file that was reviewed and the file that runs are not the same file" };
+    return { invalid: version.message, newer: true };
   }
   const entries = parsed?.triggers;
   if (!Array.isArray(entries)) {
@@ -3292,6 +3395,8 @@ export const GRAPH_LIMITS = Object.freeze({
 export function cronRunStats({ records, schedulerIds } = {}) {
   const byId = {};
   if (!Array.isArray(records) || !Array.isArray(schedulerIds)) return { byId };
+  // A newer release's record is not counted (issue #761): `readableRecords`, the rule every admin fold reads by.
+  records = readableRecords(records).records;
   for (const id of schedulerIds) {
     if (typeof id !== "string" || id === "") continue;
     // A hand-fired run of the trigger (`pi-dispatch run --trigger`, issue #505) is `manual:<id>:<minute millis>`, and
@@ -3339,6 +3444,7 @@ export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {})
   const byIndex = {};
   let unattributed = 0;
   if (!Array.isArray(records)) return { byIndex, unattributed };
+  records = readableRecords(records).records; // issue #761: its trigger fields are past the stable core
   const count = Number.isInteger(triggerCount) && triggerCount >= 0 ? triggerCount : 0;
   const types = triggerTypes && typeof triggerTypes === "object" ? triggerTypes : null;
   for (const record of records) {
@@ -3382,6 +3488,7 @@ export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {})
 export function attributeRunsToTriggers({ records, triggers } = {}) {
   const byJobId = {};
   if (!Array.isArray(records) || !Array.isArray(triggers)) return { byJobId };
+  records = readableRecords(records).records; // issue #761: its trigger fields are past the stable core
   const cronRes = triggers
     .filter((t) => t?.type === "cron" && typeof t.id === "string" && t.id !== "" && Number.isInteger(t.index))
     // `manual:<id>:<millis>` too: a hand-fired run of the trigger (issue #505) is its run, so its cost is the trigger's.
@@ -3423,6 +3530,7 @@ export function attributeRunsToTriggers({ records, triggers } = {}) {
 export function observedChainEdges({ records } = {}) {
   const empty = { edges: [], refusals: {}, truncated: false };
   if (!Array.isArray(records)) return empty;
+  records = readableRecords(records).records; // issue #761: `parentJobId` and `flow` are past the stable core
   const byJobId = new Map();
   for (const record of records) {
     if (typeof record?.jobId === "string" && record.jobId !== "") byJobId.set(record.jobId, record);
@@ -3736,6 +3844,7 @@ export function collectGraphInputs({
 export function forgeRepoTargets({ records } = {}) {
   const byKind = {};
   if (!Array.isArray(records)) return byKind;
+  records = readableRecords(records).records; // issue #761: `target` is past the stable core
   for (const record of records) {
     if (!isForgeKind(record?.kind) || typeof record?.target !== "string") continue;
     // One stripping grammar, shared with the cost fold's byRepo (costs.mjs repoOfTarget).
@@ -4282,7 +4391,8 @@ export function createFleetReader(
     if (wideRead !== null) return wideRead;
     const read = (async () => {
       const local = localIndex.records();
-      const { runs: mirrored, degraded } = await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS });
+      const { runs: fromMirror, degraded } = await readMirroredRuns(redis, { limit: WIDE_RUNS, prune: false, timeoutMs: FLEET_READ_TIMEOUT_MS });
+      const mirrored = Array.isArray(fromMirror) ? fromMirror.map(shownRecord) : fromMirror;
       const runs = mergeRuns(Array.isArray(local?.records) ? local.records : [], mirrored, { limit: WIDE_RUNS });
       // Either side unread makes the window partial: a parked run on that side would be missing without a word.
       const partial = local?.unreachable ?? (typeof degraded === "string" && degraded.startsWith("unreachable") ? "the run mirror could not be read" : null);
@@ -5886,7 +5996,7 @@ export function makeLocalRunIndex({ logsDir, fs = nodeFs, now = () => Date.now()
         for (const name of names) {
           if (!name.endsWith(".json")) continue;
           const record = readJsonFile(join(logsDir, name), fs);
-          if (record && typeof record === "object" && !Array.isArray(record)) records.push(record);
+          if (record && typeof record === "object" && !Array.isArray(record)) records.push(shownRecord(record));
         }
         records.sort(byRunAtDesc);
         value = { records: records.slice(0, max), capped: records.length > max };
@@ -5954,7 +6064,7 @@ export async function readRunsPage(redis, { logsDir, before = null, limit = 50, 
         mirrorDone = true;
       } else {
         if (mirror === null) mirror = "ok";
-        mirrored.push(...page.runs);
+        mirrored.push(...page.runs.map(shownRecord));
         mirrorFetched += page.fetched;
         examined += page.fetched;
         if (page.fetched < RUNS_PAGE_BATCH) mirrorDone = true;
@@ -6024,9 +6134,9 @@ export const RUN_RECORD_UNREAD = "the run's record could not be read";
 export async function readRunById(redis, { logsDir, jobId, fs = nodeFs, timeoutMs = 2500 } = {}) {
   if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId)) return { invalid: "a run id is letters, digits and . _ : -, at most 200 characters" };
   const local = makeReadRecord({ logsDir, fs })(jobId);
-  if (local !== null && local !== UNREADABLE_RECORD) return { record: local, source: "local" };
+  if (local !== null && local !== UNREADABLE_RECORD) return { record: shownRecord(local), source: "local" };
   const mirrored = redis ? await readMirroredRecord(redis, sanitizeJobId(jobId), { timeoutMs, tellUnread: true }) : UNREAD_RECORD;
-  if (mirrored !== null && mirrored !== UNREADABLE_RECORD && mirrored !== UNREAD_RECORD) return { record: mirrored, source: "mirror" };
+  if (mirrored !== null && mirrored !== UNREADABLE_RECORD && mirrored !== UNREAD_RECORD) return { record: shownRecord(mirrored), source: "mirror" };
   if (local === UNREADABLE_RECORD) return { unreadable: RUN_FILE_UNREADABLE };
   return mirrored === null ? { missing: true } : { unreadable: RUN_MIRROR_UNREAD };
 }
@@ -7296,6 +7406,10 @@ export function recordBundle(record) {
  */
 export function modelRunRecord(record, { list = false } = {}) {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return record;
+  // Issue #761: a record a newer pi-dispatch wrote is its stable core alone (`coreRecordOf`), flagged, with the one
+  // sentence that says why the rest is missing, so a model never reads a field that release gave another meaning. The
+  // model's own sentence: it names the fields it is given, where a page's names what the page shows.
+  if (fromNewerRelease(record)) return { ...coreRecordOf(record), newer: true, note: NEWER_RECORD_MODEL_NOTE };
   const hasBundle = Object.hasOwn(record, "bundle");
   const hasOpenshell = Object.hasOwn(record, "openshell");
   const hasProfile = Object.hasOwn(record, "secretsProfile");

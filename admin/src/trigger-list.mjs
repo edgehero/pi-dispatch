@@ -8,6 +8,7 @@ const { parseExpression } = cronParser;
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
 import { foldTriggerCosts, meteredRunMicros, refusedBeforeSpend } from "./costs.mjs";
 import { recordReason } from "./words.mjs";
+import { newerSkippedSentence, readableRecords } from "./newer-release.mjs";
 
 const DAY = 86400_000;
 const MINUTE = 60_000;
@@ -143,7 +144,10 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
   const raw = (view?.triggers ?? []).filter((t) => TYPES.has(t?.type) && Number.isSafeInteger(t?.index) && t.index >= 0);
   const rules = raw.map(ruleOf);
   if (Number.isSafeInteger(view?.count) && view.count > (view?.triggers?.length ?? 0)) problems.push("Some file rows cannot be displayed; rule counts are incomplete.");
-  const source = Array.isArray(records) ? records : null;
+  // A newer release's record is not counted (issue #761): which trigger it ran and what it cost are past its stable core.
+  const read = Array.isArray(records) ? readableRecords(records) : null;
+  const source = read ? read.records : null;
+  if (read?.newerSkipped > 0) problems.push(`${newerSkippedSentence(read.newerSkipped)}: counts and spend leave them out.`);
   const valid = source?.filter((r) => Number.isFinite(atOf(r)) && atOf(r) >= now - 30 * DAY && atOf(r) <= now).sort((a, b) => atOf(b) - atOf(a));
   const unique = new Map();
   for (const r of valid ?? []) if (typeof r.jobId === "string" && r.jobId !== "" && !unique.has(r.jobId)) unique.set(r.jobId, r);

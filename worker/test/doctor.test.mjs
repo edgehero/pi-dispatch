@@ -26,6 +26,7 @@ import { projectsFingerprint } from "../src/projects.mjs";
 import { appliedSplitChecks, envelopeChecks, fleetEnvelopeChecks, loadEnvelopeAsTheWorker } from "../src/doctor.mjs";
 import { doctorJobSize, fleetSizeChecks, jobSizeChecks } from "../src/doctor.mjs";
 import { mcpOnlyEndpoints } from "../src/doctor.mjs";
+import { newerFileFix } from "../src/doctor.mjs";
 import { egressRefusalFor } from "../src/egress-allowlist.mjs";
 import { envelopeDigest, parseEnvelope } from "../src/envelope.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
@@ -2340,6 +2341,27 @@ test("the boot-file downgrade sees the env-setup script the installed unit names
 	await runDoctor(imgEnv({ PI_ENV_SETUP: other }), deps(both.out));
 	assert.ok(both.text().includes(`${setup} runs after that file and may replace it`), both.text());
 	assert.ok(!both.text().includes(`${other} runs after that file`), "the file that boots is the answer, not this shell");
+});
+
+// Issue #761: a file the service's `.env` names that a newer pi-dispatch wrote. Its fix is the upgrade, never an edit;
+// under the unit's env-setup script it is a warning, and the fix says first that the script may replace the file.
+test("a newer pause windows file the service's .env names is a warning under the unit's env-setup script, whose fix names the script before the upgrade (#761)", async () => {
+	const cwd = scaffoldedCwd();
+	const path = join(cwd, "newer-windows.json");
+	writeFileSync(path, JSON.stringify({ version: 2, windows: [] }));
+	writeFileSync(join(cwd, ".env"), `PI_PAUSE_WINDOWS_FILE=${path}\n`);
+	const setup = setupScript({ name: "unit-setup.sh" });
+	const label = `PI_PAUSE_WINDOWS_FILE is set in ${join(cwd, ".env")} (${path}) to a file the worker cannot load`;
+	const withUnit = capture();
+	assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(withUnit.out, cwd), platform: "linux", home: installUnit({ platform: "linux", deployDir: cwd, setup }).home }), 0, withUnit.text());
+	assert.ok(withUnit.text().includes(`⚠ ${label}`), withUnit.text());
+	assert.match(withUnit.text(), /pause-windows file written by a newer pi-dispatch \(version 2; this build understands 1\)/);
+	assert.ok(withUnit.text().includes(`\n    → ${setup} runs after that file and may replace it; if it does not, ${newerFileFix("this host's worker")}\n`), withUnit.text());
+	// No unit, so no script the service runs: a failure, and the upgrade alone.
+	const bare = capture();
+	assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(bare.out, cwd), platform: "linux", home: tempDir("pi-unit-home-") }), 1);
+	assert.ok(bare.text().includes(`✗ ${label}`), bare.text());
+	assert.ok(bare.text().includes(`\n    → ${newerFileFix("this host's worker")}\n`), bare.text());
 });
 
 // Issue #481 (PR #485 review round 3): a credential doctor accepted as expected from an env-setup script reaches only the
@@ -12628,9 +12650,14 @@ test("issue #596, phase 3: doctor reads the runs only when a project exists, at 
 	// and a record over the 256 KiB cap is skipped, never parsed, and said once
 	writeFileSync(join(logs, "big.json"), JSON.stringify({ ...oom, pad: "x".repeat(256 * 1024) }));
 	utimesSync(join(logs, "big.json"), at / 1000, at / 1000);
+	// and a record a newer pi-dispatch wrote is not folded in, and said once (issue #761)
+	writeFileSync(join(logs, "newer.json"), JSON.stringify({ ...oom, v: 2, resources: { memPeak: 64 * 1024 * 1024 * 1024 } }));
+	utimesSync(join(logs, "newer.json"), at / 1000, at / 1000);
 	const real = await collectChecks({ ...env, PI_LOGS_DIR: logs }, collectSeams(plan, { nodeVersion: "22.19.0", wallClock: () => at, readRunRecords: undefined }));
 	assert.match(real.find((c) => /^project web:/.test(c.label)).label, /oom-killed/);
 	assert.ok(real.some((c) => c.ok && c.label === "size suggestions: 1 run record over 256 KiB skipped, not read"));
+	assert.ok(real.some((c) => c.ok && c.label === "size suggestions: 1 run record from a newer pi-dispatch not read"));
+	assert.match(real.find((c) => /^project web:/.test(c.label)).label, /they ask for 6g/, "the newer record's 64g peak is not read");
 	// a scoped-limits file that does not load: no size line and no read, one line saying suggestions are off
 	const broken = join(dir, "broken.json");
 	writeFileSync(broken, "{ nope");

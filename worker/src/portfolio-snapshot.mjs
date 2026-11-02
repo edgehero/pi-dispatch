@@ -16,7 +16,9 @@
  * settles in), so the numbers are complete on every host. A counter holds what was spent AND what running jobs still
  * hold: that is the number the next job is admitted against, so it is the one a manager should plan with. Run counts
  * come from the local run history merged with the Valkey run mirror; without a mirror (no `PI_WORKER_NAME`) they are
- * this host's alone, and `fleet.runsComplete` says so.
+ * this host's alone, and `fleet.runsComplete` says so. A run record from a NEWER pi-dispatch (issue #761, run-history.mjs
+ * `recordReadable`) is not counted, from either source, and makes `fleet.runsComplete` false the same way: a count that
+ * reads a record past its stable core could count a field that release gave another meaning.
  */
 
 import * as nodeFs from "node:fs";
@@ -26,6 +28,7 @@ import { dayKey, monthKey, weekKey } from "./budget.mjs";
 import { OTHER, PLAN_FIELDS, PLAN_RULES, envelopeEntries, scopeRef } from "./priorities.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { isProjectId } from "./project-id.mjs";
+import { recordReadable } from "./run-history.mjs";
 import { RUNS_INDEX_MAX, mergeRuns, readMirroredRuns } from "./run-mirror.mjs";
 import { scopeDollarKeyPrefix } from "./scoped-limits.mjs";
 
@@ -220,7 +223,9 @@ export async function buildPortfolioSnapshot({ envelope, digest, projects = [], 
 /**
  * The run records of this host's history (`PI_LOGS_DIR/*.json`) that ended at or after `sinceMs`: `{ records, complete }`.
  * A file older than the window by its mtime is not opened (a record is written when its run ends). Never throws: a
- * missing directory is no runs, and any other fault reads as `complete: false`.
+ * missing directory is no runs, and any other fault reads as `complete: false`. A record from a newer pi-dispatch is
+ * left out and counted in `newerSkipped` (present only when there were any), judged against the window by its core
+ * times, the rule `countRuns` reads.
  */
 export function readLocalRuns({ logsDir, sinceMs, fs = nodeFs }) {
 	let names;
@@ -231,19 +236,22 @@ export function readLocalRuns({ logsDir, sinceMs, fs = nodeFs }) {
 	}
 	const records = [];
 	let complete = true;
+	let newerSkipped = 0;
 	for (const name of names) {
 		if (!name.endsWith(".json")) continue;
 		try {
 			const st = fs.statSync(join(logsDir, name));
 			if (!st.isFile() || st.mtimeMs < sinceMs) continue;
 			const rec = JSON.parse(fs.readFileSync(join(logsDir, name), "utf8"));
-			if (rec && typeof rec === "object" && typeof rec.jobId === "string") records.push(rec);
+			if (!rec || typeof rec !== "object" || typeof rec.jobId !== "string") continue;
+			if (recordReadable(rec)) records.push(rec);
+			else if (Date.parse(rec.endedAt ?? rec.startedAt ?? "") >= sinceMs) newerSkipped++;
 		} catch (error) {
 			// A record reaped between the listing and the read is simply gone; anything else leaves the count short.
 			if (error?.code !== "ENOENT") complete = false;
 		}
 	}
-	return { records, complete };
+	return { records, complete, ...(newerSkipped > 0 ? { newerSkipped } : {}) };
 }
 
 /**
@@ -282,11 +290,17 @@ export function makePortfolioSnapshot({ checkPortfolioFlag, governing, projects 
 			const local = readLocalRuns({ logsDir, sinceMs, fs });
 			let mirrored = [];
 			let complete = false;
+			let newerSkipped = local.newerSkipped ?? 0;
 			if (mirror) {
 				const read = await readMirror(redis, { limit: RUNS_INDEX_MAX, sinceMs, now: () => at.getTime() });
-				mirrored = read.runs;
+				for (const r of Array.isArray(read?.runs) ? read.runs : []) {
+					if (recordReadable(r)) mirrored.push(r);
+					else if (r !== null && typeof r === "object" && !Array.isArray(r)) newerSkipped++;
+				}
 				complete = local.complete && (read.degraded === "ok" || read.degraded === "off");
 			}
+			// A newer release's record left out of the counts leaves them short, which is what `runsComplete` says.
+			if (newerSkipped > 0) complete = false;
 			const records = mergeRuns(local.records, mirrored, { limit: Number.POSITIVE_INFINITY });
 			snapshot = await buildPortfolioSnapshot({ envelope: g.envelope, digest: g.digest, projects: projects(), limits: limits(), allocation: { state, lastAttempt: last }, redis, runs: { records, complete }, now: at });
 		} catch (error) {

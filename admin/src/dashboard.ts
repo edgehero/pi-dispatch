@@ -29,6 +29,7 @@ import { windowState } from "@edgehero/pi-dispatch/budget";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { ranBefore } from "@edgehero/pi-dispatch/cancel-state";
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
+import { fromNewerRelease, NEWER_RECORD_SENTENCE, newerSkippedSentence } from "./newer-release.mjs";
 import { BUNDLE_SKIPPED_TEXT, CUSTODY_TEXT, DECLARATION_TEXT, GATEWAY_TEXT, OPENSHELL_UNPUBLISHED_TEXT, venuesView, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, liveAbsentCause, recordSkips, venueCustody, VENUE_MAY_NOT_STREAM, bundleCountsText, bundleReceivedText, recordBundle, renderSecretBundles, triggerBundleOf, cancelHeldJob, checkpointsText, createFleetReader, enqueueSteer, listRuns, planSteer, steerAuditTarget, progressStaleFor, recordRecovery, recoveryCountsText, FORGE_MCP_SERVER_NAME, TRANSCRIPT_PAGE_MAX, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile, secretProfileFacts } from "./read-model.mjs";
 import { dollarWindowRows, renderDollarWindows } from "./dollar-windows.mjs";
 import { formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
@@ -2986,6 +2987,9 @@ function projectsView(snapshot: any, info: any, selected: number, runProject: an
   else if (info?.sizing) {
     lines.push(styler.cell(`sizes: p95 of ${SUGGEST_WINDOW_DAYS} days' runs · ${budgetShown(info.sizing)}`, iw, { color: "dim" }));
     if (Number.isSafeInteger(info.sizing.skipped) && info.sizing.skipped > 0) lines.push(styler.cell(`${info.sizing.skipped} run record${info.sizing.skipped === 1 ? "" : "s"} over 256 KiB skipped`, iw, { color: "warning" }));
+    // Issue #761: the window's records a newer pi-dispatch wrote, which no suggestion reads, said beside the oversize ones.
+    const newer = newerSkippedSentence(info.sizing.newerSkipped);
+    if (newer) lines.push(styler.cell(newer, iw, { color: "warning" }));
   }
   const rows = projectRows(snapshot, info);
   rows.forEach((row: any, i: number) => {
@@ -4344,6 +4348,18 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   const out: string[] = [];
   const kv = (k: string, v: string, color = "text") =>
     fitLine(styler.cell(k, 12, { color: "muted" }) + " " + styler.fg(color, v), inner, styler);
+
+  // Issue #761: a record a newer pi-dispatch wrote reaches this pane cut to its stable core (`shownRecord`), so it shows
+  // that core and the one sentence that says why, wrapped, and nothing a field past the core would claim.
+  if (fromNewerRelease(r)) {
+    const nw = outcomeWord(r.outcome, null);
+    out.push(fitLine(styler.bold(styler.fg(nw.tone, `${nw.glyph} ${nw.known ? nw.word : show(r.outcome ?? "-")}`)), inner, styler));
+    wrapColumns(show(`${NEWER_RECORD_SENTENCE}.`), Math.max(1, inner - 13), styler).forEach((part: string, i: number) => out.push(kv(i === 0 ? "note" : "", part, "dim")));
+    out.push(styler.cell("", inner));
+    out.push(kv("timing", `${fmtStamp(r.startedAt)} → ${fmtStamp(r.endedAt)}`));
+    for (const [k, v] of [["job", r.jobId], ["kind", r.kind], ["project", r.project], ["host", r.host], ["attempt", r.attempt]]) if (v !== undefined && v !== null) out.push(kv(k as string, show(String(v))));
+    return out;
+  }
 
   // Header: colored outcome glyph + word, plus the reason when it is not a clean completion. `outcome` is
   // a record STRING and goes through `show` like every other one; the enum comparisons below read

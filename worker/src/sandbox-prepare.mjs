@@ -9,7 +9,7 @@ import { resolveBackendName } from "./backend-registry.mjs";
 import { resolveJobSize } from "./job-size.mjs";
 import { loadProjects, projectOf } from "./projects.mjs";
 import { loadScopedLimits } from "./scoped-limits.mjs";
-import { SANDBOX_MANIFEST, pinSandbox, readManifest, sandboxDeadline } from "./sandbox-store.mjs";
+import { SANDBOX_MANIFEST, pinSandbox, readManifest, sandboxDeadline, withManifestVersion } from "./sandbox-store.mjs";
 import { cloneHostWorkspace, isCloneRefGone } from "./host-clone.mjs";
 import { parseSandboxRef, resolveSandboxRef, sandboxRemoteUrl, sandboxRepoProblem } from "./sandbox-refs.mjs";
 import { sandboxManifestGeneration } from "./sandbox-inventory.mjs";
@@ -179,7 +179,8 @@ export function createSandboxPreparer({ env = process.env, config = loadConfig(e
 			} finally { token = null; }
 			if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(cloned?.sha ?? "")) throw new Error("sandbox clone returned no commit id");
 			const at = now();
-			const manifest = { jobId: id, kind: plan.kind, origin: "prepared", image: plan.image, backend: plan.backend, jobUser: observations?.jobUser ?? null, ...(observations?.podmanStore ? { podmanStore: observations.podmanStore } : {}), size: plan.size, sandboxEgress: plan.egress, workspace: join(dest, "workspace"), baseSha: cloned.sha, createdAt: new Date(at).toISOString(), retainUntil: new Date(at + plan.retentionHours * 3_600_000).toISOString(), keepUntil: plan.pin ? new Date(at + plan.pinDays * 86_400_000).toISOString() : null, prepared: { requestId: id, requestDigest: fingerprint, triggerIndex: plan.triggerIndex, triggerDigest: plan.triggerDigest, repo: plan.repo, ref: plan.ref } };
+			// Issue #761: a version only when a field needs one (`withManifestVersion`), so today's manifest is unchanged.
+			const manifest = withManifestVersion({ jobId: id, kind: plan.kind, origin: "prepared", image: plan.image, backend: plan.backend, jobUser: observations?.jobUser ?? null, ...(observations?.podmanStore ? { podmanStore: observations.podmanStore } : {}), size: plan.size, sandboxEgress: plan.egress, workspace: join(dest, "workspace"), baseSha: cloned.sha, createdAt: new Date(at).toISOString(), retainUntil: new Date(at + plan.retentionHours * 3_600_000).toISOString(), keepUntil: plan.pin ? new Date(at + plan.pinDays * 86_400_000).toISOString() : null, prepared: { requestId: id, requestDigest: fingerprint, triggerIndex: plan.triggerIndex, triggerDigest: plan.triggerDigest, repo: plan.repo, ref: plan.ref } });
 			fs.writeFileSync(join(staging, SANDBOX_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx", mode: 0o600 });
 			// Nothing under the retention root is visible until the clone AND manifest are complete.
 			try { fs.lstatSync(dest); return refused("sandbox-id-collision", "another workspace appeared under this id; nothing was replaced"); } catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -276,6 +277,8 @@ export function createSandboxPinHandler({ config, now = Date.now, fs = nodeFs, p
 		const deadline = sandboxDeadline(manifest, config.sandboxRetentionHours);
 		if (request.expect && (request.expect.until !== deadline.until || request.expect.pin !== (deadline.source === "pin") || request.expect.generation !== sandboxManifestGeneration(manifest))) return refused("sandbox-changed", "the kept workspace changed after the preview; refresh and preview it again");
 		const result = pin({ sandboxDir: config.sandboxDir, jobId: request.runId, pinDays: config.sandboxPinDays, fs, now });
+		// Issue #761: a manifest a newer pi-dispatch kept is not rewritten here, and the words say which release can pin it.
+		if (result.reason === "manifest-newer") return refused("manifest-newer", "the kept workspace was kept by a newer pi-dispatch, so this host does not rewrite it; pin it with that release");
 		if (!result.pinned) return refused("sandbox-pin-failed", "the workspace could not be pinned on its host; refresh and check the host's retention directory");
 		return { id: request.runId, host: config.workerName, until: Date.parse(result.keepUntil), pinned: true, generation: sandboxManifestGeneration(manifest) };
 	};

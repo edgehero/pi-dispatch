@@ -760,15 +760,24 @@ test("checkOnceSpent receives (effectiveJob, { queueJobId: <real BullMQ job id> 
 // the whole record path (processor wrapper -> buildRecord -> writeRecord) is exercised end-to-end, so
 // it is where "the record path never breaks the retry contract" is actually proven, not asserted piece
 // by piece. writeThrows models a real ENOSPC/EACCES from writeFileSync so (c)/(c2) exercise the
-// never-throw writer THROUGH makeProcessor, not a stub of it.
+// never-throw writer THROUGH makeProcessor, not a stub of it. The writer puts the bytes in a temporary file beside the
+// record and renames it over `<jobId>.json` (issue #761), so `writes` holds what a RENAME landed, by its final path.
 function makeRealRecordRun({ writeThrows = false } = {}) {
 	const writes = [];
+	const pending = new Map();
 	const fakeFs = {
 		mkdirSync: () => {},
-		writeFileSync: (path, data) => {
+		writeFileSync: (path, data, options) => {
 			if (writeThrows) throw new Error("ENOSPC");
-			writes.push({ path, data });
+			assert.equal(options?.flag, "wx", "the record's own path is never written directly");
+			pending.set(path, data);
 		},
+		renameSync: (from, to) => {
+			assert.ok(to.endsWith(".json") && from.startsWith(`${to}.`) && from.endsWith(".tmp"), "renamed from a temporary file beside the record");
+			writes.push({ path: to, data: pending.get(from) });
+			pending.delete(from);
+		},
+		unlinkSync: (path) => pending.delete(path),
 	};
 	const writeRecord = makeRecordWriter({ logsDir: "/logs", fs: fakeFs, log: () => {} });
 	// The default venue is passed exactly as start.mjs's closure passes it (#277).

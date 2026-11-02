@@ -1,0 +1,19 @@
+{
+  "jobId": "gl-b2a5f0c4-7e19-4c8b-8f3e-5d6a7b8c9d01",
+  "kind": "gitlab",
+  "target": "acme/infra#7",
+  "flow": "check",
+  "startedAt": "2026-09-14T11:30:00.000Z",
+  "endedAt": "2026-09-14T11:30:00.000Z",
+  "outcome": "policy",
+  "reason": "over-budget",
+  "exitCode": null,
+  "turns": null,
+  "tokens": null,
+  "budgetReserved": false,
+  "attempt": 0,
+  "parentJobId": null,
+  "chainDepth": null,
+  "chainRefused": null,
+  "session": null
+}

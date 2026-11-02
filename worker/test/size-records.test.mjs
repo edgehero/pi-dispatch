@@ -100,3 +100,16 @@ test("a record with no measurements never counts toward the 50: refusals cannot 
 	const one = (r) => readSizingRecords("/logs", { nowMs: NOW, fs: { readdirSync: () => ["x.json"], statSync: () => ({ isFile: () => true, mtimeMs: NOW, size: 10 }), readFileSync: () => Buffer.from(JSON.stringify(r)) } }).records.length;
 	assert.deepEqual([one(rec()), one({ ...rec(), size: undefined }), one({ ...rec(), resources: null }), one({ ...rec(), resources: [] }), one({ ...rec(), size: 5 })], [1, 0, 0, 0, 0]);
 });
+
+test("a record from a newer pi-dispatch is skipped and counted on its core, before its measurements are looked at (#761)", () => {
+	const dir = tempDir("pi-sizing-newer-");
+	const write = writer(dir);
+	write("a.json", JSON.stringify(rec({ i: 1 })));
+	write("b.json", JSON.stringify({ ...rec({ i: 2 }), v: 1 }));
+	write("c.json", JSON.stringify({ ...rec({ i: 3 }), v: 2 }));
+	write("d.json", JSON.stringify({ ...rec({ i: 4 }), v: 2, resources: "a shape this build does not know", size: null }));
+	write("e.json", JSON.stringify({ ...rec({ i: 5 }), v: 2, project: null })); // no project: no suggestion would read it
+	const got = readSizingRecords(dir, { nowMs: NOW });
+	assert.deepEqual([got.records.map((r) => r.jobId).sort(), got.newerSkipped, got.skipped], [["job-web-1", "job-web-2"], 2, 0]);
+	assert.equal(Object.hasOwn(readSizingRecords(join(dir, "nope"), { nowMs: NOW }), "newerSkipped"), false, "absent when there is none");
+});

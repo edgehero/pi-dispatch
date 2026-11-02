@@ -32,6 +32,7 @@ import { DOLLAR_BASIS, DOLLAR_KEY_PREFIX, MODEL_BASIS } from "@edgehero/pi-dispa
 import { DOLLAR_ENV_NAMES, formatMicros, optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { dollarKeyPrefixFor, isModelScope, isProjectScope, MODEL_SCOPE_PREFIX } from "@edgehero/pi-dispatch/scoped-limits";
 import { recordInProject, recordInRepo } from "./costs.mjs";
+import { fromNewerRelease, newerSkippedSentence } from "./newer-release.mjs";
 
 const WINDOWS = [
   { window: "day", keyOf: dayKey, setting: "dailyCostUsd", field: "dayUsd" },
@@ -160,12 +161,29 @@ function belongs(record, spec) {
 }
 
 /**
+ * Whether a record from a NEWER pi-dispatch (issue #761) could belong to this window, judged on its stable core alone:
+ * its start falls in the window, and for a project row its `project` is that id; a repo row's target is past the core,
+ * so any forge run of the window could be the repo's. It is never folded: such a record is counted, so the row can say
+ * its settled sum leaves it out.
+ */
+function newerMayBelong(record, spec) {
+  const at = Date.parse(record.startedAt ?? record.endedAt ?? "");
+  if (!Number.isFinite(at)) return false;
+  const keyOf = WINDOWS.find((w) => w.window === spec.window)?.keyOf;
+  if (!keyOf || keyOf(new Date(at), spec.keyPrefix) !== spec.key) return false;
+  if (spec.ledger === "scope" && isProjectScope(spec.name)) return recordInProject(record, spec.name.slice("project:".length));
+  if (spec.ledger === "scope") return record.kind !== "local";
+  return true;
+}
+
+/**
  * The records' side of one window: `{ runs, settledMicros, basis: { metered, floor, refunded, unreserved },
  * boundExceeded }`, or null with the reason (`UNATTRIBUTED`) for a row a record cannot be matched to. `settledMicros`
  * sums `dollars.settledMicros`; a malformed amount is skipped and counted in `malformed`, never read as 0.
  * `boundExceeded` sums the exit line's counter of settled calls that cost more than their bound, over the runs that
  * reported it. The bound assumes one token is at least one byte for every catalogued tokenizer; a non-zero count
- * anywhere is the evidence that reopens it, which is why the panel shows it at all.
+ * anywhere is the evidence that reopens it, which is why the panel shows it at all. `newerSkipped`, present only when
+ * there were any, counts the window's records from a newer pi-dispatch, which are not read (issue #761).
  */
 export function foldWindowRecords(records, spec) {
   if (spec.ledger === "model") return { records: null, unattributed: UNATTRIBUTED.model };
@@ -175,7 +193,12 @@ export function foldWindowRecords(records, spec) {
   let settledMicros = 0;
   let boundExceeded = 0;
   let malformed = 0;
+  let newerSkipped = 0;
   for (const record of Array.isArray(records) ? records : []) {
+    if (fromNewerRelease(record)) {
+      if (newerMayBelong(record, spec)) newerSkipped++;
+      continue;
+    }
     if (!belongs(record, spec)) continue;
     runs++;
     const d = record.dollars;
@@ -185,7 +208,7 @@ export function foldWindowRecords(records, spec) {
     const be = record.tokens?.boundExceeded;
     if (isCount(be)) boundExceeded += be;
   }
-  return { records: { runs, settledMicros, basis, boundExceeded, malformed } };
+  return { records: { runs, settledMicros, basis, boundExceeded, malformed, ...(newerSkipped > 0 ? { newerSkipped } : {}) } };
 }
 
 /**
@@ -215,11 +238,18 @@ export function dollarWindowRows({ specs, counters, records, jobCapMicros = null
 /**
  * The per-run dollars, newest first, for `dispatch_costs`: `{ jobId, startedAt, endedAt, flow, outcome, dollars,
  * boundExceeded }` for each record that carries a `dollars` object. `dollars` is rebuilt from its named fields, so
- * nothing else a hand-edited record holds rides along. At most `limit` rows; `more` counts the rest.
+ * nothing else a hand-edited record holds rides along. At most `limit` rows; `more` counts the rest. A record from a
+ * newer pi-dispatch is left out (issue #761: its `dollars` may mean something else there) and counted in
+ * `newerSkipped`, present only when there were any.
  */
 export function runDollars(records, { limit = 50 } = {}) {
   const rows = [];
+  let newerSkipped = 0;
   for (const r of Array.isArray(records) ? records : []) {
+    if (fromNewerRelease(r)) {
+      newerSkipped++;
+      continue;
+    }
     const d = r?.dollars;
     if (!d || typeof d !== "object") continue;
     rows.push({
@@ -238,7 +268,7 @@ export function runDollars(records, { limit = 50 } = {}) {
     });
   }
   rows.sort((a, b) => Date.parse(b.endedAt ?? b.startedAt ?? "") - Date.parse(a.endedAt ?? a.startedAt ?? "") || 0);
-  return { runs: rows.slice(0, limit), more: Math.max(0, rows.length - limit) };
+  return { runs: rows.slice(0, limit), more: Math.max(0, rows.length - limit), ...(newerSkipped > 0 ? { newerSkipped } : {}) };
 }
 
 /** `$1.20`, or `-` for a number that is not a micro-dollar amount. */
@@ -260,7 +290,8 @@ export function renderDollarWindows(dollars) {
     let tail = "records n/a";
     if (r.records) {
       const counts = DOLLAR_BASIS.filter((k) => r.records.basis?.[k] > 0).map((k) => `${r.records.basis[k]} ${k}`);
-      tail = `settled ${usd(r.records.settledMicros)} from ${r.records.runs} run${r.records.runs === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts.join(", ")})` : ""}, boundExceeded ${r.records.boundExceeded}`;
+      const newer = newerSkippedSentence(r.records.newerSkipped);
+      tail = `settled ${usd(r.records.settledMicros)} from ${r.records.runs} run${r.records.runs === 1 ? "" : "s"}${counts.length > 0 ? ` (${counts.join(", ")})` : ""}, boundExceeded ${r.records.boundExceeded}${newer ? ` (${newer})` : ""}`;
     }
     out.push(`  ${String(r.window).padEnd(6)}${name}  spent+held ${usd(r.counterMicros)} of ${usd(r.capMicros)}${r.full ? " (full)" : ""}  ${tail}`);
   }

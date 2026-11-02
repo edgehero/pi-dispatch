@@ -1,0 +1,28 @@
+{
+  "jobId": "gh-6f1c2a9e-0b7d-4c1e-9a55-0d3b2f8e7a10",
+  "kind": "github",
+  "target": "acme/web#42",
+  "flow": "fix",
+  "startedAt": "2026-09-14T10:00:00.000Z",
+  "endedAt": "2026-09-14T10:07:30.000Z",
+  "outcome": "completed",
+  "reason": null,
+  "exitCode": 0,
+  "turns": 12,
+  "tokens": {
+    "input": 48000,
+    "output": 6200,
+    "total": 54200,
+    "cost": 0.4125
+  },
+  "budgetReserved": true,
+  "attempt": 0,
+  "parentJobId": null,
+  "chainDepth": null,
+  "chainRefused": null,
+  "session": {
+    "resumed": false,
+    "reason": "absent",
+    "bytes": 0
+  }
+}

@@ -3,6 +3,7 @@ import { modelListProblem } from "./model-ref.mjs";
 import { parseUsdMicros, optionalUsdMicros } from "./money.mjs";
 import { MODEL_ROLE_RE } from "./model-roles.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
+import { recordReadable } from "./run-history.mjs";
 
 /** A canary pays for fresh isolated runs, never for a modification to the role map. */
 export function canaryOptions({ role, model, flow, count = 3, capUsd }) {
@@ -14,8 +15,13 @@ export function canaryOptions({ role, model, flow, count = 3, capUsd }) {
 	return { role, model, flow, count: Number(count), capMicros };
 }
 
+/**
+ * The completed runs of `options.flow` under `options.role` a canary replays, newest first. A record a newer pi-dispatch
+ * wrote is skipped (issue #761, `recordReadable`): only its core fields keep their meaning in every version, and the
+ * role, the flow and the cost read here are not among them.
+ */
 export function selectCanarySources(records, options, { now, windowMs = 7 * 86400_000 }) {
-	return records.filter((r) => r && !r.canary && r.modelRole === options.role && r.flow === options.flow && r.outcome === "completed" && typeof r.jobId === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(r.jobId) && Number.isFinite(Date.parse(r.endedAt)) && Date.parse(r.endedAt) <= now && Date.parse(r.endedAt) >= now - windowMs)
+	return records.filter((r) => r && recordReadable(r) && !r.canary && r.modelRole === options.role && r.flow === options.flow && r.outcome === "completed" && typeof r.jobId === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(r.jobId) && Number.isFinite(Date.parse(r.endedAt)) && Date.parse(r.endedAt) <= now && Date.parse(r.endedAt) >= now - windowMs)
 		.sort((a, b) => Date.parse(b.endedAt) - Date.parse(a.endedAt) || a.jobId.localeCompare(b.jobId)).slice(0, options.count);
 }
 

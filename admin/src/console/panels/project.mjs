@@ -5,6 +5,7 @@ import { formatCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { bundleDeclaredText } from "../../read-model.mjs";
 import { OUTCOME_KEY_WORDS, reasonWords, shortSentence } from "../../words.mjs";
+import { newerSkippedSentence } from "../../newer-release.mjs";
 import { canAct, runLink, timeHtml, usdText, moneyHtml } from "./common.mjs";
 import { actForm } from "./config-ui.mjs";
 
@@ -54,7 +55,7 @@ export function projectRuns(v) {
   const cause = reason.known ? reason.sentence.match(/, and (.+?), so /)?.[1] : null;
   const brief = cause ? shortSentence(cause) : reason.short;
   const short = reason.known ? brief.charAt(0).toLowerCase() + brief.slice(1) : "no reason is published";
-  return card("Runs, last 24 hours", html`<div class="proj-kv"><b>${r.total}</b><span>${counts.length ? counts.join(", ") : "no retained runs"}; ${unknown(r.inLine)} in line${r.inLineIncomplete ? " (at least)" : ""}</span></div>${worst && worst.outcome !== "completed" ? html`<p class="proj-state tone-${ui.STATUS[word?.status ?? "attention"].tone}">${ui.icon(ui.STATUS[word?.status ?? "attention"].icon, { size: "sm" })}<span>${runLink(worst.jobId, { pulse: true })} ${word?.word ?? "ended"}${worst.host ? html` on ${worst.host}` : null}: ${short}${short.endsWith("…") ? "" : "."}</span></p>` : null}${p.historyIncomplete ? note("Run counts are a bounded view; the retained history or a fleet mirror could not be read completely.") : null}`);
+  return card("Runs, last 24 hours", html`<div class="proj-kv"><b>${r.total}</b><span>${counts.length ? counts.join(", ") : "no retained runs"}; ${unknown(r.inLine)} in line${r.inLineIncomplete ? " (at least)" : ""}</span></div>${worst && worst.outcome !== "completed" ? html`<p class="proj-state tone-${ui.STATUS[word?.status ?? "attention"].tone}">${ui.icon(ui.STATUS[word?.status ?? "attention"].icon, { size: "sm" })}<span>${runLink(worst.jobId, { pulse: true })} ${word?.word ?? "ended"}${worst.host ? html` on ${worst.host}` : null}: ${short}${short.endsWith("…") ? "" : "."}</span></p>` : null}${p.historyIncomplete ? note("Run counts are a bounded view; the retained history or a fleet mirror could not be read completely.") : null}${newerSkippedSentence(p.newerSkipped) ? note(`${newerSkippedSentence(p.newerSkipped)}: counts and spend leave them out.`) : null}`);
 }
 
 export function projectSize(v) {

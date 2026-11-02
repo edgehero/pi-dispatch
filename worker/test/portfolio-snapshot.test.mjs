@@ -299,3 +299,33 @@ test("a member label holding a control, bidi or format character is replaced by 
 	}
 	assert.equal(memberLabel("github:Fabrikam Fiber/Web App"), "github:Fabrikam Fiber/Web App", "a space is ordinary");
 });
+
+test("a run record from a newer pi-dispatch is counted from neither source, and makes runsComplete false (#761)", async () => {
+	const newerLocal = { jobId: "j8", outcome: "completed", project: "shop", endedAt: "2026-10-06T05:30:00.000Z", v: 2 };
+	const dir = logsDirWith([...LOCAL, newerLocal, { ...newerLocal, jobId: "j9", endedAt: "2026-09-29T00:00:00.000Z" }]);
+	const local = readLocalRuns({ logsDir: dir, sinceMs: NOW.getTime() - 7 * 86_400_000 });
+	assert.deepEqual([local.records.map((r) => r.jobId).sort(), local.newerSkipped, local.complete], [["j2", "j3", "j5", "repeat:pm-weekly:1"], 1, true], "only the one in the window is counted as skipped");
+	const fromLocal = JSON.parse((await factory({ logsDir: dir }).build(JOB)).body);
+	assert.equal(fromLocal.fleet.runsComplete, false);
+	assert.deepEqual(fromLocal.projects.find((p) => p.id === "shop").runs7d, EXPECTED.projects.find((p) => p.id === "shop").runs7d, "its run is not counted");
+	const newerMirrored = { jobId: "j10", outcome: "completed", project: "platform", endedAt: "2026-10-06T04:30:00.000Z", host: "mini3", v: 2 };
+	const fromMirror = JSON.parse((await factory({ logsDir: logsDirWith(LOCAL), readMirror: async () => ({ runs: [...MIRRORED, newerMirrored], degraded: "ok" }) }).build(JOB)).body);
+	assert.equal(fromMirror.fleet.runsComplete, false);
+	assert.deepEqual(fromMirror.projects.find((p) => p.id === "platform").runs7d, EXPECTED.projects.find((p) => p.id === "platform").runs7d);
+	assert.equal(Object.hasOwn(readLocalRuns({ logsDir: logsDirWith(LOCAL), sinceMs: 0 }), "newerSkipped"), false, "absent when there is none");
+});
+
+test("a newer record touched inside the window but ended before it is not counted: its core times, not its mtime, place it (#761)", () => {
+	const sinceMs = NOW.getTime() - 7 * 86_400_000;
+	// Ended before the window, last written inside it (a copy restored from a backup, say).
+	const outside = { jobId: "j11", outcome: "completed", project: "shop", endedAt: "2026-09-29T00:00:00.000Z", v: 2 };
+	const dir = logsDirWith([...LOCAL, outside]);
+	utimesSync(join(dir, "j11.json"), NOW, NOW);
+	const local = readLocalRuns({ logsDir: dir, sinceMs });
+	assert.equal(Object.hasOwn(local, "newerSkipped"), false, "a run outside the window is no run the counts would have read");
+	assert.equal(local.records.some((r) => r.jobId === "j11"), false);
+	// The same record ended inside the window is counted.
+	writeFileSync(join(dir, "j11.json"), JSON.stringify({ ...outside, endedAt: "2026-10-06T05:30:00.000Z" }));
+	utimesSync(join(dir, "j11.json"), NOW, NOW);
+	assert.equal(readLocalRuns({ logsDir: dir, sinceMs }).newerSkipped, 1);
+});

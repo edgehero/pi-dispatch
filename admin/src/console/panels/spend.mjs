@@ -31,6 +31,7 @@ import {
   WHATIF_FLOW_RE,
 } from "./insights.mjs";
 import { OUTCOME_WORD_OF } from "../../words.mjs";
+import { newerSkippedSentence } from "../../newer-release.mjs";
 import { canAct, timeHtml, RUN_ID_RE, shownPath } from "./common.mjs";
 
 export const SPEND_VIEWS = Object.freeze([
@@ -392,8 +393,17 @@ export function spendOver(v) {
       html`${settledMoney(d)}${d.today ? html` settled; ${usd(d.heldMicros)} held` : ""}`,
     ]),
     { cols: 3 },
-  )}</details>${note("Past days show record cost only. ≥ marks a known minimum; ~ marks an estimate; ? means the cost is unknown. Unknown costs are not zero.")}`;
+  )}</details>${note("Past days show record cost only. ≥ marks a known minimum; ~ marks an estimate; ? means the cost is unknown. Unknown costs are not zero.")}${newerNote(p.spend?.newerSkipped)}`;
   return card("Spend over time", chart, null, "per day, against the daily cap");
+}
+
+/**
+ * The note for run records a newer pi-dispatch wrote, which no total here reads (issue #761): "N records from a newer
+ * pi-dispatch not read", or nothing when there were none, so every other page is drawn as it always was.
+ */
+function newerNote(n) {
+  const said = newerSkippedSentence(n);
+  return said ? note(`${said}: the totals leave them out.`) : null;
 }
 
 function moneyCost(cost) {
@@ -565,7 +575,7 @@ function whatif(v, perFlow) {
     const target = number(r.usd) === null ? null : r.usd * 1e6;
     const actual = number(r.originalUsd) === null ? null : r.originalUsd * 1e6;
     const scale = Math.max(1, target ?? 0, actual ?? 0);
-    answer = html`<p class="sp-wi__s">The same ${r.runs ?? 0} runs on <b>${q.whatif}</b> would have cost about <b>${usd(target)}</b> instead of <b>${usd(actual)}</b>.</p><div class="sp-wi"><span class="sp-wi__l">Recorded cost<small>the same ledgered runs</small></span>${progress(actual, scale, "What these ledgered runs cost", "idle")}<b>${usd(actual)}</b><span class="sp-wi__l">${q.whatif}<small>estimate</small></span>${progress(target, scale, "The same runs repriced on the selected model")}<b>about ${usd(target)}</b></div>${note(`${r.excluded ?? 0} runs had no ledger and were excluded. ${r.planId ? `Plan ${r.planId}; this is the API-equivalent amount the dollar windows would be charged.` : ""}`)}`;
+    answer = html`<p class="sp-wi__s">The same ${r.runs ?? 0} runs on <b>${q.whatif}</b> would have cost about <b>${usd(target)}</b> instead of <b>${usd(actual)}</b>.</p><div class="sp-wi"><span class="sp-wi__l">Recorded cost<small>the same ledgered runs</small></span>${progress(actual, scale, "What these ledgered runs cost", "idle")}<b>${usd(actual)}</b><span class="sp-wi__l">${q.whatif}<small>estimate</small></span>${progress(target, scale, "The same runs repriced on the selected model")}<b>about ${usd(target)}</b></div>${note(`${r.excluded ?? 0} runs had no ledger and were excluded. ${r.planId ? `Plan ${r.planId}; this is the API-equivalent amount the dollar windows would be charged.` : ""}`)}${newerNote(r.newerSkipped)}`;
   } else if (result?.result) {
     const r = result.result;
     answer = html`${ui.facts([
@@ -592,7 +602,7 @@ function whatif(v, perFlow) {
       ["Rates version", r.ratesVersion ?? "unknown"],
     ])}${note(
       "Per-run estimate, multiplied by the flow's runs in this spend window. Seeded ranges narrow after a ledgered run.",
-    )}`;
+    )}${newerNote(r.newerSkipped)}`;
   }
   return card(
     perFlow ? "What if, per flow" : "What if",
@@ -1501,7 +1511,7 @@ export function breakdownStates(v) {
         : !f.provenance.runsTotal
           ? "No runs in the spend window."
           : "The records in the selected spend window are shown.",
-    )}${
+    )}${newerNote(f?.newerSkipped)}${
       !f?.provenance.runsTotal
         ? html`<a href="${link(v, "/insights/breakdown", { range: "30d" })}"
           >Try 30 days</a

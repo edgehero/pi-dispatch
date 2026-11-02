@@ -48,6 +48,8 @@ import { isSchedulerNext } from "@edgehero/pi-dispatch/defer-reasons";
 import { scrubControls } from "./panel.mjs";
 import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, readFleetQueues, readPendingAnswer, readRunById, readWaitingRow, RUN_RECORD_UNREAD, targetKeyOf, WAITING_STATES } from "./read-model.mjs";
 import { RECORD_REASON_RE, recordReason } from "./words.mjs";
+import { fromNewerRelease, shownRecord } from "./newer-release.mjs";
+import { jobDataNewer } from "@edgehero/pi-dispatch/job-data-version";
 
 /** The most jobs one bulk action names, and so the most one preview lists (issue #642). */
 export const BULK_MAX = 100;
@@ -959,7 +961,10 @@ export const RERUN_KEPT_SLACK_MS = DAY_MS;
  *
  * In the planner's order:
  *   - a run id outside the run-id charset;
+ *   - a record a newer pi-dispatch wrote (`fromNewerRelease`), which reaches here as its stable core alone;
  *   - a cron run (`repeat:`/`manual:` ids) is rebuilt from its trigger, never from data, so nothing here refuses it;
+ *   - data a newer pi-dispatch queued (`jobDataNewer`: a `dataVersion` this build cannot read), whose fields the copy
+ *     would drop, refused as a record a newer release wrote is;
  *   - the data gone: `data === null`, or, NOT READ, a record that ended longer ago than its kind's longest retention
  *     (`RERUN_DATA_KEPT_MS` plus `RERUN_KEPT_SLACK_MS`; a recovery record's is 31 days), which is the one refusal a
  *     record alone can make;
@@ -971,8 +976,15 @@ export const RERUN_KEPT_SLACK_MS = DAY_MS;
 export function rerunRefusalOf(record, now, data) {
   const jobId = record?.jobId;
   if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return RERUN_BAD_ID;
+  // Issue #761: a record a newer pi-dispatch wrote is read here as its stable core alone, and that release's job may
+  // carry fields this build would drop on the copy, so the run is re-run from a console of that release.
+  if (fromNewerRelease(record)) return `${jobId} was recorded by a newer pi-dispatch, whose run this console cannot rebuild, so it cannot be re-run from here; re-run it from a console of that release`;
   const kind = typeof data?.kind === "string" ? data.kind : record.kind;
   if (kind === "local" && cronTriggerId(jobId) !== null) return null;
+  // Issue #761: a job a newer pi-dispatch queued may carry a field this build's copy below drops, so the re-run would be
+  // wider than the job it copies (and would be stamped with this build's version, erasing the evidence). A cron run,
+  // above, is rebuilt from its trigger alone and copies nothing of the data, so only a copied job's version refuses.
+  if (jobDataNewer(data)) return `${jobId} was queued by a newer pi-dispatch, whose job this console cannot rebuild, so it cannot be re-run from here; re-run it from a console of that release`;
   const forge = isForgeKind(kind);
   const ended = typeof record.endedAt === "string" ? Date.parse(record.endedAt) : Number.NaN;
   const recovery = typeof record.recoveryOf === "string" && record.recoveryOf !== "";
@@ -1033,10 +1045,11 @@ function notParkedRefusal(jobId, record) {
  *     wait profile needs one).
  *
  * Refused by name: no record, data expired, a `/command` run (commands run only from their reviewed trigger), an answer
- * to a parked run (answer the parked run again instead), and whatever the original path refuses. The cheap ones of these
- * (the id, the data gone, a `/command`, a parked answer, an unsupported kind) are `rerunRefusalOf`'s, asked first (issue
- * #710), which is also what the console's run page asks before it offers the form. The 10-minute
- * semantic window can still swallow a forge re-run; only the enqueue can tell, so `enqueueRerun` reports it.
+ * to a parked run (answer the parked run again instead), a record or a job a newer pi-dispatch wrote (issue #761), and
+ * whatever the original path refuses. The cheap ones of these (the id, a newer record or job, the data gone, a
+ * `/command`, a parked answer, an unsupported kind) are `rerunRefusalOf`'s, asked first (issue #710), which is also
+ * what the console's run page asks before it offers the form. The 10-minute semantic window can still swallow a forge
+ * re-run; only the enqueue can tell, so `enqueueRerun` reports it.
  *
  * `plan`: `{ kind: "local" | "cron" | "forge", jobId (the run re-run), queue, job (the data to enqueue), reserve,
  * schedule? (cron), forge? (the forge kind), deliveryId? (forge), runFields? (forge: `runFieldsSummary`, names only) }`.
@@ -1229,13 +1242,18 @@ function commentTriggerFor(triggersPath, kind, fs) {
 /**
  * Whether a parked run's RETAINED JOB can take an answer typed into the console (issues #642, #647): `{ kind, delivery,
  * rule }` or `{ refusal }`. The planner's refusals that the job's data and the triggers file decide, in its order: the
- * data expired (`data` null), not a forge issue's run, a pull request's park, and a comment trigger the receiver would
- * not route a reply through (absent, a command, without `run.resume`, without a flow). ONE predicate, so the run page's
- * Chat panel offers the reply form exactly where `planParkedAnswer` would plan it, and shows this sentence where it
- * would not; whether the run is parked and still unanswered is the caller's (the record and `chatModeOf`).
+ * data expired (`data` null), data a newer pi-dispatch queued (`jobDataNewer`, issue #761), not a forge issue's run, a
+ * pull request's park, and a comment trigger the receiver would not route a reply through (absent, a command, without
+ * `run.resume`, without a flow). ONE predicate, so the run page's Chat panel offers the reply form exactly where
+ * `planParkedAnswer` would plan it, and shows this sentence where it would not; whether the run is parked and still
+ * unanswered is the caller's (the record and `chatModeOf`).
  */
 export function parkedAnswerRefusalOf({ jobId, data, triggersPath, approval = false, fs = nodeFs }) {
   if (data === null || data === undefined) return { refusal: `the queue no longer holds ${jobId}'s data (a forge job's data is kept 31 days), so the reply cannot be built; answer on the forge instead` };
+  // Issue #761: the reply copies its repo, project and target (and an approval's match) from this job, and is stamped
+  // with this build's version: a newer pi-dispatch's job may carry a field that copy drops, so it is answered from a
+  // console of that release, in the words a re-run of such a job uses.
+  if (jobDataNewer(data)) return { refusal: `${jobId} was queued by a newer pi-dispatch, whose job this console cannot rebuild, so the reply cannot be built here; answer it from a console of that release` };
   const kind = data.kind;
   const delivery = COMMENT_DELIVERY[kind];
   if (!isForgeKind(kind) || !delivery) return { refusal: `${jobId} is a ${String(kind)} run; only a forge issue's parked run is answered this way` };
@@ -1274,7 +1292,7 @@ export function parkedAnswerRefusalOf({ jobId, data, triggersPath, approval = fa
  * scrubbed, newlines kept, at most 8 KiB, never cut); no record; a run that is not parked (not `completed` with
  * `awaiting-input`); already answered (a later run on the same target, `targetKeyOf`'s comparison); being answered (a
  * job on its target queued or running, which has no record yet: `readPendingAnswer`, issue #647), or that queue scan
- * unreadable or unable to tell (a queue deeper than its budget: `parkedVerdictOf`'s sentence, the Chat panel's); and `parkedAnswerRefusalOf`'s: expired job data, a pull request's park (its reply needs the
+ * unreadable or unable to tell (a queue deeper than its budget: `parkedVerdictOf`'s sentence, the Chat panel's); and `parkedAnswerRefusalOf`'s: expired job data, a job a newer pi-dispatch queued, a pull request's park (its reply needs the
  * head branch, so it keeps the phrase, the receiver's rule), and a comment trigger the receiver would not route a reply
  * through (absent, a command, or without `run.resume`).
  *
@@ -1407,7 +1425,9 @@ export async function planParkedAnswer({
 /** The newest runs of this host and the fleet mirror, merged (the fleet reader's wide window), never pruning. */
 async function answeredWindow(redis, { logsDir, fs, now, timeoutMs }) {
   const local = makeLocalRunIndex({ logsDir, fs, now, ttlMs: 0 }).records();
-  const { runs: mirrored } = await readMirroredRuns(redis, { limit: ANSWERED_WINDOW, prune: false, timeoutMs });
+  const { runs: fromMirror } = await readMirroredRuns(redis, { limit: ANSWERED_WINDOW, prune: false, timeoutMs });
+  // A newer release's mirrored record as its stable core (issue #761), as the local index hands it out.
+  const mirrored = Array.isArray(fromMirror) ? fromMirror.map(shownRecord) : fromMirror;
   return mergeRuns(Array.isArray(local?.records) ? local.records : [], mirrored, { limit: ANSWERED_WINDOW });
 }
 

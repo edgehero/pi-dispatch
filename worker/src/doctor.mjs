@@ -72,7 +72,7 @@ import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
 import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, RENAMED_PROVIDERS, baseUrlTarget, endpointsAt, keylessVerdict, loadModelEndpoints, providerRenameHint, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
 import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
-import { loadPauseWindows, parseScopeString } from "./pause-windows.mjs";
+import { loadPauseWindows, parsePauseWindows, parseScopeString, pauseWindowsVersionFor } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
 import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
@@ -116,7 +116,8 @@ import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
 import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
-import { parseTriggersDocument } from "./triggers.mjs";
+import { parseTriggersDocument, triggersFileVersionFor } from "./triggers.mjs";
+import { jobDataVersionFor } from "./job-data-version.mjs";
 import { secretBundleChecks } from "./doctor-bundles.mjs";
 import { doctorModelProposalChecks } from "./doctor-model-proposals.mjs";
 
@@ -126,7 +127,7 @@ import { doctorModelProposalChecks } from "./doctor-model-proposals.mjs";
  * doctor's is an operator at a prompt asking whether the wiring works, and a slow manager is an answer, not a fault.
  */
 const BUNDLE_DOCTOR_TIMEOUT_MS = 30_000;
-import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
+import { readOverlay, readOverlayDocument, resolveSettings, settingsVersionFor } from "./runtime-settings.mjs";
 import { DOLLAR_KEY_PREFIX } from "./dollar-budget.mjs";
 import { dayKey, monthKey, weekKey } from "./budget.mjs";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
@@ -1394,8 +1395,20 @@ function loadVerdict(spec, rawPath, cwd, io, platform = process.platform) {
 		spec.load(path, io.loaderIo, io.env);
 		return { ok: true };
 	} catch (err) {
-		return { ok: false, reason: envValueShown(err?.message ?? String(err)) };
+		// Issue #761: the loader's own flag says a newer pi-dispatch wrote the file (never the message's wording), so the
+		// fix can say to upgrade rather than to edit what that release wrote.
+		return { ok: false, reason: envValueShown(err?.message ?? String(err)), ...(err?.newer === true ? { newer: true } : {}) };
 	}
+}
+
+/**
+ * The fix for a file a newer pi-dispatch wrote (issue #761), whichever store: upgrade `who` and every writer of the file,
+ * never edit or delete it, which would lose what that release wrote. The one exception is a `version` an operator
+ * wrote by hand (earlier releases ignored the key): no release wrote that file, so removing the key is the fix. One
+ * sentence for the settings overlay, the pause windows file and the triggers file, so the three cannot drift apart.
+ */
+export function newerFileFix(who) {
+	return `upgrade ${who}, and every panel and console that writes this file, to the release that wrote it; do not edit or delete the file, which would lose what that release wrote, unless you added \`version\` to it yourself: then remove that key`;
 }
 
 /** The oldest git the checkpoint store accepts (issue #645), as `[major, minor]`. */
@@ -1794,10 +1807,15 @@ export async function collectChecks(shellVars, seams) {
 	// image checks just below, and `optingOut`/`requiring` colour the staged-packages lines further down.
 	// `optingOut` counts the only value that withholds the staged set; `requiring` counts an explicit
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, parseError, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName);
+	// Issue #761: the version tables, and the versions this build reads, that the store-version needs are judged by,
+	// per store: `{ settings: { supported, table, valueTable }, pauseWindows: { supported, table }, triggers: { supported,
+	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. Every table is empty in
+	// this release, so this seam is how a test drives a need above 1 through the real collection before a table has a row.
+	const versionTables = seams.versionTables ?? {};
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(env, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
-	const pauseWindowFacts = readPauseWindowFacts(env, fileExists);
+	const pauseWindowFacts = readPauseWindowFacts(env, fileExists, versionTables.pauseWindows);
 	section("triggers");
 	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env }));
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
@@ -1830,7 +1848,10 @@ export async function collectChecks(shellVars, seams) {
 			// message says which, and the old wording sent an operator hunting for a syntax error that was
 			// not there. It still covers the JSON case, whose message begins "is not valid JSON".
 			label: `triggers file is refused at load -- the receiver will refuse to start: ${parseError}`,
-			fix: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it loads`,
+			// Issue #761: a file a newer pi-dispatch wrote is no broken file, and editing it would lose what that release wrote.
+			fix: triggersFileIsNewer
+				? `${newerFileFix("this host's worker and receiver")} -- every trigger-derived check below is skipped until this host reads it`
+				: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it loads`,
 		});
 	}
 	section("dollars");
@@ -2236,6 +2257,8 @@ export async function collectChecks(shellVars, seams) {
 			const total = { memMiB: least(f.memTotalMiB, f.userMemMiB), cpuCenti: least(Number.isSafeInteger(f.hostCpus) ? f.hostCpus * 100 : null, f.userCpuCenti) };
 			checks.push(...sizeSuggestionChecks({ projects: sizingProjects, limits: budgetChecksArgs.limits, env, records: read.records, budget: { memMiB: budgetView.memMiB, cpuCenti: budgetView.cpuCenti }, total, nowMs }));
 			if (read.skipped > 0) checks.push({ ok: true, label: `size suggestions: ${read.skipped} run record${read.skipped === 1 ? "" : "s"} over ${SIZING_RECORD_MAX_BYTES / 1024} KiB skipped, not read` });
+			// Issue #761: a record a newer pi-dispatch wrote is not folded into a suggestion (`readSizingRecords`), said so.
+			if (read.newerSkipped > 0) checks.push({ ok: true, label: `size suggestions: ${read.newerSkipped} run record${read.newerSkipped === 1 ? "" : "s"} from a newer pi-dispatch not read` });
 		}
 	}
 	// Issue #596, phase 2: the aggregate CPU reserve per venue, read (never written) the way the worker reads it.
@@ -3027,6 +3050,10 @@ export async function collectChecks(shellVars, seams) {
 		// no edit to the file applies on it. Judged on the DECLARED version, or the derived one if that is higher (gate
 		// round 2). SKIPPED when this host's file does not load.
 		if (scopedLimitFacts.parseError === null) checks.push(...fleetSizeChecks(Math.max(Number(scopedLimitFacts.declaredVersion) || 0, scopedLimitsVersionFor(scopedLimitFacts.limits)), peers));
+		// Issue #761: the version each of this host's own stores needs (the higher of what the file declares and what its
+		// content needs, the size check's rule), by registry field, against what every peer publishes. A store whose file
+		// does not load here is left out: its own line already fails, and comparing would name the wrong hosts.
+		checks.push(...fleetStoreVersionChecks(storeVersionNeeds({ settingsFile: settingsFilePath(env, home), fileExists, pauseWindowFacts, triggersVersionNeed, jobDataVersionNeed, triggersParsed: parseError === null, settingsVersions: versionTables.settings }), peers));
 		// Issue #596, phase 2: each host's budget and use, and which hosts each project's size fits on, from every row that
 		// publishes a budget (this host's own included). SKIPPED when this host's scoped-limits file does not load.
 		if (scopedLimitFacts.parseError === null) checks.push(...fleetBudgetChecks((fleet.hosts ?? []).map((h) => ({ ...h, name: printable(h.name) })), { limits: scopedLimitFacts.limits, env }));
@@ -4258,7 +4285,13 @@ export async function collectChecks(shellVars, seams) {
 							ok: false,
 							warn: envSetup !== null,
 							label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)}) to a file the worker cannot load, so a service started from it ${spec.fails}: ${verdict.reason}`,
-							fix: envSetup !== null ? `${envSetup} runs after that file and may replace it; if it does not, fix ${envValueShown(fileRaw)} or point the key at a file that loads` : `fix ${envValueShown(fileRaw)}, or point ${spec.key} at a file that loads`,
+							fix: verdict.newer
+								? envSetup !== null
+									? `${envSetup} runs after that file and may replace it; if it does not, ${newerFileFix("this host's worker")}`
+									: newerFileFix("this host's worker")
+								: envSetup !== null
+									? `${envSetup} runs after that file and may replace it; if it does not, fix ${envValueShown(fileRaw)} or point the key at a file that loads`
+									: `fix ${envValueShown(fileRaw)}, or point ${spec.key} at a file that loads`,
 						},
 			);
 		}
@@ -4277,7 +4310,7 @@ export async function collectChecks(shellVars, seams) {
 					id: bootFileId(spec, "shell"),
 					ok: false,
 					label: `${spec.key} is set in this shell to a file the worker cannot load, so it ${spec.fails}: ${verdict.reason}`,
-					fix: `fix ${envValueShown(shellRaw)}, or point ${spec.key} at a file that loads`,
+					fix: verdict.newer ? newerFileFix("this host's worker") : `fix ${envValueShown(shellRaw)}, or point ${spec.key} at a file that loads`,
 				});
 			}
 		} else if (spec.defaultsToScaffold) {
@@ -4526,19 +4559,46 @@ export async function collectChecks(shellVars, seams) {
 		// become invalid on upgrade: a duplicate key, which used to take the last value, is now refused. The reason names
 		// keys only, never values. Absent is the normal empty overlay and says nothing.
 		if (fileExists(settingsFile)) {
-			const overlay = readOverlay(settingsFile);
+			// The writer's read (issue #761), so the keys this build does not know are named below; its verdict is the
+			// worker's own (`readOverlay` is this read without the carry).
+			const overlay = readOverlayDocument(settingsFile);
 			if (overlay.invalid) {
+				// Issue #761: a file written by a newer pi-dispatch is no broken file. The worker DEFERS every job
+				// (newer-release) rather than refusing it, and the fix is an upgrade, never an edit or a delete, which would
+				// lose what the newer release wrote. The one exception is a `version` an operator wrote by hand (earlier
+				// releases ignored the key): no release wrote that file, so removing the key is the fix.
+				const newer = overlay.newer === true;
 				checks.push({
 					// Named (issue #712): the console quotes it beside "the settings overlay does not load".
 					id: "settings.overlay",
 					ok: false,
-					label: `settings overlay ${settingsFile} is invalid (${overlay.invalid}) -- the worker refuses every job as settings-overlay-invalid until it is fixed, and the panel refuses to write over it`,
+					label: newer
+						? `settings overlay ${settingsFile} cannot be read here (${overlay.invalid}) -- the worker defers every job (newer-release) until it is upgraded, and the panel refuses to write over it`
+						: `settings overlay ${settingsFile} is invalid (${overlay.invalid}) -- the worker refuses every job as settings-overlay-invalid until it is fixed, and the panel refuses to write over it`,
 					// The fix follows the reason: only a duplicate key gets the upgrade note, since only it loaded before #501.
-					fix: /duplicate key/.test(overlay.invalid)
-						? "remove the repeated key from that file, keeping the value you mean (a duplicate key is refused since issue #501; it used to take the last value), or delete the file to start from an empty overlay"
-						: "fix what the reason names in that file, or delete the file to start from an empty overlay",
+					fix: newer
+						? newerFileFix("this worker")
+						: /duplicate key/.test(overlay.invalid)
+							? "remove the repeated key from that file, keeping the value you mean (a duplicate key is refused since issue #501; it used to take the last value), or delete the file to start from an empty overlay"
+							: "fix what the reason names in that file, or delete the file to start from an empty overlay",
 				});
 			} else {
+				// Issue #761: the keys this build does not know, which the worker ignores and every writer from issue #761's
+				// release on keeps. An earlier panel or console (4.3.1 included) drops every key it does not know when it writes
+				// the file (`secretBundles` included, which it predates), so the fix says to upgrade those first. NAMES only,
+				// sorted and capped, never a value.
+				const unknown = [...(overlay.carry?.unknownKeys ?? [])].map((key) => printable(key).slice(0, UNKNOWN_KEY_NAME_MAX)).sort();
+				if (unknown.length > 0) {
+					const shown = unknown.slice(0, UNKNOWN_KEYS_SHOWN);
+					const more = unknown.length - shown.length;
+					checks.push({
+						id: "settings.unknown-keys",
+						ok: false,
+						warn: true,
+						label: `settings overlay ${settingsFile} holds ${unknown.length === 1 ? "a key" : `${unknown.length} keys`} this build does not know (${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}): the worker ignores ${unknown.length === 1 ? "it" : "them"}`,
+						fix: "a key from a newer release is ignored here and kept by every panel and console from issue #761's release on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo",
+					});
+				}
 				// Issue #501 (PR #542's review): a VALID overlay can still break the dollar invariant once merged over env
 				// (a window in one, no maxCostUsd in either), which the worker checks per job and answers by refusing every
 				// job. The env-only half is `dollarChecks`; this is the merged half, said only when env alone is fine.
@@ -5629,15 +5689,24 @@ export function projectRowChecks(limits, projects, path) {
 /**
  * The pause-windows facts (issue #498): the parsed windows when PI_PAUSE_WINDOWS_FILE is set, else none. A file that
  * does not load is the BOOT_FILES check's line, so here it only silences the advisories that read the windows.
+ * `versionNeed` (issue #761) is the version the file needs, the higher of what it declares and what its RAW windows'
+ * fields need, for the fleet line that names a peer that cannot read it; 1 without a file. `versions` is the
+ * `{ supported, table, valueTable }` the file is read and its need judged by (collectChecks' `versionTables`), the
+ * module's own by default.
  */
-function readPauseWindowFacts(env, fileExists) {
+function readPauseWindowFacts(env, fileExists, versions = {}) {
 	const path = env.PI_PAUSE_WINDOWS_FILE;
-	if (typeof path !== "string" || path.trim() === "") return { windows: [], parseError: null };
+	if (typeof path !== "string" || path.trim() === "") return { windows: [], versionNeed: 1, parseError: null };
 	try {
-		if (!fileExists(path) || !statSync(path).isFile()) return { windows: [], parseError: "unreadable" };
-		return { windows: loadPauseWindows({ pauseWindowsFile: path }, { readFileSync, existsSync: fileExists }), parseError: null };
+		if (!fileExists(path) || !statSync(path).isFile()) return { windows: [], versionNeed: 1, parseError: "unreadable" };
+		// The loader's own parse (`loadPauseWindows` is this read after the existence check above), handed the versions.
+		const text = readFileSync(path, "utf8");
+		const windows = parsePauseWindows(text, path, versions);
+		// The parse just accepted this text, so it parses, and a declared version is an integer.
+		const doc = JSON.parse(text);
+		return { windows, versionNeed: Math.max(Number.isSafeInteger(doc?.version) ? doc.version : 1, pauseWindowsVersionFor(doc?.windows, versions)), parseError: null };
 	} catch (e) {
-		return { windows: [], parseError: e?.message ?? String(e) };
+		return { windows: [], versionNeed: 1, parseError: e?.message ?? String(e) };
 	}
 }
 
@@ -5827,6 +5896,76 @@ export function fleetSizeChecks(fileVersion, peers) {
 		label: `${old.map((h) => h.name).join(", ")} ${old.length === 1 ? "predates" : "predate"} job sizes (scoped-limits version 3), while this host's file is version 3: a running worker from before keeps its last good file, so neither the size nor any later edit to the file (job counts, concurrent, dollar caps) applies on it until it is upgraded and restarted, and it refuses the file at its next start`,
 		fix: "upgrade and restart every worker on this Valkey before scoped-limits.json is written as version 3",
 	}];
+}
+
+/** The overlay keys `settings.unknown-keys` names at most (issue #761), and how much of each name it shows. */
+export const UNKNOWN_KEYS_SHOWN = 8;
+const UNKNOWN_KEY_NAME_MAX = 64;
+
+/**
+ * The stores a host publishes a version for (issue #761, `DES-STORE-VERSION-WHEN-NEEDED`), by registry field: what the
+ * store is, what a peer does with this host's file when it publishes a LOWER version (this release's rule: it defers
+ * the job, `newer-release`) and when it publishes NONE (a worker from before issue #761: it reads the file without its
+ * version and drops what it does not know), and who else writes it, for the fix. A test holds the fields to the ones
+ * start.mjs publishes.
+ *
+ * A lower peer that watches the pause windows or the triggers file defers every job from its next reload of it, not
+ * only the jobs that read the file: its worker-wide newer state is read by the triggers gate at the processor's head,
+ * and by the pickup's pause gate and the watch branch's (a job ended before those, by the draft-source or sandbox
+ * check, a runtime's own result, a lost lock's replay or a grouping job's deleted project, spends nothing). Job data
+ * is written by the receivers, the console and the workers' own builders, and a receiver publishes no registry row,
+ * so its fix names the receivers as a set doctor cannot see.
+ */
+export const STORE_FLEET_LINES = Object.freeze({
+	settingsVersion: Object.freeze({ store: "the settings overlay", older: "defers every job (newer-release) while it reads this file", silent: "drops the overlay keys it does not know, so a cap they set does not apply on it", writers: "every panel and console that writes the settings overlay (one from before issue #761 drops a key it does not know when it writes)" }),
+	pauseWindowsVersion: Object.freeze({ store: "the pause windows file", older: "defers every job (newer-release) from its next reload of this file, and refuses the file at its next start", silent: "drops the window fields it does not know, so a window pauses at the wrong time on it", writers: "every panel and console that writes the pause windows file (one from before issue #761 drops a key it does not know when it writes)" }),
+	triggersVersion: Object.freeze({ store: "the triggers file", older: "defers every job (newer-release) from its next reload of this file, keeps its last good schedules, and refuses the file at its next start", silent: "drops the run keys it does not know, so a trigger's jobs run wider on it than the file says", writers: "every panel and console that writes the triggers file (one from before issue #761 drops a key it does not know when it writes)" }),
+	jobDataVersion: Object.freeze({ store: "the jobs this host's triggers queue", older: "defers each such job (newer-release) until it is upgraded", silent: "drops the job fields it does not know, so such a job runs wider on it than its trigger says", writers: "every receiver and every console that queues these jobs (a receiver publishes no registry row, so doctor cannot see which receivers are older)" }),
+});
+
+/**
+ * The version each of this host's stores needs, by registry field (issue #761): the settings overlay (read by the
+ * worker's own reader), the pause windows file and the triggers file (from the facts doctor already read), and the job
+ * data their triggers queue. A store whose file does not load is left out. `settingsVersions` is the overlay's
+ * `{ supported, table, valueTable }` (collectChecks' `versionTables`), the module's own by default.
+ */
+export function storeVersionNeeds({ settingsFile, fileExists, pauseWindowFacts, triggersVersionNeed, jobDataVersionNeed, triggersParsed, settingsVersions = {} }) {
+	const needs = {};
+	const settings = fileExists(settingsFile) ? readOverlayDocument(settingsFile, settingsVersions) : { overlay: {}, carry: null };
+	if (!settings.invalid) {
+		const declared = settings.carry?.doc?.version;
+		needs.settingsVersion = Math.max(Number.isSafeInteger(declared) ? declared : 1, settingsVersionFor(settings.overlay, settingsVersions));
+	}
+	if (pauseWindowFacts.parseError === null) needs.pauseWindowsVersion = pauseWindowFacts.versionNeed;
+	if (triggersParsed) {
+		needs.triggersVersion = triggersVersionNeed;
+		needs.jobDataVersion = jobDataVersionNeed;
+	}
+	return needs;
+}
+
+/**
+ * The fleet's store versions (issue #761): for each store whose need (`needs`, registry field -> the version this host's
+ * own file needs) is above 1, a WARNING naming the peers that publish that field below the need (they defer what the
+ * file touches until they are upgraded) and one naming the peers that publish no such field at all (workers from before
+ * the field: they read the file without its version and drop what they do not know, which can widen a job). Nothing
+ * at all while every need is 1, which is every deployment today, since no store's table has a row yet. Hosts are named,
+ * never a file's content. `fleetSizeChecks` keeps its own line: a peer without `limitsVersion` still reads version 2.
+ */
+export function fleetStoreVersionChecks(needs, peers) {
+	const checks = [];
+	const warn = (label, fix) => checks.push({ id: "fleet.store-versions", ok: false, warn: true, label, fix });
+	const fix = (line, need) => `upgrade and restart the workers named, and ${line.writers}, to a release that reads version ${need}`;
+	for (const [field, line] of Object.entries(STORE_FLEET_LINES)) {
+		const need = needs?.[field];
+		if (!Number.isSafeInteger(need) || need <= 1) continue;
+		const silent = peers.filter((h) => h[field] === undefined || h[field] === null || h[field] === "");
+		const older = peers.filter((h) => !silent.includes(h) && !(Number.isSafeInteger(Number(h[field])) && Number(h[field]) >= need));
+		const names = (hosts) => hosts.map((h) => h.name).join(", ");
+		if (older.length > 0) warn(`${names(older)} ${older.length === 1 ? "reads" : "read"} ${line.store} only below version ${need}, the version this host's file needs: ${older.length === 1 ? "it" : "each"} ${line.older}`, fix(line, need));
+		if (silent.length > 0) warn(`${names(silent)} ${silent.length === 1 ? "publishes" : "publish"} no version for ${line.store} (a worker from before issue #761), while this host's file needs version ${need}: ${silent.length === 1 ? "it" : "each"} ${line.silent}`, fix(line, need));
+	}
+	return checks;
 }
 
 export function fleetProjectsChecks(mine, peers) {
@@ -6310,8 +6449,8 @@ function triggerLabel(t, index) {
 	return t.on.type === "cron" ? `cron "${t.on.id}"` : `${t.on.type} trigger #${index}`;
 }
 
-function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
-	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], parseError: null, path: null };
+function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
+	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -6323,14 +6462,15 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		if (!statSync(path).isFile()) return { ...none, parseError: `triggers file is not a regular file: ${path}`, path };
 		const text = readFileSync(path, "utf8");
 		// The document parser, so the file's `secretBundles` (issue #704) is judged by the loaders' one rule too.
-		const { triggers, secretBundles, modelRoles, watchSources } = parseTriggersDocument(text, path);
+		const { triggers, secretBundles, modelRoles, watchSources } = parseTriggersDocument(text, path, versionTables.triggers);
 		// The one-shot facts are counted from the RAW entries, not the parsed records, because the
 		// validator collapses a disarmed entry to a sentinel that carries neither `once` nor
 		// `disarmed` -- exactly so nothing can match it -- which also erases it from every parsed
 		// count above. Doctor is the surface that must still SEE the spent entry: "why did nothing
 		// fire" is answered by a spent row, and only the raw file still holds it. Safe unguarded:
 		// parseTriggers just accepted this same text, so JSON.parse cannot throw here.
-		const rawEntries = JSON.parse(text)?.triggers ?? [];
+		const rawDocument = JSON.parse(text);
+		const rawEntries = rawDocument?.triggers ?? [];
 		// Issue #433 review rounds 2 and 3: whether THIS HOST'S WORKER schedules a cron trigger, for the unblessed-venue
 		// line, by the worker's two conditions and nothing else. (a) The worker schedules cron only from a PI_TRIGGERS_FILE
 		// it was given (`config.triggersFile` is null without one, and `loadSchedules` then returns []), while doctor
@@ -6344,6 +6484,11 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		const fleet = Boolean(declaredWorkerName);
 		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet }) !== "elsewhere";
 		return {
+			// Issue #761: the version this file needs (the higher of what it declares and what its keys need), and the version
+			// the jobs its triggers queue need, from each entry's RAW run keys (`jobDataVersionFor`): for the fleet line that
+			// names a peer that cannot read either. The loader just accepted this text, so a declared version is an integer.
+			triggersVersionNeed: Math.max(Number.isSafeInteger(rawDocument?.version) ? rawDocument.version : 1, triggersFileVersionFor(rawDocument, versionTables.triggers)),
+			jobDataVersionNeed: rawEntries.reduce((need, t) => Math.max(need, jobDataVersionFor(t?.run, versionTables.jobData)), 1),
 			watchSources,
 			watchRules: triggers.filter(t => t.on.type === "watch").length,
 			secretBundles,
@@ -6478,7 +6623,9 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName) {
 		// a directory), which is not a statement about the file's CONTENT and has no fix an operator can act
 		// on from this line. Those keep the old silent zeroes.
 		if (e?.piDispatchConfig !== true) return none;
-		return { ...none, parseError: e.message, path: triggersPath(env, cwd) };
+		// Issue #761: `parseNewer` is the loader's own flag for a file a newer pi-dispatch wrote, so the fix below says to
+		// upgrade rather than to edit it.
+		return { ...none, parseError: e.message, parseNewer: e.newer === true, path: triggersPath(env, cwd) };
 	}
 }
 

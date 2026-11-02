@@ -1,0 +1,71 @@
+{
+  "jobId": "gh-9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d-r2",
+  "kind": "github",
+  "target": "acme/api#99",
+  "flow": "fix",
+  "startedAt": "2026-09-14T14:00:00.000Z",
+  "endedAt": "2026-09-14T14:25:00.000Z",
+  "outcome": "completed",
+  "reason": "awaiting-approval",
+  "exitCode": 0,
+  "turns": 31,
+  "tokens": {
+    "input": 210000,
+    "output": 18000,
+    "total": 228000,
+    "cost": 1.86,
+    "metered": 228000,
+    "calls": 31
+  },
+  "usage": {
+    "v": 1,
+    "piAi": "0.80.7",
+    "truncated": 0,
+    "models": [
+      {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "calls": 28,
+        "input": 200000,
+        "output": 17000,
+        "cacheRead": 120000,
+        "cacheWrite": 8000,
+        "cacheWrite1h": 0,
+        "reasoning": 2000,
+        "total": 217000,
+        "cost": 1.8,
+        "unpriced": 0
+      },
+      {
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5",
+        "calls": 3,
+        "input": 10000,
+        "output": 1000,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cacheWrite1h": 0,
+        "reasoning": 0,
+        "total": 11000,
+        "cost": 0.06,
+        "unpriced": 0
+      }
+    ]
+  },
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5",
+  "budgetReserved": true,
+  "attempt": 0,
+  "parentJobId": "gh-1d2c3b4a-5f6e-4d7c-8b9a-0f1e2d3c4b5a",
+  "chainDepth": 1,
+  "chainRefused": 1,
+  "replica": 2,
+  "replicas": 2,
+  "triggerIndex": 3,
+  "triggerType": "comment",
+  "session": {
+    "resumed": true,
+    "reason": "resumed",
+    "bytes": 48213
+  }
+}
