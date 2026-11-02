@@ -17,8 +17,8 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-11-02T12:42:29Z",
+    "at": "2026-11-02T12:47:53Z",
     "via": "Claude",
-    "note": "Proposed, after the browser gateway (#754), kept simple: one line and one button about a run's workspace on each run page, the same row for every outcome as one table, and the gateway's terminal tab with its run in one line and the way back to it."
+    "note": "Proposed: a run's workspace as one line and one button on each run page (#793), and observer mode (#792): the person typing lets other operators watch a browser shell, read only, and sees who watches."
   }
 }

@@ -88,6 +88,7 @@ def run_workspace_page():
 OPEN = f'<span class="sandbox-opener">{btn("Open in Terminal", "", "terminal")}</span>'
 ROWS = [  # (job, outcome kind, line, the one action)
     ("gh-4add", "completed", "<b>Try it before you merge.</b> Kept until 14:39 UTC tomorrow.", OPEN),
+    ("gh-9575", "completed", "<b>ops is in it, and lets operators watch.</b> You see what happens and cannot type.", f'<span class="sandbox-browser">{btn("Watch", "", "eye")}</span>'),
     ("gh-d40e", "failed", "<b>Reproduce it.</b> It ran out of memory; the shell has the same limit.", OPEN),
     ("gh-2f6a", "awaiting", "<b>Look before you answer.</b> Your answer starts a new job, so put what you find in it.", OPEN),
     ("gh-a91e", "completed", "<b>Cannot reopen</b> on openshell. Prepare a fresh copy of its pull request.", btn("Prepare from this run", "", "plus")),
@@ -112,6 +113,11 @@ def states_page():
 
 # ---------------------------------------------------------------- SandboxTerminalRun: the gateway tab, with its run
 RUN_CSS = """
+.gwr-watchers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px var(--space-5); border-top: 1px solid var(--line); background: var(--running-tint); font-size: 13px; line-height: 20px; color: var(--ink-muted); }
+.gwr-watchers b { color: var(--ink); font-weight: 650; }
+.gwr-watchers .ic { flex: none; color: var(--running-ink); }
+.gwr-ro { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 13px; color: var(--ink-muted); }
+.gwr-ro b { color: var(--ink); font-weight: 650; }
 .gwr-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: var(--space-2); font-size: 14px; line-height: 22px; color: var(--ink-muted); }
 .gw-head .btn .ic { margin-right: 2px; }
 """
@@ -131,12 +137,30 @@ def terminal_run_page():
     term = (f'<section class="card gw-terminal-card gw-reference-desktop" id="p-gateway-terminal" data-panel><div class="gw-terminal-head"><div><h2>gh-9575</h2>'
             f'<p class="gw-identity">mini1 · ops · existing sandbox shell</p></div>{badge("running", "Connected")}</div>'
             f'<div class="gw-terminal-toolbar"><label class="gw-focus-control"><input type="checkbox" checked> Tab moves focus</label>'
+            f'<label class="gw-focus-control"><input type="checkbox" checked> Let operators watch</label>'
             f'<span class="gw-idle">Idle logout after 30 minutes without input here</span>{btn("Disconnect", "danger")}</div>'
+            f'<p class="gwr-watchers">{ic("eye", "ic ic--sm")}<span><b>lee</b> is watching. They see what you type, and cannot type.</span><a class="link" href="#">Remove lee</a></p>'
             f'<div class="gw-terminal">{TERM_OUT}</div>'
             f'<div class="gw-terminal-foot"><span>Only new output is shown. What you type is not recorded. Disconnect leaves the shell running.</span>{btn("Leave terminal focus", "ghost")}</div></section>')
     phone = '<section class="card gw-reference-phone"><div class="card__head"><h2>Use your own terminal</h2></div><p class="gw-foot">Browser terminals require a window wider than 760 pixels. Go back to gh-9575 and copy the command.</p></section>'
     foot = '<p class="gw-foot">Found something? Add it on gh-9575’s page, where the next run sees it. Nothing typed here reaches the run.</p>'
     return '<a class="skip" href="#main">Skip to content</a><main id="main" class="gw-page">' + head + title + term + phone + foot + '</main>'
+
+
+def watch_page():
+    """The watcher's tab: the same run line and output, no input, no resize, and a way to stop."""
+    head = ('<header class="gw-head"><span class="brandpill"><span class="brandpill__m">pi</span>pi-dispatch</span>' + chip('Sandbox gateway')
+            + '<div class="gw-head__end">' + btn('Theme: follows the system', 'ghost') + btn('Back to gh-9575', 'ghost', 'chev-l') + '</div></header>')
+    title = (f'<div class="gw-title" id="p-gateway-run" data-panel><h1>Watching gh-9575</h1>'
+             f'<p class="gwr-sub">{badge("completed")}{tag("web")}<a class="link" href="#">acme/web#490</a><span>fix, ended 15:12 UTC</span></p></div>')
+    term = (f'<section class="card gw-terminal-card gw-reference-desktop" id="p-gateway-watch" data-panel><div class="gw-terminal-head"><div><h2>gh-9575</h2>'
+            f'<p class="gw-identity">mini1 · ops is typing · you are lee</p></div>{badge("running", "Watching")}</div>'
+            f'<div class="gw-terminal-toolbar"><p class="gwr-ro">{ic("eye", "ic ic--sm")}<span><b>Read only.</b> You cannot type. Shown at ops’s size, 120 × 36.</span></p>'
+            f'<span class="gw-idle">ops can remove you</span>{btn("Stop watching", "ghost")}</div>'
+            f'<div class="gw-terminal">{TERM_OUT}</div>'
+            f'<div class="gw-terminal-foot"><span>Only new output is shown. Watching ends when ops disconnects or turns watching off. Nothing is recorded.</span></div></section>')
+    phone = '<section class="card gw-reference-phone"><div class="card__head"><h2>Watch on a wider screen</h2></div><p class="gw-foot">Browser terminals require a window wider than 760 pixels.</p></section>'
+    return '<a class="skip" href="#main">Skip to content</a><main id="main" class="gw-page">' + head + title + term + phone + '</main>'
 
 
 # ---------------------------------------------------------------- READMEs
@@ -171,6 +195,7 @@ The run page's Workspace row for each kind of run, as one table: the outcome, th
 
 **How a person uses it.**
 - **Completed** (gh-4add): *Try it before you merge*, with Open in Terminal.
+- **Shared** (gh-9575, as another operator sees it): *ops is in it, and lets operators watch*, with **Watch** (observer mode, #792). Watching is read only; SandboxWatch draws the watcher's tab.
 - **Failed, kept** (gh-d40e, out of memory): *Reproduce it*. The shell has the run's memory limit, so the same command stops the same way.
 - **Awaiting input** (gh-2f6a): *Look before you answer*. The answer starts a new job from the saved transcript, so a change in the shell does not reach it; the finding goes in the answer.
 - **Cannot reopen** (gh-a91e, on openshell): *Prepare from this run*, which opens #771's preparation filled in from the run: its repository, its pull request, the trigger it ran as and a host where that trigger's runs go. The same row shows once a workspace is swept or past its window.
@@ -191,7 +216,7 @@ Open in browser joins these buttons only once a shell is open, as on RunWorkspac
 - **No terminal in a running job.** Its container holds the job's own token and spends from its reservation; steering is the way to change a running run.
 - **Prepare from this run** keeps a pull request checkable after its workspace is gone: workspaces are kept 24 hours by default, and a review often takes longer.
 
-**Fixture note.** From the fixture: gh-4add, gh-2f6a, gh-a91e, gh-b3d7, gh-f0c2 and gh-e9a0 with their outcomes and venues. Sample: gh-d40e, an out-of-memory stop on acme/web#484 at 09:12 UTC, added to `fixture.py` as a proposed run.
+**Fixture note.** From the fixture: gh-4add, gh-9575, gh-2f6a, gh-a91e, gh-b3d7, gh-f0c2 and gh-e9a0 with their outcomes and venues. Sample: gh-d40e, an out-of-memory stop on acme/web#484 at 09:12 UTC, added to `fixture.py` as a proposed run.
 """,
 "SandboxTerminalRun": """
 The gateway's terminal tab when it knows its run: the run in one line under the title, and the way back to it.
@@ -200,6 +225,7 @@ The gateway's terminal tab when it knows its run: the run in one line under the 
 - **The title** names the sandbox and its host; the line under it says the run's outcome, project, target, flow and when it ended.
 - **The terminal** is SandboxTerminal's: one attachment, idle logout, Disconnect, nothing recorded, only new output.
 - **Back to gh-9575** in the header replaces the generic return, and the line under the terminal says where a finding goes: the run's page, where the next run sees it.
+- **Let operators watch** (observer mode, #792), off by default. On, other operators can watch from the run page or Sandboxes. A line under the toolbar names each watcher with **Remove**, and says they see what is typed. Turning it off ends every watch at once.
 - On a phone, no terminal opens, as on SandboxTerminal; the tab sends the person back to gh-9575 to copy the command.
 
 **Panels.** `p-gateway-run`, `p-gateway-terminal`.
@@ -208,9 +234,37 @@ The gateway's terminal tab when it knows its run: the run in one line under the 
 
 **Who sees what.** The operator who opened it, as on SandboxTerminal.
 
-**Why it works this way.** A prompt says only `gh-9575`; the run's target and outcome say whether this is the change about to be merged or a run that failed. The way back goes to the run, because the next useful step after a look is there.
+**Why it works this way.**
+- **Know what you type into.** A prompt says only `gh-9575`; the run's target and outcome say whether this is the change about to be merged or a run that failed. The way back goes to the run, because the next useful step after a look is there.
+- **Watching is the driver's choice, and always on their screen.** A watcher sees everything the shell prints, including what is typed, such as a pasted token. So it is off until the person typing turns it on, and they see who watches.
 
-**Fixture note.** gh-9575 and its facts are the fixture. Sample: the terminal output and the commit line.
+**Fixture note.** gh-9575 and its facts are the fixture. Sample: the terminal output and the commit line, and lee watching.
+""",
+"SandboxWatch": """
+Observer mode (#792): another operator watches a browser shell, read only, when the person typing allows it. For pairing, review and teaching.
+
+**How a person uses it.**
+- On the run page or in Sandboxes, an operator sees *ops is in it, and lets operators watch* and **Watch**. It asks for their own token again, as opening does, and opens this tab.
+- **The title** says whose shell and which run: Watching gh-9575, with the run's line under it.
+- **The terminal** shows the same new output as the driver's, at the driver's size (120 × 36 here). The toolbar says *Read only: you cannot type*. There is no Tab-focus switch and no Disconnect; **Stop watching** closes the tab's watch.
+- Watching ends when the driver disconnects, turns watching off or removes the watcher, when the shell ends, or when the watcher's own session ends.
+- On a phone, no terminal opens.
+
+**Panels.** `p-gateway-run`, `p-gateway-watch`.
+
+**The server provides.**
+- A `watch` grant: one use, 60 seconds, after the watcher's fresh sign-in with their own token, for that exact sandbox, only while its driver allows watching.
+- The driver's terminal size as it changes, and new output. No history, input or resize from a watcher.
+
+**Who sees what.** Operators only, at most three at a time. A viewer, an agent and a read-only console cannot watch: terminal output can hold issue text and anything typed.
+
+**Why it works this way.**
+- **Read only by construction.** The watcher's attach has no input stream, and the gateway drops any input or resize a watcher sends before it reaches the runtime. The tab's read-only look is not what stops typing.
+- **The driver decides.** A watcher sees what is typed, a pasted token included, so watching is off by default, turned on by the person typing, and every watcher is listed on their screen with Remove.
+- **Audited, not recorded.** Each watch's start and end are audited with who watched whom. What is shown is not kept, as for the driver.
+- **One driver.** A watcher never types. Two people typing into one prompt is what a native terminal joining a shell already allows; the browser does not add a second way.
+
+**Fixture note.** gh-9575 and its facts are the fixture. Sample: lee as a second operator (added to `fixture.py`), the terminal output and the 120 × 36 size.
 """,
 }
 
@@ -222,6 +276,8 @@ if __name__ == "__main__":
           "The workspace, run by run", states_page(), RUN_STYLE + CSS)
     write("SandboxTerminalRun", card_marker("Runs", 1100, 1440, "The gateway’s terminal tab with its run: one line under the title and the way back to the run"),
           "Sandbox terminal for gh-9575", terminal_run_page(), GW_CSS + RUN_CSS)
+    write("SandboxWatch", card_marker("Runs", 1000, 1440, "Observer mode: another operator watches a browser shell, read only, when the person typing allows it"),
+          "Watching gh-9575", watch_page(), GW_CSS + RUN_CSS)
     for name, text in README.items():
         readme(name, text)
     print("workspace cards written")

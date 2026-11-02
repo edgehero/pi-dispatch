@@ -14,6 +14,7 @@ NOW = "15:39"            # UTC, the "now" line on every timeline
 PEOPLE = {
     "ops": "operator token: every write, every action",
     "watcher": "viewer token: numbers, states and tool names only",
+    "lee": "a second operator token, drawn watching ops's shell (observer mode, #792)",
 }
 
 # host: (venues it runs, its default venue first; what it is)

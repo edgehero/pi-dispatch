@@ -2,6 +2,7 @@ The run page's Workspace row for each kind of run, as one table: the outcome, th
 
 **How a person uses it.**
 - **Completed** (gh-4add): *Try it before you merge*, with Open in Terminal.
+- **Shared** (gh-9575, as another operator sees it): *ops is in it, and lets operators watch*, with **Watch** (observer mode, #792). Watching is read only; SandboxWatch draws the watcher's tab.
 - **Failed, kept** (gh-d40e, out of memory): *Reproduce it*. The shell has the run's memory limit, so the same command stops the same way.
 - **Awaiting input** (gh-2f6a): *Look before you answer*. The answer starts a new job from the saved transcript, so a change in the shell does not reach it; the finding goes in the answer.
 - **Cannot reopen** (gh-a91e, on openshell): *Prepare from this run*, which opens #771's preparation filled in from the run: its repository, its pull request, the trigger it ran as and a host where that trigger's runs go. The same row shows once a workspace is swept or past its window.
@@ -22,4 +23,4 @@ Open in browser joins these buttons only once a shell is open, as on RunWorkspac
 - **No terminal in a running job.** Its container holds the job's own token and spends from its reservation; steering is the way to change a running run.
 - **Prepare from this run** keeps a pull request checkable after its workspace is gone: workspaces are kept 24 hours by default, and a review often takes longer.
 
-**Fixture note.** From the fixture: gh-4add, gh-2f6a, gh-a91e, gh-b3d7, gh-f0c2 and gh-e9a0 with their outcomes and venues. Sample: gh-d40e, an out-of-memory stop on acme/web#484 at 09:12 UTC, added to `fixture.py` as a proposed run.
+**Fixture note.** From the fixture: gh-4add, gh-9575, gh-2f6a, gh-a91e, gh-b3d7, gh-f0c2 and gh-e9a0 with their outcomes and venues. Sample: gh-d40e, an out-of-memory stop on acme/web#484 at 09:12 UTC, added to `fixture.py` as a proposed run.
