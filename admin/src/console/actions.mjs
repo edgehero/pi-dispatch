@@ -2298,15 +2298,15 @@ const packageActions = [
       const row = stagedRow(await ctx.a.updates.read(), name);
       const desired = row?.desired;
       if (desired?.op !== "adopt" || !desired.from) return { refusal: `There is no adoption of ${name} to undo. Nothing was changed.` };
-      return { target: `${name}@${desired.from}`, payload: { name, version: desired.from, undoOf: desired.generation },
+      return { target: `${name}@${desired.from}`, payload: { name, version: desired.from, undoOf: desired.generation, from: desired.version },
         summary: [`Puts ${name} back as it was on each host: ${desired.from}, with that host's pi-packages.json restored`, "Jobs that start after this load it; running jobs keep what they have", "A host that never took the adoption changes nothing"] };
     },
     async apply(entry, ctx) {
-      const { name, version, undoOf } = entry.payload;
+      const { name, version, undoOf, from } = entry.payload;
       const row = stagedRow(await ctx.a.updates.read(), name);
       if (row?.desired?.generation !== undoOf) return { invalid: "Someone changed this package since the preview. Preview it again." };
       try {
-        const written = await ctx.a.updates.setDesired({ name, version, op: "undo", undoOf, by: ctx.session.name, at: ctx.now(), expectGeneration: undoOf });
+        const written = await ctx.a.updates.setDesired({ name, version, op: "undo", undoOf, from, by: ctx.session.name, at: ctx.now(), expectGeneration: undoOf });
         if (written === 0) return { invalid: "Someone changed this package since the preview. Preview it again." };
       } catch {
         return { invalid: "Valkey did not take the request. Nothing was changed; preview it again." };

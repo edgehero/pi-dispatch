@@ -7,7 +7,7 @@ import { ADMIN_USED_API } from "../../worker/src/updates-look.mjs";
 import { CANNOT_ADOPT_WORDS, HOST_STATES_DRAWN, PI_STATES_DRAWN } from "../src/console/panels/updates.mjs";
 import { HOST_ADOPT_STATES, PI_ROW_STATES, UPDATE_ROW_STATES, canaryResultOf, hostStandings, packageRow, piRow, readDeploymentUpdates, readStaged, readTriggersDocument, readUpdates } from "../src/updates-view.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { UPDATES_DRAW } from "./helpers/updates-goldens.mjs";
+import { UPDATES_CONFIRM_STATES, UPDATES_DRAW } from "./helpers/updates-goldens.mjs";
 import { USED_API } from "../src/index.ts";
 
 const NOW = 1_800_000_000_000;
@@ -112,17 +112,42 @@ test("the look's copy of the admin extension's API list is that list", () => {
 test("each row state and each pi state is actually drawn by a golden, so none is unreviewed", async () => {
 	for (const key of Object.keys(UPDATES_DRAW)) assert.match(key, /^updates-[a-z-]+\.(operator|viewer)$/);
 	const golden = new Set(readdirSync(new URL("./fixtures/console/panels/", import.meta.url)).filter((f) => f.startsWith("updates-")).map((f) => f.replace(/\.html$/, "")));
-	assert.deepEqual([...golden].sort(), Object.keys(UPDATES_DRAW).sort(), "a golden per drawn state");
+	assert.deepEqual([...golden].sort(), [...Object.keys(UPDATES_DRAW), ...UPDATES_CONFIRM_STATES].sort(), "a golden per drawn state");
 	const text = [...golden].map((name) => readFileSync(new URL(`./fixtures/console/panels/${name}.html`, import.meta.url), "utf8")).join("\n");
 	// One sentence for each state on each list, so a state nobody draws, or a word that went missing from one, fails here.
-	const ROW = { current: "The newest version.", newer: "Not tried yet.", "canary-completed": "Canary completed, read the run", "canary-failed": "Canary failed: the candidate did not load", adopting: "Adopting 1.4.3", adopted: "on every host", partial: "its overlay is read-only here", undoing: "Going back to 1.4.2", "not-looking": "Not looking.", stale: "old, so what is newest may have moved", unknown: "Unknown: the look could not read this" };
+	const ROW = { current: "The newest version.", newer: "Not tried yet.", "canary-completed": "Canary completed, read the run", "canary-failed": "Canary failed: this version did not load", adopting: "Adopting 1.4.3", adopted: "on every host", partial: "mini2 cannot adopt: its overlay is read-only here", undoing: "Going back to 1.4.2", "not-looking": "Not looking.", stale: "the last look is too old to go by", unknown: "Not known: the registry could not be read" };
 	assert.deepEqual(Object.keys(ROW).sort(), [...UPDATE_ROW_STATES].sort());
-	const PI = { current: "The newest version.", "checks-passing": "checks pass on 1.6.0", "checks-failing": "Checks fail. Jobs stay on 1.5.0", "checks-pending": "still running on it", "checks-unknown": "Whether pi-dispatch", "not-looking": "Not looking.", stale: "old, so what is newest may have moved", unknown: "Unknown: the look could not read this" };
+	const PI = { current: "The newest version.", "checks-passing": "checks pass on 1.6.0", "checks-failing": "Checks fail. Jobs stay on 1.5.0", "checks-pending": "still running on it", "checks-unknown": "Whether pi-dispatch", "not-looking": "Not looking.", stale: "the last look is too old to go by", unknown: "Not known: the registry could not be read" };
 	assert.deepEqual(Object.keys(PI).sort(), [...PI_ROW_STATES].sort());
-	for (const sentence of [...Object.values(ROW), ...Object.values(PI), "Canary failed: the run did not complete", "Newer than pi-dispatch is tested with", "Older than pi-dispatch is tested with", "No pi on this host", "pi could not be read", "is not the tree the canary ran", "overdue", "The stage manifest could not be read", "reviewed subscription adapter"]) {
+	for (const sentence of [...Object.values(ROW), ...Object.values(PI), "Canary failed: the run did not complete", "Newer than pi-dispatch is tested with", "Older than pi-dispatch is tested with", "No pi on this host", "pi could not be read", "is not the tree the canary ran", "has not answered in a day", "Not known: Valkey did not answer", "The staged extensions could not be read", "reviewed subscription adapter"]) {
 		assert.ok(text.includes(sentence), `a golden draws: ${sentence}`);
 	}
 	assert.doesNotMatch(text, /\bpassed\b/i, "a canary never reads passed: a job that completed does not prove the extension is good");
+});
+
+test("what could not be read is never drawn as a fact", async () => {
+	const down = await UPDATES_DRAW["updates-valkey-down.operator"]();
+	assert.match(down, /Last look<\/dt><dd[^>]*>unknown/, "not \"never\": nobody knows");
+	const probes = await UPDATES_DRAW["updates-host-probes.operator"]();
+	assert.match(probes, /<span class="muted">unknown<\/span>/, "a host whose pi could not be read has no version, which is not the same as having none");
+	assert.match(await UPDATES_DRAW["updates-newer-available.operator"](), /<span class="muted">none<\/span>/, "and a host with no pi says none");
+});
+
+test("a paid button says what it costs where it is pressed, and Undo says what it undoes", async () => {
+	assert.match(await UPDATES_DRAW["updates-newer-available.operator"](), /A canary runs one job of trigger 3, up to \$2\.00/);
+	const after = await UPDATES_DRAW["updates-newer-after-adopt.operator"]();
+	assert.match(after, /1\.4\.3 adopted by ops\./);
+	assert.match(after, /Undo 1\.4\.3/);
+	const undoing = await UPDATES_DRAW["updates-undoing.operator"]();
+	assert.match(undoing, /1\.4\.3<svg[^]*?<\/svg>1\.4\.2/, "going from where it is to where it is going, not the end state as if it were done");
+	assert.doesNotMatch(await UPDATES_DRAW["updates-stale.operator"](), /1\.5\.0<svg[^]*?<\/svg>1\.5\.0/, "no arrow between a version and itself");
+});
+
+test("the banner about a host says which, why, and what to do, because the host table does not", async () => {
+	const partial = await UPDATES_DRAW["updates-partial.operator"]();
+	assert.match(partial, /mini2 cannot adopt: its overlay is read-only here\. Fix that there, or undo it/);
+	assert.doesNotMatch(partial, /cannot: /);
+	assert.match(await UPDATES_DRAW["updates-adopting-overdue.operator"](), /offline1 has not answered in a day/);
 });
 
 test("a viewer sees versions and results and no button; a read-only console shows none either", async () => {

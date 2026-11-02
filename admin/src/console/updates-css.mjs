@@ -14,11 +14,14 @@ export const UPDATES_CSS = `
 .up-act .config-form{display:flex;flex-direction:column;align-items:flex-end;gap:6px;width:max-content;max-width:100%;margin:0 0 0 auto}
 .up-act .config-form+.config-form{margin-top:6px}
 .up-act select{max-width:220px}
-.up-recent{display:grid;gap:2px;min-width:0;overflow-wrap:anywhere}
+.up-recent{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 12px;flex:1;min-width:0;overflow-wrap:anywhere}
 .up-recent small{font-size:12px;color:var(--ink-muted)}
-#p-up-recent .rowpill{padding-top:8px;padding-bottom:8px;padding-right:12px;border-radius:var(--radius-md)}
+.up-see{display:inline-block;white-space:nowrap}
+.up-note{padding:0 var(--space-5) var(--space-3);margin:0}
+#p-up-recent .rowpill{padding-top:6px;padding-bottom:6px;padding-right:12px;border-radius:var(--radius-md)}
 .up-foot{display:flex;gap:8px;align-items:flex-start;padding:var(--space-3) var(--space-5) var(--space-4);font-size:12px;line-height:18px;color:var(--ink-muted);border-top:1px solid var(--line)}
 .up-foot .ic{flex:none;margin-top:2px}
 @media (max-width:1180px){.updates-layout{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:1000px){.up-line{min-width:180px}.up-act select{max-width:150px}}
 @media (max-width:760px){.up-line{min-width:0}.up-act{text-align:left;white-space:normal}.up-act .config-form{align-items:flex-start;margin-left:0}}
 `;

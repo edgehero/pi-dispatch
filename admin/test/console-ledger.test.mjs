@@ -1,5 +1,5 @@
 import { MODELS_PANEL_STATES } from "./helpers/models-goldens.mjs";
-import { UPDATES_PANEL_STATES } from "./helpers/updates-goldens.mjs";
+import { UPDATES_CONFIRM_STATES, UPDATES_PANEL_STATES } from "./helpers/updates-goldens.mjs";
 import { ZERO_TOUCH_PANEL_STATES } from "./helpers/zero-touch-goldens.mjs";
 import { WORKSPACE_PANEL_STATES } from "./helpers/workspace-goldens.mjs";
 import { CONFIGURATION_PANEL_STATES } from "./helpers/configuration-goldens.mjs";
@@ -103,6 +103,7 @@ const REVERSE_CHECKED = Object.freeze([
   "sandboxes.operator", "panels/sandboxes-populated.operator",
   ...ZERO_TOUCH_PANEL_STATES.map((key) => `panels/${key}`),
   ...UPDATES_PANEL_STATES.map((key) => `panels/${key}`),
+  ...UPDATES_CONFIRM_STATES.map((key) => `panels/${key}`),
   ...CONFIGURATION_PANEL_STATES.map((key) => `panels/${key}`),
   "secrets.operator", "secrets.viewer", "connections.operator", "connections.viewer", "project.operator", "project.viewer",
   "triggers.operator", "triggers.viewer", "triggers-filtered.operator", "triggers-filtered.viewer", "trigger-check.operator", "trigger-check.viewer",

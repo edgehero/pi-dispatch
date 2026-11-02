@@ -74,7 +74,7 @@ export const UPDATES_DRAW = Object.freeze({
 	"updates-adopted.viewer": () => draw({ role: "viewer", facts: { records: [canaryRecord()], redis: { desiredRows: { "pi-lint": desired() }, appliedRows: ALL_APPLIED } } }),
 	"updates-adopted-differs.operator": () => draw({ facts: { records: [canaryRecord()], redis: { desiredRows: { "pi-lint": desired() }, appliedRows: { ...ALL_APPLIED, mini2: { "pi-lint": applied({ digest: "b".repeat(64) }) } }, facts: { "updates:canary:pi-lint@1.4.3": FACTS } } } }),
 	"updates-partial.operator": () => draw({ facts: { records: [canaryRecord()], redis: { desiredRows: { "pi-lint": desired() }, appliedRows: { ...ALL_APPLIED, mini2: { "pi-lint": applied({ state: "cannot-adopt", reason: "overlay-read-only", version: "1.4.2", digest: null }) } } } } }),
-	"updates-undoing.operator": () => draw({ facts: { redis: { desiredRows: { "pi-lint": desired({ generation: 6, op: "undo", version: "1.4.2", undoOf: 5 }) }, appliedRows: { mini1: { "pi-lint": applied({ generation: 6, state: "undone", version: "1.4.2" }) } } } } }),
+	"updates-undoing.operator": () => draw({ facts: { redis: { desiredRows: { "pi-lint": desired({ generation: 6, op: "undo", version: "1.4.2", from: "1.4.3", undoOf: 5 }) }, appliedRows: { mini1: { "pi-lint": applied({ generation: 6, state: "undone", version: "1.4.2" }) } } } } }),
 	"updates-recent.operator": () => draw({ facts: { audit: [{ action: "write-applied", kind: "package-adopt", outcome: "ok", target: "pi-lint@1.4.2", actor: { name: "ops", role: "operator", session: null }, at: "2026-10-01T10:00:00.000Z" }, { action: "write-applied", kind: "package-undo", outcome: "ok", target: "pi-test-runner@0.8.2", actor: { name: "ops", role: "operator", session: null }, at: "2026-10-02T10:00:00.000Z" }, { action: "write", kind: "package-adopt", outcome: "ok", target: "not-applied@1.0.0" }] } }),
 	"updates-unavailable.operator": () => draw({ unavailable: true }),
 	"updates-adopting.viewer": () => draw({ role: "viewer", facts: { records: [canaryRecord()], redis: { desiredRows: { "pi-lint": desired() }, appliedRows: { mini1: { "pi-lint": applied() } } } } }),
@@ -83,5 +83,8 @@ export const UPDATES_DRAW = Object.freeze({
 	"updates-newer-after-adopt.operator": () => draw({ facts: { staged: { packages: [{ name: "pi-lint", version: "1.4.3", dir: "pi-lint--1.4.3--cccccccc", from: "pi-packages" }] }, records: [canaryRecord({ packageCanary: { name: "pi-lint", version: "1.4.4", load: "loaded" } })], redis: { looks: [look("mini1", { packages: [row("pi-lint", "1.4.3", "1.4.4")] })], desiredRows: { "pi-lint": desired() }, appliedRows: { mini1: { "pi-lint": applied() } } } } }),
 	"updates-staged-unreadable.operator": () => draw({ facts: { staged: { packages: [], unreadable: true } } }),
 });
-export const UPDATES_PANEL_STATES = Object.freeze(Object.keys(UPDATES_DRAW));
+/** Every golden of this page, the two previews included: `panel-goldens.mjs` draws those, through the real action and the real confirm. */
+export const UPDATES_PANEL_STATES = Object.freeze([...Object.keys(UPDATES_DRAW)]);
+export const UPDATES_CONFIRM_STATES = Object.freeze(["updates-confirm-canary.operator", "updates-confirm-adopt.operator"]);
+export const UPDATES_CANARY_RECORD = canaryRecord();
 export { PINNED as UPDATES_FIXTURE_PIN, STAGED as UPDATES_FIXTURE_STAGED };

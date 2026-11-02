@@ -91,7 +91,7 @@ def page():
                  btn("Open the bump pull request", "", "pr"))
     inner = (f'<section id="p-up-problems" data-panel>{top}</section>'
              f'<div class="cols"><div class="stack">{jobs_table()}{hosts_table()}</div><div class="stack">{side()}</div></div>')
-    return shell("Configuration", inner, "Updates", sub="pi and the extensions jobs run, prepared for you. Nothing changes until you adopt it.",
+    return shell("Configuration", inner, "Updates", sub="pi and the extensions jobs run, and what is newer. Nothing changes until an operator adopts it.",
                  back="Configuration")
 
 

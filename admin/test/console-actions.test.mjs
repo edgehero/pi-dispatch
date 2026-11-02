@@ -3017,7 +3017,7 @@ test("Undo takes back the adoption it was shown, and only that one", async () =>
   assert.match(p.json().html, /A host that never took the adoption changes nothing/);
   assert.equal((await c.confirm("package-undo", p.json().ticket)).status, 200);
   const { at, by, ...row } = u.asked[0];
-  assert.deepEqual(row, { name: "pi-lint", version: "1.4.2", op: "undo", undoOf: 5, expectGeneration: 5 });
+  assert.deepEqual(row, { name: "pi-lint", version: "1.4.2", op: "undo", undoOf: 5, from: "1.4.3", expectGeneration: 5 });
   const moved = updatesDeps(adopted);
   const m = await start({ paths, a: { updates: moved.updates } });
   const q = await m.act("package-undo", { name: "pi-lint" });
