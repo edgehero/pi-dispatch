@@ -486,7 +486,7 @@ try {
   const additional = [];
   for (let index = 1; index <= 3; index++) additional.push(await extraShell(index));
   await launch("dark");
-  const owner = tab;
+  let owner = tab;
   const paneSelector = id => `.wb-pane[data-sandbox-id="${id}"]`;
   const textOf = id => `[...document.querySelectorAll(${JSON.stringify(paneSelector(id) + " .xterm-rows>div")})].map(e=>e.textContent).join(String.fromCharCode(10))`;
   const hasLine = (id, line) => `[...document.querySelectorAll(${JSON.stringify(paneSelector(id) + " .xterm-rows>div")})].some(e=>e.textContent.trim()===${JSON.stringify(line)})`;
@@ -669,8 +669,9 @@ try {
   await until("document.querySelectorAll('.wb-pane').length===3&&document.querySelectorAll('.wb-pane[data-state=ended]').length===0");
   assert.equal(JSON.parse((await exec(bin, ["inspect", additional[2].containerId])).stdout)[0].State.Running, true, "closing a pane only detaches");
   assert.equal(watchCtaLaunches, 2, "Run and Sandboxes both provide a working Watch handoff");
-  // After the last step that opens a new tab: on Linux CI a tab opened right after this crash stayed blank, though it opens
-  // normally on macOS. What this stage proves is the workspace surviving the crash, and that holds on both.
+  // On Linux CI a Chrome that has had a renderer crashed by Page.crash can stall afterwards: a tab opened next stayed blank, and a navigation of the
+  // surviving tab to the crashed site never committed, intermittently, though both work on macOS. What this stage proves is the workspace surviving the
+  // crash, and that holds on both. So it stays here, and every stage after it gets a Chrome of its own (below), rather than depending on the state of this one.
   stage = "a helper tab that crashes costs the workspace nothing";
   {
     const created = browser.event(m => m.method === "Target.targetCreated" && m.params.targetInfo.type === "page" && m.params.targetInfo.targetId !== owner.targetId, "Add another creates its helper");
@@ -691,6 +692,11 @@ try {
     await type(".wb-pane[data-active=true] .xterm-helper-textarea", "printf 'SURVIVES_HELPER_CRASH\\n'\n");
     await until("[...document.querySelectorAll('.wb-pane[data-active=true] .xterm-rows>div')].some(e=>e.textContent.trim()==='SURVIVES_HELPER_CRASH')");
     assert.equal(await evaluate("document.querySelector('[data-wb-action=add]').getAttribute('aria-disabled')"), "false", "a crashed helper leaves no slot behind");
+  }
+  {
+    const crashed = owner.browser;
+    owner = await isolatedTab(); await login("operator", "ops");
+    await crashed.close().catch(() => {}); // Its sockets close with it, so its driver is gone before the next stage drives.
   }
   // Each launch below navigates out first, which detaches the workspace; the original native shells remain.
   const freshDriver = async () => {
