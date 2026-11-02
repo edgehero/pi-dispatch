@@ -1,4 +1,4 @@
-<!-- @dsCard group="Runs" height=2090 width=1440 subtitle="A completed run with a shell open on its workspace: who is in it, how to open it, and where what you found goes" -->
+<!-- @dsCard group="Runs" height=1660 width=1440 subtitle="A completed run with a shell open: one Workspace row (where it is kept, who has a shell open, how to open it) and one line for a finding" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -49,43 +49,31 @@
 
 /* Ids and commands wrap inside a card on a phone rather than widening it. */
 .code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
-.ws { display: grid; gap: var(--space-4); }
-.ws-state { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); }
-.ws-state__t { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; font-weight: 650; }
-.ws-state__s { margin-top: 4px; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-who { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--space-3); align-items: start; padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); box-shadow: inset 0 0 0 1.5px var(--running); background: var(--running-tint); }
-.ws-who .dot { margin-top: 6px; }
-.ws-who__t { font-size: 14px; line-height: 20px; }
-.ws-who__s { margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-who__a { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--space-2); }
-.ws-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.ws-acts details { flex: 1 1 100%; min-width: 0; }
-.ws-acts details summary { cursor: pointer; font-size: 13px; color: var(--ink-muted); }
-.ws-acts details .cmd { margin-top: 8px; }
-.ws-note { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-note .ic { flex: none; margin-top: 2px; }
-.ws-note b { color: var(--ink); font-weight: 650; }
-.ws-none { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-none .ic { flex: none; margin-top: 2px; }
-.ws-routes { display: grid; gap: var(--space-3); }
-.ws-route { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--space-3); padding: var(--space-4); border-radius: var(--radius-md); box-shadow: inset 0 0 0 1px var(--line); }
-.ws-route > .tile { grid-row: span 2; }
-.ws-route__t { font-size: 14px; font-weight: 650; line-height: 20px; }
-.ws-route__s { font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-route__b { grid-column: 2; display: grid; gap: var(--space-3); margin-top: var(--space-2); }
-.ws-route__b .btn { justify-self: start; }
-.ws-route--plain { box-shadow: none; background: var(--surface-2); }
-.ws-kind { font-size: 12px; font-weight: 650; color: var(--ink-muted); }
-.ws-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); align-items: start; }
-.ws-grid > .card { min-width: 0; }
-.ws-mini .card__head { flex-wrap: wrap; row-gap: 6px; margin-bottom: 4px; }
-.ws-mini__run { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: var(--space-4); font-size: 13px; color: var(--ink-muted); }
-.ws-mini__run .code { font-weight: 700; color: var(--ink); }
-.ws-acts--gap { margin-top: var(--space-3); }
-.ws-lead { margin-bottom: var(--space-4); }
-.ws-reason { font-size: 13px; line-height: 20px; }
-@media (max-width: 1100px) { .ws-grid { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 760px) { .sandbox-opener, .sandbox-browser { display: none !important; } .ws-who__a { grid-column: 1 / -1; } }
+.ws-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px var(--space-4); }
+.ws-row__t { display: flex; align-items: center; gap: 10px; flex: 1 1 320px; min-width: 0; font-size: 14px; line-height: 20px; }
+.ws-row__t .dot { flex: none; }
+.ws-row__t span { color: var(--ink-muted); }
+.ws-row__t b { color: var(--ink); font-weight: 650; }
+.ws-row__a { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ws-more { margin-top: var(--space-3); }
+.ws-more summary { cursor: pointer; font-size: 13px; color: var(--ink-muted); }
+.ws-more__b { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+.ws-more__b .btn { justify-self: start; }
+.ws-found { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); font-size: 13px; line-height: 20px; color: var(--ink-muted); }
+.ws-found b { color: var(--ink); font-weight: 650; }
+.ws-tbl td { vertical-align: middle; }
+.ws-tbl .ws-line { min-width: 260px; font-size: 13px; line-height: 20px; }
+.ws-tbl .ws-line b { font-weight: 650; }
+.ws-tbl .ws-act { text-align: right; white-space: nowrap; }
+.ws-tbl .muted { font-size: 13px; }
+.ws-lead { display: flex; gap: 8px; align-items: flex-start; margin-bottom: var(--space-4); font-size: 13px; line-height: 20px; color: var(--ink-muted); }
+.ws-lead .ic { flex: none; margin-top: 2px; }
+@media (max-width: 760px) {
+  .sandbox-opener, .sandbox-browser { display: none !important; }
+  .ws-tbl .ws-line { min-width: 0; }
+  .ws-tbl .ws-act { text-align: left; }
+  .ws-tbl .ws-act:has(> .sandbox-opener:only-child), .ws-tbl .ws-act:has(> .muted:only-child) { display: none; }
+}
 </style>
 <style data-ds-status>
 .ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
@@ -121,25 +109,8 @@
   <div><p class="outcome__w">Completed</p><h2 id="oc-t" class="outcome__t">Finished in 22m on mini1</h2><p class="outcome__n">Merges are never automatic: try it in its workspace, then review the pull request on the forge.</p></div>
   <div class="outcome__act"><a class="btn btn--primary" href="#">Open acme/web#490</a><a class="btn" href="#p-workspace"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Try it in its workspace</a></div>
 </section><div class="cols"><div class="stack"><section class="card" id="p-workspace" data-panel>
-  <div class="card__head"><h2>Workspace</h2><span class="card__sub">try it before you merge</span><span class="end"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>1 open</span></span></div>
-  <div class="ws">
-  <div class="ws-state"><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-box"/></svg></span><div><p class="ws-state__t">Kept on mini1 <span class="vtag">local</span></p><p class="ws-state__s">Until 15:12 UTC tomorrow, 23h left. The same image and files as the run, a job’s isolation and network, no credentials.</p></div></div>
-  <div class="ws-who" role="status"><span class="dot tone-running"></span><div><p class="ws-who__t"><b>ops</b> has a shell open in a terminal</p><p class="ws-who__s">Since 15:20 UTC. Opening it again, in a browser or a terminal, joins that same shell: you would both type into one prompt.</p></div><div class="ws-who__a"><span class="sandbox-browser"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-globe"/></svg>Open in browser</a></span><span class="sandbox-opener"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Open in Terminal</a></span><a class="btn btn--sm btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-cancel"/></svg>Preview End</a></div></div>
-  <div class="ws-acts"><details><summary>Copy the command</summary><div class="cmd"><code>ssh -t -- ops@mini1 &#x27;/usr/bin/node&#x27; &#x27;/srv/pi/node_modules/@edgehero/pi-dispatch/src/cli.mjs&#x27; &#x27;sandbox&#x27; &#x27;gh-9575&#x27; &#x27;--deployment&#x27; &#x27;/srv/pi&#x27; &#x27;--expected-host&#x27; &#x27;mini1&#x27;</code><button class="btn btn--sm" type="button">Copy</button></div></details></div>
-  <p class="ws-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>One browser attaches at a time; a terminal can always join. End stops the shell and keeps the workspace.</span></p>
-</div>
-</section><section class="card" id="p-found" data-panel>
-  <div class="card__head"><h2>What you found</h2><span class="card__sub">after a look in its workspace</span></div>
-  <div class="ws"><ul class="ws-routes"><li class="ws-route"><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-edit"/></svg></span>
-  <p class="ws-route__t">Tell the next runs</p>
-  <p class="ws-route__s">Add a sentence to trigger 3’s instructions. Every run trigger 3 starts reads it.</p>
-  <div class="ws-route__b"><div class="field"><label for="ws-instr">Sentence to add</label><textarea id="ws-instr" class="textarea" rows="2">Run the test suite with npm test -- --runInBand before opening a pull request: the checkout tests share a port.</textarea></div>
-  <a class="btn" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-edit"/></svg>Preview the edit</a></div></li><li class="ws-route"><span class="tile tone-running"><svg class="ic" aria-hidden="true"><use href="#i-git"/></svg></span>
-  <p class="ws-route__t">Tell this run’s agent</p>
-  <p class="ws-route__s">Fork from its last saved point with a message. A separate branch and pull request; the original stays as it is.</p>
-  <div class="ws-route__b"><a class="btn btn--paid" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg>Preview a fork</a></div></li><li class="ws-route ws-route--plain"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-pr"/></svg></span>
-  <p class="ws-route__t">Push it yourself</p>
-  <p class="ws-route__s">From the shell, after <span class="code">gh auth login</span>. The commit is yours, and so is the merge.</p></li></ul><p class="ws-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span><b>Nothing you type in the shell reaches this run or the next one.</b> Only what you write here does.</span></p></div>
+  <div class="card__head"><h2>Workspace</h2><span class="card__sub">kept on mini1 until 15:12 UTC tomorrow</span></div>
+  <div class="ws-row"><p class="ws-row__t"><span class="dot tone-running"></span><span><b>ops</b> has a shell open, since 15:20 UTC. Opening it joins that shell.</span></p><div class="ws-row__a"><span class="sandbox-browser"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-globe"/></svg>Open in browser</a></span><span class="sandbox-opener"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Open in Terminal</a></span></div></div><details class="ws-more"><summary>Copy the command, or end the shell</summary><div class="ws-more__b"><div class="cmd"><code>ssh -t -- ops@mini1 &#x27;/usr/bin/node&#x27; &#x27;/srv/pi/node_modules/@edgehero/pi-dispatch/src/cli.mjs&#x27; &#x27;sandbox&#x27; &#x27;gh-9575&#x27; &#x27;--deployment&#x27; &#x27;/srv/pi&#x27; &#x27;--expected-host&#x27; &#x27;mini1&#x27;</code><button class="btn btn--sm" type="button">Copy</button></div><a class="btn btn--sm btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-cancel"/></svg>Preview End</a></div></details><p class="ws-found"><b>Found something?</b><a class="link" href="#">Add it to trigger 3’s instructions</a><a class="link" href="#">Fork it with a message</a></p>
 </section><section class="card" id="p-run" data-panel>
   <div class="card__head"><h2>Run</h2></div>
   <dl class="facts"><div class="fact"><dt>Job</dt><dd><span class="code">gh-9575</span></dd></div><div class="fact"><dt>Target</dt><dd><a class="link" href="#">acme/web#490</a></dd></div><div class="fact"><dt>Forge</dt><dd>github</dd></div><div class="fact"><dt>Flow</dt><dd>fix</dd></div><div class="fact"><dt>Project</dt><dd><span class="ptag">web</span></dd></div><div class="fact"><dt>Trigger</dt><dd>3, a comment with @pi</dd></div><div class="fact"><dt>Host</dt><dd>mini1</dd></div><div class="fact"><dt>Venue</dt><dd><span class="vtag">local</span></dd></div><div class="fact"><dt>Model</dt><dd>anthropic / claude-sonnet-5-5</dd></div><div class="fact"><dt>Turns</dt><dd>14 of 40</dd></div><div class="fact"><dt>Attempt</dt><dd>1</dd></div><div class="fact"><dt>Exit code</dt><dd>0</dd></div><div class="fact"><dt>Started</dt><dd>14:50 UTC</dd></div><div class="fact"><dt>Ended</dt><dd>15:12 UTC</dd></div><div class="fact"><dt>Took</dt><dd>22m</dd></div><div class="fact"><dt>Recovery</dt><dd>none needed</dd></div><div class="fact"><dt>Read from</dt><dd>mini1's run history</dd></div></dl>

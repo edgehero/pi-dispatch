@@ -17,8 +17,8 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-11-02T12:35:27Z",
+    "at": "2026-11-02T12:42:29Z",
     "via": "Claude",
-    "note": "Proposed, after the browser gateway (#754): a run's workspace on its run page (who is in it, how to open it, where a finding goes), the same panel outcome by outcome with Prepare from this run, and the gateway's terminal tab that shows its run and goes back to it."
+    "note": "Proposed, after the browser gateway (#754), kept simple: one line and one button about a run's workspace on each run page, the same row for every outcome as one table, and the gateway's terminal tab with its run in one line and the way back to it."
   }
 }

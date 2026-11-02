@@ -1,4 +1,4 @@
-<!-- @dsCard group="Runs" height=1500 width=1440 subtitle="The run page’s Workspace panel by outcome: try it, reproduce it, look before you answer, prepare from the run, or nothing to open" -->
+<!-- @dsCard group="Runs" height=890 width=1440 subtitle="The run page’s Workspace row by outcome, as one table: the line it says and the one button" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -49,43 +49,31 @@
 
 /* Ids and commands wrap inside a card on a phone rather than widening it. */
 .code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
-.ws { display: grid; gap: var(--space-4); }
-.ws-state { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); }
-.ws-state__t { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; font-weight: 650; }
-.ws-state__s { margin-top: 4px; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-who { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--space-3); align-items: start; padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); box-shadow: inset 0 0 0 1.5px var(--running); background: var(--running-tint); }
-.ws-who .dot { margin-top: 6px; }
-.ws-who__t { font-size: 14px; line-height: 20px; }
-.ws-who__s { margin-top: 2px; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-who__a { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--space-2); }
-.ws-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.ws-acts details { flex: 1 1 100%; min-width: 0; }
-.ws-acts details summary { cursor: pointer; font-size: 13px; color: var(--ink-muted); }
-.ws-acts details .cmd { margin-top: 8px; }
-.ws-note { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-note .ic { flex: none; margin-top: 2px; }
-.ws-note b { color: var(--ink); font-weight: 650; }
-.ws-none { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-none .ic { flex: none; margin-top: 2px; }
-.ws-routes { display: grid; gap: var(--space-3); }
-.ws-route { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px var(--space-3); padding: var(--space-4); border-radius: var(--radius-md); box-shadow: inset 0 0 0 1px var(--line); }
-.ws-route > .tile { grid-row: span 2; }
-.ws-route__t { font-size: 14px; font-weight: 650; line-height: 20px; }
-.ws-route__s { font-size: 13px; line-height: 20px; color: var(--ink-muted); }
-.ws-route__b { grid-column: 2; display: grid; gap: var(--space-3); margin-top: var(--space-2); }
-.ws-route__b .btn { justify-self: start; }
-.ws-route--plain { box-shadow: none; background: var(--surface-2); }
-.ws-kind { font-size: 12px; font-weight: 650; color: var(--ink-muted); }
-.ws-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); align-items: start; }
-.ws-grid > .card { min-width: 0; }
-.ws-mini .card__head { flex-wrap: wrap; row-gap: 6px; margin-bottom: 4px; }
-.ws-mini__run { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: var(--space-4); font-size: 13px; color: var(--ink-muted); }
-.ws-mini__run .code { font-weight: 700; color: var(--ink); }
-.ws-acts--gap { margin-top: var(--space-3); }
-.ws-lead { margin-bottom: var(--space-4); }
-.ws-reason { font-size: 13px; line-height: 20px; }
-@media (max-width: 1100px) { .ws-grid { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 760px) { .sandbox-opener, .sandbox-browser { display: none !important; } .ws-who__a { grid-column: 1 / -1; } }
+.ws-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px var(--space-4); }
+.ws-row__t { display: flex; align-items: center; gap: 10px; flex: 1 1 320px; min-width: 0; font-size: 14px; line-height: 20px; }
+.ws-row__t .dot { flex: none; }
+.ws-row__t span { color: var(--ink-muted); }
+.ws-row__t b { color: var(--ink); font-weight: 650; }
+.ws-row__a { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ws-more { margin-top: var(--space-3); }
+.ws-more summary { cursor: pointer; font-size: 13px; color: var(--ink-muted); }
+.ws-more__b { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+.ws-more__b .btn { justify-self: start; }
+.ws-found { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); font-size: 13px; line-height: 20px; color: var(--ink-muted); }
+.ws-found b { color: var(--ink); font-weight: 650; }
+.ws-tbl td { vertical-align: middle; }
+.ws-tbl .ws-line { min-width: 260px; font-size: 13px; line-height: 20px; }
+.ws-tbl .ws-line b { font-weight: 650; }
+.ws-tbl .ws-act { text-align: right; white-space: nowrap; }
+.ws-tbl .muted { font-size: 13px; }
+.ws-lead { display: flex; gap: 8px; align-items: flex-start; margin-bottom: var(--space-4); font-size: 13px; line-height: 20px; color: var(--ink-muted); }
+.ws-lead .ic { flex: none; margin-top: 2px; }
+@media (max-width: 760px) {
+  .sandbox-opener, .sandbox-browser { display: none !important; }
+  .ws-tbl .ws-line { min-width: 0; }
+  .ws-tbl .ws-act { text-align: left; }
+  .ws-tbl .ws-act:has(> .sandbox-opener:only-child), .ws-tbl .ws-act:has(> .muted:only-child) { display: none; }
+}
 </style>
 <style data-ds-status>
 .ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
@@ -113,31 +101,10 @@
 </header>
 
 <div class="titlebar">
-  <div class="titlebar__lead"><a class="back" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"/></svg>Runs</a><h1>The workspace, run by run</h1><p class="titlebar__sub">Where a run’s kept workspace opens, and what the page says when there is nothing to open.</p></div>
+  <div class="titlebar__lead"><a class="back" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"/></svg>Runs</a><h1>The workspace, run by run</h1><p class="titlebar__sub">What each run page says about its kept workspace, and the one thing to do.</p></div>
   
 </div>
-<p class="ws-note ws-lead"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>The Workspace panel as each run page draws it. Operator only: a viewer’s run page has no Workspace panel.</span></p><div class="ws-grid" id="p-workspace" data-panel><div class="stack"><section class="card ws-mini">
-  <div class="card__head"><h2>Try it before you merge</h2><span class="end"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></span></div>
-  <p class="ws-mini__run"><span class="code">gh-4add</span><span>acme/web#489, flow fix</span></p><div class="ws"><div class="ws-state"><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-box"/></svg></span><div><p class="ws-state__t">Kept on mini1 <span class="vtag">local</span></p><p class="ws-state__s">Until 14:39 UTC tomorrow, 23h left. The same image and files as the run, a job’s isolation and network, no credentials.</p></div></div><div class="ws-acts"><span class="sandbox-opener"><a class="btn btn--primary" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Open in Terminal</a></span><details><summary>Copy the command</summary><div class="cmd"><code>ssh -t -- ops@mini1 &#x27;/usr/bin/node&#x27; &#x27;/srv/pi/node_modules/@edgehero/pi-dispatch/src/cli.mjs&#x27; &#x27;sandbox&#x27; &#x27;gh-4add&#x27; &#x27;--deployment&#x27; &#x27;/srv/pi&#x27; &#x27;--expected-host&#x27; &#x27;mini1&#x27;</code><button class="btn btn--sm" type="button">Copy</button></div></details></div><p class="ws-note sandbox-browser"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-globe"/></svg><span><b>In a browser:</b> once a shell is open, Open in browser appears here. The browser attaches to a shell; it never starts one.</span></p></div>
-</section><section class="card ws-mini">
-  <div class="card__head"><h2>Look before you answer</h2><span class="end"><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Awaiting input</span></span></div>
-  <p class="ws-mini__run"><span class="code">gh-2f6a</span><span>acme/api#131, flow triage</span></p><div class="ws"><div class="ws-state"><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-box"/></svg></span><div><p class="ws-state__t">Kept on mini1 <span class="vtag">local</span></p><p class="ws-state__s">Until 15:13 UTC tomorrow, 23h left. The same image and files as the run, a job’s isolation and network, no credentials.</p></div></div><div class="ws-acts"><span class="sandbox-opener"><a class="btn btn--primary" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Open in Terminal</a></span><details><summary>Copy the command</summary><div class="cmd"><code>ssh -t -- ops@mini1 &#x27;/usr/bin/node&#x27; &#x27;/srv/pi/node_modules/@edgehero/pi-dispatch/src/cli.mjs&#x27; &#x27;sandbox&#x27; &#x27;gh-2f6a&#x27; &#x27;--deployment&#x27; &#x27;/srv/pi&#x27; &#x27;--expected-host&#x27; &#x27;mini1&#x27;</code><button class="btn btn--sm" type="button">Copy</button></div></details></div><p class="ws-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg><span><b>Your answer starts a new job from the saved transcript.</b> Nothing you change here reaches it unless you push it, so say what you found in your answer.</span></p><p><a class="link" href="#">Back to the answer</a></p></div>
-</section><section class="card ws-mini">
-  <div class="card__head"><h2>Nothing to open</h2><span class="end"><span class="badge tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg>Failed</span></span></div>
-  <p class="ws-mini__run"><span class="code">gh-f0c2</span><span>acme/web#491, flow fix</span></p><p class="ws-none"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>The container runtime never handed control to the job, so nothing ran and no workspace was kept. The outcome above offers a re-run.</span></p>
-</section><section class="card ws-mini">
-  <div class="card__head"><h2>Steer it instead</h2><span class="end"><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></span></div>
-  <p class="ws-mini__run"><span class="code">gh-b3d7</span><span>acme/web#415, flow fix</span></p><p class="ws-none"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-steer"/></svg><span>Its workspace opens once it ends. To change what it does now, steer it: a shell in a running job would act outside its cap and its record.</span></p><div class="ws-acts ws-acts--gap"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-steer"/></svg>Steer this run</a></div>
-</section></div><div class="stack"><section class="card ws-mini">
-  <div class="card__head"><h2>Reproduce it in its workspace</h2><span class="end"><span class="badge tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg>Failed</span></span></div>
-  <p class="ws-mini__run"><span class="code">gh-d40e</span><span>acme/web#484, flow fix</span></p><div class="ws"><p class="ws-reason">Stopped: the job’s container ran out of memory and was stopped. Partial work may exist.</p><div class="ws-state"><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-box"/></svg></span><div><p class="ws-state__t">Kept on mini1 <span class="vtag">local</span></p><p class="ws-state__s">Until 09:12 UTC tomorrow, 17h left. The shell gets the run’s 2,048 MiB limit, so the same command stops the same way.</p></div></div><div class="ws-acts"><span class="sandbox-opener"><a class="btn btn--primary" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Open in Terminal</a></span><details><summary>Copy the command</summary><div class="cmd"><code>ssh -t -- ops@mini1 &#x27;/usr/bin/node&#x27; &#x27;/srv/pi/node_modules/@edgehero/pi-dispatch/src/cli.mjs&#x27; &#x27;sandbox&#x27; &#x27;gh-d40e&#x27; &#x27;--deployment&#x27; &#x27;/srv/pi&#x27; &#x27;--expected-host&#x27; &#x27;mini1&#x27;</code><button class="btn btn--sm" type="button">Copy</button></div></details></div></div>
-</section><section class="card ws-mini">
-  <div class="card__head"><h2>Prepare from this run</h2><span class="end"><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></span></div>
-  <p class="ws-mini__run"><span class="code">gh-a91e</span><span>acme/web#422, flow fix</span></p><div class="ws"><p class="ws-none"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>Its venue, <span class="vtag">openshell</span> on mini2, has no sandbox shell, so it cannot reopen. The same holds once a workspace is swept or past its window.</span></p><dl class="facts facts--1"><div class="fact"><dt>Repository</dt><dd>acme/web</dd></div><div class="fact"><dt>Start from</dt><dd>its pull request, <span class="code">pr:526</span></dd></div><div class="fact"><dt>As the jobs of</dt><dd>trigger 3, comment, flow fix</dd></div><div class="fact"><dt>Host</dt><dd>mini1, <span class="vtag">local</span></dd></div></dl><p class="ws-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>A fresh clone of what the run pushed, not its own files. No container starts, no money is spent and no run slot is taken.</span></p><div class="ws-acts"><a class="btn btn--primary" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plus"/></svg>Preview preparation</a></div><div class="cmd"><code>pi-dispatch sandbox --new acme/web --ref pr:526 --as 3</code><button class="btn btn--sm" type="button">Copy</button></div></div>
-</section><section class="card ws-mini">
-  <div class="card__head"><h2>Nothing to open</h2><span class="end"><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span></span></div>
-  <p class="ws-mini__run"><span class="code">gh-e9a0</span><span>acme/billing#260, flow fix</span></p><p class="ws-none"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>It was refused before it started, so nothing ran and there is no workspace.</span></p>
-</section></div></div>
+<p class="ws-lead"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>Operator only: a viewer’s run page has no Workspace panel.</span></p><section class="card card--flush" id="p-workspace" data-panel aria-labelledby="ws-h"><div class="card__head"><h2 id="ws-h">Workspace, by outcome</h2><span class="card__sub">one line and one button on each run page</span></div><div class="tbl-wrap"><table class="tbl tbl--stack ws-tbl"><thead><tr><th>Run</th><th>Outcome</th><th>What the run page says</th><th class="ws-act">The one button</th></tr></thead><tbody><tr><td><span class="code">gh-4add</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ws-line wide"><b>Try it before you merge.</b> Kept until 14:39 UTC tomorrow.</td><td class="ws-act wide"><span class="sandbox-opener"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Open in Terminal</a></span></td></tr><tr><td><span class="code">gh-d40e</span></td><td><span class="badge tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg>Failed</span></td><td class="ws-line wide"><b>Reproduce it.</b> It ran out of memory; the shell has the same limit.</td><td class="ws-act wide"><span class="sandbox-opener"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Open in Terminal</a></span></td></tr><tr><td><span class="code">gh-2f6a</span></td><td><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Awaiting input</span></td><td class="ws-line wide"><b>Look before you answer.</b> Your answer starts a new job, so put what you find in it.</td><td class="ws-act wide"><span class="sandbox-opener"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-terminal"/></svg>Open in Terminal</a></span></td></tr><tr><td><span class="code">gh-a91e</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ws-line wide"><b>Cannot reopen</b> on openshell. Prepare a fresh copy of its pull request.</td><td class="ws-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plus"/></svg>Prepare from this run</a></td></tr><tr><td><span class="code">gh-b3d7</span></td><td><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></td><td class="ws-line wide"><b>Opens when it ends.</b> To change it now, steer it.</td><td class="ws-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-steer"/></svg>Steer this run</a></td></tr><tr><td><span class="code">gh-f0c2</span></td><td><span class="badge tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg>Failed</span></td><td class="ws-line wide"><b>Nothing to open:</b> its container never started.</td><td class="ws-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-e9a0</span></td><td><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span></td><td class="ws-line wide"><b>Nothing to open:</b> it was refused before it started.</td><td class="ws-act wide"><span class="muted">none</span></td></tr></tbody></table></div></section>
 </main>
 </body>
 </html>
