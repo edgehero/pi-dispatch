@@ -77,6 +77,28 @@ try {
 		await until(() => lines(output).includes("GATEWAY_RUNTIME_✓_界") && lines(output).includes("23 91"), "executed Unicode command and initial resize");
 		output = ""; await channel.resize({ cols: 100, rows: 30 }); channel.stream.write("stty size\r");
 		await until(() => lines(output).includes("30 100"), "live resize");
+		output = ""; channel.stream.write("printf '\\nBEFORE_WATCH_ONLY\\n'\r");
+		await until(() => lines(output).includes("BEFORE_WATCH_ONLY"), "pre-watch output");
+		let watching = "";
+		const watch = await runtime.attachWatch(target);
+		const watchDecoder = new StringDecoder("utf8");
+		watch.stream.on("error", () => {}); watch.stream.on("data", b => { watching += watchDecoder.write(b); });
+		assert.equal(typeof watch.stream.write, "undefined", "a watch exposes a readable runtime response, no input stream");
+		assert.equal(watch.resize, undefined, "a watch has no runtime resize capability");
+		await pause(100);
+		assert.equal(watching.includes("BEFORE_WATCH_ONLY"), false, "logs=false does not replay earlier output");
+		channel.stream.write("printf '\\nWATCH_RUNTIME_✓_界\\n'; stty size\r");
+		await until(() => lines(watching).includes("WATCH_RUNTIME_✓_界") && lines(watching).includes("30 100"), "read-only Unicode output at existing driver geometry");
+		watching = ""; await channel.resize({ cols: 101, rows: 31 }); channel.stream.write("stty size\r");
+		await until(() => lines(watching).includes("31 101"), "watch follows a driver-owned PTY resize");
+		watch.detach();
+		await pause(100);
+		assert.equal((await runtime.inspect(target)).ok, true); assert.equal(native.exitCode, null, "stopping a watch preserves driver and native owner");
+		output = ""; channel.stream.write("printf '\\nDRIVER_SURVIVES_WATCH\\n'\r");
+		await until(() => lines(output).includes("DRIVER_SURVIVES_WATCH"), "driver still accepts input after watch detach");
+		const abruptWatch = await runtime.attachWatch(target); abruptWatch.stream.on("error", () => {}); abruptWatch.stream.destroy();
+		await pause(100);
+		assert.equal((await runtime.inspect(target)).ok, true); assert.equal(native.exitCode, null, "abrupt read-only transport loss leaves the original shell alive");
 		output = ""; channel.stream.write("sleep 30\r"); await pause(200); channel.stream.write("\x03"); channel.stream.write("printf '\\nGATEWAY_INTERRUPTED\\n'\r");
 		await until(() => lines(output).includes("GATEWAY_INTERRUPTED"), "Ctrl-C foreground interruption");
 		channel.detach(); await pause(100);
@@ -101,5 +123,5 @@ try {
 		await cli(["rm", "-f", ...(venue === "podman" ? ["--time=0"] : []), target.containerId]);
 		await until(async () => (await runtime.inspect(target)).refused === "sandbox-ended", "external End");
 	});
-	console.log(`sandbox gateway ${venue}: Unicode, resize, Ctrl-C/Ctrl-D, native PTY/StdinOnce, detach, abrupt loss, shell exit, idle and external End passed`);
+	console.log(`sandbox gateway ${venue}: Unicode, resize, read-only watch/no-history/no-input, driver/native survival, Ctrl-C/Ctrl-D, native PTY/StdinOnce, detach, abrupt loss, shell exit, idle and external End passed`);
 } finally { rmSync(root, { recursive: true, force: true }); }

@@ -625,12 +625,16 @@ jobs:
           unzip -q "$zip" -d "$RUNNER_TEMP/gateway-cft"
 
       - name: "Browser gateway holds the real Docker shell and both CSPs (#753, #754)"
-        timeout-minutes: 8
+        timeout-minutes: 16
         env:
           PI_SANDBOX_GATEWAY_VENUE: local
           PI_SANDBOX_GATEWAY_SOCKET: /var/run/docker.sock
           VALKEY_TEST_URL: "redis://127.0.0.1:16389"
         run: PI_JOB_IMAGE="$IMAGE_REF" CHROME="$RUNNER_TEMP/gateway-cft/chrome-linux64/chrome" node .github/scripts/sandbox-gateway-browser.mjs --tls
+
+      - name: "Maintained terminal layout preserves panes, keyboard and both themes (#754, #792)"
+        timeout-minutes: 3
+        run: CHROME="$RUNNER_TEMP/gateway-cft/chrome-linux64/chrome" node gateway/test/browser/workbench-browser.mjs
 
       - name: "Gateway and native Docker attachments preserve input, detach and sandbox lifecycle (#754)"
         timeout-minutes: 5

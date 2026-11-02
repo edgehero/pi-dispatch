@@ -16,7 +16,7 @@ export async function buildGatewayAssets({ write = false, outdir = join(here, "d
 	// xterm itself supports current browsers; lowering its published artifact to Safari 14 is unsupported.
 	const bundle = (entry, format, target) => build({ entryPoints: [join(here, "src", entry)], bundle: true, write: false, format, platform: "browser", target, external: ["/static/terminal.js"], legalComments: "inline", logLevel: "silent" });
 	const [bootstrap, terminal] = await Promise.all([bundle("bootstrap.mjs", "iife", ["chrome88", "safari14", "firefox78"]), bundle("terminal-entry.mjs", "esm", ["chrome100", "safari16.4", "firefox100"])]);
-	const assets = { script: bootstrap.outputFiles[0].text, terminalScript: terminal.outputFiles[0].text, css: `${GATEWAY_CSS}\n${readFileSync(require.resolve("@xterm/xterm/css/xterm.css"), "utf8")}` };
+	const assets = { script: bootstrap.outputFiles[0].text, terminalScript: terminal.outputFiles[0].text, css: `${GATEWAY_CSS}\n${readFileSync(require.resolve("@xterm/xterm/css/xterm.css"), "utf8")}\n${readFileSync(require.resolve("dockview/dist/styles/dockview.css"), "utf8")}` };
 	if (write) {
 		mkdirSync(outdir, { recursive: true });
 		for (const [name, text] of [["gateway.js", assets.script], ["terminal.js", assets.terminalScript], ["gateway.css", assets.css]]) writeFileSync(join(outdir, name), text);

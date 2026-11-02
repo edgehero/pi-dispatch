@@ -237,7 +237,7 @@ jobs:
           echo "GATEWAY_CHROME_DIR=$cftdir" >> "$GITHUB_ENV"
 
       - name: "Browser gateway holds the real rootless Podman shell and both CSPs (#753, #754)"
-        timeout-minutes: 8
+        timeout-minutes: 16
         run: |
           as-pdjob systemctl --user start podman.socket
           as-pdjob env GITHUB_ACTIONS=true PI_JOB_IMAGE="$PI_JOB_IMAGE" \

@@ -11,8 +11,9 @@ export const GATEWAY_BOOT_WORDS = Object.freeze({
 	expired: ["This launch has ended", "The one-use authorization expired or was already used. Return to Sandboxes and start a new browser launch."],
 	loading: ["Opening the terminal", "Authorization was accepted. The terminal connects only to this gateway."],
 	coordination: ["Use your own terminal", "This browser cannot coordinate secure gateway launches. Return to Sandboxes and use Open in Terminal or copy the command."],
-	busy: ["Already open", "One browser terminal already owns this sandbox attachment. Use its existing tab, or disconnect it before authorizing a fresh launch."],
+	busy: ["Already open", "This exact browser attachment is already open. Use its existing workspace window, or disconnect it before authorizing a fresh launch."],
 	runtime: ["Sandbox runtime unavailable", "The gateway could not verify this existing shell. Inspect its host before authorizing a fresh launch. No container was started."],
+	session: ["This workspace uses another sign-in", "An existing workspace keeps its original sign-in even when all its tabs are closed. Close that workspace before opening a terminal with a different sign-in."],
 	limited: ["The gateway is at its connection limit", "No terminal opened. Disconnect an existing browser attachment or wait, then start a fresh launch from Sandboxes."],
 });
 
@@ -39,6 +40,7 @@ export function gatewayAuthorizeUrl(raw, consoleOrigin, intentId) {
 
 /** Only known closed reasons select copy; never display a runtime or response error string. */
 export function gatewayBootRefusal(status, reason) {
+	if (reason === "workbench-session-changed") return "session";
 	if (reason === "window-busy") return "busy";
 	if (reason === "runtime-unavailable" || reason === "runtime-environment") return "runtime";
 	if (status === 429) return "limited";
@@ -82,18 +84,18 @@ export async function startGatewayPage(options = {}) {
 			if (!exchange.ok) { say(gatewayBootRefusal(exchange.status, exchange.data?.error)); return { state: "refused" }; }
 			const result = exchange.data;
 			const destination = gatewayAuthorizeUrl(result.authorizeUrl, consoleOrigin, launch.intentId);
-			if (!destination) { say("invalid"); return { state: "invalid" }; }
-			window.location.replace(destination);
+			if (!destination || !/^[A-Za-z0-9_-]{43}$/.test(result.receipt ?? "")) { say("invalid"); return { state: "invalid" }; }
+			// The receipt proves to the console that the tab stepping up is the browser that just bound this intent. Without
+			// it, an operator could send the launch link to someone else, step up from their own tab, and arm that browser.
+			// A fragment reaches neither server, nor a Referer.
+			window.location.replace(`${destination}#receipt=${result.receipt}`);
 			return { state: "authorize" };
 		}
-		const response = await boundedGatewayCall(window, (signal) => requestGateway(fetch, "/api/connect", { intentId: launch.intentId, width: window.innerWidth, cols: 80, rows: 24 }, signal));
-		if (!response.ok) { say(gatewayBootRefusal(response.status, response.data?.error)); return { state: "refused" }; }
-		const connection = response.data;
-		if (!PUBLIC_ID.test(connection.connectionId ?? "")) { say("invalid"); return { state: "invalid" }; }
-		if (window.matchMedia(`(max-width: ${GATEWAY_BROWSER_MIN_WIDTH - 1}px)`).matches) { say("phone"); return { state: "phone" }; }
+		const deadline = window.performance.now() + 15000;
 		say("loading");
 		const terminal = await boundedGatewayCall(window, () => importTerminal());
-		return { state: "terminal", controller: await terminal.mountGateway({ window, document, connection }) };
+		if (typeof terminal.startWorkbenchLaunch !== "function") { say("unavailable"); return { state: "unavailable" }; }
+		return await terminal.startWorkbenchLaunch({ window, document, intentId: launch.intentId, fetch, deadline, onRefusal: (status, reason) => say(gatewayBootRefusal(status, reason)) });
 	} catch {
 		say("unavailable");
 		return { state: "unavailable" };

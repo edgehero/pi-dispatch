@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { parseDocument, Event } from "../../admin/test/helpers/script-dom.mjs";
-import { gatewayAuthorizeUrl, readGatewayLaunch, startGatewayPage, GATEWAY_BROWSER_MIN_WIDTH, GATEWAY_BOOT_TIMEOUT_MS } from "../src/bootstrap.mjs";
+import { Event } from "../../admin/test/helpers/script-dom.mjs";
+import { world } from "./helpers/frontend-world.mjs";
+import { gatewayBootRefusal, gatewayAuthorizeUrl, readGatewayLaunch, startGatewayPage, GATEWAY_BROWSER_MIN_WIDTH, GATEWAY_BOOT_TIMEOUT_MS } from "../src/bootstrap.mjs";
 import { GATEWAY_END_WORDS, mountGateway, terminalConnection } from "../src/browser.mjs";
 import { gatewayConsoleOrigin, gatewayPage } from "../src/page.mjs";
 import { gatewayDimensions, GATEWAY_LIMITS } from "../src/terminal-protocol.mjs";
@@ -17,69 +18,6 @@ test("every server end reason has fixed browser copy; connection loss is deliber
 	assert.ok(GATEWAY_END_WORDS["connection-lost"]);
 });
 
-class Target {
-	listeners = new Map();
-	addEventListener(type, fn) { const list = this.listeners.get(type) ?? []; list.push(fn); this.listeners.set(type, list); }
-	removeEventListener(type, fn) { this.listeners.set(type, (this.listeners.get(type) ?? []).filter((value) => value !== fn)); }
-	emit(type, data = {}) { for (const fn of [...(this.listeners.get(type) ?? [])]) fn({ type, ...data }); }
-}
-
-function world({ fragment = "", width = 1440 } = {}) {
-	const sequence = [], requests = [], imports = [], destinations = [], tasks = new Map();
-	let clock = 0, timerId = 0;
-	const document = parseDocument(gatewayPage({ consoleOrigin: CONSOLE }));
-	document.fonts = { ready: Promise.resolve() };
-	const phone = new Target(); phone.matches = width <= 760;
-	const colors = new Target(); colors.matches = true;
-	const window = Object.assign(new Target(), {
-		innerWidth: width, location: { href: `http://localhost:4791/s/${I}${fragment}`, origin: "http://localhost:4791", replace(url) { destinations.push(url); sequence.push("navigate"); } },
-		AbortController,
-		performance: { now: () => clock },
-		history: { replaceState(_state, _title, path) { sequence.push("scrub"); this.path = path; } },
-		matchMedia(query) { return query.includes("max-width") ? phone : colors; },
-		navigator: { locks: { request: async (_name, _options, fn) => fn() } },
-		getComputedStyle() { return { getPropertyValue(name) { return ({ "--ink": "#f3f4f2", "--surface-2": "#202121", "--font-mono": 'ui-monospace, "SF Mono", monospace' })[name] ?? ""; } }; },
-		setTimeout(fn, delay = 0) { const id = ++timerId; tasks.set(id, { fn, at: clock + delay }); return id; }, clearTimeout(id) { tasks.delete(id); },
-	});
-	const sockets = [], terminals = [];
-	class Socket extends Target {
-		readyState = 0; bufferedAmount = 0; sent = []; sentAt = []; closed = [];
-		constructor(url) { super(); this.url = url; sockets.push(this); }
-		send(text) { const message = JSON.parse(text); this.sent.push(message); this.sentAt.push({ at: clock, message }); }
-		close(code, reason) { this.closed.push({ code, reason }); this.readyState = 3; }
-		open() { this.readyState = 1; this.emit("open"); }
-		ready() { this.open(); this.emit("message", { data: JSON.stringify({ type: "ready" }) }); }
-	}
-	class Terminal {
-		cols = 90; rows = 22; writes = []; osc = new Map();
-		constructor(options) { this.options = options; terminals.push(this); this.parser = { registerOscHandler: (id, handler) => { this.osc.set(id, handler); return { dispose: () => this.osc.delete(id) }; } }; }
-		loadAddon(addon) { this.addon = addon; }
-		open(parent) { this.parent = parent; this.element = parent; this.textarea = document.createElement("textarea"); parent.appendChild(this.textarea); }
-		attachCustomKeyEventHandler(handler) { this.key = handler; }
-		onData(handler) { this.input = handler; return { dispose: () => { this.inputDisposed = true; } }; }
-		onKey(handler) { this.userKey = handler; return { dispose: () => { this.userKeyDisposed = true; } }; }
-		write(data, done) { this.writes.push({ data, done }); if (!this.holdWrites) done(); }
-		focus() { this.textarea.focus(); }
-		resize(cols, rows) { this.cols = cols; this.rows = rows; }
-		reset() { this.resetCalled = true; }
-		dispose() { this.disposed = true; }
-	}
-	class FitAddon { fit() { this.fits = (this.fits ?? 0) + 1; } }
-	window.WebSocket = Socket;
-	let response = { ok: true, status: 200, async json() { return { authorizeUrl: `${CONSOLE}/sandbox/gateway/authorize?intent=${I}` }; } };
-	const fetch = async (url, init) => { sequence.push("fetch"); requests.push({ url, ...init, body: JSON.parse(init.body) }); return response; };
-	const importTerminal = async () => { sequence.push("import"); imports.push(true); return { mountGateway: async (opts) => mountGateway({ ...opts, Terminal, FitAddon }) }; };
-	const advance = (ms) => {
-		const target = clock + ms;
-		for (;;) {
-			const next = [...tasks].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
-			if (!next) break;
-			tasks.delete(next[0]); clock = next[1].at; next[1].fn();
-		}
-		clock = target;
-	};
-	return { window, document, phone, sequence, requests, imports, destinations, sockets, terminals, Terminal, FitAddon, fetch, importTerminal, tasks, advance, response(value) { response = value; }, flushTimers() { const latest = Math.max(clock, ...[...tasks.values()].map((timer) => timer.at)); advance(latest - clock); }, text(id) { return document.getElementById(`gateway-${id}`).textContent; } };
-}
 
 test("public shell contains no session, intent, sandbox fact or inline executable resource; return origin is enrolled", () => {
 	const text = gatewayPage({ consoleOrigin: CONSOLE, theme: "dark", host: "PRIVATE_HOST", intentId: I, token: "PRIVATE_TOKEN" });
@@ -100,7 +38,7 @@ test("bootstrap scrubs handoff synchronously before requests/imports; sends only
 	assert.equal(w.window.history.path, `/s/${I}`);
 	assert.deepEqual(w.requests[0].body, { intentId: I, handoff: H });
 	assert.equal(w.requests[0].url, "/api/bootstrap"); assert.equal(w.requests[0].credentials, "same-origin");
-	assert.deepEqual(w.destinations, [`${CONSOLE}/sandbox/gateway/authorize?intent=${I}`]);
+	assert.deepEqual(w.destinations, [`${CONSOLE}/sandbox/gateway/authorize?intent=${I}#receipt=${"r".repeat(43)}`]);
 	assert.equal(w.document.body.textContent.includes(H), false); assert.equal(w.imports.length, 0);
 	const source = readFileSync(new URL("../src/bootstrap.mjs", import.meta.url), "utf8");
 	assert.doesNotMatch(source, /^\s*import\s/m, "the fragment entry has no static imports");
@@ -126,8 +64,8 @@ test("first cookie binding is serialized across launch tabs until the previous e
 	const first = world({ fragment: `#handoff=${H}` }), second = world({ fragment: `#handoff=${H}` });
 	first.window.navigator.locks = locks; second.window.navigator.locks = locks;
 	let cookie = null; const observed = [];
-	first.fetch = async () => { observed.push(cookie); await new Promise((resolve) => { firstDone = resolve; }); cookie = "first-browser-cookie"; return { ok: true, json: async () => ({ authorizeUrl: `${CONSOLE}/sandbox/gateway/authorize?intent=${I}` }) }; };
-	second.fetch = async () => { observed.push(cookie); return { ok: true, json: async () => ({ authorizeUrl: `${CONSOLE}/sandbox/gateway/authorize?intent=${I}` }) }; };
+	first.fetch = async () => { observed.push(cookie); await new Promise((resolve) => { firstDone = resolve; }); cookie = "first-browser-cookie"; return { ok: true, json: async () => ({ authorizeUrl: `${CONSOLE}/sandbox/gateway/authorize?intent=${I}`, receipt: "r".repeat(43) }) }; };
+	second.fetch = async () => { observed.push(cookie); return { ok: true, json: async () => ({ authorizeUrl: `${CONSOLE}/sandbox/gateway/authorize?intent=${I}`, receipt: "r".repeat(43) }) }; };
 	const a = startGatewayPage(first), b = startGatewayPage(second);
 	await Promise.resolve(); await Promise.resolve();
 	assert.deepEqual(observed, [null], "the second first-visit POST cannot race the first Set-Cookie response");
@@ -145,8 +83,8 @@ test("phone arrivals refuse before cookie exchange or grant redemption, includin
 	}
 });
 
-test("a lost bootstrap/connect response has a finite deadline, aborts and never imports or retries", async () => {
-	for (const fragment of ["", `#handoff=${H}`]) {
+test("a lost cookie bootstrap response has a finite deadline, aborts and never imports or retries", async () => {
+	for (const fragment of [`#handoff=${H}`]) {
 		const w = world({ fragment }); let signal, count = 0;
 		w.fetch = (_url, init) => { signal = init.signal; count++; return new Promise(() => {}); };
 		const pending = startGatewayPage(w);
@@ -170,6 +108,39 @@ test("a terminal asset that loads after its deadline cannot create a late attach
 	assert.equal(mounted, 0); assert.equal(w.sockets.length, 0);
 });
 
+test("a focus request survives an overlay that is not unhidden yet, and never takes focus back from where the person went", async () => {
+	// Dockview raises a pane's visibility event before it unhides the overlay, and a hidden element refuses focus without an
+	// error. Modelled here by a textarea that refuses focus until told otherwise (the real overlay is in workbench-browser.mjs).
+	const start = async () => {
+		const w = world(), frames = [];
+		w.window.requestAnimationFrame = fn => { frames.push(fn); return frames.length; };
+		const ctl = await mountGateway({ ...w, connection: admitted(), autoFocus: false }); w.sockets[0].ready();
+		const area = w.terminals[0].textarea, realFocus = area.focus.bind(area);
+		let hidden = true; area.focus = () => { if (!hidden) realFocus(); };
+		const outside = w.document.createElement("button"); w.document.body.appendChild(outside);
+		return { w, ctl, frames, area, outside, unhide() { hidden = false; }, nextFrame() { frames.splice(0).forEach(fn => fn()); } };
+	};
+	const first = await start();
+	first.outside.focus(); first.ctl.focus();
+	assert.equal(first.w.document.activeElement, first.outside, "the overlay refuses focus for now");
+	assert.equal(first.frames.length, 1, "the request is kept, not dropped");
+	first.nextFrame(); first.unhide(); first.nextFrame();
+	assert.equal(first.w.document.activeElement, first.area, "focus lands once the overlay can take it");
+	assert.equal(first.frames.length, 0, "and nothing keeps retrying after that");
+
+	const second = await start();
+	const elsewhere = second.w.document.createElement("button"); second.w.document.body.appendChild(elsewhere);
+	second.outside.focus(); second.ctl.focus();
+	elsewhere.focus(); second.unhide(); second.nextFrame();
+	assert.equal(second.w.document.activeElement, elsewhere, "a person who moved on keeps their focus");
+	assert.equal(second.frames.length, 0);
+
+	const third = await start();
+	third.outside.focus(); third.ctl.focus();
+	for (let frame = 0; frame < 30; frame++) third.nextFrame();
+	assert.equal(third.frames.length, 0, "a pane that never unhides stops retrying");
+});
+
 test("gateway callback URL is exact enrollment and public intent, never a server-provided open redirect", async () => {
 	const correct = `${CONSOLE}/sandbox/gateway/authorize?intent=${I}`;
 	assert.equal(gatewayAuthorizeUrl(correct, CONSOLE, I), correct);
@@ -180,25 +151,51 @@ test("gateway callback URL is exact enrollment and public intent, never a server
 	}
 });
 
-test("connect uses cookie-bound POST and loads xterm only after successful admission; failure never retries", async () => {
-	const w = world(); w.response({ ok: true, json: async () => admitted() });
-	const out = await startGatewayPage(w);
-	assert.equal(out.state, "terminal"); assert.deepEqual(w.sequence, ["fetch", "import"]);
-	assert.deepEqual(w.requests[0].body, { intentId: I, width: 1440, cols: 80, rows: 24 });
-	assert.equal(w.requests[0].url, "/api/connect"); assert.equal(w.sockets[0].url, `ws://localhost:4791/socket/${C}`);
-	for (const status of [401, 403, 409, 410, 503]) {
-		const fail = world(); fail.response({ ok: false, status, json: async () => ({ error: "PRIVATE_RUNTIME_ERROR" }) });
-		assert.equal((await startGatewayPage(fail)).state, "refused"); assert.equal(fail.requests.length, 1); assert.equal(fail.imports.length, 0);
-		assert.equal(fail.document.body.textContent.includes("PRIVATE_RUNTIME_ERROR"), false);
-	}
-	out.controller.disconnect();
+test("a scrubbed return delegates one public intent and the remaining opening budget to the owner coordinator", async () => {
+	const w = world(); let seen;
+	w.importTerminal = async () => { w.sequence.push("import"); return { startWorkbenchLaunch: async options => { seen = options; return { state: "workbench" }; } }; };
+	assert.equal((await startGatewayPage(w)).state, "workbench");
+	assert.deepEqual(w.sequence, ["import"]); assert.equal(w.requests.length, 0);
+	assert.equal(seen.intentId, I); assert.equal(seen.deadline, 15000); assert.equal(seen.fetch, w.fetch);
 });
 
-test("a second attachment reports the occupied window rather than an expired grant, with no error-string reflection", async () => {
-	for (const [status, error, title] of [[409, "window-busy", "Already open"], [409, "runtime-unavailable", "Sandbox runtime unavailable"], [429, "connection-limit", "The gateway is at its connection limit"]]) {
-		const w = world(); w.response({ ok: false, status, json: async () => ({ error }) });
-		assert.equal((await startGatewayPage(w)).state, "refused"); assert.equal(w.text("state-title"), title); assert.equal(w.imports.length, 0); assert.equal(w.requests.length, 1);
+test("closed admission errors distinguish occupied, unavailable and capacity without reflecting response strings", () => {
+	for (const [status, reason, key] of [[409, "window-busy", "busy"], [409, "runtime-unavailable", "runtime"], [429, "connection-limit", "limited"], [503, "PRIVATE", "unavailable"]]) assert.equal(gatewayBootRefusal(status, reason), key);
+});
+
+test("a bootstrap reply without a well-formed receipt goes nowhere", async () => {
+	for (const receipt of [undefined, "", "short", `${"r".repeat(43)}#x`]) {
+		const w = world({ fragment: `#handoff=${H}` });
+		w.response({ ok: true, json: async () => ({ authorizeUrl: `${CONSOLE}/sandbox/gateway/authorize?intent=${I}`, receipt }) });
+		assert.equal((await startGatewayPage({ ...w })).state, "invalid");
+		assert.deepEqual(w.destinations, []);
 	}
+});
+
+test("an ended terminal stops saying Connected and offers the way back; a watch says it is waiting until its first byte", async () => {
+	const w = world(); const ctl = await mountGateway({ ...w, connection: admitted(), returnHref: "http://console.example.test/sandbox/gateway/return" }); w.sockets[0].ready();
+	const pill = w.document.getElementById("gateway-connection"), back = w.document.getElementById("gateway-terminal-return");
+	assert.equal(pill.textContent, "Connected"); assert.equal(back.hidden, true);
+	ctl.disconnect();
+	assert.equal(pill.textContent, "Disconnected"); assert.doesNotMatch(pill.className, /tone-running/);
+	assert.equal(back.hidden, false); assert.equal(back.getAttribute("href"), "http://console.example.test/sandbox/gateway/return");
+
+	const seen = world(); await mountGateway({ ...seen, connection: { ...admitted(), kind: "watch", driver: { name: "lee", ownerKey: "c".repeat(64) }, geometry: { cols: 80, rows: 24, revision: 0 } } }); seen.sockets[0].ready();
+	const waiting = seen.document.getElementById("gateway-waiting");
+	assert.equal(waiting.hidden, false, "a watcher's quiet shell does not look like a broken page");
+	seen.sockets[0].emit("message", { data: new TextEncoder().encode("x").buffer });
+	assert.equal(waiting.hidden, true);
+});
+
+test("every admission refusal is one of the fixed words, never the response's own string", () => {
+	const hostile = '<img src=x onerror=alert(1)>';
+	for (const status of [401, 403, 409, 410, 503]) assert.ok(["expired", "unavailable"].includes(gatewayBootRefusal(status, hostile)), `${status} maps to a fixed word`);
+	assert.equal(gatewayBootRefusal(429, hostile), "limited");
+});
+
+test("the terminal socket is this origin's own path for the admitted connection, and nothing else", async () => {
+	const w = world(); await mountGateway({ ...w, connection: admitted() });
+	assert.equal(w.sockets[0].url, `ws://localhost:4791/socket/${C}`);
 });
 
 test("terminal accepts admitted text only, disables browser escape capabilities and preserves literal shell keys", async () => {
@@ -207,8 +204,8 @@ test("terminal accepts admitted text only, disables browser escape capabilities 
 	assert.equal(term.options.linkHandler.allowNonHttpProtocols, false); assert.equal(term.options.linkHandler.activate("javascript:evil"), undefined);
 	assert.deepEqual([...term.osc.keys()], [0, 1, 2, 8, 52]); for (const hook of term.osc.values()) assert.equal(hook("PRIVATE_HOSTILE_BYTES"), true);
 	assert.equal(term.key({ key: "Escape" }), true); assert.equal(term.key({ key: "c", ctrlKey: true }), true);
-	assert.equal(term.key({ key: "Tab" }), false); w.document.getElementById("gateway-tab-focus").checked = false; assert.equal(term.key({ key: "Tab" }), true);
-	let prevented = false; assert.equal(term.key({ key: "M", ctrlKey: true, shiftKey: true, type: "keydown", preventDefault() { prevented = true; } }), false); assert.equal(prevented, true); assert.equal(w.document.getElementById("gateway-tab-focus").checked, true);
+	assert.equal(term.key({ key: "Tab" }), false); ctl.setTabMovesFocus(false); assert.equal(term.key({ key: "Tab" }), true);
+	let prevented = false; assert.equal(term.key({ key: "M", ctrlKey: true, shiftKey: true, type: "keydown", preventDefault() { prevented = true; } }), false); assert.equal(prevented, true); assert.equal(ctl.tabMovesFocus, true);
 	socket.open(); term.input("PRE_READY_NEVER_SENT"); assert.equal(term.options.disableStdin, true); assert.equal(socket.sent.length, 0);
 	socket.emit("message", { data: JSON.stringify({ type: "ready" }) }); assert.equal(term.options.disableStdin, false); assert.equal(w.text("connection"), "Connected");
 	term.input("echo 界\u001b[D\u0003\r"); assert.deepEqual(socket.sent.at(-1), { type: "input", data: "echo 界\u001b[D\u0003\r" });

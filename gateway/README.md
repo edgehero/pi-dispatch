@@ -12,6 +12,15 @@ Use the existing runtime account and an explicit Docker or rootless Podman socke
 already running, registered sandbox. It cannot create a container, choose an image, start another shell or end the
 sandbox. Open in Terminal and the command-copy route remain available.
 
+The browser workspace uses exact-pinned xterm.js and Dockview for up to four terminal tabs with split panes.
+Adding a terminal selects another existing shell through fresh console authorization. Moving a pane preserves its
+connection; closing it detaches only that pane. Run context and the return link follow the selected terminal.
+
+A writing operator may enable read-only watching for up to three other attachments. It is off by default per
+terminal, with a persistent named roster and individual Remove controls. Each watcher verifies their own operator
+token. Watch attachments have no runtime input stream or resize capability, receive only new output at the
+driver's dimensions, and end on driver/consent/session loss. Stop watching leaves the driver and shell running.
+
 The gateway needs its own hostname, separate from the console, and HTTPS for public access. Another port on the same
 hostname does not isolate cookies. Each browser opening requires the original console tab and operator session,
 fresh same-token verification, a cookie-bound one-use grant and current authorization. Closing the browser detaches
