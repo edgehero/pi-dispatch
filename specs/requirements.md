@@ -1093,6 +1093,15 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-CONSOLE-SECURITY
 
+- **ADOPTED 2026-11-02 (#754, implementation pending)**: `REQ-SANDBOX-BROWSER-GATEWAY` permits only a separate
+  process, hostname and tab for an existing sandbox's terminal. Console launch/step-up actions are person-only,
+  require the original live operator session and fresh same-token authentication, and disclose no durable token,
+  console session ID or terminal bytes. The attachment grant stays server-side and binds the separate gateway's
+  browser cookie. Console CSP, Host/Origin/person/role/read-only guards and its exclusion of runtime/forge/provider
+  credentials are UNCHANGED, checked. No terminal, pty or WebSocket enters the console. The new requirement and
+  `INT-SANDBOX-GATEWAY-CONTRACT` define the secret bootstrap fragment and bounded authorization lease; the native
+  opener's link remains secret-free. This prerequisite decision claims no implementation acceptance.
+
 - **AMENDED 2026-11-01 (#774)**: the setup exceptions are strictly those in
   `REQ-BROWSER-FIRST-RUN-SETUP` and `INT-CONSOLE-SETUP-HOST`. Clause (g)'s shared funnels gain bounded host setup
   plan/apply operations under an explicit process grant; the console gains no arbitrary command path. Clause
@@ -1552,7 +1561,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 - **Models (#773)** (`/models`, viewer, not live). The page reads only its declared sources, shows its drawn time and Reload, and puts actionable Radius/capped-model and role-resolution warnings before Model roles, Cooling down, Models in use and Proposals. Roles retain their default/project scope, ordered fallbacks, linked trigger row numbers and flows; repository-agent usage is explicitly unavailable. Effective trigger-owned fallbacks remain distinct from role-owned fallbacks. Forecasts name their observed pricing/cooldown basis and the admission gates still to come; a job with no effective fallback starts on its primary. Configured cooldown keys only are read, with a worded cause and UTC end; no provider text, start time or progress fraction is inferred. Model windows retain unknown spend. Published proposals retain host/age/coverage; canary comparisons show retained source/candidate execution results and denominators, never a reconstructed experiment or quality claim. Operators may preview a role edit, prefill one from a canary, or copy a host canary command. Viewers, agents and read-only consoles receive no edit/adopt/command controls. Both themes, phone/intermediate/desktop layouts, native read navigation, keyboard interaction, production CSP, exceptional states and the complete ModelsScreen component ledger are verified behaviorally and in rendered captures.
 
-- **Extension (#771)**: Runs has an operator-only Sandboxes tab with kept-workspace selection, fresh preparation, tracked open shells and dated per-host inventory. Phones expose selectable/copyable commands only. Missing, stale, unreadable, truncated and unsupported-host/venue states are explicit. Viewer page, panel, API and event responses carry no private sandbox controls or shell list. The browser proposal remains off under `OQ-050`.
+- **Extension (#771)**: Runs has an operator-only Sandboxes tab with kept-workspace selection, fresh preparation, tracked open shells and dated per-host inventory. Phones expose selectable/copyable commands only. Missing, stale, unreadable, truncated and unsupported-host/venue states are explicit. Viewer page, panel, API and event responses carry no private sandbox controls or shell list. `OQ-050` adopts the separately specified gateway under `REQ-SANDBOX-BROWSER-GATEWAY`; it stays unavailable until implemented and verified.
 
 - **Extension (#770)**: Issue #770 adds the on-demand, viewer-readable second Runs tab and its operator-only question groups. Covered windows, theme/role/width states and native no-script reads follow `REQ-ZERO-TOUCH-RATE`; no question text enters a list.
 
@@ -3048,6 +3057,12 @@ writes retain their existing interactive confirmation. This adds no unattended p
   `.github/scripts/console-width-check.mjs --require`.
 
 ## REQ-OPERATOR-CONSOLE-ACTIONS
+
+- **ADOPTED 2026-11-02 (#754, implementation pending)**: sandbox browser launch and step-up are person-only
+  actions under `REQ-SANDBOX-BROWSER-GATEWAY`. They cannot enable a gateway, start a container or bypass fresh
+  same-session, same-token authentication. Ordinary confirmation tickets are not attachment grants. Viewers,
+  agents, tools, read-only consoles and cross-origin requests refuse before private target/control dependencies.
+  The native sandbox prepare/pin/End and terminal-mapping actions are UNCHANGED, checked.
 
 - **Implemented (#774)**: bounded setup operations in `INT-CONSOLE-SETUP-HOST` are registered as
   explicit `person` entries with reasons, using the same preview/Confirm/audit guards. `SETUP_HTTP_ACTIONS`,
@@ -6724,9 +6739,77 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   leftover; given a retained run holding files the worker cannot delete, it is no longer re-openable and
   `pi-dispatch doctor` names it (issue #446).
 
+## REQ-SANDBOX-BROWSER-GATEWAY
+
+- **Status**: **ADOPTED, implementation pending** (2026-11-02, issue #754). This is the prerequisite decision and
+  acceptance surface for the approved gateway, not a claim that code or runtime verification exists.
+- **Statement**: An operator may attach a browser terminal to an existing tracked sandbox through a separate
+  gateway on its owning host. The native terminal opener and copy command remain available. The gateway creates
+  no container, starts no agent or shell, adds no credentials, reserves no money and takes no run slot.
+- **Scope and configuration**: off by default and enabled by hand per host. No model tool, trigger, chain,
+  dispatcher, answerer, ordinary console edit or browser request can enable/enroll it or choose a runtime socket.
+  It serves only tracked running `local`/`podman` sandboxes; kept-but-unopened, prepared-but-unopened and OpenShell
+  workspaces cannot use this route. Enablement names one exact gateway and console origin under protected host
+  configuration. Their hostnames differ, not only ports. Public origins require HTTPS; explicit loopback-only
+  development is the named exception. Its listener and terminal assets belong to the gateway alone.
+- **Human authority**: the initiating console tab owns a bounded launch intent under its original live operator
+  session. Fresh step-up requires that tab's proof and the same current operator token. Viewers, agents, tools,
+  read-only consoles, changed sessions/roles/generation and foreign origins cannot mint or redeem attachment
+  authority. The gateway never receives the console cookie, raw session ID or operator token.
+- **One-use handoff and grant**: the protocol in `INT-SANDBOX-GATEWAY-CONTRACT` separates public intent identity,
+  original-tab proof, a one-use secret bootstrap verifier and a server-side attachment grant. The verifier binds
+  the gateway's HttpOnly browser cookie before step-up; a public ID cannot prebind an attacker's browser. The
+  grant lives at most 60 seconds, is redeemed once atomically, and binds the original operator session, exact
+  gateway cookie/origin/host and immutable sandbox venue/container ID/session nonce. An ordinary confirm ticket
+  or recent login cannot substitute for any of those checks. No grant or durable token traverses a URL.
+- **Runtime reach**: only inspect, attach and bounded resize for that exact already-running TTY are admitted.
+  A name prefix without tracked immutable identity is insufficient. No start/create/restart/exec/stop, image
+  selection, other-container list or arbitrary runtime API proxy exists. Runtime or control uncertainty refuses
+  before attachment. A new browser connection rechecks current state; it does not trust inventory as authority.
+- **One window and expiry**: at most one active browser connection per immutable sandbox incarnation across
+  tabs/processes. Old callbacks and expired owners cannot release a replacement. There is no automatic reconnect
+  or input replay. The console rejudges authority at least every two seconds, with an authorization lease at most
+  five seconds; revoke, role/generation change, read-only, changed enrollment, restart or unreadable control state
+  stops input/output and detaches by its expiry. Neither output nor background renewal extends console idle time.
+  `PI_SANDBOX_IDLE_MINUTES` also limits browser time without input, zero disabling that extra limit. This browser
+  rule is explicitly stronger than bash's prompt-only `TMOUT`, whose native behavior remains unchanged.
+- **Close versus End**: closing the terminal, idle or transport/auth failure detaches without stopping/removing
+  the sandbox or deleting its kept workspace/network. The existing separately confirmed End action and native
+  monitor retain lifecycle ownership. If the sandbox exits or End succeeds, the browser says why its attachment
+  ended. Lost observations alone never prove a sandbox ended.
+- **Terminal and privacy**: use an exact-pinned maintained terminal library, served locally. No CDN, eval, terminal
+  output as HTML, terminal-driven clipboard writes, output hyperlink navigation, title injection or file transfer.
+  Bound framing, input/output, resize geometry, rates, memory, pending intents and backpressure. Terminal input and
+  output are never recorded, logged, audited, mirrored into console panels or carried by run history/queue data.
+  Open/failed-open/end events are audited with safe IDs, actor/session digests and closed reasons. An audit intent
+  is not proof of successful attachment; unavailable opening audit refuses before the side effect.
+- **Layouts, roles and fallback**: only an operator on a writable console at a supported viewport above 760 px
+  receives the browser control. A phone, direct narrow gateway visit or shrinking terminal refuses/detaches and
+  retains selectable native-command guidance. This is a layout policy, not secure device identification. Both
+  themes, keyboard focus/controls, screen-reader support and complete disabled/busy/expired/revoked/offline states
+  are required. With JavaScript disabled, no authority is consumed and the native route remains readable.
+- **Acceptance**:
+  - **Isolation and runtime**: live Docker and rootless Podman prove correct attach, resize, Ctrl-C, shell editing,
+    alternate screen/Unicode, native simultaneous attachment, Ctrl-D/exit, external End and safe detach under
+    browser close, abrupt loss and `StdinOnce`. The gateway never starts/stops/execs a container. The console's CSP
+    remains byte-identical; its process gains no runtime socket, terminal library, pty or WebSocket.
+  - **Authority counterexamples**: hostile Host/Origin, all disallowed roles/surfaces, wrong session/tab/token,
+    revoked/replaced configuration, guessed public IDs, attacker-first public-ID prebinding, racing/replayed or
+    expired handoff/grant, copied cookie-less grants, changed container incarnation and competing tabs all refuse.
+    Expiry/lease tests inject clocks; real two-origin browser tests prove Strict-cookie/COOP/tab-proof behavior.
+  - **Bounded privacy**: secret/input/output canaries stay out of logs, audit, state/SSE, history, queue data and
+    third-party network requests. Hostile terminal escapes cause no clipboard/navigation/script side effect.
+    Slow consumers and invalid frames/resize cannot exhaust memory. Audit failure cannot announce a successful open.
+  - **Frontend and regression**: actual-CSP browser interactions cover operator/viewer/agent/read-only, light/dark,
+    phone/intermediate/desktop, keyboard/accessibility/no-JavaScript and every exceptional state, with final rendered
+    reference comparisons after styles/tokens/fonts load. Native opener/SSH/Podman/prepare/pin/End remain verified;
+    browser attachment adds no human-touch cause. All required repository and integration checks still apply.
+- **Traces to**: `DES-SANDBOX-GATEWAY-ATTACH-ONLY`, `INT-SANDBOX-GATEWAY-CONTRACT`, `REQ-CONSOLE-SECURITY`,
+  `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-RESURRECTABLE-SANDBOX`, `OQ-050`.
+
 ## REQ-SANDBOX-FROM-THE-CONSOLE
 
-- **As built (#771)**: Fleet exports a credential-free host mapping; the person explicitly imports it with `pi-dispatch opener install --config <file>`. A fired link never enrolls a host or changes its mapping. The terminal helper displays the complete constructed command and accepts Enter; it never evaluates entered text. Deployment-aware invocations re-execute with a clean trusted deployment environment, so ambient capability overrides cannot widen the sandbox. Preparation accepts an optional pin and writes it before reporting ready, with durations from the selected host. A dedicated host-bound control queue transports prepare/pin requests outside the paid processor. A detached CLI monitor keeps the shell lease alive until its immutable container disappears. Unknown tracking is never proof that a shell ended. No browser terminal is implemented.
+- **As built (#771)**: Fleet exports a credential-free host mapping; the person explicitly imports it with `pi-dispatch opener install --config <file>`. A fired link never enrolls a host or changes its mapping. The terminal helper displays the complete constructed command and accepts Enter; it never evaluates entered text. Deployment-aware invocations re-execute with a clean trusted deployment environment, so ambient capability overrides cannot widen the sandbox. Preparation accepts an optional pin and writes it before reporting ready, with durations from the selected host. A dedicated host-bound control queue transports prepare/pin requests outside the paid processor. A detached CLI monitor keeps the shell lease alive until its immutable container disappears. Unknown tracking is never proof that a shell ended. The separate gateway is adopted under `REQ-SANDBOX-BROWSER-GATEWAY`; it does not replace this native route.
 
 - **Status**: **BUILT** (2026-10-30, issue #771). The CLI, worker control transport, opener and operator-only console
   implement the acceptance surface below. The design is `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`; the card is
@@ -6787,8 +6870,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   whether it can reopen here) the way it publishes doctor results (`DES-DOCTOR-RESULTS-PUBLISHED`). The console's
   read of its own host's manifest stays the check for that host.
 - **Why**: The console shows the command today, and the operator still has to find a shell on the right host and
-  paste it. The opener removes the copying and the hunt for the host without putting a shell in the browser, which
-  `DES-OPERATOR-CONSOLE` rejected and `OQ-050` keeps rejected while it is open. A prepared sandbox answers "show me
+  paste it. The opener removes the copying and the hunt for the host without putting a shell in the console process,
+  which `DES-OPERATOR-CONSOLE` still rejects. The separately adopted gateway (`OQ-050`) preserves this route. A prepared sandbox answers "show me
   the repository as a job would see it" without paying for a run.
 - **Amends, when built**: `REQ-RESURRECTABLE-SANDBOX`, which today covers only a finished run's directory and that
   run's image, opened from the CLI or the panel's run detail. A prepared sandbox has no run, and the console is a new
@@ -8464,3 +8547,4 @@ instead of drifting.
 | 2026-11-01 (#775, receiver and hook integration) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) and `REQ-OPERATOR-FAILURE-NOTIFICATION` reviewed together: receiver observations and retained hook results remain visible to both human roles and the typed Connections projection, while Setup opts out of both publication reads. `REQ-CONSOLE-SECURITY`, receiver acceptance, hook exclusions, endpoint leasing and all spend/admission rules UNCHANGED, checked. |
 | 2026-11-01 (#775, endpoint occupancy) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) AMENDED: fleet leases followed by actual per-host endpoint occupancy, scope and beat age, shared-bound conflicts, unknown/version/overflow states and safe tool projection. `REQ-CONSOLE-SECURITY`, endpoint admission, spend, isolation, other Connections sections and `/api/state` UNCHANGED, checked. |
 | 2026-11-01 (#775, three publication channels) | `REQ-OPERATOR-CONSOLE-SCREENS` (g6) reviewed with receiver location/health, retained hook results and per-host endpoint use together. Both human roles and the typed Connections projection retain all safe observations; Setup opts out of every publication read. `REQ-CONSOLE-SECURITY`, receiver acceptance, hook exclusions, endpoint admission, spend, isolation and unrelated screens UNCHANGED, checked. |
+| 2026-11-02 (#753, #754, decision before implementation) | NEW `REQ-SANDBOX-BROWSER-GATEWAY`, ADOPTED with behavioral/hostile/runtime/browser acceptance. `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-SCREENS`, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-SANDBOX-FROM-THE-CONSOLE` narrowly AMENDED for person-only fresh step-up and the additional opt-in separate-hostname attach route. No model enrollment, new container, credentials, paid work or terminal-byte recording; native opener/copy/prepare/pin/End remain supported. Console CSP/guards, container isolation, author gate, budget/retry/pins, queue/session/recovery/outbox behavior, zero-touch causes and person-confirmed answer sending (`OQ-051`) UNCHANGED, checked. Implementation remains pending. |

@@ -10497,6 +10497,14 @@ in.
 
 **Extension (#771).** Sandbox preparation, pin, End and Fleet mapping writes use the existing preview/confirm audit funnel. End names an exact session incarnation. No credential, command body, repository payload or terminal input is added to audit rows.
 
+**Adopted extension (#754, implementation pending).** Gateway step-up/attachment lifecycle uses the same hardened
+audit writer and safe actor/session-digest representation. Fixed kinds distinguish authorization intent, actual
+successful attachment, refusal/failure and detach with a closed reason. An intent is not an opened receipt. Opening
+audit failure refuses before runtime attachment; an ending-audit failure reports incomplete accounting without
+repeating attachment or ending the sandbox. Neither audit nor its Valkey mirror receives proof/verifier/grant/cookie
+values, reauthentication tokens, request bodies or terminal input/output. The build pins its added kind vocabulary
+to these semantics; existing kinds and chain/mirror formats are UNCHANGED, checked.
+
 - **AMENDED 2026-10-30 (#750)**: The paid manual cron fire is kind `trigger-fire`, audited before enqueue and carrying only safe
   identity/outcome metadata. It uses the same confirmation and compensating failure-row rules as other paid actions.
 
@@ -12070,10 +12078,96 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
 
 ## INT-SANDBOX-SESSIONS-CONTRACT
 
+- **Adopted extension (#754, implementation pending)**: `INT-SANDBOX-GATEWAY-CONTRACT` adds a separate exclusive
+  browser-attachment lease bound to this record's exact host, ID, venue, container ID and nonce. It neither replaces
+  nor renews this native monitor's lease. A browser detach does not write End, remove the container or clean its
+  network. The existing confirmed End request retains its full incarnation checks and terminates any attachment
+  when the runtime confirms absence. This record's version/shape, monitor ownership and lost-tracking semantics
+  are UNCHANGED, checked.
+
 - The sandbox CLI starts a detached private monitor. `sandbox:shell:<host>:<id-digest>` holds a versioned, expiring session: checked host/ID, random 32-hex nonce, immutable 64-hex container ID, venue, terminal-reported account, since and heartbeat instants. It contains no input or idle-time claim. These records are operator-private, never run records.
 - The lease lasts 45 seconds and is renewed while the runtime confirms this incarnation. The renew's Lua script uses Valkey TIME for index expiry/pruning; key TTL is authority and host/console clocks are display only. A sorted index expires crashed observations by score. Reads are bounded to 256 entries and distinguish unreachable/malformed/truncated information. An expired observation says tracking was lost, not that the runtime container disappeared.
 - `sandbox:end:<nonce>` is a short-lived request bound to host, ID, nonce, immutable container ID and a random per-request ID. Acknowledgements include that request ID so an earlier failed End cannot answer a later one. The monitor checks that exact incarnation, removes only that container and acknowledges only confirmed disappearance. A failed stop has an explicit response. Renew/release compare ownership atomically so an old process cannot erase a replacement lease. A timed-out requester removes its own pending request and reports ambiguity.
 - The monitor survives terminal detach/closure and keeps the workspace. Its persistent client rejects disconnected commands without buffering and reconnects after an outage. Cleanup refusals/failures become bounded operator-private notices, with the admitted runtime evidence preserved. It cleans the session network only after the runtime confirms the container is absent, using existing guarded egress teardown. Unknown runtime answers never authorize stopping a replacement or cleaning its network.
+
+## INT-SANDBOX-GATEWAY-CONTRACT
+
+- **Status**: **ADOPTED, implementation pending** (2026-11-02, issue #754). This is the protocol the build must
+  implement and test. It does not assert existing readers/routes or storage support it yet. Remaining storage names
+  and resource-bound values must be fixed by the build's exported constants and behavioral contract tests before
+  this status becomes built; no unchecked hand-written copy of a derivable vocabulary is introduced here.
+- **Protected enrollment**: per-host hand-owned configuration admits one gateway identity, its canonical origin,
+  console origin and explicit local runtime socket/venue. Unknown fields and ambiguous/credential-bearing origins
+  refuse. Origins have distinct normalized hostnames, not only distinct ports. Public endpoints require HTTPS;
+  explicit loopback-only origins may use HTTP. A request cannot alter enrollment, runtime endpoint, return origin,
+  provider/forge settings or image. The native `sandbox-hosts.json` import and opener URL remain unchanged.
+- **Identity and private control**: target identity is the validated owning host, sandbox ID, `local`/`podman` venue,
+  full 64-lowercase-hex container ID and tracked 32-lowercase-hex sandbox nonce. Every browser continuation binds the
+  same tuple, gateway identity/origin and enrollment revision. Public intent/request IDs and distinct tab/handoff/
+  cookie secrets each use 32 random bytes (43 canonical base64url characters). A public ID is not a credential.
+  The shared Valkey control namespace carries only bounded private protocol state, safe actor/session digests,
+  identity, deadlines and ownership/correlation IDs; no raw console session ID, operator token, terminal bytes,
+  workspace path or harness credentials. The original console session association stays in console memory.
+  Valkey remains part of the deployment's existing trusted control boundary, not an untrusted mailbox.
+- **Launch**: a guarded same-origin operator POST in a fresh console launch tab creates a bounded expiring intent
+  and binds its current session, target tuple and gateway. The tab proof is retained in that tab's console
+  `sessionStorage`; only its digest remains server-side. A distinct handoff verifier is separate from the tab proof.
+  Launch returns no attachment authority and cannot start a container. Per-session/per-gateway pending intents,
+  attempts, bodies and total retained state have explicit finite bounds; malformed/expired state refuses.
+- **Bootstrap and cookie binding**: a top-level navigation sends the handoff verifier only in the gateway URL
+  fragment. Gateway script immediately removes that fragment before posting public ID and verifier to its own origin.
+  An HttpOnly, host-only gateway cookie supplies the browser nonce; public HTTPS uses its secure cookie protection,
+  with the explicit loopback compatibility case tested separately. Binding consumes the handoff verifier and fixes
+  the cookie digest atomically. A guessed/public ID, duplicate verifier, changed cookie or competing bind cannot
+  replace an existing binding. Cookie lifetime/state count is bounded, including simultaneous pending launches.
+  No bootstrap response authorizes attachment. Fragment exposure before removal remains an acknowledged residual.
+- **Step-up**: the gateway navigates only to the configured console landing with a public ID. The generic page
+  obtains its Strict cookie through a same-origin request. The original live session, original tab proof and fresh
+  presentation of the SAME currently valid operator token are required together. A new/different operator session,
+  a recent ordinary login, or possession of an ordinary confirmation ticket cannot substitute. Existing Host,
+  Origin, JSON, size, session-person, role, rate and read-only guards remain in force, and current enrollment/target
+  are rechecked. Raw token input is write-only, promptly cleared and never retained in DOM snapshots, storage,
+  logs, audit or returned data. This step consumes its pending authority once and issues a server-side grant.
+- **Grant and redemption**: the grant expires no later than 60 seconds after successful step-up. It binds the
+  original live session, immutable target, gateway/origin and browser-cookie digest. Only a public request ID is
+  used for return navigation; attachment grants never enter a URL, fragment, page state/SSE, referrer or audit.
+  A gateway same-origin JSON POST with its bound cookie atomically consumes the grant and claims the exclusive
+  browser-attachment lease. TTL and compare-and-set authority decide expiry/ownership, never agreement between
+  host wall clocks. Racing redemptions yield at most one owner; failure cannot restore a reusable grant.
+- **Runtime transport**: the gateway independently verifies tracked identity and running TTY through its reviewed
+  runtime socket immediately before attaching. Only inspect, attach and bounded resize of that exact full ID are
+  used; no create/start/restart/exec/stop/image/list/arbitrary-API operation is exposed. WebSocket upgrade enforces
+  exact Host and Origin plus one-use admitted browser ownership before accepting data; no CORS is enabled.
+  Input/output framing, message/byte/rate/resize bounds, connection counts and backpressure are explicit finite
+  constants. No automatic reconnect, input replay or buffering across lost authorization occurs.
+- **Authorization lease**: while an attachment is active, the console rejudges its original session with current
+  token-file/hash/role/generation and `peek` semantics at least every two seconds, without touching session idle.
+  It issues no more than five seconds of I/O authority ahead. A disappeared session, changed enrollment, read-only,
+  console restart, unreadable token/control state or unavailable broker stops input/output and detaches no later
+  than that lease's expiry. Existing stale Valkey state cannot authorize a restarted console's unknown session.
+  Host `PI_SANDBOX_IDLE_MINUTES` additionally limits browser time without input; zero disables that input-idle
+  limit. Resize/output/heartbeats do not count as user input. Native shell TMOUT is not changed or misdescribed.
+- **Ownership and end**: only one browser attachment exists per immutable sandbox incarnation across gateway
+  processes/tabs. Acquire, renew and release compare random owner/incarnation values atomically; old cleanup cannot
+  erase a replacement. Browser Close, idle, protocol/control failure and disconnect detach only. They never send
+  sandbox End or clean its network/workspace. Existing confirmed End and native monitor ownership stay separate;
+  actual sandbox exit closes the attachment with a fixed diagnosis. Missing observations do not prove exit.
+- **Browser surface**: the gateway serves exact-pinned maintained terminal assets locally, with its own CSP and
+  no console-token dependency. A verified renderer-generated inline-style allowance is gateway-only; scripts
+  remain self-hosted without inline/eval/CDN authority. Terminal output is data, not HTML or navigation/clipboard/
+  title/file-transfer authority. Browser entry is operator-only, writable-console-only and supported above 760 px;
+  narrow/direct/shrunk/no-script states retain a truthful native fallback and cannot consume an attachment grant.
+  Cookie/tab state never leaks into console live caches or generic page/panel/API/state projections.
+- **Evidence and unchanged contracts**: real two-origin actual-CSP browser tests prove cookie/COOP/tab behavior,
+  copied/public-ID and handoff prebinding counterexamples, actual terminal controls, no-script/phone and privacy.
+  Live Docker/rootless Podman prove safe detach under `StdinOnce`, abrupt loss, native simultaneous attachment,
+  shell exit and external End. Expiry/window tests inject clocks and temporary state uses workspace helpers.
+  `INT-SANDBOX-OPENER-CONTRACT`, `INT-SANDBOX-CONTROL-CONTRACT`, `INT-SANDBOX-INVENTORY-CONTRACT`,
+  `INT-SANDBOX-SESSIONS-CONTRACT`'s native shape, `INT-CONSOLE-TOKENS-FILE-CONTRACT`, console cookie/CSP,
+  `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT`,
+  `INT-RUNNER-EXIT-CODE-PROTOCOL` and paid queue/budget contracts are UNCHANGED, checked.
+- **Traces to**: `REQ-SANDBOX-BROWSER-GATEWAY`, `DES-SANDBOX-GATEWAY-ATTACH-ONLY`,
+  `INT-CONSOLE-AUDIT-LOG`, `INT-SANDBOX-SESSIONS-CONTRACT`, `OQ-050`.
 
 ## INT-SANDBOX-INVENTORY-CONTRACT
 
@@ -12637,3 +12731,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-01 (#775, receiver and hook integration) | `INT-RECEIVER-STATUS-KEY` and `INT-HOOK-RUNS-KEY` reviewed together as independent Connections-only display channels. Their versioned shapes, expiry, bounds and privacy remain intact. `INT-CONSOLE-STATE-API`, receiver authentication, hook firing, host registry and model endpoint contracts UNCHANGED, checked. |
 | 2026-11-01 (#775, endpoint occupancy) | `INT-HOST-REGISTRY-CONTRACT` AMENDED: versioned, generation-bound endpoint occupancy from the shared admission map and last-good file, direct bounded read for Connections only. `INT-MODEL-ENDPOINTS-FILE-CONTRACT`, fleet lease contracts, `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, `INT-RUN-HISTORY-FILE-CONTRACT` and `CONST-HMAC-OVER-RAW-BODY` UNCHANGED, checked: no decision or existing projection reads the new display fields. |
 | 2026-11-01 (#775, three publication channels) | `INT-RECEIVER-STATUS-KEY`, `INT-HOOK-RUNS-KEY` and the endpoint fields of `INT-HOST-REGISTRY-CONTRACT` reviewed together. Endpoint observations remain bound to the worker start generation; all channels retain their independent version, expiry, bounds and privacy. `INT-CONSOLE-STATE-API`, `INT-CONSOLE-EVENT-STREAM`, model endpoint file/lease rules, receiver authentication and hook firing UNCHANGED, checked. |
+| 2026-11-02 (#753, #754, decision before implementation) | NEW `INT-SANDBOX-GATEWAY-CONTRACT`, ADOPTED: separate protected origins/runtime enrollment, independent 256-bit tab/handoff/cookie proofs, immutable target binding, atomic one-use 60-second grant and browser ownership, two-second broker judgement/five-second authorization lease, bounded terminal transport and audit/privacy. `INT-CONSOLE-AUDIT-LOG` and `INT-SANDBOX-SESSIONS-CONTRACT` gain narrow adopted lifecycle extensions without claiming existing support. Native opener/control/inventory/session shapes, console token/cookie/CSP/state/SSE, run-record/exit protocol and paid queue/budget contracts UNCHANGED, checked. Build fixes remaining storage/resource constants and proves runtime/browser acceptance before Built. |

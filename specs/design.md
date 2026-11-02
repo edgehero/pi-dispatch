@@ -12111,7 +12111,14 @@ unreadable evidence remains unknown, and all bounds are named rather than hiding
 
 - **Sandbox paths (#771)**: Operators may see explicitly configured deployment and executable paths in Fleet sandbox mapping editors/exports and constructed terminal command boxes. This exception exists so the person can inspect exactly what Enter will run. It does not admit paths to viewer output, unrelated page regions, telemetry or audit rows.
 
-- **Extension (#771)**: `outLink`'s HTTP(S)-only rule has one checked exception: the canonical opener URL from `opener-protocol.mjs`. Generic custom schemes remain refused. The Sandboxes tab and all sandbox commands, links, preparation results and live-shell observations are operator-only across pages, panels, APIs and streams. The console only reads publications and submits confirmed requests; it never invokes a runtime or starts a shell. Shared commands serve Run, Host, Trigger and Sandboxes pages. The visual system remains generator-first, with a SandboxesScreen ledger and Built status. The browser-terminal rejection and WebSocket rejection remain in force.
+- **Extension (#771)**: `outLink`'s HTTP(S)-only rule has one checked exception: the canonical opener URL from `opener-protocol.mjs`. Generic custom schemes remain refused. The Sandboxes tab and all sandbox commands, links, preparation results and live-shell observations are operator-only across pages, panels, APIs and streams. The console only reads publications and submits confirmed requests; it never invokes a runtime or starts a shell. Shared commands serve Run, Host, Trigger and Sandboxes pages. The visual system remains generator-first, with a SandboxesScreen ledger and Built status. Its WebSocket rejection remains in force; the separate-origin gateway exception is recorded below.
+
+- **Adopted gateway exception (#754, decision before implementation)**: `OQ-050` admits the separate process in
+  `DES-SANDBOX-GATEWAY-ATTACH-ONLY`. The console may own a person-only launch intent, same-token step-up and bounded
+  authorization broker, and navigate to the configured gateway in a new tab. It gains no runtime connection, pty or
+  WebSocket; its CSP stays byte-identical. Gateway input/output is never a console page/panel/event/state surface.
+  The native opener, copy command and sandbox preparation remain available under their existing contracts. This
+  amendment records authority and required checks, not a claim that the gateway has shipped.
 
 - **Extension (#770)**: Issue #770 adds the three Zero touch cards as the second Runs tab, including operator-only projected groups and ordinary preview/Confirm actions. Grouping is explicitly paid work, never a GET side effect; the private corpus is not a console read surface. `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` and `INT-ZERO-TOUCH-FIXES` define the data and interactions.
 
@@ -14898,14 +14905,14 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     needs upgrade handling on the trusted process, a second framing to parse, and an origin check of its own (a
     WebSocket handshake is not held by the same-origin policy), all for a channel the console would never read
     from.
-  - **A terminal in the browser** (issue #642), to reopen a sandbox from the page. Reopening is an interactive
+  - **A terminal in the console process** (issue #642), to reopen a sandbox from the page. Reopening is an interactive
     `docker run -it` with the operator's terminal inherited; carrying it to a browser means a pty and a duplex
     channel in the process that holds operator power, an interactive root-adjacent shell one stolen session away
     from anyone, and the WebSocket handling rejected above. The page shows the one command instead, and the operator
-    runs it where they already have a shell. **Asked again 2026-10-27 as `OQ-050` (issue #754)**, with a separate
-    gateway process as the proposal, and still rejected while that row is open. The command itself is proposed to
-    reach the operator's own terminal through an opener on their computer (`DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`,
-    issue #753), which adds no shell, pty or WebSocket to the console.
+    runs it where they already have a shell. **Narrowly superseded 2026-11-02 by `OQ-050` (issue #754)**: the
+    approved separate gateway may attach to an existing sandbox in its own process, hostname and tab, under
+    `DES-SANDBOX-GATEWAY-ATTACH-ONLY`. A terminal, pty, runtime socket or WebSocket in the console itself stays
+    rejected. The native opener (`DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`, issue #753) remains supported.
   - **Committing configuration to git** (issue #642). A config edit lands in the files the TUI writes (the triggers
     file, the overlay, the money files) and nothing else. Committing would give the console process a git identity
     and a repository to write, turn a confirmed file write into a second, separately failing step, and take a
@@ -16004,6 +16011,94 @@ is introduced. The design generator owns the published card before the console u
   admin/test/read-model-waiting.test.mjs, admin/test/read-model-waiting.valkey.test.mjs,
   admin/test/cancel-queued.test.mjs.
 
+## DES-SANDBOX-GATEWAY-ATTACH-ONLY
+
+- **Status**: **ADOPTED, implementation pending** (2026-11-02, issue #754). The maintainer approved adoption and
+  the independently reviewed plan before this spec-only decision. No runtime or browser acceptance is claimed yet.
+- **Decision**: An optional sandbox gateway runs on the host that owns a sandbox, in its own process and tab. It
+  attaches only to the already running TTY of a tracked `pi-sandbox-*` container on `local` or `podman`. It cannot
+  create, start, restart, exec into or stop a container, choose an image, or select an untracked runtime object.
+  Docker/Podman own that existing TTY; the gateway needs no host pty. The native opener and command-copy route stay.
+- **Enrollment and origins**: enablement and the exact host/runtime/origin mapping are hand-owned configuration,
+  off by default, unreachable from model tools and ordinary console edits. Gateway and console use distinct canonical
+  hostnames, not merely different ports: the current host-only `pdc_session` cookie crosses ports. Public navigation
+  requires HTTPS through the operator's proxy; explicit loopback-only development is the named exception. Runtime
+  selection comes from the reviewed local socket configuration, never ambient Docker context or browser fields.
+  The gateway has no console-token file, provider/forge credential, worker job authority or private transcript reader.
+- **Console boundary**: all cross-origin transitions are top-level navigations. The console retains its exact CSP,
+  existing request guards, session/person checks and role-separated reads. It gains bounded launch/step-up/broker
+  operations, never a terminal renderer, pty, runtime socket or WebSocket. No CORS or cross-origin form exception is
+  added. The gateway serves its own exact-pinned maintained terminal library, assets and strictly guarded WebSocket.
+- **Fresh authority, in two distinct browser contexts**:
+  - A new same-origin console launch tab makes a guarded operator POST. The console owns the original live session,
+    exact immutable target and a bounded random public intent ID. A random tab proof stays in that tab's console
+    `sessionStorage`; only its digest is retained server-side. A separate random one-use handoff verifier is prepared.
+  - Navigation carries the handoff verifier in the gateway fragment, never a request URL. The gateway removes the
+    fragment immediately, establishes its own HttpOnly browser-binding cookie and submits a same-origin JSON POST.
+    Consuming the verifier and binding that cookie's digest is atomic and immutable. A public intent ID alone cannot
+    prebind a different browser, and the handoff verifier cannot attach a shell or satisfy console step-up.
+  - Returning to the console loads a generic landing shell, then uses a same-origin request so the console's Strict
+    cookie is available. The original session and original tab proof must match, and the person re-enters the same
+    current operator token. A fresh sign-in with a different token/session is not equivalent. Read-only, role,
+    generation, enrollment and exact sandbox identity are judged again before granting anything.
+  - The single-use attachment grant lasts at most 60 seconds and stays server-side. It binds the console session,
+    gateway browser-cookie digest, gateway origin, owning host, sandbox ID, venue, full container ID and session nonce.
+    A return navigation carries only the public request ID. The gateway's own same-origin POST atomically consumes
+    the grant and acquires the exclusive browser-attachment lease. It receives no raw console session ID or token.
+- **Liveness and boundaries**: the console rejudges session/token-file authority at least every two seconds without
+  extending session idle time, and authorizes I/O for no more than five seconds ahead. Revocation, role/generation
+  change, read-only, changed enrollment, console restart or unreadable control authority stops input/output and
+  detaches within that lease. One browser lease covers each immutable sandbox incarnation across tabs/processes;
+  stale cleanup cannot release a newer owner. There is no automatic reconnect or input replay.
+  `PI_SANDBOX_IDLE_MINUTES` additionally bounds browser time without input, with zero retaining its disabled meaning.
+  This is stronger than bash's prompt-only `TMOUT`; output and heartbeat do not count as input. Closing a browser
+  terminal only detaches. The existing monitor, retained workspace and separately confirmed End action own lifecycle.
+- **Threat model and counterexamples**:
+  - **A hostile page or sibling origin**: exact Host/Origin guards cover both JSON and WebSocket admission; no
+    CORS, framing, arbitrary return URL or same-site exception. Neither gateway nor console is frameable.
+  - **Another browser/tab or guessed intent**: public IDs authorize nothing; independent tab and handoff proofs,
+    immutable cookie binding and same-session same-token step-up prevent prebinding and session mixup. Test an
+    attacker opening the public ID before the real browser, copied IDs, racing handoffs and stolen/replayed grants.
+  - **A stolen session or revoked operator**: an existing cookie cannot satisfy fresh token step-up. The live
+    authorization lease bounds revocation; it never relies on a cached role or background traffic to stay alive.
+  - **A swapped container or competing connection**: compare the tracked nonce and full ID against live runtime
+    evidence immediately before attaching; a name prefix alone is insufficient. Atomic ownership prevents two
+    browser connections and stale release. Missing or unreadable evidence refuses, never falls back to a name.
+  - **Hostile terminal bytes**: the maintained renderer receives terminal data, never HTML. Disable terminal-driven
+    clipboard writes, output hyperlink navigation, title injection, file transfer and external resources. Audit and
+    logs receive fixed events/IDs only, never keystrokes, output, tokens, verifier, proof or cookie values.
+  - **Resource exhaustion**: bound pending intents, attempts, attachment count, protocol/body/frame/input/output
+    sizes and rates, resize geometry, memory and backpressure. A stalled consumer or unavailable broker detaches;
+    it cannot buy unbounded buffering or another valid connection.
+- **UI and accessibility**: browser attachment is an additional operator-only route on writable consoles at widths
+  above 760 px. This is a supported-layout policy, not a secure device identity; phone/direct/shrunk views refuse
+  and retain the native command. The gateway supports keyboard focus, readable status/labels, the maintained
+  terminal's accessibility mode, both themes and full exceptional-state guidance. No JavaScript leaves a truthful
+  fallback and never consumes authority. It does not expose terminal bytes to console live panels.
+- **Evidence required before claiming built**: first measure detach, abrupt loss, `StdinOnce`, native simultaneous
+  attachment, Ctrl-D/exit and external End on live Docker and rootless Podman. Prove the two-origin round trip under
+  actual Strict cookies, COOP and both CSPs. The terminal library's pinned release must render under its actual
+  gateway CSP; a narrow gateway-only inline-style allowance may be used for verified renderer-generated styles,
+  never inline scripts, eval, a CDN or changes to console CSP. Exercise terminal editing/control/resize/Unicode and
+  alternate-screen behavior, hostile output, all admission counterexamples, and final styled reference-versus-live
+  screenshots across themes/roles/widths after the last change. Unit tests alone cannot establish runtime detach.
+- **Accepted residuals**: the runtime socket retains root or rootless-account authority if the gateway is
+  compromised; a second listener and terminal parser add attack surface. The bootstrap fragment has a brief secret
+  lifetime in browser history/extensions before removal. A fully compromised browser/operator credential or shared
+  trusted control store defeats these proofs. Revocation is bounded, not instantaneous. None is described as removed
+  by separate origins or narrower application methods.
+- **Rejected**: gateway startup/exec of a sandbox, arbitrary runtime API proxying, terminal in the console, a
+  same-host/different-port cookie boundary, a bearer grant redeemable without the bound browser, ordinary login
+  recency instead of same-token step-up, public-ID prebinding, automatic reconnect, recording terminal bytes, and
+  replacing or removing the native terminal opener.
+- **UNCHANGED, checked**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-TOKEN-SCOPED-PER-JOB`,
+  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
+  `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-PI-VERSION-PINNED`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
+  `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`'s native authority, paid queues, session/recovery/outbox contracts,
+  zero-touch causes and `OQ-051`. Attaching adds no container shape, harness credentials, paid work or agent input.
+- **Traces to**: `REQ-SANDBOX-BROWSER-GATEWAY`, `INT-SANDBOX-GATEWAY-CONTRACT`, `DES-OPERATOR-CONSOLE`,
+  `INT-SANDBOX-SESSIONS-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`, `OQ-050`.
+
 ## DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL
 
 - **As built (#771)**: The per-user opener imports a versioned Fleet mapping into a protected local file. The scheme handler validates before opening a terminal helper. That helper shows the full argv and waits for Enter, then spawns the constructed argv; it does not evaluate shell input. SSH uses absolute Node/CLI paths and explicit deployment loading. A separate `pi-sandbox-prepare@<host>` BullMQ control worker reuses lock/retry machinery but never enters paid `pi-jobs` processing, run history or budget/slot ledgers. Prepared IDs reconcile against immutable request/manifest fingerprints. The session monitor binds lease and End to a nonce and immutable runtime container ID, survives detach and owns eventual guarded network cleanup. Existing host telemetry supplies one cached inventory projection, additionally published with a bounded lifetime for offline-host evidence. No new zero-touch cause is introduced.
@@ -16049,11 +16144,11 @@ is introduced. The design generator owns the published card before the console u
     manifests today.
 - **Why**: What was missing is the copying and the hunt for the right host. Neither needs a shell in the browser, and
   both are solved where the operator already has a terminal. The console gains reads of published keys, two small
-  writes, and one new kind of link. Each of those is named here as an amendment, so the rejection of a terminal in
-  the browser in `DES-OPERATOR-CONSOLE` stands untouched.
+  writes, and one new kind of link. The native path remains supported alongside the separately adopted gateway
+  (`DES-SANDBOX-GATEWAY-ATTACH-ONLY`); no gateway permission changes what a native opener link can request.
 - **Rejected**:
-  - *A terminal in the browser.* `DES-OPERATOR-CONSOLE` rejected it (issue #642). The question is asked again, with a
-    separate gateway process as the proposal, as `OQ-050` (issue #754). It stays rejected until that row closes.
+  - *A terminal in the console process.* `DES-OPERATOR-CONSOLE` still rejects it (issue #642). `OQ-050` (issue #754)
+    separately adopts `DES-SANDBOX-GATEWAY-ATTACH-ONLY`, an additional route that does not replace this native opener.
   - *The console runs `pi-dispatch sandbox` or docker itself.* An interactive shell started by the process that holds
     operator power is the thing #642 rejected, wherever the terminal ends up. And the console still has no terminal to
     give it to.
@@ -16967,3 +17062,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-01 (#775, receiver and hook integration) | `DES-OPERATOR-CONSOLE` reviewed with receiver and hook publications together: preserve native receiver disclosures, complete identities, hook history and explicit unknown states without adding a live page or authority. `DES-ADMIN-VIA-PI-EXTENSION`, shared visual tokens/styles, pending-notification-store rejection, endpoint enforcement and all runtime decisions UNCHANGED, checked. |
 | 2026-11-01 (#775, endpoint occupancy) | `DES-OPERATOR-CONSOLE` AMENDED: versioned host observations display the shared in-process endpoint map and last-good file, through bounded page-only reads and existing Pulse slot marks. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-ADMIN-VIA-PI-EXTENSION`, admission, release, CSP, shared tokens and stylesheet are UNCHANGED, checked. |
 | 2026-11-01 (#775, three publication channels) | `DES-OPERATOR-CONSOLE` reviewed with all three bounded publication channels together, preserving receiver disclosures and identities, hook history and endpoint fleet/host scopes with explicit unknown states. `DES-ADMIN-VIA-PI-EXTENSION`, shared tokens/styles, pending-notification-store rejection, fleet lease enforcement and all runtime decisions UNCHANGED, checked. |
+| 2026-11-02 (#753, #754, decision before implementation) | NEW `DES-SANDBOX-GATEWAY-ATTACH-ONLY`, ADOPTED with written pre-build threat model and counterexamples. `DES-OPERATOR-CONSOLE` and `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL` narrowly AMENDED for a separate-origin gateway; native opener remains supported. Records corrected public-intent/tab-proof/one-use-handoff/cookie-bound grant protocol, same-token step-up, existing-TTY attach only, exclusive ownership, bounded live authorization, idle/detach, maintained renderer/CSP and runtime/browser evidence required before Built. Console CSP/pty/WebSocket/runtime exclusion, `DES-SANDBOX-IS-A-FRESH-CONTAINER`, paid job/session/recovery/outbox decisions, zero-touch causes and all named constitutional constraints UNCHANGED, checked. No gateway code or fresh acceptance is claimed. |

@@ -2484,32 +2484,39 @@ adversarial passes did.
 
 ## OQ-050: A terminal in the browser for sandboxes, through a separate gateway
 
-- **Status**: **OPEN** (2026-10-27, issue #754). A decision, not a work item. Until it closes, `DES-OPERATOR-CONSOLE`'s
-  rejection of a terminal in the browser (issue #642) stands, and the console hands the command to the operator's
-  own terminal (`DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`).
+- **Status**: **ADOPTED** (2026-11-02, issue #754), by the maintainer's explicit decision and approval of the reviewed
+  implementation plan. This records the answer before gateway code; it does not claim the gateway is built. The
+  decision issue's earlier hold is superseded by that approval; GitHub closure remains the final pull request's.
 - **Question**: Should a sandbox shell open inside the browser, through a process other than the console?
-- **The proposal being weighed**:
-  - a sandbox gateway on the host with the sandbox, off by default and turned on per host;
-  - its own address and its own tab, so the console process keeps its CSP and gains no pty and no WebSocket;
-  - it only attaches to an existing `pi-sandbox-*` container the console issued a ticket for;
-  - each ticket is good once, for 60 seconds, bound to one operator session, and minted after the person signs in
-    again;
-  - one window per sandbox, never on a phone, with the CLI's idle logout;
-  - opening and ending are audited, and what is typed is not recorded.
-- **What it costs**:
-  - The gateway still talks to Docker (or Podman), and the Docker socket is root on that host. Narrowing what the
-    gateway asks for does not narrow what the socket allows. This is the part of #642's objection the proposal does not
-    remove: the root-adjacent shell leaves the console process, not the browser's reach.
-  - It is a second listener with operator reach, and its own ticket, origin and pty handling are new surface.
-  - While a ticket is valid, a stolen session is still enough, so the step-up sign-in carries most of the weight.
-- **What would close it**:
-  - **Keep it rejected** (the default) if the opener leaves no real need unmet.
-  - **Adopt the gateway** only with a written threat model for the ticket and the step-up, and an amendment to
-    `DES-OPERATOR-CONSOLE` in the same PR.
-  - **Something narrower instead**, such as a read-only view of a workspace's files with no shell, if that is the
-    need that remains.
-- **Related**: `DES-OPERATOR-CONSOLE` (Rejected: a terminal in the browser; WebSockets), `REQ-SANDBOX-FROM-THE-CONSOLE`,
-  `REQ-RESURRECTABLE-SANDBOX`.
+- **Answer**: Adopt the separate, opt-in, attach-only gateway specified by `REQ-SANDBOX-BROWSER-GATEWAY`,
+  `DES-SANDBOX-GATEWAY-ATTACH-ONLY` and `INT-SANDBOX-GATEWAY-CONTRACT`. It has its own process, hostname and tab;
+  the console keeps its CSP and gains no pty, WebSocket or runtime socket. Only a human operator may attach to an
+  existing tracked local/Podman sandbox after fresh same-token step-up. The native opener and command-copy route stay.
+- **The accepted limits**: one browser connection per immutable sandbox incarnation; a single-use 60-second grant
+  bound to that operator's live console session, initiating tab and gateway browser cookie; no phone terminal; input
+  idle expiry from `PI_SANDBOX_IDLE_MINUTES`; audited opens/ends without input or output capture. Closing the browser
+  detaches; it never starts or ends the sandbox. The existing confirmed End action remains separate.
+- **Threat model recorded before the build**: the new design entry enumerates hostile pages, guessed/public intent
+  IDs, another tab/browser, stolen sessions, revoked authority, hostile terminal output, replaced containers,
+  concurrent connections and resource exhaustion, with acceptance counterexamples. In particular a public rendezvous
+  ID cannot bind an attacker's cookie: a distinct, one-use secret handoff verifier is consumed before the immutable
+  cookie binding, while the original console tab retains its own proof for step-up. Attachment grants stay server-side.
+- **Residuals accepted, not removed**:
+  - The Docker socket is still root on that host. An attach-only code path does not restrict what a compromised
+    gateway could ask that socket to do. Rootless Podman's socket still grants the runtime account's whole reach.
+  - A second network listener and a maintained terminal renderer add origin, protocol and parser attack surface.
+    Separate hostnames prevent the gateway from receiving the host-only console cookie; another port alone does not.
+  - Same-token step-up stops a stolen session alone from buying a new attachment. Theft of the complete live browser
+    context, reauthentication credential or trusted control channel remains outside that promise. Revocation has a
+    bounded propagation interval, at most the five-second authorization lease, rather than instantaneous effect.
+  - A bootstrap-only secret traverses a URL fragment and is immediately removed before its same-origin POST. It
+    grants no shell, but browser history/extensions can observe it before removal; expiry and single use bound, not
+    erase, that exposure. The UI's desktop-width policy is not an unspoofable device identity.
+- **Reopen if**: live Docker/Podman measurements refute safe detachment without stopping the existing shell, the
+  chosen terminal cannot meet the actual gateway CSP, the cookie/tab proof cannot survive the real origin round trip,
+  or an implementation needs container creation, exec, new credentials or console WebSocket/pty authority.
+- **Related**: `DES-OPERATOR-CONSOLE`, `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`,
+  `REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-RESURRECTABLE-SANDBOX`, `OQ-051` (UNCHANGED, checked).
 
 ## OQ-051: Whether a model may answer a parked question with no person's confirm
 
@@ -2791,3 +2798,4 @@ adversarial passes did.
 | 2026-10-30 (#751) | All open questions UNCHANGED, checked. Three Configuration pages describe current published facts; they add neither the browser shell of `OQ-050` nor unattended answers of `OQ-051`, and do not infer unavailable receiver placement, delivery health or hook history. #766 remains separate policy work. |
 | 2026-10-30 (#771) | OQ-038 AMENDED narrowly by #771: opener commands explicitly load a trusted deployment environment and re-execute with ambient capability overrides rejected; this does not change the TUI panel's own-environment limitation. OQ-050 UNCHANGED, checked: browser terminal remains open and rejected; no gateway, ticket, PTY or WebSocket is added to the console. |
 | 2026-11-01 (#775, hooks) | `OQ-034` AMENDED, stays ACCEPTED: hook results are logged and published for display; no decision reads an exit code. The new bounded display history is no pending notification store, transport, retry or delivery guarantee. Reopen conditions UNCHANGED, checked; `OQ-027` and `OQ-030` UNCHANGED, checked. |
+| 2026-11-02 (#753, #754, decision before implementation) | `OQ-050` ADOPTED by the maintainer and approved reviewed plan before gateway code. Records the separate-process/hostname attach-only decision, independent tab/handoff/browser-cookie proofs, fresh same-token step-up, 60-second one-use server-side grant, bounded revocation, native-opener preservation and accepted runtime-socket/bootstrap-fragment risks. GitHub closure remains the final pull request; no implementation acceptance is claimed. `OQ-051`, its person-confirmed answer boundary and every other open question UNCHANGED, checked. |
