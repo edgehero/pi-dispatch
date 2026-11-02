@@ -39,7 +39,7 @@ import { answerTrailComment, consoleAnswerBy, consoleDraftOf } from "./console-a
 import { forgeDeliveryJobId } from "./job-id.mjs";
 // The forge-comment tables (issue #710): every fixed sentence this file posts, in one leaf the reason catalog can import
 // without the job path. Re-exported below under the names they always had here.
-import { MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS, BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
+import { MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS, APPROVAL_PARK_NEWER_COMMENT, BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -362,6 +362,10 @@ async function runJobInner(job, deps) {
 		if (!deps.approvalRuntime) return { outcome: "policy", reason: "approval-store-unavailable", budgetReserved: false, exitCode: null, turns: null, tokens: null };
 		approval = await deps.approvalRuntime.before({ ...job, id });
 		if (approval.error) throw new InfraRetry("approval state could not be read", { reason: "container-never-started", budgetReserved: false });
+		// Issue #761: the live triggers file was written by a newer pi-dispatch, so this build cannot judge the approval
+		// declaration. Before the mint and every reserve, and before any request is decided or claimed: the job waits for
+		// a worker that reads the file (`newer-release`), never refused, so neither the delivery nor the decision is lost.
+		if (approval.newer === true) throw new NewerReleaseHold("the triggers file");
 		if (!approval.ok) {
 			await deps.comment?.(job, `Refused: ${approval.refused}. Check the pending approval and current trigger declaration. Not run.`);
 			return { outcome: "policy", reason: approval.refused, ...(approval.audit ? { approval: approval.audit } : {}), budgetReserved: false, exitCode: null, turns: null, tokens: null };
@@ -459,7 +463,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// omits it behaves exactly as before -- the container's own failure stays the backstop.
 		imagePreflight = async () => ({ ok: true }),
 		subscriptionAuthRequired = async () => false,
-		// (job) => { ok } | { refused, at, jobId }. The one-shot pre-spend check (issue #231,
+		// (job) => { ok } | { refused, at, jobId } | { newer } (issue #761). The one-shot pre-spend check (issue #231,
 		// DES-ONE-SHOT-DISARM-IN-THE-FILE). Default admits everything -- an unwired processor behaves
 		// exactly as before, and the gate below only calls it for a job whose matched rule was a
 		// one-shot, so the default is never a probe running on every delivery.
@@ -803,6 +807,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// there, not optional hardening.
 		if (job.trigger?.matched?.once === true) {
 			const spent = await checkOnceSpent(job);
+			// Issue #761: the one answer that is not fail-open. A triggers file written by a newer pi-dispatch may hold this
+			// one-shot's disarm in a shape this build cannot read, and this build's own disarm of it would be refused, so
+			// running would fire the one-shot again on every delivery. Deferred (`newer-release`), never refused: a refusal
+			// would use up the delivery. Thrown here, first on the ladder, so nothing is minted, cloned or reserved.
+			if (spent.newer === true) throw new NewerReleaseHold("the triggers file");
 			if (spent.refused) {
 				// Commented like every sibling policy refusal: explainability is this refusal's whole
 				// purpose, and only a DISTINCT re-close reaches it past the GUID dedup, so the noise
@@ -822,8 +831,12 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// standing between a stale receiver and a paid job that ran when the operator wrote "wait".
 		{
 			const skew = await checkWaitSkew(job);
-			// Issue #502: an authored NARROWING field the job arrived without (`AUTHORED_NARROWING_FIELDS`, triggers-file.mjs),
-			// today `run.models` and `run.maxCostUsd`. The same two causes as a dropped wait, and the same refusal shape; without it the job would
+			// Issue #761: a triggers file written by a newer pi-dispatch may author a narrowing field this build has no row
+			// for, which no job field can show missing, so neither "skewed" nor "fine" is an answer this build can give. The
+			// job waits for a worker that reads the file (`newer-release`), before any spend, the once check's posture.
+			if (skew.newer === true) throw new NewerReleaseHold("the triggers file");
+			// Issue #502: an authored NARROWING field the job arrived without, one of the rows of `AUTHORED_NARROWING_FIELDS`
+			// (triggers-file.mjs). The same two causes as a dropped wait, and the same refusal shape; without it the job would
 			// run on the deployment's list, or on none, while every record reads like a correct run. The FIELD is named,
 			// never its value: the comment's reader may be an issue author.
 			if (skew.skewed && typeof skew.field === "string") {
@@ -2640,8 +2653,14 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 					const approvalSession = fingerprint?.ok ? { ...prepared.session, digest: fingerprint.digest } : prepared.session;
 					const published = promoted?.promoted === true && isParked(job) ? await deps.approvalRuntime.afterPark({ job: { ...job, id: deps.queueJobId ?? sourceRunId }, session: approvalSession, metadata: approvalMetadata, rawJob: deps.rawApprovalJob ?? job }) : { refused: "approval-session-not-saved" };
 					if (!published.ok) {
-						await comment(job, APPROVAL_COMMENTS["approval-state-unavailable"]);
-						return { outcome: "policy", reason: published.refused ?? "approval-state-unavailable", exitCode: code, turns, tokens, budgetReserved: true, session: mergeSession(prepared, session, promoted) };
+						// Issue #761: `{ newer: true }`, the live triggers file was written by a newer pi-dispatch, so the declaration
+						// this park would be armed under cannot be judged here. NOT deferred, unlike the free gates: the container has
+						// run and been paid for, and a deferral would run it again. No request is published, so nothing can decide or
+						// resume this park on this build; recorded as the declaration that could not be read, exactly as an
+						// unreadable file is, never as a store fault, and said in its own sentence, which names the upgrade.
+						if (published.newer === true) log("approval_park_newer_release", {});
+						await comment(job, published.newer === true ? APPROVAL_PARK_NEWER_COMMENT : APPROVAL_COMMENTS["approval-state-unavailable"]);
+						return { outcome: "policy", reason: published.newer === true ? "approval-policy-unavailable" : (published.refused ?? "approval-state-unavailable"), exitCode: code, turns, tokens, budgetReserved: true, session: mergeSession(prepared, session, promoted) };
 					}
 					approvalFacts = published.audit;
 				}
@@ -3063,6 +3082,21 @@ function headReadRateLimited(error) {
 	const get = (name) => (typeof headers.get === "function" ? headers.get(name) : headers[name]);
 	const remaining = get("x-ratelimit-remaining");
 	return String(remaining ?? "") === "0" || (get("retry-after") !== undefined && get("retry-after") !== null);
+}
+
+/**
+ * A job this worker must not run because something it reads was written by a newer pi-dispatch: the triggers file a
+ * free gate reads live, or a checkpoint (`DES-STORE-VERSION-WHEN-NEEDED`). The processor's catch DEFERS it
+ * (`newer-release`) rather than count an attempt, so the job waits for a worker that can read it, spending nothing.
+ * `what` names the store, for the log line only.
+ */
+export class NewerReleaseHold extends InfraRetry {
+	constructor(what) {
+		super(`${what} was written by a newer pi-dispatch`, { budgetReserved: false });
+		this.name = "NewerReleaseHold";
+		this.newerRelease = true;
+		this.what = what;
+	}
 }
 
 export class RecoveryWaitHold extends InfraRetry {

@@ -50,6 +50,7 @@
  */
 
 import { forgeDeliveryJobId } from "@edgehero/pi-dispatch/job-id";
+import { withJobDataVersion } from "@edgehero/pi-dispatch/job-data-version";
 import { steerTargetOf } from "@edgehero/pi-dispatch/inbox-relay";
 import { STEER_MODES, boundSteerText, forgeMessageId, liveRunsForTarget, normalizeSteerEntry, pushSteer, scrubSteerText, storeFallback } from "@edgehero/pi-dispatch/steer-inbox";
 
@@ -96,14 +97,21 @@ function skipReason(body) {
  * The job the receiver would have enqueued, as late branch A starts it: the job, its kind and its delivery job id. Exported
  * for held replies (issue #638, held.mjs), whose fallback is the same object for the same reason: one spelling of "the job
  * this comment would have been".
+ *
+ * Stored for later and enqueued by whichever worker settles the run, which may be an older release than this receiver,
+ * so it is stamped with the version its fields need, by the worker's own rule (issue #761, `withJobDataVersion`):
+ * nothing while that is 1, so today's fallback is byte-identical. A worker that cannot read the stamp refuses to rebuild
+ * the job (`enqueueLateForgeJob` and the held settle throw) and answers the comment instead, never drops a field. Never
+ * throws: the filter's job carries no `dataVersion`, so nothing here can be from a newer release. `dataVersions` is the
+ * version rule, injectable for tests.
  */
-export function fallbackJobOf(job, kind) {
+export function fallbackJobOf(job, kind, { dataVersions } = {}) {
 	const { steerMode: _mode, ...rest } = job;
 	let jobId = null;
 	try {
 		jobId = forgeDeliveryJobId(kind, job.trigger?.deliveryId);
 	} catch {}
-	return { ...rest, kind, jobId };
+	return withJobDataVersion({ ...rest, kind, jobId }, dataVersions);
 }
 
 /**

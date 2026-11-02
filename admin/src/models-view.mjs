@@ -22,6 +22,7 @@ import { readSettingsView } from "./read-model.mjs";
 import { dollarWindowSpecs } from "./dollar-windows.mjs";
 import { doctorStale } from "./doctor-view.mjs";
 import { meteredRunMicros } from "./costs.mjs";
+import { newerSkippedSentence, readableRecords } from "./newer-release.mjs";
 
 export const MODELS_LIMITS = Object.freeze({ fileBytes: 1024 * 1024, records: 1000, days: 30, hosts: 64, proposals: 256, waits: 200, canarySources: 64, timeoutMs: 2500 });
 const DAY = 86400_000;
@@ -71,6 +72,8 @@ export function canaryComparisonLines(sample) {
 }
 
 function canariesOf(records, roles, deployment, now, sourceRecords = []) {
+  // A newer release's source record is no comparison (issue #761): its cost and turns are past the stable core.
+  sourceRecords = readableRecords(sourceRecords).records;
   const index = new Map([...records, ...sourceRecords].map(record => [record.jobId, record]));
   const groups = new Map();
   for (const record of records) {
@@ -178,7 +181,8 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
     return [{ ...proposal, id: check.id, host: host.name, at: integer(host.at), ageMs: integer(host.ageMs), stale: doctorStale(host), level: check.level,
       label: typeof check.label === "string" ? check.label : "Proposal details were omitted by the host's publication limit.", fix: typeof check.fix === "string" ? check.fix : null }];
   })).slice(0, MODELS_LIMITS.proposals);
-  const historyRecords = Array.isArray(records) ? records : [];
+  // A newer release's record is not read (issue #761): its model, fallback and canary fields are past the stable core.
+  const { records: historyRecords, newerSkipped } = readableRecords(Array.isArray(records) ? records : []);
   const ordered = historyRecords.filter(record => runId(record?.jobId) && Number.isFinite(atOf(record)) && atOf(record) <= now).sort((a, b) => atOf(b) - atOf(a));
   const dedup = new Map(); for (const record of ordered) if (!dedup.has(record.jobId)) dedup.set(record.jobId, record);
   const retained = [...dedup.values()].slice(0, MODELS_LIMITS.records);
@@ -187,6 +191,7 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
   const notes = ["Comparisons and fallback history use at most 1,000 retained local and mirrored run records over 30 days. Missing remote or expired records are unknown.", "A candidate shown next has not reserved a dollar window or endpoint. Credentials, egress, windows and slots are checked again at pickup.", "Repository agents' role declarations are not readable from this page."];
   if (facts.runs.some(run => run.projectUnknown) || facts.checks.some(check => check.projectUnknown)) notes.push("A local folder could not be resolved on this console host. The possible project scopes are shown; the owning worker resolves its actual folder at pickup.");
   if (records === null) notes.push("Run records could not be read; comparison and fallback history are unknown.");
+  if (newerSkipped > 0) notes.push(`${newerSkippedSentence(newerSkipped)}: comparisons and fallback history leave them out.`);
   if (!snapshot?.waiting || snapshot.waiting.unreachable) notes.push("Waiting jobs could not be read; an empty list is not proof that none wait.");
   if (!snapshot?.doctor || snapshot.doctor.unreachable || !hostRows.length) notes.push("No published doctor proposal evidence is available. Reload after doctor publishes on a host.");
   return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", partial: true, banners, roles, cooldowns: observedCooldowns, models, proposals,

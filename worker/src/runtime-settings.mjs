@@ -7,17 +7,25 @@ import { findDuplicateKey } from "./json-duplicates.mjs";
 import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
 import { checkDollarInvariant, parseUsdMicros } from "./money.mjs";
 import { BUNDLE_FORMATS } from "./secret-profiles.mjs";
+import { neededVersion, underDeclared, valueNeededVersion, valueUnderDeclared, versionProblem } from "./store-version.mjs";
 
 /**
  * Runtime-settings overlay: the shared, durable truth between the admin extension and the worker
- * (INT-CONFIG-OVERLAY-CONTRACT, DES-RUNTIME-SETTINGS-FILE-OVERLAY). A flat `settings.json` with fourteen
- * optional keys -- `model`, `provider` (non-empty strings), `maxTurns`, `dailyCap`, `weeklyCap`,
- * `monthlyCap`, `maxTokens`, `dailyTokenCap` (int >= 1), `concurrency` (int 1-10), `softHoldPct`
+ * (INT-CONFIG-OVERLAY-CONTRACT, DES-RUNTIME-SETTINGS-FILE-OVERLAY). A flat `settings.json` of optional keys:
+ * the fourteen settings in `KNOWN_KEYS` -- `model`, `provider` (non-empty strings), `maxTurns`, `dailyCap`,
+ * `weeklyCap`, `monthlyCap`, `maxTokens`, `dailyTokenCap` (int >= 1), `concurrency` (int 1-10), `softHoldPct`
  * (int 1-99), and the dollar keys `maxCostUsd`, `dailyCostUsd`, `weeklyCostUsd`, `monthlyCostUsd`
- * (a decimal string or number, `parseUsdMicros`) -- read by the worker at each job start and written
+ * (a decimal string or number, `parseUsdMicros`) -- the two operator-only resolver tables in
+ * `OPERATOR_ONLY_KEYS` (`secretProfiles`, `secretBundles`), and an optional `version` that describes the file
+ * rather than setting anything (issue #761, `SETTINGS_VERSION`). Read by the worker at each job start and written
  * atomically by the admin extension (tmp + rename). `maxTokens`/`dailyTokenCap` are the optional token
  * controls (issue #25); the dollar keys are issue #501's (a window needs `maxCostUsd`, checked on the merged
  * values by `resolveSettings`).
+ *
+ * A key this build does not know is dropped from the overlay it hands out and logged, and a writer given the
+ * `carry` its read returned writes that key back exactly as it found it, in its place (issue #761): the file is shared
+ * by every console, panel and worker of a deployment, and a writer from an older release must not delete a key a newer
+ * one added just because it cannot read it.
  *
  * `readOverlay` NEVER throws: a bad settings file returns a discriminated `{ invalid }` rather than an
  * exception, so the processor RETURNS a policy refusal (`settings-overlay-invalid`) instead of letting
@@ -54,6 +62,38 @@ export const KNOWN_KEYS = ["model", "provider", "maxTurns", "dailyCap", "weeklyC
  * operator-only for the same reason: its path is an exec, bounded by the same roots.
  */
 export const OPERATOR_ONLY_KEYS = ["secretProfiles", "secretBundles"];
+
+/**
+ * The highest overlay version this build reads (issue #761, `DES-STORE-VERSION-WHEN-NEEDED`). A file without
+ * `version` is version 1, and a writer writes `version` only when the content needs more than 1, so every overlay of
+ * today's keys stays byte-identical.
+ *
+ * `version` is deliberately NOT in `KNOWN_KEYS`: it describes the file, never a setting, so no tool, command or dialog
+ * can set it, and it never reaches the overlay a reader hands out. The writer computes it from what it writes.
+ */
+export const SETTINGS_VERSION = 1;
+
+/**
+ * Each overlay key whose ABSENCE an older build would misread (one that narrows: a cap, a refusal, a list a job is
+ * held to), with the version that introduced it. A key that is harmless when absent declares nothing and is simply
+ * carried by older writers. Empty until a key needs one; raising `SETTINGS_VERSION` and adding the row is one commit.
+ */
+export const SETTINGS_KEY_VERSIONS = Object.freeze({});
+
+/**
+ * Each EXISTING key whose range a later release widens, as `key -> (value) => version`: the version a value needs.
+ * A key-name table cannot say this, and an older build meeting the wider value refuses the whole overlay (every job
+ * refused `settings-overlay-invalid`) with no stamp to say an upgrade is the fix. So a rule here makes the writer stamp
+ * the version for exactly the values that need it. The same holds for a new field inside a closed nested shape
+ * (a `secretBundles` entry refuses an unknown field). Empty until a value needs one.
+ */
+export const SETTINGS_VALUE_VERSIONS = Object.freeze({});
+
+/** The lowest version a VALIDATED overlay needs, from its keys and the value rules: 1 while nothing needs more. */
+export function settingsVersionFor(overlay, { table = SETTINGS_KEY_VERSIONS, valueTable = SETTINGS_VALUE_VERSIONS } = {}) {
+	if (overlay === null || typeof overlay !== "object") return 1;
+	return Math.max(neededVersion(Object.keys(overlay), table), valueNeededVersion(overlay, valueTable));
+}
 
 // The dollar keys' near-miss spellings (issue #501), already normalised (`overlayKeyShape`), each mapped to the key it
 // meant: the four keys, their env names (`PI_MAX_COST_USD` pasted into settings.json is the likeliest slip of all),
@@ -108,19 +148,50 @@ function isIntInRange(value, min, max) {
 export { settingsFilePath } from "./config.mjs";
 
 /**
- * Validate a parsed overlay against the key contract, returning the sanitized overlay (known keys only)
- * or `{ invalid }`. Shared by `readOverlay` (post-parse) and `writeOverlay` (pre-write) so a single
- * definition governs both directions. Unknown keys are dropped and logged, leaving the overlay valid;
- * any invalid known key fails the WHOLE object.
+ * Validate a parsed overlay FILE against the key contract: `{ overlay, unknownKeys }` (the sanitized overlay of known
+ * keys only, and the names this build does not know, in file order), `{ invalid }`, or `{ invalid, newer: true }` for
+ * a file written by a newer pi-dispatch. Shared by `readOverlayDocument` (post-parse) and `writeOverlay`'s re-read of
+ * its own output, so a single definition governs both directions. Unknown keys are dropped from `overlay` and logged,
+ * leaving it valid; any invalid known key fails the WHOLE object.
+ *
+ * The VERSION IS JUDGED FIRST, before any key (issue #761). A newer file may hold a value this build's rules refuse (a
+ * range a later release widened), and judged key by key it would read as broken when the truth is "upgrade". A broken
+ * `version` (not an integer of 1 or more) is an ordinary `{ invalid }`. Then, after the keys, a known key or value
+ * that needs a higher version than the file declares is refused by name: such a file was written by hand or by a
+ * writer that dropped the stamp, and an older build would read it without the key.
  */
-function validateOverlay(candidate, log) {
+export function validateOverlay(parsed, log = () => {}, { supported = SETTINGS_VERSION, table = SETTINGS_KEY_VERSIONS, valueTable = SETTINGS_VALUE_VERSIONS } = {}) {
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return { invalid: "root must be a JSON object" };
+	}
+	const declared = Object.hasOwn(parsed, "version") ? parsed.version : undefined;
+	const problem = versionProblem(declared, { supported, what: "settings file" });
+	if (problem) return problem.newer ? { invalid: problem.message, newer: true } : { invalid: problem.message };
+	const result = validateKeys(parsed, log);
+	if (result.invalid) return result;
+	const short = underDeclared(Object.keys(result.overlay), table, declared);
+	if (short) return { invalid: `${short.field} needs settings version ${short.needs}, and the file declares ${declared ?? 1}` };
+	const shortValue = valueUnderDeclared(result.overlay, valueTable, declared);
+	if (shortValue) return { invalid: `${shortValue.field} holds a value that needs settings version ${shortValue.needs}, and the file declares ${declared ?? 1}` };
+	return result;
+}
+
+/**
+ * The per-key half of `validateOverlay`, and all of what `writeOverlay` asks of a CANDIDATE: `{ overlay, unknownKeys }`
+ * or `{ invalid }`. `version` is skipped here, never copied: the file's is judged by `validateOverlay`, and a
+ * candidate's is ignored because the writer computes the version from what it writes.
+ */
+function validateKeys(candidate, log) {
 	if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
 		return { invalid: "root must be a JSON object" };
 	}
 	const overlay = {};
+	const unknownKeys = [];
 	for (const key of Object.keys(candidate)) {
 		const value = candidate[key];
 		switch (key) {
+			case "version":
+				break;
 			case "model":
 			case "provider": {
 				// Issue #673: the one model-id and provider-id shape a trigger's run.model and run.provider, PI_MODEL and
@@ -238,29 +309,49 @@ function validateOverlay(candidate, log) {
 				const meant = Object.hasOwn(DOLLAR_NEAR_MISSES, overlayKeyShape(key)) ? DOLLAR_NEAR_MISSES[overlayKeyShape(key)] : undefined;
 				if (meant !== undefined) return { invalid: `${key} is not a settings key -- did you mean ${meant}? A dollar cap the worker drops would not apply while the file reads as set` };
 				log("settings_overlay_unknown_key", { key });
+				// Issue #761: the ONE place that decides a key is unknown, so the list a writer carries cannot drift from
+				// this switch. A near miss never gets here (refused above), so it is never carried either.
+				unknownKeys.push(key);
 			}
 		}
 	}
-	return { overlay };
+	return { overlay, unknownKeys };
 }
 
 /**
- * Read the overlay at `path`. Returns `{ overlay }` (known keys only) on success, or `{ invalid }` with
- * a key-only reason on failure. NEVER throws.
+ * Read the overlay at `path` for a writer (issue #761): `{ overlay, carry: { doc, unknownKeys }, text }` on success,
+ * `{ invalid }` with a key-only reason, or `{ invalid, newer: true }` for a file written by a newer pi-dispatch.
+ * NEVER throws. `carry` is what `writeOverlay` needs to write back every key this build does not know (the parsed
+ * document and the unknown names), and `text` is the file as read, for a writer's `expect` snapshot.
  *
- * A missing file (ENOENT) is the normal empty overlay `{ overlay: {} }`. Any OTHER read error
- * (EACCES, EISDIR, ...) is `{ invalid }`: a present-but-unreadable file must fail closed, not silently
- * become an empty overlay that restores env's higher `dailyCap`. Unparseable JSON, a non-object root,
- * or an invalid known key is `{ invalid }`.
+ * A missing file (ENOENT) is the normal empty overlay, `{ overlay: {}, carry: null, text: null }` (`null` is
+ * `fileSnapshot`'s encoding of a missing file). Any OTHER read error (EACCES, EISDIR, ...) is `{ invalid }`: a
+ * present-but-unreadable file must fail closed, not silently become an empty overlay that restores env's higher
+ * `dailyCap`. Unparseable JSON, a duplicate key, a non-object root, a broken `version` or an invalid known key is
+ * `{ invalid }`.
+ *
+ * `supported`, `table` and `valueTable` default to this build's and are injectable so a test can run the version
+ * machinery while the shipped tables are empty.
  */
-export function readOverlay(path, { fs = nodeFs, log = () => {} } = {}) {
+export function readOverlayDocument(path, { fs = nodeFs, log = () => {}, supported = SETTINGS_VERSION, table = SETTINGS_KEY_VERSIONS, valueTable = SETTINGS_VALUE_VERSIONS } = {}) {
 	let text;
 	try {
 		text = fs.readFileSync(path, "utf8");
 	} catch (err) {
-		if (err?.code === "ENOENT") return { overlay: {} }; // missing file is a normal empty overlay
+		if (err?.code === "ENOENT") return { overlay: {}, carry: null, text: null }; // missing file is a normal empty overlay
 		return { invalid: `settings file unreadable (${err?.code ?? "read-error"})` };
 	}
+	const read = judgeOverlayText(text, log, { supported, table, valueTable });
+	if (read.invalid) return read;
+	return { overlay: read.overlay, carry: { doc: read.doc, unknownKeys: read.unknownKeys }, text };
+}
+
+/**
+ * The settings file's TEXT judged as a reader judges it: `{ overlay, unknownKeys, doc }`, `{ invalid }` or
+ * `{ invalid, newer: true }`. Shared by the read and by `writeOverlay`'s re-read of its own output, so the writer can
+ * never produce a file the reader refuses.
+ */
+function judgeOverlayText(text, log, versions) {
 	let parsed;
 	try {
 		parsed = JSON.parse(text);
@@ -272,7 +363,24 @@ export function readOverlay(path, { fs = nodeFs, log = () => {} } = {}) {
 	// is named, never a value. `writeOverlay` serialises an object, so a file it wrote never has one.
 	const duplicate = findDuplicateKey(text);
 	if (duplicate) return { invalid: `settings file has a duplicate key ${JSON.stringify(duplicate.key)}: JSON keeps the last value, so the file that reads and the file that runs differ` };
-	return validateOverlay(parsed, log);
+	const result = validateOverlay(parsed, log, versions);
+	if (result.invalid) return result;
+	return { ...result, doc: parsed };
+}
+
+/**
+ * Read the overlay at `path`. Returns `{ overlay }` (known keys only) on success, or `{ invalid }` with
+ * a key-only reason on failure, plus `newer: true` when the file was written by a newer pi-dispatch (issue #761: the
+ * worker defers rather than refuses then). NEVER throws. `readOverlayDocument`'s rules, without the carry.
+ *
+ * A key this build does not know NEVER appears in `overlay`, and that is load-bearing beyond tidiness: the admin's
+ * `withoutOperatorOnly` keeps operator-only values out of model-visible views with a BLOCK list, so a future
+ * operator-only key, unknown to this build, is kept out only because it never enters the overlay.
+ */
+export function readOverlay(path, { fs = nodeFs, log = () => {} } = {}) {
+	const read = readOverlayDocument(path, { fs, log });
+	if (read.invalid) return read.newer === true ? { invalid: read.invalid, newer: true } : { invalid: read.invalid };
+	return { overlay: read.overlay };
 }
 
 /**
@@ -317,13 +425,51 @@ export function effectiveSettings(config, overlay) {
  * `effectiveSettings` resolves `overlay > env` over a fixed literal whose tests pin its key set, and this key
  * deliberately has no such precedence (a name declared in both sources is refused per delivery, not silently
  * won by either). `secretBundles` (issue #704) rides beside it for the same reason, under the same rule.
+ *
+ * A file written by a newer pi-dispatch keeps its `newer: true` (issue #761), so the processor can defer the job for an
+ * upgrade instead of refusing it; every other invalid read is exactly `{ invalid }`, as it always was.
  */
 export function resolveSettings(config, read) {
-	if (read.invalid) return { invalid: read.invalid };
+	if (read.invalid) return read.newer === true ? { invalid: read.invalid, newer: true } : { invalid: read.invalid };
 	const settings = effectiveSettings(config, read.overlay);
 	const broken = checkDollarInvariant(settings);
 	if (broken) return broken;
 	return { ...settings, secretProfiles: read.overlay?.secretProfiles ?? {}, secretBundles: read.overlay?.secretBundles ?? {} };
+}
+
+/**
+ * The file text for a validated overlay (issue #761): 2-space JSON and a trailing newline.
+ *
+ * Without `carry` it is exactly `JSON.stringify(validated, null, 2)` plus the newline, the bytes this writer always
+ * wrote. With it, the text follows the FILE's key order: walking `carry.doc`, a key this build does not know is written
+ * with its value as read, a known key is written from `validated` only if it is still there (so an unset removes it),
+ * and `version` is skipped; then the keys `validated` sets that the file did not have are appended in the candidate's
+ * order. So a changed key keeps its line, a file of known keys is rewritten byte for byte, and a key from a later
+ * release survives a write by an older console. `version` leads, and only when the content needs more than 1: the
+ * writer owns it, so a hand-written `"version": 1` is dropped and a stamp whose key was unset goes with it.
+ *
+ * Built with `Object.defineProperty`, `secretBundles`' precedent above: an assignment to a carried key named
+ * `__proto__` would set the result's PROTOTYPE and drop the key from the text, while a defined property stays data.
+ * Known residual: JavaScript lists integer-like keys (`"1"`) first in any object, so such a carried key moves to the top.
+ */
+function overlayText(validated, carry, versions) {
+	const out = {};
+	const put = (key, value) => Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+	const version = settingsVersionFor(validated, versions);
+	if (version > 1) put("version", version);
+	const doc = carry?.doc;
+	if (doc !== null && typeof doc === "object" && !Array.isArray(doc)) {
+		const unknown = new Set(Array.isArray(carry.unknownKeys) ? carry.unknownKeys : []);
+		for (const key of Object.keys(doc)) {
+			if (key === "version") continue;
+			if (unknown.has(key)) put(key, doc[key]);
+			else if (Object.hasOwn(validated, key)) put(key, validated[key]);
+		}
+	}
+	for (const key of Object.keys(validated)) {
+		if (!Object.hasOwn(out, key)) put(key, validated[key]);
+	}
+	return `${JSON.stringify(out, null, 2)}\n`;
 }
 
 /**
@@ -345,10 +491,30 @@ export function resolveSettings(config, read) {
  *
  * The rename is retried once on EPERM to ride out a Windows AV/indexer briefly locking the destination;
  * a second failure surfaces as `{ invalid }`, never a throw. Returns `{ ok: true }` on success.
+ *
+ * `carry` (issue #761): `readOverlayDocument`'s `carry` for the file the candidate was built from. With it, the text
+ * keeps the FILE's key order and every key this build does not know, exactly as read (`overlayText`); without it, the
+ * output is what it always was. Only what came from the file is carried: an unknown key on the candidate itself
+ * (anything a `mutate` added) is still dropped and logged, so no caller can write an arbitrary key through here. The
+ * output is then judged by the reader's own rules before the tmp file exists, so a write never leaves a file the
+ * worker would refuse. `table`, `valueTable` and `supported` are the version rules, injectable for tests.
  */
-export function writeOverlay(path, candidate, { fs = nodeFs, log = () => {}, expect = null, random = randomBytes } = {}) {
-	const result = validateOverlay(candidate, log);
+export function writeOverlay(path, candidate, { fs = nodeFs, log = () => {}, expect = null, carry = null, random = randomBytes, supported = SETTINGS_VERSION, table = SETTINGS_KEY_VERSIONS, valueTable = SETTINGS_VALUE_VERSIONS } = {}) {
+	const result = validateKeys(candidate, log);
 	if (result.invalid) return { invalid: result.invalid };
+	// A carry is only ever a READABLE file's (`readOverlayDocument` refuses the rest), and this keeps it so for any
+	// caller: the text below drops the file's `version` and writes its own, so a newer file's carry would otherwise come
+	// out stamped as a version this build vouches for, under keys it cannot read.
+	const carried = carry?.doc;
+	if (carried !== null && typeof carried === "object" && Object.hasOwn(carried, "version")) {
+		const problem = versionProblem(carried.version, { supported, what: "settings file" });
+		if (problem) return problem.newer ? { invalid: problem.message, newer: true } : { invalid: problem.message };
+	}
+	const data = overlayText(result.overlay, carry, { table, valueTable });
+	// The reader's own judgement of the bytes about to be written (parse, duplicate keys, version, every key), silently:
+	// the candidate's unknown keys were logged above, and the carried ones were logged when the file was read.
+	const reread = judgeOverlayText(data, () => {}, { supported, table, valueTable });
+	if (reread.invalid) return { invalid: reread.invalid };
 
 	try {
 		// Issue #464: on an account with no home the overlay's default lives in the per-account temp root, which is made
@@ -367,7 +533,6 @@ export function writeOverlay(path, candidate, { fs = nodeFs, log = () => {}, exp
 			// nothing to drop
 		}
 	};
-	const data = `${JSON.stringify(result.overlay, null, 2)}\n`;
 	try {
 		fs.writeFileSync(tmp, data, { flag: "wx" });
 	} catch (err) {

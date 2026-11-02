@@ -234,3 +234,52 @@ test("an expired or unparseable mirrored body is skipped, never shown, and never
 	assert.deepEqual(read.records.map((r) => r.jobId), ["ok"]);
 	assert.ok(redis.index.has("gone"), "the index member stays: a report writes nothing");
 });
+
+test("a record from a newer pi-dispatch is read by neither source and counted, and a read without one says nothing new (#761)", async () => {
+	const dir = tempDir("pi-cap-records-");
+	const write = writer(dir);
+	write("old.json", JSON.stringify(rec("old", H)));
+	write("ours.json", JSON.stringify(rec("ours", H, { v: 1 })));
+	write("newer.json", JSON.stringify(rec("newer", 2 * H, { v: 2, capacity: { slots: 99 } })));
+	write("newer-before.json", JSON.stringify(rec("newer-before", 7 * DAY + 1, { v: 2 }))); // ended before the window: not counted
+	const local = readLocalWindow(dir, { sinceMs: SINCE });
+	assert.deepEqual([local.records.map((r) => r.jobId).sort(), local.newerSkipped], [["old", "ours"], 1]);
+	const redis = fakeMirror([rec("m", H, { host: "b" }), rec("m-newer", H, { host: "c", v: 3 })]);
+	const mirror = await readMirrorWindow(redis, { sinceMs: SINCE, nowMs: NOW });
+	assert.deepEqual([mirror.records.map((r) => r.jobId), mirror.newerSkipped], [["m"], 1]);
+	const read = await readCapacityRecords({ redis, logsDir: dir, sinceMs: SINCE, nowMs: NOW, retentionDays: 3, localHost: "a" });
+	assert.deepEqual(read.records.map((r) => r.jobId).sort(), ["m", "old", "ours"]);
+	assert.equal(read.coverage.newerSkipped, 2);
+	assert.equal(read.coverage.reason, "2 records from a newer pi-dispatch not read", "the report says it is partial, and why");
+	assert.deepEqual(read.coverage.mirror.hosts, ["b"], "the newer record's host is not one this read holds");
+	// None of them: no key and no reason, so every whole-result comparison of a read without one is unchanged.
+	const clean = await readCapacityRecords({ redis: fakeMirror([rec("m", H, { host: "b" })]), logsDir: join(dir, "none"), sinceMs: SINCE, nowMs: NOW });
+	assert.equal(Object.hasOwn(clean.coverage, "newerSkipped"), false);
+	assert.equal(Object.hasOwn(readLocalWindow(join(dir, "none"), { sinceMs: SINCE }), "newerSkipped"), false);
+	assert.equal(Object.hasOwn(await readMirrorWindow(fakeMirror([rec("m", H)]), { sinceMs: SINCE, nowMs: NOW }), "newerSkipped"), false);
+});
+
+test("the same newer record on disk and in the mirror is one record not read, as the readable ones are one per job id (#761)", async () => {
+	const dir = tempDir("pi-cap-records-");
+	const write = writer(dir);
+	// A host rolled back from a newer release: its own newer records are in both sources.
+	const newer = rec("rolled-back", H, { v: 2 });
+	write("rolled-back.json", JSON.stringify(newer));
+	write("newer-here.json", JSON.stringify(rec("newer-here", H, { v: 2 })));
+	write("ours.json", JSON.stringify(rec("ours", H)));
+	const redis = fakeMirror([newer, rec("ours", H), rec("newer-there", 2 * H, { host: "b", v: 3 }), rec("", H, { v: 2 })]);
+	const local = readLocalWindow(dir, { sinceMs: SINCE });
+	assert.deepEqual([local.newerSkipped, [...local.newerIds].sort()], [2, ["newer-here", "rolled-back"]]);
+	const mirror = await readMirrorWindow(redis, { sinceMs: SINCE, nowMs: NOW });
+	assert.deepEqual([mirror.newerSkipped, [...mirror.newerIds].sort()], [2, ["newer-there", "rolled-back"]], "a newer body with no job id is none the merge would keep");
+	const read = await readCapacityRecords({ redis, logsDir: dir, sinceMs: SINCE, nowMs: NOW, retentionDays: 3, localHost: "a" });
+	assert.deepEqual(read.records.map((r) => r.jobId), ["ours"]);
+	assert.equal(read.coverage.newerSkipped, 3, "rolled-back once, newer-here and newer-there: distinct job ids, never 4 copies");
+	assert.equal(read.coverage.reason, "3 records from a newer pi-dispatch not read");
+	assert.equal(Object.hasOwn(read.coverage, "newerIds"), false, "the coverage names a count, never the ids");
+	// Only the shared one, in both sources: one record, said in the singular.
+	const alone = tempDir("pi-cap-records-");
+	writer(alone)("rolled-back.json", JSON.stringify(newer));
+	const pair = await readCapacityRecords({ redis: fakeMirror([newer]), logsDir: alone, sinceMs: SINCE, nowMs: NOW, localHost: "a" });
+	assert.deepEqual([pair.coverage.newerSkipped, pair.coverage.reason], [1, "1 record from a newer pi-dispatch not read"]);
+});

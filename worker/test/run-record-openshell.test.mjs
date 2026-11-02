@@ -16,7 +16,7 @@ const FACTS = { mode: "copy", ruleHosts: ["api.anthropic.com", "github.com", "*.
 test("openshell: rebuilt, sorted, on the two OpenShell venues only and in the venue's own mode, TAIL position after liveSkipped", () => {
 	const r = buildRecord({ job: job({ backend: "openshell" }), result: { outcome: "completed", exitCode: 0, openshell: FACTS, liveSkipped: "no-capability" }, ...AT });
 	assert.deepEqual(r.openshell, { mode: "copy", ruleHosts: ["*.github.com", "api.anthropic.com", "github.com"], ruleHostCount: 3, providers: 2, placeholders: 4 });
-	assert.deepEqual(Object.keys(r).slice(-2), ["liveSkipped", "openshell"]);
+	assert.deepEqual(Object.keys(r).slice(-3), ["liveSkipped", "openshell", "v"], "before the record's version (#761), always last");
 	const bind = buildRecord({ job: job({ backend: "openshell-bind" }), result: { outcome: "completed", openshell: { ...FACTS, mode: "bind" } }, ...AT });
 	assert.equal(bind.openshell.mode, "bind");
 	// The default venue counts as the venue: a trigger naming none runs on PI_BACKENDS[0].
@@ -55,10 +55,10 @@ test("openshell: a host outside the host-name charset is dropped, never repaired
 test("secretsProfile: the profile name for an armed job (its own or the implicit default), absent otherwise, after openshell", () => {
 	const named = buildRecord({ job: job({ secrets: { TOKEN: "op://v/i/f" }, secretsProfile: "prod" }), result: { outcome: "completed" }, ...AT });
 	assert.equal(named.secretsProfile, "prod");
-	assert.equal(Object.keys(named).at(-1), "secretsProfile");
+	assert.equal(Object.keys(named).at(-2), "secretsProfile");
 	assert.equal(buildRecord({ job: job({ secrets: { TOKEN: "op://v/i/f" } }), result: { outcome: "policy", reason: "secret-unresolved" }, ...AT }).secretsProfile, DEFAULT_SECRETS_PROFILE);
 	const both = buildRecord({ job: job({ backend: "openshell", secrets: { T: "r" } }), result: { openshell: FACTS }, ...AT });
-	assert.deepEqual(Object.keys(both).slice(-2), ["openshell", "secretsProfile"], "the newest key last");
+	assert.deepEqual(Object.keys(both).slice(-3), ["openshell", "secretsProfile", "v"], "the newest key last before the record's version (#761)");
 	assert.equal("secretsProfile" in buildRecord({ job: job(), result: { outcome: "completed" }, ...AT }), false, "no secrets, no key");
 	assert.equal("secretsProfile" in buildRecord({ job: job({ secrets: {} }), result: {}, ...AT }), false, "an empty map arms nothing");
 	assert.equal("secretsProfile" in buildRecord({ job: job({ secrets: { T: "r" }, secretsProfile: "a:b" }), result: {}, ...AT }), false, "a name outside the charset");

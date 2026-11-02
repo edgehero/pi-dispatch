@@ -38,7 +38,7 @@ function configError(message) {
  * condition it asked for is structural now, and `scoped-limits.json` covers the wider per-scope case.
  * Accepting-and-ignoring it would be the silent no-op this project refuses.
  */
-export const WAIT_CONDITION_KEYS = ["after", "profile"];
+export const WAIT_CONDITION_KEYS = Object.freeze(["after", "profile"]);
 
 /**
  * Every reason the wait gate refuses a job with (index.mjs `refuseWait`), each before the job holds a slot. A test

@@ -172,6 +172,8 @@
     "./scheduler-stall-guard": "./src/scheduler-stall-guard.mjs",
     "./watch-closer": "./src/watch-closer.mjs",
     "./defer-reasons": "./src/defer-reasons.mjs",
+    "./store-version": "./src/store-version.mjs",
+    "./job-data-version": "./src/job-data-version.mjs",
     "./record-reason": "./src/record-reason.mjs",
     "./watch-contract": "./src/watch-contract.mjs",
     "./watch-store": "./src/watch-store.mjs",

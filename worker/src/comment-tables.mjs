@@ -309,3 +309,11 @@ export const APPROVAL_COMMENTS = {
 };
 
 for (const reason of ["approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]) TERMINAL_COMMENTS[reason] = APPROVAL_COMMENTS[reason];
+
+/**
+ * A park the processor could not arm because the live triggers file was written by a newer pi-dispatch (issue #761): the
+ * run is complete and paid for, and its record says `approval-policy-unavailable`. A string apart from
+ * `APPROVAL_COMMENTS`, which is keyed by reason tokens: this is one more comment for an existing reason, never a reason
+ * of its own, and the store comment that path posted before (`approval-state-unavailable`) sent the reader to Valkey.
+ */
+export const APPROVAL_PARK_NEWER_COMMENT = "No approval is armed: the triggers file was written by a newer pi-dispatch; upgrade this worker.";

@@ -16,7 +16,7 @@ import { makeWatchDrainer } from "./watch-drainer.mjs";
 import { makeWatchIssuePublisher } from "./watch-issue.mjs";
 import { makeWatchIssueAdapter } from "./watch-issue-adapter.mjs";
 import { checkFailoverCandidate, failoverEgressRequired } from "./model-failover.mjs";
-import { parseTriggers, parseTriggersDocument } from "./triggers.mjs";
+import { parseTriggers, parseTriggersDocument, TRIGGERS_FILE_VERSION } from "./triggers.mjs";
 import { watchDurationMs } from "./watch-contract.mjs";
 import { makeApprovalSessionCheck } from "./approval-session.mjs";
 import { makeApprovalStore } from "./approval-state.mjs";
@@ -83,7 +83,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
 import { makeBundleResolver } from "./secret-bundles.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
-import { loadPauseWindows, pauseUntilMs } from "./pause-windows.mjs";
+import { loadPauseWindows, PAUSE_WINDOWS_VERSION, pauseUntilMs } from "./pause-windows.mjs";
 import { checkProjectRows, danglingProjectRows, dollarRowsWithoutCap, makeInFlight, loadScopedLimits, SCOPED_LIMITS_VERSION, scopeClaimRows } from "./scoped-limits.mjs";
 import { escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
@@ -110,7 +110,7 @@ import { MCP_TRANSIENT_READ_CODES, jobProviders, makeMcpCheck, providerKeyNames 
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
 import { makeSecretsResolver, realExecutable } from "./secrets.mjs";
 import { servableSecretProfiles } from "./secret-profiles.mjs";
-import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
+import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, recordOfThisJob, recordReadable, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
 import { makeRunMirror, readMirroredRecord } from "./run-mirror.mjs";
 import { makeLiveTranscriptOpener } from "./live-transcript.mjs";
 import { makeInboxRelay } from "./inbox-relay.mjs";
@@ -118,7 +118,8 @@ import { makeLateForge, settleInbox } from "./inbox-settle.mjs";
 import { makeHeldSettle } from "./held-settle.mjs";
 import { readProgressKey } from "./run-progress.mjs";
 import { makeStatusCommenter, makeStatusCommentRegistry, renderStatusText, STATUS_OUTCOMES, STATUS_RETRYING } from "./status-comment.mjs";
-import { readOverlay, resolveSettings } from "./runtime-settings.mjs";
+import { readOverlay, resolveSettings, SETTINGS_VERSION } from "./runtime-settings.mjs";
+import { JOB_DATA_VERSION } from "./job-data-version.mjs";
 import { usdFingerprint } from "./dollar-fingerprint.mjs";
 import { authoredCron, envelopeJobPaths, loadSchedules, servedSchedules } from "./schedules.mjs";
 import { makeStallGuard } from "./scheduler-stall-guard.mjs";
@@ -268,13 +269,46 @@ export async function settleWithin(promise, ms, fallback) {
 }
 
 /**
+ * The triggers file's live reload (issue #761), EXPORTED apart from its watcher like `reloadPauseWindows`. The cron
+ * reload is `reloadSchedules`'s, unchanged: a file that does not load keeps the running schedules
+ * (`schedules_reload_invalid`). One state rides beside it, `state.newer`: SET when the loader refused the file as one
+ * a newer pi-dispatch wrote (its configError's `.newer`), logged `triggers_reload_newer`, and CLEARED the next time the
+ * file loads. An edit that breaks the file leaves it as it was: that says nothing about what the newer file held. The
+ * processor defers every job while it is set (`triggersNewer`), since the last good copy every reader would fall back
+ * to is no longer what the operator wrote. `reload` and `load` are injectable for tests; the rest is
+ * `reloadSchedules`' own options.
+ */
+export async function reloadTriggersFile(config, queue, state, { reload = reloadSchedules, load = loadSchedules, ...options } = {}) {
+	let loaded = false;
+	let thrown = null;
+	const loadFn = (cfg, opts) => {
+		try {
+			const schedules = load(cfg, opts);
+			loaded = true;
+			return schedules;
+		} catch (error) {
+			thrown = error;
+			throw error;
+		}
+	};
+	const result = await reload(config, queue, { ...options, loadFn });
+	if (loaded) {
+		state.newer = false;
+	} else if (thrown?.newer === true) {
+		state.newer = true;
+		options.log?.("triggers_reload_newer", { reason: thrown?.message ?? String(thrown) });
+	}
+	return result;
+}
+
+/**
  * Watch the DIRECTORY holding the triggers file (robust to the admin's atomic tmp+rename, which swaps the
  * inode a file-watch would lose), debounce, and re-reconcile the cron schedulers on change via
- * `reloadSchedules`. Best-effort: a platform without `fs.watch` logs and the worker keeps its boot-time
- * schedulers. The FSWatcher is unref'd (the debounce it arms is NOT), and the returned closer is what
- * `startWorker` registers so the watch dies with the worker that armed it (issue #295).
+ * `reloadTriggersFile` (which keeps `state.newer`, issue #761). Best-effort: a platform without `fs.watch` logs and
+ * the worker keeps its boot-time schedulers. The FSWatcher is unref'd (the debounce it arms is NOT), and the returned
+ * closer is what `startWorker` registers so the watch dies with the worker that armed it (issue #295).
  */
-function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot, afterReload = () => {}) {
+function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot, afterReload = () => {}, state = { newer: false }) {
 	const path = config.triggersFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -292,7 +326,7 @@ function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot,
 			clearTimeout(handles.timer);
 			// Issue #504 part B: a cron folder or a skills dir an edit adds is a new job path, so the envelope's place is
 			// judged again after every triggers reload.
-			handles.timer = setTimeout(() => void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet }).then(() => afterReload(closer.reloadLog)), WATCH_DEBOUNCE_MS);
+			handles.timer = setTimeout(() => void reloadTriggersFile(config, queue, state, { log: closer.reloadLog, ref, registry, tz, fleet }).then(() => afterReload(closer.reloadLog)), WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("triggers_watching", { path });
@@ -304,15 +338,41 @@ function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot,
 	// changed.
 	if (changedWhileArming(handles, readFile)) {
 		log("triggers_reread_after_arming", { path });
-		void reloadSchedules(config, queue, { log: closer.reloadLog, ref, registry, tz, fleet }).then(() => afterReload(closer.reloadLog));
+		void reloadTriggersFile(config, queue, state, { log: closer.reloadLog, ref, registry, tz, fleet }).then(() => afterReload(closer.reloadLog));
 	}
 	return closer;
 }
 
 /**
+ * The pause-windows reload, EXPORTED apart from its watcher so its two states are testable without fs.watch (the
+ * scoped-limits reload's precedent). A good file replaces `ref.current` and clears `ref.newer`. A bad edit keeps the
+ * last-good windows in effect (OQ-008 live-edit safety), logged `pause_windows_reload_invalid`: the pause gate never
+ * loses its config to a typo.
+ *
+ * A file written by a newer pi-dispatch (issue #761, the loader's configError with `.newer`) keeps the last-good
+ * windows too, and ALSO sets `ref.newer`, logged `pause_windows_reload_newer`: it is no typo, and those windows are not
+ * what the operator wrote any more, since the newer file may pause a job they would run. The processor defers every job
+ * (`newer-release`) while it is set, and only the next good reload clears it: an edit that then breaks the file says
+ * nothing about what the newer one paused.
+ */
+export function reloadPauseWindows(config, ref, log, { load = loadPauseWindows } = {}) {
+	try {
+		ref.current = load(config);
+		ref.newer = false;
+		log("pause_windows_reloaded", { count: ref.current.length });
+	} catch (err) {
+		if (err?.newer === true) {
+			ref.newer = true;
+			log("pause_windows_reload_newer", { reason: err?.message });
+		} else {
+			log("pause_windows_reload_invalid", { reason: err?.message });
+		}
+	}
+}
+
+/**
  * Watch the DIRECTORY holding the pause-windows file (same atomic-rename robustness as the triggers watch)
- * and hot-swap the in-memory windows in `ref.current` on change. A bad edit keeps the last-good windows in
- * effect (OQ-008 live-edit safety) — the pause gate never loses its config to a typo. Best-effort; the
+ * and hot-swap the in-memory windows in `ref.current` on change (`reloadPauseWindows`). Best-effort; the
  * FSWatcher is unref'd and the returned closer stops the watch with the worker (issue #295).
  */
 function watchPauseWindowsFile(config, ref, log, atBoot) {
@@ -321,14 +381,7 @@ function watchPauseWindowsFile(config, ref, log, atBoot) {
 	const file = basename(path);
 	const handles = { watcher: null, timer: null, closed: false };
 	const closer = makeWatchCloser(handles, log);
-	const reload = () => {
-		try {
-			ref.current = loadPauseWindows(config);
-			closer.reloadLog("pause_windows_reloaded", { count: ref.current.length });
-		} catch (err) {
-			closer.reloadLog("pause_windows_reload_invalid", { reason: err?.message });
-		}
-	};
+	const reload = () => reloadPauseWindows(config, ref, closer.reloadLog);
 	const readFile = () => readFileSync(path, "utf8");
 	readBeforeArming(handles, readFile, atBoot); // the BOOT LOAD's own bytes; see watch-closer (issue #386)
 	try {
@@ -922,11 +975,16 @@ export async function startWorker(
 		},
 	});
 	const schedules = { current: loadSchedules(config, { fleet: config.workerNameDeclared, ...recording("triggers", config.triggersFile) }) };
+	// Issue #761: whether the triggers file on disk was written by a newer pi-dispatch, kept by the triggers watcher's
+	// reload (`reloadTriggersFile`). At boot such a file is the loader's configError, so it starts false.
+	const triggersState = { newer: false };
 
 	// REQ-SCOPED-PAUSE-WINDOWS: load + validate the pause-windows file with the operator present and before any
 	// Valkey contact, so a malformed file refuses startup (configError) rather than silently disabling scoped
 	// pauses. Held in a mutable ref so the live-reload watcher can hot-swap it. [] means no scoped pauses.
-	const pauseWindows = { current: loadPauseWindows(config, recording("pauseWindows", config.pauseWindowsFile)) };
+	// `newer` (issue #761) is set by a live reload that met a file written by a newer pi-dispatch, which keeps these
+	// windows (`reloadPauseWindows`); at boot such a file is the loader's configError, so it starts false.
+	const pauseWindows = { current: loadPauseWindows(config, recording("pauseWindows", config.pauseWindowsFile)), newer: false };
 
 	// Issue #242: same posture for the scoped-limits file -- fail-loud with the operator present, mutable
 	// ref for the live-reload watcher, [] when unset (the folder mutex is code and needs no file).
@@ -1830,9 +1888,9 @@ export async function startWorker(
 		readMirrored: runMirror ? (jobId) => readMirroredRecordFn(redis, sanitizeJobId(jobId)) : null,
 	});
 	// Issue #645: a run's record by job id, this host's file then the fleet's copy where a mirror is armed, for the
-	// processor's recovery gate (a recovery whose base run already settled is superseded, not run) and for the lost-lock
-	// check of a recovery's own returned failure below. A recovery may land on a host that never ran its base attempt, so
-	// a local-only read would miss exactly the fleet case. Never rejects; unreadable or unreachable is null.
+	// processor's recovery gate (a recovery whose base run already settled is superseded, not run). A recovery may land on
+	// a host that never ran its base attempt, so a local-only read would miss exactly the fleet case. Never rejects;
+	// unreadable or unreachable is null.
 	const readRunRecord = async (jobId) => {
 		const local = readRecord(jobId);
 		if (local && local !== UNREADABLE_RECORD) return local;
@@ -1843,14 +1901,20 @@ export async function startWorker(
 	// The record a retry (or a pickup after a stall) is about to replace (issue #599), read BOTH ways: this host's file and
 	// the fleet's copy where a mirror is armed. Both, because each host keeps its own file: a job that ran on A, then B,
 	// then A again finds A's stale first attempt locally while B's second is in the mirror. `newerRecord` keeps the higher
-	// attempt (a tie: the later end). Its slot interval rides the new record as `earlier`. Never rejects: unreadable or
-	// unreachable is no record from that side.
-	const previousRecord = async (jobId) => {
+	// attempt (a tie: the later end). Its slot interval rides the new record as `earlier`. The failed listener's lost-lock
+	// check reads a job's own failed record through it too, for the same reason (issue #761). Never rejects: unreadable
+	// or unreachable is no record from that side.
+	// `keep`, when given, is the rule a caller's record must pass (`recordOfThisJob` for one attempt, pure and never
+	// throwing), applied to EACH side before the higher attempt is chosen. Applied after, it would judge only the side
+	// chosen: ids are reused, so a stale record an older job left at a higher attempt would win on attempt and then fail
+	// the rule, and this attempt's own record on the other side would never be looked at.
+	const previousRecord = async (jobId, { keep = null } = {}) => {
+		const kept = (record) => (record === null || typeof keep !== "function" || keep(record) ? record : null);
 		const read = readRecord(jobId);
-		const local = read === UNREADABLE_RECORD ? null : read;
+		const local = kept(read === UNREADABLE_RECORD ? null : read);
 		if (!runMirror) return local;
 		const mirrored = await readMirroredRecordFn(redis, sanitizeJobId(jobId)).catch(() => null);
-		return newerRecord(local, mirrored === UNREADABLE_RECORD ? null : mirrored);
+		return newerRecord(local, kept(mirrored === UNREADABLE_RECORD ? null : mirrored));
 	};
 
 	// INT-CONFIG-OVERLAY-CONTRACT: the worker reads the runtime-settings overlay at EACH job start, so this
@@ -1864,6 +1928,12 @@ export async function startWorker(
 		// (issue #501), so an overlay window with an env per-job cap is valid. `secretProfiles` rides alongside the
 		// effective keys; that function says why.
 		const res = resolveSettings(config, readOverlay(settingsFile, { log }));
+		// Issue #761: a file written by a newer pi-dispatch keeps `newer: true`, so the processor DEFERS the job
+		// (`newer-release`) instead of refusing it as settings-overlay-invalid. Its own line: it is no broken file.
+		if (res.invalid && res.newer === true) {
+			log("settings_overlay_newer", { reason: res.invalid, settingsFile });
+			return { invalid: res.invalid, newer: true };
+		}
 		if (res.invalid) {
 			log("settings_overlay_invalid", { reason: res.invalid, settingsFile });
 			return { invalid: res.invalid };
@@ -2243,6 +2313,13 @@ export async function startWorker(
 		// Issue #596: the highest scoped-limits version this build reads, so doctor can name a worker that would keep its
 		// last good file (so no size and no later edit to the file applies on it) once the file is version 3. An integer.
 		limitsVersion: SCOPED_LIMITS_VERSION,
+		// Issue #761 (DES-STORE-VERSION-WHEN-NEEDED): the highest version this build reads of the settings overlay, the pause
+		// windows file, the triggers file and a queued job's data, integers, on `limitsVersion`'s model: only doctor reads
+		// them, to name a peer that would defer (or, from before these fields, misread) what this host's files now need.
+		settingsVersion: SETTINGS_VERSION,
+		pauseWindowsVersion: PAUSE_WINDOWS_VERSION,
+		triggersVersion: TRIGGERS_FILE_VERSION,
+		jobDataVersion: JOB_DATA_VERSION,
 		// Issue #596, phase 2: this host's budget and what its jobs hold against it, integers (MiB and hundredths of a CPU),
 		// `off` for a budget switched off and "" while unknown, so doctor and a forge job's never-fits check can read which
 		// host a size fits on. Thunks over the worker's one budget, so every beat says what is held now.
@@ -2787,6 +2864,12 @@ export async function startWorker(
 		// REQ-SCOPED-PAUSE-WINDOWS: the processor defers a job whose folder/repo is inside an active window.
 		// Reads the live-reloaded ref, so an operator edit takes effect on the next job without a restart.
 		pauseUntil: (job, now) => pauseUntilMs(pauseWindows.current, job, now),
+		// Issue #761: while the file on disk was written by a newer pi-dispatch, `pauseUntil` above reads the last good
+		// windows, which may not pause what the file pauses, so every job waits for this host's upgrade instead.
+		pauseWindowsNewer: () => pauseWindows.newer === true,
+		// Issue #761: while the triggers file on disk was written by a newer pi-dispatch, every reader of it holds a last
+		// good copy or refuses, so every job waits for this host's upgrade instead (the processor's first gates).
+		triggersNewer: () => triggersState.newer === true,
 		// Issue #242: the scoped-limits snapshot the pickup gate and the scoped budget read, once per
 		// pickup, from the live-reloaded ref -- same next-job grain as pauseUntil above.
 		scopedLimits: () => scopedLimits.current,
@@ -3203,10 +3286,22 @@ export async function startWorker(
 		});
 		// The failed listener's body, for a failure the queue decided. Split out only so the lost-lock check below can
 		// run it after an await; a failure of any other reason runs it synchronously, exactly as before.
+		//
+		// `settledElsewhere` (issue #761) is a terminal failure whose attempt another host already ended and recorded,
+		// in a record this build can read only by its core (the lost-lock check below says which). It runs the terminal
+		// duties below, so nothing the job held is left open: the processor never closes the approval claim of a failed
+		// attempt, so without this one its target would refuse new requests `target-pending` for good. Two things
+		// differ: the terminal line is `job_lost_lock_after_completion` with the outcome alone, and nothing is posted.
+		// The page is the same as any terminal failure's, and a stall's error carries no reason, so the hook's argv reads
+		// `infra`. The run's inbox and held replies close as the run's end says (below). What the host that ran the
+		// attempt may already have done is safe to do again: a second close of an inbox or of held replies acts on
+		// nothing, and the draft's refusal writes the same state.
 		const approvalFinalizers = new Set();
 		let approvalFinalizerCloser = false;
-		const onFailed = (job, err) => {
-			log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) });
+		const onFailed = (job, err, { settledElsewhere = false } = {}) => {
+			// Exactly one terminal line either way (REQ-LOCAL-JOB-VISIBILITY).
+			if (settledElsewhere) log("job_lost_lock_after_completion", { jobId: job?.id, outcome: "failed" });
+			else log("job_failed", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? err).slice(0, 120) });
 			// The one reason whose sentence is the fix itself (issue #458): logged WHOLE, beside the cut line above.
 			if (err?.reason === NETNS_KEEPER_NOT_HOLDING || err?.reason === NETNS_KEEPER_CRASH_LOOP) log("job_failed_netns_keeper", { jobId: job?.id, attempt: job?.attemptsMade, reason: String(err?.message ?? "") });
 			// The TERMINAL failed attempt only (issue #288): `finishedOn` is set by BullMQ's own move on the
@@ -3236,11 +3331,18 @@ export async function startWorker(
 				// inbox is closed here and what waits becomes `late` instead of sitting `queued` until the key expires. A
 				// terminal failure the processor did see was settled before its record: this second close returns the same entries
 				// with `first: false` (steer-inbox.mjs closeInbox), so settleInbox answers nothing again (review round 1, F2).
-				if (job.data?.steer === true) void settleInbox({ redis, job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" }, log, onLateForge: lateForge });
-				// Issue #638: the same for an awaitInput run's held replies; a failure never parked, so they are dropped, and a
-				// second close (the processor settled first) acts on nothing.
-				if (job.data?.awaitInput === true) void heldSettle({ job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" } });
-				void comment({ ...job.data, id: job.id }, (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason) ? FAILED_COMMENT_BY_REASON[err.reason] : null) ?? FAILED_COMMENT);
+				// Both closes are the RUN's, keyed by its run id, which a #645 recovery keeps. A run settled elsewhere may have
+				// been handed to a recovery there (a `recovery-enqueued` this build cannot read), and that recovery must find
+				// both open (inbox-settle.mjs `isFinalOutcome`): closing them would answer its waiting messages as late, on the
+				// forge, about a run that goes on. So they close then only for a job no recovery can continue, whose run ended
+				// with it.
+				if (!settledElsewhere || !isRecoveryArmed(job.data)) {
+					if (job.data?.steer === true) void settleInbox({ redis, job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" }, log, onLateForge: lateForge });
+					// Issue #638: the same for an awaitInput run's held replies; a failure never parked, so they are dropped, and
+					// a second close (the processor settled first) acts on nothing.
+					if (job.data?.awaitInput === true) void heldSettle({ job, error: { reason: typeof err?.reason === "string" ? err.reason : "infra" } });
+				}
+				if (!settledElsewhere) void comment({ ...job.data, id: job.id }, (typeof err?.reason === "string" && Object.hasOwn(FAILED_COMMENT_BY_REASON, err.reason) ? FAILED_COMMENT_BY_REASON[err.reason] : null) ?? FAILED_COMMENT);
 				onFailure?.({ jobId: job?.id, outcome: "failed", reason: typeof err?.reason === "string" ? err.reason : "infra" });
 			}
 		};
@@ -3317,8 +3419,28 @@ export async function startWorker(
 					// everything: `recovery-failed` posted its own sentence (so only its page is owed, once), and
 					// `recovery-enqueued` handed the run to a recovery (nothing is owed). Running the failure path for either
 					// would post a second failure comment, the second one false for a run that continues.
-					const own = await readRunRecord(job.id).catch(() => null);
-					if (own?.jobId === job.id && own.attempt === job.attemptsMade && own.outcome === "failed" && (own.reason === "recovery-failed" || own.reason === "recovery-enqueued")) {
+					// Read BOTH ways (`previousRecord`), never this host's file alone: on a fleet this host may hold an earlier
+					// attempt's file while the host that ran THIS attempt wrote its record to the mirror. And each side held to
+					// the rule every lookup of a job's own record shares (`recordOfThisJob`: the id, this attempt, and not older
+					// than the job) BEFORE the higher attempt is kept, because ids are reused: a failed record an older job left
+					// under the same id must not stand in for this attempt's and take away its recovery or its comment, and,
+					// at a higher attempt, must not hide this attempt's own record on the other side either.
+					const keep = (record) => recordOfThisJob(record, { jobId: job.id, attempt: job.attemptsMade, since: job.timestamp });
+					const own = await previousRecord(job.id, { keep }).catch(() => null);
+					const ownFailure = own !== null && own.outcome === "failed";
+					// Issue #761: this attempt's `failed` record, written by a newer pi-dispatch. Its id, attempt, times and
+					// outcome are stable core fields, so it says that the attempt ended on that host and what became of it was
+					// decided there. Its `reason` is not core, so this build cannot tell `recovery-enqueued` (the run continues,
+					// nothing is owed) from `recovery-failed` (its sentence posted, its page owed) from an ordinary failure (the
+					// comment and the page owed). The failure path below fits only the last, and breaks the first:
+					// `recoverStall` would ask for the newer host's recovery again and write this build's record over the newer
+					// one, and the comment would say "will not be retried further" of a run that continues. So the terminal
+					// failure path runs without its comment (`settledElsewhere`): every duty that closes what the job held, and
+					// one page, which is owed or harmless in all three cases, where a wrong comment is wrong on the forge, in
+					// front of everyone. An ordinary failure's comment is what this costs, and only while the fleet runs two
+					// releases.
+					if (ownFailure && !recordReadable(own)) return onFailed(job, err, { settledElsewhere: true });
+					if (ownFailure && (own.reason === "recovery-failed" || own.reason === "recovery-enqueued")) {
 						log("job_lost_lock_after_completion", { jobId: job.id, outcome: own.outcome, reason: own.reason });
 						if (pagesAsReturnedFailure(own)) onFailure({ jobId: job.id, outcome: "failed", reason: own.reason });
 						return;
@@ -3334,8 +3456,11 @@ export async function startWorker(
 					if (recovered) return;
 					return onFailed(job, err);
 				}
-				log("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(record.reason ? { reason: record.reason } : {}) });
-				if (pagesAsPolicy(record)) onFailure({ jobId: job.id, outcome: "policy", reason: record.reason });
+				// Issue #761: a record a newer pi-dispatch wrote is read for its stable core only; its reason may mean
+				// something else there, so it is neither logged nor paged on.
+				const readable = recordReadable(record);
+				log("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(readable && record.reason ? { reason: record.reason } : {}) });
+				if (readable && pagesAsPolicy(record)) onFailure({ jobId: job.id, outcome: "policy", reason: record.reason });
 			})().catch(() => {}); // `settledRecord` never rejects; this only keeps a throwing log line from going unhandled
 		});
 
@@ -3387,7 +3512,7 @@ export async function startWorker(
 		// Only when a triggers file is configured; best-effort; a bad edit keeps the running schedulers. The
 		// closer each of the three returns joins `extraClosers`, so the watch stops with the worker (issue #295).
 		if (config.triggersFile) {
-			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers, checkEnvelopePlace));
+			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers, checkEnvelopePlace, triggersState));
 		}
 
 		// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so

@@ -123,6 +123,9 @@ export const DOCTOR_SECTIONS = Object.freeze([
  *     carries it too. A host on both venues publishes `egress.proxy` and `egress.proxy-2` (`assignCheckIds`), and a
  *     reader judges the worst of the two.
  *   - `provider.key`: whether the provider's key is found where the worker looks.
+ * Issue #761, for an upgrade: `settings.unknown-keys`, the overlay keys this build does not know (names only, a warning),
+ * and `fleet.store-versions`, a peer that cannot read a store this host's files need a version above 1 for (a warning,
+ * one per store and kind of peer, so a run may publish `-2` and on).
  * No id names a forge's credentials, because no one check holds them: the `github` section alone prints about twenty
  * lines across its three auth sources, and the other forges print theirs under `forges`. A reader judges those by the
  * section part of their derived ids, which `DOCTOR_SECTIONS` pins.
@@ -142,6 +145,8 @@ export const NAMED_CHECK_IDS = Object.freeze([
 	"envelope.file-shell",
 	"settings.overlay",
 	"settings.overlay-dollars",
+	"settings.unknown-keys",
+	"fleet.store-versions",
 	"egress.proxy",
 	"provider.key",
 	"watch.sources",

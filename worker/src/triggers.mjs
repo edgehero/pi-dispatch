@@ -47,6 +47,7 @@ import { normalizeWatchSources, normalizeWatchRule, watchDurationMs } from "./wa
 import { validateWatchDecision } from "./watch-decision.mjs";
 import { builtinModel } from "./model-catalog.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
+import { neededVersion, underDeclared, valueNeededVersion, valueUnderDeclared, versionProblem } from "./store-version.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
 // the loader and the pickup gate cannot disagree about what a legal instant is: a second spelling here is
 // how a file that loads clean starts holding for an instant nobody wrote. wait-for.mjs is pure and
@@ -288,12 +289,108 @@ function isNonEmptyString(value) {
 }
 
 /**
+ * The highest triggers file version this build reads (issue #761, `DES-STORE-VERSION-WHEN-NEEDED`): a top-level
+ * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
+ * file of today's fields stays byte-identical.
+ */
+export const TRIGGERS_FILE_VERSION = 1;
+
+/**
+ * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
+ * of an entry are carried by every writer, and an older loader DROPS a key it does not know: harmless for most, a
+ * widened job for a key that narrows one. Every row of `AUTHORED_NARROWING_FIELDS` added after issue #761 must appear
+ * here (and in `JOB_DATA_FIELD_VERSIONS`) at 2 or above; a test holds that. Empty until a key needs one.
+ */
+export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({});
+
+/** Each top-level block (beside `triggers`) whose absence an older build would misread, as above. Empty until one does. */
+export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
+
+/**
+ * Each EXISTING field of a trigger entry whose range a later release widens, as `field -> (value) => version` (the
+ * shared rule, `valueNeededVersion`): a new `on.type`, say, or a new field inside `on`. A key-name table cannot say
+ * this, and an older loader meeting the wider value refuses the whole file as broken (its schedules keep running, and
+ * its next start fails) where a stamp makes it defer. Empty until a value needs one.
+ */
+export const TRIGGER_VALUE_VERSIONS = Object.freeze({});
+
+/**
+ * Each EXISTING `run` key whose range a later release widens (a new `run.waitFor` condition kind, or a new `run.kind`,
+ * say), as above.
+ */
+export const TRIGGER_RUN_VALUE_VERSIONS = Object.freeze({});
+
+/**
+ * Each EXISTING top-level block whose range a later release widens, keyed by the block's name (`secretBundles`,
+ * `modelRoles`, `answerRules`, ...), as above: a new field in a bundle, say, which this loader refuses by name. The rule
+ * is handed the whole block. Empty until a value needs one.
+ */
+export const TRIGGERS_BLOCK_VALUE_VERSIONS = Object.freeze({});
+
+/**
+ * The lowest version a parsed triggers document needs: the raw `run` keys of every entry, the values of every entry's
+ * fields and of its `run` keys, and every top-level key and its value (`version` itself aside). 1 while nothing in it
+ * needs more.
+ */
+export function triggersFileVersionFor(doc, { runTable = TRIGGER_RUN_FIELD_VERSIONS, blockTable = TRIGGERS_BLOCK_VERSIONS, entryValueTable = TRIGGER_VALUE_VERSIONS, runValueTable = TRIGGER_RUN_VALUE_VERSIONS, blockValueTable = TRIGGERS_BLOCK_VALUE_VERSIONS } = {}) {
+	if (doc === null || typeof doc !== "object" || Array.isArray(doc)) return 1;
+	const { version: _version, ...blocks } = doc;
+	let needed = Math.max(neededVersion(Object.keys(blocks), blockTable), valueNeededVersion(blocks, blockValueTable));
+	for (const entry of Array.isArray(doc.triggers) ? doc.triggers : []) {
+		if (entry === null || typeof entry !== "object") continue;
+		const byEntry = valueNeededVersion(entry, entryValueTable);
+		if (byEntry > needed) needed = byEntry;
+		const run = entry.run;
+		if (run === null || typeof run !== "object") continue;
+		const needs = Math.max(neededVersion(Object.keys(run), runTable), valueNeededVersion(run, runValueTable));
+		if (needs > needed) needed = needs;
+	}
+	return needed;
+}
+
+/**
+ * The problem with a parsed triggers document's RAW `version`, or null: `{ newer: true, message }` above this build,
+ * `{ newer: false, message }` when it is not an integer of 1 or more. The one rule every reader of the file asks
+ * through, the loader, the writers and the worker's per-job reads alike.
+ */
+export function triggersFileVersionProblem(doc, { supported = TRIGGERS_FILE_VERSION } = {}) {
+	if (doc === null || typeof doc !== "object" || Array.isArray(doc) || !Object.hasOwn(doc, "version")) return null;
+	return versionProblem(doc.version, { supported, what: "triggers file" });
+}
+
+/**
+ * Whether a triggers file (its text, or the parsed document) was written by a newer pi-dispatch. A text that does not
+ * parse is not newer: it is broken, and each caller keeps its own answer for a broken file. For the worker's per-job
+ * reads, which must DEFER on a newer file rather than fail open: a one-shot's disarm may be written in a shape this
+ * build cannot see, and a narrowing field this build does not know cannot be checked at all.
+ *
+ * A text with a duplicate key is broken too, never newer, the loader's order (`parseTriggersDocument` refuses the
+ * duplicate before it reads `version`): `JSON.parse` keeps the LAST value, so `{"version": 1, "version": 2}` would read
+ * as newer here while the loader calls it broken, and the jobs that read it would wait for an upgrade that changes
+ * nothing. Only the TEXT can show a duplicate, so the per-job readers pass the text; a parsed document is judged on its
+ * `version` alone.
+ */
+export function triggersFileNewer(textOrDoc, { supported = TRIGGERS_FILE_VERSION } = {}) {
+	let doc = textOrDoc;
+	if (typeof textOrDoc === "string") {
+		try {
+			doc = JSON.parse(textOrDoc);
+		} catch {
+			return false;
+		}
+		if (findDuplicateKey(textOrDoc)) return false;
+	}
+	return triggersFileVersionProblem(doc, { supported })?.newer === true;
+}
+
+/**
  * Parse, validate, and normalize the unified triggers file text. Returns an array of normalized
  * `{ on, run }` entries (unknown fields dropped, so consumers only ever read validated fields). Throws
- * `configError` (fail-loud) on any malformed entry. The `path` is for error messages only.
+ * `configError` (fail-loud) on any malformed entry. The `path` is for error messages only. `versions` is
+ * `parseTriggersDocument`'s, for tests.
  */
-export function parseTriggers(text, path) {
-	return parseTriggersDocument(text, path).triggers;
+export function parseTriggers(text, path, versions = {}) {
+	return parseTriggersDocument(text, path, versions).triggers;
 }
 
 /**
@@ -302,8 +399,15 @@ export function parseTriggers(text, path) {
  * bundle read and every loader judge the file by ONE rule: a file whose `secretBundles` is malformed is
  * refused WHOLE, by the receiver, the worker's cron loader, doctor and every writer alike, exactly as a
  * malformed trigger is (see `validateSecretBundles` for why that is the right blast radius).
+ *
+ * The file's `version` (issue #761) is judged right after the duplicate-key check and BEFORE the `triggers` array: a
+ * newer file may have reshaped anything below it, and its true message is "upgrade", not a complaint about a shape.
+ * A newer file throws a configError with `.newer === true`; a broken `version`, or a `run` key, a top-level block or a
+ * block, entry or `run` value that needs a higher version than the file declares, throws the ordinary configError.
+ * `supported`, `runTable`, `blockTable`, `entryValueTable`, `runValueTable` and `blockValueTable` default to this
+ * build's and are injectable for tests.
  */
-export function parseTriggersDocument(text, path) {
+export function parseTriggersDocument(text, path, { supported = TRIGGERS_FILE_VERSION, runTable = TRIGGER_RUN_FIELD_VERSIONS, blockTable = TRIGGERS_BLOCK_VERSIONS, entryValueTable = TRIGGER_VALUE_VERSIONS, runValueTable = TRIGGER_RUN_VALUE_VERSIONS, blockValueTable = TRIGGERS_BLOCK_VALUE_VERSIONS } = {}) {
 	let parsed;
 	try {
 		parsed = JSON.parse(text);
@@ -326,6 +430,13 @@ export function parseTriggersDocument(text, path) {
 		throw configError(
 			`triggers file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}: JSON keeps the LAST value, so the file that was reviewed and the file that runs are not the same file: ${path}`,
 		);
+	}
+
+	const versionTrouble = triggersFileVersionProblem(parsed, { supported });
+	if (versionTrouble) {
+		const error = configError(`${versionTrouble.message}: ${path}`);
+		if (versionTrouble.newer) error.newer = true;
+		throw error;
 	}
 
 	const entries = parsed?.triggers;
@@ -356,6 +467,24 @@ export function parseTriggersDocument(text, path) {
 	for (const key of Object.keys(parsed)) if (key !== "modelRoles" && isModelRolesField(key)) throw configError("triggers file: use modelRoles");
 	let zeroTouch;
 	try { zeroTouch = validateZeroTouchConfig(parsed.zeroTouch); } catch (error) { throw configError(error.message); }
+	// Issue #761: a block, a `run` key or a value that needs a higher version than the file declares, after every other
+	// check so a broken file names its first broken entry as it always did. Such a file was hand-edited or written by a
+	// writer that dropped the stamp, and an older loader would read it without the key, or refuse the value as broken
+	// rather than newer: refused like any malformed entry.
+	const { version: _version, ...blocks } = parsed;
+	const shortBlock = underDeclared(Object.keys(blocks), blockTable, parsed.version);
+	if (shortBlock) throw configError(`triggers file: top-level ${JSON.stringify(shortBlock.field)} needs triggers file version ${shortBlock.needs}, and the file declares ${parsed.version ?? 1}: ${path}`);
+	const shortBlockValue = valueUnderDeclared(blocks, blockValueTable, parsed.version);
+	if (shortBlockValue) throw configError(`triggers file: top-level ${JSON.stringify(shortBlockValue.field)} holds a value that needs triggers file version ${shortBlockValue.needs}, and the file declares ${parsed.version ?? 1}: ${path}`);
+	entries.forEach((entry, index) => {
+		const declared = parsed.version ?? 1;
+		const short = underDeclared(Object.keys(entry.run), runTable, parsed.version);
+		if (short) throw configError(`trigger at index ${index}: run.${short.field} needs triggers file version ${short.needs}, and the file declares ${declared}: ${path}`);
+		const shortEntry = valueUnderDeclared(entry, entryValueTable, parsed.version);
+		if (shortEntry) throw configError(`trigger at index ${index}: ${shortEntry.field} holds a value that needs triggers file version ${shortEntry.needs}, and the file declares ${declared}: ${path}`);
+		const shortRun = valueUnderDeclared(entry.run, runValueTable, parsed.version);
+		if (shortRun) throw configError(`trigger at index ${index}: run.${shortRun.field} holds a value that needs triggers file version ${shortRun.needs}, and the file declares ${declared}: ${path}`);
+	});
 	return { triggers, secretBundles, modelRoles, ...(parsed.answerRules !== undefined ? { answerRules } : {}), ...(parsed.standingAnswers !== undefined ? { standingAnswers } : {}), ...(parsed.zeroTouch !== undefined ? { zeroTouch } : {}), ...(parsed.watchSources !== undefined ? { watchSources } : {}) };
 }
 

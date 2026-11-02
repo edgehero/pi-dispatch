@@ -270,6 +270,21 @@ test("project charts use that project's holds even when Today's headline falls b
   assert.equal(data.spend.daily.at(-1).heldMicros, 2_000_000);
 });
 
+test("the spend view counts a newer pi-dispatch's records of the selected project up to now, as dispatch_costs does (#761)", async () => {
+  // Only the core is judged: the project and the times. One that ends after now is past every fold here.
+  const newer = (id, project, over = {}) => run(id, { project, v: 2, ...over });
+  const scanned = [run("site-ok"), newer("n-site-1", "site"), newer("n-site-2", "site", { flow: "other" }), newer("n-other", "other"), newer("n-none", undefined), newer("n-later", "site", { endedAt: new Date(NOW + 60_000).toISOString() })];
+  const spendOf = async (project) => {
+    const { reads } = readsFixture();
+    reads.scan = () => scanned;
+    return (await assembleInsightsView({}, "7d", { project, pricing, nowMs: NOW, envFn: () => ({}), reads })).spend;
+  };
+  assert.equal((await spendOf("site")).newerSkipped, 2, "the project's own, up to now");
+  assert.equal((await spendOf("other")).newerSkipped, 1);
+  assert.equal((await spendOf(null)).newerSkipped, 4, "no project: every one up to now");
+  assert.equal(Object.hasOwn(await spendOf("absent"), "newerSkipped"), false, "a project with none has no count");
+});
+
 
 test("a real loader-invalid trigger file draws only the Flows error and performs no scheduler read", async () => {
   const dir = tempDir("insights-invalid-graph-");

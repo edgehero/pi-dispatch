@@ -35,6 +35,7 @@ import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/ch
 import { repoOfTarget } from "../costs.mjs";
 import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
 import { recordReason } from "../words.mjs";
+import { coreRecordOf, fromNewerRelease, NEWER_RECORD_SENTENCE } from "../newer-release.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
 import { RUN_MODEL_RE, RUN_PROVIDER_RE } from "../run-filter.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
@@ -108,8 +109,17 @@ const runAt = (r) => {
  * The record's fields `/api/run` may carry, each rebuilt by name against its shape (null when it fails): ids, closed
  * words, instants and integers. Never `why`, never a token count's neighbour that is text, never anything a forge payload
  * could fill with words.
+ *
+ * A record a NEWER pi-dispatch wrote (issue #761) is read as its stable core alone (`coreRecordOf`: id, attempt,
+ * outcome, times, host, kind, project), so every other field is null, and it carries `newer: true` and the one sentence
+ * that says so (`note`, `NEWER_RECORD_SENTENCE`). The shape is the same, so a client that reads a field finds null.
  */
 export function safeRunOf(id, record) {
+  return fromNewerRelease(record) ? { ...safeRunFields(id, coreRecordOf(record)), newer: true, note: NEWER_RECORD_SENTENCE } : safeRunFields(id, record);
+}
+
+/** `safeRunOf`'s field-by-field rebuild of one record. */
+function safeRunFields(id, record) {
   const r = record ?? {};
   const watchTarget = r.kind === "watch" && typeof r.target === "string" && r.target.startsWith("watch:") && WATCH_RULE_ID_RE.test(r.target.slice(6));
   const target = r.kind === "watch" ? (watchTarget ? r.target : null) : str(r.target, TARGET_RE);

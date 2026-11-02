@@ -12,9 +12,13 @@ const failed = (out) => out?.error ? { error: out.error } : { refused: typeof ou
  * The comment hook receives (request, fixedText); it owns forge delivery/idempotence, never a model summary. */
 export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now(), host, hostQueue = null, requireSessionDigest = false, enqueueExpiry, comment = async () => {}, touchStore = null, touchOutbox = null } = {}) {
 	if (!store || typeof checkPolicy !== "function" || typeof host !== "string" || !host) throw new TypeError("approval runtime needs store, checkPolicy and host");
+	// `{ newer: true }` (issue #761) passes through untouched: the triggers file was written by a newer pi-dispatch, so
+	// this build cannot judge the declaration either way. It is neither a refusal nor a changed policy, so no request is
+	// cancelled, declined, decided or claimed on it; the processor defers the job (`newer-release`) and the sweep skips it.
 	const policy = async (job, request = null) => {
 		let out;
 		try { out = await checkPolicy(job); } catch { return { refused: "approval-policy-unavailable" }; }
+		if (out?.newer === true) return { newer: true };
 		if (!out?.ok) return failed(out);
 		if (request && (out.digest !== request.configDigest || !job?.gates?.includes(request.action))) return { refused: "approval-policy-changed" };
 		return out;
@@ -152,6 +156,9 @@ export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now()
 				if (!read.ok) { failures.push({ requestId: id, ...failed(read) }); continue; }
 				if (!read.request || read.request.host !== host) continue;
 				const checked = await policy(read.request.resumeJob, read.request);
+				// A newer triggers file (issue #761): neither expired nor revoked here. Left due, so the next sweep asks again,
+				// and the build that reads the file decides it.
+				if (checked.newer) continue;
 				if (!checked.ok) {
 					if (checked.refused === "approval-policy-changed") {
 						const cancelled = await terminalMove(read.request, "approval-policy-changed", () => store.cancel({ requestId: id, jobId: approvalExpiryJobId(id) }));

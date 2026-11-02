@@ -250,6 +250,35 @@ test("expiry withdraws revoked policy without enqueuing; unavailable policy rema
 	}
 });
 
+// Issue #761: a triggers file written by a newer pi-dispatch is neither a changed policy nor an unreadable one here. The
+// runtime hands `{ newer: true }` through untouched (the processor defers the job), and on the way it cancels, decides,
+// claims, publishes, expires and enqueues nothing, and the sweep leaves the request due for a build that reads the file.
+test("a newer triggers file passes through as { newer: true } and moves no request: before, park and sweep", async () => {
+	const newer = () => ({ newer: true });
+	const initial = setup({ pending: null, checkPolicy: newer });
+	assert.deepEqual(await initial.runtime.before(job({ approvalRequestId: undefined })), { newer: true });
+	assert.deepEqual(initial.calls, ["find"]);
+	const bound = setup({ checkPolicy: newer });
+	assert.deepEqual(await bound.runtime.before(job()), { newer: true }, "a bound reply is neither decided nor claimed, and its request not cancelled");
+	assert.deepEqual(bound.calls, ["find"]);
+	const parked = setup({ checkPolicy: newer });
+	assert.deepEqual(await parked.runtime.afterPark({ job: job(), session: { key: "session-1" }, metadata: { action: "budget-raise", toolCallId: "call-1" } }), { newer: true });
+	assert.deepEqual(parked.calls, [], "nothing published");
+	let touched = 0;
+	const { runtime } = setup({
+		checkPolicy: newer,
+		methods: {
+			async due() { return { ok: true, requestIds: ["request-1"] }; },
+			async read() { return { ok: true, request: request() }; },
+			async cancel() { touched++; return { ok: true, request: accepted() }; },
+			async expire() { touched++; return { ok: true, request: accepted() }; },
+		},
+		hooks: { async enqueueExpiry() { touched++; }, async comment() { touched++; } },
+	});
+	assert.deepEqual(await runtime.sweep(), { ok: true, enqueued: 0, failures: [] }, "not a failure: the request stays due and the next sweep asks again");
+	assert.equal(touched, 0);
+});
+
 test("a valid comment reply cannot approve a timeless request after its initiating label declaration is withdrawn", { skip: live }, async (t) => {
 	const { makeRedisClient } = await import("../src/connection.mjs");
 	const liveUrl = new URL(url);

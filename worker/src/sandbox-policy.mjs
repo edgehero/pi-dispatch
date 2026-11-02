@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
 import { DEFAULT_BACKEND, PODMAN_BACKEND, UNATTRIBUTED_BACKEND, parseBackendFloor, parseBackendList } from "./backends.mjs";
 import { buildDockerRunArgs, buildPodmanRunArgs } from "./docker-run.mjs";
-import { sandboxDeadline } from "./sandbox-store.mjs";
+// The manifest's version rule (issue #761) lives beside its writers in sandbox-store.mjs, which the console already
+// imports; only the refusal below is decided here.
+import { SANDBOX_MANIFEST_VERSION, sandboxDeadline, sandboxManifestNewer } from "./sandbox-store.mjs";
 
 /**
  * sandbox-policy.mjs -- which retained runs a sandbox may reopen, decided from the manifest and an environment alone
@@ -153,8 +155,22 @@ export function sandboxVenueOf(manifest) {
  * workspace are symptoms, and the first refusal an operator reads should be the cause. A workspace that
  * happens to exist at the same path on this host would otherwise pass and silently reproduce the wrong
  * run.
+ *
+ * Before even the venue, a manifest this build cannot read (issue #761): `manifest-newer`. A newer release may have
+ * redefined any field below, the venue's included, so judging one would answer a question this build cannot ask. A
+ * `version` that is not an integer of 1 or more is refused the same way, since nothing here wrote it. `supported` is
+ * injectable for tests.
  */
-export function sandboxSyncRefusal({ jobId, manifest, fileExists = existsSync, blessed }) {
+export function sandboxSyncRefusal({ jobId, manifest, fileExists = existsSync, blessed, supported = SANDBOX_MANIFEST_VERSION }) {
+	const newer = sandboxManifestNewer(manifest, { supported });
+	if (newer) {
+		return {
+			refused: "manifest-newer",
+			message: newer.version === null
+				? `the manifest for ${jobId} carries a "version" that is not an integer of 1 or more, which no pi-dispatch writes, so this host cannot tell how to read it`
+				: `the retained workspace for ${jobId} was kept by a newer pi-dispatch (manifest version ${newer.version}; this build understands ${supported}); open it with that release`,
+		};
+	}
 	const venue = sandboxVenueRefusal({ jobId, manifest, blessed });
 	if (venue) return venue;
 	if (!manifest?.image) {

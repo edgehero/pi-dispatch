@@ -26,7 +26,7 @@
  * would be cosmetic.
  */
 
-import { blankSettingsFile, envBundleProfiles, envSecretProfiles, listRuns, overlayBundleProfiles, readProjects, readSettingsView, readTriggers, renderBundleProfiles, renderSecretBundles, renderSecretProfilesView, secretBundlesView, secretProfilesView, writeSettings } from "./read-model.mjs";
+import { blankSettingsFile, envBundleProfiles, envSecretProfiles, listRuns, overlayBundleProfiles, overlayInvalidRefusal, readProjects, readSettingsView, readTriggers, renderBundleProfiles, renderSecretBundles, renderSecretProfilesView, secretBundlesView, secretProfilesView, writeSettings } from "./read-model.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
 // The name and path rules and the confirm's exact bytes (issue #642): pi-free, so the operator console declares a
 // profile under the same rules and shows the same words.
@@ -52,6 +52,11 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
   // be told what is wrong rather than handed nothing. A BLANK file (whitespace or a byte-order mark only, issue #540)
   // holds no key, so it reads as a missing one, the rule `writeSettings` applies to the write itself.
   if (view.invalid && !blankSettingsFile(paths.settingsFile, deps.fs)) {
+    // A file written by a newer pi-dispatch (issue #761) is not broken, so it says the upgrade rather than "fix it".
+    if (view.newer === true) {
+      notify?.(overlayInvalidRefusal(view.invalid, { newer: true }), "error");
+      return;
+    }
     notify?.(`settings overlay is unreadable (${view.invalid}) — fix it before declaring a profile`, "error");
     return;
   }

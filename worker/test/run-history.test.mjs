@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
+import { constants as fsConstants, lstatSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { test } from "node:test";
-import { createHmac } from "node:crypto";
-import { authenticExitLines, AWAIT_INPUT_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, recordVerdict, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { createHmac, randomBytes } from "node:crypto";
+import { authenticExitLines, AWAIT_INPUT_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, RECORD_CORE_FIELDS, RECORD_TMP_MAX_AGE_MS, RECORD_TMP_RE, RUN_RECORD_VERSION, earlierFrom, recordOfThisJob, recordReadable, recordVerdict, recordVersionOf, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { recordReasonEnum } from "./helpers/spec-enum.mjs";
 import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT, RECORD_REASON_RE, WORKER_ERROR, recordReasonOf } from "../src/record-reason.mjs";
 import { RESOURCE_KEYS as RUNNER_RESOURCE_KEYS } from "../../image/runner/src/cgroup-usage.mjs";
+import { CRON_ID_MAX } from "../src/triggers.mjs";
 
 /**
  * A fake writable that records chunks and lets a test drive `finish`/`error` timing.
@@ -51,8 +53,10 @@ function makeFakeStream({ emitOn = "finish", writeThrows = false, emitError = fa
 
 /**
  * A fake fs exposing only what the sink, the record writer, and the log reaper touch, with call
- * counters for the assertions. `writes` records every `writeFileSync({path, data})`; `writeThrows`
- * makes it throw so the writer's never-throw posture can be exercised.
+ * counters for the assertions. `writes` records every `writeFileSync({path, data, flag})`; `writeThrows`
+ * makes it throw so the writer's never-throw posture can be exercised, and `writeErrors` is a list of error codes the
+ * next writes throw, one per call, in order (`null` lets that call through). `renames` records every
+ * `renameSync({from, to})`, and `renameErrors` is the same per-call list for renames.
  *
  * Reaper surface: `readdirNames` is the directory listing `readdirSync` returns; `readdirThrows` makes
  * it throw (first-boot ENOENT). `stats` maps a filename to `{ isFile, mtimeMs }` -- `statSync` looks the
@@ -69,13 +73,18 @@ function makeFakeFs({
 	stats = {},
 	statThrowsFor = [],
 	unlinkThrowsFor = [],
+	writeErrors = [],
+	renameErrors = [],
 } = {}) {
 	const calls = { mkdir: 0, createWriteStream: 0, paths: [], readdir: 0, stat: [] };
 	const writes = [];
+	const renames = [];
 	const unlinked = [];
+	const coded = (code) => Object.assign(new Error(`${code}: failed`), { code });
 	return {
 		calls,
 		writes,
+		renames,
 		unlinked,
 		mkdirSync() {
 			calls.mkdir++;
@@ -86,9 +95,16 @@ function makeFakeFs({
 			calls.paths.push(path);
 			return stream;
 		},
-		writeFileSync(path, data) {
+		writeFileSync(path, data, options) {
 			if (writeThrows) throw new Error("writeFileSync failed");
-			writes.push({ path, data });
+			const code = writeErrors.shift();
+			if (code) throw coded(code);
+			writes.push({ path, data, flag: options?.flag ?? null });
+		},
+		renameSync(from, to) {
+			const code = renameErrors.shift();
+			if (code) throw coded(code);
+			renames.push({ from, to });
 		},
 		readdirSync() {
 			calls.readdir++;
@@ -282,9 +298,10 @@ test("the record carries a host, in tail position, and null when nobody named on
 	const keys = Object.keys(withHost);
 	// `host` was the tail when it landed; `backend` (#277) took the tail after it, `dollars` (#501) after that, and
 	// `why` after that, `project` (#499) after that, `plan` (#505) after that, `resources` (#596) after that, and `size`
-	// (#596, phase 1) after that, `hostBudget` (#596, phase 2) after that, and `queuedAt`, `capacity`, `earlier` and `stalledRepick` (#599) after that.
-	assert.equal(keys.at(-13), "host", "tail position when it landed: field order is the contract");
-	assert.equal(keys.length, 37);
+	// (#596, phase 1) after that, `hostBudget` (#596, phase 2) after that, and `queuedAt`, `capacity`, `earlier` and `stalledRepick` (#599) after that,
+	// and `v` (#761) last of all.
+	assert.equal(keys.at(-14), "host", "tail position when it landed: field order is the contract");
+	assert.equal(keys.length, 38);
 	assert.equal(withHost.host, "mac-mini-1");
 
 	// UNCONDITIONAL. `tokens`/`usage`/`session` set the precedent that null-with-the-key-present is this
@@ -307,7 +324,7 @@ test("the record names the RESOLVED venue in tail position, read from the job DA
 	const record = (job, over = {}) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...at, ...over });
 
 	const unflagged = record(wrap(data), { defaultBackend: "local" });
-	assert.equal(Object.keys(unflagged).at(-12), "backend", "tail position when it landed; `dollars` (#501), `why`, `project` (#499), `plan` (#505), `resources`, `size`, `hostBudget` (#596), `queuedAt` and `capacity` (#599) took the tail after it");
+	assert.equal(Object.keys(unflagged).at(-13), "backend", "tail position when it landed; `dollars` (#501), `why`, `project` (#499), `plan` (#505), `resources`, `size`, `hostBudget` (#596), `queuedAt` and `capacity` (#599) and `v` (#761) took the tail after it");
 	assert.equal(unflagged.backend, "local", "a trigger that names no venue records the default it resolved to, never an absent key");
 	assert.equal(record(wrap({ ...data, backend: "far" }), { defaultBackend: "local" }).backend, "far", "a named venue wins over the default");
 	assert.equal(
@@ -334,7 +351,7 @@ test("a deployment that never names a backend keeps the first twenty-five fields
 		"triggerIndex", "triggerType", "session", "host",
 	]);
 	// Byte-level: everything a pre-#277 reader parsed serialises identically, and the new fields are appended.
-	const { backend, dollars, why, project, plan, resources, size, hostBudget, queuedAt, capacity, earlier, stalledRepick, ...before } = rec;
+	const { backend, dollars, why, project, plan, resources, size, hostBudget, queuedAt, capacity, earlier, stalledRepick, v, ...before } = rec;
 	assert.equal(backend, "local");
 	assert.equal(dollars, null);
 	assert.equal(why, null);
@@ -347,7 +364,8 @@ test("a deployment that never names a backend keeps the first twenty-five fields
 	assert.equal(capacity, null, "no capacity passed: the new key (#599) is present and null");
 	assert.equal(earlier, null, "a first attempt: no earlier attempts (#599)");
 	assert.equal(stalledRepick, false, "no stall (#599)");
-	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local","dollars":null,"why":null,"project":null,"plan":null,"resources":null,"size":null,"hostBudget":null,"queuedAt":null,"capacity":null,"earlier":null,"stalledRepick":false}`);
+	assert.equal(v, 1, "the record's version (#761), its last key");
+	assert.equal(JSON.stringify(rec), `${JSON.stringify(before).slice(0, -1)},"backend":"local","dollars":null,"why":null,"project":null,"plan":null,"resources":null,"size":null,"hostBudget":null,"queuedAt":null,"capacity":null,"earlier":null,"stalledRepick":false,"v":1}`);
 });
 
 test("parseExitTokens REBUILDS: a key the runner never had no reach into the record", () => {
@@ -1050,27 +1068,156 @@ test("makeLogSink never throws from the factory when mkdirSync fails", () => {
 	assert.ok(logs.some((l) => l.event === "logs_dir_error"), "a logs-dir failure is reported, not thrown");
 });
 
-test("makeRecordWriter writes one truncating JSON sidecar whose content round-trips the record", () => {
+/** A fixed `random` for the writer, so a test knows the temporary name: `a1b2c3d4e5f6`. */
+const fixedRandom = () => Buffer.from("a1b2c3d4e5f6", "hex");
+
+/** The in-place fallback's open flags: `"w"` plus `O_NOFOLLOW` where the platform has one. */
+const IN_PLACE = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0);
+
+test("makeRecordWriter's temporary name, made with its own random, is the shape the reaper sweeps, and a shorter random's is not", () => {
 	const fs = makeFakeFs({ stream: makeFakeStream() });
-	const writeRecord = makeRecordWriter({ logsDir: "/logs", fs });
+	makeRecordWriter({ logsDir: "/logs", fs })({ jobId: "repeat:t:100", outcome: "completed" });
+	const name = basename(fs.writes[0].path);
+	assert.match(name, RECORD_TMP_RE, "a leftover of this writer's is one the reaper knows");
+	assert.equal(name.replace(/\.[0-9a-f]+\.tmp$/, ""), `repeat_t_100.json.${process.pid}`);
+	// The pattern takes exactly six random bytes: a writer that took fewer would leave crash leftovers nothing sweeps.
+	assert.doesNotMatch(`repeat_t_100.json.${process.pid}.${randomBytes(5).toString("hex")}.tmp`, RECORD_TMP_RE);
+});
+
+test("makeRecordWriter writes a temporary file of its own beside the record, exclusively, then renames it over <id>.json (#761)", () => {
+	const fs = makeFakeFs({ stream: makeFakeStream() });
+	const writeRecord = makeRecordWriter({ logsDir: "/logs", fs, random: fixedRandom });
 	const record = { jobId: "gh-x", target: "o/r#5", outcome: "completed" };
 
 	writeRecord(record);
 
-	assert.equal(fs.writes.length, 1);
-	assert.equal(fs.writes[0].path, join("/logs", "gh-x.json"));
+	const tmp = join("/logs", `gh-x.json.${process.pid}.a1b2c3d4e5f6.tmp`);
+	assert.deepEqual(fs.writes.map((w) => [w.path, w.flag]), [[tmp, "wx"]], "one write, to the temporary name, created exclusively");
 	assert.deepEqual(JSON.parse(fs.writes[0].data), record);
+	assert.equal(fs.writes[0].data, `${JSON.stringify(record)}\n`, "the bytes the in-place write always wrote");
+	assert.deepEqual(fs.renames, [{ from: tmp, to: join("/logs", "gh-x.json") }], "then renamed over the record");
+	assert.ok(!fs.writes.some((w) => w.path === join("/logs", "gh-x.json")), "the record's own path is never written directly");
+	assert.match(basename(tmp), RECORD_TMP_RE);
+	assert.ok(!tmp.endsWith(".json"), "no reader of *.json can take the temporary file for a record");
+	assert.equal(fs.unlinked.length, 0);
 });
 
 test("makeRecordWriter sanitizes the job id at the filename boundary only", () => {
 	const fs = makeFakeFs({ stream: makeFakeStream() });
-	const writeRecord = makeRecordWriter({ logsDir: "/logs", fs });
+	const writeRecord = makeRecordWriter({ logsDir: "/logs", fs, random: fixedRandom });
 
 	writeRecord({ jobId: "repeat:a:1", target: "o/r#5", outcome: "completed" });
 
-	assert.equal(basename(fs.writes[0].path), "repeat_a_1.json");
+	assert.equal(basename(fs.renames[0].to), "repeat_a_1.json");
+	assert.equal(basename(fs.writes[0].path), `repeat_a_1.json.${process.pid}.a1b2c3d4e5f6.tmp`);
 	// The record body keeps the raw id; only the filename is sanitized.
 	assert.equal(JSON.parse(fs.writes[0].data).jobId, "repeat:a:1");
+});
+
+test("makeRecordWriter retries a rename refused with EPERM once (a Windows scanner holding the record), and the record lands", () => {
+	const logs = [];
+	const fs = makeFakeFs({ stream: makeFakeStream(), renameErrors: ["EPERM"] });
+	const writeRecord = makeRecordWriter({ logsDir: "/logs", fs, random: fixedRandom, log: (event, fields) => logs.push({ event, fields }) });
+
+	writeRecord({ jobId: "gh-x", outcome: "completed" });
+
+	assert.deepEqual(fs.renames, [{ from: join("/logs", `gh-x.json.${process.pid}.a1b2c3d4e5f6.tmp`), to: join("/logs", "gh-x.json") }]);
+	assert.equal(fs.writes.length, 1, "no in-place write: the retry landed");
+	assert.deepEqual(logs, []);
+});
+
+test("makeRecordWriter falls back to the in-place write when the rename still fails, removes its temporary file and says so", () => {
+	for (const renameErrors of [["EPERM", "EPERM"], ["EACCES"]]) {
+		const logs = [];
+		const fs = makeFakeFs({ stream: makeFakeStream(), renameErrors: [...renameErrors] });
+		const writeRecord = makeRecordWriter({ logsDir: "/logs", fs, random: fixedRandom, log: (event, fields) => logs.push({ event, fields }) });
+		const record = { jobId: "gh-x", target: "o/r#5", outcome: "completed" };
+
+		assert.doesNotThrow(() => writeRecord(record));
+
+		const tmp = join("/logs", `gh-x.json.${process.pid}.a1b2c3d4e5f6.tmp`);
+		assert.deepEqual(fs.writes.map((w) => [w.path, w.flag]), [[tmp, "wx"], [join("/logs", "gh-x.json"), IN_PLACE]], `${renameErrors}: the record is written in place, never lost to the safer path, and never through a link`);
+		assert.equal(fs.writes[1].data, `${JSON.stringify(record)}\n`);
+		assert.deepEqual(fs.unlinked, [tmp], "the temporary file is removed");
+		// Only EPERM is retried: the fake refuses EACCES once, so a retry of it would have landed and written nothing in place.
+		assert.equal(fs.renames.length, 0);
+		assert.deepEqual(logs, [{ event: "run_record_in_place", fields: { jobId: "gh-x", reason: renameErrors.at(-1) } }], "a fallback names the job and an error code only, and is no failure");
+	}
+});
+
+test("makeRecordWriter falls back in place when the temporary file cannot be written, and leaves a name that was not its own alone", () => {
+	for (const [code, removed] of [["EEXIST", false], ["ENOSPC", true]]) {
+		const logs = [];
+		const fs = makeFakeFs({ stream: makeFakeStream(), writeErrors: [code] });
+		const writeRecord = makeRecordWriter({ logsDir: "/logs", fs, random: fixedRandom, log: (event, fields) => logs.push({ event, fields }) });
+
+		writeRecord({ jobId: "gh-x", outcome: "completed" });
+
+		assert.deepEqual(fs.writes.map((w) => w.path), [join("/logs", "gh-x.json")], `${code}: written in place`);
+		assert.equal(fs.renames.length, 0);
+		// EEXIST: the exclusive create failed, so the file at that name is someone else's and is not removed. Any other
+		// failure came after this write made the file, which is its own to remove.
+		assert.deepEqual(fs.unlinked, removed ? [join("/logs", `gh-x.json.${process.pid}.a1b2c3d4e5f6.tmp`)] : [], code);
+		assert.deepEqual(logs, [{ event: "run_record_in_place", fields: { jobId: "gh-x", reason: code } }]);
+	}
+});
+
+test("makeRecordWriter's in-place fallback never writes through a link planted at the record's name, and says so by its code", { skip: process.platform === "win32" }, () => {
+	const dir = tempDir("run-record-link-");
+	const logsDir = join(dir, "logs");
+	nodeFs.mkdirSync(logsDir);
+	const outside = join(dir, "outside.txt");
+	writeFileSync(outside, "not a record\n");
+	symlinkSync(outside, join(logsDir, "job-2.json"));
+	const logs = [];
+	// The real disk, with only the rename refused (a folder on another device, say), so the write falls back in place.
+	const fs = { ...nodeFs, renameSync() { throw Object.assign(new Error("EXDEV: cross-device link"), { code: "EXDEV" }); } };
+	const writeRecord = makeRecordWriter({ logsDir, fs, log: (event, fields) => logs.push({ event, fields }) });
+
+	assert.doesNotThrow(() => writeRecord({ jobId: "job-2", outcome: "completed" }));
+
+	assert.equal(readFileSync(outside, "utf8"), "not a record\n", "the file outside the folder is untouched");
+	assert.ok(lstatSync(join(logsDir, "job-2.json")).isSymbolicLink(), "the link is left as it was");
+	assert.deepEqual(readdirSync(logsDir), ["job-2.json"], "the temporary file is removed");
+	assert.deepEqual(logs, [{ event: "run_record_in_place", fields: { jobId: "job-2", reason: "ELOOP" } }], "a code, never a path or the record");
+	// Without the link the same fallback writes the record in place.
+	nodeFs.unlinkSync(join(logsDir, "job-2.json"));
+	writeRecord({ jobId: "job-2", outcome: "completed" });
+	assert.deepEqual(JSON.parse(readFileSync(join(logsDir, "job-2.json"), "utf8")), { jobId: "job-2", outcome: "completed" });
+	assert.deepEqual(logs.at(-1), { event: "run_record_in_place", fields: { jobId: "job-2", reason: "EXDEV" } });
+});
+
+test("makeRecordWriter on disk leaves the record and nothing else, and a re-run replaces it", () => {
+	const logsDir = tempDir("run-record-writer-");
+	const logs = [];
+	const writeRecord = makeRecordWriter({ logsDir, log: (event, fields) => logs.push({ event, fields }) });
+
+	writeRecord({ jobId: "repeat:t:100", outcome: "failed", attempt: 1 });
+	writeRecord({ jobId: "repeat:t:100", outcome: "completed", attempt: 2 });
+
+	assert.deepEqual(readdirSync(logsDir), ["repeat_t_100.json"], "no temporary file is left behind");
+	assert.deepEqual(JSON.parse(readFileSync(join(logsDir, "repeat_t_100.json"), "utf8")), { jobId: "repeat:t:100", outcome: "completed", attempt: 2 }, "the last write wins");
+	assert.deepEqual(logs, []);
+});
+
+test("makeRecordWriter's temporary name fits a filename for the longest job id a reader takes, and a longer one still lands in place", () => {
+	// The longest cron run id (`repeat:<CRON_ID_MAX>:<16 digits>`) is the 200 characters every job id reader takes, and
+	// the largest pid any platform hands out is ten digits. That temporary name must fit the common 255-byte limit.
+	const longest = `repeat:${"a".repeat(CRON_ID_MAX)}:${"9".repeat(16)}`;
+	assert.equal(longest.length, 200);
+	const name = `${sanitizeJobId(longest)}.json.${"9".repeat(10)}.${"f".repeat(12)}.tmp`;
+	assert.ok(Buffer.byteLength(name) <= 255, `${Buffer.byteLength(name)} bytes`);
+	assert.match(name, RECORD_TMP_RE);
+
+	// An id whose record name fits but whose temporary name does not (no reader takes one, but nothing refuses it at the
+	// writer): the filesystem refuses the temporary file, and the record is written in place exactly as before.
+	const logsDir = tempDir("run-record-long-");
+	const logs = [];
+	const jobId = `gh-${"x".repeat(240)}`;
+	makeRecordWriter({ logsDir, log: (event, fields) => logs.push({ event, fields }) })({ jobId, outcome: "completed" });
+	assert.deepEqual(readdirSync(logsDir), [`${jobId}.json`]);
+	assert.equal(JSON.parse(readFileSync(join(logsDir, `${jobId}.json`), "utf8")).outcome, "completed");
+	assert.deepEqual(logs, [{ event: "run_record_in_place", fields: { jobId, reason: "ENAMETOOLONG" } }]);
 });
 
 test("makeRecordWriter swallows an fs failure and logs jobId + reason with no record content", () => {
@@ -1104,16 +1251,18 @@ test("makeRecordWriter swallows a JSON.stringify failure and never touches the f
 	assert.equal(fs.writes.length, 0, "no partial write reaches the fs when serialization fails");
 });
 
-test("makeRecordWriter overwrites on a re-run: two same-id writes are truncating writeFileSync, not append", () => {
+test("makeRecordWriter overwrites on a re-run: two same-id writes rename over one path, never an append", () => {
 	const fs = makeFakeFs({ stream: makeFakeStream() });
 	const writeRecord = makeRecordWriter({ logsDir: "/logs", fs });
 
 	writeRecord({ jobId: "gh-x", target: "o/r#5", outcome: "failed", attempt: 0 });
 	writeRecord({ jobId: "gh-x", target: "o/r#5", outcome: "completed", attempt: 1 });
 
-	assert.equal(fs.writes.length, 2);
-	assert.equal(fs.writes[0].path, fs.writes[1].path); // same job id -> same sidecar, last write wins
-	assert.equal(fs.calls.createWriteStream, 0); // truncating writeFileSync, never an append stream
+	assert.equal(fs.renames.length, 2);
+	assert.equal(fs.renames[0].to, fs.renames[1].to); // same job id -> same sidecar, last write wins
+	assert.equal(fs.renames[1].to, join("/logs", "gh-x.json"));
+	assert.notEqual(fs.renames[0].from, fs.renames[1].from, "each write has a temporary name of its own");
+	assert.equal(fs.calls.createWriteStream, 0); // a whole-file write, never an append stream
 	assert.equal(JSON.parse(fs.writes[1].data).outcome, "completed");
 });
 
@@ -1273,18 +1422,39 @@ test("makeLogReaper unlinks files older than the window and keeps newer ones, lo
 	assert.deepEqual(reaped, ["old.json", "old.log"]);
 });
 
-test("makeLogReaper with retentionDays 0 keeps forever: nothing is read or unlinked", () => {
+test("makeLogReaper with retentionDays 0 keeps every record and log forever, and still sweeps a crash's record temporary file", () => {
+	const tmp = `gh-x.json.4242.${"0".repeat(12)}.tmp`;
 	const fs = makeFakeFs({
 		stream: makeFakeStream(),
-		readdirNames: ["old.log"],
-		stats: { "old.log": { isFile: true, mtimeMs: 0 } },
+		readdirNames: ["old.log", "old.json", tmp],
+		stats: { "old.log": { isFile: true, mtimeMs: 0 }, "old.json": { isFile: true, mtimeMs: 0 }, [tmp]: { isFile: true, mtimeMs: 0 } },
 	});
 	const reapLogs = makeLogReaper({ logsDir: "/logs", retentionDays: 0, fs, now: () => NOW });
 
 	reapLogs();
 
-	assert.equal(fs.calls.readdir, 0); // keep-forever sentinel: the directory is never listed
-	assert.equal(fs.unlinked.length, 0);
+	// Keep-forever is a promise about records and logs: neither is even statted. A temporary file is neither.
+	assert.deepEqual(fs.calls.stat.map((p) => basename(p)), [tmp]);
+	assert.deepEqual(fs.unlinked, [join("/logs", tmp)]);
+});
+
+test("makeLogReaper sweeps a record temporary file by its own hour, keeps a young one and never touches another .tmp (#761)", () => {
+	const logs = [];
+	const old = `gh-old.json.4242.${"a".repeat(12)}.tmp`;
+	const young = `gh-young.json.4242.${"b".repeat(12)}.tmp`;
+	const names = [old, young, "other.tmp", "gh-x.json.tmp", `gh-x.json.4242.${"c".repeat(11)}.tmp`, "settings.json.4242.abc.tmp"];
+	const stats = Object.fromEntries(names.map((n) => [n, { isFile: true, mtimeMs: NOW - RECORD_TMP_MAX_AGE_MS - 1 }]));
+	stats[young] = { isFile: true, mtimeMs: NOW - RECORD_TMP_MAX_AGE_MS + 1000 };
+	const fs = makeFakeFs({ stream: makeFakeStream(), readdirNames: names, stats });
+	const reapLogs = makeLogReaper({ logsDir: "/logs", retentionDays: 30, fs, now: () => NOW, log: (event, fields) => logs.push({ event, fields }) });
+
+	reapLogs();
+
+	assert.equal(RECORD_TMP_MAX_AGE_MS, 60 * 60 * 1000);
+	// Its own age, not the 30-day window: a write lives for milliseconds, so an hour-old one is a crash's.
+	assert.deepEqual(fs.unlinked, [join("/logs", old)]);
+	assert.deepEqual(fs.calls.stat.map((p) => basename(p)).sort(), [old, young].sort(), "a name that is not the writer's is never even statted");
+	assert.deepEqual(logs, [{ event: "reaped_log", fields: { file: old } }]);
 });
 
 test("makeLogReaper isolates a per-file failure: one statSync throw does not abort the sweep", () => {
@@ -1744,14 +1914,14 @@ test("the record's dollars (#501) is REBUILT from named fields: four keys, integ
 	assert.equal(rec({ reservedMicros: 1, settledMicros: 1, basis: "floor", modelBasis: "unreserved" }).modelBasis, null);
 	for (const bad of [undefined, null, "x", { reservedMicros: 1.5, settledMicros: 0, basis: "floor" }, { reservedMicros: 1, settledMicros: -1, basis: "floor" }, { reservedMicros: 1, settledMicros: 1, basis: "free" }]) assert.equal(rec(bad), null, JSON.stringify(bad));
 	assert.equal(buildRecord({ job, error: Object.assign(new Error("x"), { dollars: { reservedMicros: 1, settledMicros: 1, basis: "floor" } }) }).dollars.basis, "floor", "read off a throw too");
-	assert.equal(Object.keys(buildRecord({ job, result: { outcome: "completed" } })).at(-11), "dollars", "the tail when it landed; `why`, `project`, `plan`, `resources`, `size`, `hostBudget`, `queuedAt` and `capacity` took it after");
+	assert.equal(Object.keys(buildRecord({ job, result: { outcome: "completed" } })).at(-12), "dollars", "the tail when it landed; `why`, `project`, `plan`, `resources`, `size`, `hostBudget`, `queuedAt`, `capacity` and `v` took it after");
 });
 
 test("the record carries the refusal's why: a fixed token, in tail position, else null", () => {
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
 	const rec = (result) => buildRecord({ job, result });
 	const refused = rec({ outcome: "policy", reason: "model-unknown", why: "overlay-link", budgetReserved: false });
-	assert.equal(Object.keys(refused).at(-10), "why", "the tail when it landed; `project` (#499), `plan` (#505), `resources`, `size`, `hostBudget` (#596), `queuedAt` and `capacity` (#599) took it after");
+	assert.equal(Object.keys(refused).at(-11), "why", "the tail when it landed; `project` (#499), `plan` (#505), `resources`, `size`, `hostBudget` (#596), `queuedAt` and `capacity` (#599) and `v` (#761) took it after");
 	assert.deepEqual([refused.reason, refused.why], ["model-unknown", "overlay-link"]);
 	for (const why of ["overlay-not-a-file", "overlay-unreadable", "not-in-catalog", "fallback-unlisted"]) assert.equal(rec({ outcome: "policy", reason: "model-unknown", why }).why, why);
 	// Never a free string: the record stays PII-free by construction.
@@ -1763,7 +1933,7 @@ test("the record carries the job's project id in tail position after why, charse
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
 	const rec = (project) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...(project === undefined ? {} : { project }) });
 	const keys = Object.keys(rec("shop"));
-	assert.deepEqual(keys.slice(-10, -8), ["why", "project"], "the tail when it landed, after why; `plan` (#505), `resources`, `size`, `hostBudget` (#596), `queuedAt` and `capacity` (#599) took it after");
+	assert.deepEqual(keys.slice(-11, -9), ["why", "project"], "the tail when it landed, after why; `plan` (#505), `resources`, `size`, `hostBudget` (#596), `queuedAt` and `capacity` (#599) and `v` (#761) took it after");
 	assert.equal(rec("shop").project, "shop");
 	assert.equal(rec("0-a").project, "0-a");
 	assert.equal(rec(undefined).project, null, "no project passed: the key is present and null");
@@ -1886,7 +2056,7 @@ test("makeFindPreviousRun counts a hand fire (manual:<id>:<millis>) as a run of 
 test("the record carries a collected plan in tail position after project: enums and a hash only, else null (#505)", () => {
 	const job = { id: "repeat:pm:1", name: "local", attemptsMade: 0, data: { kind: "local", folder: "/srv/pm", trigger: { id: "pm", pattern: "0 6 * * 1" }, portfolio: true } };
 	const rec = (plan) => buildRecord({ job, result: { outcome: "completed", exitCode: 0, ...(plan === undefined ? {} : { plan }) } });
-	assert.deepEqual(Object.keys(rec(undefined)).slice(-9, -7), ["project", "plan"], "the tail when it landed; `resources`, `size`, `hostBudget` (#596), `queuedAt` and `capacity` (#599) took it after");
+	assert.deepEqual(Object.keys(rec(undefined)).slice(-10, -8), ["project", "plan"], "the tail when it landed; `resources`, `size`, `hostBudget` (#596), `queuedAt` and `capacity` (#599) and `v` (#761) took it after");
 	assert.equal(rec(undefined).plan, null, "no plan file: present and null");
 	assert.deepEqual(rec({ outcome: "applied", reason: null, planId: "0123456789abcdef", clamped: true }).plan, { outcome: "applied", reason: null, planId: "0123456789abcdef", clamped: true });
 	assert.deepEqual(rec({ outcome: "duplicate", reason: "plan-duplicate", planId: "0123456789abcdef", clamped: false }).plan, { outcome: "duplicate", reason: "plan-duplicate", planId: "0123456789abcdef", clamped: false });
@@ -1955,6 +2125,59 @@ test("recordSettlesAttempt: this job, this attempt, not failed, started after th
 	assert.equal(recordSettlesAttempt(SETTLED), false, "no question, no match");
 });
 
+test("recordVersionOf: no v is 1, a positive safe integer is itself, and anything else is no version (#761)", () => {
+	assert.equal(recordVersionOf({ jobId: "j" }), 1, "every record before issue #761");
+	assert.equal(recordVersionOf({ jobId: "j", v: undefined }), 1);
+	assert.equal(recordVersionOf({ v: 1 }), 1);
+	assert.equal(recordVersionOf({ v: 7 }), 7);
+	for (const v of ["1", 0, -1, 1.5, null, Number.MAX_SAFE_INTEGER + 1, true, {}]) assert.equal(recordVersionOf({ v }), null, JSON.stringify(v));
+	for (const record of [null, undefined, "x", [], 3]) assert.equal(recordVersionOf(record), null);
+	assert.equal(recordVersionOf(Object.create({ v: 9 })), 1, "an inherited v is not the record's");
+});
+
+test("recordReadable: version 1 up to this build's own; a newer or malformed one is not, and a test can widen what is supported (#761)", () => {
+	assert.equal(RUN_RECORD_VERSION, 1);
+	assert.equal(recordReadable({ jobId: "j" }), true);
+	assert.equal(recordReadable({ v: 1 }), true);
+	assert.equal(recordReadable({ v: 2 }), false);
+	assert.equal(recordReadable({ v: 2 }, { supported: 2 }), true, "the build's own version is readable");
+	assert.equal(recordReadable({ v: 3 }, { supported: 2 }), false);
+	assert.equal(recordReadable({ v: "2" }, { supported: 9 }), false, "a malformed v is not readable at any version");
+	assert.equal(recordReadable(null), false);
+});
+
+test("the stable core is pinned, and every record carries all of it with its version last (#761)", () => {
+	// A field joins the core only when it keeps its meaning in every version: a reader of a newer record reads these
+	// and nothing else, so this list is a promise to every older release still running.
+	assert.deepEqual(RECORD_CORE_FIELDS, ["jobId", "attempt", "outcome", "startedAt", "endedAt", "host", "kind", "project"]);
+	assert.ok(Object.isFrozen(RECORD_CORE_FIELDS));
+	const record = buildRecord({ job: { id: "j", data: { kind: "github" } }, result: { outcome: "completed" } });
+	for (const field of RECORD_CORE_FIELDS) assert.ok(Object.hasOwn(record, field), field);
+	assert.equal(Object.keys(record).at(-1), "v");
+	assert.equal(record.v, RUN_RECORD_VERSION);
+});
+
+/** A newer record that remembers every field read from it. */
+function watched(record) {
+	const read = new Set();
+	const proxy = new Proxy(record, {
+		get: (target, key, receiver) => (read.add(key), Reflect.get(target, key, receiver)),
+		getOwnPropertyDescriptor: (target, key) => (read.add(key), Reflect.getOwnPropertyDescriptor(target, key)),
+		has: (target, key) => (read.add(key), Reflect.has(target, key)),
+	});
+	return { proxy, read };
+}
+
+test("recordVerdict and earlierFrom read only the stable core of a record from a newer pi-dispatch (#761)", () => {
+	const newer = { jobId: "gh-n", attempt: 2, outcome: "completed", startedAt: "2026-09-14T15:00:00.000Z", endedAt: "2026-09-14T15:20:00.000Z", host: "mini-3", kind: "github", project: "api", capacity: { slots: 8 }, size: { memMiB: 8192, cpuCenti: 800 }, earlier: [{ host: "mini-1", startedAt: "2026-09-14T14:00:00.000Z", endedAt: "2026-09-14T14:10:00.000Z" }], lane: { name: "batch" }, v: 2 };
+	const verdict = watched(newer);
+	assert.equal(recordVerdict(verdict.proxy, { jobId: "gh-n", attempt: 2, since: Date.parse(newer.startedAt) }), null, "a newer host's finished run settles the attempt");
+	assert.deepEqual([...verdict.read].filter((k) => !RECORD_CORE_FIELDS.includes(k)), [], "nothing past the core");
+	const earlier = watched(newer);
+	assert.deepEqual(earlierFrom(earlier.proxy), [{ host: "mini-3", startedAt: newer.startedAt, endedAt: newer.endedAt, memMiB: null, cpuCenti: null }]);
+	assert.deepEqual([...earlier.read].filter((k) => !RECORD_CORE_FIELDS.includes(k)), ["v"], "the version, then nothing past the core: no sizes, no capacity, no chain");
+});
+
 test("recordVerdict names why a record was refused, from a fixed set", () => {
 	const v = (rec, over = {}) => recordVerdict(rec, { jobId: "j1", attempt: 1, since: SINCE, ...over });
 	assert.equal(v(SETTLED), null);
@@ -1969,6 +2192,43 @@ test("recordVerdict names why a record was refused, from a fixed set", () => {
 	assert.equal(v({ ...SETTLED, outcome: undefined }), "failed");
 	assert.equal(v({ ...SETTLED, startedAt: "2026-10-04T09:00:00.000Z" }), "older-than-job");
 	assert.equal(v({ ...SETTLED, startedAt: "garbage" }), "older-than-job");
+});
+
+test("recordOfThisJob: the id, the attempt and not older than the job, whatever the outcome; recordVerdict shares it and judges a settling record by its start", () => {
+	const of = (rec, over = {}) => recordOfThisJob(rec, { jobId: "j1", attempt: 1, since: SINCE, ...over });
+	for (const outcome of ["completed", "failed", "policy", undefined]) assert.equal(of({ ...SETTLED, outcome }), true, `outcome ${outcome}: whose record it is, not how it ended`);
+	assert.equal(of({ ...SETTLED, v: 2 }), true, "a newer release's record, by its core");
+	for (const [rec, over, label] of [
+		[{ ...SETTLED, jobId: "j2" }, {}, "another job's"],
+		[SETTLED, { attempt: 2 }, "an earlier attempt's"],
+		[SETTLED, { attempt: "1" }, "an attempt that is not a number"],
+		[{ ...SETTLED, startedAt: "2026-10-04T09:00:00.000Z" }, {}, "an older job's under a reused id"],
+		[{ ...SETTLED, startedAt: "garbage", endedAt: "2026-10-04T10:04:00.000Z" }, {}, "a start that does not parse is not passed over for the end"],
+		[{ ...SETTLED, startedAt: null, endedAt: "2026-10-04T09:30:00.000Z" }, {}, "no start, and an end before the job existed"],
+		[{ ...SETTLED, startedAt: null, endedAt: null }, {}, "no time at all"],
+		[null, {}, "no record"],
+		[UNREADABLE_RECORD, {}, "an unreadable one"],
+		[[SETTLED], {}, "not an object"],
+	]) assert.equal(of(rec, over), false, label);
+	// The record's time is its start, or its end when it has none: the stall listener writes `startedAt: null` when it
+	// cannot tell the crashed attempt's start, and that record is this job's.
+	assert.equal(of({ ...SETTLED, startedAt: null, endedAt: "2026-10-04T10:04:00.000Z" }), true);
+	assert.equal(of({ jobId: "j1", attempt: 1, outcome: "failed", endedAt: "2026-10-04T10:04:00.000Z" }), true, "a start that is absent altogether");
+	assert.equal(of({ ...SETTLED, startedAt: new Date(SINCE - RECORD_CLOCK_SKEW_MS).toISOString() }), true, "the clock tolerance, at its edge");
+	assert.equal(of({ ...SETTLED, startedAt: new Date(SINCE - RECORD_CLOCK_SKEW_MS - 1).toISOString() }), false, "and one millisecond past it");
+	assert.equal(of({ ...SETTLED, startedAt: "2026-10-04T09:00:00.000Z" }, { since: undefined }), true, "no job time: the age is not judged");
+	// recordVerdict shares the id and attempt checks, but a record that SETTLES an attempt is judged by its start alone
+	// (CONST-RETRY-INFRA-ONLY): the end fallback serves the stall listener's own `failed` record, which settles nothing.
+	assert.equal(recordVerdict({ ...SETTLED, startedAt: null, endedAt: "2026-10-04T10:04:00.000Z" }, { jobId: "j1", attempt: 1, since: SINCE }), "older-than-job");
+	assert.equal(recordVerdict({ ...SETTLED, startedAt: null, endedAt: "2026-10-04T09:30:00.000Z" }, { jobId: "j1", attempt: 1, since: SINCE }), "older-than-job");
+	assert.equal(recordVerdict(SETTLED, { jobId: "j1", attempt: 1, since: SINCE }), null);
+	assert.equal(recordVerdict({ ...SETTLED, outcome: "failed", startedAt: "2026-10-04T09:00:00.000Z" }, { jobId: "j1", attempt: 1, since: SINCE }), "failed", "the outcome is named before the age, as it always was");
+});
+
+test("recordOfThisJob reads only the stable core of a record from a newer pi-dispatch (#761)", () => {
+	const newer = watched({ jobId: "gh-n", attempt: 2, outcome: "failed", startedAt: null, endedAt: "2026-09-14T15:20:00.000Z", reason: "recovery-enqueued", capacity: { slots: 8 }, v: 2 });
+	assert.equal(recordOfThisJob(newer.proxy, { jobId: "gh-n", attempt: 2, since: Date.parse("2026-09-14T15:00:00.000Z") }), true);
+	assert.deepEqual([...newer.read].filter((k) => !RECORD_CORE_FIELDS.includes(k)), [], "nothing past the core, its version included");
 });
 
 test("makeSettledRecord: the local record first, the mirror only when the local one does not settle the attempt, and never a rejection", async () => {
@@ -2137,7 +2397,7 @@ test("the record carries resources at its TAIL, rebuilt, null when the run repor
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
 	const rec = (source, as = "result") => buildRecord({ job, [as]: source });
 	const keys = Object.keys(rec({ outcome: "completed", exitCode: 0 }));
-	assert.equal(keys.at(-7), "resources", "the tail when it landed; `size` (#596, phase 1), `hostBudget` (phase 2), `queuedAt` and `capacity` (#599) took it after");
+	assert.equal(keys.at(-8), "resources", "the tail when it landed; `size` (#596, phase 1), `hostBudget` (phase 2), `queuedAt` and `capacity` (#599) and `v` (#761) took it after");
 	assert.deepEqual(rec({ outcome: "completed", exitCode: 0, resources: { ...FULL, leaked: "/home/x" } }).resources, FULL);
 	assert.equal(rec({ outcome: "completed", exitCode: 0 }).resources, null, "an older image: null, key present");
 	assert.equal(rec({ outcome: "completed", resources: { ...FULL, cpuUsec: -5 } }).resources, null, "rebuilt here too, not trusted from the source");
@@ -2148,7 +2408,7 @@ test("the record carries the job's size at its TAIL after resources, rebuilt, nu
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 }, size: { memMiB: 999999, cpuCenti: 1, source: "project" } } };
 	const rec = (size) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...(size === undefined ? {} : { size }) });
 	const keys = Object.keys(rec({ memMiB: 2048, cpuCenti: 50, source: "project" }));
-	assert.deepEqual(keys.slice(-7, -4), ["resources", "size", "hostBudget"], "the tail when they landed; `queuedAt` and `capacity` (#599) took it after: field order is the serialisation order");
+	assert.deepEqual(keys.slice(-8, -5), ["resources", "size", "hostBudget"], "the tail when they landed; `queuedAt` and `capacity` (#599) and `v` (#761) took it after: field order is the serialisation order");
 	assert.deepEqual(rec({ memMiB: 2048, cpuCenti: 50, source: "project", leaked: "/home/x" }).size, { memMiB: 2048, cpuCenti: 50, source: "project" });
 	assert.equal(rec(undefined).size, null, "a caller that passes no size (a record before the pickup gate): null, key present");
 	assert.deepEqual(Object.keys(rec(undefined)), keys, "the key SET does not depend on a size");
@@ -2177,7 +2437,7 @@ test("the record carries queuedAt and then capacity at its TAIL after hostBudget
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, timestamp: Date.parse("2026-08-30T11:59:00.000Z"), opts: {}, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
 	const rec = (capacity) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...(capacity === undefined ? {} : { capacity }) });
 	const keys = Object.keys(rec({ slots: 3, memMiB: 8192, cpuCenti: 400, cpus: 8 }));
-	assert.deepEqual(keys.slice(-5, -2), ["hostBudget", "queuedAt", "capacity"], "the tail when they landed; `earlier` and `stalledRepick` took it after: field order is the serialisation order");
+	assert.deepEqual(keys.slice(-6, -3), ["hostBudget", "queuedAt", "capacity"], "the tail when they landed; `earlier`, `stalledRepick` and `v` (#761) took it after: field order is the serialisation order");
 	assert.deepEqual(Object.keys(rec(undefined)), keys, "the key SET does not depend on a capacity");
 	assert.equal(rec(undefined).capacity, null, "no capacity passed (a refusal before a slot): null, key present");
 	assert.equal(rec(undefined).queuedAt, "2026-08-30T11:59:00.000Z");
@@ -2314,7 +2574,7 @@ test("durable-run fields: shape, tail position, and absent for a job that never 
 		result: { outcome: "completed", recovered: { from: "exit", n: 1, fromAttempt: 2, checkpointSeq: 9, orphans: 2, replayed: 1, interrupted: 1, notStarted: 0 }, recoverSkipped: "base-unprimed", checkpoints: { written: 4, failed: 0, skipped: 1 } },
 	});
 	const keys = Object.keys(rec);
-	assert.deepEqual(keys.slice(-4), ["recoveryOf", "recovered", "recoverSkipped", "checkpoints"], "tail position, in this order");
+	assert.deepEqual(keys.slice(-5, -1), ["recoveryOf", "recovered", "recoverSkipped", "checkpoints"], "tail position, in this order, before the record's version (#761)");
 	assert.equal(rec.recoveryOf, "gh-d1");
 	assert.deepEqual(rec.recovered, { from: "exit", n: 1, fromAttempt: 2, checkpointSeq: 9, orphans: 2, replayed: 1, interrupted: 1, notStarted: 0 });
 	assert.equal(rec.recoverSkipped, "base-unprimed");
@@ -2390,7 +2650,7 @@ test("the record's turn budget is pickup's validated positive integer, never a m
 	const result = { outcome: "completed", maxTurns: 100, turns: 3 };
 	assert.equal(buildRecord({ job, result, maxTurns: 40 }).maxTurns, 40);
 	for (const maxTurns of [null, undefined, 0, -1, 1.5, "40", Infinity]) assert.equal(buildRecord({ job, result, maxTurns }).maxTurns, undefined);
-	assert.equal(Object.keys(buildRecord({ job, result, maxTurns: 40 })).at(-1), "maxTurns", "the additive field preserves existing field order");
+	assert.equal(Object.keys(buildRecord({ job, result, maxTurns: 40 })).at(-2), "maxTurns", "the additive field preserves existing field order; `v` (#761) stays last");
 });
 
 test("ignored watch finding has a stable reporting target and public decision without private evidence", async () => {

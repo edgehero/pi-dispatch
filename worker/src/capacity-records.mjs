@@ -35,12 +35,21 @@
  * only. Every Valkey call is bounded (`bounded`, host-registry.mjs' reason: this client QUEUES a command while offline
  * rather than rejecting it, so an unbounded await is a hang, not an error).
  *
+ * A record from a NEWER pi-dispatch (issue #761, run-history.mjs `recordReadable`) is not read by either source: a
+ * capacity report adds up slot time and sizes, fields whose meaning that release may have changed. It is skipped and
+ * COUNTED (`newerSkipped`, and a reason naming the count), so the report says it is partial rather than reading a
+ * busy host as idle. Each source skips its own before the merge, so an older attempt's readable copy of the same job
+ * (a retry that landed on a newer host) still counts its own slot. The merged count is of distinct job ids, the key
+ * `mergeRuns` keeps one record per: a host rolled back from a newer release holds its own newer records both on disk
+ * and in the mirror, and each is one record the report did not read, not two.
+ *
  * Never throws.
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { READ_SCRIPT, RUNS_HORIZON, RUNS_HORIZON_MEMBER, RUNS_INDEX, RUNS_INDEX_MAX, RUNS_SINCE, mergeRuns, mirrorWindowMs, runRecordKey } from "./run-mirror.mjs";
+import { recordReadable } from "./run-history.mjs";
 import { SIZING_RECORD_MAX_BYTES } from "./size-records.mjs";
 
 /** How many record bodies one MGET asks for: a full mirror is ten round trips, never one 5,000-key command. */
@@ -49,6 +58,14 @@ export const CAPACITY_MGET_CHUNK = 500;
 export const CAPACITY_OP_TIMEOUT_MS = 2_000;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A source's newer-release fields: `newerSkipped` (how many) and `newerIds` (their job ids, which the merged count
+ * de-duplicates), both absent when there are none, so a whole-result comparison of a read without one is unchanged.
+ */
+function newerOf(ids) {
+	return ids.length > 0 ? { newerSkipped: ids.length, newerIds: ids } : {};
+}
 
 /** Reject rather than wait forever (host-registry.mjs `bounded`). */
 function bounded(promise, ms) {
@@ -63,7 +80,10 @@ function bounded(promise, ms) {
 
 /**
  * The mirror's records that ended after `sinceMs`: `{ records, state, fromMs, truncated, skipped }`, `state` "ok", "off"
- * or "unreachable (<reason>)", `fromMs` where its history starts (see the header). Never throws.
+ * or "unreachable (<reason>)", `fromMs` where its history starts (see the header), plus `newerSkipped`, how many
+ * records from a newer pi-dispatch were left out, and `newerIds`, their job ids, only when there were any. A newer
+ * record with no job id is not counted: `mergeRuns` keeps no record without one, so it is none the report would read.
+ * Never throws.
  */
 export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPACITY_OP_TIMEOUT_MS, chunk = CAPACITY_MGET_CHUNK } = {}) {
 	const none = (state) => ({ records: [], state, fromMs: null, truncated: false, skipped: 0 });
@@ -84,6 +104,7 @@ export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPA
 		for (let i = 0; i < ids.length; i += 2) members.push({ id: ids[i], score: Number(ids[i + 1]) });
 		const records = [];
 		let skipped = 0;
+		const newerIds = [];
 		let expiredMs = NaN;
 		for (let i = 0; i < members.length; i += chunk) {
 			const part = members.slice(i, i + chunk);
@@ -102,7 +123,9 @@ export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPA
 				}
 				try {
 					const record = JSON.parse(raw);
-					if (record !== null && typeof record === "object" && !Array.isArray(record)) records.push(record);
+					if (record === null || typeof record !== "object" || Array.isArray(record)) return;
+					if (recordReadable(record)) records.push(record);
+					else if (typeof record.jobId === "string" && record.jobId !== "") newerIds.push(record.jobId);
 				} catch {
 					// unparseable is not showable
 				}
@@ -117,14 +140,16 @@ export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPA
 		if (size >= RUNS_INDEX_MAX && Number.isFinite(oldestMs)) fromMs = Math.max(fromMs, oldestMs);
 		if (Number.isFinite(expiredMs)) fromMs = Math.max(fromMs, expiredMs);
 		fromMs = Math.min(fromMs, nowMs);
-		return { records, state: "ok", fromMs, truncated: fromMs > sinceMs, skipped };
+		return { records, state: "ok", fromMs, truncated: fromMs > sinceMs, skipped, ...newerOf(newerIds) };
 	} catch (err) {
 		return none(`unreachable (${err?.message ?? "error"})`);
 	}
 }
 
 /**
- * This host's records that ended after `sinceMs`: `{ records, skipped, unreachable, absent }`. `fs` is `{ readdirSync,
+ * This host's records that ended after `sinceMs`: `{ records, skipped, unreachable, absent }`, plus `newerSkipped`, how
+ * many records of the window from a newer pi-dispatch were left out, and `newerIds`, their job ids, only when there
+ * were any. `fs` is `{ readdirSync,
  * statSync, readFileSync }`.
  */
 export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFileSync, statSync } } = {}) {
@@ -137,6 +162,7 @@ export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFile
 	}
 	const records = [];
 	let skipped = 0;
+	const newerIds = [];
 	for (const name of names) {
 		if (typeof name !== "string" || !name.endsWith(".json")) continue;
 		try {
@@ -156,20 +182,25 @@ export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFile
 			}
 			const record = JSON.parse(buf.toString("utf8"));
 			if (record === null || typeof record !== "object" || Array.isArray(record) || typeof record.jobId !== "string") continue;
+			// `endedAt` is in the stable core, so a newer record is judged against the window before it is skipped: only one
+			// the report would have read is counted.
 			const end = Date.parse(record.endedAt ?? "");
-			if (Number.isFinite(end) && end > sinceMs) records.push(record);
+			if (!Number.isFinite(end) || end <= sinceMs) continue;
+			if (recordReadable(record)) records.push(record);
+			else newerIds.push(record.jobId);
 		} catch {
 			// unparseable, or reaped between the listing and the read
 		}
 	}
-	return { records, skipped, unreachable: null, absent: false };
+	return { records, skipped, unreachable: null, absent: false, ...newerOf(newerIds) };
 }
 
 /**
  * The records of the window `[sinceMs, nowMs]` from both sources, merged, and what each covers: `{ records, mirrorState,
  * coverage }`,
  * `coverage` being `{ source, reason, localHost, localHosts, local: { fromMs } | null, mirror: { fromMs, truncated,
- * hosts } | null, skipped }` as `computeCapacity` reads it. `redis` may be null (no Valkey to ask); `noMirrorReason` then
+ * hosts } | null, skipped }` as `computeCapacity` reads it, plus `newerSkipped` when records from a newer pi-dispatch
+ * were left out (the reason then names how many). `redis` may be null (no Valkey to ask); `noMirrorReason` then
  * says why, in place of "no run mirror". `localHost` is this host's name. Never throws.
  */
 export async function readCapacityRecords({ redis = null, logsDir, sinceMs, nowMs, fs, retentionDays = 0, localHost = null, noMirrorReason = null, timeoutMs = CAPACITY_OP_TIMEOUT_MS, chunk = CAPACITY_MGET_CHUNK } = {}) {
@@ -189,6 +220,9 @@ export async function readCapacityRecords({ redis = null, logsDir, sinceMs, nowM
 	if (local.unreachable) reasons.push(local.unreachable);
 	const skipped = local.skipped + mirror.skipped;
 	if (skipped > 0) reasons.push(`${skipped} record${skipped === 1 ? "" : "s"} over ${SIZING_RECORD_MAX_BYTES / 1024} KiB skipped`);
+	// Distinct job ids, as the records are merged (the header): the same newer record on disk and in the mirror is one.
+	const newerSkipped = new Set([...(local.newerIds ?? []), ...(mirror.newerIds ?? [])]).size;
+	if (newerSkipped > 0) reasons.push(`${newerSkipped} record${newerSkipped === 1 ? "" : "s"} from a newer pi-dispatch not read`);
 	const hostsOf = (records) => [...new Set(records.map((r) => r.host).filter((h) => typeof h === "string" && h !== ""))].sort();
 	return {
 		// One per job id, the later end winning (a retry can land on another host); `Infinity` keeps every run, since the
@@ -204,6 +238,7 @@ export async function readCapacityRecords({ redis = null, logsDir, sinceMs, nowM
 			local: localRead ? { fromMs: localFromMs } : null,
 			mirror: mirrored ? { fromMs: mirror.fromMs, truncated: mirror.truncated, hosts: hostsOf(mirror.records) } : null,
 			skipped,
+			...(newerSkipped > 0 ? { newerSkipped } : {}),
 		},
 	};
 }

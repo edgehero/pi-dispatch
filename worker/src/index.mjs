@@ -2,7 +2,7 @@ import { resolveModelRoles } from "./model-roles.mjs";
 import { SubscriptionWait } from "./subscription-wait.mjs";
 import { zeroRatedFor } from "./reserve-estimate.mjs";
 import { isTransientOverlayRead } from "./model-catalog.mjs";
-import { checkFailoverCandidate, markModelCooldown, selectFailoverJob, writeModelAttempt } from "./model-failover.mjs";
+import { checkFailoverCandidate, markModelCooldown, readModelAttempt, selectFailoverJob, writeModelAttempt } from "./model-failover.mjs";
 import { availableParallelism } from "node:os";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
@@ -15,7 +15,7 @@ import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL
 import { CANCELLED_BEFORE_START_COMMENT, SIZE_REFUSAL_COMMENTS } from "./comment-tables.mjs";
 import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
-import { earlierFrom, targetFor } from "./run-history.mjs";
+import { earlierFrom, recordOfThisJob, recordReadable, targetFor } from "./run-history.mjs";
 import { isPerMachineHost } from "./backends.mjs";
 import { hash16 } from "./fleet-lease.mjs";
 import { endpointsForModel } from "./model-endpoints.mjs";
@@ -30,6 +30,7 @@ import { governedDollars } from "./allocation.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, afterMs, unreadableConditions, waitArmed, waitBackoffMs, waitLabel, waitProfileNames } from "./wait-for.mjs";
 import { answerOf, makeWaitState } from "./wait-state.mjs";
 import { makeDeferTo } from "./defer-write.mjs";
+import { jobDataNewer } from "./job-data-version.mjs";
 import { releaseSemanticWindow } from "./queue.mjs";
 import { runIdOf } from "./recovery-queue.mjs";
 import { isFinalOutcome, settleInbox } from "./inbox-settle.mjs";
@@ -60,6 +61,12 @@ export const REJECTED_SEEN_MAX = 1000;
 // folder -- pays exactly one re-check, not fifteen seconds of dead air. No jitter: one worker per
 // docker daemon bounds any herd by its own concurrency, and a contended wake just re-defers.
 export const SCOPE_BUSY_RECHECK_MS = 5_000;
+
+// The newer-release re-check (issue #761, DES-STORE-VERSION-WHEN-NEEDED): a job this worker cannot read, or one whose
+// settings, triggers or pause windows file a newer pi-dispatch wrote, waits for this host's upgrade. Nothing here can
+// end that wait but an upgrade or a rollback of the file, so it asks rarely: ten minutes keeps a fleet mid-upgrade
+// from spinning on jobs it cannot run, and an upgraded worker picks the job up on its next look.
+export const NEWER_RELEASE_RECHECK_MS = 600_000;
 
 // The endpoint-busy re-check (issue #503): a job whose model server has every slot held re-tests on a fixed
 // cadence, for the scope re-check's reason (a held slot has no natural "until"). Its own value rather than a
@@ -178,7 +185,9 @@ function boundAfterAbort(run, signal, job, log, graceMs = ABORT_GRACE_MS, onStop
  * runs inside runJob against the freshly passed caps (CONST-BUDGET-BEFORE-TOKENS).
  *
  * The read happens once per pickup, right after the scope gate and before the model endpoint gate (issue #503),
- * because that gate needs the effective provider and model, which the overlay can supply.
+ * because that gate needs the effective provider and model, which the overlay can supply. One more read sits at the
+ * processor's head (issue #761) and asks only whether a newer pi-dispatch wrote the file; every value a job runs with
+ * still comes from the pickup's read.
  */
 /**
  * A job's endpoint set (issues #503, #502): the endpoints its main model AND every model on its effective allowed
@@ -278,7 +287,7 @@ function makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs() }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs() }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -335,6 +344,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			};
 			const record = await settledRecord(job.id, { attempt, since: job.timestamp, onReject });
 			if (record) {
+				// A record a NEWER pi-dispatch wrote (issue #761) settles the attempt by its stable core, as `recordVerdict`
+				// judged it, and is replayed by that core alone: its `reason`, `exitCode`, `turns`, `tokens` and
+				// `budgetReserved` may mean something this build does not know, and the completed listener pages and logs on
+				// them. So the job ends as the record's outcome with every other field null: `pagesAsPolicy` needs a reason
+				// it knows and so pages nobody, and the `job_completed` line names the outcome alone.
+				if (!recordReadable(record)) {
+					deps?.log?.("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome });
+					return { outcome: record.outcome, reason: null, exitCode: null, turns: null, tokens: null, budgetReserved: null };
+				}
 				deps?.log?.("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(record.reason ? { reason: record.reason } : {}) });
 				return { outcome: record.outcome, reason: record.reason ?? null, exitCode: record.exitCode ?? null, turns: record.turns ?? null, tokens: record.tokens ?? null, budgetReserved: record.budgetReserved ?? null };
 			}
@@ -371,8 +389,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (modelRolesRan) target.modelRoles = modelRolesRan;
 				// Every attempt replaces the same record. Carry intervention fallback and uncertainty from the
 				// prior attempt, or a later cold start would erase the only proof of an earlier resumed answer.
-				if (priorAttemptRecord?.touchLineageSkipped === "source-unavailable") target.touchLineageSkipped = "source-unavailable";
-				const touches = [...(Array.isArray(priorAttemptRecord?.touches) ? priorAttemptRecord.touches : []), ...(Array.isArray(target.touches) ? target.touches : [])].map(cleanTouch).filter(Boolean);
+				// Only from a record this build can read (issue #761): a newer one's touches are outside its stable core and
+				// may mean something else, and this attempt's record would present them as this build's own.
+				const prior = recordReadable(priorAttemptRecord) ? priorAttemptRecord : null;
+				if (prior?.touchLineageSkipped === "source-unavailable") target.touchLineageSkipped = "source-unavailable";
+				const touches = [...(Array.isArray(prior?.touches) ? prior.touches : []), ...(Array.isArray(target.touches) ? target.touches : [])].map(cleanTouch).filter(Boolean);
 				if (touches.length) target.touches = [...new Map(touches.map((event) => [event.id, event])).values()].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)).slice(0, 16);
 			} catch {}
 		};
@@ -469,6 +490,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// BullMQ marks this pickup active before entering here. The canary takes its exclusive
 		// lease before proving all active lists empty, so either side of that race sees the other.
 		if (await deps?.canaryBusy?.()) await deferTo(job, token, nowMs + SCOPE_BUSY_RECHECK_MS, "canary", { project });
+		// Issue #761: the pause windows file on disk was written by a newer pi-dispatch. The windows the gate below reads
+		// are the LAST GOOD ones, and the newer file may pause this very job (a field this build would drop narrows when
+		// a window applies), so judging it by them would run a job the operator paused. Every job waits for this host's
+		// upgrade or a readable file instead, right before the pause gate and so before every hold and spend.
+		if (pauseWindowsNewer() === true) {
+			deps?.log?.("newer_release_hold", { jobId: job.id, what: "the pause windows file", delayMs: NEWER_RELEASE_RECHECK_MS });
+			await deferTo(job, token, nowMs + NEWER_RELEASE_RECHECK_MS, "newer-release", { project });
+		}
 		const until = pauseUntil(job.data, nowMs);
 		if (until && until > nowMs + 1000) await deferTo(job, token, until, "pause-window", { project });
 
@@ -1050,6 +1079,19 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			settingsThrew = true;
 			settingsError = error;
 		}
+		// Issue #761: an overlay written by a newer pi-dispatch is not a broken file, it is one this build cannot read. The
+		// settings-overlay-invalid refusal below is for a broken file; this job instead waits for this host's upgrade (or a
+		// readable file), deferred `newer-release`: a refusal would use up a forge delivery and spend a one-shot over a file
+		// nobody got wrong. HERE, right after the read and above every gate that reads the settings, and outside the main
+		// `try` (a DelayedError inside it would become an UnrecoverableError), every hold given back first, as each gate's
+		// deferral does. Nothing is settled, recorded, minted or reserved. The processor's head asks the same question
+		// before any branch runs, so a file that was newer then never gets here; this one covers a file that turned newer
+		// between that read and this one.
+		if (!settingsThrew && settings?.invalid && settings.newer === true) {
+			await releaseAllHolds();
+			deps?.log?.("newer_release_hold", { jobId: job.id, what: "the settings file", delayMs: NEWER_RELEASE_RECHECK_MS });
+			await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", { project });
+		}
 
 		// Failover selection precedes endpoint leases and every paid gate. Capture failures here and report them
 		// inside the ordinary record/release try below; no early throw may strand the scope slots already held.
@@ -1058,6 +1100,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let selectionWait = null;
 		let failoverSnapshot = null;
 		let chosenModel = null;
+		// Set by the selection when a retry can be judged only by a record a newer pi-dispatch wrote (issue #761): the job
+		// then waits below, outside this block's `try`, instead of being refused.
+		let priorRecordNewer = false;
 		const modelAttemptId = `${job.queueName ?? QUEUE}:${job.id}`;
 		if (!settingsThrew && !settings?.invalid) {
 			try {
@@ -1085,9 +1130,48 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						if (!ref) { const error = new Error("the recovery model is invalid"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
 						effective = { ...effective, provider: ref.provider, model: ref.model };
 					}
-					const selection = effective.fallbackModels === undefined ? { job: effective } : await selectFailoverJob(effective, {
-						redis, id: modelAttemptId, retry: Number(job.attemptsMade) > 0 || Number(job.stalledCounter) > 0,
-						recoveryModel, retryNeverStarted: priorAttemptRecord?.reason === "container-never-started" && priorAttemptRecord?.budgetReserved === false && priorAttemptRecord?.exitCode === null, models, limits, now, log: deps?.log,
+					const retry = Number(job.attemptsMade) > 0 || Number(job.stalledCounter) > 0;
+					// Issue #761: a retry whose previous attempt's record a newer pi-dispatch wrote, with no model attempt key to
+					// lock to. That record's `reason`, `budgetReserved` and `exitCode` are outside its stable core, so it cannot
+					// say the attempt never started a container, and the selection would refuse the retry
+					// (`model-failover-no-candidate`) rather than start over from the primary. That refusal comments, records,
+					// uses up a forge delivery and disarms a one-shot over work nothing is wrong with; the job waits instead, as
+					// it does for every store this build cannot read, until a host that reads the record takes it or a later
+					// record replaces it. Exactly that case and no other: a model attempt key keeps the lock to its model, and a
+					// record this build can read keeps today's answers. The key is read here only in that case (the selection
+					// reads it again when it is there), and a throw is the selection's own read failing, handled below as such.
+					// The record counts only when it is this job's previous attempt's (`recordOfThisJob`, the rule the lost-lock
+					// checks share): one an older job left under a reused id, or an earlier attempt's, says nothing about the
+					// attempt being retried, so the retry is judged as one with no record, never held by it. The previous attempt
+					// carries `attemptsMade` after a failure, which BullMQ counts, and this pickup's own number,
+					// `attemptsMade + 1`, after a stall, which it does not (a scheduled job's stall puts it back to wait with
+					// only its `stalledCounter` raised).
+					// The pickup's record is the higher attempt of this host's file and the fleet's copy, chosen before any
+					// rule, so a stale record an older job left at a higher attempt can hide this attempt's own on the other
+					// side. Where the wait could apply and that record is not the job's own, both sides are read again, each
+					// held to the rule first (`previousRecord`'s `keep`), and the record that passes, if any, is judged. The
+					// pickup's record still gives `earlier` and the touches, as before.
+					const ownPrior = (record) => [job.attemptsMade, job.attemptsMade + 1].some((attempt) => recordOfThisJob(record, { jobId: job.id, attempt, since: job.timestamp }));
+					const waitMayApply = effective.fallbackModels !== undefined && retry && !recoveryModel;
+					let priorOwnRecord = ownPrior(priorAttemptRecord) ? priorAttemptRecord : null;
+					if (waitMayApply && priorOwnRecord === null && priorAttemptRecord !== null) {
+						// Judged by the rule again, so a reader that ignores `keep` cannot hand the stale record back. A fault reads
+						// as no record, as the pickup's own read does.
+						try {
+							const again = await previousRecord(job.id, { keep: ownPrior });
+							priorOwnRecord = ownPrior(again) ? again : null;
+						} catch {
+							priorOwnRecord = null;
+						}
+					}
+					priorRecordNewer = waitMayApply && priorOwnRecord !== null && !recordReadable(priorOwnRecord) && (await readModelAttempt(redis, modelAttemptId)) === null;
+					const selection = priorRecordNewer ? {} : effective.fallbackModels === undefined ? { job: effective } : await selectFailoverJob(effective, {
+						redis, id: modelAttemptId, retry,
+						// Read from a record this build can read only (issue #761): a newer one's `reason`, `budgetReserved` and
+						// `exitCode` are outside its stable core. Such a record is no usable prior record, so the retry goes by the
+						// model attempt key alone, locked to the model it names (with no key the job waited above), never started
+						// over from the primary on a record this build cannot vouch for.
+						recoveryModel, retryNeverStarted: recordReadable(priorAttemptRecord) && priorAttemptRecord.reason === "container-never-started" && priorAttemptRecord.budgetReserved === false && priorAttemptRecord.exitCode === null, models, limits, now, log: deps?.log,
 						reservationFor: (candidate) => zeroRatedFor(candidate, { modelEndpoints: failoverSnapshot, builtinModel: deps?.builtinModel }).zeroRated ? 0 : candidate.maxCostMicros,
 						subscriptionCheck: deps?.subscriptionRuntime ? (candidate) => deps.subscriptionRuntime.check(candidate) : null,
 						checkCandidate: (candidate) => deps?.checkFailoverCandidate ? deps.checkFailoverCandidate(candidate, { models, endpoints }) : checkFailoverCandidate(candidate, { models, endpoints, credential: deps?.checkProviderCredential, lookup: deps?.builtinModel }),
@@ -1134,8 +1218,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				else selectionError = error instanceof InfraRetry ? error : new InfraRetry("the model candidates could not be read", { cause: error, reason: "container-never-started", budgetReserved: false });
 			}
 		}
-		if (selectionWait) {
+		// The selection's two deferrals, through one exit that gives every hold back first: a retry whose previous record a
+		// newer pi-dispatch wrote (issue #761, above; the selection did not run, so it named no wait), or a wait the
+		// selection or the subscription check named.
+		if (priorRecordNewer || selectionWait) {
 			await releaseAllHolds();
+			if (priorRecordNewer) {
+				deps?.log?.("newer_release_hold", { jobId: job.id, what: "the previous attempt's run record", delayMs: NEWER_RELEASE_RECHECK_MS });
+				await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", { project });
+			}
 			await deferTo(job, token, selectionWait.until, selectionWait.wait, { project });
 		}
 
@@ -1851,6 +1942,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				deps?.log?.("recovery_wait_hold", { jobId: job.id, delayMs: error.recoveryWaitMs });
 				await deferTo(job, token, now() + error.recoveryWaitMs, "recovery-wait", { project, holder: job.data?.recoveryOf });
 			}
+			// Issue #761: a free gate of the processor read something a newer pi-dispatch wrote (`NewerReleaseHold`: the live
+			// triggers file, for the one-shot, skew and approval checks), before the mint and every reserve. Deferred like the
+			// recovery hold above, without spending an attempt, and with nothing settled, recorded or posted: the job waits
+			// for a worker that reads the file. The log names the store, never the error's words.
+			if (error?.newerRelease === true) {
+				deps?.log?.("newer_release_hold", { jobId: job.id, what: typeof error.what === "string" ? error.what : null, delayMs: NEWER_RELEASE_RECHECK_MS });
+				await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", { project });
+			}
 			// Issue #476: a job whose egress preflight found the rootless network keeper running on its own bridge but younger
 			// than the minimum age is HELD until it is old enough (one `moveToDelayed`, no attempt), the move the hold above
 			// makes, since a keeper merely young is not a keeper that does not hold: every joint start of the stack read it
@@ -1930,6 +2029,37 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 	};
 	return async function processor(job, token, signal) {
+		// First, before any gate reads the data: a job queued by a newer pi-dispatch, whose fields this build would drop
+		// or misread, waits for a worker that can read it (issue #761). A deferral, never a refusal: a refusal would use up
+		// a forge delivery (its id deduplicates a redelivery for 31 days) and spend a one-shot trigger, and its record
+		// would be built from data this build cannot read. Nothing is spent, recorded or posted.
+		if (jobDataNewer(job.data)) {
+			deps?.log?.("newer_release_hold", { jobId: job.id, what: "job data", delayMs: NEWER_RELEASE_RECHECK_MS });
+			await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+		}
+		// Issue #761: the triggers file on disk was written by a newer pi-dispatch (start.mjs's reload refused it and keeps
+		// the last good schedules). ONE gate for every job, right after the job data's and before every branch below,
+		// rather than a patch in each reader: the file is read live by many of them (the fork policy, the secret bundles,
+		// the model roles, the answer rules, the question grouping, the approvals, the watch rules, the one-shot and skew
+		// checks), and each would otherwise run on its last good copy or refuse. Waiting for this host's upgrade is the one
+		// answer that neither misreads the file nor loses the work. A cron job minted from the last good schedules waits
+		// here too, so no schedule the newer file changed runs as it was. Free, before anything is read, held or spent.
+		if (triggersNewer() === true) {
+			deps?.log?.("newer_release_hold", { jobId: job.id, what: "the triggers file", delayMs: NEWER_RELEASE_RECHECK_MS });
+			await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+		}
+		// Issue #761: the settings file was written by a newer pi-dispatch. Asked HERE, with the same `getSettings` the
+		// pickup reads, because several refusals run before the pickup's own read (the question grouping's, the never-fits
+		// size, the wait gate's) and each comments, records and disarms a one-shot: one gate makes "every job defers" true
+		// for all of them, where a check in each branch would be one more place to forget. Only the newer answer is acted
+		// on. A throw falls through to the pickup, which reads again and handles it as it always did; nothing is held yet,
+		// so nothing is given back.
+		let headSettings = null;
+		try { headSettings = await getSettings(); } catch {}
+		if (headSettings?.invalid && headSettings.newer === true) {
+			deps?.log?.("newer_release_hold", { jobId: job.id, what: "the settings file", delayMs: NEWER_RELEASE_RECHECK_MS });
+			await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+		}
 		const sourceRefusal = await checkDraftAnswerSource(job.data, deps);
 		if (sourceRefusal) {
 			return recordBeforePickup(job, sourceRefusal);
@@ -1937,6 +2067,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		if (job.data?.kind === "answer-draft" || job.data?.answerDraft) {
 			if (!deps.answerDraftRuntime) return { outcome: "policy", reason: "answer-draft-unavailable", budgetReserved: false };
 			const resolved = await deps.answerDraftRuntime.resolve(job.data, job.id);
+			// Issue #761: the runtime read a triggers file a newer pi-dispatch wrote (a write that landed before the watcher's
+			// reload said so) and answered before writing anything: the job waits as at the head, without using an attempt.
+			if (typeof resolved.newer === "string") {
+				deps?.log?.("newer_release_hold", { jobId: job.id, what: resolved.newer, delayMs: NEWER_RELEASE_RECHECK_MS });
+				await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+			}
 			if (resolved.result) {
 				await recordWatchOutcome({ job, result: resolved.result, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
 				return resolved.result;
@@ -1946,6 +2082,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		if (job.data?.kind === "zero-touch-grouping" || job.data?.questionGrouping) {
 			if (!deps.questionGroupRuntime) return { outcome: "policy", reason: "question-group-unavailable", budgetReserved: false };
 			const resolved = await deps.questionGroupRuntime.resolve(job.data, job.id);
+			// Issue #761: the runtime read a triggers or settings file a newer pi-dispatch wrote (one that turned newer after
+			// the head's checks) and answered before setting any status: the job waits as at the head, never refused.
+			if (typeof resolved.newer === "string") {
+				deps?.log?.("newer_release_hold", { jobId: job.id, what: resolved.newer, delayMs: NEWER_RELEASE_RECHECK_MS });
+				await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+			}
 			if (resolved.result) {
 				await recordWatchOutcome({ job, result: resolved.result, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
 				return resolved.result;
@@ -1954,7 +2096,21 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		}
 		if (job.data?.kind === "watch" || job.data?.watch) {
 			if (!deps.watchRuntime) return { outcome: "policy", reason: "watch-unavailable" };
+			// Issue #761: the watch runtime judges its own pause window below (`pauseUntil`, from the last good windows), and
+			// it takes the finding, or files the issue, as soon as that says the target is not paused, before pickup's pause
+			// gate ever runs. A pause windows file written by a newer pi-dispatch may pause the target, so the job waits for
+			// this host's upgrade first, before anything is taken, as every other job does at the pause gate.
+			if (pauseWindowsNewer() === true) {
+				deps?.log?.("newer_release_hold", { jobId: job.id, what: "the pause windows file", delayMs: NEWER_RELEASE_RECHECK_MS });
+				await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+			}
 			const resolved = await deps.watchRuntime.resolve(job.data, job.id);
+			// Issue #761: the runtime read the triggers file or the settings a newer pi-dispatch wrote (a write that landed
+			// before the watcher's reload said so), and answered BEFORE taking the finding: the job waits as at the head.
+			if (typeof resolved.newer === "string") {
+				deps?.log?.("newer_release_hold", { jobId: job.id, what: resolved.newer, delayMs: NEWER_RELEASE_RECHECK_MS });
+				await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+			}
 			if (resolved.deferUntil) await deferTo(job, token, resolved.deferUntil, "pause-window");
 			if (resolved.result) {
 				await recordWatchOutcome({ job, result: resolved.result, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
@@ -2029,7 +2185,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -2101,6 +2257,12 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 				for (const w of workers) if (w.concurrency !== n) w.concurrency = n;
 			},
 			pauseUntil,
+			// Issue #761: whether the pause windows file on disk was written by a newer pi-dispatch (start.mjs keeps it beside
+			// the last good windows). Every job defers `newer-release` at the pause gate while it is.
+			pauseWindowsNewer,
+			// Issue #761: whether the triggers file on disk was written by a newer pi-dispatch (start.mjs keeps it beside the
+			// running schedules). Every job defers `newer-release` at the processor's head while it is.
+			triggersNewer,
 			// SHARED across both workers, and that sharing is the point rather than an optimisation: the
 			// folder mutex, the per-scope ceiling and the wait-check lease all bound the HOST, so two
 			// independent maps would double every one of them exactly as two Workers double concurrency.

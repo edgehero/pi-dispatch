@@ -26,6 +26,7 @@ import { clip, columnsOf, fmtCost, pad, scrubControls, sliceColumns } from "./pa
 import { KNOWN_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 // The one vocabulary the console and the panel read (issue #710): the runs table's OUTCOME column says the same words.
 import { outcomeWord, recordReason } from "./words.mjs";
+import { newerSkippedSentence } from "./newer-release.mjs";
 
 // The three spend windows and the overlay cap key each reads. Order is day -> week -> month.
 const BUDGET_WINDOWS = [
@@ -502,10 +503,14 @@ function schedulerLine(s) {
 export function renderWhatIf(result, { flow, target } = {}) {
   const head = `What-if ${flow} @ ${target}:`;
   if (!result || typeof result !== "object") return `${head}\n  no estimate`;
+  // Issue #761: one more line only when records from a newer pi-dispatch were left out, so every other answer reads as before.
+  const newer = newerSkippedSentence(result.newerSkipped);
+  const tail = newer ? [`  ${newer}`] : [];
   if (result.class === "seeded") {
     return [
       head,
       `  no ledgered run to measure from — seeded band ${fmtCost({ usd: result.low, class: "seeded" })} to ${fmtCost({ usd: result.high, class: "seeded" })} · ${result.note}`,
+      ...tail,
     ].join("\n");
   }
   const pct = Math.round((result.coverage ?? 0) * 100);
@@ -514,6 +519,7 @@ export function renderWhatIf(result, { flow, target } = {}) {
     `  estimate ${fmtCost({ usd: result.usd, class: "estimated" })} total · ${fmtCost({ usd: result.perRun, class: "estimated" })} per run`,
     `  coverage ${pct}% of observed runs ledgered · excluded ${result.excluded} (no ledger)`,
     `  rates pi-ai ${result.ratesVersion ?? "unknown"}`,
+    ...tail,
   ].join("\n");
 }
 

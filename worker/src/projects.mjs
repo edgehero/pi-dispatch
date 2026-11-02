@@ -25,9 +25,32 @@ import { hash16 } from "./fleet-lease.mjs";
 import { PROJECT_ID_RE, isProjectId } from "./project-id.mjs";
 import { parseScopeString, qualifiedScopeOf } from "./pause-windows.mjs";
 import { canonicalScope } from "./scoped-limits.mjs";
+import { neededVersion } from "./store-version.mjs";
 
 /** The highest schema version this build reads. A file declaring a higher one is refused loudly. */
 export const PROJECTS_VERSION = 1;
+
+/**
+ * Each project field whose ABSENCE an older build would misread, with the version that introduced it (issue #761,
+ * `DES-STORE-VERSION-WHEN-NEEDED`). A project entry is a closed shape its writers rebuild, so an older admin drops a
+ * field it does not know on its next write: a new field that changes which scope a project holds (and so which cap
+ * counts it) must declare its version here and raise `PROJECTS_VERSION` in the same commit. Empty until one does.
+ */
+export const PROJECTS_FIELD_VERSIONS = Object.freeze({});
+
+/**
+ * The version a file of `rows` (the projects as written, `{ id, name?, members }`) needs: the LOWEST that expresses
+ * them, 1 while no field needs more, and never above `PROJECTS_VERSION` (a table above this build's version is its own
+ * bug, held by the table test). `version` is required in this file, so the writer always writes the number this
+ * returns; it is a function rather than the constant so the file keeps the lowest version when the constant rises.
+ */
+export function projectsVersionFor(rows, { table = PROJECTS_FIELD_VERSIONS, supported = PROJECTS_VERSION } = {}) {
+	const fields = new Set();
+	for (const row of Array.isArray(rows) ? rows : []) {
+		if (row !== null && typeof row === "object" && !Array.isArray(row)) for (const key of Object.keys(row)) fields.add(key);
+	}
+	return Math.min(neededVersion(fields, table), supported);
+}
 
 // The id rule lives in an import-free module, so the run record can check an id without this module's graph.
 export { PROJECT_ID_RE, isProjectId };

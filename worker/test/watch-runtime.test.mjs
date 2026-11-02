@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeWatchRuntime, readWatchOutput } from "../src/watch-runtime.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeRedactor } from "../src/redact-secrets.mjs";
 const findingId = "a".repeat(64);
-function fixture({ decision = false, shadow = false, storeOverrides = {}, pauseUntil = () => null, mode = "investigate", onEnqueue = async () => {}, publishIssue = async () => ({ status: "created" }) } = {}) {
+function fixture({ decision = false, shadow = false, storeOverrides = {}, pauseUntil = () => null, mode = "investigate", onEnqueue = async () => {}, publishIssue = async () => ({ status: "created" }), getSettings = () => ({ provider: "anthropic", model: "claude-sonnet-4-5-20250929" }) } = {}) {
 	const root = tempDir("pi-watch-runtime-"); const outboxDir = join(root, "outbox"); mkdirSync(outboxDir);
 	const triggersPath = join(root, "triggers.json");
 	const finding = { id: findingId, ruleId: "shop", source: "prod", fingerprint: "b".repeat(64), severity: "error", count: 37, firstSeen: "2026-10-29T00:00:00Z", lastSeen: "2026-10-29T00:10:00Z", fields: { service: "checkout" }, samples: ["private-hostile-sample"] };
@@ -15,7 +15,7 @@ function fixture({ decision = false, shadow = false, storeOverrides = {}, pauseU
 	const changes = []; const traces = []; const queued = []; const handoffs = []; const acknowledged = [];
 	let latest = { ...finding };
 	const store = { async scheduleAction(id, ruleId, dueAt) { handoffs.push({ id, ruleId, dueAt }); }, async pendingActions() { return handoffs; }, async acknowledgeAction(id) { acknowledged.push(id); }, async takeFinding() { return { status: "ready", finding }; }, async readFinding() { return latest; }, async readBoard() { return { version: 4, frozen: true, blocks: [] }; }, async updateFinding(_id, patch) { changes.push(patch); latest = { ...latest, ...patch }; }, async appendTrace(_id, entry) { traces.push(entry); }, async proposeBoard() { assert.fail("no proposal expected"); }, ...storeOverrides };
-	const runtime = makeWatchRuntime({ store, triggersPath, pauseUntil, enqueue: async (...args) => { queued.push(args); return onEnqueue(...args); }, publishIssue, getSettings: () => ({ provider: "anthropic", model: "claude-sonnet-4-5-20250929" }), now: () => 1793232000000 });
+	const runtime = makeWatchRuntime({ store, triggersPath, pauseUntil, enqueue: async (...args) => { queued.push(args); return onEnqueue(...args); }, publishIssue, getSettings, now: () => 1793232000000 });
 	return { runtime, changes, traces, queued, handoffs, acknowledged, finding, outboxDir, triggersPath, trigger, store, ref: { kind: "watch", watch: { findingId, ruleId: "shop", phase: "dispatch" } } };
 }
 test("watch pickup ignores forged execution selectors and private evidence never serializes into persisted queue bytes", async () => {
@@ -144,4 +144,29 @@ test("durable handoff drain retries queue delivery, never the paid decision", as
 	await f.runtime.drain();
 	assert.equal(f.queued.length, 1); assert.deepEqual(f.queued[0][1], { phase: "action" });
 	assert.equal(f.changes.length, 0);
+});
+
+// Issue #761: a read of a file a newer pi-dispatch wrote is answered `{ newer }` BEFORE the finding is taken (a take
+// cannot be undone), so the processor defers the job; it is never `watch-config-changed`, which would spend the finding.
+test("a newer triggers file or settings overlay never takes the finding: the runtime answers newer and touches nothing", async () => {
+	let takes = 0;
+	const counted = { async takeFinding() { takes++; return { status: "ready", finding: {} }; } };
+	const f = fixture({ storeOverrides: counted });
+	const doc = JSON.parse(readFileSync(f.triggersPath, "utf8"));
+	writeFileSync(f.triggersPath, JSON.stringify({ version: 2, ...doc }));
+	assert.deepEqual(await f.runtime.resolve(f.ref, "run1"), { newer: "the triggers file" });
+	const newerSettings = fixture({ decision: true, storeOverrides: counted, getSettings: () => ({ invalid: "settings file written by a newer pi-dispatch (version 2; this build understands 1)", newer: true }) });
+	assert.deepEqual(await newerSettings.runtime.resolve(newerSettings.ref, "gate1"), { newer: "the settings file" });
+	assert.equal(takes, 0, "no finding taken");
+	assert.deepEqual([...f.changes, ...newerSettings.changes, ...f.traces, ...newerSettings.traces, ...f.queued, ...newerSettings.queued], [], "nothing updated, traced or queued");
+	// A BROKEN overlay is refused as before (after the take, the decision's own read), and the settings are read once.
+	let reads = 0;
+	const broken = fixture({ decision: true, getSettings: () => (reads++, { invalid: "maxTurns must be an integer of 1 or more" }) });
+	assert.equal((await broken.runtime.resolve(broken.ref, "gate1")).result.reason, "watch-config-changed");
+	assert.equal(reads, 1, "one read per resolve");
+	// A rule without a decision, or an action phase, reads no settings at all.
+	let plainReads = 0;
+	const plain = fixture({ getSettings: () => (plainReads++, {}) });
+	await plain.runtime.resolve(plain.ref, "run1");
+	assert.equal(plainReads, 0);
 });
