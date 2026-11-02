@@ -25,7 +25,7 @@ Start with **Start here**: the concept map shows how the pieces connect, the glo
 |---|---|
 | Start here | How pi-dispatch fits together (concept map), Glossary, The sample deployment, Journeys: a run asks a question, a run fails, set up a new deployment |
 | Overview | Overview, Overview all clear, First run setup (in the browser, after one command) |
-| Runs | Runs, Sandboxes (#771, operator only; optional separate gateway #754), Sandbox terminal, Sandbox gateway sign-in and states, Zero touch with its viewer view (#770), Parked with answer rules and its viewer view (#772), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
+| Runs | Runs, Sandboxes (#771, operator only; optional separate gateway #754), Sandbox terminal, Sandbox gateway sign-in and states, a run's workspace on its page and outcome by outcome with the terminal tab that knows its run (proposed), Zero touch with its viewer view (#770), Parked with answer rules and its viewer view (#772), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
 | Fleet | Fleet, Fleet part paused (bulk actions, held, delayed), Host detail (registry row, budget, capacity, doctor), Venue detail (14 properties), Fleet as a viewer |
 | Spend | Spend, Budget split, Capacity, Breakdown, Flows map, as tabs of one page |
 | Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, Add a trigger, Triggers as a viewer |
@@ -63,13 +63,13 @@ Every page, panel, state and write of the console at `ce5338f`, plus the 5.0.0 i
 | `/`: fleet state, spend against caps, hosts online, parked, failures in 24 hours, active jobs | Overview, Overview all clear, Overview on a phone |
 | First run: no worker, no egress proxy, no provider key, no triggers, `/dispatch setup`, `pi-dispatch setup github` | First run setup, every step from the browser |
 | `/runs`: filters, outcome words, reason sentences, "no explanation yet", mirror and 2,000-run notes, pager | Runs, Runs on a phone |
-| `/run`: outcome, progress and phases, live transcript, chat, inbox, steer and follow-up, re-run with its reserve, sandbox command | Run live, Run ended, Run refused, Run parked, Run chat states |
+| `/run`: outcome, progress and phases, live transcript, chat, inbox, steer and follow-up, re-run with its reserve, sandbox command | Run live, Run ended, Run refused, Run parked, Run chat states, Run workspace and The workspace run by run (proposed) |
 | `/run` for durable runs: continues as, recovery facts, checkpoints, replayed, interrupted and not started calls, earlier attempts, replicas, stalled re-pick | Run recovered |
 | `/run` on OpenShell: sandbox policy, rule hosts, secret bundle variables, shadowed names, bundle skipped, cost floor and settled basis, per-model usage, resources, chain | Run in a sandbox |
 | `/run` for a viewer: numbers and tool names only, the operator-only sentences | Run as a viewer, Access states |
 | `/parked`: waiting, being answered, unknown, the answer and its reserve | Run parked, Parked on a phone, Approval request, Parked with an answer rule |
 | `/runs/sandboxes` (#771, #754): operator-only kept workspaces and live shells, native terminal handoff, fresh preparation, pin and End with preview/Confirm, Fleet target settings, and separately enrolled browser attachment | Sandboxes |
-| Separate gateway `/s/<intent>` and console `/sandbox/gateway/authorize` (#754): fresh same-session sign-in, existing-container attachment, phone/no-script fallback and exceptional states | Sandbox terminal, Sandbox gateway sign-in, Sandbox gateway states |
+| Separate gateway `/s/<intent>` and console `/sandbox/gateway/authorize` (#754): fresh same-session sign-in, existing-container attachment, phone/no-script fallback and exceptional states | Sandbox terminal, Sandbox gateway sign-in, Sandbox gateway states, Sandbox terminal for a run (proposed) |
 | `pi-dispatch sandbox`: kept runs and their deadline, `--list`, `--pin`, the `--publish` refusal, one sandbox per run, venues that cannot reopen | Sandboxes |
 | `/runs/zero-touch` (#770, #753): ended workload records, fleet-wide human causes, deduplicated sent-draft source runs, partial windows, private question groups and cause-linked fixes | Zero touch, Zero touch as a viewer, Zero touch on a phone |
 | `/insights`: windows, tiles, budget and soft hold, job sizes, what-if | Spend |
@@ -151,6 +151,7 @@ The original #753 proposals are implemented by #770 (Zero touch), #771 (native s
 - **Answer rules.** When a run of a listed project parks, a draft job classifies the question and drafts an answer from cited sources, only in the categories the person allowed. The person sends it through the usual preview and Confirm, edits it, or answers otherwise. Product decisions, security, money, scope and approvals are never drafted.
 - A draft the person sends is still a touch, shown apart as a quicker one. Nothing answers a run without a person: the repo's constitution has no door for that, so it is an open question (`OQ-051`), not a design.
 - **Sandboxes.** Open a run's kept workspace, or prepare a fresh one with no run, in the person's own terminal. The command is always there to copy. An enrolled separate gateway can attach to an already-open shell in its own browser tab after fresh operator sign-in, with one attachment per sandbox incarnation. It never starts a container. Phone, no-script and unavailable-browser states retain the native route.
+- **A run's workspace on its page** (proposed, after #754). Each run page says whether its workspace is kept, who has a shell open in it, and how to open it: *Try it before you merge*, *Reproduce it in its workspace*, *Look before you answer*, or *Prepare from this run* when it cannot reopen; a running run is steered instead. A finding goes where the next run sees it: a sentence in the trigger's instructions, a fork with a message, or a push of the person's own. The gateway's tab shows the run it belongs to and goes back to it. Nothing starts a shell from the browser.
 
 ## Triggers
 

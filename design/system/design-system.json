@@ -17,8 +17,8 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-11-02T10:04:16.587Z",
-    "via": "Codex",
-    "note": "#753 and #754: Zero touch reports confirmed draft-answer source runs. Sandboxes offers separately enrolled browser attachment to existing shells, with fresh same-session sign-in, own-hostname terminal and truthful exceptional states. Native terminal/copy routes stay available; shared tokens and bundle stylesheet are unchanged."
+    "at": "2026-11-02T12:35:27Z",
+    "via": "Claude",
+    "note": "Proposed, after the browser gateway (#754): a run's workspace on its run page (who is in it, how to open it, where a finding goes), the same panel outcome by outcome with Prepare from this run, and the gateway's terminal tab that shows its run and goes back to it."
   }
 }

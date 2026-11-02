@@ -87,6 +87,7 @@ OTHER_RUNS = {
     "gh-6e1d": ("15:35", "acme/web#512", "fix", "mini2", "local", "awaiting"),   # planned: ParkedAnswerer
     "gh-5a02": ("14:31", "acme/web#498", "fix", None, None, "completed"),        # planned: ParkedAnswerer
     "sb-3c1f": ("open", "acme/web", None, "mini1", "local", "sandbox"),          # proposed: SandboxesScreen
+    "gh-d40e": ("09:12", "acme/web#484", "fix", "mini1", "local", "failed"),     # proposed: RunWorkspaceStates, out of memory
     "gh-0c4e": (None, None, None, None, None, None),     # first drawn on ApprovalRequest; fill in when a second card draws it
     "gh-38aa": (None, None, None, None, None, None),     # first drawn on OverviewScreen; fill in when a second card draws it
     "gh-3c90": (None, None, None, None, None, None),     # first drawn on ApprovalRequest; fill in when a second card draws it
