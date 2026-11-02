@@ -293,6 +293,17 @@ at another daemon is invisible to it, and only the rules above protect it.
   in front, `.x` as `_.x` and `_x` as `__x`, so two ids never meet in one directory; a run retained before that
   rule under `_x` is still found, opened and swept under that name); one a crash left behind is removed by the next
   pass.
+- **A run kept by a newer pi-dispatch opens only with that release** (issue #761). A run's manifest may carry a
+  `version`, written only when the manifest uses a field an older release would misread (none does yet, so today's
+  manifests have none). An open or a `--pin` of a run whose manifest says a newer version is refused
+  (`manifest-newer`: "kept by a newer pi-dispatch (manifest version 2; this build understands 1); open it with that
+  release"), before its venue, image or workspace is judged, and a pin refuses before it rewrites anything. A
+  `version` that is not a whole number of 1 or more is refused under the same word, since no release writes one. The
+  console's run page says "Its workspace was kept by a newer pi-dispatch, whose manifest this release cannot read:
+  open it with the pi-dispatch of that release on its host.", and offers no command; the `/dispatch` panel says "not
+  reopenable here: kept by a newer pi-dispatch" (for a broken `version`, "not reopenable (its manifest's version is
+  unreadable)"). The retention sweep does not read the version: a run's deadline means the same in every release, so
+  it is deleted on time whichever release kept it.
 - **Sandbox *containers* are not reaped by the worker.** They are named `pi-sandbox-*`, outside the
   `pi-job-*` filter the boot reaper uses, precisely so a worker restart cannot kill a shell you are
   sitting in. The cost is that stopping a forgotten one is yours: `docker stop pi-sandbox-<jobId>` (or

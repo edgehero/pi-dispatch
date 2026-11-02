@@ -65,6 +65,41 @@ value silently won. A hand-edited file that loaded before can stop every job aft
 `pi-dispatch doctor` after upgrading to find one. A misspelled dollar key (`maxcostusd`, `max_cost_usd`,
 `PI_MAX_COST_USD` written into the file) is refused by name too, rather than ignored.
 
+### A key or a file from a newer release
+
+During an upgrade the panel, the console and the workers can run different releases, and they all share this file.
+Since issue #761 none of them deletes what it cannot read:
+
+- **A key this release does not know is kept.** The worker ignores it, as before, but every write (`/dispatch set`,
+  `dispatch_set`, the console, `/dispatch secrets`) now writes it back as it was, in its place. A key that a later
+  release added survives an edit from a console of issue #761's release or later. An earlier panel or console (4.3.1
+  included) still drops every key it does not know when it writes the file, `secretBundles` included, so **upgrade
+  every panel and console first**. `pi-dispatch doctor` names such keys (names only, never a value) in one warning,
+  so a typo stands out too: a misspelt key is kept the same way, so remove it if it is one.
+- **A file written by a newer pi-dispatch is not a broken file.** It says so in a `version` key, which a release writes
+  only when the file uses something an older release would misread (no release does yet). A worker that meets one waits
+  instead of refusing: when the file is newer as a job starts, that job, of whatever kind, is deferred with the reason
+  "Queued or configured by a newer pi-dispatch: waits for this host's upgrade" (`newer-release`) before any check that
+  could refuse it, and looked at again every ten minutes. A file that turns newer while a job is already past that
+  point is caught when the job reads its settings, but a check before that which does not read them (a `waitFor` it
+  cannot read, a job too big for the host) can still refuse the job as it would with today's file. The panel and the
+  console refuse to write over such a file, and say that nothing was written and no
+  key was lost. Doctor fails on it with the upgrade as the fix. **Upgrade; do not edit or delete the file**, which would
+  lose what that release wrote. The one exception is a `version` you added yourself: no release wrote that file, so
+  remove the key (see Upgrading, below).
+- **Each write checks that nobody wrote in between.** An edit compares the file with what it read just before it
+  renames its own over it, and refuses (nothing written) when another session changed it. Look again and retry.
+
+**Upgrading.** Earlier releases ignored a top-level `version` in this file, in `pause-windows.json` and in
+`triggers.json`; since issue #761 it is read. If you put one there yourself (a revision number of your own, say),
+remove it before you upgrade. A `version` that is not a whole number of 1 or more makes the settings file invalid, so
+every job is refused `settings-overlay-invalid`, and stops a worker from starting on either of the other two; one above
+1 reads as a file a newer release wrote, so jobs wait for an upgrade as described above. `pi-dispatch doctor` after
+upgrading shows either.
+
+The pause windows and triggers files follow the same rule ([`docs/pause-windows.md`](pause-windows.md),
+[`docs/triggers.md`](triggers.md#the-files-version)).
+
 ## What is deliberately not backed up
 
 These are all regenerated or bounded, and copying them buys nothing:
@@ -77,14 +112,25 @@ These are all regenerated or bounded, and copying them buys nothing:
   worker's stdout and stderr. **This is not the run history**, and `PI_LOGS_DIR` must never be pointed
   at that directory: the retention sweep deletes any `.log` or `.json` older than the window, and it
   would eat the daemon's own logs.
+- A run record's temporary file in the run history, `<job id>.json.<pid>.<12 hex characters>.tmp`: the worker writes
+  each record there first and renames it into place, so one is left behind only when the worker died in between. The
+  sweep removes one that is more than an hour old, also when retention is `0` (keep forever), and never touches a
+  `.tmp` of any other shape. Most other files pi-dispatch writes with a temp file and a rename (the settings file,
+  the console's tokens, and the pause windows, projects, scoped-limits and subscriptions files the panel and the
+  console write) use the same shape, so if you keep one of them in the run history folder, a temp file it left behind
+  goes the same way after an hour.
 
 ## Stop, copy, start
 
-Stop writers before you copy, outermost first. Each individual file is safe to copy on its own:
-`settings.json` and `triggers.json` are both written with a temp file and a rename, and `triggers.json`
-takes a lock as well because it has two writers. What you cannot get while things are running is a
-consistent snapshot of the SET, and a run record is written at a job's terminal state with no lock at
-all, so a copy taken mid-run can catch a partial one. Stopping first is what buys the group.
+Stop writers before you copy, outermost first. Each individual file is safe to copy on its own: `settings.json` and
+`triggers.json` are both written with a temp file and a rename, and `triggers.json` takes a lock as well because it has
+two writers. Since issue #761 a run record is written the same way, to a temp file beside it and renamed into place, so
+a copy taken mid-run, or a worker that dies mid-write, finds the previous record or the new one, never a cut one. The
+one exception is a host where that rename failed: the worker then writes the record in place, the old way, and logs
+`run_record_in_place` with the job and an error code, so `grep` the worker's log for it if a copy matters. When that
+error code is `ELOOP`, a symbolic link sat at the record's name and nothing was written: the worker never writes a
+record through a link (except on Windows). What you cannot get while things are running is a consistent snapshot of the
+SET. Stopping first is what buys the group.
 
 1. **Stop the worker.** It owns the record writer, the retention sweep and one of the two
    `triggers.json` writers. If you installed it with `pi-dispatch service install`, use this project's

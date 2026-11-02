@@ -50,6 +50,10 @@ Restart and infrastructure retry preserve the decision and bind it to the exact 
 check its reason and start a new authorized run if needed. An expired, missing, changed or compacted conversation cannot
 receive approval by starting a fresh session. If publication fails after a completed container, its work stays saved,
 the issue gets an actionable refusal, and no approval is armed. Repair the stores before starting another run.
+When the triggers file was written by a newer pi-dispatch, this worker cannot judge the declaration (issue #761): a
+park after a completed container arms no approval, the issue gets "No approval is armed: the triggers file was written
+by a newer pi-dispatch; upgrade this worker." and the record says `approval-policy-unavailable`, while a decision, a
+reply or a resume waiting on that file is deferred (`newer-release`) and an expiry is left for an upgraded worker.
 
 Decision metadata alone crosses the container environment. Accepted human text is read from the existing read-only event input, including on OpenShell, whose exec arguments may be logged.
 
