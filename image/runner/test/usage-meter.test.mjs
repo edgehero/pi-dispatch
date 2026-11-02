@@ -1120,6 +1120,66 @@ test("the compat copy is accepted by IDENTITY with the one pi hands extensions, 
 	assert.equal(hoisted.registry.get("anthropic-messages").sourceId, `${METER_PROVIDER_PREFIX}:anthropic-messages`);
 });
 
+test("a re-exported extension view shares metering, reset re-arm and the cap brake with its proven compat copy", async () => {
+	const copy = fakeCopy(["anthropic-messages"]);
+	let providerCalls = 0;
+	copy.module.resetApiProviders = () => {
+		copy.reset();
+		const entry = copy.registry.get("anthropic-messages");
+		for (const method of ["stream", "streamSimple"]) {
+			const original = entry[method];
+			entry[method] = (...args) => { providerCalls++; return original(...args); };
+		}
+	};
+	copy.module.resetApiProviders();
+	const view = Object.freeze({ ...copy.module, Type: {}, StringEnum: () => ({}) });
+	assert.notEqual(view, copy.module, "the published 1.5 extension view has a distinct namespace");
+	const meter = createUsageMeter({ maxTokens: 3, rootSessionId: "root" });
+	const handle = await installProcessUsageMeter(installArgs({ copy, extensionCopy: { module: view }, meter }));
+	try {
+		assert.equal(handle.module, copy.module, "pricing and provider siblings remain relative to the proven candidate");
+		await view.getApiProvider("anthropic-messages").streamSimple(MODEL, [], { sessionId: "root" }).result();
+		await flush();
+		assert.equal(meter.state.total, 1);
+		view.resetApiProviders();
+		handle.arm();
+		await view.getApiProvider("anthropic-messages").stream(MODEL, [], { sessionId: "root" }).result();
+		await flush();
+		assert.equal(meter.state.total, 2, "calls after the view reset still cross the re-armed meter");
+		assert.equal(providerCalls, 2);
+		meter.record(usage({ total: 2 }));
+		const before = meter.state.total;
+		const stopped = await view.getApiProvider("anthropic-messages").streamSimple(MODEL, [], { sessionId: "root" }).result();
+		assert.equal(stopped.stopReason, "aborted");
+		assert.equal(providerCalls, 2, "the capped facade call reaches no provider");
+		assert.equal(meter.state.total, before);
+	} finally { handle.uninstall(); }
+});
+
+test("a facade must share all five callable identities, never names, missing exports or another registry", async (t) => {
+	const names = ["registerApiProvider", "getApiProvider", "getApiProviders", "resetApiProviders", "createAssistantMessageEventStream"];
+	for (const name of names) {
+		for (const variant of ["missing-view", "missing-both", "noncallable-both", "different-function"]) {
+			await t.test(`${name}: ${variant}`, async () => {
+				const copy = fakeCopy(["anthropic-messages"]), foreign = fakeCopy(["anthropic-messages"]);
+				copy.module.resetApiProviders = () => copy.reset();
+				foreign.module.resetApiProviders = () => foreign.reset();
+				const view = { ...copy.module };
+				if (variant.startsWith("missing")) delete view[name];
+				if (variant === "missing-both") delete copy.module[name];
+				if (variant === "noncallable-both") view[name] = copy.module[name] = "same-name-is-not-a-function";
+				if (variant === "different-function") view[name] = foreign.module[name];
+				const handle = await installProcessUsageMeter(installArgs({ copy, extensionCopy: { module: view } }));
+				try {
+					assert.equal(handle.module, null);
+					assert.equal(copy.registry.get("anthropic-messages").sourceId, undefined, "unproven candidate is untouched");
+					assert.equal(foreign.registry.get("anthropic-messages").sourceId, undefined, "foreign registry is untouched");
+				} finally { handle.uninstall(); }
+			});
+		}
+	}
+});
+
 test("no provable compat copy degrades the meter LOUDLY and leaves the runtime half metering", async () => {
 	// The compat half serves legacy extension calls only; a session's own calls go through ModelRuntime. So
 	// losing it is `compat: false` with a reason on the line, never ok:false (which would drop the whole job

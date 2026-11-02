@@ -1366,9 +1366,11 @@ export async function installProcessUsageMeter({
 			continue;
 		}
 		if (typeof mod?.registerApiProvider !== "function" || typeof mod?.getApiProvider !== "function" || typeof mod?.getApiProviders !== "function") continue;
-		// Identity, not equality of shape: two copies export the same names. Only the copy pi hands its
-		// extensions is the registry a legacy extension call goes through.
-		if (extensionModules["@earendil-works/pi-ai"] !== mod) continue;
+		// pi 1.5.0 wraps compat in an extension view. Namespace identity still proves the
+		// pinned copy; a view must share every registry/reset/stream function by identity.
+		// Matching names (or two absent exports) cannot prove shared module-level state.
+		const extensionView = extensionModules["@earendil-works/pi-ai"];
+		if (extensionView !== mod && !["registerApiProvider", "getApiProvider", "getApiProviders", "resetApiProviders", "createAssistantMessageEventStream"].every((name) => typeof mod[name] === "function" && extensionView?.[name] === mod[name])) continue;
 		accepted = { candidate, mod };
 		break;
 	}
