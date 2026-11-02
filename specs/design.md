@@ -16337,10 +16337,224 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   `INT-SUBSCRIPTION-CREDENTIAL-STORE`, `INT-SUBSCRIPTION-QUOTA-KEY`, `DES-MODEL-FAILOVER`,
   `DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER`, `DES-OPERATOR-GLOBAL-OVERLAY`.
 
+## DES-DISPATCHER-ADMISSION
+
+- **Status**: **PROPOSED, spec only** (2026-11-02, issue #776), the common admission and persistence design
+  for `REQ-DISPATCHERS`. No producer, runtime configuration shape or Valkey key is introduced here.
+- **Decision**: The resident component is a deterministic producer. An operator-written declaration names a
+  stable dispatcher identity, purpose, reviewed inputs, allowed target/flow/model combinations and finite limits.
+  Its only model-driven requests are listed local read-only jobs and inert trigger proposals. The worker, not a
+  container or payload, resolves every identity to current configuration. This is a new producer to be specified
+  alongside `REQ-AI-TRIGGERED-RUNS`, not permission to broaden same-folder generic outbox chaining.
+- **Admission order**: Validate the event reference and current declaration, replay identity, authority list,
+  current pauses, target identity, pre-agent-SHA `ai-trigger: allow`, read-only execution capability, model pricing
+  and credentials before mint, clone, token-cap read or reserve. Reject commands, forge children and executable
+  repository/overlay discovery. Revalidate after a queue wait and at every new paid phase. Source and event
+  cardinality/rate limits, decision/helper/child day counts, per-target limits and the deployment/scoped limits
+  all apply; a dispatcher limit supplements them and never replaces one. Then reserve ordinary job counts and
+  dollars before container/provider dispatch. Each decision, helper run and child has its own explicit per-job
+  cap and holds. The LLM helper profile adds no inline classifier tool; its admitted model calls stay within
+  its own guarded job cap, and its child requests buy no work from that cap. Determinate refusals return
+  named policy results. Infrastructure failures may retry only the same reconciled intent, never an uncertain
+  paid call as a fresh request.
+- **Duplicate identities**: A source event has a stable reviewed source identity and event identity. Its paid
+  decision journal prevents replay independently of the child coalescer. The child coalescer atomically claims
+  canonical target plus flow for ten minutes across dispatchers. Event ID, dispatcher ID and model are excluded
+  from that semantic key; whichever admitted intent owns the claim supplies the reviewed model and provenance,
+  while subsequent requests name the existing job. Check every candidate's current authority before treating it
+  as an eligible duplicate. A duplicate spends no additional child slot or hold. A distinct flow or target still
+  passes every cap. Local target identity includes the trusted execution host and the repository root resolved
+  with realpath under reviewed containment roots. Recheck both after routing or queue waits; a symlink retarget
+  or changed root refuses rather than silently selecting another repository. Path spelling is not identity.
+  Preserve routing/mutex requirements, including `OQ-031`'s shared-folder residual. This new reviewed producer
+  does not broaden generic outbox chaining or close `OQ-009`.
+- **Durability protocol**: A fenced lease owns each input cursor. Before advancing it, persist the bounded
+  normalized event and its intent reference atomically, so replay finds the same intent. The journal records
+  admission, each reservation's identity, dispatching, terminal result and child job identity; phase transitions
+  compare the lease/generation so a stale reader cannot enqueue after losing ownership. Persist a dispatching
+  phase before the provider request. An interrupted phase with proof no request/container began may proceed
+  under the same reservation; one without that proof is uncertain, keeps its conservative charge and produces
+  no child until a person resolves it. There is no claim of an atomic transaction with a provider API.
+
+  For a child, persist its deterministic queue identity and coalescing claim before queue creation, and reconcile
+  the journal with that queue identity after a crash instead of generating another ID. Queue entry removal is
+  not evidence that paid work never happened. Retain the journal/replay tombstone through the source's maximum
+  admitted replay interval and all unresolved reservations; stop accepting that source when bounded state cannot
+  establish whether a replay was already paid. A missing cursor or lost store is an operator-visible stop, not a
+  reset to the beginning. Source journals, active events, cursors and private evidence have explicit byte/count/
+  age ceilings in the future interface. Pending/uncertain work is never evicted to make room for more spending;
+  reaching the ceiling stops collection/admission with a named reason.
+- **Accounting across time**: Dispatcher day counters are held before paid starts and settled from trusted
+  metering or the conservative floor. Separate counters bound paid decisions, LLM helper starts and child starts;
+  a dispatcher dollar limit includes both its own calls and attributed children. A queued child is checked again
+  against the UTC day it starts in, not allowed through on yesterday's promise. Rolling midnight or restarting a
+  producer does not discard unresolved dollar liabilities or create fresh count authority for the same intent.
+  Settlement retains each original reservation/window identity; new starts include unresolved dispatcher
+  liabilities conservatively while ordinary deployment ledgers retain their own reserve-and-settle rules. The
+  build must define atomic race/rollback semantics and prove them under concurrent admission and a shifted clock.
+  Stable dispatcher IDs survive display-name edits and restarts. They are operator-controlled configuration,
+  not a defense against an operator deliberately replacing an ID; deployment dollar windows, source caps and
+  target limits bind independently of dispatcher identity.
+- **Operational state and audit**: Explicit person-confirmed pause/resume changes bounded durable control state,
+  never the authority list. The pause adds a denial to current `triggers.json` authority; resume clears only
+  that dispatcher's pause, never a broader pause or removed/disabled configuration. The file remains the
+  authority source (`OQ-008`). Pause is checked before each decision, helper and child phase and again at pickup;
+  already-running containers use existing cancellation. Audit writes precede mutations and carry validated
+  dispatcher/proposal/job identifiers and fixed reason tokens, never event values or exception messages. An
+  operator sees caps, stopped inputs, uncertain attempts and unavailable state; viewers get only the public
+  projection. Existing optional hooks may notify, but transport availability is not a prerequisite to stopping
+  spend and no delivery guarantee is inferred. Restart reconciliation is deterministic and calls no model.
+- **Rejected**: Trusting a payload's target or model; deriving authority from a collector signature; allowing
+  different models to evade dedup; treating a cursor checkpoint as proof a provider call happened once; releasing
+  an ambiguous hold on timeout; a fresh intent ID on infrastructure retry; resetting all caps on boot; using a
+  rate limit instead of an atomic day bound. Present local minute dedup and forge ten-minute dedup are left as
+  they are; this proposed cross-dispatcher coalescer is distinct.
+- **Traces to**: `REQ-DISPATCHERS`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
+  `CONST-TRIGGER-AUTHOR-GATE`, `REQ-AI-TRIGGERED-RUNS`, `DES-DOLLAR-RESERVE-AND-SETTLE`, `OQ-008`, `OQ-009`,
+  `OQ-052`.
+
+## DES-DISPATCHER-DECISION-ENGINE
+
+- **Status**: **PROPOSED, spec only** (2026-11-02, issue #776). The card's resident Jev model container is
+  rejected in favor of deterministic collection and one fresh decision container per admitted event.
+- **Decision and evidence**: Reuse the placement, guarded classifier contract and metering discipline of
+  `DES-DECISION-MODEL-BEFORE-THE-JOB`. The pinned pi-ai 1.4.0 classifier API is already exercised by
+  `image/runner/src/watch-decision.mjs` and its pinned/runtime tests; this proposal adds no decision package or
+  endpoint assumption. A catalog model must be a classifier with known input pricing and zero output pricing,
+  and its request must pass the pinned runtime's conservative cost bound. Free output alone is not an input
+  bound. One fresh ordinary budgeted container makes one guarded classify call, with the existing ten-second
+  decision timeout, no resource loader, agent session or discovered executable context. The host validates
+  authenticated metering and schema-checks the untrusted decision output before interpreting it.
+- **Input and state**: The declaration supplies questions, options, thresholds and allowed scalar field names.
+  One event supplies bounded structured values; no sample/message/issue/comment text, raw fingerprint, previous
+  model output or transcript enters classifier state. Strings remain attacker data even when their keys are
+  reviewed. Deterministic collection may retain source-qualified structured facts such as a deployment's ID,
+  time and target with provenance and expiry. Reviewed deterministic counters/windows may contribute scalar
+  fields to the current event, never old model state. The classifier sees only its one event's reviewed projection;
+  cross-event reasoning belongs in the bounded LLM engine. Remembered facts cannot become instructions or a
+  source of new target, flow, model or endpoint identities.
+- **Actions and failures**: Shadow is the default and buys no child; explicit reviewed activation may allow a
+  normalized, thresholded listed choice to request a child or select an operator-authored proposal template.
+  The host instantiates that template with bounded, validated substitutions from operator-declared scalar
+  domains. It cannot invent a diff, free-text reason, identity or authority field from classifier output. A
+  proposal needing new prose/diff drafting requires a separately listed and budgeted LLM helper, not a second
+  hidden classifier or host call. Choices/probabilities/cost are visible as bounded facts. A malformed result,
+  unknown option, non-normalized probabilities, low selected probability, timeout or uncertain/failed call yields review-needed with no child. No host model is called and
+  no issue is filed as a fallback. That differs deliberately from an existing watch rule's reviewed issue
+  fallback, whose shipped behavior remains unchanged. A paid failure settles conservatively and never becomes
+  an automatic second call. The dispatcher cannot invoke the watch issue publisher as a hidden third power.
+- **Credential custody**: Source/forge/cloud read credentials stay with host collection. The provider credential
+  is probed before spending, resolved for this decision's ordinary job, and forwarded only to its admitted
+  provider through the existing container/venue contract. Its injected copy survives no longer than the job and
+  no credential enters retained dispatcher state; the deployment's host provider key may remain long-lived.
+  A restart schedules no replacement for an uncertain paid decision.
+- **Recorded decisions, UNCHANGED, checked**: `DES-WATCH-DETERMINISTIC-PRODUCER` still rejects resident decision
+  agents and long-lived LLMs; `DES-DECISION-MODEL-BEFORE-THE-JOB` and `OQ-053` still put first decisions in fresh
+  metered containers with no host model client. The alternative explicitly offered by #776 is selected, so none
+  of those decisions is reversed. #735's rejection of a long-lived decision agent stands. The published cards
+  must mark their contrary uptime/model-loop claims as rejected, through their generators.
+- **Traces to**: `REQ-DISPATCHERS`, `DES-DISPATCHER-ADMISSION`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
+  `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`, `DES-DECISION-MODEL-BEFORE-THE-JOB`, `OQ-053`.
+
+## DES-DISPATCHER-LLM-ENGINE
+
+- **Status**: **PROPOSED, spec only** (2026-11-02, issue #776). A scheduled or event-requested flow is an
+  ordinary fresh job, not a model process that lives in the background for days.
+- **Decision**: The deterministic producer gathers a bounded interval of reviewed events and source facts;
+  a fresh flow job may reason across them and return capped inert job intents/proposals. It has the same
+  declaration/authority checks as the classifier engine and its own helper-start and dollar caps. Its flow and
+  any selected child combination must be listed and opted in with `ai-trigger: allow` at a pre-agent SHA.
+  Every helper and child has its own ordinary reservation and current policy checks. The helper's cost does not
+  cover its children, and a model cannot submit unlimited intents after paying for one helper.
+- **Read-only profile**: The worker stages host-written bounded evidence on the existing read-only job input
+  boundary and a read-only target snapshot. Payload text is fenced data below standing instructions, never a
+  system prompt, discovered context file or persisted model instruction. As with the trusted read-only watch
+  and answer profiles, executable repository/overlay discovery is withheld before loading: removing write tools
+  after a module has run is insufficient. No arbitrary extension, staged package, command, shell, write/edit
+  tool, inline classifier tool, role subagent, forge publication or generic outbox chain is available. Trusted
+  reads and bounded intent/proposal output are the only relevant powers. The container holds its admitted
+  provider credential, never host input credentials, a console token, Valkey reach or a forge write token. A future build must make
+  that profile measurable on each supported venue before admitting it.
+- **Lifetime and memory**: `REQ-JOB-TIMEOUT-30M` applies without exception. Ending a job releases its process
+  and container; no model context, running wait loop or resumed transcript reaches the next helper. Host-held
+  event facts are bounded, provenance-bearing, expiring data; model hypotheses and proposal reasons do not
+  automatically become facts or adopted guidance for the next run. A job that needs more than its current
+  interval says so; it cannot buy an hour-long hold or refresh a token to remain alive. The protocol for longer
+  jobs is left to `OQ-056` and must be decided in its own issue before the cards may promise it.
+- **Output and evidence**: The worker distrusts every output byte, refuses non-regular/linked/oversized files
+  and validates intent references against the current reviewed list. It does not treat plausible prose as an
+  executable action. Invalid or uncertain output is review-needed and starts no child. Known credentials are
+  redacted before trace/proposal persistence; private samples and model explanations stay operator-only with
+  byte/count/age limits and explicit missing/partial states. The public projection carries reviewed identities,
+  fixed actions, counts and metering only, not model-written labels or summaries.
+- **Rejected**: Reusing an ordinary writable flow while hiding its write buttons; invoking host pi for
+  correlation; loading then filtering executable extensions; giving a helper the admin extension or an agent
+  console token; paying children from the helper's remaining hold; silently carrying hypotheses across runs;
+  hour-at-a-time holds and refreshable long-lived job credentials without a lifetime decision.
+- **Traces to**: `REQ-DISPATCHERS`, `DES-DISPATCHER-ADMISSION`, `REQ-JOB-TIMEOUT-30M`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-TOKEN-SCOPED-PER-JOB`, `OQ-056`.
+
+## DES-DISPATCHER-TRIGGER-PROPOSALS
+
+- **Status**: **PROPOSED, spec only** (2026-11-02, issue #776). No proposal store or adoption action ships here.
+- **Decision**: A separate capped private store retains inert trigger proposals, not active configuration.
+  Content comes either from a reviewed classifier-selected template instantiated by the host with bounded
+  validated substitutions, or from the inert output of a separately admitted LLM helper. Classifier answers
+  themselves cannot generate arbitrary diffs or prose, and LLM content gains no authority from being fluent.
+  Each names a host-validated dispatcher/event identity, proposed trigger identity, base configuration digest,
+  a bounded validated diff and bounded provenance/reasons. Model-authored prose remains data. Proposal byte,
+  count and age limits are mandatory; the future interface must state their numbers and behavior at capacity.
+  Capacity refuses a new proposal with a named result, never overwrites an operator's pending work silently.
+  Expired or unavailable proposals are reported explicitly and cannot be adopted from a stale browser copy.
+  Known credentials are redacted before persistence, including proposed diff values and reason text.
+- **Coalescing**: The canonical proposed target/change and base digest identify an identical compatible edit,
+  not the natural-language reason, dispatcher name or arrival time. Identical edits may share one proposal with
+  capped provenance from several dispatchers. Different desired values or bases remain separate conflicts;
+  neither last-write-wins nor concatenated unbounded reasons are permitted. Dismissing a proposal records its
+  identity and bounded suppression interval so the same event cannot repopulate it immediately. Re-evaluation
+  after a new event still passes proposal storage/rate caps and never changes active configuration itself.
+- **Person-confirmed adoption**: An operator sees the inert diff and its private evidence, then the ordinary
+  validated planner's preview and a single-use session-bound confirmation. Recheck proposal ID/version, base
+  digest, dispatcher declaration, referenced flow opt-in and current target/model authority at confirmation.
+  A stale, expired, dismissed or incompatible proposal refuses. The audited mutation is `trigger-add` or
+  `trigger-edit` carrying `proposalId`. Proposed future audit kinds are `dispatcher-proposal-dismiss`,
+  `dispatcher-pause`, `dispatcher-resume` and `dispatcher-proposal-associate` for manual-change association.
+  A model run's proposed `dispatcherId` field is copied only from the validated reviewed declaration, never
+  event values or model output. These names are not registered in today's audit or run-record schemas; the
+  build must amend those interfaces. Audit-before-write and failure correlation remain the existing rules.
+
+  Adoption cannot smuggle `TOOL_PROOF_FIELDS`, caps, secrets, MCP declarations, images, executable discovery,
+  unattended authority or unlisted models through today's narrow trigger planner. Fields the planner cannot
+  set stay hand-written. The operator must explicitly supply any required model/cap/authority field; a proposed
+  flow's plausible name is no authorization to invent one. Adopting a trigger never edits a dispatcher's own
+  list or caps. #766's delegated agent tools do not gain adoption authority from this design.
+- **Watch proposals and manual changes**: Today's `TRIGGER_ADD_FIELDS` has no watch kind. A later build needs
+  a person-only watch add/edit planner using the shared watch validator and the same preview/confirm/audit
+  contract. It must preserve the deliberate tool-proof-field boundary rather than making arbitrary JSON edits
+  available to models. Until then, show the proposed diff as a reviewed-file edit for a person; do not route it
+  through a non-watch form. If a build offers manual-change association, the operator explicitly confirms a
+  comparison between the retained proposal/base and the current validated file, naming its digest and proposal
+  ID in an audit event. It marks association only, never claims the console made the file edit. A matching file
+  watcher event or dispatcher-written reason is insufficient evidence of a person's adoption.
+- **Roles and exceptional states**: Only an operator reads proposal contents and confirms adoption, dismissal,
+  pause or resume. Viewers see public counts and fixed outcomes without private diffs/reasons/event values,
+  including in JSON. Missing store, changed config, no eligible planner, storage cap, expiry and audit/write
+  failures have distinct actionable states. No-JavaScript forms must retain preview/confirm and stale-state
+  protection when these controls are built; server authorization, CSP and keyboard-accessible interactions are
+  requirements, not properties of a static card. Both themes and phone/intermediate/desktop layouts must carry
+  the same complete information at the applicable role. This issue only corrects Proposed source cards.
+- **Rejected**: Applying proposals without a person, including a hand-written on switch; treating the #766
+  agent role as a dispatcher identity; letting a proposal change its own caps/models/secrets/MCP; silently
+  merging conflicting edits; using a board proposal as an active trigger; claiming manual adoption because a
+  file's bytes happen to match. `OQ-057` is the prerequisite for any future authority expansion.
+- **Traces to**: `REQ-DISPATCHERS`, `CONST-TRIGGER-AUTHOR-GATE`, `REQ-CONSOLE-SECURITY`,
+  `REQ-OPERATOR-CONSOLE-ACTIONS`, `INT-CONSOLE-AUDIT-LOG`, `INT-TRIGGERS-FILE-CONTRACT`, `OQ-057`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#776) | Four NEW PROPOSED entries, spec only: `DES-DISPATCHER-ADMISSION` bounds new producers, caps, semantic duplicates and crash reconciliation; `DES-DISPATCHER-DECISION-ENGINE` selects deterministic collection and fresh per-event classifier containers; `DES-DISPATCHER-LLM-ENGINE` keeps correlation in fresh read-only jobs of at most thirty minutes; `DES-DISPATCHER-TRIGGER-PROPOSALS` keeps bounded private proposals and validated adoption with a person. `DES-WATCH-DETERMINISTIC-PRODUCER`, `DES-DECISION-MODEL-BEFORE-THE-JOB` and `OQ-053` UNCHANGED, checked: their resident-agent rejections stand; the alternative explicitly offered by #776 is selected, and contrary card claims are marked through generators. `DES-JOB-OUTBOX-CHAINING`, `DES-DOLLAR-RESERVE-AND-SETTLE` and `DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: generic chains, existing holds and #766 delegation are not widened. To be AMENDED by later builds: `DES-AI-TRIGGER-FLOW-GATE` for the new producer and current-list revalidation, and `DES-OPERATOR-CONSOLE` for the new screens and audited person actions. No runtime code or executable interface is added. |
 | 2026-11-01 (#774, subscription guide review) | `DES-HOST-OWNED-SUBSCRIPTION-AUTH` corrects the local OpenAI callback mirror to pinned pi's explicit `127.0.0.1` redirect, with authorization/exchange and callback counterexamples. Provider-key guidance revealed the former `localhost` drift; the upstream whole-file hash alone did not compare local semantics. Connection-policy validation is moved without schema changes into an SDK-free leaf for safe console metadata. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, refresh/custody, billing routes and public snapshots UNCHANGED, checked; no live sign-in is claimed by offline verification. |
 | 2026-11-01 (#774, provider management) | `DES-BROWSER-FIRST-RUN-SETUP` AMENDED: Connections owns a permanent Provider API keys editor with complete safe inventory, explicit provider/mode binding, separate Add/Replace preconditions, derived shared-slot warnings and no retained old credential. Setup keeps a compact link after readiness. Reviewed static official help and separate host subscription guides include OpenRouter/DeepSeek, OpenAI callback recovery and honest Claude community/Claude Code distinctions. Host grant, no browser OAuth, selected job credential forwarding, default/model routing, budgets, CSP and all other console/setup decisions UNCHANGED, checked. |
 | 2026-11-01 (#774, implementation) | `DES-BROWSER-FIRST-RUN-SETUP`, `DES-FIRST-RUN-SETUP-WIZARD` and `DES-OPERATOR-CONSOLE` IMPLEMENTED after #783. Bounded worker child revalidates local package/service identities and effective provider/runtime sources; typed outcomes do not infer readiness. Setup doctor explicitly withholds probe containers and sweeps with a warning, because ordinary non-live doctor can run them. API-key and invitation payloads stay private with proactive expiry/cancellation. SetupScreen/JourneySetup generators/cards and shipped docs move together. Existing job/container, money/admission, forge, pointer, repository consent, CSP and pi-pin decisions UNCHANGED, checked; `OQ-054` remains OPEN. |

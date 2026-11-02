@@ -2583,10 +2583,80 @@ adversarial passes did.
   an external form or writing on GET is not that decision. `REQ-CONSOLE-SECURITY`, `DES-OPERATOR-CONSOLE` and the
   relevant interfaces must change in that same decision before implementation.
 
+## OQ-055: Dispatcher input adapters and their read credentials
+
+- **Status**: **PROPOSED, OPEN, spec only** (2026-11-02, issue #776). This question grants no new input kind.
+- **Question**: which authenticated read-only adapters should feed dispatchers, with what identities, replay
+  bounds and credential custody? Existing signed findings and file/journald/Loki collection are precedents.
+  Existing issue/comment/pull-request deliveries do not imply push, merged-commit, deployment, organization,
+  advisory or CloudWatch collection. The cards' EventBridge/CloudWatch and git-change fixtures are proposals,
+  not a claim that receiver filters or pull readers already support them.
+- **Current decision**: `REQ-DISPATCHERS` admits only explicitly reviewed readers and structured projections.
+  Input adapters run deterministically on the host, not in a resident agent. Forge read credentials remain
+  host-held and repository-scoped for each read where the forge supports it; cloud read credentials remain
+  host-held, least-privileged to declared resources and renewed there. No adapter hands its credential to a
+  decision or LLM container. Provider keys are the separate job credential path. An event's signature or a
+  merged commit proves neither the event author's write authority nor permission to start a forge job.
+- **What closes an adapter's part**: a build specifies and tests its exact event vocabulary, projection and
+  canonical target/source/event identity; payload signature or authenticated polling; pagination and bounded
+  backfill; cursor fencing and replay retention; late/out-of-order events, deletion/rotation and a missing
+  cursor; count/byte/rate/age ceilings; source fact expiry; and the credential's permission scope, holder,
+  lifetime, refresh and revocation behavior. Forge reader roles must be verified against that forge's source
+  or API behavior rather than assumed to be read-only from their names. CloudWatch must name the concrete
+  read API/resources or signed ingress route before choosing SDK/credentials. Unknown/expired credentials or
+  an ambiguous cursor stop that source loudly; no credential expansion or reset-and-replay fallback is allowed.
+  The future dispatcher interfaces and the proposed entry are amended in the same build.
+- **Traces**: `REQ-DISPATCHERS`, `DES-DISPATCHER-ADMISSION`, `CONST-TOKEN-SCOPED-PER-JOB`,
+  `CONST-HMAC-OVER-RAW-BODY`, `INT-WATCH-EVENT-CONTRACT`, `OQ-052`.
+
+## OQ-056: Long-lived LLM dispatchers, reservations and credential lifetime
+
+- **Status**: **PROPOSED, OPEN, spec only** (2026-11-02, issue #776). Deciding long LLM runs is a separate issue.
+- **Question**: should an LLM dispatcher ever remain alive beyond `REQ-JOB-TIMEOUT-30M`, and if so how are
+  isolation, paid exposure, cancellation, resource fairness and credentials bounded throughout its life?
+- **Current decision**: `DES-DISPATCHER-LLM-ENGINE` uses ordinary fresh read-only jobs of at most thirty minutes.
+  Waiting for a later event happens in deterministic host collection, not inside a paid container. No hourly
+  hold, rolling in-container credential refresh or reusable model session is admitted. The resident Jev model
+  container is rejected by the selected architecture, not left implicitly enabled by this question.
+- **What closes it**: a separate justified lifetime decision must specify the wall-clock limit and stop path,
+  per-phase spend bound and atomic hold renewal, accounting across UTC/window boundaries and crashes, fair
+  worker/scoped resource use, credential expiry/rotation/revocation and custody on every supported venue,
+  event/intent replay semantics and what state may cross trust populations. It must amend the affected
+  `REQ-`, `DES-`, `INT-` entries and any constitutional constraint it actually relaxes, with paid-boundary,
+  hostile-input, cancellation and restart counterexamples. Merely naming a timeout per trigger, one hour's
+  budget or refreshing tokens does not establish those properties. Until then the contrary card details are
+  blocked proposals, not implementation requirements of #776.
+- **Traces**: `REQ-DISPATCHERS`, `DES-DISPATCHER-LLM-ENGINE`, `REQ-JOB-TIMEOUT-30M`,
+  `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TOKEN-SCOPED-PER-JOB`.
+
+## OQ-057: Dispatcher authority beyond read-only local jobs and person adoption
+
+- **Status**: **PROPOSED, OPEN, spec only** (2026-11-02, issue #776). No authority expansion is admitted here.
+- **Question**: may a dispatcher ever start a forge/code-changing job without an admitted human actor, or apply
+  a trigger proposal without a person's confirmation? These are separate powers requiring separate decisions;
+  accepting one must not imply the other.
+- **Current decision**: dispatchers request only listed local read-only jobs. They write no code, forge comment,
+  label or issue and never acquire a write token. A person adopts trigger proposals through current validated
+  authority or edits the reviewed file by hand; no hand-written switch enables autonomous adoption. The
+  `review-router` card's machine-started forge reviews and its contrary adoption language are rejected for this
+  proposal. #766's agent role/delegation remains unchanged and is not a token a dispatcher receives. `OQ-051`'s
+  unanswered question about autonomous parked answers is separate and remains open.
+- **What closes either part**: explicitly amend `CONST-TRIGGER-AUTHOR-GATE` for the new door, identify who
+  authorizes each target and flow and how current authorization is rechecked, and specify pre-agent flow
+  opt-in, pre-spend list/cap enforcement, provenance marked as machine authority, immutable audit and operator
+  stop/revocation semantics. Automatic rule application also needs protected-field and future-fire gates that
+  cannot remove a person's narrowing, as #766's deferred agent-added-trigger work requires. Measure failure
+  rates on both honest mistakes and attacker-controlled events/text, with counterexamples for self-widening,
+  target switching and replay. Human review of the proposed authority amendment is necessary; a successful
+  classifier probability is not authorization. `CONST-MERGE-NEVER-AUTOMATIC` stays unchanged regardless.
+- **Traces**: `REQ-DISPATCHERS`, `DES-DISPATCHER-TRIGGER-PROPOSALS`, `CONST-TRIGGER-AUTHOR-GATE`,
+  `CONST-MERGE-NEVER-AUTOMATIC`, `REQ-AI-TRIGGERED-RUNS`, `OQ-051`, `OQ-052`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#776) | NEW PROPOSED OPEN `OQ-055` (input adapters and exact host-held read-credential/replay contracts), `OQ-056` (long LLM jobs, a separate lifetime/reservation/credential decision) and `OQ-057` (machine-started forge/code-changing jobs or autonomous rule adoption, separate authority decisions). No question grants a runtime feature. `OQ-008` and `OQ-009` UNCHANGED, checked: dispatcher pause state adds only a denial to current file authority, resume cannot re-arm removed/disabled configuration, and the reviewed producer does not widen generic same-folder/local-parent outbox chaining. `OQ-053` UNCHANGED, checked: first decisions remain fresh metered containers, no host model client or resident decision agent; its board/probability/retention residuals stand. `OQ-052` UNCHANGED, checked: authenticated findings still have no human author and source/cardinality limits still bind. `OQ-051` UNCHANGED, checked: autonomous parked answers are not admitted by dispatcher proposals; #766's bounded delegation is not broadened. `OQ-054` UNCHANGED, checked: console GitHub App setup remains its own open CSP/callback question, which is why numbering starts at 055. |
 | 2026-11-01 (#774, implementation) | `OQ-054` remains OPEN, checked after #774 implementation: browser GitHub App creation still needs a separate CSP/state/side-effect decision. The setup page shows valid terminal webhook/polling instructions and Connections status; it offers no manifest or credential-writing GET. Other open questions UNCHANGED, checked. |
 | 2026-10-31 (#774, prerequisite specs) | NEW `OQ-054` (OPEN): GitHub App manifest submission and credential-writing callback from the browser need a separate origin/state/confirmation/CSP decision; #774 keeps the complete terminal setup command and webhook-shape choice. The local host, provider-key and viewer-invitation authority questions are decided in `DES-BROWSER-FIRST-RUN-SETUP`, not blocked by this question. Existing open questions and current CSP/side-effect-free GET contracts UNCHANGED, checked. |
 | 2026-10-29 (#735, #743) | NEW `OQ-052` and `OQ-053`: collectors have no human authors, fingerprint cardinality remains attacker-controlled, first decisions run in fresh metered containers, shadow is the default, boards require operator adoption and probability/retention residuals are explicit. Existing retry, credential-custody and session-retention questions UNCHANGED, checked; a watch never resumes a transcript or silently grants write authority. |
