@@ -989,7 +989,7 @@ group for each reason that has jobs, in this order:
 | Waiting on a time or a check | its [`run.waitFor`](wait-for.md): the `after` time, or its wait check |
 | Retry backoff | the next attempt after a failed one |
 | In a pause window | the end of a pause window |
-| Waiting for its host to get ready | rootful Podman's service to restart, or the network keeper to settle |
+| Waiting for its host to get ready | rootful Podman's service to restart, the network keeper to settle, or its host's upgrade: a newer pi-dispatch queued the job, wrote the settings, triggers or pause windows file it reads, or wrote the run record a retry must choose its model from ("Queued or configured by a newer pi-dispatch: waits for this host's upgrade", asked again every ten minutes) |
 | In a paused queue | its queue to be resumed |
 | Due, and no worker has taken it | a worker to take it: it is more than 10 seconds past the time it was due, whatever it recorded ("Due since <time>; no worker has taken it"), a cron trigger's overdue next run among them |
 | A reason this console does not know | what its record names, a reason this console has no words for (most often a newer worker's), shown as its word with "no explanation yet" |
@@ -1267,6 +1267,17 @@ or pull request instead.
 A run **refused before it started** (refused, with no tokens, no exit code and no budget slot held, which is what most
 refusals before any spend write) never had a container, so its page has no Progress, Chat or live transcript section.
 
+A run whose record a **newer pi-dispatch** wrote (issue #761), or whose record carries a version no release writes,
+shows only what keeps its meaning in every release: the Outcome panel with the outcome word, how long it took and on
+which host, and a Run card with its job id, outcome, attempt, kind, project, host and times, under the sentence
+"Written by a newer pi-dispatch; only its core facts are shown (id, attempt, outcome, times, host, kind and
+project)." Every other panel and the transcript are left out, and the run cannot be re-run from here. Totals on the
+other pages leave such records out and say how many ("2 records from a newer pi-dispatch not read"). Upgrade the
+console to read them whole.
+
+The Run card labels the kind "Forge" when it names a forge (`github`, `gitlab`, `forgejo`, `azure`) and "Kind"
+otherwise (`local`, or a kind a newer release added), on every run's page.
+
 The Session and plan panel and the Recovery row use the catalog's plain sentences. A saved session says it is kept for the next run; session transcript size is shown in KB.
 
 The title shows the wrapping job id, status and a line of project, target, flow, host and start/end. A running job
@@ -1517,7 +1528,9 @@ waiting any more (answered already, or a later run on the same issue), a run bei
 another run on the same issue is queued or running), a run for which that could not be told (the queue could not be
 read, try again; or it holds more than 10,000 queued and running jobs, answer on the forge or wait), a run that parked
 on a pull request (answer it on the forge, with your trigger phrase),
-a run whose queue data has expired (31 days), a deployment whose comment trigger would not route a reply (none for
+a run whose queue data has expired (31 days), a run whose job a newer pi-dispatch queued ("the reply cannot be built
+here; answer it from a console of that release", and the Chat panel shows that sentence in place of the form), a
+deployment whose comment trigger would not route a reply (none for
 that forge, a command, or no `run.resume`), and a run whose record could not be read (it says which, and that nothing
 was queued: try again). The audit log records the run and a hash of your answer, never the text.
 Answering needs a worker of the same release as the console: an older worker runs the answer but posts no comment.
@@ -1563,8 +1576,11 @@ Re-run on a run's page queues the same work again:
   the preview lists it. If the trigger was deleted, changed kind, stopped matching that label or action, or runs
   another flow, the re-run is refused: start it again from the forge.
 
-A run whose data has expired, a `/command` run, and an answer to a parked run (answer the parked run again instead)
-are refused by name. The run's page offers the re-run only where these checks pass: for a run that cannot be re-run
+A run whose data has expired, a `/command` run, an answer to a parked run (answer the parked run again instead), a
+run recorded by a newer pi-dispatch, and a job queued by one (its data carries a version this console cannot read, so
+the copy would drop what it does not know) are refused by name; re-run either of the last two from a console of that
+release. A scheduled run is not refused for its data, since it is rebuilt from its trigger alone. The run's page
+offers the re-run only where these checks pass: for a run that cannot be re-run
 for one of them, or for a kind the console cannot re-run, the page says "Not offered for a re-run:" and the reason, in
 the same words the preview would give. The page asks the queue for the run's data at most every 15 seconds; when it
 cannot, it judges from the record alone, and then only says the data is gone once the run ended more than 8 days ago (a local run:
@@ -1981,7 +1997,11 @@ kept was read and holds none of it, the run page's run-not-found rule; when one 
 is a `503` whose sentence names what the console could not read ("whether a run with that id exists could not be
 told: this console could not read every queue; try again"), so a script should ask again rather than read it as no
 such run. A run the console does find, but whose queue it could not read, is a `503` too: "the queue could not be
-read, so this run's chat cannot be judged; try again".
+read, so this run's chat cannot be judged; try again". For a run whose record a newer pi-dispatch wrote, `run` holds
+only its ids, kind, outcome, times, host, project and attempt (every other field null), plus `newer: true` and a
+`note` with the run page's sentence. The `dispatch_runs` tool answers such a record the same way, with a note of its
+own that names the fields it gives and says the others are left out. Every role, the agent included, gets both times,
+`startedAt` and `finishedAt`, for every run (before issue #761's release an agent's copy had no `finishedAt`).
 
 Without a session, `/api/state` answers 401 with a JSON error, never a redirect to the sign-in page:
 `{"error": "sign in first", "ended": "idle"}`, where `ended` says why the session behind your cookie ended (one of the

@@ -292,7 +292,9 @@ change it.
 
 Two things about that backstop you have to know, because neither announces itself. It **fails open in
 silence**: a `triggers.json` it cannot read means the job runs, and nothing is logged and nothing lands in
-the record. And it reads `PI_TRIGGERS_FILE`, falling back to `triggers.json` in the worker's *current
+the record. The one exception is a file written by a newer pi-dispatch (issue #761): the job waits instead
+(`newer-release`) for a worker that can read it ([triggers.md](triggers.md#the-files-version)). And it reads
+`PI_TRIGGERS_FILE`, falling back to `triggers.json` in the worker's *current
 directory*, so on a deployment where the variable is unset and the worker's cwd is somewhere else the
 detector is a permanent no-op. Set `PI_TRIGGERS_FILE` explicitly and confirm `pi-dispatch doctor` reads the
 file you think it does.

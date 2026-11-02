@@ -150,7 +150,7 @@ test("the record's steered and steerSkipped: integers and the enum only, and onl
 	assert.deepEqual(r.steered, { delivered: 2, late: 1, withdrawn: 0 });
 	assert.equal(r.steerSkipped, "no-exit-key");
 	const keys = Object.keys(r);
-	assert.deepEqual(keys.slice(-2), ["steered", "steerSkipped"], "TAIL position");
+	assert.deepEqual(keys.slice(-3, -1), ["steered", "steerSkipped"], "TAIL position, before the record's version (#761)");
 	for (const reason of STEER_SKIPPED_REASONS) assert.equal(buildRecord({ job: job(), result: { steerSkipped: reason }, ...AT }).steerSkipped, reason);
 	// The same fields on a job that never armed run.steer are not recorded at all.
 	const plain = buildRecord({ job: job({ data: { kind: "github" } }), result: { outcome: "completed", steered: { delivered: 1, late: 0, withdrawn: 0 }, steerSkipped: "venue-copies" }, ...AT });
@@ -186,13 +186,13 @@ test("the record's liveSkipped: the enum only, on any job, tail position, absent
 	for (const reason of LIVE_SKIPPED_REASONS) {
 		const r = buildRecord({ job: job({ data: { kind: "github" } }), result: { outcome: "completed", exitCode: 0, liveSkipped: reason }, ...AT });
 		assert.equal(r.liveSkipped, reason);
-		assert.equal(Object.keys(r).at(-1), "liveSkipped", "TAIL position");
+		assert.equal(Object.keys(r).at(-2), "liveSkipped", "TAIL position, before the record's version (#761)");
 	}
 	// After the steering keys, before nothing else a steer job carries.
 	const steerJob = buildRecord({ job: job(), result: { steerSkipped: "venue-copies", liveSkipped: "venue-copies" }, ...AT });
-	assert.deepEqual(Object.keys(steerJob).slice(-2), ["steerSkipped", "liveSkipped"]);
+	assert.deepEqual(Object.keys(steerJob).slice(-3, -1), ["steerSkipped", "liveSkipped"]);
 	const bundled = buildRecord({ job: job(), result: { steerSkipped: "venue-copies", bundleSkipped: "manual", liveSkipped: "venue-copies" }, ...AT });
-	assert.deepEqual(Object.keys(bundled).slice(-3), ["steerSkipped", "bundleSkipped", "liveSkipped"], "the newest key last, after the bundle keys");
+	assert.deepEqual(Object.keys(bundled).slice(-4, -1), ["steerSkipped", "bundleSkipped", "liveSkipped"], "the newest key last before the record's version (#761), after the bundle keys");
 	assert.equal("liveSkipped" in buildRecord({ job: job(), result: { outcome: "completed" }, ...AT }), false, "byte-identical when nothing was skipped");
 	for (const reason of ["venue-copies; rm -rf /", "NO-CAPABILITY", "", 1, null, { toString: () => "no-exit-key" }]) {
 		assert.equal("liveSkipped" in buildRecord({ job: job(), result: { liveSkipped: reason }, ...AT }), false, String(reason));
@@ -227,7 +227,7 @@ test("parseExitSteer: the decisive exit line's steer block, counts only", () => 
 
 test("F2, BY SHAPE: the terminal branch of the failed listener (a stall-kill the processor never saw) settles a steer job's inbox", () => {
 	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
-	const from = src.indexOf("const onFailed = (job, err) => {");
+	const from = src.indexOf("const onFailed = (job, err, { settledElsewhere = false } = {}) => {");
 	assert.ok(from !== -1);
 	const body = src.slice(from, src.indexOf("\n\t\t};", from));
 	const terminal = body.indexOf("if (job?.finishedOn) {");

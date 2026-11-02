@@ -1,0 +1,30 @@
+{
+  "jobId": "gh-9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d-r2",
+  "kind": "github",
+  "target": "acme/api#99",
+  "flow": "fix",
+  "startedAt": "2026-09-14T14:00:00.000Z",
+  "endedAt": "2026-09-14T14:25:00.000Z",
+  "outcome": "completed",
+  "reason": "awaiting-approval",
+  "exitCode": 0,
+  "turns": 31,
+  "tokens": {
+    "input": 210000,
+    "output": 18000,
+    "total": 228000,
+    "cost": 1.86,
+    "metered": 228000,
+    "calls": 31
+  },
+  "budgetReserved": true,
+  "attempt": 0,
+  "parentJobId": "gh-1d2c3b4a-5f6e-4d7c-8b9a-0f1e2d3c4b5a",
+  "chainDepth": 1,
+  "chainRefused": 1,
+  "session": {
+    "resumed": true,
+    "reason": "resumed",
+    "bytes": 48213
+  }
+}

@@ -787,3 +787,26 @@ for (const forge of Object.keys(FORGES)) test(`${forge}: a real steered answer i
 	assert.equal(counts.steered.hours.reduce((n, r) => n + r[1], 0), 1);
 	assert.equal(counts.queued.hours.reduce((n, r) => n + r[1], 0), 0);
 });
+
+// Issue #761: the fallback is stored for whichever worker settles the run, possibly an older release, so it carries the
+// version its fields need by the worker's own rule. Today nothing (byte-identical); with an injected table, the lowest
+// version needed, which an older worker's builder refuses to rebuild (it answers the comment instead, never drops a field).
+test("the stored fallback job is stamped with the version its fields need: nothing today, the stamp under an injected table", async () => {
+	const { fallbackJobOf } = await import("../src/steer.mjs");
+	const { enqueueLateForgeJob } = await import("@edgehero/pi-dispatch/queue");
+	const job = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", steerMode: "steer", waitFor: [{ profile: "jira", ticket: "PD-1" }], trigger: { deliveryId: "d-761", sender: { id: 1 } } };
+	const today = fallbackJobOf(job, "github");
+	assert.equal(JSON.stringify(today), '{"repo":"acme/web","target":{"type":"issue","number":7},"flow":"fix","waitFor":[{"profile":"jira","ticket":"PD-1"}],"trigger":{"deliveryId":"d-761","sender":{"id":1}},"kind":"github","jobId":"gh-d-761"}');
+	const v2 = { table: Object.freeze({ waitFor: 2 }), supported: 2 };
+	const stamped = fallbackJobOf(job, "github", { dataVersions: v2 });
+	assert.equal(stamped.dataVersion, 2);
+	const { waitFor: _w, ...without } = job;
+	assert.equal(Object.hasOwn(fallbackJobOf(without, "github", { dataVersions: v2 }), "dataVersion"), false);
+	// An older worker (this build, which reads version 1) refuses to rebuild the stamped fallback, and queues nothing.
+	const adds = [];
+	await assert.rejects(enqueueLateForgeJob({ add: async (...a) => adds.push(a) }, "github", stamped), (e) => e instanceof RangeError && e.code === "newer-release");
+	assert.equal(adds.length, 0);
+	// A worker that reads it keeps the stamp.
+	await enqueueLateForgeJob({ add: async (...a) => adds.push(a) }, "github", stamped, { dataVersions: v2 });
+	assert.equal(adds[0][1].dataVersion, 2);
+});

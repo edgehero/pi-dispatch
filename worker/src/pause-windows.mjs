@@ -17,9 +17,89 @@ import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node
 import { isAbsolute } from "node:path";
 import { configError } from "./config.mjs";
 import { FORGE_KINDS, isForgeKind } from "./forges.mjs";
+import { neededVersion, underDeclared, valueNeededVersion, valueUnderDeclared, versionProblem } from "./store-version.mjs";
 
-// Sunday-first to match JS getUTCDay() and the Intl weekday index used in zonedParts().
-const DAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+/**
+ * The highest pause windows file version this build reads (issue #761, `DES-STORE-VERSION-WHEN-NEEDED`): a top-level
+ * `version`, absent meaning 1, written only when a window uses a field that needs more, so every file of today's
+ * fields stays byte-identical.
+ */
+export const PAUSE_WINDOWS_VERSION = 1;
+
+/**
+ * The window fields `normalizeWindow` reads, in its order. The console's whole-list action checks a submitted window
+ * against this list, and the version table's keys must come from it; a test holds it to the normalizer's own reads.
+ */
+export const PAUSE_WINDOW_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
+
+/**
+ * Each window field whose ABSENCE an older build would misread (a field that narrows when a window pauses, so a build
+ * that drops it pauses at the wrong time), with the version that introduced it. Empty until a field needs one.
+ */
+export const PAUSE_WINDOW_FIELD_VERSIONS = Object.freeze({});
+
+/**
+ * Each EXISTING window field whose range a later release widens, as `field -> (value) => version` (the shared rule,
+ * `valueNeededVersion`): a new `scope` form, say, or a new `days` form. An older build would refuse the whole file as
+ * broken, keep its last good windows and run the jobs the new file pauses; a stamp makes it defer them instead.
+ * Empty until a value needs one.
+ */
+export const PAUSE_WINDOW_VALUE_VERSIONS = Object.freeze({});
+
+/**
+ * The lowest version a list of RAW windows needs, from each window's own keys and their values: 1 while nothing needs
+ * more. The highest window wins, whatever its place in the list.
+ */
+export function pauseWindowsVersionFor(windows, { table = PAUSE_WINDOW_FIELD_VERSIONS, valueTable = PAUSE_WINDOW_VALUE_VERSIONS } = {}) {
+	let needed = 1;
+	for (const w of Array.isArray(windows) ? windows : []) {
+		if (w === null || typeof w !== "object") continue;
+		const needs = Math.max(neededVersion(Object.keys(w), table), valueNeededVersion(w, valueTable));
+		if (needs > needed) needed = needs;
+	}
+	return needed;
+}
+
+/**
+ * Whether a writer must refuse the parsed document `doc`: `{ newer, message }` when its raw `version` is newer than
+ * this build reads (`newer: true`) or is not an integer of 1 or more (`newer: false`), else null. The RAW version
+ * only, never the full parser, so a file with one bad window can still be fixed by deleting that window; a writer
+ * refuses the newer case (it would lose what a newer release wrote) and repairs the rest, the recorded posture.
+ */
+export function pauseWindowsVersionRefusal(doc, { supported = PAUSE_WINDOWS_VERSION } = {}) {
+	if (doc === null || typeof doc !== "object" || Array.isArray(doc) || !Object.hasOwn(doc, "version")) return null;
+	return versionProblem(doc.version, { supported, what: "pause-windows file" });
+}
+
+/**
+ * The pause windows file text for `windows`, written over the parsed document `doc` the write started from (issue
+ * #761): 2-space JSON and a trailing newline. Every top-level key of `doc` other than `windows` and `version` is
+ * carried in its original place (the file is shared, and a writer from an older release must not delete a block a
+ * newer one added), `windows` keeps its position (first when `doc` had none, the repair-from-empty shape), and
+ * `version` leads only when the windows need more than 1. A `doc` whose only key is `windows`, or no `doc`, gives
+ * exactly the bytes this file was always written with, `JSON.stringify({ windows }, null, 2)` plus the newline.
+ * Built with `Object.defineProperty`, so a carried key named `__proto__` stays data.
+ */
+export function pauseWindowsText(doc, windows, { table = PAUSE_WINDOW_FIELD_VERSIONS, valueTable = PAUSE_WINDOW_VALUE_VERSIONS } = {}) {
+	const rest = doc !== null && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+	const out = {};
+	const put = (key, value) => Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+	const version = pauseWindowsVersionFor(windows, { table, valueTable });
+	if (version > 1) put("version", version);
+	if (!Object.hasOwn(rest, "windows")) put("windows", windows);
+	for (const key of Object.keys(rest)) {
+		if (key === "version") continue;
+		put(key, key === "windows" ? windows : rest[key]);
+	}
+	return `${JSON.stringify(out, null, 2)}\n`;
+}
+
+/**
+ * The weekdays a window's `days` may name, Sunday-first to match JS getUTCDay() and the Intl weekday index used in
+ * zonedParts(). A `days` entry is read by its first three letters, lowercased. EXPORTED for the version bolt (issue
+ * #761): a form added here is one an older build refuses, so it needs a `PAUSE_WINDOW_VALUE_VERSIONS.days` rule.
+ */
+export const DAYS = Object.freeze(["sun", "mon", "tue", "wed", "thu", "fri", "sat"]);
 const DAY_SET = new Set(DAYS);
 
 function isNonEmptyString(value) {
@@ -60,19 +140,38 @@ function validateTz(tz, at, path) {
  * Parse, validate, and normalize the pause-windows file text. Returns an array of normalized windows
  * (unknown fields dropped; `fromMin`/`toMin` precomputed). Throws `configError` (fail-loud) on any malformed
  * entry. `path` is for messages only.
+ *
+ * The file's `version` is judged FIRST, before the windows (issue #761): a newer file's windows may use a shape this
+ * build would call malformed, and the true message is "upgrade". A newer file throws a configError with
+ * `.newer === true` (the worker defers jobs rather than misread a pause); a broken `version`, or a window using a field
+ * or a value that needs a higher version than the file declares, throws the ordinary configError. `supported`, `table`
+ * and `valueTable` are injectable for tests.
  */
-export function parsePauseWindows(text, path) {
+export function parsePauseWindows(text, path, { supported = PAUSE_WINDOWS_VERSION, table = PAUSE_WINDOW_FIELD_VERSIONS, valueTable = PAUSE_WINDOW_VALUE_VERSIONS } = {}) {
 	let parsed;
 	try {
 		parsed = JSON.parse(text);
 	} catch (error) {
 		throw configError(`pause-windows file is not valid JSON: ${path} (${error.message})`);
 	}
+	const problem = pauseWindowsVersionRefusal(parsed, { supported });
+	if (problem) {
+		const error = configError(`${problem.message}: ${path}`);
+		if (problem.newer) error.newer = true;
+		throw error;
+	}
 	const windows = parsed?.windows;
 	if (!Array.isArray(windows)) {
 		throw configError(`pause-windows file must have a "windows" array: ${path}`);
 	}
-	return windows.map((w, index) => normalizeWindow(w, index, path));
+	const normalized = windows.map((w, index) => normalizeWindow(w, index, path));
+	windows.forEach((w, index) => {
+		const short = underDeclared(Object.keys(w), table, parsed.version);
+		if (short) throw configError(`pause window at index ${index}: ${short.field} needs pause-windows file version ${short.needs}, and the file declares ${parsed.version ?? 1}: ${path}`);
+		const shortValue = valueUnderDeclared(w, valueTable, parsed.version);
+		if (shortValue) throw configError(`pause window at index ${index}: ${shortValue.field} holds a value that needs pause-windows file version ${shortValue.needs}, and the file declares ${parsed.version ?? 1}: ${path}`);
+	});
+	return normalized;
 }
 
 function normalizeWindow(w, index, path) {

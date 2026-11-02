@@ -1,0 +1,55 @@
+{
+  "jobId": "gh-0d1e2f3a-4b5c-4d6e-8f70-81a2b3c4d5e6",
+  "kind": "github",
+  "target": "acme/api#120",
+  "flow": "fix",
+  "startedAt": "2026-09-14T15:00:00.000Z",
+  "endedAt": "2026-09-14T15:20:00.000Z",
+  "outcome": "completed",
+  "reason": null,
+  "attempt": 2,
+  "host": "mini-3",
+  "project": "api",
+  "dollars": {
+    "reservedMicros": 9000000,
+    "settledMicros": 7500000,
+    "basis": "metered",
+    "modelBasis": "metered"
+  },
+  "resources": {
+    "memPeak": 6442450944,
+    "swapPeak": 0,
+    "oomKills": 0,
+    "memSomeUsec": 0,
+    "memFullUsec": 0,
+    "cpuUsec": 3600000000,
+    "throttledUsec": 0,
+    "throttled": 0,
+    "pidsPeak": 300
+  },
+  "size": {
+    "memMiB": 8192,
+    "cpuCenti": 800,
+    "source": "project"
+  },
+  "capacity": {
+    "slots": 8,
+    "memMiB": 32768,
+    "cpuCenti": 1600,
+    "cpus": 16
+  },
+  "earlier": [
+    {
+      "host": "mini-1",
+      "startedAt": "2026-09-14T14:30:00.000Z",
+      "endedAt": "2026-09-14T14:50:00.000Z",
+      "memMiB": 8192,
+      "cpuCenti": 800
+    }
+  ],
+  "lane": {
+    "name": "batch",
+    "weight": 3
+  },
+  "v": 2
+}

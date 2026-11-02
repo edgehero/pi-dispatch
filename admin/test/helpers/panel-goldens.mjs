@@ -792,6 +792,10 @@ const RUN_CARD_STATES = {
   "run-sandbox-kept.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: true, until: NOW + 23 * HOUR } }),
   "run-sandbox-past-window.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: false, why: "past-window" } }),
   "run-sandbox-swept.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: false, why: "swept" } }),
+  // Issue #761: a workspace a newer pi-dispatch kept, as the run page's sandbox check reads its manifest.
+  "run-sandbox-manifest-newer.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: false, why: "manifest-newer", reason: "not reopenable here: kept by a newer pi-dispatch" } }),
+  // Issue #761: a record a newer pi-dispatch wrote, as every admin read hands it to the page: its stable core and `v`.
+  "run-newer-record.operator": () => runCard({ rec: RM.coreRecordOf({ ...record({ jobId: "gh-pulse", attempt: 2 }), lane: { name: "batch" }, v: 2 }) }),
   "run-sandbox-replica.operator": () => runCard({ rec: record({ jobId: "gh-pulse-r2", replica: 2, replicas: 3 }), siblings: [record({ jobId: "gh-pulse-r1", outcome: "failed" }), record({ jobId: "gh-pulse-r3" })] }),
   "run-failed-no-reason.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "failed", reason: null }) }),
   "run-failed-no-reason.viewer": () => runCard({ role: "viewer", rec: record({ jobId: "gh-pulse", outcome: "failed", reason: null }) }),

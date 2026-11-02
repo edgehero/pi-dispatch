@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { test } from "node:test";
-import { InfraRetry, runJob } from "../src/processor.mjs";
+import { InfraRetry, NewerReleaseHold, runJob } from "../src/processor.mjs";
 import { makeApprovalRuntime } from "../src/approval-runtime.mjs";
 import { approvalConfigDigest } from "../src/approval-policy.mjs";
 import { approvalDueKey, approvalTargetKey, makeApprovalStore } from "../src/approval-state.mjs";
+import { APPROVAL_PARK_NEWER_COMMENT } from "../src/comment-tables.mjs";
 
 const AT = Date.parse("2026-10-28T12:00:00Z");
 const USD = 1_000_000;
@@ -155,6 +156,32 @@ test("publication failure keeps the saved transcript, returns a policy result an
 	assert.equal(f.calls.filter(([name]) => name === "promote").length, 1);
 	assert.match(f.calls.find(([name]) => name === "comment")[1], /could not be saved durably/);
 	assert.equal(f.calls.some(([name, on]) => name === "label" && on === true), false);
+});
+
+// Issue #761: a triggers file written by a newer pi-dispatch. Before the run it is a hold the processor's caller defers
+// (`newer-release`), before any decision, mint, clone or reserve; after a paid run it is never a hold (that would run the
+// container again): the park is refused, recorded as the declaration that could not be read, and no approval is armed.
+test("a newer triggers file at the approval check holds the job before any decision, mint, clone or reserve", async () => {
+	const f = setup({ tokenCap: 100 });
+	f.runtime.before = async () => (f.calls.push(["approval-before"]), { newer: true });
+	await assert.rejects(runJob(jobOf(), f.deps), (error) => error instanceof NewerReleaseHold && error instanceof InfraRetry && error.newerRelease === true && error.what === "the triggers file" && error.budgetReserved === false);
+	assertNoSpend(f.calls);
+	assert.equal(f.calls.some(([name]) => name === "comment" || name === "approval-finish"), false, "nothing posted, no request closed");
+});
+
+test("a newer triggers file at the park (after the paid run) refuses the park, never holds or reruns it", async () => {
+	const logs = [];
+	const f = setup({ runContainer: async () => ({ code: 0, aborted: false, exitAuth: "verified", exitReason: "awaiting-approval", approval: { action: "deploy:staging", toolCallId: "call-2" } }), log: (event, fields) => logs.push([event, fields]) });
+	f.runtime.afterPark = async () => (f.calls.push(["approval-publish"]), { newer: true });
+	const out = await runJob(jobOf(), f.deps);
+	assert.equal(out.outcome, "policy");
+	assert.equal(out.reason, "approval-policy-unavailable", "the declaration could not be read here, never a store fault");
+	assert.equal(out.budgetReserved, true, "the run was paid for");
+	assert.equal(f.calls.filter(([name]) => name === "approval-publish").length, 1);
+	assert.equal(f.calls.some(([name, on]) => name === "label" && on === true), false, "no parked marker: nothing can resume it");
+	assert.equal(f.calls.find(([name]) => name === "comment")[1], APPROVAL_PARK_NEWER_COMMENT, "its own sentence, which names the upgrade, never the store comment");
+	assert.equal(APPROVAL_PARK_NEWER_COMMENT, "No approval is armed: the triggers file was written by a newer pi-dispatch; upgrade this worker.");
+	assert.deepEqual(logs.filter(([event]) => event === "approval_park_newer_release"), [["approval_park_newer_release", {}]]);
 });
 
 const url = process.env.VALKEY_TEST_URL;

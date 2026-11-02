@@ -396,8 +396,8 @@ test("the record's progress: integers and closed keys at the tail, absent when t
 	p.consume(asst(call("3", "bash")), T0);
 	p.finalSnapshot("completed");
 	const r = rec(p.summary());
-	assert.deepEqual(Object.keys(r).slice(-2), ["stalledRepick", "progress"], "the tail, after stalledRepick");
-	assert.deepEqual(Object.keys(r).slice(0, -1), Object.keys(without), "every other key where it was");
+	assert.deepEqual(Object.keys(r).slice(-3), ["stalledRepick", "progress", "v"], "the tail, after stalledRepick and before the record's version (#761)");
+	assert.deepEqual(Object.keys(r).filter((k) => k !== "progress"), Object.keys(without), "every other key where it was");
 	assert.deepEqual(r.progress, { turns: 2, steps: 1, interrupted: 2, toolMs: 2, longestStepMs: 2, phasesDeclared: 1, lastPhaseIndex: 0, tools: { report_progress: 1 } });
 	assert.deepEqual(rec({}).progress, {}, "the reducer ran and saw nothing: present and empty");
 });

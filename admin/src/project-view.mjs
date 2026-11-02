@@ -15,6 +15,7 @@ import { assembleAllocationView, recordSpendOf } from "./insights-assembly.mjs";
 import { readProjects, readScopedLimits, readTriggers, readSettingsView, readSubscriptions, scanRunRecords, readSizeSuggestions, hostBudgetsOf, secretBundlesView, attributeRunsToTriggers } from "./read-model.mjs";
 import { planProjectEdit, planProjectDelete } from "./write-plans.mjs";
 import { outcomeKey, recordReason, reasonWords } from "./words.mjs";
+import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
 
 const DAY = 86_400_000;
 const instant = (r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "");
@@ -159,7 +160,11 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   // The local file is authoritative over a mirrored record with the same id, as it is in the fleet reader.
   const records = new Map([...(Array.isArray(snapshot?.runs) ? snapshot.runs : []), ...(Array.isArray(fleetHistory?.runs) ? fleetHistory.runs : [])].map((r) => [r.jobId, r]));
   for (const r of Array.isArray(scanned) ? scanned : []) records.set(r.jobId, r);
-  const history = [...records.values()].filter((r) => Number.isFinite(instant(r)) && instant(r) <= now && instant(r) >= historySince).sort((a, b) => instant(b) - instant(a));
+  const inWindow = (r) => Number.isFinite(instant(r)) && instant(r) <= now && instant(r) >= historySince;
+  // A newer release's record is not read (issue #761): its money, target and trigger are past the stable core. Its
+  // `project` is core, so the ones of this project are counted, and they make the history read as incomplete.
+  const newerSkipped = [...records.values()].filter((r) => fromNewerRelease(r) && inWindow(r) && recordInProject(r, id)).length;
+  const history = readableRecords([...records.values()]).records.filter(inWindow).sort((a, b) => instant(b) - instant(a));
   const recorded = history.filter((r) => recordInProject(r, id));
   const day = recorded.filter((r) => instant(r) >= now - DAY);
   const window = ["day", "week", "month"].includes(allocation?.window) ? allocation.window : "week";
@@ -233,7 +238,8 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   return {
     id, state: "ready", project: { id, name: current.name ?? null }, file: basename(paths.projectsFile ?? "projects.json"), now,
     members, memberInput: current.members.some((m) => /^(?:\/|[A-Za-z]:[\\/])/.test(m)) ? "" : current.members.join("\n"),
-    historyIncomplete: !historyReadable || fleetHistory?.incomplete !== false || typeof snapshot?.runMirror === "string" && snapshot.runMirror.startsWith("unreachable"),
+    historyIncomplete: !historyReadable || fleetHistory?.incomplete !== false || typeof snapshot?.runMirror === "string" && snapshot.runMirror.startsWith("unreachable") || newerSkipped > 0,
+    ...(newerSkipped > 0 ? { newerSkipped } : {}),
     runs24h: { total: day.length, counts, inLine: snapshot?.waiting && !snapshot.waiting.unreachable ? queued.length : null, inLineIncomplete: snapshot?.waiting?.truncated === true, worst: worst ? runView(worst, subscriptions, pricing) : null },
     recent: recorded.slice(0, 5).map((r) => runView(r, subscriptions, pricing)), totalRuns: recorded.length,
     spend: { window, since, envelope, usedMicros, settledMicros, heldMicros: holds.micros, heldKnownMicros: holds.knownMicros, heldIncomplete: holds.incomplete, floor: envelope ? false : historyFloor, shareMicros: amount(allocation?.state?.allocations?.[id]), problem: allocation?.problem ? "The allocation file could not be read. Run pi-dispatch doctor for the reason." : allocation?.unreachable ? "The allocation could not be read from Valkey." : null },

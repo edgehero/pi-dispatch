@@ -3,6 +3,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { sanitizeJobId } from "./run-history.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { TRANSIENT_READ_ERRORS } from "./runtime-observations.mjs";
+import { neededVersion } from "./store-version.mjs";
 
 /**
  * sandbox-store.mjs -- the host side of a resurrectable sandbox (REQ-RESURRECTABLE-SANDBOX,
@@ -36,6 +37,53 @@ import { TRANSIENT_READ_ERRORS } from "./runtime-observations.mjs";
 
 /** The manifest filename inside a retained directory. */
 export const SANDBOX_MANIFEST = "manifest.json";
+
+/**
+ * The highest manifest version this build reads (issue #761, `DES-STORE-VERSION-WHEN-NEEDED`): a top-level `version`,
+ * absent meaning 1, written only when the manifest uses a field that needs more, so every manifest of today's fields is
+ * the shape it always was. Defined here, beside the writers (`retainJobDir`, `pinSandbox`, the preparer), and read by
+ * `sandbox-policy.mjs`'s refusal, which already imports this module (the reverse would be a cycle).
+ *
+ * THE DEADLINE FIELDS NEVER CHANGE MEANING: `createdAt`, `retainUntil` and `keepUntil` keep theirs in every version, so
+ * an older worker's retention sweep (after a rollback, or on a host a newer CLI pinned) still deletes a newer run on
+ * time. That is why the sweep never consults the version, while opening and pinning refuse a newer manifest.
+ */
+export const SANDBOX_MANIFEST_VERSION = 1;
+
+/** Each manifest field whose absence an older build would misread, with the version that introduced it. Empty until one does. */
+export const SANDBOX_MANIFEST_FIELD_VERSIONS = Object.freeze({});
+
+/** The lowest version `manifest` needs from its fields (`version` and the reader-added `dir` aside): 1 while none needs more. */
+export function sandboxManifestVersionFor(manifest, { table = SANDBOX_MANIFEST_FIELD_VERSIONS } = {}) {
+	if (manifest === null || typeof manifest !== "object") return 1;
+	return neededVersion(Object.keys(manifest).filter((key) => key !== "version" && key !== "dir"), table);
+}
+
+/**
+ * `manifest` with `version` set to what it needs: the higher of the version it carries (a manifest a newer build
+ * wrote, rewritten here by a pin) and the one its fields need, in its place when it had one and first when added, and
+ * no key at all while that is 1. So a manifest of today's fields is returned unchanged, byte for byte once serialized.
+ */
+export function withManifestVersion(manifest, { table = SANDBOX_MANIFEST_FIELD_VERSIONS } = {}) {
+	const declared = Number.isSafeInteger(manifest?.version) && manifest.version >= 1 ? manifest.version : 1;
+	const needed = Math.max(declared, sandboxManifestVersionFor(manifest, { table }));
+	const had = Object.hasOwn(manifest ?? {}, "version");
+	if (needed <= 1 && !had) return manifest;
+	const { version: _owned, ...rest } = manifest;
+	if (needed <= 1) return rest;
+	return had ? { ...manifest, version: needed } : { version: needed, ...rest };
+}
+
+/**
+ * Whether this build cannot read `manifest`'s version: `{ version }` when `version` is present and is not an integer
+ * from 1 to `supported` (a newer build's manifest, version N; or a value nothing here wrote, version null), else null.
+ */
+export function sandboxManifestNewer(manifest, { supported = SANDBOX_MANIFEST_VERSION } = {}) {
+	if (manifest === null || typeof manifest !== "object" || !Object.hasOwn(manifest, "version")) return null;
+	const declared = manifest.version;
+	if (Number.isSafeInteger(declared) && declared >= 1 && declared <= supported) return null;
+	return { version: Number.isSafeInteger(declared) && declared >= 1 ? declared : null };
+}
 
 const HOUR_MS = 3600000;
 const DAY_MS = 86400000;
@@ -170,7 +218,8 @@ export function retainJobDir(prepared, { sandboxDir, retentionHours = null, fs =
 		fs.rmSync(dest, { recursive: true, force: true });
 		fs.renameSync(jobDir, dest);
 
-		const manifest = {
+		// Issue #761: `withManifestVersion` stamps a version only when a field needs one, so today's manifest is unchanged.
+		const manifest = withManifestVersion({
 			jobId: meta.jobId,
 			...(typeof prepared.sha === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(prepared.sha) ? { baseSha: prepared.sha } : {}),
 			kind: meta.kind ?? null,
@@ -200,7 +249,7 @@ export function retainJobDir(prepared, { sandboxDir, retentionHours = null, fs =
 			// reader's window alone, as every manifest from before the key does.
 			retainUntil: Number.isFinite(retentionHours) && retentionHours > 0 ? new Date(created + retentionHours * HOUR_MS).toISOString() : null,
 			keepUntil: null,
-		};
+		});
 		fs.writeFileSync(join(dest, SANDBOX_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
 		log("sandbox_retained", { jobId: meta.jobId, kind: manifest.kind });
 		return manifest;
@@ -302,9 +351,12 @@ export function listSandboxes({ sandboxDir, fs = defaultFs, throwOnReadFailure =
  * is how a directory holding a full repository clone per run becomes unbounded, and the acceptance this
  * feature was written against says retention stays swept.
  */
-export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = () => Date.now(), euid = process.geteuid?.() }) {
+export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = () => Date.now(), euid = process.geteuid?.(), supported = SANDBOX_MANIFEST_VERSION }) {
 	const manifest = readManifest({ sandboxDir, jobId, fs });
 	if (!manifest) return { pinned: false, reason: "absent" };
+	// Issue #761: refused BEFORE the rewrite. This build would write back a manifest it cannot read, under a stamp it
+	// cannot vouch for; the release that kept the run pins it. (The sweep still honours the deadline either way.)
+	if (sandboxManifestNewer(manifest, { supported })) return { pinned: false, reason: "manifest-newer" };
 	const keepUntil = new Date(now() + pinDays * DAY_MS).toISOString();
 	const { dir, ...body } = manifest;
 	// ATOMIC (issue #429 review): a temp file beside it, then a rename over it. `writeFileSync` on the manifest itself
@@ -324,7 +376,7 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
 	try {
 		const original = fs.lstatSync(target);
 		const mode = Number.isInteger(original?.mode) ? original.mode & 0o777 : 0o600;
-		fs.writeFileSync(tmp, `${JSON.stringify({ ...body, keepUntil }, null, 2)}\n`, { mode, flag: "wx" });
+		fs.writeFileSync(tmp, `${JSON.stringify(withManifestVersion({ ...body, keepUntil }), null, 2)}\n`, { mode, flag: "wx" });
 		created = true;
 		if (Number.isInteger(original?.uid) && Number.isInteger(original?.gid)) {
 			try {

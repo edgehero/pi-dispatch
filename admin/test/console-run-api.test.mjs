@@ -8,6 +8,8 @@ import { CANDIDATES_MAX, chatFactsOf, NEWER_CACHE_MS, PARK_CHECK_CACHE_MS, parke
 import { parkedQuestions, runChat } from "../src/console/panels.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
+import { agentReadProjection } from "../src/agent-read.mjs";
+import { NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE } from "../src/newer-release.mjs";
 import { FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, PENDING_STATES, readJobStatus, readPendingAnswer, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD, runAbsent, runPlaces, targetKeyOf } from "../src/read-model.mjs";
 
 // `GET /api/run` (issue #647): the run lookup the terminal chat asks which mode to open. `forgeTargetOf` held to
@@ -270,6 +272,45 @@ test("/api/run gives agents only closed reasons and safe numeric transcript/prog
   r.reason = "cost-cap";
   assert.equal((await c.get(`/api/run?id=${r.jobId}`, c.agent)).json().run.reason, "cost-cap");
 });
+test("/api/run gives an agent a newer record's core, newer and the run page's sentence, as it gives a viewer, and no other note (#761)", async () => {
+  const r = record("gh-agent-newer", { v: 2, project: "api", note: CANARY });
+  const c = await runConsole(fakeFleet({ records: { [r.jobId]: r } }));
+  for (const [who, cookie] of [["agent", c.agent], ["viewer", c.viewer]]) {
+    const res = await c.get(`/api/run?id=${r.jobId}`, cookie);
+    assert.equal(res.status, 200, res.text);
+    const { run } = res.json();
+    assert.deepEqual([run.jobId, run.outcome, run.kind, run.host, run.project, run.attempt, run.newer, run.note], [r.jobId, "completed", "github", "mini1", "api", 1, true, NEWER_RECORD_SENTENCE], who);
+    assert.equal(run.model, null, `${who}: nothing past the core`);
+    assert.ok(!res.text.includes(CANARY), `${who}: the record's own note and free text stay out`);
+  }
+  // The projection lets the sentence through whole and under `note` alone, as it does the model's own.
+  for (const own of [NEWER_RECORD_SENTENCE, NEWER_RECORD_MODEL_NOTE]) {
+    assert.deepEqual(agentReadProjection({ note: own }), { note: own });
+    for (const note of [`${own}.`, own.slice(0, -1), [own]]) assert.deepEqual(agentReadProjection({ note }), {}, JSON.stringify(note).slice(0, 40));
+    assert.deepEqual(agentReadProjection({ notes: own, says: own }), {}, "under any other field it is prose");
+  }
+});
+test("/api/run gives an agent a run's end time as it gives a viewer, for a version-1 record and a newer one (#761)", async () => {
+  const v1 = record("gh-agent-ended-v1");
+  const v2 = record("gh-agent-ended-v2", { v: 2 });
+  const c = await runConsole(fakeFleet({ records: { [v1.jobId]: v1, [v2.jobId]: v2 } }));
+  for (const r of [v1, v2]) {
+    const times = {};
+    for (const [who, cookie] of [["agent", c.agent], ["viewer", c.viewer]]) {
+      const res = await c.get(`/api/run?id=${r.jobId}`, cookie);
+      assert.equal(res.status, 200, res.text);
+      const { run } = res.json();
+      assert.equal(run.newer, r.v === 2 ? true : undefined, `${r.jobId} ${who}`);
+      times[who] = [run.startedAt, run.finishedAt];
+    }
+    assert.deepEqual(times.agent, [iso(T0 - 600_000), iso(T0 - 300_000)], `${r.jobId}: the start and the end, as the record says`);
+    assert.deepEqual(times.agent, times.viewer, `${r.jobId}: the agent's times are the viewer's`);
+  }
+  // The end time is held to the same shape as the start: an instant passes, prose does not.
+  assert.deepEqual(agentReadProjection({ startedAt: `${CANARY} x`, finishedAt: `${CANARY} x` }), { startedAt: null, finishedAt: null });
+  assert.deepEqual(agentReadProjection({ finishedAt: iso(T0) }), { finishedAt: iso(T0) });
+});
+
 const RUN_KEYS = ["attempt", "backend", "exitCode", "finishedAt", "flow", "host", "id", "jobId", "kind", "maxTurns", "model", "outcome", "parentJobId", "project", "provider", "reason", "recoveryOf", "repo", "session", "startedAt", "target", "triggerIndex", "triggerType", "turns"];
 
 test("/api/run: the keys, a finished run's fork, and no free text, job data or session key for either role", { timeout: 20_000 }, async () => {

@@ -732,6 +732,21 @@ test("RUN_DETAIL shows a portfolio run's plan and the dollars a run settled, and
   assert.deepEqual(nulls, older, "a record with null fields renders byte-identical to one written before them");
 });
 
+test("RUN_DETAIL of a record a newer pi-dispatch wrote shows its stable core and the one sentence, nothing past the core (#761)", async () => {
+  const { coreRecordOf, NEWER_RECORD_SENTENCE } = await import("../src/newer-release.mjs");
+  const run = coreRecordOf({ ...SNAPSHOT.runs[0], jobId: "gh-newer", attempt: 2, host: "mini-3", project: "api", v: 2 });
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [run] }) }) });
+  await flush();
+  comp.handleInput("\r");
+  await flush();
+  const lines = comp.render(80).map(stripAnsi);
+  await comp.dispose();
+  const text = lines.map((l) => l.replace(/^\s*│ ?|\s*│\s*$/g, "").trim()).join(" ").replace(/\s+/g, " ");
+  assert.ok(text.includes(`${NEWER_RECORD_SENTENCE}.`), text);
+  for (const fact of ["gh-newer", "mini-3", "api", "attempt 2"]) assert.ok(text.includes(fact), `${fact}: ${text}`);
+  for (const absent of ["target", "tokens", "dollars", "session"]) assert.ok(!new RegExp(`\\b${absent}\\b`).test(text), `no ${absent} row: ${text}`);
+});
+
 test("RUN_DETAIL of an attempt whose run continues as a recovery: its own progress and the recovery job's id, within every width (#662)", async () => {
   const reads = [];
   const openRun = async (extra, { width = 80, progressOfRun } = {}) => {

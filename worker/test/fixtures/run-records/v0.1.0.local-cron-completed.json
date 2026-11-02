@@ -1,0 +1,23 @@
+{
+  "jobId": "repeat:nightly-docs:1789354800000",
+  "kind": "local",
+  "target": "local:blog",
+  "flow": "docs",
+  "startedAt": "2026-09-14T03:00:02.000Z",
+  "endedAt": "2026-09-14T03:04:12.000Z",
+  "outcome": "completed",
+  "reason": null,
+  "exitCode": 0,
+  "turns": 5,
+  "tokens": {
+    "input": 9000,
+    "output": 1100,
+    "total": 10100,
+    "cost": 0.061
+  },
+  "budgetReserved": true,
+  "attempt": 0,
+  "parentJobId": null,
+  "chainDepth": null,
+  "chainRefused": null
+}

@@ -57,13 +57,20 @@ export function makeWatchRuntime({ store, triggersPath, readFile = nodeFs.readFi
 			if (data?.kind !== "watch" && !data?.watch) return { data };
 			const ref = data.watch;
 			if (!ref || !/^[a-f0-9]{64}$/.test(ref.findingId) || !["dispatch", "action"].includes(ref.phase)) return { result: refusal("watch-reference-invalid") };
+			// Issue #761: a read of a file a newer pi-dispatch wrote is `{ newer: <the store> }`, never `watch-config-changed`,
+			// and is answered BEFORE the finding is taken (a take cannot be undone): the processor defers the job
+			// (`newer-release`) and this build neither misreads the rule nor spends the finding.
 			let doc;
-			try { doc = document(); } catch (error) { if (error?.piDispatchConfig || error?.code === "ENOENT") return { result: refusal("watch-config-changed") }; throw error; }
+			try { doc = document(); } catch (error) { if (error?.newer === true) return { newer: "the triggers file" }; if (error?.piDispatchConfig || error?.code === "ENOENT") return { result: refusal("watch-config-changed") }; throw error; }
 			const rule = currentRule(doc, ref.ruleId);
 			if (!rule || !doc.watchSources?.[rule.on.source]) return { result: refusal("watch-config-changed") };
 			const target = rule.run.mode === "issue" ? { kind: rule.run.issue.kind, repo: rule.run.issue.repo } : { kind: "local", folder: rule.run.folder };
 			const until = pauseUntil(target, now());
 			if (Number.isFinite(until) && until > now()) return { deferUntil: until };
+			// The settings a decision reads, read ONCE and before the take (issue #761), so a newer overlay defers the job
+			// with the finding still in place. Only a deciding rule's dispatch can become a decision, so only it reads them.
+			const settings = rule.decide && ref.phase === "dispatch" ? getSettings() : null;
+			if (settings?.invalid && settings.newer === true) return { newer: "the settings file" };
 			const taken = await store.takeFinding(ref.findingId);
 			if (taken.status !== "ready") return { result: refusal(taken.status === "below-threshold" ? "watch-threshold" : taken.status === "held" ? "watch-window-pending" : "watch-evidence-expired") };
 			const finding = taken.finding;
@@ -95,7 +102,7 @@ export function makeWatchRuntime({ store, triggersPath, readFile = nodeFs.readFi
 			if (phase === "decision") {
 				Object.defineProperty(watch, "gate", { value: { version: 1, model: modelRef(rule.decide.model), state: projectWatchDecisionState({ ...finding, window: rule.on.window }, rule.decide.fields), questions: rule.decide.questions } });
 				execution.maxCostUsd = rule.decide.maxCostUsd;
-				const settings = getSettings();
+				// The read from before the take: a broken overlay is still refused here, as it always was.
 				if (settings.invalid) return { result: refusal("watch-config-changed") };
 				const primary = `${execution.provider ?? settings.provider}/${execution.model ?? settings.model}`;
 				execution.models = [...new Set([...(execution.models ?? []), primary, rule.decide.model])];

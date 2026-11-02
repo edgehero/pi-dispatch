@@ -262,6 +262,50 @@ test("dispatch_costs carries the dollar windows and the per-run dollars beside t
   }
 });
 
+test("dispatch_costs says beside the per-run dollars how many records a newer pi-dispatch wrote, which the list leaves out (#761)", async () => {
+  const logsDir = tempDir("pd-761-costs-logs-");
+  process.env.PI_LOGS_DIR = logsDir;
+  const now = Date.now();
+  const at = (ms) => new Date(ms).toISOString();
+  const rec = (jobId, over) => ({ jobId, kind: "github", target: "acme/web#1", flow: "fix", startedAt: at(now - 60_000), endedAt: at(now - 30_000), outcome: "completed", tokens: { total: 1, cost: 0.4, boundExceeded: 0 }, usage: null, dollars: { reservedMicros: 2_000_000, settledMicros: 400_000, basis: "metered", modelBasis: null }, ...over });
+  writeFileSync(join(logsDir, "a.json"), JSON.stringify(rec("a")));
+  writeFileSync(join(logsDir, "n.json"), JSON.stringify(rec("n", { dollars: { reservedMicros: 9_000_000, settledMicros: 7_500_000, basis: "metered", modelBasis: null }, v: 2 })));
+  tmpFile("settings.json", { maxCostUsd: "2" }, "PI_SETTINGS_FILE");
+  tmpFile("scoped-limits.json", undefined, "PI_SCOPED_LIMITS_FILE");
+  tmpFile("subscriptions.json", undefined, "PI_SUBSCRIPTIONS_FILE");
+  tmpFile("triggers.json", { triggers: [] }, "PI_TRIGGERS_FILE");
+  process.env.VALKEY_URL = "not-a-url";
+  try {
+    const out = textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined));
+    assert.deepEqual(out.dollars.runs.map((r) => [r.jobId, r.dollars.settledMicros]), [["a", 400_000]], "the newer run's dollars are not listed");
+    assert.equal(out.dollars.newerSkipped, 1, "and the list says one was left out");
+    assert.equal(out.fold.newerSkipped, 1, "as the fold does");
+    // A record's project is core, so `project=x` counts only x's newer records; its flow and target are not, so the
+    // flow and repo filters leave the count as it is (here, a flow none of the records has).
+    writeFileSync(join(logsDir, "x1.json"), JSON.stringify(rec("x1", { project: "x", v: 2 })));
+    writeFileSync(join(logsDir, "x2.json"), JSON.stringify(rec("x2", { project: "x", flow: "triage", v: 3 })));
+    writeFileSync(join(logsDir, "y1.json"), JSON.stringify(rec("y1", { project: "y", v: 2 })));
+    writeFileSync(join(logsDir, "xa.json"), JSON.stringify(rec("xa", { project: "x" })));
+    // One that ends after now is past the window the fold reads, as a released one would be, so it is not counted either.
+    writeFileSync(join(logsDir, "xf.json"), JSON.stringify(rec("xf", { project: "x", v: 2, startedAt: at(now + 3_600_000), endedAt: at(now + 3_660_000) })));
+    const costs = async (params) => textOf(await toolByName("dispatch_costs").execute("id", params, undefined, undefined, undefined));
+    for (const [params, count] of [[{ project: "x" }, 2], [{ project: "y" }, 1], [{}, 4], [{ project: "x", flow: "absent" }, 2], [{ repo: "acme/none" }, 4]]) {
+      const out = await costs(params);
+      assert.equal(out.dollars.newerSkipped, count, JSON.stringify(params));
+      assert.equal(out.fold.newerSkipped, count, `${JSON.stringify(params)}: the fold's count is the same one`);
+    }
+    assert.deepEqual((await costs({ project: "x" })).dollars.runs.map((r) => r.jobId), ["xa"], "the project's own released run is listed");
+    const none = await costs({ project: "z" });
+    assert.equal(Object.hasOwn(none.dollars, "newerSkipped") || Object.hasOwn(none.fold, "newerSkipped"), false, "a project with no newer record has no count");
+    for (const name of ["x1", "x2", "y1", "xa", "xf"]) writeFileSync(join(logsDir, `${name}.json`), JSON.stringify(rec(name)));
+    // None left out: no count at all, so every other answer is as it was.
+    writeFileSync(join(logsDir, "n.json"), JSON.stringify(rec("n")));
+    assert.equal(Object.hasOwn(textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined)).dollars, "newerSkipped"), false);
+  } finally {
+    delete process.env.VALKEY_URL;
+  }
+});
+
 // --- PR #550's review ----------------------------------------------------------------------------------------
 
 for (const extra of [{ fallbackModels: ["a/b"] }, { fallback_models: ["a/b"] }, { run: { fallbackModels: null } }, { on: { fallbackModels: [] } }, { MaxCostUsd: "9" }, { max_cost_usd: "9" }, { maxcostusd: "9" }, { "maxCostUsd ": "9" }, { allowedModels: ["a/b"] }, { run: { maxCostUsd: "9" } }, { run: { models: ["a/b"] } }, { on: { maxCostUsd: "9" } }, { "m\u0430xCostUsd": "9" }]) {

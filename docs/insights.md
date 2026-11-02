@@ -14,6 +14,8 @@ Spend and Breakdown offer 7 days, 30 days (the default) and month to date. Proje
 
 History is bounded by log retention and the 92-day scan cap. A missing read, truncated history or unknown amount is named rather than shown as zero. Reload to refresh.
 
+A run record a newer pi-dispatch wrote (issue #761) is left out of every total, chart and count on these pages. Spend, its what-if and Breakdown say how many they left out ("2 records from a newer pi-dispatch not read: the totals leave them out."; on Spend, only records up to now, and only the selected project's when one is selected), and the capacity view names them among its coverage reasons; the job sizes section leaves them out without saying how many yet. The runs list and the run's own page still show which run it was, how it ended and when ([console.md](console.md#the-run-pages-outcome)).
+
 ## Settled, held and caps
 
 Today's settled amount comes from run records. An enforcement record marked `unreserved` with zero dollars means no dollar window was charged; a paid run still shows its recorded metered cost. The view names counter-charged settlement separately when it differs. Missing prices remain unknown, and partial or estimated totals keep their marks. Held money comes from the live workers' actual reservations and their reservation times, never from the difference between a counter and the records. Older workers or incomplete job lists leave the hold total incomplete and are named. Any remaining difference from the enforcement counter is named separately. Past daily bars show settled money only.

@@ -685,7 +685,7 @@ function idSettingProblem(key, value) {
 function planSettingTool({ key, value, paths, env, shown, fs }) {
   if (!KNOWN_KEYS.includes(key)) return { refusal: `unknown key '${key}'. valid keys: ${KNOWN_KEYS.join(", ")}` };
   const view = readSettingsView({ settingsFile: paths.settingsFile, fs });
-  if (view?.invalid && !blankSettingsFile(paths.settingsFile, fs)) return { refusal: `rejected: ${overlayInvalidRefusal(view.invalid)}` };
+  if (view?.invalid && !blankSettingsFile(paths.settingsFile, fs)) return { refusal: `rejected: ${overlayInvalidRefusal(view.invalid, { newer: view.newer === true })}` };
   const unset = value === undefined || value === null || String(value).trim() === "";
   const newVal = unset ? undefined : coerceSettingValue(key, String(value).trim());
   const isDollarKey = DOLLAR_SETTING_KEYS.includes(key);

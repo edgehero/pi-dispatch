@@ -28,7 +28,9 @@ import { NO_EXPLANATION, VENUE_LABEL, capitalised, docsHref, outcomeWord, record
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 import { QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { rerunRefusalOf } from "../../job-actions.mjs";
+import { fromNewerRelease, NEWER_RECORD_SENTENCE } from "../../newer-release.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
+import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
@@ -37,6 +39,11 @@ import { SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, run
 const titled = (title, body) => ui.card({ title, body });
 const facts = (pairs) => ui.facts(pairs.filter(([, value]) => value !== null && value !== undefined));
 const recordOf = (view) => view.data?.run?.record ?? null;
+/**
+ * The run card's label for the record's `kind`: "Forge" where it names a forge (its value then says which), "Kind" for
+ * anything else (`local`, or a kind a newer release added), so a local run is never labelled with a forge.
+ */
+const kindLabel = (kind) => (isForgeKind(kind) ? "Forge" : "Kind");
 const hiddenRecord = (view) => !recordOf(view) || refusedBeforeStart(recordOf(view));
 const command = (jobId, host = null) => ui.cmd(["pi-dispatch", "chat", jobId], { host: host ? `Run it on ${host}, or a host that holds the session store (PI_SESSIONS_DIR).` : "Run it on a host that holds the session store (PI_SESSIONS_DIR)." });
 
@@ -183,6 +190,7 @@ export function runOutcome(view) {
     const { text } = absentOutcome(view);
     return ui.banner({ status: "idle", title: text });
   }
+  if (fromNewerRelease(r)) return newerOutcome(r);
   const token = recordReason(r);
   const w = outcomeWord(r.outcome, token);
   const recovering = token === "recovery-enqueued" && [view.data?.chat?.activeJobId, view.data?.chat?.queuedJobId].some((id) => typeof id === "string" && id !== r.jobId);
@@ -199,6 +207,36 @@ export function runOutcome(view) {
   const fixLink = r.outcome === "policy" && !["awaiting-input", "awaiting-approval"].includes(token) && /^[a-f0-9]{64}$/.test(r.touchScopeId ?? "") ? ui.btn({ href: `/config?becauseRun=${encodeURIComponent(r.jobId)}`, label: "Fix configuration", kind: "sm", icon: "config" }) : null;
   const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
   return ui.banner({ block: true, status: recovering ? "running" : w.status, title: `${word}${refusedBeforeStart(r) ? "" : duration}`, body: html`<p>${reason}</p>${next}${(view.data?.children?.length ?? 0) > 0 || r.chainRefused > 0 ? html`<p>It queued ${view.data?.children?.length ?? 0} runs from /outbox${r.chainRefused > 0 ? `, and ${r.chainRefused} more requests were refused: a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT}` : ""}. ${view.data?.children?.map((child) => runLink(child.jobId))}</p>` : null}${refusedBeforeStart(r) ? html`<p>Nothing was spent.</p>` : href ? html`<p>Merges are never automatic: a person merges the pull request on the forge.</p>` : null}`, actions });
+}
+
+/**
+ * The banner for a record a NEWER pi-dispatch wrote (issue #761): its outcome and times, which keep their meaning in
+ * every release, and the one sentence that says why the page shows nothing else. No reason, no next step and no action:
+ * each reads a field past the stable core, which this record reaches the page without.
+ */
+function newerOutcome(r) {
+  const w = outcomeWord(r.outcome, null);
+  const started = msOf(r.startedAt), ended = msOf(r.endedAt);
+  const where = r.host ? ` on ${r.host}` : "";
+  const duration = Number.isFinite(started) && Number.isFinite(ended) ? `: finished in ${ageText(ended - started)}${where}` : where;
+  return ui.banner({ block: true, status: w.status, title: `${capitalised(w.known ? w.word : bannerCut(r.outcome))}${duration}`, body: html`<p>${NEWER_RECORD_SENTENCE}.</p>` });
+}
+
+/** The "Run" card for a record a newer pi-dispatch wrote (issue #761): its stable core alone, each field by name. */
+function newerSummary(r, source) {
+  const started = msOf(r.startedAt), ended = msOf(r.endedAt);
+  return titled("Run", facts([
+    ["Job", html`<span class="mono">${cell(r.jobId)}</span>`],
+    ["Outcome", outcomeText(r)],
+    ["Attempt", cell(r.attempt)],
+    [kindLabel(r.kind), cell(r.kind)],
+    ["Project", cell(r.project)],
+    ["Host", cell(r.host)],
+    ["Started", timeHtml(started)],
+    ["Ended", timeHtml(ended)],
+    ["Took", Number.isFinite(started) && Number.isFinite(ended) ? ageText(ended - started) : "-"],
+    ["Read from", source === "mirror" ? "the fleet's run mirror" : "this host's run history"],
+  ]));
 }
 
 // ---- run progress (issue #644) ---------------------------------------------------------------------------------------
@@ -523,6 +561,9 @@ function chatDrawsSteer(view) {
 const SANDBOX_KEPT_TEXT = Object.freeze({
   "retention-off": "Its workspace was not kept: sandbox retention is off on this host (PI_SANDBOX_RETENTION_HOURS=0).",
   swept: "Its workspace is no longer kept on this host: it was swept after its retention window, or never kept.",
+  // Issue #761: the manifest's version is above what this release reads, so no shell of it opens the workspace; the
+  // retention sweep still honours its deadline, which keeps its meaning in every version.
+  "manifest-newer": "Its workspace was kept by a newer pi-dispatch, whose manifest this release cannot read: open it with the pi-dispatch of that release on its host.",
 });
 
 /**
@@ -532,7 +573,7 @@ const SANDBOX_KEPT_TEXT = Object.freeze({
  * command of every podman run, and the opener's own venue check (`sandboxVenueRefusal`) is the one that can tell. The
  * fleet reader asks with the policy unknown, so those words should not reach here; this list is the backstop.
  */
-const SANDBOX_CERTAIN = new Set(["retention-off", "swept", "id-mismatch", "no-image", "workspace-gone", "venue", "no-venue", "no-launcher"]);
+const SANDBOX_CERTAIN = new Set(["retention-off", "swept", "id-mismatch", "manifest-newer", "no-image", "workspace-gone", "venue", "no-venue", "no-launcher"]);
 
 /** Codes the fork reader returns, in words a person can act on. Anything else it says is already a sentence. */
 const FORK_REFUSAL_WORDS = Object.freeze({
@@ -686,7 +727,7 @@ const recordSummary = withRun("Run", (r, view, source) => {
   return html`${facts([
     ["Job", html`<span class="mono">${cell(r.jobId)}</span>`],
     ["Target", targetLink(r, view.env)],
-    ["Forge", cell(r.kind)],
+    [kindLabel(r.kind), cell(r.kind)],
     ["Flow", cell(r.flow)],
     ["Outcome", outcomeText(r)],
     ["Reason", recordReason(r)],
@@ -812,6 +853,7 @@ export function runHeadline(view) {
 
 export function runSummary(view) {
   if (recordOf(view)) {
+    if (fromNewerRelease(recordOf(view))) return newerSummary(recordOf(view), view.data?.run?.source);
     if (refusedBeforeStart(recordOf(view))) return titled("Run", facts([["Job", recordOf(view).jobId], ["Target", targetLink(recordOf(view), view.env)], ["Project", recordOf(view).project], ["Host", recordOf(view).host], [VENUE_LABEL, recordOf(view).backend]]));
     return recordSummary(view);
   }

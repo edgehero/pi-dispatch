@@ -327,6 +327,8 @@ export function normFold(fold) {
     byProject,
     plans,
     provenance,
+    // Issue #761: how many records from a newer pi-dispatch the fold left out, only when there were any.
+    ...(Number.isSafeInteger(fold.newerSkipped) && fold.newerSkipped > 0 ? { newerSkipped: fold.newerSkipped } : {}),
   };
 }
 

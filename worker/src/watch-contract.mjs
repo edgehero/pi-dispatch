@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isProjectId } from "./project-id.mjs";
 
 export const WATCH_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-export const WATCH_SEVERITIES = ["debug", "info", "warning", "error", "critical"];
+export const WATCH_SEVERITIES = Object.freeze(["debug", "info", "warning", "error", "critical"]);
 const FIELD_RE = /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/;
 const forbidden = new Set(["__proto__", "prototype", "constructor"]);
 function fail(message) { const error = new Error(`watch: ${message}`); error.piDispatchConfig = true; throw error; }

@@ -128,3 +128,7 @@ design/.shots/
 # Planning notes and review evidence belong in pull requests.
 .plan-artifacts/
 plan-artifacts/
+
+# The release tags' worker/src, extracted while .github/scripts/run-record-fixtures.mjs builds the run-record fixtures
+# (issue #761). Inside the repository so each tag's imports resolve; the generator removes it when it finishes.
+/.run-record-fixtures/

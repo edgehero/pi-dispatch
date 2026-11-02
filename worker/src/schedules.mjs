@@ -17,6 +17,7 @@ import { isAbsolute } from "node:path";
 import { configError } from "./config.mjs";
 import { triggerCapAboveDeployment } from "./money.mjs";
 import { parseTriggers } from "./triggers.mjs";
+import { withJobDataVersion } from "./job-data-version.mjs";
 
 /**
  * Parse, validate, and select the cron schedules from the triggers file named by `config.triggersFile`.
@@ -24,7 +25,7 @@ import { parseTriggers } from "./triggers.mjs";
  * valid deployment. `readFileSync`/`existsSync` are injectable so tests exercise the full path with no
  * real filesystem.
  */
-export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync, fleet = false } = {}) {
+export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync, fleet = false, dataVersions = {} } = {}) {
 	const path = config.triggersFile;
 	if (path === null || path === undefined) return []; // cron disabled
 
@@ -44,7 +45,7 @@ export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSyn
 		throw configError(`trigger at index ${above}: run.maxCostUsd is above this deployment's PI_MAX_COST_USD. A trigger can only narrow the per-job cost cap, so lower it or remove it (${path})`);
 	}
 
-	return triggers.filter((t) => t.on.type === "cron").map((t) => normalizeCronSchedule(t, path, existsSync, fleet));
+	return triggers.filter((t) => t.on.type === "cron").map((t) => normalizeCronSchedule(t, path, existsSync, fleet, dataVersions));
 }
 
 /**
@@ -120,7 +121,7 @@ export function cronPlacement(run, { existsSync = fsExistsSync, fleet = false } 
 	return fleet ? "elsewhere" : "refused";
 }
 
-function normalizeCronSchedule({ on, run }, path, existsSync, fleet) {
+function normalizeCronSchedule({ on, run }, path, existsSync, fleet, dataVersions = {}) {
 	// The pure validator already guaranteed a non-empty, `:`-free, charset-valid, unique id and a
 	// well-formed pattern; folder existence is the one fs-dependent check it deferred to here.
 	//
@@ -188,7 +189,11 @@ function normalizeCronSchedule({ on, run }, path, existsSync, fleet) {
 	// (issue #645), for the same posture: the loader refuses `true` on cron, so there is no armed value to carry.
 	// `steer` (issue #646) DOES ride a cron job, progress's rule: only when armed, at JOB level (never inside `trigger`,
 	// which becomes /job/event.json), and never part of the repeat:<id>:<millis> id. An operator can steer a folder job.
-	const data = { kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.backend !== undefined && { backend: run.backend }), ...(run.excludeTools !== undefined && { excludeTools: run.excludeTools }), ...(run.mcp !== undefined && { mcp: run.mcp }), ...(run.models !== undefined && { models: run.models }), ...(run.fallbackModels !== undefined && { fallbackModels: run.fallbackModels }), ...(run.maxCostUsd !== undefined && { maxCostUsd: run.maxCostUsd }), ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, ...(run.portfolio !== undefined && { portfolio: run.portfolio }), ...(run.progress === true && { progress: true }), ...(run.steer === true && { steer: true }), trigger: { id: on.id, pattern: on.pattern } };
+	//
+	// Stamped like every builder's (issue #761, `withJobDataVersion`): the template is what every tick of this schedule
+	// stores, so a field that needs a version above 1 says so on every job, and nothing is added while none does.
+	// `dataVersions` is the version rule, injectable for tests.
+	const data = withJobDataVersion({ kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.backend !== undefined && { backend: run.backend }), ...(run.excludeTools !== undefined && { excludeTools: run.excludeTools }), ...(run.mcp !== undefined && { mcp: run.mcp }), ...(run.models !== undefined && { models: run.models }), ...(run.fallbackModels !== undefined && { fallbackModels: run.fallbackModels }), ...(run.maxCostUsd !== undefined && { maxCostUsd: run.maxCostUsd }), ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, ...(run.portfolio !== undefined && { portfolio: run.portfolio }), ...(run.progress === true && { progress: true }), ...(run.steer === true && { steer: true }), trigger: { id: on.id, pattern: on.pattern } }, dataVersions);
 	// Retention only; the deterministic repeat:<id>:<millis> jobId supplies dedup, so no jobId here, and
 	// scheduler jobs are not retried (DES-CRON-VIA-BULLMQ-SCHEDULER) so no attempts/backoff.
 	const opts = { removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } };

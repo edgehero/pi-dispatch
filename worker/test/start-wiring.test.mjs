@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
 import { makePodmanBackend as realPodmanBackend } from "../src/backend-podman.mjs";
 import { makeOpenshellBackend as realOpenshellBackend } from "../src/backend-openshell.mjs";
-import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
+import { RUNNER_POLICY_REASONS, sanitizeJobId } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs";
 import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inventory.mjs";
@@ -3131,6 +3131,20 @@ test("a lost-lock job whose record is a paid policy stop pages as that stop, onc
 	assert.deepEqual(posted, []);
 });
 
+test("a lost-lock job whose record a newer pi-dispatch wrote is settled by its outcome alone: its reason is neither logged nor paged on (issue #761)", { skip }, async () => {
+	const logsDir = tempDir("pi-lost-lock-");
+	// The same paid policy stop as above, but `v: 2`: that release's `reason` may mean something else.
+	writeFileSync(join(logsDir, "gh-n.json"), `${JSON.stringify({ ...lostLockRecord("gh-n", { outcome: "policy", reason: "runner-policy", exitCode: 2 }), v: 2 })}\n`);
+	const { drive, posted } = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir } });
+	const lines = await drive(lostLockJob("gh-n"), await stalledError());
+	assert.deepEqual(posted, [], "the record still settles this attempt: no failure comment");
+	assert.ok(!lines.some((l) => l.event === "on_failure"), "and no page from a reason this build cannot read");
+	const terminal = lines.filter((l) => l.event === "job_lost_lock_after_completion");
+	assert.equal(terminal.length, 1);
+	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host"], "the outcome, without the reason");
+	assert.equal(terminal[0].outcome, "policy");
+});
+
 test("on a fleet the lost-lock check falls back to the run mirror, and a single host never asks one", { skip }, async () => {
 	const logsDir = tempDir("pi-lost-lock-");
 	const asked = [];
@@ -5181,6 +5195,137 @@ test("issue #596 (gate round 1): a size flag the daemon drops rides beside the u
 	assert.deepEqual(await deps.jobUserPreflight(job, { capabilities: [] }), { user: null, home: null, hostCpus: 4 }, "the next pickup reads the resized daemon, and an enforcing one adds nothing");
 	assert.equal(reads, readsBefore + 1);
 	assert.equal(published?.limitsVersion, 3, "the highest scoped-limits version this build reads, for doctor's fleet line");
+	// Issue #761: beside it, the highest version this build reads of each store with a version, for doctor's
+	// `fleet.store-versions` line, from the stores' own constants, never a copy.
+	const { SETTINGS_VERSION } = await import("../src/runtime-settings.mjs");
+	const { PAUSE_WINDOWS_VERSION } = await import("../src/pause-windows.mjs");
+	const { TRIGGERS_FILE_VERSION } = await import("../src/triggers.mjs");
+	const { JOB_DATA_VERSION } = await import("../src/job-data-version.mjs");
+	const { STORE_FLEET_LINES } = await import("../src/doctor.mjs");
+	assert.deepEqual({ settingsVersion: published?.settingsVersion, pauseWindowsVersion: published?.pauseWindowsVersion, triggersVersion: published?.triggersVersion, jobDataVersion: published?.jobDataVersion }, { settingsVersion: SETTINGS_VERSION, pauseWindowsVersion: PAUSE_WINDOWS_VERSION, triggersVersion: TRIGGERS_FILE_VERSION, jobDataVersion: JOB_DATA_VERSION });
+	assert.deepEqual(Object.keys(STORE_FLEET_LINES).sort(), ["jobDataVersion", "pauseWindowsVersion", "settingsVersion", "triggersVersion"], "doctor reads exactly the fields this row publishes");
+	for (const field of Object.keys(STORE_FLEET_LINES)) assert.ok(Number.isSafeInteger(published?.[field]) && published[field] >= 1, field);
+});
+
+// Issue #761: a store written by a newer pi-dispatch, through the boot and the live paths.
+test("issue #761: a newer settings overlay reaches the processor as { invalid, newer } with its own log line, and a broken one as before", { skip }, async () => {
+	const dir = tempDir("pi-761-settings-");
+	const settingsFile = join(dir, "settings.json");
+	writeFileSync(settingsFile, `${JSON.stringify({ version: 2, maxTurns: 5 }, null, 2)}\n`);
+	const { captured, logs } = await runStart({ env: { PI_SETTINGS_FILE: settingsFile }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	const read = captured.getSettings();
+	assert.equal(read.newer, true, "the processor defers on this (newer-release), never refuses");
+	assert.match(read.invalid, /written by a newer pi-dispatch \(version 2; this build understands 1\)/);
+	assert.ok(logs.some((l) => l.event === "settings_overlay_newer"), "its own line, not settings_overlay_invalid");
+	writeFileSync(settingsFile, '{"maxTurns": "five"}');
+	const broken = captured.getSettings();
+	assert.equal(broken.newer, undefined);
+	assert.ok(broken.invalid);
+	assert.equal(typeof captured.pauseWindowsNewer, "function", "wired beside pauseUntil");
+	assert.equal(captured.pauseWindowsNewer(), false, "no pause windows file: never newer");
+	assert.equal(typeof captured.triggersNewer, "function", "and the triggers file's state beside it");
+	assert.equal(captured.triggersNewer(), false, "a boot that loaded starts not newer");
+});
+
+test("issue #761: a triggers reload that meets a newer file keeps the running schedules and sets the newer state, which only a load clears", { skip }, async () => {
+	const lines = [];
+	const log = (event, fields) => lines.push([event, fields]);
+	const state = { newer: false };
+	const ref = { current: [{ schedulerId: "kept" }] };
+	const newerError = Object.assign(new Error("triggers file written by a newer pi-dispatch (version 2; this build understands 1): /t.json"), { piDispatchConfig: true, newer: true });
+	// The real cron reload, with the loader and the reconcile replaced: what it keeps on a refused load is its own rule.
+	const reconciled = [];
+	const reconcileFn = async (_queue, served) => (reconciled.push(served), { installed: served.length, removed: 0 });
+	const opts = (load) => ({ log, ref, registry: null, tz: "UTC", fleet: false, load, reload: (config, queue, o) => cronReload(config, queue, { ...o, reconcileFn, authoredFn: () => null }) });
+	const { reloadSchedules: cronReload } = await import("../src/cron.mjs");
+	const refused = await mod.reloadTriggersFile({}, null, state, opts(() => { throw newerError; }));
+	assert.ok(refused.invalid);
+	assert.equal(state.newer, true);
+	assert.deepEqual(ref.current, [{ schedulerId: "kept" }], "the last good schedules keep running (and the head gate holds their jobs)");
+	assert.deepEqual(reconciled, []);
+	assert.deepEqual(lines.filter(([event]) => event === "triggers_reload_newer"), [["triggers_reload_newer", { reason: newerError.message }]]);
+	await mod.reloadTriggersFile({}, null, state, opts(() => { throw Object.assign(new Error("triggers file is not valid JSON: /t.json"), { piDispatchConfig: true }); }));
+	assert.equal(state.newer, true, "a broken edit says nothing about what the newer file held");
+	assert.equal(lines.filter(([event]) => event === "triggers_reload_newer").length, 1);
+	const next = [{ schedulerId: "next", name: "local", pattern: "0 3 * * *", data: {}, opts: {} }];
+	const loaded = await mod.reloadTriggersFile({}, null, state, opts(() => next));
+	assert.equal(loaded.ok, true);
+	assert.equal(state.newer, false, "the next load clears it");
+	assert.equal(ref.current, next);
+	// A load whose reconcile then refuses still cleared it: the state is about the file, which loaded.
+	state.newer = true;
+	await mod.reloadTriggersFile({}, null, state, { ...opts(() => next), reload: async (config, queue, o) => (o.loadFn(config, {}), { refused: "fleet" }) });
+	assert.equal(state.newer, false);
+});
+
+test("issue #761: a pause windows or triggers file a newer pi-dispatch wrote refuses the boot with the loader's own sentence", { skip }, async () => {
+	const dir = tempDir("pi-761-boot-");
+	const pausePath = join(dir, "pause-windows.json");
+	writeFileSync(pausePath, `${JSON.stringify({ version: 2, windows: [] }, null, 2)}\n`);
+	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_PAUSE_WINDOWS_FILE: pausePath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `pause-windows file written by a newer pi-dispatch (version 2; this build understands 1): ${pausePath}`);
+	const triggersPath = join(dir, "triggers.json");
+	writeFileSync(triggersPath, `${JSON.stringify({ version: 2, triggers: [] }, null, 2)}\n`);
+	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version 2; this build understands 1): ${triggersPath}`);
+});
+
+test("issue #761: a pause windows reload that meets a newer file keeps the last good windows and sets the newer state, which only a good reload clears", { skip }, () => {
+	const lines = [];
+	const log = (event, fields) => lines.push([event, fields]);
+	const good = [{ scope: "acme/web" }];
+	const ref = { current: good, newer: false };
+	const newerError = Object.assign(new Error("pause-windows file written by a newer pi-dispatch (version 2; this build understands 1): /p.json"), { piDispatchConfig: true, newer: true });
+	mod.reloadPauseWindows({}, ref, log, { load: () => { throw newerError; } });
+	assert.equal(ref.current, good, "the last good windows stay");
+	assert.equal(ref.newer, true);
+	assert.deepEqual(lines.at(-1), ["pause_windows_reload_newer", { reason: newerError.message }]);
+	mod.reloadPauseWindows({}, ref, log, { load: () => { throw Object.assign(new Error("pause-windows file is not valid JSON: /p.json"), { piDispatchConfig: true }); } });
+	assert.equal(ref.newer, true, "a broken edit says nothing about what the newer file paused");
+	assert.equal(lines.at(-1)[0], "pause_windows_reload_invalid");
+	const next = [];
+	mod.reloadPauseWindows({}, ref, log, { load: () => next });
+	assert.equal(ref.current, next);
+	assert.equal(ref.newer, false, "a good reload clears it");
+	assert.deepEqual(lines.at(-1), ["pause_windows_reloaded", { count: 0 }]);
+});
+
+test("issue #761: a running worker's watchers carry a newer pause windows or triggers file to the processor's head gates, and a good file clears them", { skip }, async () => {
+	const dir = tempDir("pi-761-live-");
+	const pausePath = join(dir, "pause-windows.json");
+	const triggersPath = join(dir, "triggers.json");
+	const today = (doc) => `${JSON.stringify(doc, null, 2)}\n`;
+	writeFileSync(pausePath, today({ windows: [] }));
+	writeFileSync(triggersPath, today({ triggers: [] }));
+	// The watchers' debounce, then a read and a reload: polled, because the moment fs.watch delivers is the platform's.
+	const until = async (what, predicate) => {
+		const deadline = Date.now() + 10_000;
+		while (!predicate()) {
+			if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	};
+	let seen = null;
+	await runStart({
+		env: { PI_PAUSE_WINDOWS_FILE: pausePath, PI_TRIGGERS_FILE: triggersPath },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		whileRunning: async ({ captured }) => {
+			assert.equal(captured.pauseWindowsNewer(), false, "a boot that loaded both starts not newer");
+			assert.equal(captured.triggersNewer(), false);
+			writeFileSync(pausePath, today({ version: 2, windows: [] }));
+			await until("the pause windows reload", () => captured.pauseWindowsNewer() === true);
+			// The triggers watcher was handed the state the processor reads; with its own default the gate never moves.
+			writeFileSync(triggersPath, today({ version: 2, triggers: [] }));
+			await until("the triggers reload", () => captured.triggersNewer() === true);
+			writeFileSync(pausePath, today({ windows: [] }));
+			writeFileSync(triggersPath, today({ triggers: [] }));
+			await until("both good reloads", () => captured.pauseWindowsNewer() === false && captured.triggersNewer() === false);
+			seen = "cleared";
+		},
+	});
+	assert.equal(seen, "cleared");
+	const lines = parseLines(bootLines);
+	assert.ok(lines.some((l) => l.event === "pause_windows_reload_newer"), "the pause windows reload said why");
+	assert.ok(lines.some((l) => l.event === "triggers_reload_newer"), "and the triggers reload");
 });
 
 test("issue #596 (gate round 2): the boot's clock and log reach the podman info cache the bundle is handed, so a re-read past the age that fails serves the last answer and says so", { skip }, async () => {
@@ -6102,6 +6247,322 @@ test("issue #645: a returned recovery-failed pages once and comments nothing mor
 	const other = await drive(lostLockJob("gh-f"), await stalledError());
 	assert.deepEqual(posted, [FAILED_SENTENCE]);
 	assert.equal(other.filter((l) => l.event === "on_failure").length, 1);
+});
+
+// Issue #761: a newer pi-dispatch's `failed` record of THIS attempt. Its reason is not core, so this build cannot tell a
+// run handed to a recovery from one that failed; the attempt ended on that host, which decided what came next. The job
+// takes the terminal failure path without its comment: what the job held is closed and the operator is paged once.
+const NEWER_POINTER = { v: 1, host: "h1", hostQueue: null, seq: 2, attempt: 1, at: DURABLE_NOW, jobDir: "job-ab12cd" };
+/** A run record of `id` as its file holds it: a newer release's (`v` 2) unless `v` says otherwise, null for none (a v1 record). */
+const newerRecordText = (id, fields = {}, v = 2) => `${JSON.stringify({ ...lostLockRecord(id, { outcome: "failed", reason: "infra", startedAt: new Date(DURABLE_NOW - 50_000).toISOString(), endedAt: new Date(DURABLE_NOW - 40_000).toISOString(), ...fields }), futureField: { kept: "by that release" }, ...(v === null ? {} : { v }) })}\n`;
+
+/**
+ * A boot whose failure hook is a REAL script appending its argv, one line per page (as the end-to-end hook test above),
+ * whose record writer is the real one (so a record written over the newer one shows on disk), with a checkpoint pointer
+ * for every run unless `pointer` says otherwise (so a fall-through to the stall recovery enqueues one), driven WHILE
+ * the boot's Valkey client is live, so the run's inbox and held replies really close or stay open. `body` gets the
+ * drive and what it observes.
+ */
+async function newerFailedBoot({ env = {}, readMirroredRecord, pointer = NEWER_POINTER, body }) {
+	const { chmodSync } = await import("node:fs");
+	const { makeRecordWriter: realRecordWriter } = await import("../src/run-history.mjs");
+	const logsDir = tempDir("pi-lost-newer-");
+	const hookDir = tempDir("on-failure-");
+	const script = join(hookDir, "notify.sh");
+	const out = join(hookDir, "argv.txt");
+	writeFileSync(script, `#!/bin/sh\necho "$@" >> "${out}"\n`);
+	chmodSync(script, 0o755);
+	const t = durableDoubles({ pointer });
+	const posted = [];
+	const finished = [];
+	const draftsRefused = [];
+	const host = fakeHost({ postStatusComment: async (_job, _target, text) => void posted.push(text) });
+	const pages = () => (existsSync(out) ? readFileSync(out, "utf8").split("\n").filter(Boolean).map((line) => line.split(" ")) : []);
+	// A real child: poll on a wall clock for its line, with the end-to-end hook test's ceiling and for its reasons.
+	const pagesWhen = async (n) => {
+		const deadline = Date.now() + 10_000;
+		while (pages().length < n && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+		return pages();
+	};
+	await runStart({
+		env: { PI_LOGS_DIR: logsDir, PI_ON_FAILURE: script, ...env },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => host,
+		makeRecordWriter: realRecordWriter,
+		now: () => DURABLE_NOW,
+		durable: t.durable,
+		readProgressKey: async () => null,
+		makeRetentionSweep: () => ({ start() {}, close() {} }),
+		...(readMirroredRecord ? { readMirroredRecord } : {}),
+		whileRunning: async ({ deps, handlers, captured }) => {
+			// The approval close is counted here; the store's own transition is driven by the approval test below.
+			deps.approvalRuntime.finish = async (args) => (finished.push(args), { ok: true });
+			// So is an answer draft's refusal: the job's data and what it was told.
+			deps.answerDraftRuntime.refused = async (data, args) => void draftsRefused.push([data, args]);
+			const drive = async (job, text) => {
+				const file = join(logsDir, `${sanitizeJobId(job.id)}.json`);
+				if (text !== undefined) writeFileSync(file, text);
+				posted.length = 0;
+				finished.length = 0;
+				draftsRefused.length = 0;
+				t.pointerReads.length = 0;
+				t.enqueued.length = 0;
+				const from = bootLines.length;
+				handlers.failed(job, await stalledError());
+				await settleDurable();
+				const lines = parseLines(bootLines.slice(from));
+				return { lines, after: existsSync(file) ? readFileSync(file, "utf8") : null };
+			};
+			await body({ drive, t, posted, finished, draftsRefused, pagesWhen, pages, redis: captured.redis });
+		},
+	});
+}
+
+/** What the settled-elsewhere path owes and leaves, for one drive: one terminal line, nothing posted, recovered or written. */
+function assertSettledElsewhere({ lines, after }, { id, text, t, posted, label }) {
+	assert.deepEqual(posted, [], `${label}: nothing is posted`);
+	assert.deepEqual(t.pointerReads, [], `${label}: no stall recovery is tried`);
+	assert.deepEqual(t.enqueued, [], `${label}: nothing is enqueued`);
+	assert.equal(after, text, `${label}: no record is written, the newer one on disk is byte-unchanged`);
+	assert.ok(!lines.some((l) => l.event === "job_failed" || l.event === "job_recovery_skipped"), `${label}: not the failure line`);
+	const terminal = lines.filter((l) => l.event === "job_lost_lock_after_completion");
+	assert.equal(terminal.length, 1, `${label}: exactly one terminal line (REQ-LOCAL-JOB-VISIBILITY)`);
+	assert.deepEqual(Object.keys(terminal[0]), ["event", "jobId", "outcome", "host"], `${label}: the outcome, without the reason`);
+	assert.deepEqual([terminal[0].jobId, terminal[0].outcome], [id, "failed"], label);
+	return terminal[0].host;
+}
+
+test("issue #761: a lost-lock job whose own failed record a newer pi-dispatch wrote takes the failure path without its comment: one page reading infra, nothing recovered, written or posted", { skip }, async () => {
+	await newerFailedBoot({
+		body: async ({ drive, t, posted, finished, draftsRefused, pagesWhen, pages }) => {
+			const paged = [];
+			for (const [id, reason, data] of [["gh-ne", "recovery-enqueued", ARMED_DATA], ["gh-nf.r1", "recovery-failed", { ...ARMED_DATA, recoveryOf: "gh-nf", recovery: 1 }], ["gh-ni", "infra", ARMED_DATA]]) {
+				const text = newerRecordText(id, { reason });
+				const host = assertSettledElsewhere(await drive(stalledArmed(id, { data }), text), { id, text, t, posted, label: reason });
+				paged.push([id, "failed", "infra", host]);
+				assert.deepEqual(await pagesWhen(paged.length), paged, `${reason}: one page, and the hook's argv carries infra, never the newer release's reason`);
+			}
+			assert.deepEqual(finished, [], "no approval was claimed");
+			// The approval the job claimed is closed, as for any terminal failure: the processor never closes a failed
+			// attempt's claim, and an open one keeps its target refusing new requests.
+			const approval = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, flow: "fix", approvalRequestId: "req-761" };
+			const text = newerRecordText("gh-na");
+			const host = assertSettledElsewhere(await drive(stalledArmed("gh-na", { data: approval }), text), { id: "gh-na", text, t, posted, label: "approval" });
+			assert.deepEqual(finished, [{ requestId: "req-761", jobId: "gh-na" }], "the claim is closed once");
+			paged.push(["gh-na", "failed", "infra", host]);
+			assert.deepEqual(await pagesWhen(paged.length), paged);
+			// An answer draft is refused as failed, as for any terminal failure, so the draft does not wait on a run that ended.
+			const draft = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, purpose: "answer-draft", answerDraft: { runId: "gh-ndp", ruleId: "faq" } };
+			const draftText = newerRecordText("gh-nd");
+			const draftHost = assertSettledElsewhere(await drive(stalledArmed("gh-nd", { data: draft }), draftText), { id: "gh-nd", text: draftText, t, posted, label: "answer draft" });
+			assert.deepEqual(draftsRefused, [[draft, { reason: "failed" }]], "the draft is refused once, as failed");
+			paged.push(["gh-nd", "failed", "infra", draftHost]);
+			assert.deepEqual(await pagesWhen(paged.length), paged);
+			// The same for an ordinary terminal failure: a stall that left no record at all.
+			const ordinary = await drive(stalledArmed("gh-nd0", { data: draft }));
+			assert.deepEqual(draftsRefused, [[draft, { reason: "failed" }]], "an ordinary terminal failure refuses the draft once, as failed");
+			const failedLines = ordinary.lines.filter((l) => l.event === "job_failed");
+			assert.deepEqual(failedLines.map((l) => l.jobId), ["gh-nd0"], "the ordinary terminal line");
+			paged.push(["gh-nd0", "failed", "infra", failedLines[0].host]);
+			assert.deepEqual(await pagesWhen(paged.length), paged);
+			// What must take today's path, here the stall recovery (an armed job, a pointer): a record of the attempt before,
+			// a completed record older than the job, and a stale failed record of either release an older job left under the
+			// same id. None of them is this attempt's.
+			const stale = { startedAt: new Date(DURABLE_NOW - 20 * 86_400_000).toISOString(), endedAt: new Date(DURABLE_NOW - 20 * 86_400_000 + 60_000).toISOString() };
+			for (const [label, id, text, job] of [
+				["the previous attempt's failed record", "gh-np", newerRecordText("gh-np", { attempt: 1 }), { attemptsMade: 2 }],
+				["a completed record older than the job", "gh-nc", newerRecordText("gh-nc", { outcome: "completed", reason: null, ...stale }), {}],
+				["a stale failed record under a reused id", "gh-ns", newerRecordText("gh-ns", stale), {}],
+				["a stale readable recovery-enqueued record under a reused id", "gh-n645", newerRecordText("gh-n645", { reason: "recovery-enqueued", ...stale }, null), {}],
+				["another job's record under the same file name", "gh:nx:1", newerRecordText("gh_nx_1"), {}],
+				["a record of this attempt with no outcome", "gh-nu", newerRecordText("gh-nu", { outcome: undefined }), {}],
+			]) {
+				const { lines, after } = await drive(stalledArmed(id, job), text);
+				assert.equal(t.enqueued.length, 1, `${label}: the attempt that died running is recovered`);
+				assert.notEqual(after, text, `${label}: and this build's record of the crash replaces it`);
+				assert.deepEqual(posted, [], `${label}: the run continues, nothing is posted`);
+				assert.deepEqual(lines.filter((l) => l.event === "job_failed").map((l) => l.reason), ["recovery-enqueued"], label);
+				assert.ok(!lines.some((l) => l.event === "job_lost_lock_after_completion"), label);
+			}
+			// The same record, readable, keeps the stall path too: it is this build's to judge by its reason.
+			const readable = newerRecordText("gh-oi", {}, null);
+			const today = await drive(stalledArmed("gh-oi"), readable);
+			assert.equal(t.enqueued.length, 1, "a readable failure with a pointer is recovered");
+			assert.notEqual(today.after, readable);
+			// None of the recovered runs paged anyone. A page from any of them would have spawned a child by now.
+			await new Promise((r) => setTimeout(r, 300));
+			assert.deepEqual(pages(), paged, "exactly the pages above");
+		},
+	});
+});
+
+test("issue #761: settled elsewhere, a run that no recovery can continue has its inbox and held replies closed; one a recovery may continue keeps them open", { skip }, async () => {
+	const { inboxKeys, steerOpenKey } = await import("../src/steer-inbox.mjs");
+	const { awaitOpenKey, heldKeys } = await import("../src/held-replies.mjs");
+	const steered = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, flow: "fix", steer: true, awaitInput: true };
+	const ended = `gh-nend-${process.pid}`;
+	const continuing = `gh-ncont-${process.pid}`;
+	const ordinary = `gh-nord-${process.pid}`;
+	const keysOf = (id) => [inboxKeys(id).closed, inboxKeys(id).list, inboxKeys(id).state, steerOpenKey(id), heldKeys(id).closed, heldKeys(id).list, awaitOpenKey(id)];
+	try {
+		await newerFailedBoot({
+			body: async ({ drive, t, posted, pagesWhen, redis }) => {
+				const closed = async (id) => [await redis.exists(inboxKeys(id).closed), await redis.exists(heldKeys(id).closed)];
+				// Not recovery-armed: the run was the job, and it ended.
+				const a = newerRecordText(ended);
+				assertSettledElsewhere(await drive(stalledArmed(ended, { data: steered }), a), { id: ended, text: a, t, posted, label: "unarmed" });
+				assert.deepEqual(await closed(ended), [1, 1], "its inbox and its held replies are closed, as for any terminal failure");
+				// Recovery-armed: the newer host may have handed the run to a recovery, which keeps the run id and must find both
+				// open. Closing them would answer its waiting messages as late, on the forge, about a run that goes on.
+				const b = newerRecordText(continuing);
+				assertSettledElsewhere(await drive(stalledArmed(continuing, { data: { ...steered, recover: true } }), b), { id: continuing, text: b, t, posted, label: "armed" });
+				assert.deepEqual(await closed(continuing), [0, 0], "neither is closed");
+				assert.equal((await pagesWhen(2)).length, 2, "both are paged");
+			},
+		});
+		// Recovery-armed, but an ordinary terminal failure: no record and no checkpoint, so no recovery can continue the run
+		// and it ended here. Only a run settled elsewhere keeps them open for a recovery.
+		await newerFailedBoot({
+			pointer: null,
+			body: async ({ drive, posted, redis }) => {
+				const { lines } = await drive(stalledArmed(ordinary, { data: { ...steered, recover: true } }));
+				assert.deepEqual(lines.filter((l) => l.event === "job_recovery_skipped" || l.event === "job_failed").map((l) => l.event), ["job_recovery_skipped", "job_failed"], "the ordinary failure path");
+				assert.deepEqual(posted, [FAILED_SENTENCE]);
+				// The closes are not awaited by the listener: poll for them on a wall clock, bounded.
+				const deadline = Date.now() + 5_000;
+				const closed = async () => [await redis.exists(inboxKeys(ordinary).closed), await redis.exists(heldKeys(ordinary).closed)];
+				let state = await closed();
+				while (state.join() !== "1,1" && Date.now() < deadline) {
+					await new Promise((r) => setTimeout(r, 20));
+					state = await closed();
+				}
+				assert.deepEqual(state, [1, 1], "its inbox and its held replies are closed");
+			},
+		});
+	} finally {
+		const { makeRedisClient } = await import("../src/connection.mjs");
+		const redis = makeRedisClient(VALKEY_URL);
+		redis.on("error", () => {});
+		await redis.del(...keysOf(ended), ...keysOf(continuing), ...keysOf(ordinary)).catch(() => {});
+		await redis.quit().catch(() => redis.disconnect());
+	}
+});
+
+test("issue #761: on a fleet the lost-lock check reads the mirror too: this host's earlier attempt does not hide a newer host's failed record of THIS attempt", { skip }, async () => {
+	const asked = [];
+	const id = `gh-nfl-${process.pid}`;
+	const mirrored = JSON.parse(newerRecordText(id, { attempt: 2 }));
+	await newerFailedBoot({
+		env: { PI_WORKER_NAME: `nfl-${process.pid}` },
+		readMirroredRecord: async (_redis, sanitizedId) => (asked.push(sanitizedId), sanitizedId === id ? mirrored : null),
+		body: async ({ drive, t, posted, pagesWhen }) => {
+			// This host ran attempt 1 (a readable failure, retried); another host, on a newer release, ran attempt 2.
+			const local = newerRecordText(id, { attempt: 1 }, null);
+			const host = assertSettledElsewhere(await drive(stalledArmed(id, { attemptsMade: 2 }), local), { id, text: local, t, posted, label: "fleet" });
+			assert.ok(asked.includes(id), "the mirror was asked, though this host has a file");
+			assert.deepEqual(await pagesWhen(1), [[id, "failed", "infra", host]]);
+		},
+	});
+});
+
+// Issue #761: a job id is used again while the record an older job left under it lives on at a HIGHER attempt on one
+// side (this host's file or the fleet's copy), and THIS attempt's own record is on the other. Each side is held to the
+// rule (`recordOfThisJob`) before the higher attempt is kept, so the stale record hides nothing: this attempt's record
+// decides, exactly as it does when it is alone.
+const STALE_AT = DURABLE_NOW - 20 * 86_400_000;
+/** The record an older job left under `id` twenty days ago at attempt 3: a failure this build reads, never this attempt's. */
+const staleHigherRecord = (id) => lostLockRecord(id, { outcome: "failed", reason: "infra", attempt: 3, startedAt: new Date(STALE_AT).toISOString(), endedAt: new Date(STALE_AT + 60_000).toISOString() });
+
+/**
+ * `newerFailedBoot` on a fleet (a declared name arms the mirror) whose mirror answers from `mirrored` by job id. The
+ * run-mirror keys of `ids` are deleted after, since a fall-through to the stall recovery writes this build's record there.
+ */
+async function reusedIdBoot({ ids, mirrored, pointer, body }) {
+	try {
+		await newerFailedBoot({
+			env: { PI_WORKER_NAME: `nreuse-${process.pid}` },
+			readMirroredRecord: async (_redis, sanitizedId) => mirrored.get(sanitizedId) ?? null,
+			pointer,
+			body,
+		});
+	} finally {
+		const { makeRedisClient } = await import("../src/connection.mjs");
+		const { RUNS_INDEX, runRecordKey } = await import("../src/run-mirror.mjs");
+		const redis = makeRedisClient(VALKEY_URL);
+		redis.on("error", () => {});
+		await redis.del(...ids.map(runRecordKey)).catch(() => {});
+		await redis.zrem(RUNS_INDEX, ...ids).catch(() => {});
+		await redis.quit().catch(() => redis.disconnect());
+	}
+}
+
+test("issue #761: a stale record at a higher attempt in the fleet's copy hides no returned failure of this attempt on this host: a run handed to a recovery is not handed on again, and a failed recovery pages once (#645)", { skip }, async () => {
+	const a = `gh-nra-${process.pid}`;
+	const b = `gh-nrb-${process.pid}`;
+	const c = `gh-nrc-${process.pid}.r1`;
+	const mirrored = new Map([a, b, c].map((id) => [id, staleHigherRecord(id)]));
+	/** #645's ending: one terminal line with the record's reason; nothing posted, no recovery tried, the record unchanged. */
+	const endsThere = ({ lines, after }, { id, text, t, posted, reason, label }) => {
+		assert.deepEqual(posted, [], `${label}: nothing is posted`);
+		assert.deepEqual(t.pointerReads, [], `${label}: no stall recovery is tried`);
+		assert.deepEqual(t.enqueued, [], `${label}: nothing is enqueued`);
+		assert.equal(after, text, `${label}: this attempt's record is byte-unchanged`);
+		assert.ok(!lines.some((l) => l.event === "job_failed" || l.event === "job_recovery_skipped"), `${label}: not the failure line`);
+		const terminal = lines.filter((l) => l.event === "job_lost_lock_after_completion");
+		assert.deepEqual(terminal.map((l) => [l.jobId, l.outcome, l.reason]), [[id, "failed", reason]], `${label}: exactly one terminal line, with the reason`);
+		return terminal[0].host;
+	};
+	// With a pointer: the run was handed to a recovery already. Handing it on again would write this build's crash record
+	// over this attempt's, which carries its start and its reservation.
+	await reusedIdBoot({
+		ids: [a],
+		mirrored,
+		pointer: NEWER_POINTER,
+		body: async ({ drive, t, posted, pages }) => {
+			const text = newerRecordText(a, { reason: "recovery-enqueued" }, null);
+			endsThere(await drive(stalledArmed(a), text), { id: a, text, t, posted, reason: "recovery-enqueued", label: "handed on, a pointer" });
+			await new Promise((r) => setTimeout(r, 300));
+			assert.deepEqual(pages(), [], "nothing is owed: no page");
+		},
+	});
+	// Without a pointer: the failure comment would say "will not be retried further" of a run a recovery continues, and
+	// a failed recovery's comment was posted when it returned.
+	await reusedIdBoot({
+		ids: [b, c],
+		mirrored,
+		pointer: null,
+		body: async ({ drive, t, posted, pagesWhen, pages }) => {
+			const handed = newerRecordText(b, { reason: "recovery-enqueued" }, null);
+			endsThere(await drive(stalledArmed(b), handed), { id: b, text: handed, t, posted, reason: "recovery-enqueued", label: "handed on, no pointer" });
+			const failed = newerRecordText(c, { reason: "recovery-failed" }, null);
+			const host = endsThere(await drive(stalledArmed(c, { data: { ...ARMED_DATA, recoveryOf: `gh-nrc-${process.pid}`, recovery: 1 } }), failed), { id: c, text: failed, t, posted, reason: "recovery-failed", label: "a failed recovery" });
+			assert.deepEqual(await pagesWhen(1), [[c, "failed", "recovery-failed", host]], "the failed recovery's page, once");
+			await new Promise((r) => setTimeout(r, 300));
+			assert.equal(pages().length, 1, "and none for the run handed on");
+		},
+	});
+});
+
+test("issue #761: a stale record at a higher attempt on either side hides no failed record a newer pi-dispatch wrote of this attempt on the other: settled elsewhere, never recovered again or written over", { skip }, async () => {
+	const d = `gh-nrd-${process.pid}`;
+	const g = `gh-nrg-${process.pid}`;
+	// d: this host ran the attempt on the newer release, while the fleet's copy is still the older job's.
+	// g: this host's file is the older job's, and the host that ran this attempt wrote its record to the fleet's copy.
+	const mirrored = new Map([[d, staleHigherRecord(d)], [g, JSON.parse(newerRecordText(g))]]);
+	await reusedIdBoot({
+		ids: [d, g],
+		mirrored,
+		pointer: NEWER_POINTER,
+		body: async ({ drive, t, posted, pagesWhen }) => {
+			const own = newerRecordText(d);
+			const hostD = assertSettledElsewhere(await drive(stalledArmed(d), own), { id: d, text: own, t, posted, label: "stale in the fleet's copy" });
+			// Each page awaited before the next drive: the hook's children are not ordered between them.
+			assert.deepEqual(await pagesWhen(1), [[d, "failed", "infra", hostD]], "one page, reading infra");
+			const stale = `${JSON.stringify(staleHigherRecord(g))}\n`;
+			const hostG = assertSettledElsewhere(await drive(stalledArmed(g), stale), { id: g, text: stale, t, posted, label: "stale in this host's file" });
+			assert.deepEqual(await pagesWhen(2), [[d, "failed", "infra", hostD], [g, "failed", "infra", hostG]], "one page each, reading infra");
+		},
+	});
 });
 
 // Issue #645's PR: a BullMQ queue closed while its connection's INFO is pending rejected unhandled inside BullMQ (CI,

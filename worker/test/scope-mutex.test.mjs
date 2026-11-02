@@ -670,7 +670,7 @@ test("invalid or unreadable settings take no endpoint slot and read no declarati
 	}
 });
 
-test("getSettings is read ONCE per pickup, and its throw is recorded exactly as before the read moved", { skip }, async () => {
+test("getSettings is read ONCE per pickup beside the head's newer-release check, and its throw is recorded exactly as before the read moved", { skip }, async () => {
 	// Completed run and endpoint deferral: one read each.
 	{
 		let calls = 0;
@@ -678,12 +678,12 @@ test("getSettings is read ONCE per pickup, and its throw is recorded exactly as 
 		const h = harness({ getSettings: () => (calls++, LOCAL_MODEL()), extra: w.extra });
 		const p = h.processor(localJob("l-1", "/srv/a").job, "tok", new AbortController().signal);
 		await h.untilStarted(1);
-		assert.equal(calls, 1, "one read before the gate, none again in the main try");
+		assert.equal(calls, 2, "the head's newer-release check, then one read before the gate, none again in the main try");
 		await assert.rejects(() => h.processor(localJob("l-2", "/srv/b").job, "tok", new AbortController().signal), (e) => e.name === "DelayedError");
-		assert.equal(calls, 2, "a deferred pickup reads once too");
+		assert.equal(calls, 4, "a deferred pickup reads once too, after its own head check");
 		h.releaseNext();
 		await p;
-		assert.equal(calls, 2);
+		assert.equal(calls, 4);
 	}
 	// A throw: one record carrying the error, an UnrecoverableError to the queue, every hold released.
 	{
@@ -697,7 +697,7 @@ test("getSettings is read ONCE per pickup, and its throw is recorded exactly as 
 			inFlight, now: () => NOW, recordRun: (r) => records.push(r), timeoutMs: 100000, deps: { log: () => {} }, ...w.extra,
 		});
 		await assert.rejects(() => processor(localJob("l-1", "/f").job, "tok", new AbortController().signal), (e) => e.name === "UnrecoverableError" && e.message === "overlay boom");
-		assert.equal(calls, 1);
+		assert.equal(calls, 2, "the head's throw falls through to the pickup's read, which records it");
 		assert.equal(records.length, 1);
 		assert.equal(records[0].error.message, "overlay boom");
 		// Plus the pickup-time project (issue #499), null with no projects, and the size resolved beside it (issue #596), the

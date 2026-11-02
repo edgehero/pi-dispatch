@@ -124,6 +124,7 @@ import { runTranscriptSection } from "./transcript.mjs";
 import { WHATIF_MODEL_RE } from "./whatif.mjs";
 import { SPEND_TITLE, VENUE_LABEL, recordReason } from "../words.mjs";
 import { RUN_RECORD_UNREAD, runAbsent, runPlaces } from "../read-model.mjs";
+import { fromNewerRelease } from "../newer-release.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
 import { runAnswerDraft } from "./panels/run.mjs";
 import { overviewAgentWrites } from "./panels/agent-writes.mjs";
@@ -1053,10 +1054,20 @@ function viewOf(name, ctx) {
 /** The viewer card's fixed visible panels. The other ids remain empty for live state swaps. */
 export const RUN_VIEWER_PANELS = Object.freeze(["p-viewer", "p-outcome", "p-progress", "p-transcript", "p-chat", "p-inbox", "p-run"]);
 
+/**
+ * The run page's panels for a record a NEWER pi-dispatch wrote (issue #761), for both roles: the outcome banner and the
+ * run's stable core, nothing else. Every other panel reads fields past that core (progress, chat, the sandbox, the
+ * money), whose meaning that release may have changed, and the record reaches this page cut to its core, so they would
+ * say what the record does not ("no session", "not armed"). The other ids stay empty for live state swaps.
+ */
+export const RUN_NEWER_PANELS = Object.freeze(["p-viewer", "p-outcome", "p-run"]);
+
 /** Each panel of screen `name` as `{ id, fragment }`, with the role split enforced before rendering. */
 function panelFragments(name, ctx) {
   const view = viewOf(name, ctx);
-  return PAGE_PANELS[name].filter(([id]) => !(name === "host" && ctx?.data?.live === true && id === "p-hostcap")).map(([id, render]) => ({ id, fragment: name === "run" && view.role !== "operator" && !RUN_VIEWER_PANELS.includes(id) ? html`` : render(view) }));
+  const newer = name === "run" && fromNewerRelease(ctx?.data?.run?.record);
+  const hidden = (id) => name === "run" && ((view.role !== "operator" && !RUN_VIEWER_PANELS.includes(id)) || (newer && !RUN_NEWER_PANELS.includes(id)));
+  return PAGE_PANELS[name].filter(([id]) => !(name === "host" && ctx?.data?.live === true && id === "p-hostcap")).map(([id, render]) => ({ id, fragment: hidden(id) ? html`` : render(view) }));
 }
 
 /**
@@ -1134,7 +1145,8 @@ export async function renderPage(name, ctx) {
   // renders and swaps, and the transcript's entries are appended by the browser from the operator's own stream.
   // Issue #710: none for a run that never had one to show: refused before it started, or no record of a run that is not
   // running (not a run id, queued, or unknown), which the outcome banner says once.
-  const extra = name === "run" && !ctx?.data?.run?.invalid ? html`<div id="transcript" class="run-transcript">${runTranscriptSection(viewOf(name, ctx))}</div>` : null;
+  // Issue #761: none for a record a newer pi-dispatch wrote either, whose page shows its stable core alone.
+  const extra = name === "run" && !ctx?.data?.run?.invalid && !fromNewerRelease(ctx?.data?.run?.record) ? html`<div id="transcript" class="run-transcript">${runTranscriptSection(viewOf(name, ctx))}</div>` : null;
   const sections = new Map(panels.map(({ id, fragment }) => [id, html`<section id="${id}" data-panel>${fragment}</section>`]));
   if (name === "run" && extra !== null) sections.set("p-transcript", html`${sections.get("p-transcript")}${extra}`);
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : name === "zero-touch" ? zeroTouchLayout(role) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;

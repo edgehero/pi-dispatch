@@ -67,8 +67,9 @@ import { DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_WHY_RE, DEFER_WHYS } from
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { hostQueueName } from "@edgehero/pi-dispatch/queue";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
-import { parsePauseWindows } from "@edgehero/pi-dispatch/pause-windows";
+import { PAUSE_WINDOW_FIELDS, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 import { auditedWrite } from "../audited-write.mjs";
+import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
 import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
@@ -117,9 +118,6 @@ export const VALKEY_UNREACHABLE = "the deployment's Valkey could not be reached,
 /** The deepest a request body may nest, and the most keys an object in it may carry. */
 const BODY_DEPTH_MAX = 8;
 const BODY_KEYS_MAX = 64;
-
-/** The pause-windows file's own fields (`INT-PAUSE-WINDOWS-FILE-CONTRACT`), for the whole-list write. */
-const PAUSE_WINDOW_KEYS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFrom", "dateTo"]);
 
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 const digestOf = (text) => (text === null || text === undefined ? null : sha256(text));
@@ -631,8 +629,11 @@ function bundlesNaming(ctx, name) {
 
 /**
  * The whole pause-windows list, #640's reference write, kept as an action: `POST /api/pause-windows/preview|confirm`
- * stay its aliases (DES-OPERATOR-CONSOLE). It validates through the loader's own parser and serializes exactly as
- * `writePauseWindows` does, so its after digest is the written file's; its responses keep `before` and `after`.
+ * stay its aliases (DES-OPERATOR-CONSOLE). It validates through the loader's own parser and serializes through
+ * `pauseWindowsText`, the one serializer `writePauseWindows` uses too, so its after digest is the written file's, other
+ * top-level keys carried included (issue #761); its responses keep `before` and `after`. A window's fields are the
+ * parser's own list (`PAUSE_WINDOW_FIELDS`), and a file written by a newer pi-dispatch is refused at the preview, in
+ * `writePauseWindows`' words.
  */
 const pauseWindowsWhole = {
   name: "pause-windows",
@@ -648,7 +649,7 @@ const pauseWindowsWhole = {
       const at = atIndex("pause window", i);
       if (w === null || typeof w !== "object" || Array.isArray(w)) return { refusal: `${at} is not an object; nothing was changed` };
       for (const [k, value] of Object.entries(w)) {
-        if (!PAUSE_WINDOW_KEYS.includes(k)) return { refusal: `${at} has a field this file does not take (${PAUSE_WINDOW_KEYS.join(", ")} only); nothing was changed` };
+        if (!PAUSE_WINDOW_FIELDS.includes(k)) return { refusal: `${at} has a field this file does not take (${PAUSE_WINDOW_FIELDS.join(", ")} only); nothing was changed` };
         const plain = typeof value === "string" || (k === "days" && Array.isArray(value) && value.every((d) => typeof d === "string"));
         if (!plain) return { refusal: `${at}: ${k} must be ${k === "days" ? "a list of weekday names" : "a string"}; nothing was changed` };
       }
@@ -657,13 +658,16 @@ const pauseWindowsWhole = {
     const snap = readNow(ctx.fs, path);
     if (snap.refusal) return snap;
     let before = [];
+    let doc = null;
     try {
-      const parsedFile = JSON.parse(snap.text ?? "null");
-      if (Array.isArray(parsedFile?.windows)) before = parsedFile.windows;
+      doc = JSON.parse(snap.text ?? "null");
+      if (Array.isArray(doc?.windows)) before = doc.windows;
     } catch {
       // An unparseable file reads as empty, as writePauseWindows reads it; the write repairs it.
     }
-    const afterText = `${JSON.stringify({ windows: body.windows }, null, 2)}\n`;
+    const newer = pauseWindowsNewerRefusal(doc, path);
+    if (newer) return { refusal: newer, status: 409 };
+    const afterText = pauseWindowsText(doc, body.windows);
     try {
       parsePauseWindows(afterText, path);
     } catch (e) {

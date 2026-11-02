@@ -80,7 +80,7 @@ wrapper do not agree about quoting, inline comments or spacing, and printing one
 
 | Field | Required | Meaning |
 |---|---|---|
-| `scope` | **yes** | What the window applies to: the job's **repo path** on **any** forge (GitHub, GitLab, Forgejo, Azure DevOps), the **folder** host path for a local/cron job, or `"*"` for **all** scopes. Prefix the repo with its forge (`"github:acme/web"`, `"forgejo:acme/web"`) to pause it on that forge only; a bare repo pauses it on every forge, and an unknown prefix or a repo that is not a forge repo (a trailing `/`, `#12`, a space at the start or end of a part) refuses the file. This file has no version, so a worker older than this release reads a prefixed window as a name no job has and pauses nothing: upgrade every worker before you write one. Matched exactly, so mind the segment count: GitHub and Forgejo are `owner/name`, but a GitLab project is `group/subgroup/project` and Azure DevOps is `project/repo` (the organisation is the deployment's `AZURE_ORG_URL`). The rule is just local → folder, anything else → repo, so a forge added later is scoped automatically. |
+| `scope` | **yes** | What the window applies to: the job's **repo path** on **any** forge (GitHub, GitLab, Forgejo, Azure DevOps), the **folder** host path for a local/cron job, or `"*"` for **all** scopes. Prefix the repo with its forge (`"github:acme/web"`, `"forgejo:acme/web"`) to pause it on that forge only; a bare repo pauses it on every forge, and an unknown prefix or a repo that is not a forge repo (a trailing `/`, `#12`, a space at the start or end of a part) refuses the file. A worker older than the release that added prefixes reads a prefixed window as a name no job has and pauses nothing, and the file's `version` cannot warn it (a worker that old ignores `version`, and a prefix, which every release since reads, raises none): upgrade every worker before you write one. Matched exactly, so mind the segment count: GitHub and Forgejo are `owner/name`, but a GitLab project is `group/subgroup/project` and Azure DevOps is `project/repo` (the organisation is the deployment's `AZURE_ORG_URL`). The rule is just local → folder, anything else → repo, so a forge added later is scoped automatically. |
 | `from` | **yes** | Pause **start**, `"HH:MM"` 24-hour. |
 | `to` | **yes** | Resume time, `"HH:MM"` 24-hour. If `from > to` the window is **overnight** (spans midnight). `from == to` is rejected — a 24h pause isn't expressible; remove the trigger instead. |
 | `tz` | no (default `UTC`) | IANA timezone, e.g. `"Europe/Amsterdam"`, `"America/New_York"`. `from`/`to` are that zone's wall clock, DST-correct. |
@@ -139,6 +139,38 @@ accept that minute or lay down two adjacent windows:
   spend slot and counts nothing against your daily/weekly/monthly caps — a deferral is not a job start.
 - **Timezone-correct.** Wall-clock times are resolved in the window's `tz` using the runtime's built-in
   timezone data (DST-correct), with no extra dependency.
+
+## The file's version
+
+The file may carry a `version` beside `windows` (issue #761). Absent means `1`, and a release writes it only when a
+window uses a field, or a value of a field (a new form of `days` or `scope`, say), that an older release would misread.
+Nothing needs one yet, so today's files have none and are written exactly as before. Two things follow when one does
+appear:
+
+- **A file written by a newer pi-dispatch** refuses the worker's start, like any file that does not load. Written
+  while the worker runs, it keeps the last good windows, logs `pause_windows_reload_newer`, and defers every job that
+  reaches its pause check, every watch job included, until it is upgraded or the file loads again ("Queued or
+  configured by a newer pi-dispatch: waits for this host's upgrade", re-checked every ten minutes): the newer file may
+  pause a job the last good windows would run. A job that an earlier check ends (a refused console draft, say) never
+  reaches the pause check, and nothing is spent on it. The panel, the tools and the console refuse to write over it
+  ("nothing was written and nothing in it was lost; change it with that release"). Upgrade; do not edit the file by
+  hand to get past it. The one exception is a `version` you wrote yourself (below): no release wrote that file, so
+  remove the key. `pi-dispatch doctor` says which: for a file a newer release wrote, its fix is to upgrade, "unless you
+  added `version` to it yourself: then remove that key".
+- **Other keys in the file are kept.** Every writer of this release writes back each top-level key beside `windows`
+  as it found it, in its place, so a block a later release adds survives an edit from this one. A panel or console
+  from before issue #761 writes `windows` alone, so upgrade them first.
+
+A file that is broken (bad JSON, a bad window) is handled as it always was: the worker refuses it at boot and keeps
+the last good windows on a live edit, and an edit through the panel or the tools that leaves a valid file repairs it
+(an unparseable one is rebuilt from empty). A window that uses a field or a value above the `version` the file
+declares is broken too ("pause window at index 1: days holds a value that needs pause-windows file version 2, and the
+file declares 1").
+
+**Upgrading.** Earlier releases ignored a top-level `version` in this file; since issue #761 it is read. If you put one
+there yourself, remove it before you upgrade: one that is not a whole number of 1 or more makes the file broken, so
+the worker refuses to start on it (a live edit keeps the last good windows, and an edit through the panel or the tools
+drops it), and one above 1 reads as a file a newer release wrote, so jobs wait as described above.
 
 ## Managing windows
 

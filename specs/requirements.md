@@ -748,7 +748,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the weaker claim this entry made while both defaulted under the OS temp dir). Given an account with no home
   directory, then both default under its own per-account temp root, `<tmp>/pi-dispatch-<euid>` (issue #464; it was the
   shared `<tmp>/pi-dispatch`), which the worker at boot and the panel's overlay write make this account's (`0700`) or
-  refuse, and doctor fails on it when another account owns it.
+  refuse, and doctor fails on it when another account owns it. Given a worker that dies, or a backup copy taken,
+  while a record is being written, then the file or the copy holds the previous record or the new one, never a cut
+  one (the in-place fallback excepted, which the worker logs as `run_record_in_place`; issue #761,
+  `INT-RUN-HISTORY-FILE-CONTRACT`). Given a record a newer pi-dispatch wrote, then every surface still shows which
+  run it was, how it ended and when, and no total reads the rest of it.
 
 ## REQ-ADMIN-VIA-PI-EXTENSION
 
@@ -3223,7 +3227,10 @@ writes retain their existing interactive confirmation. This adds no unattended p
     `admin/test/console-actions.test.mjs`. **AMENDED 2026-10-22 (#710): offered only where it can work.** The refusals
     that need neither git nor the triggers file are one pure function, `rerunRefusalOf(record, now, data)` (a bad id;
     the data gone, or with the data unread, a record that ended longer ago than its kind's longest retention, 7 days
-    local and 31 days forge, plus a day's slack; a `/command`; a parked answer; a kind the console cannot re-run), which
+    local and 31 days forge, plus a day's slack; a `/command`; a parked answer; a kind the console cannot re-run; and,
+    AMENDED 2026-11-02 (#761), a record a newer pi-dispatch wrote, whose job this console cannot rebuild, and a job
+    whose `dataVersion` this build cannot read, whose fields the copy would drop; a cron run, rebuilt from its trigger
+    alone, is not refused for its data), which
     `planRerun` asks FIRST, so its sentences are the planner's byte for byte and the two cannot disagree. The run page
     asks it through the fleet reader over the retained job's data (`rerunCheck`, cached 15 s per run id, the data never
     leaving the reader), else over the record alone, and draws "Not offered for a re-run: <sentence>." in place of the
@@ -3266,7 +3273,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
     do not matter), being answered (a job queued or running on its target, which has no record yet,
     `readPendingAnswer`), when that queue scan is unreadable (nothing is queued; try again) or the queues hold more
     jobs than its budget (`CHAT_REFUSALS.parkedTooMany`'s sentence: answer on the forge, or wait), a pull
-    request's park, its data expired, or no comment trigger would route a reply. The audit row holds
+    request's park, its data expired, AMENDED 2026-11-02 (#761) its job queued by a newer pi-dispatch (a `dataVersion`
+    this build cannot read: "answer it from a console of that release"), or no comment trigger would route a reply.
+    The audit row holds
     the job id and the answer's sha256, never the text. The worker posts exactly one trail comment ("Answered from the
     operator console by <name>:" and the text quoted, every `@` neutralised) once every pre-spend gate and reserve has
     passed, just before the container starts, and none when the job is refused by any gate (`not-parked`, a missing
@@ -8326,6 +8335,7 @@ instead of drifting.
 | Date | Change |
 |---|---|
 | 2026-11-02 (#754, #792, #793; approved extension) | REQ-SANDBOX-BROWSER-GATEWAY, REQ-SANDBOX-FROM-THE-CONSOLE and REQ-OPERATOR-CONSOLE-SCREENS amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
+| 2026-11-02 (#761, store versions) | `REQ-DURABLE-RUN-HISTORY` AMENDED (acceptance): a record is written to a temporary file and renamed, so a crash mid-write leaves the previous record or the new one (the in-place fallback excepted, logged `run_record_in_place`), and a record a newer pi-dispatch wrote still shows which run it was, how it ended and when, while no total reads the rest of it (`INT-RUN-HISTORY-FILE-CONTRACT`, `DES-STORE-VERSION-WHEN-NEEDED`). `REQ-OPERATOR-CONSOLE-ACTIONS` (e) AMENDED by one clause: `rerunRefusalOf` refuses a record a newer pi-dispatch wrote, whose job this console cannot rebuild, and a job whose `dataVersion` this build cannot read (a cron run, rebuilt from its trigger, excepted); (f) AMENDED by one clause: a parked run whose job a newer pi-dispatch queued is refused (`parkedAnswerRefusalOf`, so the Chat panel offers no form for it); the rest of both rules is UNCHANGED, checked. UNCHANGED, checked: `REQ-SCOPED-PAUSE-WINDOWS` (the gate, its place before the reservation and the live reload are as written; a newer file adds a deferral, `INT-PAUSE-WINDOWS-FILE-CONTRACT`) and `REQ-LOCAL-JOB-VISIBILITY` (a lost lock on this attempt's newer `failed` record still ends with exactly one terminal line, `job_lost_lock_after_completion` with the outcome, in place of `job_failed`). |
 | 2026-11-02 (#776) | NEW `REQ-DISPATCHERS`, PROPOSED, spec only: bounded multi-input selection and person-reviewed proposals, deterministic collection, fresh event decisions and read-only LLM jobs and local children. Includes independent event replay and target/flow dedup, pre-spend day/window/scoped limits, conservative crash accounting, private evidence and explicit stop controls. No runtime feature, schema, console tab or doctor check is built. `REQ-PARKED-ANSWERER` AMENDED in words only: dispatchers now have a proposed specification and remain no dependency of answer rules. `REQ-WATCH-TRIGGER`, `REQ-WATCH-DECISION-STEP`, `REQ-JOB-TIMEOUT-30M` and `REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked: existing watch behavior, timeouts and budget mechanics are not widened. To be AMENDED by later builds, not claimed unchanged in their future scope: `REQ-AI-TRIGGERED-RUNS` for a new reviewed producer, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-OPERATOR-CONSOLE-SCREENS` for proposals, controls and views, and `REQ-DURABLE-RUN-HISTORY` for validated dispatcher provenance. Future behavioral acceptance is specified here; no test is claimed to implement the proposed feature. |
 | 2026-11-01 (#774, coverage verification) | `REQ-BROWSER-FIRST-RUN-SETUP` acceptance clarified: exact-pin catalogue and credential-source coverage, exhaustive eligible API-key Add/resolve/Replace tests and explicit authentication/runtime limits. Browser regression checks identify account owner and copy controls independently of preceding help guides, retaining exact destinations, full commands and actual clipboard effects. Runtime/provider authentication capabilities, cloud/custom admission, credential forwarding, spend gates, `REQ-CONSOLE-SECURITY`, `CONST-*`, `DES-*` and `INT-*` contracts UNCHANGED, checked. |
 | 2026-11-01 (#774, provider management) | `REQ-BROWSER-FIRST-RUN-SETUP` and `REQ-CONSOLE-SECURITY` AMENDED: permanent multi-provider inventory and explicit selected-slot Add/Replace, with danger confirmation for replacement, preserved provider/model defaults, derived aliases, source-switch/reload explanations and private cancellation across selection changes. Fixed official provider help includes OpenRouter/DeepSeek; subscription help remains host-only and distinguishes Claude community compatibility from Claude Code tokens. Admission, spend, container isolation, roles, CSP, no-secret projections and subscription credential custody UNCHANGED, checked. |

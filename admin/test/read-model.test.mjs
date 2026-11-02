@@ -642,13 +642,78 @@ test("writeSubscriptions validates through the shared parser and writes atomical
   assert.equal(JSON.parse(fs.files["subs.json"]).subscriptions.length, 1, "a rejected edit leaves the file unchanged");
 });
 
-test("writeSubscriptions on a missing or unparseable file starts from the empty v1 shape and repairs it", () => {
+test("writeSubscriptions starts from the empty v1 shape only for a MISSING file; a garbled, newer or unreadable one is refused untouched (#761)", () => {
   const missing = triggerFs({});
   assert.deepEqual(writeSubscriptions({ subscriptionsPath: "subs.json", fs: missing, mutate: (l) => [...l, kimiPlan] }), { ok: true });
   assert.equal(JSON.parse(missing.files["subs.json"]).subscriptions.length, 1);
-  const garbled = triggerFs({ "subs.json": "{ not json" });
-  assert.deepEqual(writeSubscriptions({ subscriptionsPath: "subs.json", fs: garbled, mutate: (l) => l }), { ok: true });
-  assert.deepEqual(JSON.parse(garbled.files["subs.json"]), { version: 1, subscriptions: [] }, "the validated write repaired the file");
+  // It used to rebuild these from empty, dropping every declared plan (and a newer release's fields) on the next edit.
+  let mutated = 0;
+  for (const text of ["{ not json", JSON.stringify({ version: 2, subscriptions: [kimiPlan], futureField: true })]) {
+    const fs = triggerFs({ "subs.json": text });
+    const res = writeSubscriptions({ subscriptionsPath: "subs.json", fs, mutate: (l) => (mutated++, l) });
+    assert.equal(res.ok, undefined, text);
+    assert.equal(fs.files["subs.json"], text, "the bytes are untouched");
+    assert.deepEqual(Object.keys(fs.files), ["subs.json"], "no tmp file is left");
+  }
+  assert.equal(mutated, 0, "a refused file is never handed to mutate");
+  const newer = writeSubscriptions({ subscriptionsPath: "subs.json", fs: triggerFs({ "subs.json": JSON.stringify({ version: 2, subscriptions: [] }) }), mutate: (l) => l });
+  assert.equal(newer.invalid, "subscriptions file written by a newer pi-dispatch (version 2; this build understands 1), so nothing was written and nothing in it was lost; change it with that release: subs.json");
+  // A refusal says what is wrong, never the file's bytes: not the JSON engine's excerpt, not the value it judged.
+  const SECRET = "SECRET-TOKEN-abcdef";
+  for (const [text, said] of [
+    [`${SECRET} {`, "the subscriptions file subs.json is not valid JSON, so its subscriptions cannot be kept; nothing was written"],
+    [JSON.stringify({ version: SECRET, subscriptions: [] }), "the subscriptions file subs.json is not a valid subscriptions file, so its subscriptions cannot be kept; nothing was written"],
+    [JSON.stringify({ version: 1, subscriptions: [{ ...kimiPlan, price: { ...kimiPlan.price, per: SECRET } }] }), "the subscriptions file subs.json is not a valid subscriptions file, so its subscriptions cannot be kept; nothing was written"],
+  ]) {
+    const fs = triggerFs({ "subs.json": text });
+    assert.equal(writeSubscriptions({ subscriptionsPath: "subs.json", fs, mutate: (l) => l }).invalid, said, text);
+    assert.equal(fs.files["subs.json"], text);
+    assert.match(readSubscriptions({ subscriptionsPath: "subs.json", fs }).invalid, /SECRET-TOK/, "the reader keeps the parser's words for the views that show the file");
+  }
+  // A file that is there but cannot be read refuses with its code, never read as missing.
+  const held = JSON.stringify({ version: 1, subscriptions: [kimiPlan] });
+  const eacces = triggerFs({ "subs.json": held });
+  eacces.readFileSync = () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); };
+  const res = writeSubscriptions({ subscriptionsPath: "subs.json", fs: eacces, mutate: (l) => l });
+  assert.equal(res.invalid, "the subscriptions file subs.json could not be read (EACCES), so its subscriptions cannot be kept; nothing was written");
+  assert.equal(eacces.files["subs.json"], held);
+  // No path, no file: refused with the variable to set.
+  assert.match(writeSubscriptions({ subscriptionsPath: null, fs: triggerFs({}), mutate: (l) => l }).invalid, /^PI_SUBSCRIPTIONS_FILE is unset/);
+});
+
+test("writeSubscriptions calls a file newer exactly when the shared parser does, at the edges of a whole number too (#761)", () => {
+  // The views read the parser's words (`readSubscriptions`); a write must refuse the same file for the same reason, so
+  // an operator is never told to upgrade by one and to fix the file by the other. 1e300 and 2^53 + 2 are whole numbers
+  // that are not safe integers: the parser reads them as versions, so they are newer here too.
+  const newerSaid = (version) => `subscriptions file written by a newer pi-dispatch (version ${version}; this build understands 1), so nothing was written and nothing in it was lost; change it with that release: subs.json`;
+  const invalidSaid = "the subscriptions file subs.json is not a valid subscriptions file, so its subscriptions cannot be kept; nothing was written";
+  for (const [raw, newer] of [["2", true], ["1e300", true], ["9007199254740994", true], ["2.0", true], ["1.5", false], ["0", false], ["-1", false], ['"2"', false], ["null", false], ["true", false], ["1e-300", false], ["[2]", false]]) {
+    const text = `{"version":${raw},"subscriptions":[]}`;
+    const read = readSubscriptions({ subscriptionsPath: "subs.json", fs: triggerFs({ "subs.json": text }) });
+    const fs = triggerFs({ "subs.json": text });
+    const wrote = writeSubscriptions({ subscriptionsPath: "subs.json", fs, mutate: (l) => l });
+    assert.equal(/newer pi-dispatch/.test(read.invalid), newer, `${raw}: the parser's verdict`);
+    assert.equal(wrote.invalid, newer ? newerSaid(JSON.parse(raw)) : invalidSaid, raw);
+    assert.equal(fs.files["subs.json"], text, `${raw}: untouched`);
+  }
+  assert.equal(writeSubscriptions({ subscriptionsPath: "subs.json", fs: triggerFs({ "subs.json": '{"version":1e300,"subscriptions":[]}' }), mutate: (l) => l }).invalid, newerSaid("1e+300"));
+});
+
+test("writeSubscriptions writes through a tmp file of its own and re-checks against expect before the rename (#761)", () => {
+  const before = JSON.stringify({ version: 1, subscriptions: [] });
+  const fs = triggerFs({ "subs.json": before });
+  const written = [];
+  const write = fs.writeFileSync;
+  fs.writeFileSync = (p, data, opts) => { written.push([p, opts?.flag]); return write(p, data, opts); };
+  // A snapshot that no longer matches the file refuses, and the tmp file is removed.
+  const stale = writeSubscriptions({ subscriptionsPath: "subs.json", fs, expect: [{ path: "subs.json", text: "{}" }], mutate: (l) => [...l, kimiPlan] });
+  assert.match(stale.invalid, /^subs\.json changed after this change was built from it/);
+  assert.equal(fs.files["subs.json"], before);
+  assert.deepEqual(Object.keys(fs.files), ["subs.json"]);
+  assert.match(written[0][0], /^subs\.json\.\d+\.[0-9a-f]{12}\.tmp$/, "a tmp name of its own");
+  assert.equal(written[0][1], "wx", "created exclusively");
+  assert.deepEqual(writeSubscriptions({ subscriptionsPath: "subs.json", fs, expect: [{ path: "subs.json", text: before }], mutate: (l) => [...l, kimiPlan] }), { ok: true });
+  assert.equal(JSON.parse(fs.files["subs.json"]).subscriptions[0].id, "kimi-for-coding");
 });
 
 test("readTriggers normalizes each on.type into its discriminated display record", () => {

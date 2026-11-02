@@ -1201,6 +1201,29 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   pre-spend check is the once-enforcement layer; the compose comment says so beside the mount, and a
   container restart picks up the current file. Native (service-unit) deployments reload live as
   designed.
+- **A newer file defers the one-shot; it is the one answer that does not fail open** (AMENDED 2026-11-02, issue #761,
+  `DES-STORE-VERSION-WHEN-NEEDED`). The triggers file has an optional `version`, and a file written by a newer
+  pi-dispatch may hold this one-shot's disarm in a shape this build cannot read (a renamed key, a mark this build would
+  not see as one). "Run", the check's answer for every other doubt, could then fire a spent one-shot again; "refuse"
+  would use up a delivery over a file nobody got wrong. So `readDisarmState` answers `newer` before it reads any entry,
+  `makeCheckOnceSpent` answers `{ newer }`, and the processor DEFERS the job (`newer-release`), first on the pre-spend
+  ladder, so nothing is minted, cloned or reserved, until a worker that reads the file takes it. While the triggers
+  watcher holds the file as newer, every job already defers at the processor's head, so this check is the backstop for
+  a write that landed before the reload. It judges the file's TEXT (`triggersFileNewer`), so a repeated `version` key
+  is a broken file here as it is to the loaders, never a newer one, and is read as before issue #761 (`JSON.parse`, the
+  last value): it answers run unless the file shows the one-shot disarmed.
+- **The disarm still writes into a newer file** (same amendment). It is the one writer that does: every other writer
+  refuses such a file because its rewrite would drop what the newer release wrote, while the disarm adds one key to
+  the document as read. It owns one key, `on.disarmed`, and writes it through `serialize` over the RAW document,
+  which keeps every top-level block, every key of every entry and of its `run`, and `version` itself; each value is
+  re-encoded through `JSON.parse` and `JSON.stringify`, as every write of this file is
+  (`DES-STORE-VERSION-WHEN-NEEDED`'s residuals say what that changes). Its identity checks run as before (an armed
+  one-shot at the index, for this item, on this job's lane, and no duplicate key), and the shared validator's refusal
+  of a newer file is the one refusal it does not take; any other still stops it. Refused, a run
+  that ended after the file turned newer would leave its one-shot armed, and an upgraded worker or receiver would fire
+  it again: a second paid run. A build that reads the newer version then loads the entry as disarmed, but only while
+  it still accepts the shape this build writes: so a release that raises the triggers file's version keeps accepting
+  `on.disarmed` as `{ at, jobId? }`, because an older build's disarm writes exactly that into the newer file.
 - **Code evidence**: `worker/src/triggers-file.mjs` → `writeTriggers`, `disarmTrigger`,
   `readDisarmState`, `makeDisarmOnce`, `makeCheckOnceSpent`; `worker/src/start.mjs` → the recordRun
   wrap and the `PI_TRIGGERS_FILE ?? ./triggers.json` resolution; `worker/src/processor.mjs` → the
@@ -3809,6 +3832,30 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     rebuilt from an empty overlay, because the rebuild erased the keys the file still held (a `maxCostUsd`)
     and turned refused jobs into jobs running at a wider cap. The operator fixes the named key or deletes
     the file.
+  - **A write carries what it cannot read, and a newer file is no broken one** (AMENDED 2026-11-02, issue #761,
+    `DES-STORE-VERSION-WHEN-NEEDED`). The file is shared by every console, panel and worker of a deployment, and during
+    an upgrade those run different releases. A key this build does not know is still dropped from the overlay it hands
+    out (a reader cannot apply what it cannot read, and `withoutOperatorOnly`'s block list keeps a future operator-only
+    key out of model-visible views only because such a key never enters the overlay), but every write now carries it
+    back with its value, in its place (`readOverlayDocument`'s `carry` into `writeOverlay`). Before, one `set` from an
+    older console deleted a key a newer release had added, silently, and a panel or console from before this release
+    still does (4.3.1 included: it drops every key it does not know, `secretBundles` among them), so a carried key is
+    safe only once every panel and console runs this release or later. Carrying alone is not enough for a key whose
+    ABSENCE narrows a job (a cap, a refusal), since an older worker still runs without it, so such a key declares the
+    version that introduced it (`SETTINGS_KEY_VERSIONS`, or `SETTINGS_VALUE_VERSIONS` for a range a later release
+    widens), the writer stamps `version` then and only then, and a worker that meets a version above its own DEFERS the
+    job (`newer-release`) at the processor's head, before any runtime or refusal, rather than refuse it
+    `settings-overlay-invalid` (and at the pickup's read for a file that turned newer since, which a refusal that
+    reads no settings can still precede, `DES-STORE-VERSION-WHEN-NEEDED`'s residuals): the file is not broken, the fix
+    is an upgrade, and a refusal would use up a forge delivery over a file nobody got wrong. Every admin write over
+    such a file is refused with the upgrade named, this bullet's fail-closed posture applied to a file this build
+    cannot judge. And the admin's write re-checks the file against its own read by default, because a carried key is
+    written back as it was at the read, which would otherwise roll back a write that landed in between. `version` is
+    not a setting and not in `KNOWN_KEYS`: the writer computes it from what it writes. Every earlier release read a
+    top-level `version` as an unknown key and dropped it, so one an operator wrote by hand is now judged: a value that
+    is not an integer of 1 or more makes the file invalid (every job refused, as above), and an integer above 1 reads
+    as a newer release's file (every job deferred); doctor's fix for a newer file says to remove a `version` the
+    operator added.
   - **One id shape for every source of a job's model** (issue #673). `model` and `provider` here, `PI_MODEL` and
     `PI_PROVIDER` at boot and `pi-dispatch run --model`/`--provider` are judged by the rule a trigger's
     `run.model`/`run.provider` already were: `modelIdProblem` and `providerIdProblem` in `worker/src/model-ref.mjs`,
@@ -7207,6 +7254,17 @@ free local model, or using a few successful live probes as proof of every routin
     and start.mjs pages it once (`pagesAsReturnedFailure`, also when the job lost its lock after returning). A recovery
     lost to a stall with no further recovery takes today's failure path. The processor refuses a recovery job numbered
     past the cap (`recovery-cap`, with its own comment) as a backstop.
+  - **A returned failure that then lost its lock** (AMENDED 2026-11-02, issue #761). The failed listener asks the
+    job's own record before the stall recovery: a `failed` record of this attempt that says `recovery-failed` (paged
+    once, never commented again) or `recovery-enqueued` (nothing owed) ends it there. That record is read from this
+    host's file AND the run mirror, each side held to the rule below first and the higher attempt kept among what
+    passes (`previousRecord` with `keep`; before, this host's file whenever one existed, so a host holding an earlier
+    attempt's file missed this attempt's record in the mirror), and is taken only when it is this attempt's under the
+    rule the failed listener's own-record check and the failover wait share
+    (`recordOfThisJob`, the same id, this attempt, and not older than the job: its `startedAt`, or its `endedAt` when
+    it has none, as the stall listener's own `recovery-enqueued` record may, no earlier than the job's enqueue time
+    less `RECORD_CLOCK_SKEW_MS`; the id and the attempt were checked before too). A record older than the job (left
+    under a reused id) no longer suppresses anything: the job goes to the stall recovery or the failure path.
   - **Never-started faults of a recovery wait, they do not fail.** A recovery job has one attempt, so every
     never-started `InfraRetry` it throws (a pointer read, a ledger write, a restore that met a lock, a failed trust
     reset) becomes a `RecoveryWaitHold` of 60 s (`RECOVERY_RETRY_WAIT_MS`, `recovery_retry_held`): delayed without
@@ -16743,12 +16801,237 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 - **Traces to**: `REQ-DISPATCHERS`, `CONST-TRIGGER-AUTHOR-GATE`, `REQ-CONSOLE-SECURITY`,
   `REQ-OPERATOR-CONSOLE-ACTIONS`, `INT-CONSOLE-AUDIT-LOG`, `INT-TRIGGERS-FILE-CONTRACT`, `OQ-057`.
 
+## DES-STORE-VERSION-WHEN-NEEDED
+
+- **Decision** (issue #761): a store that outlives a release and had no version gets an OPTIONAL integer `version`,
+  absent meaning 1, under ONE rule (`worker/src/store-version.mjs`, a leaf with no imports, so the receiver and the
+  console share it; `worker/src/job-data-version.mjs` applies it to queued job data, whose field is `dataVersion`).
+  Each store declares, in a frozen table, the fields whose ABSENCE an older build would misread (a field that narrows
+  a job: a cap, a refusal, a model list, a pause), each with the version that introduced it. A writer writes the
+  LOWEST version its content needs, which is nothing at all while that is 1, so a store of today's content stays byte
+  for byte what it was, and an older reader is turned away only by content it would misread. The store's own
+  `*_VERSION` constant is the highest version this build reads and equals its table's largest value (or 1); a test
+  holds every store to that (`versionTableProblems`). Today every table is empty and every version is 1, so this
+  change writes nothing new into any of these stores (run records gain `v`, below) and only teaches every reader and
+  writer what a newer one means. The stores: the settings overlay (`SETTINGS_VERSION`, `SETTINGS_KEY_VERSIONS`, and
+  `SETTINGS_VALUE_VERSIONS` for a value a later release allows where this one refuses), the pause windows file
+  (`PAUSE_WINDOWS_VERSION`, `PAUSE_WINDOW_FIELD_VERSIONS`), the triggers file (`TRIGGERS_FILE_VERSION`,
+  `TRIGGER_RUN_FIELD_VERSIONS`, `TRIGGERS_BLOCK_VERSIONS`), queued job data (`JOB_DATA_VERSION`, `JOB_DATA_FIELD_VERSIONS`), the sandbox manifest
+  (`SANDBOX_MANIFEST_VERSION`, `SANDBOX_MANIFEST_FIELD_VERSIONS`), and the projects file's writer
+  (`projectsVersionFor`, `PROJECTS_FIELD_VERSIONS`; that file's `version` was already required). Two answers are kept
+  apart on purpose: a version above this build's is NEWER, which is no fault in the file and whose fix is an upgrade;
+  a version that is not an integer of 1 or more is a broken file and keeps that store's ordinary refusal or repair
+  (job data and a manifest, which no operator edits, treat it like a newer one, since nothing here wrote it: the job
+  waits, re-checked every ten minutes and spending nothing, until an operator cancels it, and the manifest does not
+  open). A file that uses a field above the version it declares was written by hand or
+  by a writer that dropped the stamp, and is refused like a broken file (`underDeclared`). A repeated `version` key is
+  a broken file wherever the store refuses a repeated key, never a newer one: the overlay refuses it, the triggers
+  file's loaders refuse it, and no reader of the triggers file reads it as newer (the per-job readers, and the
+  console's triggers view when the parsed `version` reads newer, judge the file's TEXT for that reason; the console's
+  view still shows a repeated key whose last value does not read newer as leniently as before); the pause windows
+  file has never refused a repeated key, so there its last value counts, as for every key in it.
+- **A field table, and a value table beside it.** A field table cannot say that an EXISTING field now takes a wider
+  value (a new condition kind in `waitFor`, a new `on.type`, a new form of a window's `days`), and an older build
+  meeting such a value refuses it as broken, with no stamp to say the fix is an upgrade: a job refused `wait-unreadable`
+  or `config-refused` posts a comment, writes a record and disarms a one-shot, and a pause windows or triggers file it
+  calls broken leaves it running on its last good copy. So each of the four stores whose newer content defers a job
+  also declares a VALUE table beside its field table, `field -> (value) => the version that value needs`, frozen and
+  empty until a value needs one: `SETTINGS_VALUE_VERSIONS`, `PAUSE_WINDOW_VALUE_VERSIONS` (a window's fields),
+  `TRIGGER_VALUE_VERSIONS` (a trigger entry's fields), `TRIGGER_RUN_VALUE_VERSIONS` (its `run` keys),
+  `TRIGGERS_BLOCK_VALUE_VERSIONS` (each top-level block, the rule handed the whole block) and `JOB_DATA_VALUE_VERSIONS`
+  (job data's top-level fields). The writer stamps the version a value needs (`valueNeededVersion`: the highest any
+  rule answers), and a reader refuses a value that needs more than the file declares as an ordinary config error, for
+  the reason it refuses such a field (`valueUnderDeclared`; "pause window at index 1: days holds a value that needs
+  pause-windows file version 2, and the file declares 1: <path>", and the same words for a trigger entry's field, a
+  `run.<key>` and a top-level block). A rule runs over a file's raw content, so one that THROWS counts as 1: a value it
+  was not written for is the store's own validator's to judge, never a reason to crash the reader. `valueTableProblems`
+  holds each value table to the rule as far as a rule can be judged without running it (frozen, every key a field the
+  store knows, every value a function). The sandbox manifest and the projects file have field tables only. An
+  exported closed list whose new member an older build refuses is pinned at this release's members, and a member added
+  later needs a rule in the value table of every store that carries it (`worker/test/store-versions-files.test.mjs`,
+  which also widens each list by one member and fails until every table it names has that rule):
+  `WAIT_CONDITION_KEYS` (`JOB_DATA_VALUE_VERSIONS.waitFor` and `TRIGGER_RUN_VALUE_VERSIONS.waitFor`), `FORGE_KINDS` as
+  a pause scope's prefix (`PAUSE_WINDOW_VALUE_VERSIONS.scope`), `DAYS` (`PAUSE_WINDOW_VALUE_VERSIONS.days`),
+  `RUN_KINDS` (`TRIGGER_RUN_VALUE_VERSIONS.kind` and `JOB_DATA_VALUE_VERSIONS.kind`: this build refuses a job of a kind
+  it does not know `config-refused` at the token mint, recorded and commented, so only a stamp makes an older worker
+  defer it), `ON_TYPES`, `PR_ACTIONS`, `ISSUE_ACTIONS` and `REVIEW_STATES` (`TRIGGER_VALUE_VERSIONS.on`),
+  `EXCLUDABLE_TOOL_NAMES` and `MCP_EXCLUDABLE_TOOL_NAMES` (`TRIGGER_RUN_VALUE_VERSIONS.excludeTools`; the first is
+  generated from the pinned pi by `pi-derived.mjs`, so a pi bump that adds a built-in tool turns the test red until the
+  rule is added), `BACKEND_NAMES` (`TRIGGER_RUN_VALUE_VERSIONS.backend` and `JOB_DATA_VALUE_VERSIONS.backend`; an older
+  worker refuses an unknown venue `backend-unblessed`), `FORGE_MCP_KINDS` (`TRIGGER_VALUE_VERSIONS.run`, the one table
+  that sees both the kind and `mcp`, and `JOB_DATA_VALUE_VERSIONS.mcp`, whose rule judges one field and so stamps every
+  job that names the forge server; an older worker refuses `mcp-server-unknown`), `ANSWER_CATEGORIES`
+  (`TRIGGERS_BLOCK_VALUE_VERSIONS.answerRules`), `WATCH_SEVERITIES` (`TRIGGERS_BLOCK_VALUE_VERSIONS.watchSources` and
+  `TRIGGER_VALUE_VERSIONS.on`), `FORK_THINKING_LEVELS` (`JOB_DATA_VALUE_VERSIONS.thinkingLevel`; refused
+  `thinking-level-unsupported`) and `BUNDLE_FORMATS` (`SETTINGS_VALUE_VERSIONS.secretBundles`). A closed list written
+  inline, with no exported name, is not pinned (Residuals).
+- **A `version` that earlier releases ignored is now read.** Before issue #761 a top-level `version` in the settings
+  overlay, the pause windows file or the triggers file was an unknown key, which every reader ignored. One an operator
+  wrote by hand (a revision number of their own) now meets the rule: a value that is not an integer of 1 or more makes a
+  pause windows or triggers file refuse a service's start (a live edit keeps the last good copy, as for any file that
+  does not load) and makes the overlay invalid, so every job is refused `settings-overlay-invalid`; an integer above 1
+  reads as a newer release's file, so every job defers. No release writes one yet, so the fix is to remove it: doctor's
+  fix for a newer file (`newerFileFix`, one sentence for the three files) says so, and so do the upgrade notes in
+  `docs/backup.md`, `docs/pause-windows.md` and `docs/triggers.md`.
+- **What each writer carries that it does not know.** A version only protects what an older reader would otherwise
+  drop or misread, so the carry level is part of each store's rule:
+  - the settings overlay: every TOP-LEVEL key this build does not know, written back as read and in the file's own
+    order (`readOverlayDocument`'s `carry`), never one a caller adds; a closed nested shape (a `secretBundles` entry)
+    still refuses an unknown field, which is why a field added there needs a value rule. Only a panel or console of
+    this release or later carries: an earlier one (4.3.1 included) drops every key it does not know, `secretBundles`
+    among them, so every panel and console is upgraded first;
+  - the pause windows file: every top-level key but `windows` and `version`, in place (`pauseWindowsText`, the one
+    serializer both writers use; a panel or console from before this release writes `windows` alone); a window's own
+    fields are its writers', so a new one declares a version;
+  - the triggers file: every top-level key (since issue #704, which no release before this one holds: a 4.3.1 panel,
+    console or disarm writes `triggers` alone) and each entry's raw `run` keys, which the loaders drop when they do not
+    know them;
+  - the sandbox manifest: a pin rewrites it with every key kept;
+  - the projects file: an entry is a closed shape its writers rebuild, so nothing is carried and a field that changes
+    which scope a project holds declares its version;
+  - job data: every builder takes an explicit field list, so a field this build does not know is dropped on a
+    rebuild; the stamp turns that rebuild into a refusal (`code: "newer-release"`) and the caller answers with a reply;
+  - run records: written whole by the worker and never edited by a reader. They keep their own rule, below.
+- **Newer means defer, and why.** A worker that meets job data, or a settings, triggers or pause windows file, written
+  by a newer pi-dispatch DEFERS the job (`newer-release`, bucket `ready`, `INT-DEFER-REASON-KEY`), re-checked every ten
+  minutes (`NEWER_RELEASE_RECHECK_MS`), before any mint, clone or reservation and without spending an attempt: job data
+  first thing in the processor (a `dataVersion` that is not an integer of 1 or more too); the triggers file by a
+  worker-wide state its watcher keeps (`triggers_reload_newer`), which holds every job right after the job data's gate,
+  a cron job minted from the last good schedules included, and by the one-shot, skew and approval checks' own live reads
+  (`NewerReleaseHold`); the overlay at the processor's head too (`settings_overlay_newer`), right after the triggers
+  file's gate and before the console-draft source check, every runtime and every refusal, so no refusal that runs before
+  the pickup's settings read (the question grouping's, the never-fits size, the wait gate's) can comment, record or
+  disarm a one-shot over a file that is newer at the head's read, and again at the pickup's own read, for a file that
+  turned newer between the two (the head read only asks that question; every value a job runs with comes from the
+  pickup's read; a question-grouping job, and a watch job whose rule decides in its dispatch phase, read the file once
+  more in their runtime, and the secret-bundle lookup reads it once more for a job with a project on a host with no
+  triggers file and no environment bundle profile); the pause windows file by a state its watcher keeps
+  (`pause_windows_reload_newer`), right before the pause gate, which a job meets early in the pickup, before any hold
+  or spend (a watch job before its runtime too; a job ended earlier, by the draft-source check, the
+  `local-folder-is-sandbox` check, a runtime's own result, a lost lock's replay or a grouping job's deleted project,
+  never reaches it, and nothing is spent on those paths); a model failover retry whose previous
+  attempt's run record a newer release wrote, with no model attempt key, at the selection (below); a watch job's
+  runtime before it takes a finding; and the answer-draft and question-grouping runtimes before any write, which read
+  the triggers file (the grouping the settings too) and answer `{ newer }` where they used to refuse
+  (`question-group-refused`, `question-group-config-changed`) or throw and use up an attempt ("answer draft inputs
+  could not be read"). Running is wrong because the newer content may narrow the job (a cap, a model list, a pause, a
+  one-shot's disarm) in a way this build cannot see, and the last good copy every reader would fall back to is no
+  longer what the operator wrote. Refusing is wrong because a refusal uses up a forge delivery (its id deduplicates a
+  redelivery for 31 days), spends a one-shot and writes a record built from data this build cannot read, over a file
+  nobody got wrong; a deferral loses nothing and costs nothing, and an upgraded worker takes the job on its next look.
+  The one exception is a park after a paid run on a newer triggers file: a deferral would run the paid container
+  again, so it records `approval-policy-unavailable` with its own comment, which names the upgrade. Every WRITER
+  (panel, console, tools) refuses to write over a newer file with nothing written: its own stamp would otherwise lower
+  the version under content it does not understand. The one writer that writes into one is the worker's one-shot
+  disarm, which owns one key and writes it with every other key kept (`DES-ONE-SHOT-DISARM-IN-THE-FILE`). A writer
+  judges the raw `version` alone, so a file that is merely broken keeps that writer's answer for a broken file: the
+  triggers and pause windows writers repair it, a broken `version` included, and the overlay's refuses it with its
+  reason. A newer sandbox manifest refuses an open and a pin (`manifest-newer`), while the retention sweep never asks
+  the version: the deadline fields keep their meaning in every version, so an older worker still deletes a newer run
+  on time.
+- **Run records keep a different rule.** Every record carries `v` (1) as its last key, written always, and it rises
+  only when an EXISTING field changes meaning, unit or type: a new field is additive and nullable or conditional, and
+  a version for one would only make older readers drop records they can read. Eight fields, the stable core
+  (`RECORD_CORE_FIELDS`), keep their meaning in every version, so a reader can always say which run a newer record is,
+  how it ended, when, where and for which project; a fold that adds up anything past them skips such a record and
+  says how many, and every page shows its core alone (`INT-RUN-HISTORY-FILE-CONTRACT`). The worker reads it by its
+  core too wherever it judges a settled attempt: a lost lock replays its outcome alone and pages nobody, and a retry
+  carries none of its touches and does not take it as a run that never started. Whether a record is a job's own
+  attempt's goes by one rule (`recordOfThisJob`), used by the failed listener's own-record check and the failover
+  wait: the same job id, that attempt, and not older than the job (its `startedAt`, or its `endedAt` when it has no
+  start, no earlier than the job's enqueue time less `RECORD_CLOCK_SKEW_MS`), because ids are reused and a record an
+  older job left under the same id answers for nobody. The lost-lock settle check (`recordVerdict`) shares its id and
+  attempt checks, and judges a settling record's age by its `startedAt` alone, as before this release: the end
+  fallback is for the stall listener's own `failed` record, and a `failed` record never settles. A model failover
+  retry that has no model attempt key to lock to, and whose previous attempt's record passes that rule, would have to
+  judge the record, so it DEFERS `newer-release` at the selection, after the pickup's settings read and before the
+  endpoint gate, every hold given back first: refused (`model-failover-no-candidate`), it would comment, record, use up
+  a delivery and disarm a one-shot over work nothing is wrong with. A stale newer record under a reused id does not
+  make the retry wait. The failed listener, on a lost lock, logs a settled newer record by its outcome alone and pages
+  nobody. It reads its own record from this host's file and the run mirror, keeping the higher attempt among the
+  records that pass the rule, and on this
+  attempt's newer `failed` one it takes the terminal failure path without its comment: the line is
+  `job_lost_lock_after_completion`, the approval claim is closed, an answer draft is refused, the inbox and held
+  replies are closed unless the job is recovery-armed (a recovery the newer host queued keeps the run id and must find
+  them open), and one page goes out (the hook's argv carries `infra`); nothing is posted, no recovery is requested and
+  no record is written, because its `reason` cannot tell a run handed to a recovery from a failed one, and the newer
+  host already reported its own outcome. A `v` that is not a positive integer
+  is read the same way, since no release writes one. The record is now written to a temporary file and renamed, so a
+  crash leaves the previous record or the new one.
+- **The release rule: a stamp protects only against readers at this release or later.** A build from before issue
+  #761 reads every store without its version and drops what it does not know, so the first row in any of these
+  tables, field or value, must not ship until every host, and every panel and console that writes the store, runs
+  issue #761's release or later. Each worker publishes the highest version it reads of four stores
+  (`INT-HOST-REGISTRY-CONTRACT`), and doctor's `fleet.store-versions` names a peer that publishes a lower one or none
+  while this host's file needs more than 1. It is a warning; nothing refuses on it. The other way round, a release that
+  raises the triggers file's version keeps accepting `on.disarmed` as `{ at, jobId? }`: an older build's disarm writes
+  that shape into the newer file (`DES-ONE-SHOT-DISARM-IN-THE-FILE`), so a newer loader that refused it would refuse
+  the whole file over a disarm.
+- **Rejected**:
+  - *Stamping the current version on every write.* Every reader older than the writer would refuse every file,
+    including the ones it reads perfectly well, so an upgrade of one console would stop a fleet.
+  - *A required `version`.* Every existing file and every hand-written one has none, so requiring it refuses them all
+    at the upgrade; absent meaning 1 costs nothing. (The scoped-limits, projects, subscriptions and envelope files
+    required one from their first release and keep it.)
+  - *Comparing release numbers.* A release number says nothing about which fields a file uses, so it refuses too much
+    and protects nothing a field table does not.
+  - *Carrying unknown keys without a version.* The key survives on disk, and an older worker still runs the job
+    without it, wider than the file says. Carrying keeps the data; only the version keeps the older reader away.
+  - *Refusing a newer job or file.* Above: it uses up the delivery and the one-shot, and is a policy refusal of work
+    nothing is wrong with, while a deferral waits for the reader that can run it.
+- **Residuals**: the triggers file's worker-wide state is set by its watcher's reload, so a worker without one (no
+  `PI_TRIGGERS_FILE`, or a platform without `fs.watch`) never sets it; the one-shot, skew and approval reads and the
+  answer-draft, question-grouping and watch runtimes still defer there, and every other live reader of the file answers
+  as it does for a file that does not load. Output collected after a paid run on a triggers file that turned newer
+  during it is still judged on that file: a watch run marks its finding `watch-config-changed`, the answer-draft and
+  question-grouping runtimes' `collect` takes it as a failure (the grouping `failed`, the draft `failed` or
+  `output-invalid`), and the answer-draft `afterPark` logs `answer_rule_unavailable` and captures no draft intent for
+  that park; none of them spends anything new. A wider value is covered only where a value table and its bolt reach: a
+  scope string's form (an absolute folder, `<forge>:owner/name`, a bare `owner/name`) has no exported list and no value
+  rule (a forge kind in a scope is covered through `FORGE_KINDS`), and the scoped-limits file, which reads scopes
+  through the same `parseScopeString` and `FORGE_KINDS`, is outside this rule, under its own version (`limitsVersion`).
+  The disarm, like `writeTriggers` for any file, re-encodes the whole document through `JSON.parse` and
+  `JSON.stringify`: a number beyond 2^53 loses precision, `1e400` becomes `null`, `-0` becomes `0`, and keys named by
+  an integer move to the front of their object; every key, `version` included, survives. A settings file that turns
+  newer between the head's read and the pickup's can still meet a refusal that does not read the settings (an
+  unreadable wait condition, a job too big for the host), which comments, records and disarms a one-shot as it would
+  with today's file. On a lost lock, this attempt's `failed` record from a newer release is settled by its outcome, so
+  for an ordinary failure the comment this build owes is not posted (only the page), and for a newer
+  `recovery-enqueued` record a page goes out that was not owed; and when such a record was an ordinary failure of a
+  recovery-armed steer or awaitInput job that the newer host did not settle, its inbox and held replies stay open
+  until their keys expire (an hour each); all only while the fleet runs two releases. The rule for a job's own
+  record is not yet everywhere: `retryNeverStarted`, the `earlier` interval (`earlierFrom`) and the touches a retry's
+  record carries still take a readable prior record without it, and a recovery's superseded check (`processor.mjs`)
+  matches a record's id and outcome but not its age. A failover retry waiting on a newer previous record waits until
+  it is cancelled on a fleet with no newer host while the record stays, and one that the selection would refuse waits
+  too instead: an invalid fallback list, a local folder holding subscription auth
+  (`local-folder-holds-subscription-auth`), and the subscription check after the selection, since those checks run
+  inside the selection the wait skips or on the model it selects. A closed list written inline, with no exported
+  name, is not pinned, so a member a later release adds to it gets its value rule only if its author adds one: a
+  settings `secretBundles` entry's fields; in the triggers file a `secretBundles` entry's fields, an endpoint's
+  fields and `auth` forms, `on.disarmed`'s fields, a watch trigger's `run` fields, mode, `run.issue` fields, issue-mode fields, investigate
+  venues, `queryLogs` fields and scheme, its `on` and `on.match` fields and its `decide` block, a watch source's fields,
+  `verify`, `pull.kind` and per-kind fields, the duration units, the `answerRules` and `standingAnswers` fields,
+  `answerRules[].mode`, a standing answer's forge prefix, `zeroTouch`'s and a model role's fields, and the approval
+  gates refused as unsupported (a gate a later release supports is refused by an older loader, and by an older worker as
+  `approval-config-invalid`); in job data a fork's fields, position and target type, and the wait target's kinds. The
+  pinned pi catalog (a watch `decide.model`, a job's provider and model) and a job image's forge label are vocabularies
+  of their own pin. A record written in place (the fallback) keeps the old exposure to a crash mid-write, and says so in
+  the log; on Windows, which has no `O_NOFOLLOW`, that fallback still writes through a symbolic link at the record's
+  name. A power cut can still lose a record write the disk had not flushed: the record writer does not fsync.
+- **Traces to**: `INT-CONFIG-OVERLAY-CONTRACT`, `INT-PAUSE-WINDOWS-FILE-CONTRACT`, `INT-TRIGGERS-FILE-CONTRACT`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-SANDBOX-CONTRACT`, `INT-PROJECTS-FILE-CONTRACT`,
+  `INT-SUBSCRIPTIONS-FILE-CONTRACT`, `INT-HOST-REGISTRY-CONTRACT`, `INT-DEFER-REASON-KEY`,
+  `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `DES-ONE-SHOT-DISARM-IN-THE-FILE`, `DES-WAITING-REASONS`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
+
 ## Revision History
 
 | Date | Change |
 |---|---|
 | 2026-11-02 (#754, #792; independent implementation review) | DES-SANDBOX-GATEWAY-ATTACH-ONLY records the sibling-cookie fixation counterexample, HTTPS prefix-only binding, synchronous pre-attach deadline checks and bounded pending control queue. DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY also records the explicitly approved five-callable-identity facade correction verified against exact pi 1.4.0 and 1.5.0 artifacts. Production pi pins, policy/brake behavior, console CSP/cookies, native lifecycle and paid admission UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, #793; approved extension) | DES-SANDBOX-GATEWAY-ATTACH-ONLY and DES-OPERATOR-CONSOLE amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
+| 2026-11-02 (#761, store versions) | **NEW `DES-STORE-VERSION-WHEN-NEEDED`**: one shared rule for a store that outlives a release and had no version: an optional `version`, absent meaning 1, written only when a field in the store's frozen field table, or a value in its value table, needs more (value tables for the settings overlay, the pause windows file, the triggers file's entries, `run` keys and top-level blocks, and job data; `valueNeededVersion`, a throwing rule counting as 1; every table empty today, so nothing new is written); a field or value above the declared version refused as an ordinary config error; every exported closed list whose new member an older build refuses pinned so that a new member needs a value rule in every store that carries it (`WAIT_CONDITION_KEYS`, `FORGE_KINDS` as pause scopes, `DAYS`, `RUN_KINDS`, `ON_TYPES`, `PR_ACTIONS`, `ISSUE_ACTIONS`, `REVIEW_STATES`, `EXCLUDABLE_TOOL_NAMES`, `MCP_EXCLUDABLE_TOOL_NAMES`, `BACKEND_NAMES`, `FORGE_MCP_KINDS`, `ANSWER_CATEGORIES`, `WATCH_SEVERITIES`, `FORK_THINKING_LEVELS` and `BUNDLE_FORMATS`), a list written inline a residual; a top-level `version` that earlier releases ignored is now read, so one written by hand is removed; a repeated `version` is broken, never newer, wherever the store refuses a repeated key, and no reader of the triggers file reads it as newer; what each writer carries that it does not know (an overlay key only by a panel or console of this release or later); a newer job or file, or a `dataVersion` that is not an integer of 1 or more, defers the job (`newer-release`) before any spend, without an attempt: the overlay at the processor's head, before every runtime and refusal, for a file newer at that read, and again at the pickup's read; the pause windows file at the pause gate, which a job meets early in the pickup (a job ended earlier spends nothing); the answer-draft and question-grouping runtimes before any write; and a model failover retry with no model attempt key whose previous record a newer release wrote, at the selection, instead of a `model-failover-no-candidate` refusal; a park after a paid run is the one exception to deferring; every writer but the one-shot disarm refuses to write over a newer file; a newer sandbox manifest refuses an open and a pin while the sweep ignores the version; run records' unconditional `v` and stable core, read by the core wherever the worker judges a settled attempt, and one rule for a job's own attempt's record (`recordOfThisJob`: the same id, that attempt, and not older than the job by its `startedAt`, or its `endedAt` when it has none), used by the failed listener's own-record check (which reads this host's file and the run mirror, each side held to the rule before the higher attempt is kept) and the failover wait (a stale newer record under a reused id makes no retry wait), while the lost-lock settle check shares its id and attempt checks and judges a settling record's age by its start alone, as before; on a lost lock, this attempt's newer `failed` record takes the terminal failure path without its comment (the line `job_lost_lock_after_completion`, the approval claim closed, an answer draft refused, the inbox and held replies closed unless the job is recovery-armed, one page whose argv carries `infra`; no comment, recovery request or record); the release rule that a stamp protects only against readers at issue #761's release or later, and that a release raising the triggers file's version keeps accepting `on.disarmed` as `{ at, jobId? }`; the residuals (a worker without the triggers watcher, output collected after a paid run on a file that turned newer, scope forms and the scoped-limits file, the disarm's and the triggers writer's JSON re-encoding (numbers beyond 2^53, `1e400`, `-0`, keys named by an integer), a settings file that turns newer between the head's and the pickup's reads, a newer `failed` record's comment not posted or its page not owed, and a recovery-armed run's inbox and held replies left to expire when that record was an ordinary failure the newer host did not settle, the prior-record uses that do not apply the rule yet (`retryNeverStarted`, `earlierFrom`, the touches, and a recovery's superseded check, which does not judge age), a failover retry that waits while the newer record stays or that the skipped selection would refuse (an invalid fallback list, `local-folder-holds-subscription-auth`, the subscription check after the selection), the closed lists written inline, the in-place fallback and Windows, no fsync). Rejected: stamping the current version on every write, a required version, comparing release numbers, carrying unknown keys without a version, refusing newer work. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` AMENDED**: a write carries the keys this build does not know (a panel or console from before this release still drops them), a newer file defers the job at the processor's head instead of refusing it (and at the pickup's read for one that turned newer since), a hand-written `version` is now judged, and the admin's write re-checks against its own read by default. **`DES-ONE-SHOT-DISARM-IN-THE-FILE` AMENDED**: a newer triggers file defers the one-shot, the one answer of its check that does not fail open (a repeated `version` is broken there, never newer), and the disarm still writes its one key into a newer file with every other key and `version` kept (each value re-encoded, as by every write of the file), so a one-shot whose file turned newer during its run is not fired again, and a release that raises the file's version keeps accepting `on.disarmed` as `{ at, jobId? }`. **`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST` AMENDED**, for every release, a new bullet: a returned `recovery-failed` or `recovery-enqueued` failure that then lost its lock is found by reading this host's file and the run mirror, each side held to `recordOfThisJob` before the higher attempt is kept (before: this host's file whenever one existed), so a record older than the job (a reused id) goes to the stall recovery or the failure path instead of suppressing it, while a #645 record with `startedAt: null` still counts by its `endedAt`; the rest of the entry UNCHANGED, checked. UNCHANGED, checked: `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` (the lost-lock settle check's answers are those of before this release: the same id, `attempt` equal to `attemptsMade`, an outcome other than `failed`, and a `startedAt` no earlier than the job's creation less `RECORD_CLOCK_SKEW_MS`, now through the id and attempt checks it shares with `recordOfThisJob`; the one exception to the entry's failed-listener comment, a newer release's `failed` record of this attempt settled without it, is recorded under `DES-STORE-VERSION-WHEN-NEEDED`, as #645's exception is under its own entry), `DES-RUN-HISTORY-FLAT-FILES-NO-DB` (still one flat file per job and no database; the write now goes through a temporary file and a rename, `INT-RUN-HISTORY-FILE-CONTRACT`), `DES-TRIGGERS-UNIFIED-FILE` (one file and one shared parser, which now also judges the version), `DES-WAITING-REASONS` (one more reason, written through the same `deferTo`) and `DES-DOCTOR-RESULTS-PUBLISHED` (two more named ids in the `NAMED_CHECK_IDS` it cites). `constitution.md` UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS` (every `newer-release` deferral comes before the token mint, the clone and the budget reservation) and `CONST-RETRY-INFRA-ONLY` (a newer store is neither a determinate refusal nor an infrastructure failure: the job is moved to the delayed set without spending an attempt, and the park after a paid run returns a policy result, never a retry; the lost-lock gate still takes only a record started no earlier than the job less 5 minutes). |
 | 2026-11-02 (#776) | Four NEW PROPOSED entries, spec only: `DES-DISPATCHER-ADMISSION` bounds new producers, caps, semantic duplicates and crash reconciliation; `DES-DISPATCHER-DECISION-ENGINE` selects deterministic collection and fresh per-event classifier containers; `DES-DISPATCHER-LLM-ENGINE` keeps correlation in fresh read-only jobs of at most thirty minutes; `DES-DISPATCHER-TRIGGER-PROPOSALS` keeps bounded private proposals and validated adoption with a person. `DES-WATCH-DETERMINISTIC-PRODUCER`, `DES-DECISION-MODEL-BEFORE-THE-JOB` and `OQ-053` UNCHANGED, checked: their resident-agent rejections stand; the alternative explicitly offered by #776 is selected, and contrary card claims are marked through generators. `DES-JOB-OUTBOX-CHAINING`, `DES-DOLLAR-RESERVE-AND-SETTLE` and `DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: generic chains, existing holds and #766 delegation are not widened. To be AMENDED by later builds: `DES-AI-TRIGGER-FLOW-GATE` for the new producer and current-list revalidation, and `DES-OPERATOR-CONSOLE` for the new screens and audited person actions. No runtime code or executable interface is added. |
 | 2026-11-01 (#774, subscription guide review) | `DES-HOST-OWNED-SUBSCRIPTION-AUTH` corrects the local OpenAI callback mirror to pinned pi's explicit `127.0.0.1` redirect, with authorization/exchange and callback counterexamples. Provider-key guidance revealed the former `localhost` drift; the upstream whole-file hash alone did not compare local semantics. Connection-policy validation is moved without schema changes into an SDK-free leaf for safe console metadata. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, refresh/custody, billing routes and public snapshots UNCHANGED, checked; no live sign-in is claimed by offline verification. |
 | 2026-11-01 (#774, provider management) | `DES-BROWSER-FIRST-RUN-SETUP` AMENDED: Connections owns a permanent Provider API keys editor with complete safe inventory, explicit provider/mode binding, separate Add/Replace preconditions, derived shared-slot warnings and no retained old credential. Setup keeps a compact link after readiness. Reviewed static official help and separate host subscription guides include OpenRouter/DeepSeek, OpenAI callback recovery and honest Claude community/Claude Code distinctions. Host grant, no browser OAuth, selected job credential forwarding, default/model routing, budgets, CSP and all other console/setup decisions UNCHANGED, checked. |

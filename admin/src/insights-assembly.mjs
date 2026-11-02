@@ -53,6 +53,7 @@ import { parseHostBackends } from "@edgehero/pi-dispatch/backends";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "@edgehero/pi-dispatch/config";
 import { parseLiveJobs, parseJobsMore } from "@edgehero/pi-dispatch/live-jobs";
 import { deploymentDollarCaps } from "./dollar-windows.mjs";
+import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
 import { windowState } from "@edgehero/pi-dispatch/budget";
 
 /** The environment a caller that names none reads: this process's own. */
@@ -97,21 +98,32 @@ export function envelopeProblem(r) {
  * records, so every aggregate -- daily, plans, provenance -- is scoped, not just one table. Returns
  * `{ fold }`, or scanRunRecords' `{ unreachable }` passed through for the caller to surface. `pricing` is the
  * façade (`needPricing`).
+ *
+ * A record from a NEWER pi-dispatch is left out before any scope (issue #761, `readableRecords`): its flow, target and
+ * money are past the stable core, so no filter or fold here can read it. The fold says how many in `newerSkipped`
+ * (present only when there were any), counted over the window the fold reads and narrowed by `project`, a core field,
+ * but never by `flow` or `repo`, which are not; the `records` returned beside it hold none, so a caller's further
+ * folds never meet one.
  */
 export function assembleCosts(paths, window, { flow, repo, project, pricing, nowMs = Date.now() } = {}) {
   needPricing(pricing);
   const sinceMs = costsSinceMs(window, nowMs);
-  const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
-  if (!Array.isArray(records)) return records; // { unreachable }
+  const scanned = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
+  if (!Array.isArray(scanned)) return scanned; // { unreachable }
+  const { records } = readableRecords(scanned);
   const subs = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
+  const byProject = typeof project === "string" && project !== "";
+  // A flow or repo filter cannot be judged on a newer record, so under one the count stays the window's (the
+  // project's, when one is given), as `dispatch_costs` describes it.
+  const newerSkipped = newerInScope(scanned, { nowMs, project: byProject ? project : null });
   const flowScoped = typeof flow === "string" && flow !== "" ? records.filter((r) => (r?.flow ?? null) === flow) : records;
   // The repo filter applies at the same records level as the flow one, so EVERY fold arm scopes --
   // one table filtered against unscoped siblings would misread as attribution. `recordInRepo` (issue #498): a bare
   // "acme/web" selects that repo on every forge, a qualified "github:acme/web" (the byRepo rollup's key) one forge.
   const repoScoped = typeof repo === "string" && repo !== "" ? flowScoped.filter((r) => recordInRepo(r, repo)) : flowScoped;
   // Issue #499 part C: the project filter at the same records level, by the id each record carries (never re-derived).
-  const projectScoped = typeof project === "string" && project !== "" ? repoScoped.filter((r) => recordInProject(r, project)) : repoScoped;
-  const scoped = projectScoped.filter((r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "") <= nowMs);
+  const projectScoped = byProject ? repoScoped.filter((r) => recordInProject(r, project)) : repoScoped;
+  const scoped = projectScoped.filter((r) => recordInstant(r) <= nowMs);
   // The trigger join over the SCOPED records (a flow-filtered fold attributes only what it folds),
   // the same file-read-plus-pure-fold path the dashboard seam takes.
   const triggersView = readTriggers({ triggersPath: paths.triggersPath });
@@ -125,6 +137,7 @@ export function assembleCosts(paths, window, { flow, repo, project, pricing, now
     sinceMs, // the same instant the scan cut at -- proration denominates on the requested window
     triggerJoin,
   });
+  if (newerSkipped > 0) fold.newerSkipped = newerSkipped;
   return { fold, records: scoped };
 }
 
@@ -142,7 +155,9 @@ export async function assembleGraph(paths, { pricing, project, fullPaths = false
   const triggerList = Array.isArray(triggers?.triggers) ? triggers.triggers : [];
   const schedulers = await readSchedulersFn({ url: paths.valkeyUrl });
   const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs: nowMs - GRAPH_LIMITS.windowDays * 24 * 60 * 60 * 1000, nowMs });
-  const recs = Array.isArray(records) ? records.filter((r) => !project || recordInProject(r, project)) : [];
+  // A newer release's record is left out of every count below (issue #761): its trigger, chain and target are past the
+  // stable core.
+  const recs = Array.isArray(records) ? readableRecords(records).records.filter((r) => !project || recordInProject(r, project)) : [];
   // Spend badges (issue #175): the dashboard seam's twin -- one subscriptions read, two pure folds.
   const subsView = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
   const triggerJoin = attributeRunsToTriggers({ records: recs, triggers: triggerList });
@@ -270,7 +285,10 @@ export function splitCounts(records) {
   if (!Array.isArray(records)) return null;
   const refusals = Object.fromEntries(SPLIT_REFUSALS.map((r) => [r, 0]));
   const plans = {};
-  for (const r of records) {
+  // A newer release's record is not counted (issue #761): its `reason` is core, its `plan` is not, and half a record is
+  // a count nobody made. `newerSkipped` says how many, only when there were any.
+  const { records: readable, newerSkipped } = readableRecords(records);
+  for (const r of readable) {
     if (typeof r?.reason === "string" && SPLIT_REFUSALS.includes(r.reason)) refusals[r.reason] += 1;
     const p = r?.plan;
     if (p !== null && typeof p === "object" && typeof p.outcome === "string") {
@@ -278,7 +296,7 @@ export function splitCounts(records) {
       plans[key] = (plans[key] ?? 0) + 1;
     }
   }
-  return { refusals, plans };
+  return { refusals, plans, ...(newerSkipped > 0 ? { newerSkipped } : {}) };
 }
 
 /**
@@ -430,7 +448,9 @@ export async function assembleInsights(paths, window, { pricing, fullPaths = fal
   // Re-fold the spend map at the requested window so badge and table agree. assembleCosts already
   // scanned; scanning again here costs one directory pass and keeps the two assemblers untouched.
   const sinceMs = costsSinceMs(window, nowMs);
-  const records = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
+  const scanned = scanRunRecords({ logsDir: paths.logsDir, sinceMs, nowMs });
+  // Without a newer release's records (issue #761), as the fold reads them; `fold.newerSkipped` already says how many.
+  const records = Array.isArray(scanned) ? readableRecords(scanned).records : scanned;
   let costByTrigger = null;
   if (Array.isArray(records)) {
     const triggersView = readTriggers({ triggersPath: paths.triggersPath });
@@ -453,9 +473,10 @@ export async function assembleInsights(paths, window, { pricing, fullPaths = fal
  * the insights page: the worker's own `suggestSize` over this host's run records, read once for every project, each
  * raise capped by the live hosts' budgets judged per host (`hostBudgets`, `hostBudgetsOf`; null where no budget was read,
  * and a raise then offers no call). `projectIds` defaults to every project in the projects file. `{ projects, hosts,
- * skipped }` (`hosts` how many budgets were judged against, null for none read), or `{ unreachable }` when the records
- * or the scoped-limits file cannot be read: a size resolved without the file would be the default, which is not the
- * project's. `envFn` is the deployment's environment (`processEnv`).
+ * skipped, newerSkipped? }` (`hosts` how many budgets were judged against, null for none read; `newerSkipped` how many
+ * of the window's records a newer pi-dispatch wrote, which no suggestion reads, present only when there were any, issue
+ * #761), or `{ unreachable }` when the records or the scoped-limits file cannot be read: a size resolved without the
+ * file would be the default, which is not the project's. `envFn` is the deployment's environment (`processEnv`).
  */
 export function projectSizing(paths, { hostBudgets = null, projectIds = null, nowMs, withSeries = false, envFn = processEnv }) {
   const sl = readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath });
@@ -464,13 +485,26 @@ export function projectSizing(paths, { hostBudgets = null, projectIds = null, no
   const pv = readProjects({ projectsPath: paths.projectsFile });
   const ids = projectIds ?? (Array.isArray(pv?.projects) ? pv.projects.map((p) => p.id) : []);
   const res = readSizeSuggestions({ logsDir: paths.logsDir, projectIds: ids, limits, env: envFn(), hostBudgets, nowMs, withSeries });
-  return res.unreachable ? { unreachable: String(res.unreachable) } : { projects: res.projects, hostBudgetCount: Array.isArray(hostBudgets) ? hostBudgets.length : null, skipped: res.skipped };
+  if (res.unreachable) return { unreachable: String(res.unreachable) };
+  return { projects: res.projects, hostBudgetCount: Array.isArray(hostBudgets) ? hostBudgets.length : null, skipped: res.skipped, ...(res.newerSkipped > 0 ? { newerSkipped: res.newerSkipped } : {}) };
 }
 
 const INSIGHTS_DAY_MS = 24 * 60 * 60 * 1000;
 const safeAmount = (n) => Number.isSafeInteger(n) && n >= 0;
 const recordInstant = (r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "");
 const inProject = (records, project) => records.filter((r) => !project || recordInProject(r, project));
+
+/**
+ * How many of `records` a newer pi-dispatch wrote within a fold's scope (issue #761): up to `nowMs`, as every fold here
+ * cuts (a scan keeps every record from its window's start on, a later one included), and of `project` when one is
+ * given. Judged only on fields every release keeps the meaning of (the times and `project`), as the project page
+ * counts them (`readProjectView`): a project's fold that counted every project's newer records would say it left out
+ * runs that project never had. The one count `assembleCosts` (`fold.newerSkipped`, `dispatch_costs`'
+ * `dollars.newerSkipped`) and the insights spend view (`spend.newerSkipped`) give.
+ */
+function newerInScope(records, { nowMs, project = null }) {
+  return records.filter((r) => fromNewerRelease(r) && recordInstant(r) <= nowMs && (!project || recordInProject(r, project))).length;
+}
 
 /** A live row can omit money because it predates the field, not because every job reserved zero. */
 export function heldMoneyOf(hosts, { nowMs, project = null } = {}) {
@@ -573,7 +607,8 @@ export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, 
     const row = own ?? deployment.find((r) => r.window === kind);
     return { usedMicros: row?.counterMicros ?? null, capMicros: row?.capMicros ?? null, basis: own ? `project:${project}` : "deployment", projectFallback: Boolean(project && !own) };
   };
-  const all = Array.isArray(records) ? records : [];
+  // A newer release's record carries no money this build can read (issue #761); `newerSkipped` counts it.
+  const { records: all, newerSkipped } = readableRecords(records);
   const dayStart = Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS;
   const settled = spendAccumulator(Array.isArray(records));
   for (const r of all) if (recordInstant(r) >= dayStart && recordInstant(r) <= nowMs) addRecordSpend(settled, r, { subscriptions, pricing });
@@ -592,6 +627,7 @@ export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, 
     tokens: { used: budget?.tokens?.spent ?? null, cap: budget?.tokens?.cap ?? null },
     average: { costMicros: micros.length > 0 ? Number((micros.reduce((sum, n) => sum + BigInt(n), 0n) + BigInt(Math.floor(micros.length / 2))) / BigInt(micros.length)) : null, runs: micros.length, largestMicros: micros.length > 0 ? Math.max(...micros) : null },
     jobCapMicros,
+    ...(newerSkipped > 0 ? { newerSkipped } : {}),
   };
 }
 
@@ -680,12 +716,19 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   const overlay = settings?.overlay ?? {};
   const { jobCapMicros } = deploymentDollarCaps(overlay, env);
   out.settings = { ...overlay, provider: overlay.provider ?? env.PI_PROVIDER ?? DEFAULT_PROVIDER, model: overlay.model ?? env.PI_MODEL ?? DEFAULT_MODEL, maxCostMicros: jobCapMicros };
-  const scanned = io.scan({ logsDir: paths.logsDir, sinceMs: Math.min(costsSinceMs("week", nowMs), nowMs - INSIGHTS_DAY_MS), nowMs });
+  const scannedAll = io.scan({ logsDir: paths.logsDir, sinceMs: Math.min(costsSinceMs("week", nowMs), nowMs - INSIGHTS_DAY_MS), nowMs });
+  // Without a newer release's records (issue #761): every read below goes past the stable core (money, model, trigger).
+  // `spendSummaryOf` would leave them out anyway; leaving them out here keeps the loops below to readable ones too.
+  const scanned = Array.isArray(scannedAll) ? readableRecords(scannedAll).records : scannedAll;
   // A selected project's charts can coexist with deployment caps. For that fallback the KPI records must also be
   // deployment-wide; otherwise settled and held would describe different populations beside the same counter.
   const hasProjectWindow = project && (out.budget?.dollars?.windows ?? []).some((r) => r.ledger === "scope" && r.name === `project:${project}` && r.window === "day");
   const all = Array.isArray(scanned) ? inProject(scanned, hasProjectWindow ? project : null) : null;
   out.spend = spendSummaryOf({ records: all, hosts: out.hosts, budget: out.budget, project, nowMs, jobCapMicros, subscriptions, pricing });
+  // The selected project's newer records up to now, as `dollars.newerSkipped` counts them, whichever population the
+  // headline falls back to: the charts and the recent fold beside it follow the project filter.
+  const newerSkipped = Array.isArray(scannedAll) ? newerInScope(scannedAll, { nowMs, project: project || null }) : 0;
+  if (newerSkipped > 0) out.spend.newerSkipped = newerSkipped;
   if (hosts?.unreachable) {
     out.spend.today.heldMicros = null;
     out.spend.today.unattributedMicros = null;
@@ -739,7 +782,8 @@ export function spendChartsOf({ records, sinceMs, nowMs, jobCapMicros, subscript
     days.set(date, { date, ...spendAccumulator(Array.isArray(records)), heldMicros: date === today ? heldMicros : 0, today: date === today });
   }
   const costs = [];
-  for (const r of Array.isArray(records) ? records : []) {
+  // A newer release's record carries no money this build can read (issue #761): skipped, as `spendSummaryOf` skips it.
+  for (const r of readableRecords(records).records) {
     const at = recordInstant(r);
     if (!(at >= sinceMs && at <= nowMs)) continue;
     const day = days.get(new Date(at).toISOString().slice(0, 10));

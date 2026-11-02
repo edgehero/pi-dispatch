@@ -7,12 +7,32 @@ import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeli
 import { targetSeparator } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
 import { consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
+import { JOB_DATA_VERSION_FIELD, withJobDataVersion } from "./job-data-version.mjs";
 
 // The close words in every forge's spelling, derived from the one table (never re-typed here): a
 // matched PR action in this set marks a close job for the semantic-key discriminant below.
 const PR_CLOSE_WORDS = new Set(Object.values(PR_CLOSE_ACTIONS));
 
 export const QUEUE = "pi-jobs";
+
+/**
+ * A builder's job data stamped with the version it needs (issue #761, `DES-STORE-VERSION-WHEN-NEEDED`). `dataVersion`
+ * is the version the builder's INPUT arrived with: a job a newer release stored that this build re-enqueues (a held
+ * reply, a late message's fallback, a rerun), so the stamp never falls below it. Throws when that version is one this
+ * build cannot read, above its own or not a whole number of 1 or more (`withJobDataVersion`'s RangeError): such input
+ * cannot be rebuilt here without dropping what this build does not know, and the error carries `code: "newer-release"`,
+ * so a caller that falls back to a reply logs why. Nothing is stamped while the data needs 1, so every job of today's
+ * fields is stored byte for byte as before. `dataVersions` (`{ table, valueTable, supported }`) is the version rule,
+ * injectable for tests.
+ */
+function stampJobData(data, dataVersion, dataVersions = {}) {
+	try {
+		return withJobDataVersion(dataVersion === undefined ? data : { ...data, [JOB_DATA_VERSION_FIELD]: dataVersion }, dataVersions);
+	} catch (error) {
+		if (error instanceof RangeError && error.code === undefined) error.code = "newer-release";
+		throw error;
+	}
+}
 
 /** Deterministic source/run binding survives a lost enqueue acknowledgement. No question or draft is queued. */
 export async function enqueueAnswerDraftJob(queue, { runId, ruleId, draftRunId }) {
@@ -111,8 +131,8 @@ export function makeQueue(connection, { name = QUEUE } = {}) {
  * removeOnComplete keeps the dedup window ~= the retention. Unlike webhooks, local jobs are not
  * redelivered, so a modest window is enough.
  */
-export async function enqueueLocalJob(queue, fields) {
-	return (await addLocalJob(queue, fields)).id;
+export async function enqueueLocalJob(queue, fields, { dataVersions } = {}) {
+	return (await addLocalJob(queue, fields, { dataVersions })).id;
 }
 
 /**
@@ -145,8 +165,8 @@ export async function enqueueLocalJob(queue, fields) {
  * done rather than inventing one. A read that fails outright returns `existing: undefined`: whether this
  * call queued anything is then unknown, and the caller says so instead of guessing either way.
  */
-export async function enqueueLocalJobReporting(queue, fields) {
-	return addReporting(queue, (enqueueNonce) => addLocalJob(queue, { ...fields, enqueueNonce }));
+export async function enqueueLocalJobReporting(queue, fields, { dataVersions } = {}) {
+	return addReporting(queue, (enqueueNonce) => addLocalJob(queue, { ...fields, enqueueNonce }, { dataVersions }));
 }
 
 /**
@@ -201,7 +221,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, maxCostUsd, image, backend, excludeTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, now = new Date() }) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, maxCostUsd, image, backend, excludeTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -214,7 +234,9 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 	// image/chainDepth/parentJobId land on `data` only when present, so a plain non-chained job's data is
 	// byte-identical. `image` is the container image this job runs in (INT-TRIGGERS-FILE-CONTRACT); absent
 	// resolves the deployment default at job start, never a value frozen here.
-	const data = {
+	// Stamped with the version its fields need (issue #761, `stampJobData`): nothing while that is 1. Before the add, so
+	// input from a newer release throws here and nothing is queued.
+	const data = stampJobData({
 		kind: "local",
 		folder,
 		flow,
@@ -265,7 +287,7 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		...(parentJobId !== undefined && { parentJobId }),
 		// Issue #524: `enqueueLocalJobReporting`'s own mark, so it can tell whether ITS add is the one stored.
 		...(enqueueNonce !== undefined && { enqueueNonce }),
-	};
+	}, dataVersion, dataVersions);
 	await queue.add("local", data, {
 		jobId: id,
 		attempts: 2,
@@ -376,8 +398,9 @@ export async function enqueueGitLabJob(queue, fields) {
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
  */
-export async function enqueueForgeJob(queue, kind, fields) {
-	const { jobId, data, dedupId } = forgeJobOf(kind, fields);
+export async function enqueueForgeJob(queue, kind, fields, { dataVersions } = {}) {
+	const { jobId, data: built, dedupId } = forgeJobOf(kind, fields, { dataVersions });
+	let data = built;
 	let routedName = null;
 	// Bind the delivery to the request visible at ingress: a delayed old reply must never decide a later park.
 	// A reply held before publication has no binding yet; its post-park enqueue reads again here.
@@ -390,6 +413,8 @@ export async function enqueueForgeJob(queue, kind, fields) {
 			data.approvalRequestId = found.request.requestId;
 		}
 		if (data.approvalRequestId !== undefined && found.request?.hostQueue) routedName = found.request.hostQueue;
+		// Issue #761: the binding above adds a field to built data, so the stamp is asked again for what is stored.
+		data = stampJobData(data, undefined, dataVersions);
 	}
 	// Only the host owning the retained session can consume this decision. Central routing also covers console
 	// answers and held replies, whose callers may have selected the shared queue before a request existed.
@@ -436,14 +461,18 @@ const forgeJobOpts = () => ({
  * Returns `{ jobId }` (an id bullmq already held answers the same, by design); throws what `queue.add` throws, and
  * the caller falls back to a reply.
  */
-export async function enqueueLateForgeJob(queue, kind, fields) {
-	const { jobId, data } = forgeJobOf(kind, fields);
+export async function enqueueLateForgeJob(queue, kind, fields, { dataVersions } = {}) {
+	const { jobId, data } = forgeJobOf(kind, fields, { dataVersions });
 	await queue.add(kind, data, { jobId, ...forgeJobOpts() });
 	return { jobId };
 }
 
-/** The forge job's id, its data (an explicit field list, see `enqueueForgeJob`) and its semantic dedup id. Throws on a bad delivery id or console name. */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas }) {
+/**
+ * The forge job's id, its data (an explicit field list, see `enqueueForgeJob`, stamped by `stampJobData`) and its
+ * semantic dedup id. Throws on a bad delivery id or console name, and on input a newer release stored with a
+ * `dataVersion` above this build's (issue #761; every caller that rebuilds stored input answers with a reply then).
+ */
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	if (approvalRequestId !== undefined && (typeof approvalRequestId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(approvalRequestId))) throw new TypeError("approval-request-invalid");
 	if (replyReceivedAt !== undefined && (!Number.isSafeInteger(replyReceivedAt) || replyReceivedAt < 0 || resume !== true || typeof trigger?.comment?.body !== "string")) throw new TypeError("reply-receipt-invalid");
@@ -460,7 +489,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 	// only when the filter resolved one, exactly like chainDepth/parentJobId above, so an unflagged trigger's
 	// job data is byte-identical. Both sit at JOB level, never inside `trigger` -- that object is descriptive
 	// and is copied verbatim into /job/event.json, where an execution knob has no business.
-	const data = {
+	const data = stampJobData({
 		kind,
 		repo,
 		...(projectId !== undefined && { projectId }),
@@ -559,7 +588,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		...(thinkingLevel !== undefined && { thinkingLevel }),
 		...(replica !== undefined && { replica }),
 		...(replicas !== undefined && { replicas }),
-	};
+	}, dataVersion, dataVersions);
 	// A close-triggered job (issue #231) leads the semantic key's flow slot with `closed:`. Without it,
 	// a label/comment/PR job on the same target and flow inside the 10-minute window silently swallows
 	// the close job -- and because a swallowed close job writes no run record, the once trigger it was
