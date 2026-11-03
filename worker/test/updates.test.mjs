@@ -502,7 +502,10 @@ test("a retired tree an Undo flips back to is rescued from the delay", async () 
 
 // ---- real Valkey: the keys, and two hosts over one desired row
 
-const VALKEY = process.env.VALKEY_TEST_URL;
+// Database 2, not the default. `updates:desired` is one key per Valkey, these tests write and wipe it, and start-wiring's test
+// asserts it holds nothing pending: the two files run concurrently, and in one database that test failed about one run in five.
+// Shared with connection.test's one uniquely named key: neither flushes, and these wipe only `updates:*`.
+const VALKEY = process.env.VALKEY_TEST_URL ? Object.assign(new URL(process.env.VALKEY_TEST_URL), { pathname: "/2" }).href : undefined;
 // CI sets PI_DISPATCH_REQUIRE_WORKER_TESTS, which turns a missing URL into a failure rather than a quiet skip.
 if (!VALKEY && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS) throw new Error("updates.test REQUIRES VALKEY_TEST_URL when PI_DISPATCH_REQUIRE_WORKER_TESTS is set");
 const live = { skip: VALKEY ? false : "needs VALKEY_TEST_URL (CI sets it)" };

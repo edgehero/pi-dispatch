@@ -16,12 +16,21 @@ const VALKEY = process.env.VALKEY_TEST_URL;
 // CI sets this, which turns a missing URL into a failure rather than a quiet skip.
 if (!VALKEY && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS) throw new Error("updates-wired.test REQUIRES VALKEY_TEST_URL when PI_DISPATCH_REQUIRE_WORKER_TESTS is set");
 
-// Database 10, emptied before and after: updates:* and runs:* are not prefixed, and other files use their own databases.
+// Database 6, because these keys are not prefixed and start-wiring's test reads `updates:desired` whole on the default one.
+// Every database is claimed by some test, so this one is shared with recovery-queue's uniquely tagged queues, and that is
+// why this deletes what it wrote and never flushes: a flush here would take that file's queues with it.
 const databaseUrl = () => {
   const url = new URL(VALKEY);
-  url.pathname = "/10";
+  url.pathname = "/6";
   return url.href;
 };
+const OWN_KEYS = ["updates:*", "runs:*", "console:audit", "bull:pi-jobs:*"];
+async function deleteOwnKeys(redis) {
+  for (const pattern of OWN_KEYS) {
+    const keys = await redis.keys(pattern);
+    if (keys.length > 0) await redis.del(...keys);
+  }
+}
 const NOW = 1_800_000_000_000;
 const CACHE_PASSED = 31_000;
 
@@ -57,7 +66,7 @@ function httpTo(port) {
 test("a canary on another host opens Adopt on a real console, through the real run mirror, and closes it when its record is gone", { skip: VALKEY ? false : "needs VALKEY_TEST_URL (CI sets it)", timeout: 60_000 }, async () => {
   const url = databaseUrl();
   const redis = makeRedisClient(url, {});
-  await redis.flushdb();
+  await deleteOwnKeys(redis);
   const dep = deployment(url);
   let clock = NOW;
   const now = () => clock;
@@ -134,7 +143,7 @@ test("a canary on another host opens Adopt on a real console, through the real r
   } finally {
     stop();
     await running;
-    await redis.flushdb();
+    await deleteOwnKeys(redis);
     redis.disconnect();
   }
 });
