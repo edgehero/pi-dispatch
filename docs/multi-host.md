@@ -428,7 +428,7 @@ version that is empty or not version-shaped reads as `unknown`, a group of its o
 group, the warning says "pi-dispatch versions cannot all be read" instead, since doctor cannot tell whether they
 differ. The fix is to finish the upgrade in one window: the same version on every host, and on each host
 `pi-dispatch pause`, wait until `pi-dispatch status` shows no active job, restart the worker, then
-`pi-dispatch resume` (`service restart --drain` watches the shared queue only, not a host's own queue). With peers
+`pi-dispatch resume` (`service restart --drain` covers this host's queues, and is not the fleet's pause). With peers
 that agree it prints one line about the workers with a live row, "Fleet versions: the 3 workers with a live row report
 5.0.0", which leaves out a worker that publishes no row; on a single host whose versions match it prints nothing.
 During an upgrade the warning is expected until the last worker is restarted ([the order](upgrading.md#the-order)).

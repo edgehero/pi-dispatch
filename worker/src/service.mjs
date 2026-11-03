@@ -39,9 +39,11 @@
  *     from the cross-scope check (a second receiver is pointless, not destructive) but still refuse
  *     same-scope duplicates.
  *
- * `restart --drain` composes the README's manual ritual (pause → poll active → restart → resume) with
- * the same VALKEY_URL-only queue connection as cli.mjs's pause/resume: the drain must work even when
- * the rest of the config is broken.
+ * `restart --drain` composes the README's manual ritual (pause → poll active → restart → resume) over this
+ * host's queues (issue #804): the shared one and, when the deployment declares PI_WORKER_NAME, the host's own,
+ * which is where its cron, chained and manual runs wait. It reads VALKEY_URL and PI_WORKER_NAME alone, as cli.mjs's
+ * verbs read them, so the drain works even when the rest of the config is broken. It is not the fleet's pause: a
+ * peer's own queue is neither paused nor waited for.
  */
 import { spawn as nodeSpawn } from "node:child_process";
 import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -58,7 +60,7 @@ import { egressArmed, egressProxyName } from "./egress.mjs";
 import { ENV_WRITER_FS, updateEnvFile } from "./env-file.mjs";
 import { operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.mjs";
 import { resolveSetupWorkerEntry, setupCachePath } from "./setup-host-entry.mjs";
-import { deploymentServiceEnv } from "./service-env.mjs";
+import { cliDeploymentEnv, deploymentServiceEnv } from "./service-env.mjs";
 import * as nodeFs from "node:fs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
 import { VALKEY_HEALTH_SCRIPT, VALKEY_IMAGE, VALKEY_PASSWORD_KEY, VALKEY_START_SCRIPT, dollarsDoubled, newValkeyPassword, valkeyPasswordDecision } from "./valkey-auth.mjs";
@@ -433,8 +435,9 @@ const SERVICE_USAGE = `pi-dispatch service — run the worker (or --receiver, or
   pi-dispatch service uninstall             stop, disable and remove the installed unit
   pi-dispatch service status                which unit exists in which scope, and whether it is active
   pi-dispatch service start|stop            thin launchctl / systemctl --user / nssm wrappers
-  pi-dispatch service restart [--drain]     restart; --drain pauses the queue, waits for active jobs
-                                            to finish, restarts, resumes  [--drain-timeout <s>, default 600]
+  pi-dispatch service restart [--drain]     restart; --drain pauses this host's queues (the shared one, and
+                                            its own when PI_WORKER_NAME is set), waits for their active jobs to
+                                            finish, restarts, resumes the ones it paused  [--drain-timeout <s>, default 600]
 
   flags: --receiver          the webhook receiver instead of the worker
          --console           the operator console (pi-dispatch-console serve) instead of the worker;
@@ -474,7 +477,9 @@ export async function runService(argv = [], deps = {}) {
 		err = (s) => process.stderr.write(s),
 		sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 		now = () => Date.now(),
-		queue = null, // test seam; production builds one lazily in doRestart from VALKEY_URL
+		// Test seam: `(name) => queue`, one handle per queue the drain covers. Production builds them lazily in doRestart
+		// from VALKEY_URL.
+		queueFor = null,
 		// Is anything on 127.0.0.1:6379? Asked only on a podman deployment, to decide whether the Quadlet Valkey is
 		// wanted (issue #430); the same plain TCP connect `up` uses, for up's reason. Issue #464: asked of every address
 		// VALKEY_URL's host resolves to (`lookup`, as the worker's client resolves it), and `interfaces` says which of
@@ -529,9 +534,9 @@ export async function runService(argv = [], deps = {}) {
 		// The Docker Desktop reason is the worker's; the console and the receiver start no container (round 1 review of #708).
 		return fail(err, values.console || values.receiver ? "macOS is user-scope only here (a LaunchAgent, in your login session, where this command installs every unit). Drop --system." : "macOS is user-scope only (a LaunchAgent): Docker Desktop lives in the login session, so a system daemon would wait on a docker socket that only exists once you log in. Drop --system.");
 	}
-	// `--drain` pauses the QUEUE and waits for its jobs, which only the worker runs (round 1 review of #708): on the
+	// `--drain` pauses the QUEUES and waits for their jobs, which only the worker runs (round 1 review of #708): on the
 	// receiver or the console it would pause every job for a restart that drains nothing.
-	if (values.drain && (values.console || values.receiver)) return fail(err, "--drain applies to the worker alone (it pauses the queue and waits for its running jobs); restart the receiver or the console without it");
+	if (values.drain && (values.console || values.receiver)) return fail(err, "--drain applies to the worker alone (it pauses the queues and waits for their running jobs); restart the receiver or the console without it");
 	if (platform === "win32" && (values.user || values.system)) {
 		return fail(err, "Windows services via nssm are machine-scoped; --user/--system do not apply here");
 	}
@@ -565,7 +570,7 @@ export async function runService(argv = [], deps = {}) {
 		err,
 		sleep,
 		now,
-		queue,
+		queueFor,
 		probeTcp,
 		lookup,
 		interfaces,
@@ -1958,9 +1963,28 @@ async function doRestart(ctx, values) {
 	if (!Number.isFinite(timeoutS) || timeoutS <= 0) {
 		return fail(ctx.err, `--drain-timeout must be a positive number of seconds, got: ${values["drain-timeout"]}`);
 	}
-	let queue = ctx.queue;
+	// Which queues (issue #804): the ones this host's worker drains, as `createWorker` builds them, the shared queue and,
+	// when the deployment declares PI_WORKER_NAME, `pi-jobs@<name>`. The shared queue alone let the restart go ahead while
+	// a cron, chained or manual run from the host queue still ran, and the stop aborted it. The name is read as
+	// `pi-dispatch run` reads it, this shell's else the deployment `.env`'s, and a disagreement or a line the service's
+	// loader may read differently refuses: guessing would drain a queue the worker does not run, or miss the one it does.
+	const deployment = cliDeploymentEnv(ctx.env, ["PI_WORKER_NAME"], { cwd: ctx.deployDir, platform: ctx.platform, readFile: (p) => ctx.fs.readFileSync(p) });
+	if (deployment.problem) return fail(ctx.err, `${deployment.problem}. Nothing was paused.`);
+	// Lazy, as below: `service` subcommands that never touch the queue must not load bullmq/ioredis.
+	const { QUEUE, hostQueueName } = await import("./queue.mjs");
+	let names = [QUEUE];
+	if (deployment.env.PI_WORKER_NAME) {
+		// The worker's own rule (`workerName`), so a name it refuses at boot is refused here, never drained as typed.
+		const { workerName } = await import("./config.mjs");
+		try {
+			names = [QUEUE, hostQueueName(workerName(deployment.env))];
+		} catch (error) {
+			return fail(ctx.err, `${error.message}. Nothing was paused.`);
+		}
+	}
+	let queueFor = ctx.queueFor;
 	let url;
-	if (!queue) {
+	if (!queueFor) {
 		// VALKEY_URL only, exactly like cli.mjs's pause/resume: the drain must work even when the rest
 		// of the config (forge auth …) is broken, and failFast keeps a down Valkey an error in seconds
 		// instead of a hung restart. Lazy imports for the same reason cli.mjs uses them: `service`
@@ -1969,53 +1993,97 @@ async function doRestart(ctx, values) {
 		const { cliValkeyUrl, parseConnection } = await import("./connection.mjs");
 		url = cliValkeyUrl(ctx.env, { cwd: ctx.deployDir, warn: (line) => ctx.err(line) });
 		const { makeQueue } = await import("./queue.mjs");
-		queue = makeQueue(parseConnection(url, { failFast: true }));
+		queueFor = (name) => makeQueue(parseConnection(url, { failFast: true }), { name });
 	}
+	const queues = [];
+	// The queues THIS drain paused and has not resumed yet. Only these are resumed at the end: a queue an operator paused
+	// before the drain (`pi-dispatch pause`, say) stays paused after it, where the drain used to resume it regardless.
+	const held = [];
+	// The queues paused before this drain, which it leaves as it found them.
+	const kept = [];
+	const and = (list) => list.join(" and ");
+	const keptWords = () => `${and(kept)} ${kept.length === 1 ? "was" : "were"} paused before the drain and ${kept.length === 1 ? "stays" : "stay"} paused`;
+	// The words an operator acts on, naming the queues this drain left paused.
+	const staysPaused = (list) => (list.length === 1 ? `the queue ${list[0]} STAYS PAUSED` : `each queue (${list.join(", ")}) STAYS PAUSED`);
+	// The way back from a drain that stopped short. `pi-dispatch resume` is the deployment's resume and takes every queue
+	// at once, so the advice says so: told only to run it, an operator would also resume a queue paused before the drain,
+	// which the drain itself leaves as it found it.
+	const resumeNote = () => `\`pi-dispatch resume\` resumes every queue of the deployment${kept.length > 0 ? ` (${and(kept)} too, though ${kept.length === 1 ? "it was" : "they were"} paused before the drain)` : ""}`;
+	// `then` is what the operator does first. With nothing paused by this drain there is nothing of its own to resume.
+	const leftPaused = (then) => (held.length > 0 ? `${staysPaused(held)}; ${then}, then resume: ${resumeNote()}` : `this drain paused no queue (${keptWords()}); ${then}`);
 	try {
-		await queue.pause();
-		ctx.out("paused — no new jobs will start; waiting for active jobs to finish\n");
+		// One queue at a time, each opened only once the one before it answered, and INSIDE the try, so `finally` closes
+		// every handle opened (a throw while opening the second cannot leak the first). Opening them all first left the
+		// second still connecting when the first could not reach Valkey, and closing a BullMQ queue mid-connect makes it
+		// emit an `error` nothing listens for: an unhandled rejection printed after the right message.
+		const before = [];
+		for (const name of names) {
+			const q = queueFor(name);
+			queues.push(q);
+			before.push((await q.isPaused()) === true);
+		}
+		kept.push(...names.filter((_, i) => before[i]));
+		for (const [i, q] of queues.entries()) {
+			if (before[i]) continue;
+			await q.pause();
+			held.push(names[i]);
+		}
+		if (kept.length === 0) ctx.out(`paused ${and(held)}: no new jobs will start; waiting for their active jobs to finish\n`);
+		else ctx.out(`${held.length > 0 ? `paused ${and(held)}; ` : ""}${keptWords()}: no new jobs will start; waiting for the active jobs on ${and(names)} to finish\n`);
 		const deadline = ctx.now() + timeoutS * 1000;
-		let { active = 0 } = await queue.getJobCounts("active");
+		// Every queue's active count, summed: a job running from either one is a job the restart would abort.
+		const activeNow = async () => {
+			const per = await Promise.all(queues.map((q) => q.getJobCounts("active").then((c) => Number(c?.active ?? 0))));
+			return { active: per.reduce((a, b) => a + b, 0), shown: names.length > 1 ? ` (${names.map((n, i) => `${n} ${per[i]}`).join(", ")})` : "" };
+		};
+		let { active, shown } = await activeNow();
 		while (active > 0) {
 			if (ctx.now() >= deadline) {
 				// Deliberately NO resume and NO restart: a job is still running. Restarting would abort
 				// it; resuming would feed new jobs toward a restart that is still owed. Paused is the
 				// safe durable state (it survives the restart the operator will now do by hand).
-				ctx.out(
-					`drain timed out after ${timeoutS}s with ${active} job(s) still active — NOT restarting.\nThe queue STAYS PAUSED so the running job can finish undisturbed. Investigate (pi-dispatch status), then restart and \`pi-dispatch resume\` yourself.\n`,
-				);
+				const stays = held.length > 0 ? `${staysPaused(held)} so the running job can finish undisturbed. Investigate (pi-dispatch status), then restart and resume yourself: ${resumeNote()}.` : `this drain paused no queue (${keptWords()}). Investigate (pi-dispatch status), then restart yourself.`;
+				ctx.out(`drain timed out after ${timeoutS}s with ${active} job(s) still active${shown}: NOT restarting.\n${stays[0].toUpperCase()}${stays.slice(1)}\n`);
 				return 1;
 			}
-			ctx.out(`  ${active} active — waiting\n`);
+			ctx.out(`  ${active} active${shown}, waiting\n`);
 			await ctx.sleep(2000);
-			({ active = 0 } = await queue.getJobCounts("active"));
+			({ active, shown } = await activeNow());
 		}
 		// A HELD job is neither active nor waiting, so the loop above has just reported a drained queue with
 		// however many jobs still parked on `run.waitFor` (issue #230). They are safe -- a hold spends
 		// nothing, survives a restart and reserves no slot -- but the operator is upgrading, and those jobs
 		// will wake against the new version. Said plainly rather than left to be discovered, which is what
 		// this command would otherwise be doing: reporting a drained queue it cannot see all of.
-		const delayed = await queue.getJobCounts("delayed").then((c) => Number(c?.delayed ?? 0), () => 0);
+		const delayed = (await Promise.all(queues.map((q) => q.getJobCounts("delayed").then((c) => Number(c?.delayed ?? 0), () => 0)))).reduce((a, b) => a + b, 0);
 		if (delayed > 0) {
 			ctx.out(`note: ${delayed} job(s) sit in the delayed set (cron next-occurrences, retry backoff, quiet hours, scope/host deferrals, or jobs held on run.waitFor). None is active, so none blocked this drain; they will wake against the new version.\n`);
 		}
 		const stopped = await doStop(ctx);
 		if (stopped !== 0) {
-			ctx.out("restart did not happen — the queue STAYS PAUSED; fix the service, then `pi-dispatch resume`.\n");
+			ctx.out(`restart did not happen: ${leftPaused("fix the service")}.\n`);
 			return 1;
 		}
 		const started = await doStart(ctx);
 		if (started !== 0) {
-			ctx.out("the service did not come back — the queue STAYS PAUSED; fix the service, then `pi-dispatch resume`.\n");
+			ctx.out(`the service did not come back: ${leftPaused("fix the service")}.\n`);
 			return 1;
 		}
-		await queue.resume();
-		ctx.out("resumed — drained restart complete\n");
+		const ours = [...held];
+		for (const name of ours) {
+			await queues[names.indexOf(name)].resume();
+			held.shift();
+		}
+		ctx.out(`${ours.length > 0 ? `resumed ${and(ours)}: ` : ""}drained restart complete${kept.length > 0 ? `; ${keptWords()}` : ""}\n`);
 		return 0;
 	} catch (error) {
-		return fail(ctx.err, `could not reach Valkey: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
+		// Name what this drain left paused: a failure after the first pause (the second pause refused, Valkey gone mid-wait,
+		// a resume refused partway) leaves the deployment half switched, and "could not reach Valkey" alone reads as
+		// "nothing happened".
+		const left = held.length > 0 ? `${leftPaused("wait until Valkey answers")}.` : "Nothing was paused.";
+		return fail(ctx.err, `could not reach Valkey: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}\n  ${left}`);
 	} finally {
-		await queue.close().catch(() => {});
+		for (const q of queues) await q.close().catch(() => {});
 	}
 }
 

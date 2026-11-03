@@ -9245,11 +9245,12 @@ const rowVersion = (v) => (typeof v === "string" && ROW_VERSION_RE.test(v) ? v :
  * "differ" only of versions it read: two readable ones among the workers, or this doctor's against this host's row.
  * Where the only other group is "unknown" it says the versions "cannot all be read", since an unread version may be the
  * same one. The fix is the order of docs/upgrading.md for each host: pause, wait for no active job, restart, resume.
- * Not `service restart --drain`, which pauses and watches the shared queue only, so a job running on a host queue
- * (PI_WORKER_NAME) is not waited for. An ok line when peers exist and every one, this host's included, reports one known
- * version, naming them as the workers with a live row (this host's worker may publish none); nothing on a single host
- * whose worker row reports this doctor's version, or publishes none, so its output is unchanged. Workers only: the
- * receiver's status row is never a doctor input (INT-RECEIVER-STATUS-KEY).
+ * Not `service restart --drain`, which covers this host's queues alone (the shared one and its own) and resumes them
+ * after its own restart, so it is not the fleet's pause: a peer's own queue keeps running under it. An ok line when
+ * peers exist and every one, this host's included, reports one known version, naming them as the workers with a live
+ * row (this host's worker may publish none); nothing on a single host whose worker row reports this doctor's version,
+ * or publishes none, so its output is unchanged. Workers only: the receiver's status row is never a doctor input
+ * (INT-RECEIVER-STATUS-KEY).
  */
 export function fleetVersionChecks({ installed, self = null, selfName = null, peers = [] }) {
 	const others = Array.isArray(peers) ? peers : [];

@@ -4,7 +4,7 @@
 pi-dispatch service render    # show the unit it would install, with the real paths
 pi-dispatch service install   # LaunchAgent (macOS), systemctl --user (Linux), nssm (Windows, a machine service)
 pi-dispatch service status    # which unit exists, where, and whether it runs
-pi-dispatch service restart --drain   # pause, wait for running jobs, restart, resume
+pi-dispatch service restart --drain   # pause this host's queues, wait for their running jobs, restart, resume
 ```
 
 `install` renders the [`deploy/`](../deploy/) templates without sudo (`--system` on Linux prints the sudo commands instead). A unit uses
@@ -34,6 +34,16 @@ From any terminal:
 
 - `pi-dispatch pause` stops taking new jobs. It is stored in the queue, so it survives restarts. Jobs still queue up and wait.
   `pi-dispatch resume` takes jobs again, and `pi-dispatch status` prints counts.
+- `pi-dispatch service restart --drain` restarts the worker without stopping a job halfway. It pauses the queues this host's worker takes
+  jobs from: the shared one and, when `PI_WORKER_NAME` is set, the host's own (`pi-jobs@<name>`, where its cron, chained and manual runs and
+  the forge deliveries [routed to it](multi-host.md#a-forge-delivery-that-needs-one-particular-machine) wait). It waits until none of them has
+  a running job (600 seconds, or `--drain-timeout <seconds>`), restarts the worker, and resumes the queues it paused. A queue you paused
+  before stays paused. It reads `PI_WORKER_NAME` as `pi-dispatch run` does, from the shell or else the `.env`, and refuses when the two
+  disagree. That is the name the next worker will run, not the running worker's: rename or remove `PI_WORKER_NAME` in the `.env` just
+  before `--drain` and the old `pi-jobs@<name>` is not watched, and a name your `--env-setup` script sets is not seen, as `pi-dispatch run`
+  does not see it. It is not the fleet's pause: while it waits, no host takes a job from the shared queue, and every other host's own queue
+  keeps running ([several machines](multi-host.md)). If the wait times out or the restart fails, it names the queues it left paused, and says
+  that `pi-dispatch resume` resumes every queue, one you paused before included.
 - `pi-dispatch cancel <jobId>` stops one job in any state. A queued or held job is removed. A running job is stopped on whichever host runs
   it, and its run record says `operator-cancel`. If no reachable worker owns the job (its host is down, or its worker is older than this
   command), the command says so and changes nothing. Like `pause`, it reads only `VALKEY_URL`, so a broken forge setting cannot stand
