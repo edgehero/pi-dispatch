@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "c0e78c0c15dfa9c35f6771d40a044c44eff3a24322a7623f0090aac88092bf6f",
+  "words": "014dfadbd750cacc47dd1240138d6b4c60857c084f0bfb9b23b8e31cc85c8664",
   "elements": [
     {
       "el": "p-loaded",
@@ -48,7 +48,9 @@
       "shows": [
         "Completed, without its flow",
         "Read what it did before you trust it.",
-        "Open trigger 3"
+        "Open trigger 3",
+        "pi found no skill named fix",
+        "Open the base commit a41c0d2"
       ]
     },
     {
@@ -193,7 +195,7 @@
       "golden": [
         "panels/run-loaded-cut.operator"
       ],
-      "shows": "Cut to fit: this record keeps the counts and leaves out the tool names."
+      "shows": "Cut to fit: this record keeps the counts and leaves out package, overlay and tool names."
     },
     {
       "el": "Ran without its flow (gh-03a9)",
@@ -206,8 +208,9 @@
       ],
       "shows": [
         "Ran without its flow.",
-        "acme/api has no fix skill at its base commit, and no skills folder, overlay or staged package ships one.",
-        "Open trigger 3"
+        "pi found no skill named fix: not in acme/api at its base commit, nor in a skills folder, the overlay or a staged package.",
+        "Open trigger 3",
+        "Open the base commit a41c0d2"
       ]
     },
     {
@@ -222,6 +225,37 @@
       "shows": [
         "1 of acme/api’s extensions failed to load.",
         "The run went on.",
+        "Open the base commit a41c0d2"
+      ]
+    },
+    {
+      "el": "Went on without it only when none of that tier's loaded (gh-5e1d)",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "golden": [
+        "panels/run-loaded-extension-thrown.operator"
+      ],
+      "shows": [
+        "The extension from acme/api failed to load.",
+        "The run went on without it.",
+        "Open the base commit a41c0d2"
+      ]
+    },
+    {
+      "el": "Failures in two tiers name each, with one way per tier",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "golden": [
+        "panels/run-loaded-two-tiers.operator"
+      ],
+      "shows": [
+        "3 of this run’s extensions failed to load.",
+        "1 from pi-lint and 2 from acme/api.",
+        "Open Updates",
         "Open the base commit a41c0d2"
       ]
     },

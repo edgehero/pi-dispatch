@@ -123,7 +123,7 @@ export function safeRunOf(id, record) {
 function safeRunFields(id, record) {
   const r = record ?? {};
   // Issue #800: what the run loaded, rebuilt, and the word its row reads. Names, versions, counts and states, for an
-  // operator and a viewer alike. `agentReadProjection` takes both out for an agent: a model reads no extension's name.
+  // operator and a viewer alike. `agentReadProjection` takes the list out for an agent, so a model reads no extension's name, and hands on the word as `note`.
   const loaded = loadedOf(record);
   const note = outcomeNote(record);
   const watchTarget = r.kind === "watch" && typeof r.target === "string" && r.target.startsWith("watch:") && WATCH_RULE_ID_RE.test(r.target.slice(6));

@@ -781,9 +781,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     try { const hosts = deps.sandboxes.hosts(); data.sandboxHosts = hosts.config ?? null; data.sandboxHostsProblem = hosts.refusal ?? null; } catch { data.sandboxHosts = null; data.sandboxHostsProblem = "Terminal host configuration could not be read. Inspect its owner, permissions and format."; }
     if (name === "sandboxes") {
       try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }
-      // The run a kept workspace came from, for what opens: its record's `loaded`, unknown when it cannot be read.
+      // The run a kept workspace came from, for what opens: its record's `loaded`, unknown when it cannot be read. A read that
+      // failed is not a record with nothing in it, so it says so rather than "not recorded".
       if (typeof q.id === "string" && typeof deps.fleet?.runById === "function") {
-        try { data.sandboxRun = (await deps.fleet.runById(q.id))?.record ?? null; } catch { data.sandboxRun = null; }
+        try { data.sandboxRun = (await deps.fleet.runById(q.id))?.record ?? null; } catch { data.sandboxRun = null; data.sandboxRunUnread = true; }
       }
     }
   }

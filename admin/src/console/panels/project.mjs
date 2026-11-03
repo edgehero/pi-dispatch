@@ -68,11 +68,12 @@ export function projectSize(v) {
 }
 
 /**
- * What its runs load (issue #800, the ProjectLoads card): this week's records by host, with a warning when runs of one
+ * What its runs load (issue #800, the ProjectLoads card): the last 7 days' records by host, with a warning when runs of one
  * project load different things on different hosts. A viewer reads the same words, and the top line has no way to the host.
+ * An agent's page draws no card: its copy has no `loads`, by rule, and "could not be read" would be false.
  */
 export function projectLoads(v) {
-  if (!ready(v)) return null;
+  if (!ready(v) || v.role === "agent") return null;
   const l = data(v).loads;
   if (l === null || l === undefined) return card(LOADED_WORDS.projectTitle, note("What its runs load could not be read."));
   const opens = v.role === "operator" ? l.links.map((fix) => html`<a class="link" href="${fix.href}">${fix.label}</a> `) : null;

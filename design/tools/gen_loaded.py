@@ -9,7 +9,7 @@ One rule keeps it simple, as on the Workspace row: one line per kind, and the de
 
 Three cards:
 - RunLoaded: a completed run's Loaded card (pi and image, model, extensions, skills, MCP, tools).
-- LoadedStates: that card's one line, run by run, and the two places it is repeated (a sandbox, a trigger).
+- LoadedStates: that card's one line, run by run, and where it is repeated (a sandbox, and with part 2 a trigger).
 - ProjectLoads: the project page's What its runs load, which says when runs of one project differ by host."""
 from pulse import *
 from gen_runs import RUN_STYLE, RUNS_STYLE, RUNS, run_title, ended_facts, ended_tokens, ended_resources, ended_session, row as runs_row
@@ -31,16 +31,25 @@ def state_line(tone, icon, text):
 LOADED_CSS = """
 .ld-st { display: inline-flex; align-items: flex-start; gap: 6px; color: var(--tone-ink); font-weight: 600; line-height: 18px; }
 .ld-st .ic { margin-top: 2px; }
-.ld-st > span { min-width: 0; }
+.ld-st > span { min-width: 0; overflow-wrap: anywhere; }
 .ld-st .code, .ld-v .code, .ld-more .code, .ld-foot .code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .ld-top { display: block; margin-bottom: var(--space-4); font-size: 14px; }
 .ld-top small { display: block; margin-top: 2px; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
+/* A way to where a problem is fixed can name a host or a commit, and a button's own rule keeps it on one line whatever its width.
+   Here it wraps, in a corner a second line fits. The banner's is the same button. */
+.ld-top .btn, #p-outcome .btn--sm { height: auto; min-height: 30px; max-width: 100%; padding-block: 4px; border-radius: var(--radius-md); white-space: normal; overflow-wrap: anywhere; }
+.ld-top .btn { margin: 2px 6px 2px 0; }
+/* The record's names stand in two more places on a run's page: the banner's sentences and the headline's target and flow. */
+#p-outcome .banner > div { min-width: 0; }
+#p-outcome .banner__t, #p-outcome .banner__s, #p-headline { overflow-wrap: anywhere; }
+/* "Completed, without its flow and with 2 failed extensions" is wider than a phone, and a badge's own rule holds it on one line. */
+#p-headline .badge, #p-proj-recent .badge { height: auto; min-height: 24px; padding-block: 2px; white-space: normal; }
 .ld-list { display: grid; gap: 12px; }
 .ld-row { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 2px 14px; align-items: baseline; font-size: 14px; line-height: 20px; }
 .ld-k { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 650; color: var(--ink-muted); }
 .ld-k .ic { flex: none; }
-.ld-v { min-width: 0; color: var(--ink); }
-.ld-v b { font-weight: 650; }
+.ld-v { min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+.ld-v b { font-weight: 650; overflow-wrap: anywhere; }
 .ld-v small { display: block; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
 .ld-more { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
 .ld-more summary { cursor: pointer; font-size: 13px; color: var(--ink-muted); }
@@ -48,6 +57,7 @@ LOADED_CSS = """
 .ld-foot { display: flex; gap: 8px; align-items: flex-start; margin-top: var(--space-4); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
 .ld-foot .ic { flex: none; margin-top: 2px; }
 .ld-host td { vertical-align: top; }
+.ld-top .link, .ld-fold td, .ld-host td { overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   .ld-row { grid-template-columns: minmax(0, 1fr); }
   /* The bundle's stacked row is a shrinking column beside an auto one. A long name in the auto column takes the whole
@@ -128,7 +138,7 @@ def loaded_panel():
         ("Image", code("sha256:7c1e0b4…"), "", "The image id on this host; two local builds of one tag differ, so it never counts as a host difference."),
         ("Extension", code("pi-lint"), "1.4.2", "staged on mini1"),
         ("Extension", code("pi-test-runner"), "0.9.0", "staged on mini1"),
-        ("Extension failed", "0", "", "to load, in any tier; a path and its error stay in the job’s log"),
+        ("Extension failed", "0", "", "to load, in any tier; a path and its kind stay in the job’s log"),
         ("Extension dropped", "0", "", "by the recursion guard, per tier; names stay in the job’s log"),
         ("Repository extensions", "0", "", "the repository’s .pi/extensions at its base commit"),
         ("Overlay", "none", "", "no extension from mini1’s overlay"),
@@ -164,16 +174,19 @@ NONE = '<span class="muted">none</span>'
 ALL_LOADED = state_line("ok", "done", "Everything trigger 3 asks for loaded.")
 NO_FLOW, EXT_FAILED = "Completed, without its flow", "Completed, with a failed extension"
 BASE_BUTTON = "Open the base commit a41c0d2"
+NO_SKILL = "pi found no skill named fix: not in acme/api at its base commit, nor in a skills folder, the overlay or a staged package."
 STATES = [  # (job, its outcome, the line, where it is fixed)
     ("gh-9575", badge("completed"), ALL_LOADED, NONE),
     ("gh-8251-r2", badge("completed"), state_line("ok", "done", "Everything trigger 2 asks for loaded. <b>Left out, as it asks:</b> bash, and the staged packages."), NONE),
     ("gl-af91", badge("completed"), state_line("ok", "done", "Everything trigger 4 asks for loaded. <b>Left out for this job:</b> the overlay’s extensions."), NONE),
     ("gh-2f6a", badge("awaiting"), state_line("ok", "done", "Everything trigger 7 asks for loaded.") + "<small>MCP: linear connected, with 12 tools.</small>", NONE),
     ("gh-4add", badge("completed"), ALL_LOADED + "<small>In the fold, and nowhere else: Extension dropped, 1, acme/web, by the recursion guard; names stay in the job’s log.</small>", NONE),
-    ("gh-a3ac", badge("completed"), ALL_LOADED + "<small>Cut to fit: this record keeps the counts and leaves out the tool names.</small>", NONE),
-    ("gh-03a9", badge("attention", NO_FLOW), state_line("attention", "attention", "<b>Ran without its flow.</b> acme/api has no fix skill at its base commit, and no skills folder, overlay or staged package ships one."),
-     btn("Open trigger 3", "", "config")),
+    ("gh-a3ac", badge("completed"), ALL_LOADED + "<small>Cut to fit: this record keeps the counts and leaves out package, overlay and tool names.</small>", NONE),
+    ("gh-03a9", badge("attention", NO_FLOW), state_line("attention", "attention", f"<b>Ran without its flow.</b> {NO_SKILL}"),
+     btn("Open trigger 3", "", "config") + " " + btn(BASE_BUTTON, "", "git")),
     ("gh-444c", badge("attention", EXT_FAILED), state_line("failed", "failed", "<b>1 of acme/api’s extensions failed to load.</b> The run went on."),
+     btn(BASE_BUTTON, "", "git")),
+    ("gh-5e1d", badge("attention", EXT_FAILED), state_line("failed", "failed", "<b>The extension from acme/api failed to load.</b> The run went on without it."),
      btn(BASE_BUTTON, "", "git")),
     ("gh-6b0d", badge("refused"), state_line("refused", "refused", "<b>linear could not be used.</b> The run stopped before the agent started, after its extensions and skills had loaded.")
      + "<small>Not retried: the next attempt would find it the same.</small>", btn("Open Connections", "", "plug")),
@@ -209,8 +222,8 @@ def in_the_list():
               f'<div class="tbl-wrap"><table class="tbl tbl--stack runs-tbl"><caption class="sr">The Runs list’s rows for a run that lacked what it needed</caption>'
               f'<thead><tr>{head}</tr></thead><tbody>{list_row("gh-03a9", NO_FLOW)}{list_row("gh-444c", EXT_FAILED)}</tbody></table></div></section>')
     no_flow = outcome_state("p-outcome-no-flow", "attention", NO_FLOW, "Finished in 22m on mini2",
-                            f"acme/api has no fix skill at its base commit, and no skills folder, overlay or staged package ships one. Read what it did before you trust it. {MERGES}",
-                            run_actions(btn("Open trigger 3", "", "config", sm=False)))
+                            f"{NO_SKILL} Read what it did before you trust it. {MERGES}",
+                            run_actions(btn("Open trigger 3", "", "config", sm=False) + btn(BASE_BUTTON, "", "git", sm=False)))
     ext_failed = outcome_state("p-outcome-extension-failed", "attention", EXT_FAILED, "Finished in 22m on mini2",
                                f"1 of acme/api’s extensions failed to load. The extension failed while it loaded and the run went on. Read what it did before you trust it. {MERGES}",
                                run_actions(btn(BASE_BUTTON, "", "git", sm=False)))
@@ -259,11 +272,12 @@ def states_page():
         (f'<span class="ld-new">On mini2</span>', f'<span class="ld-new">{NO_OVERLAY} What a job of trigger 3 would load on this host is unknown: it has published no doctor run.</span>'),
     ], 1) + f'<p class="ld-foot">{ic("info", "ic ic--sm")}<span>A fresh sandbox has no run to quote, so it says what a job would load there, from the host’s last doctor run, or unknown. The repository’s part is decided at its base commit.</span></p>',
         sub="Sandboxes, a fresh one", id_="p-loaded-sandbox-fresh")
+    # Part 2's, drawn here because this card is where a run's record is repeated. No console page draws it yet, so its sub says so.
     trigger = card("MCP servers", facts([
         (code("run.mcp"), "linear"),
         (f'<span class="ld-new">Its last run</span>', f'<span class="ld-new"><a class="link code" href="#">gh-2f6a</a> connected linear, with 12 tools. Before it, <a class="link code" href="#">gh-4b12</a> connected none: linear did not answer.</span>'),
     ], 1) + f'<p class="ld-foot">{ic("info", "ic ic--sm")}<span>Each run field the record covers gets this line: what the trigger asks for, beside what its last run had.</span></p>',
-        sub="trigger 7, a run field", id_="p-loaded-trigger")
+        sub="trigger 7, a run field; comes with part 2", id_="p-loaded-trigger")
     rest = (f'<h3 class="ld-h3">The same record, in two more places</h3><div class="ld-pair">{sandbox}{fresh}</div>'
             f'<div class="ld-pair">{trigger}</div>')
     viewer = f'<h3 class="ld-h3">For a viewer</h3>{viewer_card()}'
@@ -285,8 +299,8 @@ def loads_card():
         row("layers", "Extensions", "pi-lint 1.4.2, pi-test-runner 0.9.0", "all 21 recorded runs, and git-guard in the 15 recorded on build3; 3 did not load or were not recorded"),
         row("skill", "Flows", f'{code("fix")} in 15, {code("review")} in 6', "fix from acme/billing’s .pi/skills; review from the overlay"),
         row("plug", "MCP", "none", "no recorded run names a server"),
-        row("refused", "Missing", "nothing", "every recorded run found its flow and loaded every extension"),
-        row("minus", "Not read", "3 of 24 runs", f"{run_link('gh-e9a0')} was refused before its container started; {run_link('gh-4a7e')}’s stop did not take, so it left no exit line; an older release wrote {run_link('gh-c3f8')}’s record"),
+        row("refused", "Missing", "nothing", "every recorded run found its flow and loaded every extension, and no MCP server stopped one"),
+        row("minus", "Not read", "3 of 24 runs", f"{run_link('gh-e9a0')} was refused before its container started; {run_link('gh-4a7e')}’s runner did not say what it loaded; an older release wrote {run_link('gh-c3f8')}’s record"),
     ])
     hosts = [
         [(f'<b class="code">build3</b> {venue("podman")}', ""), ("18", "num"), ("15", "num"),
@@ -297,21 +311,21 @@ def loads_card():
          (code("review"), "")],
     ]
     tbl = table([("Host", ""), ("Runs", "num"), ("Recorded", "num"), ("Extensions", ""), ("Flow", "")], hosts, cls="tbl ld-host", caption="What billing’s runs load, by host", stack=True)
-    foot = (f'<p class="ld-foot">{ic("info", "ic ic--sm")}<span>From the records of its runs this week. The overlay and staged packages are each host’s own, '
+    foot = (f'<p class="ld-foot">{ic("info", "ic ic--sm")}<span>From the records of its runs in the last 7 days. The overlay and staged packages are each host’s own, '
             f'so runs of one project can load different things on different hosts.</span></p>')
     return card("What its runs load", top + f'<ul class="ld-list">{lines}</ul>' + f'<div class="ld-more">{tbl}</div>' + foot,
-                sub="24 runs this week", id_="p-proj-loads")
+                sub="24 runs in the last 7 days", id_="p-proj-loads")
 
 
 def loads_incomplete_card():
-    top = (f'<p class="ld-top">{state_line("attention", "attention", "Read from 9 of its 24 runs this week, so runs may differ in ways this does not show.")}'
-           f'<small>15 did not load or were not recorded: 12 from an older release, 2 refused, 1 cancelled with no exit line.</small></p>')
+    top = (f'<p class="ld-top">{state_line("attention", "attention", "Read from 9 of its 24 runs in the last 7 days, so runs may differ in ways this does not show.")}'
+           f'<small>15 did not load or were not recorded: 12 from an older release, 2 refused, 1 whose runner did not say.</small></p>')
     lines = "".join([
         row("box", "pi", f'pi 1.5.0 in {code("pi-job:4.3.1")}', "the 9 recorded"),
         row("layers", "Extensions", "pi-lint 1.4.2, pi-test-runner 0.9.0, git-guard", "the 9 recorded; unknown for the other 15"),
         row("refused", "Missing", "nothing in the 9 recorded", "a run with no record cannot say"),
     ])
-    return card("What its runs load", top + f'<ul class="ld-list">{lines}</ul>', sub="24 runs this week", id_="p-proj-loads-incomplete")
+    return card("What its runs load", top + f'<ul class="ld-list">{lines}</ul>', sub="24 runs in the last 7 days", id_="p-proj-loads-incomplete")
 
 
 def loads_same_card():
@@ -320,12 +334,12 @@ def loads_same_card():
         row("box", "pi", f'pi 1.5.0 in {code("pi-job:4.3.1")}', "every recorded run"),
         row("layers", "Extensions", "pi-lint 1.4.2, pi-test-runner 0.9.0", f"every recorded run, but for trigger 2’s, which withhold them, and the canary {run_link('gh-c0a7')}, which tried pi-lint 1.4.3"),
     ])
-    return card("What its runs load", top + f'<ul class="ld-list">{lines}</ul>', sub="8 runs this week", id_="p-proj-loads-same")
+    return card("What its runs load", top + f'<ul class="ld-list">{lines}</ul>', sub="8 runs in the last 7 days", id_="p-proj-loads-same")
 
 
 def loads_none_card():
-    top = f'<p class="ld-top">{state_line("idle", "minus", "Nothing to read: no run of this project has a record this week.")}<small>Either none ran, or an older release wrote their records.</small></p>'
-    return card("What its runs load", top, sub="0 runs this week", id_="p-proj-loads-none")
+    top = f'<p class="ld-top">{state_line("idle", "minus", "Nothing to read: no run of this project has a record in the last 7 days.")}<small>Either none ran, or an older release wrote their records.</small></p>'
+    return card("What its runs load", top, sub="0 runs in the last 7 days", id_="p-proj-loads-none")
 
 
 def project_page():
@@ -340,7 +354,7 @@ def project_page():
 </ul>""", id_="p-proj-triggers", sub="last 24 hours")
     lead = (f'<p class="ld-lead">{ic("info", "ic ic--sm")}<span>A new card on the project page, beside the ones ProjectDetail draws. '
             f'The rest of the page is unchanged.</span></p>')
-    # The other three states carry the console's own sub, as runs this week, so what tells them apart is said above each.
+    # The other three states carry the console's own sub, as runs in the last 7 days, so what tells them apart is said above each.
     states = (f'<h3 class="ld-h3">While most runs have no record</h3>{loads_incomplete_card()}'
               f'<h3 class="ld-h3">On web, when no host differs</h3>{loads_same_card()}'
               f'<h3 class="ld-h3">On shop, with no record</h3>{loads_none_card()}')
@@ -386,7 +400,7 @@ A completed run's **Loaded** card: what the job had when it started, one line pe
   - How many of each package's skills were replaced, and how many extensions the guard dropped per tier; names stay in the job's log.
   - Each MCP server's state and how many tools it brought. The record holds a state, not a duration.
   - The active tools by count, and pi's own and the job's own by name. Names each staged or overlay extension's tools; a repository's stay a count.
-  - Every load failure, as a count by tier. Its path and error stay in the job's log.
+  - Every load failure, as a count by tier. Its path and a fixed kind stay in the job's log, and pi's error text is kept nowhere, because it can quote the module's source.
 - **The worker adds** the image and its id. The image id on this host; two local builds of one tag differ, so it never counts as a host difference. It adds the commit the workspace was prepared at too, so the fold's *Read them there* and a repository extension's problem open the code that ran.
 - **Past its bound** the record says it was cut (LoadedStates draws it) and never drops an entry silently. Older records have no `loaded` field, and say so.
 
@@ -401,7 +415,7 @@ A completed run's **Loaded** card: what the job had when it started, one line pe
 **Fixture note.** gh-9575, acme/web#490, fix on mini1, trigger 3 and the model are the fixture, as on RunEnded. pi 1.5.0, pi-job:4.3.1 and the staged packages pi-lint 1.4.2 and pi-test-runner 0.9.0 are as on Updates, Sandboxes and Connections. That pairing is sample only: tag 4.3.1 pins pi 1.2.0, and these cards cite 4.3.1 for its behaviour alone. Sample: the image id, the counts, the replaced skill, and the tool names and split (as on TriggerEnvironment).
 """,
 "LoadedStates": """
-The top line of each run's Loaded card, run by run, what the outcome says in the Runs list and on the run page, the two places the same record is repeated (a sandbox and a trigger), and what a viewer reads.
+The top line of each run's Loaded card, run by run, what the outcome says in the Runs list and on the run page, where the same record is repeated (a sandbox now, and a trigger with #800's part 2), and what a viewer reads.
 
 **How a person uses it.**
 - **Everything loaded** (gh-9575): one green line, nothing to do.
@@ -409,9 +423,9 @@ The top line of each run's Loaded card, run by run, what the outcome says in the
 - **Left out for this job** (gl-af91): *Left out for this job: the overlay's extensions*. That switch is the job's: `PI_GLOBAL_ALLOW_EXTENSIONS=0` on its host closes it and so does a canary's replay, so no line says the host asked, and the fold names both. Still green, for the same reason.
 - **An MCP server connected** (gh-2f6a): each server the trigger names, with its state and how many tools it brought.
 - **An extension was dropped** (gh-4add): the recursion guard dropped one of the repository's extensions. A count in the fold, with no sentence and no warning.
-- **A record was cut** (gh-a3ac): the record ran past its bound, so it says what it left out. *Cut to fit: this record keeps the counts and leaves out the tool names.* It says nothing about whether the run was fine, so it sits under the line that does.
-- **Ran without its flow** (gh-03a9): the trigger names fix, and neither the repository at its base commit nor a skills folder, the overlay or a staged package ships it. *Open trigger 3*. The outcome says *Completed, without its flow*.
-- **An extension failed to load** (gh-444c): one of the repository's own extensions failed while loading. The line gives no total, because a conflicted extension counts as both loaded and failed and the record keeps no kind, and says *went on without it* only when none of that tier's loaded. *Open the base commit a41c0d2*, the code that ran. A record that names no commit says *Open the repository*, and a forge with no address leaves the words with no button. The outcome says *Completed, with a failed extension*.
+- **A record was cut** (gh-a3ac): the record ran past its bound, so it says what it left out. *Cut to fit: this record keeps the counts and leaves out package, overlay and tool names.* It says nothing about whether the run was fine, so it sits under the line that does.
+- **Ran without its flow** (gh-03a9): the trigger names fix, and pi found no skill of that name in the repository at its base commit, a skills folder, the overlay or a staged package. That is what the record knows: at pi 1.5.0 a skill with no description is not loaded and `frontmatter.name` renames one, so the line never says the repository has none. *Open trigger 3*, or *Open the base commit a41c0d2* to read what it held. The outcome says *Completed, without its flow*.
+- **An extension failed to load** (gh-444c): one of the repository's own extensions failed while loading. The line gives no total, because a conflicted extension counts as both loaded and failed and the record keeps no kind, and says *went on without it* only when none of that tier's loaded (gh-5e1d). *Open the base commit a41c0d2*, the code that ran. A record that names no commit says *Open the repository*, and a forge with no address leaves the words with no button. Failures in two tiers name each, with one way per tier. A run a server stopped before the agent started says only what failed to load, and nothing about going on. The outcome says *Completed, with a failed extension*.
 - **An MCP server could not be used** (gh-6b0d): it failed at start, so the run stopped before the agent started, after its extensions and skills had loaded, and its outcome is refused. It is not retried. *Open Connections*.
 - **An MCP server did not answer** (gh-4b12): the wait ran out, so the run stopped before the agent started. It is retried as any infrastructure failure, so its outcome is failed. *This was its last attempt* is said only when the queue reports the job failed, as here, because each attempt writes a record of its own; an earlier attempt's line stops at *Retried, as any infrastructure failure.* *Open Connections*.
 - **A host differs** (gh-ebd7): build3's overlay adds an extension mini1 does not have, and mini2 has published nothing. *Open build3*.
@@ -419,12 +433,12 @@ The top line of each run's Loaded card, run by run, what the outcome says in the
 - **No record** (gh-c3f8): an older release wrote it. **Refused** (gh-e9a0): nothing loaded.
 - **In the Runs list and the banner** (`p-loaded-runs`, and `p-outcome` drawn twice): the record's outcome stays completed, and the word a person reads is *Completed, without its flow* or *Completed, with a failed extension*.
 - **In a sandbox,** What opens gains one row. A shell has no overlay, so pi started there loads only the workspace's own `.pi/`, whatever the run loaded; the row says that first, then what the run itself had, linked to it. A fresh sandbox has no run to quote, so it says what a job of the trigger would load on that host, from its last doctor run with the time, or that this is unknown.
-- **On a trigger,** each run field the record covers gains *Its last run*: what the trigger asks for, beside what its last run had, and the one before it when that one did not get it.
+- **On a trigger,** with #800's part 2 and not built yet: each run field the record covers gains *Its last run*: what the trigger asks for, beside what its last run had, and the one before it when that one did not get it.
 - **As a viewer sees it:** the same words with no button.
 
 **Panels.** `p-loaded`, `p-loaded-runs`, `p-outcome-no-flow`, `p-outcome-extension-failed`, `p-loaded-sandbox`, `p-loaded-sandbox-fresh`, `p-loaded-trigger`, `p-loaded-viewer`. On a run page the two outcome panels are `p-outcome`.
 
-**The server provides.** The run record's new `loaded` field (RunLoaded). For a trigger, its last run's record. For a fresh sandbox: What the host's last doctor run published, with its time, or unknown. The repository's part is decided at its base commit. The publication is a new key, `doctor:loads:<name>`, and it is also what the gh-ebd7 line reads for mini1 and mini2. pi's version and the image come from what every live host already publishes, `host:h:<name>` (`image`, `imageDigest`, `piVersion`, `INT-HOST-REGISTRY-CONTRACT`), so mini2's fresh row still has them. For a shell, nothing about the overlay: `worker/src/sandbox.mjs` mounts no `/opt/pi-global`, and `worker/src/sandbox-store.mjs` says a reopened workspace loads neither the candidate nor the overlay.
+**The server provides.** The run record's new `loaded` field (RunLoaded). For a trigger, with part 2, its last run's record. For a fresh sandbox: What the host's last doctor run published, with its time, or unknown. The repository's part is decided at its base commit. The publication is a new key, `doctor:loads:<name>`, and it is also what the gh-ebd7 line reads for mini1 and mini2. pi's version and the image come from what every live host already publishes, `host:h:<name>` (`image`, `imageDigest`, `piVersion`, `INT-HOST-REGISTRY-CONTRACT`), so mini2's fresh row still has them. Its version is said only where the sandbox's image is the one that host booted on: a kept older image and a trigger's own `run.image` hold their own pi. For a shell, nothing about the overlay: `worker/src/sandbox.mjs` mounts no `/opt/pi-global`, and `worker/src/sandbox-store.mjs` says a reopened workspace loads neither the candidate nor the overlay.
 
 **Who sees what.** As RunLoaded: viewers read the same words, and the buttons are operator actions, so a viewer has none (`p-loaded-viewer`).
 
@@ -433,20 +447,20 @@ The top line of each run's Loaded card, run by run, what the outcome says in the
 - **The outcome says it too,** so a run list read at a glance does not show a run that lacked its flow, or lost an extension, as plainly completed.
 - **An MCP server that fails stops the job.** One that failed at start is `mcp-unavailable` (exit 2, not retried, so the outcome is refused), and one still pending after the wait is `mcp-unreachable` (exit 1, retried). Both come from `lifecycle.start`, which runs after the session is created, so what loaded is still in the record. The wait is 15 seconds by default, longer for a server whose own `timeout` is longer, so the line says *in time* and names no duration.
 - **A dropped extension is quiet on purpose.** This repository ships `dispatch.ts` in `.pi/extensions`, so a warning would fire on every run on itself.
-- **A host's publication proves that host, and only one that published.** The gh-ebd7 line says what build3's run had, that mini1's publication lacks the extension, and that mini2 has published nothing, which is not the same as lacking it. It does not say other runs went without it.
+- **A host's publication proves that host, and only one that published.** The gh-ebd7 line says what build3's run had, that mini1's publication lacks the extension, and that mini2 has published nothing, which is not the same as lacking it. It does not say other runs went without it. The other hosts are read as they are now, so a name is a difference only while the run's own host still lists it: a package every host has moved past is no difference between any of them.
 - **Shown when it ends.** The record is written from the exit line; a live line would need the worker to trust a second line during the run.
 
-**Fixture note.** From the fixture: every run with its outcome and host (gh-8251-r2, gl-af91, gh-03a9 and gh-444c on mini2; gh-2f6a, gh-4add, gh-a3ac, gh-6b0d, gh-4b12 and gh-b3d7 on mini1; gh-ebd7 and gh-c3f8 on build3). The cut record is on mini1 because every recorded run on build3 reads the git-guard line. A merge between gh-444c at 09:45 and gh-03a9 at 12:43 removed acme/api's fix skill, so the earlier run has no flow warning. gh-2f6a is the fixture's parked job, so it connected, and it ended after gh-4b12, which did not; gh-6b0d is earlier still. mini1's doctor run at 14:39 UTC is Fleet's "1h ago" against the fixture's 15:39. Sample: trigger 2's removed bash and withheld packages, gl-af91's overlay off (yesterday, so today's mini2 runs do not carry the line), that merge, acme/api's failed extension, the base commit a41c0d2, linear as trigger 7's MCP server with its 12 tools, build3's overlay extension git-guard (as on ProjectLoads), the extension dropped on gh-4add, the record cut on gh-a3ac, the two banners' sentences, and pi 1.5.0 in pi-job:4.3.1 (RunLoaded's note says why).
+**Fixture note.** From the fixture: every run with its outcome and host (gh-8251-r2, gl-af91, gh-03a9 and gh-444c on mini2; gh-2f6a, gh-4add, gh-a3ac, gh-6b0d, gh-4b12 and gh-b3d7 on mini1; gh-ebd7 and gh-c3f8 on build3). The cut record is on mini1 because every recorded run on build3 reads the git-guard line. gh-2f6a's 24 active tools are pi's 4, the extensions' 5, the job's 3 and linear's 12. A merge between gh-444c at 09:45 and gh-03a9 at 12:43 removed acme/api's fix skill, so the earlier run has no flow warning. gh-2f6a is the fixture's parked job, so it connected, and it ended after gh-4b12, which did not; gh-6b0d is earlier still. mini1's doctor run at 14:39 UTC is Fleet's "1h ago" against the fixture's 15:39. Sample: trigger 2's removed bash and withheld packages, gl-af91's overlay off (yesterday, so today's mini2 runs do not carry the line), that merge, acme/api's failed extension and gh-5e1d, the base commit a41c0d2, linear as trigger 7's MCP server with its 12 tools, build3's overlay extension git-guard (as on ProjectLoads), the extension dropped on gh-4add, the record cut on gh-a3ac, the two banners' sentences, and pi 1.5.0 in pi-job:4.3.1 (RunLoaded's note says why).
 """,
 "ProjectLoads": """
-The project page's **What its runs load**: what its runs had this week, one line per kind, and a warning when runs of one project load different things on different hosts.
+The project page's **What its runs load**: what its runs had in the last 7 days, one line per kind, and a warning when runs of one project load different things on different hosts.
 
 **How a person uses it.**
 - **The top line** says what differs. Here build3's overlay adds git-guard, so the 15 recorded runs of acme/billing on build3 load an extension the 6 on mini2 do not. *Open build3*.
-- **One line per kind:** pi and image, models, extensions, flows and where each was found, MCP servers, what was missing, and the runs it could not read. Every claim counts recorded runs: of the 18 on build3, gh-e9a0 was refused before its container started, gh-4a7e's stop did not take, so it left no exit line, and an older release wrote gh-c3f8's record. A cancel with a live runner does write an exit line, on SIGTERM, so cancelled alone does not mean not recorded.
+- **One line per kind:** pi and image, models, extensions, flows and where each was found, MCP servers, what was missing, and the runs it could not read. Every claim counts recorded runs: of the 18 on build3, gh-e9a0 was refused before its container started, gh-4a7e's runner did not say what it loaded, and an older release wrote gh-c3f8's record. A record cannot tell why a runner did not say (an older image, a runner that died), so none is claimed; a cancel with a live runner does write its line, on SIGTERM, so cancelled alone does not mean not recorded.
 - **By host:** a table of each host's runs, how many of them are recorded, the extensions they loaded and the flow.
-- **While most runs have no record** (`p-proj-loads-incomplete`): the same card, whose top line says how few it read and why, and that runs may differ in ways it does not show. It claims no difference and no sameness on what it cannot read.
-- **When no host differs** (`p-proj-loads-same`): one green line naming the hosts, on web, whose 8 runs this week are all it counts.
+- **While most runs have no record** (`p-proj-loads-incomplete`): the same card, whose top line says how few it read and why, and that runs may differ in ways it does not show. It claims no sameness on what it cannot read. A difference between two hosts it did read stands, however few runs that was: the card above then says how few under its top line.
+- **When no host differs** (`p-proj-loads-same`): one green line naming the hosts, on web, whose 8 runs in the last 7 days are all it counts. It is green only with nothing missing: when a run lacked its flow or an extension, or an MCP server stopped it, Missing says so and the line takes the attention tone, however well the hosts agree.
 - **When nothing has a record** (`p-proj-loads-none`): one muted line, on shop, saying so, with no rows to read.
 
 **Panels.** `p-proj-loads`, and `p-proj-loads-incomplete`, `p-proj-loads-same` and `p-proj-loads-none` (the same panel in those states), beside ProjectDetail's panels.
@@ -458,7 +472,7 @@ The project page's **What its runs load**: what its runs had this week, one line
 **Why it works this way.**
 - **A project spans hosts,** and each host has its own overlay and staged packages. A difference by host is the one thing no single run page shows.
 - **From records, not configuration,** so it shows what happened, including after an Adopt that one host missed.
-- **This week, the page's own window.** Members counts its runs from Monday 00:00 UTC (`costsSinceMs("week")`), so 18 and 6 add up to this card's 24. A rolling 7 days beside it would be a second window under a near-identical word.
+- **The last 7 days, rolling.** A calendar week would empty this card every Monday, when a person is most likely to ask what ran over the weekend. Members, under it, stays this week from Monday 00:00 UTC (`costsSinceMs("week")`) and says so, so the two can differ; here 18 and 6 add up to this card's 24 because nothing of billing's ran earlier.
 - **The image id is not a difference.** The image id on this host; two local builds of one tag differ, so it never counts as a host difference.
 
 **Fixture note.** billing, its two repositories with 18 and 6 runs this week, its triggers' 9 and 2 runs in the last 24 hours, build3 for acme/billing, mini2 for acme/billing-ui, and gh-e9a0, gh-4a7e and gh-c3f8 are as on ProjectDetail, LoadedStates and in the fixture. Sample: git-guard in build3's overlay, review in the overlay (as on TriggerEnvironment), the incomplete card's 9 of 24 and its split, which are all build3's and so hold git-guard, the same and none states on web and shop, and pi 1.5.0 in pi-job:4.3.1 (RunLoaded's note says why).
@@ -469,7 +483,7 @@ The project page's **What its runs load**: what its runs had this week, one line
 if __name__ == "__main__":
     write("RunLoaded", card_marker("Runs", 1700, 1440, "A completed run’s Loaded card: pi and its image, the model, extensions, skills, MCP and tools, one line each"),
           "Run gh-9575, what it loaded", run_loaded_page(), RUN_STYLE + CSS)
-    write("LoadedStates", card_marker("Runs", 1300, 1440, "The Loaded card’s top line run by run, and the same record in a sandbox and on a trigger"),
+    write("LoadedStates", card_marker("Runs", 1300, 1440, "The Loaded card’s top line run by run, and the same record in a sandbox and, with part 2, on a trigger"),
           "What each run loaded", states_page(), RUN_STYLE + RUNS_STYLE + CSS)
     write("ProjectLoads", card_marker("Configuration", 1100, 1440, "The project page’s What its runs load: one line per kind, and a warning when runs differ by host"),
           "billing, what its runs load", project_page(), CSS + PROJECT_CSS)

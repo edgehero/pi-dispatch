@@ -135,6 +135,42 @@ test("What opens says a shell has no overlay first, and an unread record or publ
   assert.equal(data.sandboxRun, null);
   const page = await renderPage("sandboxes", { data, query: parsed.query, session: { role: "operator", name: "ops" }, readOnly: false });
   assert.equal(page.status, 200);
-  assert.match(String(page.html), /What <a [^>]*>gh-9575<\/a> itself loaded is not recorded\./);
+  // A read that failed is unknown, and not the record's silence.
+  assert.equal(data.sandboxRunUnread, true);
+  assert.match(String(page.html), /What <a [^>]*>gh-9575<\/a> itself loaded could not be read\./);
   assert.ok(String(page.html).includes("would load on this host is unknown"));
+  // A run that is not there is a record with nothing in it, and says so.
+  const missing = await loadPageData("sandboxes", parsed.query, { ...failing, fleet: { parkedCount: async () => 1, runById: async () => ({ missing: true }) } }, { role: "operator", readOnly: false });
+  assert.equal(missing.sandboxRunUnread, undefined);
+  assert.match(String((await renderPage("sandboxes", { data: missing, query: parsed.query, session: { role: "operator", name: "ops" }, readOnly: false })).html), /What <a [^>]*>gh-9575<\/a> itself loaded is not recorded\./);
+});
+
+test("a sandbox's pi version is the host's only for the image that host booted on: a kept older image holds its own (#800)", async () => {
+  const { HOST_LOADS, LOADED_SAMPLES } = await import("./helpers/loaded-samples.mjs");
+  const { loaded: _gone, ...older } = LOADED_SAMPLES.everything();
+  const parsed = parsePageQuery("sandboxes", "id=gh-9575&host=mini1");
+  const pageWith = async (change, record = older) => {
+    const report = sandboxFixture();
+    change(report);
+    const deps = { now: () => NOW, fleet: { parkedCount: async () => 1, runById: async () => ({ record }) }, sandboxes: { hosts: () => ({ config: SANDBOX_HOSTS_FIXTURE }), read: async () => report }, hostLoads: async () => HOST_LOADS };
+    const data = await loadPageData("sandboxes", parsed.query, deps, { role: "operator", readOnly: false });
+    return String((await renderPage("sandboxes", { data, query: parsed.query, session: { role: "operator", name: "ops" }, readOnly: false })).html);
+  };
+  const named = "pi 1.5.0 in the image. No overlay is mounted";
+  const plain = "pi in the image, at a version this page cannot name. No overlay is mounted";
+  // The kept workspace's image is the host's: its version is known, on the row and on the fresh line.
+  const same = await pageWith(() => {});
+  assert.ok(same.includes(`<dd>${named}`) || same.includes(named));
+  assert.ok(!same.includes(plain));
+  // A kept pi-job:4.0.0 from before an upgrade, with a record that does not say.
+  const kept = await pageWith((report) => { report.hosts[0].rows[0].image = "pi-job:4.0.0"; });
+  assert.ok(kept.includes(`${plain} so pi started here loads`.replace(" so pi started here loads", "")), "the row says it cannot name it");
+  // A kept image with no record to name it, but a record that does names it from the record.
+  const recorded = await pageWith((report) => { report.hosts[0].rows[0].image = "pi-job:4.0.0"; }, { ...LOADED_SAMPLES.everything(), loaded: { ...LOADED_SAMPLES.everything().loaded, pi: "1.4.0", imagePi: "1.4.0", image: "pi-job:4.0.0" } });
+  assert.ok(recorded.includes("pi 1.4.0 in the image. No overlay is mounted"), "its own record says");
+  // A trigger's own run.image, on a fresh sandbox.
+  const own = await pageWith((report) => { report.plan.image = "registry.example/custom:7"; });
+  const fresh = own.slice(own.indexOf('id="p-sb-new"'));
+  assert.ok(fresh.includes(plain), "the fresh line cannot name it either");
+  assert.ok(!fresh.includes(named));
 });

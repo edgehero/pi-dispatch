@@ -23,7 +23,7 @@ A completed run's **Loaded** card: what the job had when it started, one line pe
   - How many of each package's skills were replaced, and how many extensions the guard dropped per tier; names stay in the job's log.
   - Each MCP server's state and how many tools it brought. The record holds a state, not a duration.
   - The active tools by count, and pi's own and the job's own by name. Names each staged or overlay extension's tools; a repository's stay a count.
-  - Every load failure, as a count by tier. Its path and error stay in the job's log.
+  - Every load failure, as a count by tier. Its path and a fixed kind stay in the job's log, and pi's error text is kept nowhere, because it can quote the module's source.
 - **The worker adds** the image and its id. The image id on this host; two local builds of one tag differ, so it never counts as a host difference. It adds the commit the workspace was prepared at too, so the fold's *Read them there* and a repository extension's problem open the code that ran.
 - **Past its bound** the record says it was cut (LoadedStates draws it) and never drops an entry silently. Older records have no `loaded` field, and say so.
 

@@ -1,7 +1,7 @@
 {
   "card": "ProjectLoads",
   "pr": 800,
-  "words": "bbe669ab2343c87f7c5c3d7b0dd240de4e797efe5d6b87803137ba3d0629d7b5",
+  "words": "94496b68112408e84c071782d85e2bc082d58d14fcd26711066a4fc237cf0b38",
   "elements": [
     {
       "el": "p-proj-loads",
@@ -14,7 +14,7 @@
       ],
       "shows": [
         "What its runs load",
-        "24 runs this week"
+        "24 runs in the last 7 days"
       ]
     },
     {
@@ -26,7 +26,7 @@
       "golden": [
         "panels/project-loads-incomplete.operator"
       ],
-      "shows": "Read from 9 of its 24 runs this week, so runs may differ in ways this does not show."
+      "shows": "Read from 9 of its 24 runs in the last 7 days, so runs may differ in ways this does not show."
     },
     {
       "el": "p-proj-loads-same",
@@ -48,7 +48,7 @@
       "golden": [
         "panels/project-loads-none.operator"
       ],
-      "shows": "Nothing to read: no run of this project has a record this week."
+      "shows": "Nothing to read: no run of this project has a record in the last 7 days."
     },
     {
       "el": "p-proj-members",
@@ -98,10 +98,10 @@
         "git-guard in the 15 recorded on build3; 3 did not load or were not recorded",
         "fix from acme/billing’s .pi/skills; review from the overlay",
         "no recorded run names a server",
-        "every recorded run found its flow and loaded every extension",
+        "every recorded run found its flow and loaded every extension, and no MCP server stopped one",
         "3 of 24 runs",
         "was refused before its container started",
-        "stop did not take, so it left no exit line",
+        "runner did not say what it loaded",
         "an older release wrote"
       ]
     },
@@ -130,7 +130,7 @@
         "panels/project-loads-incomplete.operator"
       ],
       "shows": [
-        "15 did not load or were not recorded: 12 from an older release, 2 refused, 1 cancelled with no exit line.",
+        "15 did not load or were not recorded: 12 from an older release, 2 refused, 1 whose runner did not say.",
         "the 9 recorded; unknown for the other 15",
         "nothing in the 9 recorded",
         "a run with no record cannot say"
@@ -163,7 +163,7 @@
         "panels/project-loads-none.operator"
       ],
       "shows": [
-        "Nothing to read: no run of this project has a record this week.",
+        "Nothing to read: no run of this project has a record in the last 7 days.",
         "Either none ran, or an older release wrote their records."
       ]
     },
@@ -179,7 +179,7 @@
       "shows": "Runs differ by host: build3 also loads git-guard from its overlay."
     },
     {
-      "el": "From the records of its runs this week",
+      "el": "From the records of its runs in the last 7 days",
       "kind": "readme",
       "status": "new",
       "panel": "p-proj-loads",
@@ -188,7 +188,7 @@
       "golden": [
         "panels/project-loads.operator"
       ],
-      "shows": "From the records of its runs this week."
+      "shows": "From the records of its runs in the last 7 days."
     },
     {
       "el": "Nothing new beyond RunLoaded's loaded field: the page groups its runs' records by host",

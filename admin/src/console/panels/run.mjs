@@ -213,7 +213,7 @@ export function runOutcome(view) {
   const recoveryId = view.data?.chat?.activeJobId ?? view.data?.chat?.queuedJobId;
   const recoveryActions = recovering ? html`${typeof recoveryId === "string" && RUN_ID_RE.test(recoveryId) ? ui.btn({ href: `/run?id=${encodeURIComponent(recoveryId)}`, label: "Open recovery run", kind: "primary", icon: "running" }) : null}${view.data?.siblings?.map((s) => ui.btn({ href: `/run?id=${encodeURIComponent(s.jobId)}`, label: "Open sibling replica", kind: "sm", icon: "runs" }))}` : null;
   const fixLink = r.outcome === "policy" && !["awaiting-input", "awaiting-approval"].includes(token) && /^[a-f0-9]{64}$/.test(r.touchScopeId ?? "") ? ui.btn({ href: `/config?becauseRun=${encodeURIComponent(r.jobId)}`, label: "Fix configuration", kind: "sm", icon: "config" }) : null;
-  const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${lacked ? fixButton(lacked.fix, { repositoryHref: forgeBaseLinkOf(r, view.env) }) : null}${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
+  const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${lacked ? lacked.fixes.map((fix) => fixButton(fix, { repositoryHref: forgeBaseLinkOf(r, view.env) })) : null}${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
   return ui.banner({ block: true, status: recovering ? "running" : note !== null ? "attention" : w.status, title: `${word}${refusedBeforeStart(r) ? "" : duration}`, body: html`${lacked === null || token ? html`<p>${reason}</p>` : null}${lacked === null ? null : lacked.sentences.map((sentence) => html`<p>${sentence}</p>`)}${next}${(view.data?.children?.length ?? 0) > 0 || r.chainRefused > 0 ? html`<p>It queued ${view.data?.children?.length ?? 0} runs from /outbox${r.chainRefused > 0 ? `, and ${r.chainRefused} more requests were refused: a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT}` : ""}. ${view.data?.children?.map((child) => runLink(child.jobId))}</p>` : null}${refusedBeforeStart(r) ? html`<p>Nothing was spent.</p>` : href ? html`<p>Merges are never automatic: a person merges the pull request on the forge.</p>` : null}`, actions });
 }
 
@@ -882,24 +882,26 @@ export function runSummary(view) {
  * line per kind with the details folded. Its top line says whether everything the trigger asks for loaded, or names what
  * did not, with a way to where each thing is fixed. Both roles read the same words, names, versions, counts and states and
  * never content; a viewer has no button. A running job's line says when the card arrives: the record is written from the
- * exit line, and a live card would need the worker to trust a second line during the run.
+ * exit line, and a live card would need the worker to trust a second line during the run. An agent's page draws no card: its copy
+ * of the record has no `loaded`, by rule (`agentReadProjection`), and a card over that copy would say "an older release wrote this".
  */
 export function runLoaded(view) {
+  if (view.role === "agent") return html``;
   const r = recordOf(view);
   if (!r && !runningWithoutRecord(view)) return html``;
   const v = r ? loadedVerdict(r, view.data?.hostLoads ?? null, { jobEnded: view.data?.chat?.jobState === "failed" }) : runningVerdict(view.data?.activeRun?.triggerIndex);
   const operator = view.role === "operator";
   const repositoryHref = r ? forgeBaseLinkOf(r, view.env) : null;
-  const fix = (entry) => (operator ? fixButton(entry, { repositoryHref }) : null);
+  const fix = (entry) => (operator ? entry.fixes.map((one) => fixButton(one, { repositoryHref })) : null);
   // A problem and a chosen line draw their icon and tone; the quiet ones (no record, nothing loaded) are one muted line, as on the card.
   const line = (entry, lead = null) => html`${lead === null ? null : html`${lead} `}${entry.bold ? html`<b>${entry.bold}</b> ` : null}${entry.rest}${(entry.then ?? []).map((part) => html` <b>${part.bold}</b> ${part.rest}`)}`;
   const top = v.tone === "idle" ? html`<span class="muted">${line(v)}</span>` : stateLine(v.tone, v.icon, line(v, v.lead));
   const small = v.small.map((text) => html`<small>${text}</small>`);
-  const also = v.also.map((entry) => html`<p class="ld-top">${stateLine(entry.tone, entry.icon, line(entry))} ${fix(entry.fix)}</p>`);
+  const also = v.also.map((entry) => html`<p class="ld-top">${stateLine(entry.tone, entry.icon, line(entry))} ${fix(entry)}</p>`);
   const rows = r ? loadedRows(r) : [];
   const fold = r ? loadedFold(r) : [];
   const folded = fold.length === 0 ? null : html`<details class="ld-more"><summary>${LOADED_WORDS.fold}</summary><div class="tbl-wrap"><table class="tbl tbl--stack ld-fold"><caption class="sr">What ${r.jobId} loaded</caption><thead><tr><th scope="col">Kind</th><th scope="col">Name or count</th><th scope="col">Version</th><th scope="col">From</th></tr></thead><tbody>${fold.map((row) => html`<tr><td>${row.kind}</td><td class="ld-fold__n">${wordsHtml(row.name)}</td><td${row.version ? html` data-l="Version"` : null}>${row.version}</td><td class="wide">${wordsHtml(row.from, { repositoryHref })}</td></tr>`)}</tbody></table></div></details>`;
-  return ui.card({ title: LOADED_WORDS.title, sub: LOADED_WORDS.sub, body: html`<p class="ld-top">${top} ${fix(v.fix)}${small}</p>${also}${rows.length > 0 ? loadedList(rows) : null}${folded}${fold.length > 0 ? loadedFoot(LOADED_WORDS.foot) : null}` });
+  return ui.card({ title: LOADED_WORDS.title, sub: LOADED_WORDS.sub, body: html`<p class="ld-top">${top} ${fix(v)}${small}</p>${also}${rows.length > 0 ? loadedList(rows) : null}${folded}${fold.length > 0 ? loadedFoot(LOADED_WORDS.foot) : null}` });
 }
 
 export function runRecord(view) {

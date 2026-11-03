@@ -312,7 +312,7 @@ test("/api/run gives an agent a run's end time as it gives a viewer, for a versi
   assert.deepEqual(agentReadProjection({ finishedAt: iso(T0) }), { finishedAt: iso(T0) });
 });
 
-test("/api/run gives an operator and a viewer what a run loaded in the same words, and an agent none of it (#800)", async () => {
+test("/api/run gives an operator and a viewer what a run loaded in the same words, and an agent only the closed sentence (#800)", async () => {
   const r = { ...record("gh-loaded"), reason: null, loaded: recordedLoaded({ v: 1, runner: "reported", at: "ready", cut: null, image: "pi-job:4.3.1", imageDigest: null, imagePi: "1.5.0", pi: "1.5.0", flow: { tier: "none", package: null }, sources: [], mcp: [], tools: { active: 1, own: ["read"], job: [] }, problems: { failed: 0, dropped: 0, mcp: 0 }, leftOut: null }) };
   assert.ok(r.loaded, "the sample survives the record's rebuild");
   const c = await runConsole(fakeFleet({ records: { [r.jobId]: r } }));
@@ -327,6 +327,7 @@ test("/api/run gives an operator and a viewer what a run loaded in the same word
   const agent = await of(c.agent);
   assert.equal(Object.hasOwn(agent, "loaded"), false, "the agent's projection does not gain it");
   assert.equal(Object.hasOwn(agent, "outcomeNote"), false);
+  assert.equal(agent.note, "Completed, without its flow", "as the note a model is already allowed");
   assert.equal(agent.outcome, "completed");
 });
 

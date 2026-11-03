@@ -4116,7 +4116,7 @@ function sortRuns(rows: any[], runSort: string): any[] {
  * column count -- so a long target can neither
  * overflow the frame nor mis-size a row. Operates only on the passed rows -- no read, no `.log`, no `.data`.
  */
-function renderRunList(rows: any[], selected: number, w: number): string[] {
+export function renderRunList(rows: any[], selected: number, w: number): string[] {
   if (!Array.isArray(rows) || rows.length === 0) return [clip("(no runs)", w)];
   // The plain twin of runLines' viewport, with ASCII edge markers -- the windowing is a fact about which
   // rows are visible, and the monochrome panel must not silently show a different set than the colored one.
@@ -4148,7 +4148,9 @@ function renderRunList(rows: any[], selected: number, w: number): string[] {
     // the reason's token last, as the colored row has them.
     const said = outcomeWord(run?.outcome, run?.reason);
     const token = reasonToken(run?.outcome, run?.reason);
-    const cells = [run?.jobId, run?.target, ...(project === null ? [] : [project]), run?.flow, said.known ? said.word : run?.outcome, run?.turns, run?.tokens?.total, ...(venue === null ? [] : [venue]), ...(token === null ? [] : [token])].map(cellOf).join(" · ");
+    // Issue #800: the colored row's word for a completed run that lacked something, so the monochrome panel does not read it as fine.
+    const note = outcomeNote(run);
+    const cells = [run?.jobId, run?.target, ...(project === null ? [] : [project]), run?.flow, note !== null ? `${note.charAt(0).toLowerCase()}${note.slice(1)}` : said.known ? said.word : run?.outcome, run?.turns, run?.tokens?.total, ...(venue === null ? [] : [venue]), ...(token === null ? [] : [token])].map(cellOf).join(" · ");
     out.push(clipData(`${cursor} ${rep}${cells}`, w));
   }
   const below = rows.length - top - count;
@@ -4386,7 +4388,8 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // the first draft. The word is the console's (words.mjs, issue #710); an unknown outcome prints as itself.
   const w = outcomeWord(r.outcome, r.reason);
   const oc = w.known ? w.word : show(r.outcome ?? "-");
-  let head = styler.bold(styler.fg(w.tone, `${w.glyph} ${oc}`));
+  // Issue #800: a completed run that lacked its flow or an extension says so here as on its row, and not "✔ completed".
+  let head = styler.bold(loadedNoteColored(r, styler) ?? styler.fg(w.tone, `${w.glyph} ${oc}`));
   // The reason's detail (the record's `why`, a fixed token, PR #558) in parentheses after it, so a refusal says WHICH
   // rule refused: `model-unknown (overlay-link)`, and since issue #507 `cost-cap (unboundable)`. That one carries a
   // pointer to doctor, which distinguishes an unsupported protocol such as Radius from an output-cap

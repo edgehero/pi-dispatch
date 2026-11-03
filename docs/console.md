@@ -1361,7 +1361,7 @@ is what ran.
   or says both. Its record still says `completed`, so no count moves and `outcome=completed` still finds it, and **Only
   problems** lists it too ([Finding runs](#finding-runs)). The `/dispatch` panel's row and a project's recent runs say the
   same.
-- **A project's page**, in **What its runs load**: this week's records, and whether they differ from host to host
+- **A project's page**, in **What its runs load**: the last 7 days' records, and whether they differ from host to host
   ([One project](#one-project)).
 - **Sandboxes**, in **What opens** ([Opening a sandbox](#opening-a-sandbox)).
 - **`GET /api/run`**, as `run.loaded` and `run.outcomeNote` ([The state API](#the-state-api)).
@@ -1376,7 +1376,8 @@ button on a repository extension's problem and the fold's row of repository skil
 ran. A failure's path and error stay in the job's log. A repository's extension shares the
 process that reports this, so the worker checks every name against what it knows, and holds a tool's name, which it has
 nothing to compare with, to one closed shape (`INT-RUN-HISTORY-FILE-CONTRACT`). A viewer reads the same lines and gets no
-button. No tool and no agent reads any of it, so a model that reads such a run reads `completed` with no note.
+button. No tool and no agent reads the list. A model that reads such a run reads `completed` and, as its `note`, the same word a
+row says: fixed words and a count, with no name in it.
 
 **What each top line means, and what to do.** The card's own words say more, including which name, host or commit. Each
 line is one of these states:
@@ -1385,18 +1386,17 @@ line is one of these states:
 |---|---|---|
 | `everything` | Everything the trigger asks for loaded, and each MCP server that connected. | Nothing. |
 | `left-out` | Everything loaded, and what the trigger's `run.excludeTools` or `"packages": false`, this job's overlay switch or this kind of run left out, in green, as a choice and never as missing. | Nothing, unless you did not mean it: change the trigger, or `PI_GLOBAL_ALLOW_EXTENSIONS` on the host. |
-| `host-differs` | This run loaded something from its host's overlay or staged packages that another host's publication lacks, and which hosts have published nothing. | Open the host. If they should match, run `import-pi` on the one that is behind, or Adopt the version on [Updates](#updates). A trigger's own choice and a canary's candidate are never counted as a difference. |
-| `no-flow` | The job ran, and no tier held its flow, so it went on without its instructions. | Read what it did before you trust it. Open the trigger and correct `run.flow`, or add the skill to the repository's default branch, the overlay, the skills folder or a staged package. |
+| `host-differs` | This run loaded something from its host's overlay or staged packages that its host still publishes and another host's publication lacks, and which hosts have published nothing. A past run whose name every host has moved past is no difference. | Open the host. If they should match, run `import-pi` on the one that is behind, or Adopt the version on [Updates](#updates). A trigger's own choice and a canary's candidate are never counted as a difference. |
+| `no-flow` | pi found no skill named for its flow in any tier it looked in. A skill with no description is not loaded and `name` in its frontmatter renames it, so this says what pi found, not what the repository holds. If the agent started, it ran without its instructions; the line says so only then. | Read what it did before you trust it. Open the trigger and correct `run.flow`, open the base commit to read what it held, or add the skill to the repository's default branch, the overlay, the skills folder or a staged package. |
 | `extension-failed` | An extension failed to load, by whose it was, and that the run went on. Its path and error are in the job's log. | The button goes where it is fixed: a repository's opens the base commit, an overlay's the host's page, a package's [Updates](#updates), a skills folder's the trigger. |
 | `mcp-stopped` | An MCP server did not answer in time, so the run stopped before the agent started. The queue retries it as any infrastructure failure. | Open Connections, and check that the server answers from that host. |
 | `mcp-failed` | An MCP server could not be used, so the run stopped before the agent started. It is not retried, because the next attempt would find it the same ([`mcp-unavailable`](reasons.md#mcp-unavailable)). | Open Connections, and check that the server starts and accepts its credentials. |
-| `mcp-off` | A server the trigger names is turned off on this host, and the run went on without it. | Open Connections. Turn it on, or take it out of the trigger. |
 | `stopped` | It stopped before anything loaded, while its extensions and skills loaded, or while its MCP servers connected. | Read the outcome above it, which says why it stopped. |
 | `no-agent` | This kind of run has no agent, so it has nothing to load. | Nothing. |
 | `running` | The card arrives when the run ends. | Nothing yet. The trigger's page says what it asks for. |
 | `not-recorded` | There is no list: an older release wrote this record, or the run ended before its container reported. | Nothing for this run. Later runs of an upgraded worker have one. |
 | `refused` | Nothing loaded: the run was refused or cancelled before its container started. | Read the outcome's reason ([reasons.md](reasons.md)). |
-| `absent` | The runner ended before it said, or a stop did not take. An older image never says and a runner that died did not get to, and the record cannot tell them apart. | If every run on a host says this, check that its job image is this release's. |
+| `absent` | This run's runner did not say what it loaded. An older image never says, a runner that died did not get to, and a stop can read the same, and the record cannot tell them apart, so the line names no cause. | If every run on a host says this, check that its job image is this release's. |
 | `invalid` | What the runner said did not hold up, so the page keeps only what the worker knows. | Find `loaded_invalid` in the worker's log, which names the check by a fixed word. A re-stage during the run can cause it. Otherwise, read what the repository's extensions do. |
 | `cut` | What the run loaded had no room, on its exit line or in its record. | Nothing: the rest of the record stands. |
 
@@ -1834,7 +1834,9 @@ the tab, its event stream or the opener configuration export. Private inventory 
 
 **What opens** names the image and the workspace, and says what pi can load in the shell. A shell has no overlay, so
 pi started there loads only the workspace's own `.pi/`, whatever the run loaded. The line says that first, then what the
-run itself loaded, from its record, linked to it. Reviewing a fresh sandbox for a trigger says what a job of that trigger
+run itself loaded, from its record, linked to it, or that its record could not be read. It names pi's version from the run's
+record, or from the host where the sandbox's image is the one that host started on. A kept older image and a trigger's own
+`run.image` hold their own pi, so otherwise it says it cannot name the version. Reviewing a fresh sandbox for a trigger says what a job of that trigger
 would load on that host, from the host's last doctor run and with its time. A host that has published nothing, or whose
 last doctor run could not read a part that job loads from, reads as unknown, never as nothing. The repository's part is
 decided at its base commit ([What a run loaded](#what-a-run-loaded), and
@@ -2116,7 +2118,7 @@ its target that takes its answer (`pendingRunOnTarget`). `steer.armed` is null w
 number, among the newest 2000 runs it searches. Both roles may read it: it carries ids, fixed
 words, times and numbers, and in `run.loaded` the names and versions of what the deployment staged and configured,
 never a record's free text, a job's data, transcript text or a session key. `run.outcomeNote` is the word a row says for
-a completed run that lacked its flow or an extension ([What a run loaded](#what-a-run-loaded)). An agent's copy has neither key. This is what
+a completed run that lacked its flow or an extension ([What a run loaded](#what-a-run-loaded)). An agent's copy has no `loaded`, and carries that word as `run.note`. This is what
 `pi-dispatch chat` asks. The fields are `INT-CONSOLE-STATE-API`'s. A run id is a `404` only when everywhere a run is
 kept was read and holds none of it, the run page's run-not-found rule; when one of those could not be read, the answer
 is a `503` whose sentence names what the console could not read ("whether a run with that id exists could not be
@@ -2377,12 +2379,15 @@ Open a project row's link, `/config/project?id=<id>`. The title gives its name/i
 filename, with **Open in Runs** filtered to that id. An unknown id in a readable projects file has its own
 not-found page; an unreadable file is an unavailable state.
 
-**What its runs load**, first in the main column, reads this week's records of the project's runs, the same window as
-Members beside it. It says the runs differ by host, and how, when two hosts it can read differ. It says they load the same only
-when every host that ran something has a record that says so and the history could be read whole; otherwise it says how
-many runs it read. A trigger that withholds its packages and a canary's candidate are said by name and never count as a
-host's difference. A difference also draws a table of each host's runs, extensions and flows. A run from an older
-release, or one refused before its container, is counted as not read ([What a run loaded](#what-a-run-loaded)).
+**What its runs load**, first in the main column, reads the records of the project's runs in the last 7 days; Members, under it,
+counts this week, so the two can differ. It says the runs differ by host, and how, when two hosts it can read differ, however few
+runs it read, and it then says how few. It says they load the same only when every host that ran something has a record that says
+so and the history could be read whole; otherwise it says how many runs it read and why it will not say more. A trigger that
+withholds its packages and a canary's candidate are said by name and never count as a host's difference, and neither does the
+overlay of a canary or a restricted run, which has it shut by its kind. A host's own `PI_GLOBAL_ALLOW_EXTENSIONS=0` does count. A
+difference also draws a table of each host's runs, extensions and flows. **Missing** counts runs without their flow, with a failed
+extension or stopped by an MCP server, and with anything in it the line is not green, however well the hosts agree. A run from an
+older release, or one refused before its container, is counted as not read ([What a run loaded](#what-a-run-loaded)).
 
 Three cards show spend against the current share (settled and held separately), 24-hour runs and jobs in line,
 and job size with each dimension's source. When combined spend is known but the settled/held split is not,

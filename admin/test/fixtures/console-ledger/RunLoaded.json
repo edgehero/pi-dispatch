@@ -1,7 +1,7 @@
 {
   "card": "RunLoaded",
   "pr": 800,
-  "words": "792f69adc42d7a7ec093ba490851d77092ef00a3950ad9da1b00e0f8beb5d27b",
+  "words": "64d3c55ef2f07e06f5187ae66d7c7eb2dd7658f28d8f5cbdd6a681e68e03cd58",
   "elements": [
     {
       "el": "p-outcome",
@@ -256,7 +256,7 @@
       "golden": [
         "panels/run-loaded-cut.operator"
       ],
-      "shows": "Cut to fit: this record keeps the counts and leaves out the tool names."
+      "shows": "Cut to fit: this record keeps the counts and leaves out package, overlay and tool names."
     },
     {
       "el": "Older records have no loaded field, and say so",

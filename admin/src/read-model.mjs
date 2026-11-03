@@ -118,6 +118,7 @@ import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT } from "@edg
 // A record reason as every surface carries it (issue #737): `recordReason`, the worker's own token charset (its
 // import-free leaf), else null. The one door: no reader here hands out a record's reason another way.
 import { OUTCOME_KEYS, OUTCOME_WORDS, outcomeKey, outcomeWord, recordReason, rowNumber } from "./words.mjs";
+import { outcomeNote } from "./loaded-words.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -7417,7 +7418,8 @@ export function recordBundle(record) {
  * Issue #737: the `reason` is the one every surface shows (words.mjs `recordReason`): a token, else null, so an older
  * worker's error text (a forge's API path, an address, a library's words) reaches no model either. Every other key is
  * the record's own but `loaded`, which goes, and a record with none of them whose reason is a token or null is returned
- * as it is (the same object), so every other run reads byte-identical.
+ * as it is (the same object), so every other run reads byte-identical. Issue #800: what the field said of a completed run that
+ * lacked its flow or an extension stays as `note`, `outcomeNote`'s closed sentence: fixed words and a count, no name.
  */
 export function modelRunRecord(record, { list = false } = {}) {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return record;
@@ -7426,7 +7428,7 @@ export function modelRunRecord(record, { list = false } = {}) {
   // model's own sentence: it names the fields it is given, where a page's names what the page shows.
   if (fromNewerRelease(record)) return { ...coreRecordOf(record), newer: true, note: NEWER_RECORD_MODEL_NOTE };
   const hasBundle = Object.hasOwn(record, "bundle");
-  // Issue #800: what a run loaded is for the console's operator and viewer views, and no model reads any of it.
+  // Issue #800: the list of what a run loaded is for the console's operator and viewer views, and no model reads it.
   const hasLoaded = Object.hasOwn(record, "loaded");
   const hasOpenshell = Object.hasOwn(record, "openshell");
   const hasProfile = Object.hasOwn(record, "secretsProfile");
@@ -7437,6 +7439,8 @@ export function modelRunRecord(record, { list = false } = {}) {
   const { modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
   const out = { ...rest };
   if (freeReason) out.reason = null;
+  const lacked = outcomeNote(record);
+  if (lacked !== null) out.note = lacked;
   if (modelRolesTelemetryOf(record.modelRoles)) out.modelRoles = modelRolesTelemetryOf(record.modelRoles);
   if (typeof record.modelRole === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(record.modelRole)) out.modelRole = record.modelRole;
   if (MODEL_WHY.includes(record.modelWhy)) out.modelWhy = record.modelWhy;

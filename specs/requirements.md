@@ -1621,13 +1621,15 @@ writes retain their existing interactive confirmation. This adds no unattended p
   (`doctor:loads:<name>`, `INT-DOCTOR-RESULTS-KEY`; `sandboxFreshLine`), leaving out packages the trigger withholds and
   an overlay that is off. It reads unknown for a host that published nothing, a publication that could not be read and
   a last doctor run that could not read a part this job loads from, and it never reads as the same or as none. pi's
-  version is the host's beat's (`host:h:<name>`) where the record does not say, so a host that published nothing still
-  has one. **Who sees what**: an operator and a viewer read the same words on the run page, the Runs list and a project's
+  version is the record's, or the host's beat's (`host:h:<name>`) where the sandbox's image is the one that host booted on, so
+  a host that published nothing still has one. A kept older image and a trigger's own `run.image` hold their own pi, so otherwise
+  the line says it cannot name the version (`hostPiFor`). A read of the record that failed says it could not be read. **Who sees what**: an operator and a viewer read the same words on the run page, the Runs list and a project's
   page, which are names, versions, counts and states and never content. A way to where a problem is fixed is an operator's
   button and is not drawn for a viewer; the fold's link to the base commit is part of its words and stays. Sandboxes stays
   operators only (`REQ-SANDBOX-FROM-THE-CONSOLE`, UNCHANGED, checked: it adds no control, command or shell list).
-  `/api/run` carries the field for both roles (`INT-CONSOLE-STATE-API`) and no model or agent reads any of it.
-  Goldens: `sandbox-loaded-run.operator`, `sandbox-loaded-fresh.operator`, `sandbox-loaded-unknown.operator`. Tests:
+  `/api/run` carries the field for both roles (`INT-CONSOLE-STATE-API`). No model or agent reads the list, and each reads
+  `outcomeNote`'s closed sentence as `note`, and an agent's page draws no Loaded card or project card over a copy with no field.
+  Goldens: `sandbox-loaded-run.operator`, `sandbox-loaded-fresh.operator`, `sandbox-loaded-unknown.operator`, `sandbox-loaded-long-names.operator`. Tests:
   `admin/test/loaded-words.test.mjs`, `admin/test/console-sandboxes.test.mjs`, `admin/test/sandbox-data.test.mjs`.
 
 - **AMENDED 2026-11-02 (#792, #793)**: Run Workspace and the separate gateway workbench/observer surface follow
@@ -2237,21 +2239,28 @@ writes retain their existing interactive confirmation. This adds no unattended p
     says not recorded, or that a refused or cancelled run loaded nothing; a field that fails `recordedLoaded` reads as
     could not be read, never as absent and never raw. A record a newer release wrote draws no card (`RUN_NEWER_PANELS`).
     What a trigger or a host left out on purpose (`leftOut`) is said as chosen, in the ok tone, never as missing. Given a
-    problem, the line names it and offers the way to where it is fixed: a missing flow, its trigger; a repository's
-    extension, the base commit the record names (`forgeBaseLinkOf`), or the repository for a record that names none; an
-    MCP server, Connections; an overlay extension, its host's page; a staged package's, Updates; a skills folder's, its
-    trigger. A failed MCP server stops the run (`mcp-unavailable`, or a wait that ran out, which is retried), so it is
-    never a completed run's note. A dropped extension is a row of the fold and no warning: this repository's own
+    problem, the line names it and offers each way to where it is fixed: a missing flow, its trigger and the base commit; a
+    repository's extension, the base commit the record names (`forgeBaseLinkOf`), or the repository for a record that names
+    none; an MCP server, Connections; an overlay extension, its host's page; a staged package's, Updates; a skills folder's, its
+    trigger; failures in two tiers, one way per tier. A missing flow says what pi found, not what the repository holds: a skill
+    with no description is not loaded and `frontmatter.name` renames one. A run that did not reach `ready`, or a server stopped,
+    did not run: its line says what was found nowhere and what failed to load, and nothing about going on. A failed MCP server
+    stops the run (`mcp-unavailable`, or a wait that ran out, which is retried), so it is
+    never a completed run's note. A server turned off cannot reach a job (`mcp-server-unknown`, `INT-RUN-HISTORY-FILE-CONTRACT`), so
+    a record that says one is could not be read. A dropped extension is a row of the fold and no warning: this repository's own
     `dispatch.ts` is dropped on every run on itself. Given a publication of another host (`doctor:loads:<name>`) that
-    lacks a name this run loaded from its overlay or its staged packages, the line says who lacks it, who published
-    nothing and whose publication is old or could not be read, and a failed read adds no line. The Run card's MCP row, as
+    lacks a name this run loaded from its overlay or its staged packages, while its own host's publication still lists that name,
+    the line says who lacks it, who published
+    nothing and whose publication is old or could not be read, and a failed read adds no line. A past run's name every host has moved past is no difference. A cancel reads as before its container only where it spent nothing (`refusedBeforeSpend`) and names no base commit. `absent` is said with no cause. The Run card's MCP row, as
     the triggers file says now, stays only on a record with no `loaded`. **The banner** (`p-outcome`): given a completed run
     that lacked its flow or an extension, its title is `outcomeNote` in the attention status, its body `outcomeBanner`'s
-    sentences and its first action the same way to where it is fixed; the record's outcome stays `completed`. The goldens
+    sentences and its first actions the same ways to where it is fixed; the record's outcome stays `completed`. An agent's page
+    draws no card, since its copy of the record has no field to read. The goldens
     are one per row of the LoadedStates card (`run-loaded`, and `-left-out`, `-left-out-overlay`, `-no-flow`,
-    `-extension-failed`, `-dropped`, `-mcp-connected`, `-mcp-failed`, `-mcp-stopped`, `-host-differs`, `-running`,
+    `-extension-failed`, `-extension-thrown`, `-dropped`, `-mcp-connected`, `-mcp-failed`, `-mcp-stopped`, `-host-differs`, `-running`,
     `-not-recorded`, `-refused` and `-cut`, each `.operator`, with `run-loaded.viewer` and `run-loaded-no-flow.viewer`
-    beside them) and `runs-loaded-problems.operator`, drawn by `admin/test/helpers/loaded-goldens.mjs`. Tests:
+    beside them), one per state the card has no row for (`-stopped`, `-no-agent`, `-absent`, `-invalid`, `-no-room`, held to `LOADED_STATES`
+    by `LOADED_STATE_GOLDENS`), `-two-tiers`, `-both`, the width check's `run-loaded-long-names.operator`, `runs-loaded-both.operator` and `runs-loaded-problems.operator`, drawn by `admin/test/helpers/loaded-goldens.mjs`. Tests:
     `admin/test/loaded-words.test.mjs`, `admin/test/console-loaded.test.mjs`, `admin/test/dashboard.test.mjs` (the panel's
     row says the same word).
     **The Chat panel** (issue #647, `REQ-TERMINAL-CHAT`): the run page gains a "Chat" panel (`p-chat`) between Progress
@@ -2681,17 +2690,17 @@ writes retain their existing interactive confirmation. This adds no unattended p
     but its settled/held split is not, the known total leads with that qualification. The allocation meter labels
     both total and share. Primary spend text retains heading size and ink, including nested formatted amounts.
     The worst run uses one short catalog-grounded sentence. No envelope means no share.
-    **What its runs load** (issue #800, `p-proj-loads`, first in the main column; the ProjectLoads card) reads this week's
-    records, the window Members counts its runs in beside it (`costsSinceMs("week")`), and nothing else (`projectLoadsOf`):
-    one line says its state (`differs`, `same`, `incomplete` or `none`), then the rows that state has, and a difference draws
-    a table by host and a foot. It claims a difference when two hosts it can read differ, whatever a third says. It says
+    **What its runs load** (issue #800, `p-proj-loads`, first in the main column; the ProjectLoads card) reads the records of
+    the last 7 days, rolling, and nothing else (`projectLoadsOf`); Members, under it, stays this week and says so, so the two can
+    differ. One line says its state (`differs`, `same`, `incomplete` or `none`), then the rows that state has, and a difference draws
+    a table by host and a foot. It claims a difference when two hosts it can read differ, whatever a third says and however few
+    runs it read, and says how few under the line. It says
     the same only when `hostsAgree` does of every host that ran something, so a host with no record that says what it
-    loaded, a record cut past its names and a history that could not be read whole each leave the question open. With
-    under half the week's runs read it says only how little it read, whatever those show. A trigger's withheld packages and a canary's candidate are said by name
-    and are never a host's difference, and an image's local id is never compared. A viewer reads the same words, with
+    loaded, a record cut past its names, a host whose only runs had the overlay shut by their kind and a history that could not be read whole each leave the question open, and each gives its reason under the line. A trigger's withheld packages and a canary's candidate are said by name
+    and are never a host's difference, nor is the overlay of a canary or a restricted run, and an image's local id is never compared. A host's own `PI_GLOBAL_ALLOW_EXTENSIONS=0` is its difference. **Missing** counts runs that lacked their flow or an extension, or that an MCP server stopped, and when it holds anything the line takes the attention tone in every state. A viewer reads the same words, with
     no link to the host. A view that could not be built says so. `projectViewForAgent`'s rebuild names its keys, so this
     reaches no model. Goldens: `project-loads` (`.operator`, `.viewer`), `project-loads-same.operator`,
-    `project-loads-none.operator`, `project-loads-incomplete.operator`. Tests: `admin/test/loaded-words.test.mjs`,
+    `project-loads-none.operator`, `project-loads-incomplete.operator`, `project-loads-long-names.operator`. Tests: `admin/test/loaded-words.test.mjs`,
     `admin/test/project-view.test.mjs`.
     Members retain weekly runs and last run; local folders display by basename. Invalid or unreadable triggers
     make bundle state unknown, never absent, with a fixed actionable source-load sentence that never repeats parser
@@ -8818,4 +8827,5 @@ instead of drifting.
 | 2026-11-02 (#754, #792, security review) | REQ-SANDBOX-BROWSER-GATEWAY: a launch link opened in another browser can no longer be armed by a step-up elsewhere; a launch from outside the console waits for a click; an unauthenticated reset can no longer end the gateway. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |
 | 2026-11-02 (#796) | New `REQ-PACKAGE-UPDATES`; `REQ-OPERATOR-CONSOLE-SCREENS` gains (g8) Updates. `REQ-GLOBAL-PI-OVERLAY` gate 1: a person's Adopt also declares a package, at the same exact version, in the same file. The other three gates are UNCHANGED, checked: staging still runs through the same assertions with `--ignore-scripts`, the runner still validates each path, and `run.packages` still withdraws per trigger. The console's egress is unchanged; the look is the worker host's, and off until enabled. |
 | 2026-11-03 (#796, a canary on another host) | `REQ-PACKAGE-UPDATES`: the page and Adopt's gate read a canary's result from the fleet's records. They read this host's files alone, so without a shared `PI_LOGS_DIR` a canary that ran on another host read as never tried and could not be adopted. A read that could not cover them is said. It fails toward another canary, never toward an Adopt. `REQ-OPERATOR-CONSOLE-SCREENS` (g8) and every other entry UNCHANGED, checked. |
-| 2026-11-03 (#800, what a run loaded, in the console) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, part 1 of #800: a new extension (what four surfaces say, Sandboxes' What opens, who sees what), (b1) `problems=1` also keeps a completed run that lacked its flow or an extension, (b5) that run's badge, (c) the Loaded card and the banner, (g7) What its runs load, (i) the goldens. The record's outcome stays `completed`, so `outcome=completed`, every count by outcome and `failures24h` are UNCHANGED, checked. **Where this departs from the issue's words:** a project reads this week and not the last 7 days, because Members counts its runs in that window beside it and a rolling seven days would be a second window under a near-identical word; a failed MCP server stops the run, so it is no completed run's note; a repository extension's problem names no total, because the record keeps no kind and a conflicted extension counts as both loaded and failed. Part 2's trigger card is not built here. (o) UNCHANGED, checked: it measures every panel golden. `REQ-CONSOLE-SECURITY` (l) UNCHANGED, checked: a viewer's page holds names, versions, counts and states and still no failure text, and the hostile-value walk covers the new panels. `REQ-SANDBOX-FROM-THE-CONSOLE` UNCHANGED, checked: operators only, with no new control. `constitution.md` UNCHANGED, checked: nothing here decides or spends. **Code evidence**: admin/src/loaded-words.mjs; admin/src/console/panels/run.mjs -> runLoaded; admin/src/console/panels/project.mjs -> projectLoads; admin/src/console/panels/sandboxes.mjs; admin/src/run-filter.mjs -> runMatches. |
+| 2026-11-03 (#800, what a run loaded, in the console) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, part 1 of #800: a new extension (what four surfaces say, Sandboxes' What opens, who sees what), (b1) `problems=1` also keeps a completed run that lacked its flow or an extension, (b5) that run's badge, (c) the Loaded card and the banner, (g7) What its runs load, (i) the goldens. The record's outcome stays `completed`, so `outcome=completed`, every count by outcome and `failures24h` are UNCHANGED, checked. **Where this departs from the issue's words:** a failed MCP server stops the run, so it is no completed run's note; a repository extension's problem names no total, because the record keeps no kind and a conflicted extension counts as both loaded and failed. Part 2's trigger card is not built here. (o) UNCHANGED, checked: it measures every panel golden. `REQ-CONSOLE-SECURITY` (l) UNCHANGED, checked: a viewer's page holds names, versions, counts and states and still no failure text, and the hostile-value walk covers the new panels. `REQ-SANDBOX-FROM-THE-CONSOLE` UNCHANGED, checked: operators only, with no new control. `constitution.md` UNCHANGED, checked: nothing here decides or spends. **Code evidence**: admin/src/loaded-words.mjs; admin/src/console/panels/run.mjs -> runLoaded; admin/src/console/panels/project.mjs -> projectLoads; admin/src/console/panels/sandboxes.mjs; admin/src/run-filter.mjs -> runMatches. |
+| 2026-11-03 (#800, what an independent check of the console found) | **`REQ-OPERATOR-CONSOLE-SCREENS` CORRECTED**, each from a run of the code. (g7) reads the last 7 days, rolling, as the issue asked: this entry's own row had recorded this week as a departure, to match Members, and that row is corrected, because this week empties the card every Monday. Members stays this week and says so. (g7) also claims a difference it can read however few runs it read, says why it will not say the same in each way it does not, leaves out the overlay of a canary or a restricted run, and counts a run an MCP server stopped in Missing, with the attention tone when Missing holds anything. (c): each way to a fix is a button, a stopped run does not say it ran or went on, a host difference needs the run's own host still to list the name, a cancel reads as before its container only where it spent nothing and names no base commit, `absent` names no cause, a state `mcp-off` is gone because the worker refuses such a job before it starts (`worker/src/mcp-preflight.mjs`), and an agent's page draws no card. The extension: pi's version is the host's only for the image it booted on. `constitution.md` UNCHANGED, checked: nothing here decides or spends, and a model now reads `outcomeNote`'s closed sentence and still no name. **Code evidence**: admin/src/loaded-words.mjs; admin/src/project-view.mjs -> readProjectView; admin/src/console/panels/run.mjs -> runLoaded; admin/src/console/panels/sandboxes.mjs; admin/src/agent-read.mjs -> agentReadProjection. |

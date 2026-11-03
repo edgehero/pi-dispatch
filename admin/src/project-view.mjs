@@ -24,6 +24,8 @@ const amount = (n) => Number.isSafeInteger(n) && n >= 0 ? n : null;
 const folder = (s) => String(s).split(/[\\/]/).filter(Boolean).at(-1) ?? "folder";
 const memberLabel = (s) => /^(?:\/|[A-Za-z]:[\\/])/.test(s) ? `.../${folder(s)}` : s;
 const WINDOW_KEYS = Object.freeze({ day: dayKey, week: weekKey, month: monthKey });
+/** What its runs load reads the last 7 days, rolling: `projectLoadsOf` says why not this week. `historySince` always reaches past it. */
+const LOADS_WINDOW_MS = 7 * DAY;
 const WORST = Object.freeze({ failed: 6, "awaiting-approval": 5, "awaiting-input": 4, refused: 3, cancelled: 2, completed: 1 });
 
 /** Four bounded pages across the fleet; the page says when that cap leaves older records outside its view. */
@@ -246,8 +248,7 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
     spend: { window, since, envelope, usedMicros, settledMicros, heldMicros: holds.micros, heldKnownMicros: holds.knownMicros, heldIncomplete: holds.incomplete, floor: envelope ? false : historyFloor, shareMicros: amount(allocation?.state?.allocations?.[id]), problem: allocation?.problem ? "The allocation file could not be read. Run pi-dispatch doctor for the reason." : allocation?.unreachable ? "The allocation could not be read from Valkey." : null },
     allocation: { window, shareMicros: amount(allocation?.state?.allocations?.[id]), totalMicros: amount(allocation?.totalMicros), floorMicros: amount(allocation?.floors?.[id]), weight: amount(weights[id]), totalWeight: amount(totalWeight), split: allocation?.state ? { id: allocation.state.planId ?? null, writer: allocation.state.writer ?? null, appliedAt: allocation.state.appliedAt ?? null, validUntil: allocation.state.validUntil ?? null } : null, refused: selected.filter((r) => recordReason(r) === "allocation-cap").length, unset: !envelope, problem: allocation?.problem || allocation?.unreachable ? "The allocation could not be read." : null },
     size, sizing: sizingView, sizingUnreadable: registryUnreadable || !sizing || Boolean(sizing.unreachable) || !sl || Boolean(sl.invalid || sl.unreadable), limits: limitRows, limitsUnreadable: !sl || Boolean(sl.invalid || sl.unreadable), bundle, bundleKnown,
-    // This week, the window Members counts its runs in beside it. A rolling seven days would be a second window under a near-identical word.
-    loads: projectLoadsOf(recorded.filter((r) => instant(r) >= costsSinceMs("week", now)), { historyIncomplete: !historyReadable || fleetHistory?.incomplete !== false || newerSkipped > 0 }),
+    loads: projectLoadsOf(recorded.filter((r) => instant(r) >= now - LOADS_WINDOW_MS), { historyIncomplete: !historyReadable || fleetHistory?.incomplete !== false || newerSkipped > 0 }),
     triggers: [...triggerCounts.values()].sort((a, b) => a.index - b.index), editRefusal: projectRefusal(edit, id, "edit"), deleteRefusal: projectRefusal(deletion, id, "delete"),
   };
 }
