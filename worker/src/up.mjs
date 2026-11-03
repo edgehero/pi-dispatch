@@ -54,6 +54,7 @@ import { jobImageFix, pullOffered, registryQualified } from "./image-ref.mjs";
 import { DEFAULT_EGRESS_PROXY, egressArmed as egressArmedFn, egressProxyName } from "./egress.mjs";
 import { ENV_WRITER_FS, ENV_VALUE_UNWRITABLE, envKeyIsBlank, envValueShown, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
 import { COMPOSE_FILE, COMPOSE_VALKEY_OVERRIDE, OWNER_MARKER_KEY, VALKEY_PASSWORD_KEY, VALKEY_PORT_KEY, OWNER_CHECK_CONTAINER, OWNER_CHECK_EXEC, VALKEY_VOLUME_RECORD, adoptVolumeQuestion, composeArgs, ownerCheckAnswer, readVolumeRecord, valkeyOwnerCheckArgs, volumeRecordMatches, volumeRecordText, composeProjectName, foreignContainerSentence, foreignMarkerRefusal, foreignVolumeLabelRefusal, foreignVolumeRefusal, foreignVolumeUsers, isLoopbackHost, newValkeyPassword, unadoptedVolumeRefusal, valkeyContainerOwner, valkeyDockerRunArgs, valkeyPasswordDecision, valkeyPortEnvDecision, valkeyVolumeCreateArgs, valkeyVolumeOwner } from "./valkey-auth.mjs";
+import { olderValkeyContainerFinding } from "./older-state.mjs";
 import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs";
 import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 import { operatorCount, readTokensFile } from "./console-tokens.mjs";
@@ -722,6 +723,9 @@ export async function runUp(argv = [], deps = {}) {
 	// a folder /dispatch setup copied it into). A folder init made has none, and there the way is this command again.
 	const laterValkey = () => (composeHere(cwd, fs) ? `start it later with \`${shownCompose([...composeBase, "up", "-d"])}\`${composeNote}` : "start it later by running `pi-dispatch up` again and accepting");
 	let existing = null;
+	// Issue #761: the verdict on the Valkey container up leaves as it is, whose image the summary holds against the older
+	// ones below when up runs that container itself (`upValkeyContainerImage`, older-state.mjs, doctor's rule too).
+	let keptValkey = null;
 	if (dockerValkey.error) {
 		valkeyRefused = "url";
 		out(`✗ ${dockerValkey.error}\n`);
@@ -781,6 +785,7 @@ export async function runUp(argv = [], deps = {}) {
 			summary.push(["valkey", `port ${vport} has a listener that answers WITHOUT a password, left alone: restart it with ${VALKEY_PASSWORD_KEY}`]);
 		} else {
 			summary.push(["valkey", ours ? `container ${ourName} already running` : `port ${vport} already has a listener, left alone`]);
+			keptValkey = who;
 		}
 	} else if (handedOver) {
 		// The wizard handed this folder's Valkey to compose (PR #475's review): up starts THAT one, compose's valkey on
@@ -814,6 +819,7 @@ export async function runUp(argv = [], deps = {}) {
 		if (existing.ours) {
 			out(`⚠ pi-dispatch-valkey is this deployment's and is not listening on ${vport}: \`docker start pi-dispatch-valkey\` starts it as it is\n`);
 			summary.push(["valkey", "pi-dispatch-valkey exists (this deployment's) and is not running; `docker start pi-dispatch-valkey`"]);
+			keptValkey = existing;
 		} else {
 			valkeyRefused = "volume";
 			const why = existing.unknown ? `whether pi-dispatch-valkey is this deployment's could not be read (${existing.unknown})` : foreignContainerSentence("pi-dispatch-valkey", existing.owner);
@@ -842,6 +848,12 @@ export async function runUp(argv = [], deps = {}) {
 			summary.push(["valkey", "started container pi-dispatch-valkey (durable: --appendonly yes, restart unless-stopped)"]);
 		}
 	}
+	// Issue #761: a container an older `up` started keeps the floating `valkey/valkey:8` until it is recreated, and up
+	// leaves a Valkey it finds on the image it has (doctor's `state.older` says the same, by the same rule: this
+	// deployment's container, in a folder not handed to compose). Read off the inspect the ownership rule already made, so
+	// this asks docker nothing more; an image of the operator's own choosing is no finding.
+	const olderValkey = keptValkey ? await olderValkeyContainerFinding({ valkeyContainer: () => keptValkey, handedOver }) : null;
+	if (olderValkey) summary.push(["valkey image", `${olderValkey.label}. ${olderValkey.fix}`]);
 	}
 
 	// (e2) the egress policy's proxy, and ONLY when the operator has already armed it. up never invents

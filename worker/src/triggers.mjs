@@ -26,6 +26,7 @@ import { validateZeroTouchConfig } from "./question-groups.mjs";
  */
 
 import { BACKEND_NAMES, backendFor, servesOf } from "./backends.mjs";
+import { SCHEDULER_JOB_ID_OVERHEAD, SLOT_DIGITS_MAX } from "./bullmq-internals.mjs";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 // SKILL_NAME_RE is the single-sourced skill charset (flow-gate exports it for exactly this reason:
@@ -235,10 +236,13 @@ const ID_CHARSET = /^[A-Za-z0-9._-]+$/;
  * a scheduler and a surface prints the key in running text; and each run the scheduler mints is the job
  * `repeat:<id>:<slot>`, the slot the run's instant in ms (at most 16 digits), which every reader of a job id takes at
  * most 200 characters long (`DEFER_ID_RE`, the console's `RUN_ID_RE`). So the id is at most 200 less the run id's
- * frame: every run of every legal id is a job id the readers take, and a longer id, a schedule whose runs no surface
- * could name, is refused here. The admin's bound is this constant (`SCHEDULER_NAME_MAX`, admin/src/read-model.mjs).
+ * frame (`SCHEDULER_JOB_ID_OVERHEAD`, bullmq-internals.mjs): every run of every legal id is a job id the readers take,
+ * and a longer id, a schedule whose runs no surface could name, is refused here. A surface's bound on a scheduler key
+ * is the wider `SCHEDULER_ID_MAX` (200), so a scheduler an earlier release made for a longer id is still named there.
  */
-export const CRON_ID_MAX = 200 - "repeat::".length - 16;
+export const CRON_ID_MAX = 200 - SCHEDULER_JOB_ID_OVERHEAD;
+// The 200 characters the readers of a run id take, which the refusal of a longer cron id names: the bound above, read back.
+const RUN_ID_READ_MAX = CRON_ID_MAX + SCHEDULER_JOB_ID_OVERHEAD;
 
 /**
  * The ceiling on `run.replicas` (REQ-REPLICA-RUNS). Three, because `PI_CONCURRENCY` defaults to 3
@@ -622,7 +626,7 @@ function normalizeCron(on, run, index, path, state) {
 		throw configError(`cron trigger "${id}": on.id must match [A-Za-z0-9._-]+: ${path}`);
 	}
 	if (id.length > CRON_ID_MAX) {
-		throw configError(`${at}: cron on.id is ${id.length} characters, more than ${CRON_ID_MAX}: a scheduler's id is read back at most that long, so a longer one would run with no surface naming it: ${path}`);
+		throw configError(`${at}: cron on.id is ${id.length} characters, more than ${CRON_ID_MAX}: each run's job id is repeat:<id>:<up to ${SLOT_DIGITS_MAX} digits> and must stay within the ${RUN_ID_READ_MAX} characters the readers take, so a longer id would run with no surface naming it: ${path}`);
 	}
 	if (state.seenCronIds.has(id)) {
 		throw configError(`cron trigger "${id}": duplicate on.id (cron ids must be unique): ${path}`);

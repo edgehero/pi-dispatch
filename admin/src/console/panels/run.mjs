@@ -31,6 +31,7 @@ import { rerunRefusalOf } from "../../job-actions.mjs";
 import { fromNewerRelease, NEWER_RECORD_SENTENCE } from "../../newer-release.mjs";
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
+import { isSchedulerJobId } from "@edgehero/pi-dispatch/bullmq-internals";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
@@ -897,7 +898,7 @@ export function runActionsPanel(view) {
   if (!r || view.role !== "operator" || !RUN_ID_RE.test(r.jobId ?? "")) return html``;
   const continuing = r.reason === "recovery-enqueued" && [view.data?.chat?.activeJobId, view.data?.chat?.queuedJobId].some((id) => typeof id === "string" && id !== r.jobId);
   if (continuing) return html``;
-  return titled("Actions", html`${rerunLine(r, view)}${forkLine(r, view)}${String(r.jobId).startsWith("repeat:") ? html`<p>A cron run is fired again by hand from its trigger as the triggers file says now.</p>` : null}`);
+  return titled("Actions", html`${rerunLine(r, view)}${forkLine(r, view)}${isSchedulerJobId(r.jobId) ? html`<p>A cron run is fired again by hand from its trigger as the triggers file says now.</p>` : null}`);
 }
 
 export function runSandbox(view) {

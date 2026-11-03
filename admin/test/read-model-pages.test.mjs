@@ -143,6 +143,8 @@ test("runVenueOf and triggerValueOf read a record as the filter matches it (#737
   assert.equal(triggerValueOf(rec("gh-1", AT, { triggerIndex: 12 })), "12");
   assert.equal(triggerValueOf(rec("repeat:nightly:1760443200000", AT, { triggerIndex: null })), "nightly");
   assert.equal(triggerValueOf(rec("manual:nightly:1", AT)), "nightly");
+  // A record's cron id at any length (every release before issue #761 took one); the filter's own value rule bounds a list.
+  assert.equal(triggerValueOf(rec(`repeat:${"n".repeat(500)}:1760443200000`, AT, { triggerIndex: null })), "n".repeat(500));
   for (const odd of [rec("gh-1", AT, { triggerIndex: -1 }), rec("gh-1", AT, { triggerIndex: 1.5 }), rec("gh-1", AT, { triggerIndex: "3" }), rec("gh-1", AT), null]) assert.equal(triggerValueOf(odd), null);
   // Each value it gives is one the filter matches back to the record.
   for (const r of [rec("gh-1", AT, { triggerIndex: 4 }), rec("repeat:nightly:1760443200000", AT)]) assert.equal(runMatches(r, parseRunFilter({ trigger: triggerValueOf(r) }).filter), true);

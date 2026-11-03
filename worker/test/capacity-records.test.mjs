@@ -215,6 +215,26 @@ test("the local read: an mtime prefilter (never opened), the 256 KiB cap (skippe
 	assert.match(denied.unreachable, /EACCES/);
 });
 
+test("issue #761: a deadline is checked before each file, and a read past it stops there and says it was cut short", () => {
+	const dir = tempDir("pi-cap-records-");
+	const write = writer(dir);
+	for (const id of ["a", "b", "c"]) write(`${id}.json`, JSON.stringify(rec(id, H)));
+	// A clock that moves a second per look: the deadline passes after the first file is read.
+	let t = 1_000;
+	const clock = () => (t += 1_000);
+	const opened = [];
+	const fs = { readdirSync: (p) => nodeFs.readdirSync(p).sort(), statSync: (p) => nodeFs.statSync(p), readFileSync: (p) => (opened.push(p.split("/").at(-1)), nodeFs.readFileSync(p)) };
+	const cut = readLocalWindow(dir, { sinceMs: SINCE, fs, deadlineAt: 2_500, clock });
+	assert.deepEqual(cut.records.map((r) => r.jobId), ["a"]);
+	assert.deepEqual(opened, ["a.json"], "no file is opened once the deadline has passed");
+	assert.equal(cut.cutShort, true);
+	// Without a deadline, or before it, every file is read and the result is the one it always was.
+	const whole = readLocalWindow(dir, { sinceMs: SINCE, fs, clock });
+	assert.equal(whole.records.length, 3);
+	assert.equal(Object.hasOwn(whole, "cutShort"), false);
+	assert.equal(readLocalWindow(dir, { sinceMs: SINCE, deadlineAt: Number.MAX_SAFE_INTEGER, clock }).records.length, 3);
+});
+
 test("the local files cover this host to their retention; an absent or unreadable directory covers nothing", async () => {
 	const dir = tempDir("pi-cap-records-");
 	writer(dir)("l.json", JSON.stringify(rec("local", H, { host: "here" })));

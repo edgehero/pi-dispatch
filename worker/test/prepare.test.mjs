@@ -167,12 +167,36 @@ test("a cron job with a missing or unparseable queueJobId gets null scheduledFor
 			return "2026-07-26T03:00:00.000Z";
 		};
 
-		for (const queueJobId of [undefined, "local-abc123", "repeat:t:not-millis"]) {
+		// A hand fire (`manual:`, and a canary's, issue #796) has no scheduled instant: its number is the minute it was queued.
+		for (const queueJobId of [undefined, "local-abc123", "repeat:t:not-millis", "manual:t:1758868620000", "manual:t:1758868620001"]) {
 			const job = { kind: "local", folder: "/some/folder", task: "x", trigger };
 			const arg = await dispatchLocal(jobsDir, job, { queueJobId, findPreviousRun });
 			assert.deepEqual(arg.event, nullEvent, `queueJobId=${JSON.stringify(queueJobId)} -> nulls, never a guess`);
 		}
 		assert.equal(looked, false, "an unparseable fire instant skips the history lookup entirely");
+	} finally {
+		cleanup();
+	}
+});
+
+test("a cron job whose repeat id names a slot past a Date's last instant gets nulls, never a throw from the prepare", async () => {
+	// The id grammar takes 16 digits, and a hand-written slot past 8.64e15 ms is no instant: `toISOString` throws on it.
+	// `9999999999999999` is past Number.MAX_SAFE_INTEGER too, while `9000000000000000` is a safe integer, so only the
+	// 8.64e15 bound refuses it. The last instant a Date holds is still a date.
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const trigger = { id: "a", pattern: "0 3 * * *" };
+		let looked = false;
+		const findPreviousRun = () => ((looked = true), null);
+		const job = { kind: "local", folder: "/some/folder", task: "x", trigger };
+		for (const queueJobId of ["repeat:a:9999999999999999", "repeat:a:9000000000000000", "repeat:a:8640000000000001"]) {
+			const past = await dispatchLocal(jobsDir, job, { queueJobId, findPreviousRun });
+			assert.deepEqual(past.event, { source: "cron", trigger, scheduledFor: null, previousRunAt: null }, queueJobId);
+		}
+		assert.equal(looked, false, "no history lookup for a slot that is no instant");
+		const last = await dispatchLocal(jobsDir, job, { queueJobId: "repeat:a:8640000000000000", findPreviousRun });
+		assert.equal(last.event.scheduledFor, new Date(8.64e15).toISOString());
+		assert.equal(looked, true);
 	} finally {
 		cleanup();
 	}

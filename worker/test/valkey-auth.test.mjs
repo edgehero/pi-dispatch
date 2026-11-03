@@ -109,7 +109,8 @@ test("the Quadlet unit, the compose file and `up`'s docker run carry the ONE sta
 	assert.match(valkeyEnvFileText(null), /^VALKEY_PASSWORD=$/m, "no password: an empty value, which starts Valkey without one");
 });
 
-// The script runs under the IMAGE's /bin/sh, which is dash (measured: valkey/valkey:8 is Debian). Run it under each POSIX
+// The script runs under the IMAGE's /bin/sh, which is dash (measured: valkey/valkey:8.1, Valkey 8.1.11, is Debian 13,
+// 8.0.2 Debian 12, and /bin/sh is /usr/bin/dash in both). Run it under each POSIX
 // shell this host has, dash among them where installed (CI's /bin/sh is dash), with a stand-in for the image's entrypoint
 // that records its argv and what it reads on stdin.
 const SHELLS = ["/bin/sh", "/bin/dash", "/usr/bin/dash", "/bin/bash"].filter((s) => existsSync(s));

@@ -28,6 +28,7 @@
  * `redis` is any ioredis-compatible client, injected so the logic is testable without a server.
  */
 
+import { createHash } from "node:crypto";
 import { DAY_TTL_SECONDS, MONTH_TTL_SECONDS, WEEK_TTL_SECONDS, dayKey, monthKey, weekKey } from "./budget.mjs";
 import { MICROS_PER_USD, optionalUsdMicros } from "./money.mjs";
 
@@ -366,8 +367,213 @@ export const MODEL_BASIS = Object.freeze(["metered", "floor", "refunded"]);
  * The run record's `dollars` object (INT-RUN-HISTORY-FILE-CONTRACT): an explicit literal of integers and fixed
  * tokens. `modelBasis` is how the job's MODEL windows settled (issue #502 part 6): `metered` when every one settled
  * to its own usage row, `floor` when any kept at least its reservation, `refunded` when they were given back, and
- * `null` when the job held no model window.
+ * `null` when the job held no model window. `reservedIn` (issue #761) is `deploymentWindowsOf`'s answer, carried
+ * only when it is one, so a record of a job that reserved in no deployment window keeps the shape it had.
  */
-export function dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis = null }) {
-	return { reservedMicros, settledMicros, basis, modelBasis: MODEL_BASIS.includes(modelBasis) ? modelBasis : null };
+export function dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis = null, reservedIn = null }) {
+	return { reservedMicros, settledMicros, basis, modelBasis: MODEL_BASIS.includes(modelBasis) ? modelBasis : null, ...(reservedIn ? { reservedIn } : {}) };
+}
+
+// ---- which deployment windows a record's money is in (issue #761, the dollar window reset check) ----
+//
+// A dollar counter holds the history a cap is judged against, and Valkey is its only copy: a flushed, replaced or
+// restored Valkey, an evicted key or a hand edit reopens the cap with nothing saying so. A record cannot be bucketed by
+// its own times to find out (the reservation's clock is neither `startedAt` nor `endedAt`, and a window whose cap was
+// set mid-window was never written by the records before it), so a record says which deployment windows its settled
+// amount is in, `dollars.reservedIn`, and doctor sums this host's records per window against the counter
+// (`dollarWindowFloors`). Only the deployment's day, week and month: a scoped, project or model window's key is a hash
+// per ledger, and a job-count window holds no amount a record states.
+
+/** The deployment's three dollar windows, in the order a hold reserves them (`activeWindows`). */
+export const DEPLOYMENT_WINDOWS = Object.freeze(["day", "week", "month"]);
+
+/** A Valkey endpoint tag: 16 lowercase hex characters (`valkeyEndpointTag`). */
+export const VALKEY_TAG_RE = /^[0-9a-f]{16}$/;
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// The inverse of budget.mjs's `dayKey`, `weekKey` and `monthKey` under the deployment's own prefix, exactly: a scoped
+// or model key (`budget:usd:s:<hash>`, `budget:usd:mdl:<hash>`) starts with the same prefix and matches none of them.
+const WINDOW_KEY_RES = Object.freeze({
+	day: new RegExp(`^${escapeRe(DOLLAR_KEY_PREFIX)}:(\\d{4}-\\d{2}-\\d{2})$`),
+	week: new RegExp(`^${escapeRe(DOLLAR_KEY_PREFIX)}:w:(\\d{4}-\\d{2}-\\d{2})$`),
+	month: new RegExp(`^${escapeRe(DOLLAR_KEY_PREFIX)}:m:(\\d{4}-\\d{2})$`),
+});
+
+/** Which deployment window `key` is and its bucket id (`{ window, bucket }`, the text after the prefix), or null. */
+export function deploymentWindowOfKey(key) {
+	if (typeof key !== "string") return null;
+	for (const window of DEPLOYMENT_WINDOWS) {
+		const m = key.match(WINDOW_KEY_RES[window]);
+		if (m) return { window, bucket: m[1] };
+	}
+	return null;
+}
+
+/**
+ * The deployment's three windows at `now`, `{ day, week, month }`, each `{ key, bucket, startMs, endMs, ttlSeconds }`:
+ * the key a reservation at `now` writes (budget.mjs's key functions, so a reader and the worker cannot disagree about a
+ * boundary), its bucket id, when the bucket begins and ends (UTC: the day, the week from Monday, the month), and the
+ * TTL the worker sets on the key's first write.
+ */
+export function deploymentWindowsAt(now) {
+	const d = new Date(now);
+	const y = d.getUTCFullYear();
+	const mo = d.getUTCMonth();
+	const day = Date.UTC(y, mo, d.getUTCDate());
+	const monday = day - ((new Date(day).getUTCDay() + 6) % 7) * 86_400_000;
+	const at = (key, startMs, endMs, ttlSeconds) => ({ key, bucket: deploymentWindowOfKey(key)?.bucket ?? null, startMs, endMs, ttlSeconds });
+	return {
+		day: at(dayKey(d, DOLLAR_KEY_PREFIX), day, Date.UTC(y, mo, d.getUTCDate() + 1), DAY_TTL_SECONDS),
+		week: at(weekKey(d, DOLLAR_KEY_PREFIX), monday, monday + 7 * 86_400_000, WEEK_TTL_SECONDS),
+		month: at(monthKey(d, DOLLAR_KEY_PREFIX), Date.UTC(y, mo, 1), Date.UTC(y, mo + 1, 1), MONTH_TTL_SECONDS),
+	};
+}
+
+/**
+ * The tag of the Valkey a deployment's counters live in: the first 16 hex characters of SHA-256 over `host:port/db`, so
+ * two deployments that share a logs directory and a worker name (the default per-account `~/.pi-dispatch/logs` and the
+ * hostname) but not a Valkey never add up each other's records. `endpoint` is a VALKEY_URL or a client's connection
+ * options (`{ host, port, db }`, connection.mjs `parseConnection`, which reads them off the URL by the rules below), so
+ * the worker, which holds the options its clients connect with, and doctor, which holds the URL it talks to, compute the
+ * same tag for the same endpoint. Both take the JUDGED address (`pinnedValkeyUrl`: the literal a local Valkey is pinned
+ * to on Linux), the one the worker really dials. A unix socket (`{ path }`, which no client of this project builds
+ * today) is tagged by its path. Credentials and the scheme are never part of it; the host is lowercased, an IPv6
+ * literal's brackets dropped, and a missing host, port or database is ioredis's and `parseConnection`'s default
+ * (127.0.0.1, 6379, 0). Null for anything else (a URL that does not parse, a database that is not a number). A tag that
+ * differs where the endpoint is the same (`localhost` against `127.0.0.1` on a host that pins nothing) only leaves
+ * records out of the floor, which can miss a reset and never invents one.
+ */
+export function valkeyEndpointTag(endpoint) {
+	let host;
+	let port;
+	let db;
+	if (typeof endpoint === "string") {
+		let u;
+		try {
+			u = new URL(endpoint);
+		} catch {
+			return null;
+		}
+		host = u.hostname;
+		port = u.port;
+		db = u.pathname && u.pathname !== "/" ? u.pathname.slice(1) : "";
+	} else if (endpoint !== null && typeof endpoint === "object") {
+		if (typeof endpoint.path === "string" && endpoint.path !== "") return hash16(`unix:${endpoint.path}`);
+		({ host, port, db } = endpoint);
+	} else {
+		return null;
+	}
+	const h = String(host ?? "").replace(/^\[(.*)\]$/, "$1").toLowerCase() || "127.0.0.1";
+	const p = port === undefined || port === null || port === "" ? 6379 : Number(port);
+	const n = db === undefined || db === null || db === "" ? 0 : Number(db);
+	if (!Number.isSafeInteger(p) || p < 0 || !Number.isSafeInteger(n) || n < 0) return null;
+	return hash16(`${h}:${p}/${n}`);
+}
+
+function hash16(text) {
+	return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
+
+/**
+ * The record's `dollars.reservedIn` for a hold (issue #761): `{ day?, week?, month?, valkey }`, the bucket of each
+ * DEPLOYMENT window whose counter holds at least the amount the record states, and the endpoint tag of the Valkey it is
+ * in (`valkeyEndpointTag`). Null when there is no such window: a zero hold (no `ledgers`), a hold with no deployment
+ * ledger, a malformed tag, or every key below the record. PURE.
+ *
+ *   - `hold` is the hold the settlement or release WALKED (`settleDollars`' `hold`: the job's part for a settle, the
+ *     whole hold for a release), so `applied` counts along its `keys`. The deployment ledger is the one whose
+ *     `keyPrefix` is exactly `DOLLAR_KEY_PREFIX`, never a prefix match: every dollar key starts with it.
+ *   - `applied` is how many of those keys the step completed (0 when no step ran); `target` what this job's share of an
+ *     adjusted key now is (the settled amount, 0 for a release); `recorded` the record's `settledMicros`.
+ *
+ * A window is in only when its key holds at least `recorded` of this job's money: `target` for a key the step already
+ * moved, the reservation otherwise. That is what keeps doctor's sum below the counter on a healthy deployment where a
+ * step stopped part-way: a settle whose fault left later keys at the reservation while the record states a metered cost
+ * ABOVE it (an overshoot is charged in full), and a release that gave back the first keys before the fault while the
+ * record states the whole reservation. Both leave their window out, which only lowers the floor.
+ */
+export function deploymentWindowsOf(hold, { applied = 0, target, recorded, valkey } = {}) {
+	if (typeof valkey !== "string" || !VALKEY_TAG_RE.test(valkey)) return null;
+	const ledger = (Array.isArray(hold?.ledgers) ? hold.ledgers : []).find((l) => l?.keyPrefix === DOLLAR_KEY_PREFIX);
+	if (!ledger || !Array.isArray(ledger.keys)) return null;
+	const reserved = hold.amountMicros;
+	if (!Number.isSafeInteger(reserved) || !Number.isSafeInteger(recorded) || !Number.isSafeInteger(applied)) return null;
+	const walked = Array.isArray(hold.keys) ? hold.keys : [];
+	const found = {};
+	for (const key of ledger.keys) {
+		const at = deploymentWindowOfKey(key);
+		if (at === null) continue;
+		const i = walked.indexOf(key);
+		const holds = i >= 0 && i < applied ? target : reserved;
+		if (Number.isSafeInteger(holds) && holds >= recorded) found[at.window] = at.bucket;
+	}
+	const windows = DEPLOYMENT_WINDOWS.filter((w) => Object.hasOwn(found, w));
+	return windows.length === 0 ? null : { ...Object.fromEntries(windows.map((w) => [w, found[w]])), valkey };
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+/** `text` as a real UTC calendar date (`2026-02-30` is none), or null. */
+function calendarDate(text) {
+	if (typeof text !== "string" || !DATE_RE.test(text)) return null;
+	const d = new Date(`${text}T00:00:00.000Z`);
+	return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === text ? d : null;
+}
+
+/**
+ * A record's `dollars.reservedIn` rebuilt from its own keys, or null (INT-RUN-HISTORY-FILE-CONTRACT): `day` a real
+ * calendar date, `week` a real date that is a Monday, `month` a real month, at least one of them, and `valkey` a tag
+ * (`VALKEY_TAG_RE`). Anything else, a member of the wrong shape included, is null as a whole: a record that carries one
+ * no release wrote says nothing trustworthy about where its money is. Only OWN keys are read, so a value inherited
+ * through the prototype is no member. The one rule the record writer and doctor's sum read it by.
+ */
+export function reservedInOf(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	const own = (key) => (Object.hasOwn(value, key) ? value[key] : undefined);
+	const valkey = own("valkey");
+	if (typeof valkey !== "string" || !VALKEY_TAG_RE.test(valkey)) return null;
+	const out = {};
+	const day = own("day");
+	if (day !== undefined) {
+		if (calendarDate(day) === null) return null;
+		out.day = day;
+	}
+	const week = own("week");
+	if (week !== undefined) {
+		if (calendarDate(week)?.getUTCDay() !== 1) return null;
+		out.week = week;
+	}
+	const month = own("month");
+	if (month !== undefined) {
+		if (typeof month !== "string" || !MONTH_RE.test(month)) return null;
+		out.month = month;
+	}
+	return Object.keys(out).length === 0 ? null : { ...out, valkey };
+}
+
+/**
+ * Per deployment window in `buckets` (`{ day?, week?, month? }`, each the CURRENT bucket id), the micro-dollars this
+ * host's own records settled into it: the sum of `dollars.settledMicros` over the records whose `host` is `host`, whose
+ * `reservedIn` (`reservedInOf`) names that bucket for that window, and whose `valkey` is `valkey`. PURE.
+ *
+ * The counter is at least this sum on a healthy deployment: a reservation adds R, a settlement adds S - R and the record
+ * carrying S is written after it, a refunded record is 0, and nothing else lowers a key (`reservedIn` already leaves out
+ * a window a step stopped part-way in). Everything that is not counted (another host's records, a record from before
+ * `reservedIn`, an earlier attempt a retry overwrote, a hold that crashed, a record over the read's size cap, retention
+ * shorter than the window) makes the sum smaller, never larger. So a counter below it lost history.
+ */
+export function dollarWindowFloors(records, { host, valkey, buckets }) {
+	const floors = {};
+	for (const w of DEPLOYMENT_WINDOWS) if (typeof buckets?.[w] === "string") floors[w] = 0;
+	for (const r of Array.isArray(records) ? records : []) {
+		if (r === null || typeof r !== "object" || r.host !== host) continue;
+		const d = r.dollars;
+		if (d === null || typeof d !== "object" || !Number.isSafeInteger(d.settledMicros) || d.settledMicros < 0) continue;
+		const at = reservedInOf(d.reservedIn);
+		if (at === null || at.valkey !== valkey) continue;
+		for (const w of Object.keys(floors)) {
+			if (at[w] === buckets[w] && Number.isSafeInteger(floors[w] + d.settledMicros)) floors[w] += d.settledMicros;
+		}
+	}
+	return floors;
 }

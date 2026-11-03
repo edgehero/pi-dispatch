@@ -47,7 +47,7 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 import { PROJECT_ID_RE, parseProjects, projectOf, projectsVersionFor } from "@edgehero/pi-dispatch/projects";
 import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
 import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, effectiveWord, meets, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
-import { CRON_ID_MAX, parseTriggersDocument, triggersFileNewer, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
+import { parseTriggersDocument, triggersFileNewer, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
 // `revert`, so the ladder, the step and the compare-and-set are one implementation.
@@ -62,7 +62,8 @@ import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerI
 import { HELD_SET, jobKey, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
 // Why a waiting job waits (issue #737): the worker's closed vocabulary and the rules each field of its record is held to,
 // from the leaf the worker writes with, so the reader and the writer cannot drift on the key, a field or a bucket.
-import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, deferKey, dueOfScore, isSchedulerNext, parseDefer } from "@edgehero/pi-dispatch/defer-reasons";
+import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, deferKey, parseDefer } from "@edgehero/pi-dispatch/defer-reasons";
+import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SCHEDULER_JOB_PREFIX, cronRunOf, dueOfScore, isPausedFlag, isSchedulerNext, jobKeyOf, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
@@ -2443,25 +2444,26 @@ export async function readSchedulers({
 }
 
 /**
- * The longest scheduler id or name the snapshot carries (`mapSchedulers`): the triggers loader's longest cron id
- * (`CRON_ID_MAX`), so every id the loader takes is one this read keeps, and a scheduler the worker upserts is never
- * read as one with no id.
+ * The longest scheduler id or name the snapshot carries (`mapSchedulers`): `SCHEDULER_ID_MAX`, the bound every reader
+ * of a scheduler key in Valkey shares (bullmq-internals.mjs). At least the triggers loader's longest cron id
+ * (`CRON_ID_MAX`), so every id the loader takes is one this read keeps and a scheduler the worker upserts is never read
+ * as one with no id; and wider, so a scheduler an earlier release upserted for a longer id (every release before issue
+ * #761 took any length) is still named, which is how an operator finds it to remove it.
  */
-export const SCHEDULER_NAME_MAX = CRON_ID_MAX;
-const SCHEDULER_NAME_RE = new RegExp(`^[A-Za-z0-9._-]{1,${SCHEDULER_NAME_MAX}}$`);
+export const SCHEDULER_NAME_MAX = SCHEDULER_ID_MAX;
 
 /**
  * A scheduler's id (`key`) or job name as the snapshot carries it: the triggers loader's cron id charset
- * (`[A-Za-z0-9._-]`, its `ID_CHARSET`) at most `SCHEDULER_NAME_MAX` characters, else null. BOUNDED WHERE IT IS READ,
- * because nothing writes a scheduler only through the worker: anything holding the Valkey's URL can add one, and every
- * surface prints the id in running text (the overview's Scheduled line, the Fleet's Schedules table, the TUI, the
- * status tool), so a planted 3,000-character id widened the overview to 23,512 px. Bounding each surface instead would
- * be one rule per printer, and the next printer would forget it. Null, never a cut: a cut id would name a scheduler
- * that does not exist, and could match a trigger that is not its own. A refused value keeps its entry (its pattern, its
- * next fire and its overdue time still say a schedule is there), and each surface draws it as it draws a scheduler
- * BullMQ answered without that field.
+ * (`[A-Za-z0-9._-]`, its `ID_CHARSET`) at most `SCHEDULER_NAME_MAX` characters (`SCHEDULER_ID_RE`), else null. BOUNDED
+ * WHERE IT IS READ, because nothing writes a scheduler only through the worker: anything holding the Valkey's URL can
+ * add one, and every surface prints the id in running text (the overview's Scheduled line, the Fleet's Schedules table,
+ * the TUI, the status tool), so a planted 3,000-character id widened the overview to 23,512 px. Bounding each surface
+ * instead would be one rule per printer, and the next printer would forget it. Null, never a cut: a cut id would name a
+ * scheduler that does not exist, and could match a trigger that is not its own. A refused value keeps its entry (its
+ * pattern, its next fire and its overdue time still say a schedule is there), and each surface draws it as it draws a
+ * scheduler BullMQ answered without that field.
  */
-const schedulerNameOf = (v) => (typeof v === "string" && SCHEDULER_NAME_RE.test(v) ? v : null);
+const schedulerNameOf = (v) => (typeof v === "string" && SCHEDULER_ID_RE.test(v) ? v : null);
 
 /**
  * Map raw BullMQ job-scheduler entries to the PII-free display shape, computing per-entry `overdueMs`
@@ -3416,30 +3418,29 @@ export const GRAPH_LIMITS = Object.freeze({
  * Fold run counts and the last outcome per cron scheduler id from already-parsed records.
  *
  * The join is the RAW jobId (`repeat:<id>:<millis>`, or `manual:<id>:<millis>` for a hand-fired run of the trigger,
- * INT-RUN-HISTORY-FILE-CONTRACT keeps it raw in
- * the body) against each scheduler id, with the digits-only tail as the disambiguator -- the same
- * doctrine as the worker's makeFindPreviousRun filename scan: scheduler `a` must not swallow
- * `a:1`-shaped siblings, and a millis tail is all digits while a foreign id segment is not. Pure over
- * its inputs (records come from scanRunRecords) so it costs no extra I/O and tests hand-build both.
+ * INT-RUN-HISTORY-FILE-CONTRACT keeps it raw in the body), parsed once per record by the one grammar
+ * (`cronRunOf`, bullmq-internals.mjs) and matched on its scheduler id, so scheduler `a` never swallows a sibling: the
+ * id holds no `:` and the tail is all digits. Any id length, since a record is this deployment's own history and every
+ * release before issue #761 took a cron id of any length. Pure over its inputs (records come from scanRunRecords) so it
+ * costs no extra I/O and tests hand-build both.
  */
 export function cronRunStats({ records, schedulerIds } = {}) {
   const byId = {};
   if (!Array.isArray(records) || !Array.isArray(schedulerIds)) return { byId };
   // A newer release's record is not counted (issue #761): `readableRecords`, the rule every admin fold reads by.
   records = readableRecords(records).records;
+  // A hand-fired run of the trigger (`pi-dispatch run --trigger`, issue #505) is `manual:<id>:<minute millis>`, and the
+  // worker counts it as a run of its trigger; the panel does too, by the same grammar.
+  const runsOf = records.map((record) => ({ record, run: cronRunOf(record?.jobId) })).filter((e) => e.run !== null);
   for (const id of schedulerIds) {
     if (typeof id !== "string" || id === "") continue;
-    // A hand-fired run of the trigger (`pi-dispatch run --trigger`, issue #505) is `manual:<id>:<minute millis>`, and
-    // the worker counts it as a run of its trigger; the panel does too, by the same digits-tail rule.
-    const re = new RegExp(`^(?:repeat|manual):${escapeRegExp(id)}:(\\d+)$`);
     let runs = 0;
     let lastMillis = -1;
     let last = null;
-    for (const record of records) {
-      const m = typeof record?.jobId === "string" ? re.exec(record.jobId) : null;
-      if (!m) continue;
+    for (const { record, run } of runsOf) {
+      if (run.id !== id) continue;
       runs++;
-      const millis = Number(m[1]);
+      const millis = run.ms;
       if (millis > lastMillis) {
         lastMillis = millis;
         last = record;
@@ -3519,18 +3520,17 @@ export function attributeRunsToTriggers({ records, triggers } = {}) {
   const byJobId = {};
   if (!Array.isArray(records) || !Array.isArray(triggers)) return { byJobId };
   records = readableRecords(records).records; // issue #761: its trigger fields are past the stable core
-  const cronRes = triggers
-    .filter((t) => t?.type === "cron" && typeof t.id === "string" && t.id !== "" && Number.isInteger(t.index))
-    // `manual:<id>:<millis>` too: a hand-fired run of the trigger (issue #505) is its run, so its cost is the trigger's.
-    .map((t) => ({ t, re: new RegExp(`^(?:repeat|manual):${escapeRegExp(t.id)}:(\\d+)$`) }));
+  // `manual:<id>:<millis>` too: a hand-fired run of the trigger (issue #505) is its run, so its cost is the trigger's.
+  const crons = triggers.filter((t) => t?.type === "cron" && typeof t.id === "string" && t.id !== "" && Number.isInteger(t.index));
   const byIndex = new Map(triggers.filter((t) => Number.isInteger(t?.index)).map((t) => [t.index, t]));
   for (const record of records) {
     const jobId = typeof record?.jobId === "string" && record.jobId !== "" ? record.jobId : null;
     if (jobId === null) continue;
-    // Cron first: the raw repeat jobId names its scheduler outright, digits-tail disambiguated.
-    const cron = cronRes.find(({ re }) => re.test(jobId));
+    // Cron first: the raw cron jobId names its scheduler outright (`cronRunOf`, any id length).
+    const run = cronRunOf(jobId);
+    const cron = run === null ? undefined : crons.find((t) => t.id === run.id);
     if (cron) {
-      byJobId[jobId] = { key: `trigger:${cron.t.index}`, index: cron.t.index, type: "cron", label: triggerMatchLabel(cron.t) };
+      byJobId[jobId] = { key: `trigger:${cron.index}`, index: cron.index, type: "cron", label: triggerMatchLabel(cron) };
       continue;
     }
     if (!isForgeKind(record?.kind)) continue;
@@ -3885,11 +3885,6 @@ export function forgeRepoTargets({ records } = {}) {
   return Object.fromEntries(
     Object.entries(byKind).map(([kind, set]) => [kind, [...set].sort().slice(0, GRAPH_LIMITS.maxReposListed)]),
   );
-}
-
-/** Escape a string for literal use inside a RegExp source (the cron id join above). */
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** The sanitized ids present in the logs dir (from `*.json` filenames), for `logs <id>` autocomplete. */
@@ -5563,20 +5558,21 @@ export const WAITING_STATES = Object.freeze(["delayed", "waiting", "prioritized"
 
 /**
  * The fields of a waiting job's own hash this reader asks for: the short scalars BullMQ's own `Job.fromJSON` reads
- * beside the data (bullmq 5.80.4): its kind (`name`), its dedup id (`deid`), its scheduler (`rjk`), its attempts
- * (`atm`, and the older `attemptsMade`), its stall count (`stc`) and its enqueue instant. Never `data`, `opts`,
- * `stacktrace` or `returnvalue`: a forge job's data holds the issue's title and body.
+ * beside the data (`JOB_FIELD`, bullmq-internals.mjs): its kind (`name`), its dedup id (`deid`), its scheduler (`rjk`),
+ * its attempts (`atm`, and the older `attemptsMade`), its stall count (`stc`) and its enqueue instant. Never `data`,
+ * `opts`, `stacktrace` or `returnvalue`: a forge job's data holds the issue's title and body. In this order, because
+ * `hydrateWaiting` reads the answer by position.
  */
-const WAITING_JOB_FIELDS = Object.freeze(["name", "deid", "rjk", "atm", "attemptsMade", "stc", "timestamp"]);
+const WAITING_JOB_FIELDS = Object.freeze([JOB_FIELD.name, JOB_FIELD.dedupId, JOB_FIELD.schedulerKey, JOB_FIELD.attempts, JOB_FIELD.attemptsOld, JOB_FIELD.stalls, JOB_FIELD.timestamp]);
 
 /** A job's kind as its hash names it (the `name` BullMQ was given: `local`, `github`, ...), else null. */
 const WAITING_KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
-/** A cron trigger's id as BullMQ's scheduler key (`rjk`) carries it: the loader's charset (`[A-Za-z0-9._-]`, no `:`). */
-const SCHEDULER_ID_RE = /^[A-Za-z0-9._-]{1,200}$/;
-
-/** A cron trigger's job id: `repeat:<id>:<millis>` (its scheduler) or `manual:<id>:<millis>` (fired by hand). */
-const TRIGGER_JOB_ID_RE = /^(repeat|manual):([A-Za-z0-9._-]{1,200}):(0|[1-9][0-9]{0,15})$/;
+/**
+ * A cron trigger's run from a job id read off Valkey: `repeat:<id>:<millis>` (its scheduler) or `manual:<id>:<millis>`
+ * (fired by hand), the id bounded as every reader of a scheduler key bounds it (`SCHEDULER_ID_MAX`), else null.
+ */
+const triggerRunOf = (jobId) => cronRunOf(jobId, { idMax: SCHEDULER_ID_MAX });
 
 /** A recovery's job id (`recoveryJobId`: `<run id>.r<n>`). A hint for a row; the planner reads the data to know. */
 const RECOVERY_JOB_ID_RE = /\.r[1-9][0-9]{0,5}$/;
@@ -5611,23 +5607,7 @@ const WAIT_LABEL_RE = /^[A-Za-z0-9._:+ -]{1,512}$/;
  * presence rule (`isPausedFlag`).
  */
 function pausedAsk(redis, q) {
-  return [typeof redis?.hexists === "function" ? "hexists" : "hget", queueKeyOf(q, "meta"), "paused"];
-}
-
-/**
- * Whether a queue's meta `paused` field says paused, as BullMQ 5.80.4 reads it: the field's PRESENCE (`HEXISTS` in
- * isQueuePaused.lua and getTargetQueueList), whatever it holds, so `"0"` and `""` are paused too. Its pause writes `1`
- * and its resume deletes the field. `cmd` is the command `pausedAsk` sent: `HEXISTS` answers 1 for a field that is
- * there, `HGET` the value, null for none.
- */
-function isPausedFlag(cmd, value) {
-  if (cmd === "hexists") return value === 1 || value === "1";
-  return value !== null && value !== undefined;
-}
-
-/** A queue's key for `type` (`bull:<name>:<type>`, or the queue's own `toKey`, which knows its prefix). */
-function queueKeyOf(q, type) {
-  return typeof q?.toKey === "function" ? q.toKey(type) : `bull:${q?.name}:${type}`;
+  return [typeof redis?.hexists === "function" ? "hexists" : "hget", queueKeyOf(q, QUEUE_KEY.meta), META_FIELD.paused];
 }
 
 /**
@@ -5719,9 +5699,9 @@ function waitingProjectOf({ record, kind, deid, jobId, projectList, triggerList 
     const id = repo !== null ? projectIdOf(projectOf({ kind, repo }, projectList)) : null;
     if (id !== null) return { project: id, from: "deid" };
   }
-  const t = projectList !== null && triggerList !== null ? TRIGGER_JOB_ID_RE.exec(jobId) : null;
+  const t = projectList !== null && triggerList !== null ? triggerRunOf(jobId) : null;
   if (t) {
-    const trigger = triggerList.find((x) => x?.type === "cron" && x.id === t[2]);
+    const trigger = triggerList.find((x) => x?.type === "cron" && x.id === t.id);
     const id = typeof trigger?.folder === "string" && trigger.folder !== "" ? projectIdOf(projectOf({ kind: "local", folder: trigger.folder }, projectList)) : null;
     if (id !== null) return { project: id, from: "trigger" };
   }
@@ -5738,7 +5718,7 @@ async function hydrateWaiting(redis, entries, { heldIds, projectList, triggerLis
   const cmds = [];
   for (const e of entries) {
     e.atJob = cmds.length;
-    cmds.push(["hmget", queueKeyOf(e.q, e.jobId), ...WAITING_JOB_FIELDS]);
+    cmds.push(["hmget", jobKeyOf(e.q, e.jobId), ...WAITING_JOB_FIELDS]);
     e.atDefer = null;
     if (e.state === "delayed") {
       e.atDefer = cmds.length;
@@ -5763,7 +5743,7 @@ async function hydrateWaiting(redis, entries, { heldIds, projectList, triggerLis
     const key = `${e.q?.name}\u0000${rjk}`;
     if (!nextAt.has(key)) {
       nextAt.set(key, nextCmds.length);
-      nextCmds.push(["zscore", queueKeyOf(e.q, "repeat"), rjk]);
+      nextCmds.push(["zscore", queueKeyOf(e.q, QUEUE_KEY.repeat), rjk]);
     }
     e.atNext = key;
   }
@@ -5801,9 +5781,10 @@ async function hydrateWaiting(redis, entries, { heldIds, projectList, triggerLis
     // The scheduler's run of slot `<millis>` became eligible AT that slot; its hash's timestamp is when the run before it
     // minted it, one period earlier (queued-at.integration.test.mjs pins the same for the record's `queuedAt`).
     let queuedAt = instantOf(timestamp);
-    const t = TRIGGER_JOB_ID_RE.exec(e.jobId);
-    if (t && t[1] === "repeat" && t[2] === e.rjk) {
-      const slot = instantOf(t[3]);
+    // Its scheduler's runs only: a hand-fired `manual:` run's time is the minute it was queued, never a slot.
+    const t = triggerRunOf(e.jobId);
+    if (t && t.kind === SCHEDULER_JOB_PREFIX && t.id === e.rjk) {
+      const slot = instantOf(t.ms);
       if (slot !== null && (queuedAt === null || slot > queuedAt)) queuedAt = slot;
     }
     rows.push({
@@ -5918,10 +5899,10 @@ export async function readWaiting(redis, { queues, now = () => Date.now(), perLi
     const at = now();
     const cmds = [];
     for (const q of list) {
-      cmds.push(["zrange", queueKeyOf(q, "delayed"), 0, bound, "WITHSCORES"]);
-      cmds.push(["zrange", queueKeyOf(q, "prioritized"), 0, bound]);
-      cmds.push(["lrange", queueKeyOf(q, "wait"), -(bound + 1), -1]);
-      cmds.push(["lrange", queueKeyOf(q, "paused"), -(bound + 1), -1]);
+      cmds.push(["zrange", queueKeyOf(q, QUEUE_KEY.delayed), 0, bound, "WITHSCORES"]);
+      cmds.push(["zrange", queueKeyOf(q, QUEUE_KEY.prioritized), 0, bound]);
+      cmds.push(["lrange", queueKeyOf(q, QUEUE_KEY.wait), -(bound + 1), -1]);
+      cmds.push(["lrange", queueKeyOf(q, QUEUE_KEY.paused), -(bound + 1), -1]);
       cmds.push(pausedAsk(redis, q));
     }
     cmds.push(["smembers", HELD_SET]);
@@ -5989,7 +5970,7 @@ export async function readWaitingRow(redis, { q, jobId, state, now = () => Date.
   if (typeof jobId !== "string" || !RUN_ID_RE.test(jobId) || !WAITING_STATES.includes(state)) return { gone: true };
   const read = async () => {
     const ask = pausedAsk(redis, q);
-    const [meta, score] = await batched(redis, [ask, ...(state === "delayed" ? [["zscore", queueKeyOf(q, "delayed"), jobId]] : [])]);
+    const [meta, score] = await batched(redis, [ask, ...(state === "delayed" ? [["zscore", queueKeyOf(q, QUEUE_KEY.delayed), jobId]] : [])]);
     const entry = { q, jobId, state, score: score?.value ?? null, queuePaused: isPausedFlag(ask[0], meta?.value) };
     const { rows, scheduled } = await hydrateWaiting(redis, [entry], { heldIds: null, projectList: projectListOf(projects), triggerList: triggerListOf(triggers), nowMs: now() });
     if (scheduled.length > 0) return { scheduled: scheduled[0] };
@@ -7877,7 +7858,7 @@ async function pendingPage(q, state, start, end) {
     if (ids.length === 0) return [];
     const client = await q.client;
     const pipe = client.pipeline();
-    for (const id of ids) pipe.hmget(q.toKey(id), "name", "deid");
+    for (const id of ids) pipe.hmget(jobKeyOf(q, id), JOB_FIELD.name, JOB_FIELD.dedupId);
     const got = await pipe.exec();
     return ids.map((id, i) => {
       const [err, v] = got[i] ?? [];
@@ -7893,7 +7874,7 @@ async function pendingPage(q, state, start, end) {
 async function pendingData(q, ids) {
   const client = await q.client;
   const pipe = client.pipeline();
-  for (const id of ids) pipe.hget(q.toKey(id), "data");
+  for (const id of ids) pipe.hget(jobKeyOf(q, id), JOB_FIELD.data);
   const got = await pipe.exec();
   return ids.map((_, i) => {
     const [err, v] = got[i] ?? [];

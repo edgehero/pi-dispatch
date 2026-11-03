@@ -10,7 +10,7 @@ import { NETNS_KEEPER_FORMAT } from "../src/podman-stack.mjs";
 import { runInit } from "../src/init.mjs";
 import { readPackagedProxyConf } from "../src/egress-conf-copy.mjs";
 import { addToken } from "../src/console-tokens.mjs";
-import { VALKEY_HEALTH_SCRIPT, VALKEY_START_SCRIPT } from "../src/valkey-auth.mjs";
+import { VALKEY_HEALTH_SCRIPT, VALKEY_IMAGE, VALKEY_START_SCRIPT } from "../src/valkey-auth.mjs";
 
 // A fake `spawn`, mirroring doctor.test.mjs: plan keys are command-line prefixes ("docker version",
 // "docker image inspect", "docker pull", "docker tag", "docker ps", "docker volume", "docker run")
@@ -187,18 +187,19 @@ const VALKEY_RUN = [
 	"run", "-d", "--name", "pi-dispatch-valkey", "--label", "com.pi-dispatch.deployment=/deploy", "--restart", "unless-stopped",
 	"-p", "127.0.0.1:6379:6379", "-v", "pi-dispatch-valkey-data:/data", "-e", "VALKEY_PASSWORD",
 	"--health-cmd", VALKEY_HEALTH_SCRIPT, "--health-interval", "10s", "--health-timeout", "3s", "--health-retries", "5",
-	"valkey/valkey:8", "sh", "-c", VALKEY_START_SCRIPT,
+	VALKEY_IMAGE, "sh", "-c", VALKEY_START_SCRIPT,
 ];
 
 /**
  * One `docker container inspect` answer (PR #475's review, round 3): a container with up's label, compose's working
  * dir, or neither, publishing 6379 on `port`.
  */
-function inspectRecord({ name = "pi-dispatch-valkey", label, workingDir, port = 6379 } = {}) {
+function inspectRecord({ name = "pi-dispatch-valkey", label, workingDir, port = 6379, image } = {}) {
 	const Labels = {};
 	if (label) Labels["com.pi-dispatch.deployment"] = label;
 	if (workingDir) Labels["com.docker.compose.project.working_dir"] = workingDir;
-	return { code: 0, output: JSON.stringify([{ Name: `/${name}`, Config: { Labels }, HostConfig: { PortBindings: { "6379/tcp": [{ HostIp: "127.0.0.1", HostPort: String(port) }] } } }]) };
+	// Issue #761: the image the container was created from, as `Config.Image` holds it, where a test gives one.
+	return { code: 0, output: JSON.stringify([{ Name: `/${name}`, Config: { Labels, ...(image ? { Image: image } : {}) }, HostConfig: { PortBindings: { "6379/tcp": [{ HostIp: "127.0.0.1", HostPort: String(port) }] } } }]) };
 }
 
 test("up: everything already in place prompts for nothing and exits 0", async () => {
@@ -208,6 +209,54 @@ test("up: everything already in place prompts for nothing and exits 0", async ()
 	assert.match(h.text(), /Job image present \(pi-job:latest\)/);
 	assert.match(h.text(), /assuming your Valkey/);
 	assert.match(h.text(), /up: summary/);
+});
+
+// Issue #761: a Valkey container an older `up` started keeps the floating valkey/valkey:8 until it is recreated, and up
+// leaves a Valkey it finds on its image. The summary names it, and the way off it, from the inspect up already makes.
+test("up: this deployment's pi-dispatch-valkey on the floating valkey/valkey:8 is named in the summary and left as it is (#761)", async () => {
+	const shown = /\n {2}valkey image {10}the pi-dispatch-valkey container runs valkey\/valkey:8, the floating tag an older `pi-dispatch up` started it with, and keeps it until it is recreated; this release pins valkey\/valkey:8\.1\. `docker stop pi-dispatch-valkey && docker rm pi-dispatch-valkey && pi-dispatch up` in the deployment folder starts valkey\/valkey:8\.1 on the same pi-dispatch-valkey-data volume/;
+	const running = (image) => harness({ plan: { ...green, "docker container inspect pi-dispatch-valkey": inspectRecord({ label: "/deploy", image }) }, listening: true });
+	const old = running("valkey/valkey:8");
+	assert.equal(await old.run(), 0, "a hint, never a failed up");
+	assert.match(old.text(), shown);
+	assert.ok(old.text().indexOf("valkey image") > old.text().indexOf("up: summary"), "in the summary");
+	assert.ok(!old.calls.some((c) => ["stop", "rm", "run", "start"].includes(c.args[0])), "named, never acted on");
+	// This release's image, an image of the operator's choosing, or none recorded: no row, and not one docker call more.
+	for (const image of [VALKEY_IMAGE, "valkey/valkey:8.1-alpine", "docker.io/valkey/valkey:8.0", undefined]) {
+		const t = running(image);
+		assert.equal(await t.run(), 0);
+		assert.doesNotMatch(t.text(), /valkey image/, String(image));
+		assert.deepEqual(t.calls.map((c) => [c.cmd, ...c.args].join(" ")), old.calls.map((c) => [c.cmd, ...c.args].join(" ")), "the image comes off the ownership inspect");
+	}
+	// Stopped on the older image: the same row beside `docker start`, which would only start it on that image again.
+	const stopped = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker container inspect pi-dispatch-valkey": inspectRecord({ label: "/deploy", image: "docker.io/valkey/valkey:8" }) }, listening: false, argv: ["--yes"] });
+	assert.equal(await stopped.run(), 0);
+	assert.match(stopped.text(), /pi-dispatch-valkey exists \(this deployment's\) and is not running/);
+	assert.match(stopped.text(), /\n {2}valkey image {10}the pi-dispatch-valkey container runs docker\.io\/valkey\/valkey:8, /);
+	assert.ok(!stopped.calls.some((c) => ["stop", "rm", "run", "start"].includes(c.args[0])));
+	// Another deployment's container on the older image is not this deployment's to name: up refuses it, as before.
+	const foreign = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker container inspect pi-dispatch-valkey": inspectRecord({ label: "/srv/a", port: 16495, image: "valkey/valkey:8" }) }, listening: false, argv: ["--yes"] });
+	assert.equal(await foreign.run(), 1);
+	assert.doesNotMatch(foreign.text(), /valkey image/);
+});
+
+// The container row's fix is `docker stop` and `docker rm` of pi-dispatch-valkey, so it is said only of a container up
+// runs itself (`upValkeyContainerImage`, doctor's rule too). In a folder /dispatch setup handed to compose, compose runs
+// the Valkey and recreates it from the compose file (whose own line doctor names); another deployment's is never touched.
+test("up: a Valkey container up does not run itself, compose's in a handed-over folder or another deployment's, gets no valkey image row (#761)", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16495\nVALKEY_PASSWORD=${PASSWORD}\n`, "/deploy/deploy/docker-compose.valkey.yml": "# override\n" };
+	const composeValkey = inspectRecord({ name: "deploy-valkey-1", workingDir: "/deploy/deploy", port: 16495, image: "valkey/valkey:8" });
+	const h = harness({ plan: { "docker version": 0, "docker image inspect": 0, "docker container inspect deploy-valkey-1": composeValkey }, listening: true, files });
+	assert.equal(await h.run(), 0);
+	assert.match(h.text(), /container deploy-valkey-1 already running/, "this deployment's, by compose's working dir, and left as it is");
+	assert.doesNotMatch(h.text(), /valkey image/);
+	assert.ok(!h.calls.some((c) => ["stop", "rm", "run", "start", "compose"].includes(c.args[0])), "nothing acted on");
+	// Another deployment's pi-dispatch-valkey answering on this port, on the older image: up leaves it, and names no fix
+	// that would stop and remove it.
+	const foreign = harness({ plan: { ...green, "docker container inspect pi-dispatch-valkey": inspectRecord({ label: "/srv/a", image: "valkey/valkey:8" }) }, listening: true });
+	assert.equal(await foreign.run(), 0);
+	assert.match(foreign.text(), /pi-dispatch-valkey is not this deployment's Valkey \(the deployment in \/srv\/a\)/);
+	assert.doesNotMatch(foreign.text(), /valkey image/);
 });
 
 test("up: declined prompts run NOTHING and the summary says skipped", async () => {

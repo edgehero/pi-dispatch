@@ -93,7 +93,13 @@
     "reservedMicros": 3000000,
     "settledMicros": 1860000,
     "basis": "metered",
-    "modelBasis": "metered"
+    "modelBasis": "metered",
+    "reservedIn": {
+      "day": "2026-09-14",
+      "week": "2026-09-14",
+      "month": "2026-09",
+      "valkey": "9999999999999999"
+    }
   },
   "decision": {
     "model": "anthropic/claude-haiku-4-5",

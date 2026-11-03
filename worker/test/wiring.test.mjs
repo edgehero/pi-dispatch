@@ -8,6 +8,8 @@ import { InfraRetry } from "../src/processor.mjs";
 // run-history.mjs pulls in only node:fs/node:path -- safe below the node floor alongside processor.mjs.
 import { buildRecord, makeRecordWriter } from "../src/run-history.mjs";
 import { makeBackendRegistry } from "../src/backend-registry.mjs";
+// dollar-budget.mjs pulls in node:crypto and two leaf modules, no bullmq.
+import { valkeyEndpointTag } from "../src/dollar-budget.mjs";
 
 // index.mjs imports bullmq, so this skips below the node floor / without deps and runs in CI,
 // where PI_DISPATCH_REQUIRE_WORKER_TESTS=1 turns a skip into a hard failure.
@@ -1207,6 +1209,60 @@ test("issue #596, phase 2: createWorker builds ONE host budget, ticks it off the
 		assert.ok(reads <= after + 1, "stopped with the worker");
 	} finally {
 		process.exit = origExit;
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+		await Promise.resolve(worker?.close()).catch(() => {});
+	}
+});
+
+// Issue #761: the settled record's `dollars.reservedIn.valkey` is the tag of the Valkey createWorker's own connection
+// dials (`valkeyEndpointTag(connection)`), the value doctor's `dollars.window-reset` computes from the same URL. Without
+// it no record says where it was charged, and the check never fires. Driven through the processor createWorker hands
+// BullMQ's Worker (read back as the Worker keeps it), with the real record writer. The window is the real clock's day; only
+// the tag is asserted, which no instant changes.
+test("createWorker's settled record carries reservedIn.valkey, the tag of the connection it was built with", { skip }, async () => {
+	const store = new Map();
+	const held = (k) => store.get(k) ?? 0;
+	const redis = {
+		async incr(k) { store.set(k, held(k) + 1); return held(k); },
+		async decr(k) { store.set(k, held(k) - 1); return held(k); },
+		async incrby(k, n) { store.set(k, held(k) + n); return held(k); },
+		async decrby(k, n) { store.set(k, held(k) - n); return held(k); },
+		async eval(_script, _n, k, delta) {
+			if (!store.has(k)) return [1, 0];
+			store.set(k, Math.max(0, held(k) + Number(delta)));
+			return [0, held(k)];
+		},
+		async expire() {},
+		async get() { return null; },
+	};
+	const { recordRun, writes } = makeRealRecordRun();
+	// A database other than 0, so the tag is this connection's and not the default address's.
+	const connection = parseConnection("redis://127.0.0.1:1/3");
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	let worker;
+	try {
+		worker = mod.createWorker({
+			connection,
+			concurrency: 1,
+			// A daily dollar cap and a per-job cap: the job reserves in the deployment's day window.
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3, dailyCostUsd: 10, maxCostUsd: 2 }),
+			redis,
+			deps: { mintToken: async () => "t", isDefaultBranchProtected: async () => true, prepareWorkspace: async () => ({}), runContainer: async () => ({ code: 0, aborted: false, turns: 3 }), cleanup: async () => {}, comment: async () => {}, log: () => {} },
+			recordRun,
+			stopContainer: async () => {},
+		});
+		worker.on("error", () => {});
+		assert.equal(typeof worker.processFn, "function", "the processor createWorker handed BullMQ's Worker");
+		await worker.processFn(secretJob("j-tag"), "tok", new AbortController().signal);
+		assert.equal(writes.length, 1);
+		const { dollars } = JSON.parse(writes[0].data);
+		assert.equal(dollars.settledMicros, 2_000_000, "the floor: no meter, so the reservation is charged");
+		assert.equal(dollars.reservedIn.valkey, valkeyEndpointTag(connection));
+		assert.match(dollars.reservedIn.valkey, /^[0-9a-f]{16}$/);
+		assert.notEqual(dollars.reservedIn.valkey, valkeyEndpointTag(parseConnection("redis://127.0.0.1:1")), "database 3's tag, not database 0's");
+	} finally {
 		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
 		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
 		await Promise.resolve(worker?.close()).catch(() => {});

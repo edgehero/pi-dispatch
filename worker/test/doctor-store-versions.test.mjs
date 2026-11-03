@@ -198,6 +198,24 @@ test("with a version table that has a row, this host's files raise each store's 
 	assert.deepEqual(jobOnly.map((l) => l.split(" only below")[0].split(" (a worker")[0]), ["mini2 reads the jobs this host's triggers queue", "mini3 publishes no version for the jobs this host's triggers queue"]);
 });
 
+// The jobs a triggers file queues carry what the loader KEEPS of each entry (the builders copy the parsed `run`), never a
+// raw key it drops. `packageCanary` is a job data field (version 2) only the Updates page's canary job carries; written
+// by hand into a trigger's `run`, the loader drops it, so no job carries it and no peer needs version 2 for it.
+test("the jobs' need is what the loader keeps: a hand-written run.packageCanary, which the loader drops, needs no version 2", async () => {
+	const canary = { packageCanary: { name: "pi-x", version: "1.0.0" } };
+	const cron = { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "fix", task: "x", ...canary } };
+	const { checks } = await doctorWith("{}", { hosts: PEERS, triggers: { triggers: [LABEL(canary), cron] } });
+	assert.equal(checks.some((c) => c.id === "triggers.file" && c.ok === false), false, "the loader accepts the file");
+	assert.ok(checks.some((c) => /^Fleet: 4 workers/.test(c.label ?? "")), "the fleet was read");
+	assert.deepEqual(fleetLines({ checks }), [], "need 1: mini2 (version 1) and mini3 (none) are not named");
+	assert.equal(checks.some((c) => /version 2/.test(`${c.label ?? ""} ${c.fix ?? ""}`)), false, "no line claims version 2");
+	// A key the loader keeps still counts, beside the dropped one, under a table that puts both above 1.
+	const both = { jobData: { table: { packageCanary: 2, maxTurns: 2 } } };
+	assert.deepEqual(fleetLines(await doctorWith("{}", { hosts: PEERS, triggers: { triggers: [LABEL(canary)] }, versionTables: both })), []);
+	const kept = fleetLines(await doctorWith("{}", { hosts: PEERS, triggers: { triggers: [LABEL({ ...canary, maxTurns: 5 })] }, versionTables: both }));
+	assert.deepEqual(kept.map((l) => l.split(" only below")[0].split(" (a worker")[0]), ["mini2 reads the jobs this host's triggers queue", "mini3 publishes no version for the jobs this host's triggers queue"]);
+});
+
 test("the store-version lines clear when every peer reads the need, and when this host's files no longer need it", async () => {
 	const files = {
 		pauseWindows: { version: 2, windows: [{ scope: "*", from: "01:00", to: "02:00", tz: "Europe/Amsterdam" }] },

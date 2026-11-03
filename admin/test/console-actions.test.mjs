@@ -2544,6 +2544,13 @@ test("the controls: drawn for an operator, never for a viewer or on a read-only 
   assert.ok(ro.includes("pi-dispatch sandbox gh-1") && !ro.includes("data-action"), "read-only: the command to copy, no re-run control");
 });
 
+test("the run's Actions say a cron run is fired again from its trigger for a scheduler's run only, never a hand-fired one", () => {
+  const context = (jobId) => ({ data: { run: { record: { jobId, startedAt: null } } }, role: "operator", readOnly: false, env: {}, now: 0, query: {} });
+  const says = (jobId) => /A cron run is fired again by hand from its trigger/.test(String(runActionsPanel(context(jobId))));
+  assert.equal(says("repeat:nightly:1760500000000"), true);
+  for (const jobId of ["manual:nightly:1760500000000", "manual:nightly:1760500000001", "gh-1"]) assert.equal(says(jobId), false, jobId);
+});
+
 // ---- BullMQ-backed actions on database 13 ------------------------------------------------------------------------------
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

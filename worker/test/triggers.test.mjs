@@ -179,6 +179,11 @@ test("a cron id is at most CRON_ID_MAX (176) characters, so every run its schedu
 		() => parse([{ ...CRON, on: { ...CRON.on, id: "n".repeat(CRON_ID_MAX + 1) } }]),
 		(e) => isConfigError(e) && e.message.includes(`${CRON_ID_MAX + 1} characters, more than ${CRON_ID_MAX}`) && !e.message.includes("n".repeat(CRON_ID_MAX + 1)),
 	);
+	// The reason, as it is: the run ids, not the scheduler key (which a surface reads up to 200 characters long).
+	assert.throws(
+		() => parse([{ ...CRON, on: { ...CRON.on, id: "n".repeat(CRON_ID_MAX + 1) } }]),
+		(e) => e.message.includes(": each run's job id is repeat:<id>:<up to 16 digits> and must stay within the 200 characters the readers take, so a longer id would run with no surface naming it: ") && !/read back at most/.test(e.message),
+	);
 });
 
 test("duplicate cron id is a config error", () => {

@@ -32,7 +32,7 @@ import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mj
 export const LOCAL_FOLDER_PROJECT_CHANGED = "local-folder-project-changed";
 // Issue #505: a portfolio cron job refused before it spends, because this host could not apply the plan it would write.
 export const PORTFOLIO_NO_ENVELOPE = "portfolio-no-envelope";
-import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
+import { DOLLAR_CAP_REASON, DOLLAR_KEY_PREFIX, deploymentWindowsOf, dollarLedgers, dollarSettlement, dollarsRecord, holdPart, meteredMicros, modelDollarSettlement, releaseDollars, reserveDollars, settleDollars } from "./dollar-budget.mjs";
 import { callableModelRefs, zeroRatedFor } from "./reserve-estimate.mjs";
 import { outputCapView } from "./output-cap.mjs";
 import { answerTrailComment, consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
@@ -663,6 +663,10 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		otherDollars = null,
 		dollarCapSource = null,
 		envelopeMismatch = false,
+		// Issue #761: the endpoint tag of the Valkey this worker's dollar counters live in (`valkeyEndpointTag`), which the
+		// record's `dollars.reservedIn` carries so doctor sums only the records of the counter it reads. Null (an unwired
+		// processor) writes no `reservedIn`, so such a record keeps the shape it had.
+		valkeyTag = null,
 		// Issue #505: whether the LIVE triggers file still flags this job's cron trigger `run.portfolio: true`, as
 		// `(job) => boolean`, and this host's envelope `delegation` block (`{ enabled, writers }`), null with no envelope.
 		// The flag on the job data is what the trigger said when the job was queued; the file is what the operator says
@@ -2328,7 +2332,10 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				}
 				dollarHold = reservation.hold;
 				publishDollarHold({ amountMicros: dollarHold.amountMicros, at: new Date(now).getTime() });
-				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis: modelPrefixes.size > 0 ? "floor" : null });
+				// Issue #761: every key holds the whole reservation until a settle or a release moves it, so every deployment
+				// window the hold reserved in holds what this record states (`deploymentWindowsOf`). Each later path below
+				// replaces `dollars`, with the windows that hold what IT states.
+				dollars = dollarsRecord({ reservedMicros: job.maxCostMicros, settledMicros: job.maxCostMicros, basis: "floor", modelBasis: modelPrefixes.size > 0 ? "floor" : null, reservedIn: deploymentWindowsOf(dollarHold, { applied: 0, target: job.maxCostMicros, recorded: job.maxCostMicros, valkey: valkeyTag }) });
 				// Issue #645: an armed run never runs a container without a DURABLE record of its hold (run-budget-ledger.mjs's
 				// contract), so a recovery after a crash can see it and settle it exactly once. A record that did not land
 				// throws a never-started retry before any container; the catch gives the hold back directly (`holdRecorded`
@@ -2591,7 +2598,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// basis would have been, and the record says so. A partial one is logged (dollar_settle_error) and recorded
 			// as computed: the keys that were adjusted hold the settled amount.
 			if (!ledgerMoved && modelPrefixes.size > 0) modelBasis = "floor";
-			dollars = applied === 0 && of > 0 && (settledMicros !== reservedMicros || !ledgerMoved) ? dollarsRecord({ reservedMicros, settledMicros: reservedMicros, basis: "floor", modelBasis }) : dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis });
+			const kept = applied === 0 && of > 0 && (settledMicros !== reservedMicros || !ledgerMoved);
+			// Issue #761: the deployment windows whose keys hold what this record states, along the keys the settle walked
+			// (`jobPart`, the deployment's first): a key it moved holds the settled amount, one it did not the reservation.
+			const reservedIn = deploymentWindowsOf(jobPart, { applied, target: settledMicros, recorded: kept ? reservedMicros : settledMicros, valkey: valkeyTag });
+			dollars = kept ? dollarsRecord({ reservedMicros, settledMicros: reservedMicros, basis: "floor", modelBasis, reservedIn }) : dollarsRecord({ reservedMicros, settledMicros, basis, modelBasis, reservedIn });
 			dollarHold = null;
 			publishDollarHold(null);
 			log("dollar_settled", { reservedMicros: dollars.reservedMicros, settledMicros: dollars.settledMicros, basis: dollars.basis, ...(modelBasis !== null ? { modelBasis } : {}) });
@@ -2858,11 +2869,15 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				if (!releasable) log("run_budget_release_skipped", { seq: durable.seq });
 				const { applied, of } = releasable ? await releaseDollars(redis, hold, { log }) : { applied: 0, of: 1 };
 				const heldModel = (hold.ledgers ?? []).some((l) => modelPrefixesOf(modelDollars).has(l.keyPrefix));
-				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: applied === of ? 0 : hold.amountMicros, basis: applied === of ? "refunded" : "floor", modelBasis: heldModel ? (applied === of ? "refunded" : "floor") : null });
+				// Issue #761: along the whole hold, which the release walked: a key it gave back holds 0 of this job's money, so
+				// a release that stopped part-way (the record then states the whole reservation) leaves those windows out.
+				const reservedIn = deploymentWindowsOf(hold, { applied, target: 0, recorded: applied === of ? 0 : hold.amountMicros, valkey: valkeyTag });
+				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: applied === of ? 0 : hold.amountMicros, basis: applied === of ? "refunded" : "floor", modelBasis: heldModel ? (applied === of ? "refunded" : "floor") : null, reservedIn });
 			} else {
 				log("dollar_hold_unsettled", { reservedMicros: hold.amountMicros, error: e instanceof InfraRetry ? "infra-retry" : (e?.name ?? "error") });
 				const heldModel = (hold.ledgers ?? []).some((l) => modelPrefixesOf(modelDollars).has(l.keyPrefix));
-				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: hold.amountMicros, basis: "floor", modelBasis: heldModel ? "floor" : null });
+				// Issue #761: nothing moved a key, so each holds the whole reservation, which is what this record states.
+				dollars = dollarsRecord({ reservedMicros: hold.amountMicros, settledMicros: hold.amountMicros, basis: "floor", modelBasis: heldModel ? "floor" : null, reservedIn: deploymentWindowsOf(hold, { applied: 0, target: hold.amountMicros, recorded: hold.amountMicros, valkey: valkeyTag }) });
 			}
 			// A failed give-back becomes a settled floor, not a running job's reservation.
 			publishDollarHold(null);

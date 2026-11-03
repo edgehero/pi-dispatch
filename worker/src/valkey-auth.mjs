@@ -13,10 +13,11 @@
  * says only whether it is set. An operator's own VALKEY_URL with its own userinfo (a managed Valkey, TLS) is left as it
  * is, and its password wins over this key (`connection.mjs`).
  *
- * HOW THE VALKEY LEARNS IT, measured on Podman 5.8.1 (Fedora 44) and 4.9.3 (Ubuntu 24.04) with valkey/valkey:8
- * (Valkey 8.1.10): the image runs `tini -- docker-entrypoint.sh <command>`, and tini keeps its whole argv as PID 1 for
- * the life of the container, so `valkey-server --requirepass X` put the password in a /proc/<pid>/cmdline that another
- * account read, on the host, for as long as the Valkey ran (the pid namespace hides nothing: /proc of the host lists
+ * HOW THE VALKEY LEARNS IT, measured on Podman 5.8.1 (Fedora 44) and 4.9.3 (Ubuntu 24.04) with Valkey 8.1.10 (pulled
+ * as valkey/valkey:8 then, the minor `VALKEY_IMAGE` pins since issue #761): the image runs
+ * `tini -- docker-entrypoint.sh <command>`, and tini keeps its whole argv as PID 1 for the life of the container, so
+ * `valkey-server --requirepass X` put the password in a /proc/<pid>/cmdline that another account read, on the host,
+ * for as long as the Valkey ran (the pid namespace hides nothing: /proc of the host lists
  * the container's processes, and cmdline is world-readable). The image's VALKEY_EXTRA_FLAGS only appends to that same
  * argv. So the password travels in the container's ENVIRONMENT (a Quadlet `EnvironmentFile=` of a 0600 file, compose's
  * `environment:`, `docker run -e VALKEY_PASSWORD` with the value in the CLI's own environment), which /proc shows only
@@ -37,6 +38,25 @@ import { basename, join } from "node:path";
 
 /** The `.env` key (issue #468). */
 export const VALKEY_PASSWORD_KEY = "VALKEY_PASSWORD";
+
+/**
+ * The image of every Valkey this project starts or ships (issue #761): `up`'s `docker run` and the owner check below,
+ * `deploy/docker-compose.yml`, the Quadlet unit (as `docker.io/` and this), CI's services and its smoke script, each
+ * held to this value by `worker/test/valkey-image.test.mjs`. A minor, where an older release shipped the floating
+ * major `:8` on the reasoning that a bad pull breaks loudly and spends nothing. That is not enough:
+ *   - the specs state measured facts about this Valkey (`HEXPIRE` answers `ERR unknown command`, `/bin/sh` is dash),
+ *     and a floating tag makes each a claim about whatever was pulled last;
+ *   - the hosts of one fleet must not cross a minor at different times, each on its own next pull;
+ *   - a newer minor's data files need not load in an older one, so a pull nobody chose could rule out a rollback;
+ *   - an upgrade guide needs a known starting point.
+ * Not a patch or a digest: `8.1` still takes 8.1's patch releases, security fixes among them, which a patch pin would
+ * hold back until someone moved it (the egress proxy, which IS the allowlist, stays digest-pinned). When pinned
+ * it was the image `:8` pulled (both resolved to Valkey 8.1.11, and no `:8.2` existed), so neither a fresh pull nor a
+ * host that pulled `:8` moved, and a volume written by 8.0.2 or by 8.1.11 loaded in the other, measured both ways.
+ * Moving it: change this value, add the old one to `OLDER_VALKEY_IMAGES` (older-state.mjs), re-measure the claims above
+ * and the load in both directions, and add a row to docs/upgrading.md.
+ */
+export const VALKEY_IMAGE = "valkey/valkey:8.1";
 
 /**
  * A new password: 32 random bytes as 64 lowercase hex characters. Hex because every loader of `.env` reads it back
@@ -115,7 +135,7 @@ export function valkeyDockerRunArgs({ port = 6379, deployment = null } = {}) {
 		"3s",
 		"--health-retries",
 		"5",
-		"valkey/valkey:8",
+		VALKEY_IMAGE,
 		"sh",
 		"-c",
 		VALKEY_START_SCRIPT,
@@ -319,8 +339,10 @@ function ownerShown(info) {
 }
 
 /**
- * One container by name: `{ absent }`, `{ ours, owner }`, or `{ unknown }` when docker did not answer (which is never
- * taken as ours). `query(cmd, args)` resolves `{ code, stdout, stderr }`.
+ * One container by name: `{ absent }`, `{ ours, owner, image? }`, or `{ unknown }` when docker did not answer (which is
+ * never taken as ours). `query(cmd, args)` resolves `{ code, stdout, stderr }`. `image` is the record's `Config.Image`,
+ * the reference the container was created from as given (measured on docker 27.4: `valkey/valkey:8` and
+ * `docker.io/valkey/valkey:8` each come back unchanged), which `up` holds against the older images (issue #761).
  */
 export async function valkeyContainerOwner(name, { dirs, port, query }) {
 	const res = await query("docker", ["container", "inspect", name]);
@@ -331,7 +353,8 @@ export async function valkeyContainerOwner(name, { dirs, port, query }) {
 	} catch {
 		return { unknown: `docker container inspect ${name} printed no record` };
 	}
-	return { ours: valkeyContainerIsOurs(info, { dirs, port }), owner: ownerShown(info) };
+	const image = info?.Config?.Image;
+	return { ours: valkeyContainerIsOurs(info, { dirs, port }), owner: ownerShown(info), ...(typeof image === "string" ? { image } : {}) };
 }
 
 /**
@@ -511,7 +534,7 @@ export const OWNER_CHECK_CONTAINER = "pi-dispatch-valkey-ownercheck";
  * AOF on, as always, so it loads the queue as the real one will; it is stopped (SIGTERM), never killed.
  */
 export function valkeyOwnerCheckArgs(deployment) {
-	return ["run", "-d", "--name", OWNER_CHECK_CONTAINER, "--label", `${DEPLOYMENT_LABEL}=${deployment}`, "--network", "none", "-v", `${VALKEY_VOLUME}:/data`, "valkey/valkey:8", "valkey-server", "--appendonly", "yes"];
+	return ["run", "-d", "--name", OWNER_CHECK_CONTAINER, "--label", `${DEPLOYMENT_LABEL}=${deployment}`, "--network", "none", "-v", `${VALKEY_VOLUME}:/data`, VALKEY_IMAGE, "valkey-server", "--appendonly", "yes"];
 }
 
 /** `docker exec` reading the marker inside the owner check's Valkey. */

@@ -182,7 +182,7 @@ export function caseInput(name) {
 					budgetReserved: true,
 					chainRefused: 1,
 					session: { resumed: true, reason: "resumed", bytes: 48_213 },
-					dollars: { reservedMicros: 3_000_000, settledMicros: 1_860_000, basis: "metered", modelBasis: "metered" },
+					dollars: { reservedMicros: 3_000_000, settledMicros: 1_860_000, basis: "metered", modelBasis: "metered", reservedIn: { day: "2026-09-14", week: "2026-09-14", month: "2026-09", valkey: hex(16, "9") } },
 					decision: { model: "anthropic/claude-haiku-4-5", action: "investigate", shadow: false, questions: ["scope"], probabilities: { investigate: 0.7, file_issue: 0.2, ignore: 0.1 }, confidence: 0.7, costUsd: 0.002 },
 					approval: { requestId: hex(64, "e"), action: "deploy:prod", decision: "approved", actorKind: "operator", actorId: hex(64, "f"), decidedAt: ms("2026-09-14T14:20:00.000Z") },
 					why: "fallback",

@@ -36,6 +36,8 @@ export function serviceEnvLoader(platform) {
  * The deployment `.env` as the service is judged by (issue #464, gate round 3): decoded from its BYTES with the
  * hardened reader, and `hazard` set to the first thing the service's loader reads differently from this reader, or
  * refuses to load (a NUL, invalid UTF-8, an environment too big to exec, a lone CR), as `{ line, what, fix }`, or null.
+ * `raw` is the content as given, for a reader that judges the bytes itself (`readValkeyKeys`), since decoding erases
+ * invalid UTF-8.
  */
 export function serviceEnvFileOf(raw, path, loader) {
 	const { text, loadHazard } = decodeEnvFile(raw, { loader });
@@ -45,7 +47,7 @@ export function serviceEnvFileOf(raw, path, loader) {
 		const shape = h.shape !== undefined ? SYSTEMD_HAZARD_SHAPES[h.shape] : null;
 		hazard = shape ? { line: h.line, what: `has ${shape.what}${h.detail ? ` (${h.detail})` : ""}`, fix: shape.fix } : { line: h.line, what: "is one this command cannot read the way the service's loader will (an open quote, a continuation, or a line that runs)", fix: "fix that line, then re-run doctor" };
 	}
-	return { text, path, loader, hazard };
+	return { text, raw, path, loader, hazard };
 }
 
 /**

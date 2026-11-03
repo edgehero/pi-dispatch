@@ -9,6 +9,8 @@ import { randomUUID } from "node:crypto";
 import { builtinChatModels } from "../../worker/src/model-catalog.mjs";
 import { makeRedisClient } from "../../worker/src/connection.mjs";
 import { CANARY_LOCK_KEY } from "../../worker/src/canary-lock.mjs";
+// The pinned Valkey, which the workflow pulls by the same constant first: `--pull=never` below finds only that image.
+import { VALKEY_IMAGE } from "../../worker/src/valkey-auth.mjs";
 
 const exec = promisify(execFile);
 const image = process.argv[2];
@@ -41,7 +43,7 @@ try {
 	writeFileSync(join(retained, "event.json"), "{\"source\":\"manual\"}");
 	writeFileSync(join(retained, "model-roles.json"), JSON.stringify({ version: 1, roles: { editor: candidate } }));
 	writeFileSync(join(root, "triggers.json"), JSON.stringify({ triggers: [], modelRoles: { default: { editor: candidate } } }));
-	await docker(["run", "--pull=never", "--rm", "-d", "--name", valkey, "-p", "127.0.0.1::6379", "valkey/valkey:8"]);
+	await docker(["run", "--pull=never", "--rm", "-d", "--name", valkey, "-p", "127.0.0.1::6379", VALKEY_IMAGE]);
 	const port = JSON.parse((await docker(["inspect", "--format", "{{json .NetworkSettings.Ports}}", valkey])).stdout)["6379/tcp"][0].HostPort;
 	const url = `redis://127.0.0.1:${port}/0`;
 	const cli = resolve("worker/src/cli.mjs");

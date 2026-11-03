@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { issueBranch } from "./branch.mjs";
+import { cronRunOf } from "./bullmq-internals.mjs";
 import { isForgeKind } from "./forges.mjs";
 
 /**
@@ -150,9 +151,10 @@ export function sessionKeyOfRecord(record) {
 	const kind = record?.kind;
 	if (kind === "local") {
 		// The scheduler id is the middle of a cron (`repeat:`) or manual-fire (`manual:`) job id; the trailing number is
-		// the fire's own, which differs every time and must not split one schedule's sessions.
-		const m = typeof record?.jobId === "string" ? /^(?:repeat|manual):(.+):\d+$/.exec(record.jobId) : null;
-		return m ? sessionKeyFor({ kind: "local", trigger: { id: m[1] } }) : null;
+		// the fire's own, which differs every time and must not split one schedule's sessions. Any id length: a record
+		// is this deployment's own history, and every release before issue #761 took a cron id of any length.
+		const run = cronRunOf(record?.jobId);
+		return run ? sessionKeyFor({ kind: "local", trigger: { id: run.id } }) : null;
 	}
 	if (!isForgeKind(kind) || typeof record?.target !== "string") return null;
 	// `!` (a GitLab merge request, an Azure pull request) never matches: a request's key needs the head ref.

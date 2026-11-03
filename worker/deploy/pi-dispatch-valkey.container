@@ -10,13 +10,15 @@
 # (measured on Podman 5.8.1: with linger on it came up 25 s after a reboot with nobody logged in).
 #
 # Fully qualified image names throughout: under short-name enforcement a unit cannot answer the prompt a short
-# name raises, so `valkey/valkey:8` could fail to start where Docker quietly assumed docker.io.
+# name raises, so `valkey/valkey:8.1` could fail to start where Docker quietly assumed docker.io. Pinned to a minor,
+# never a floating major (issue #761): VALKEY_IMAGE in worker/src/valkey-auth.mjs says why, and a test holds the
+# Image= line to it. A changed line restarts Valkey when `service install --force` writes it; the volume is kept.
 
 [Unit]
 Description=pi-dispatch Valkey (the job queue; rootless Podman, Quadlet)
 
 [Container]
-Image=docker.io/valkey/valkey:8
+Image=docker.io/valkey/valkey:8.1
 ContainerName=pi-dispatch-valkey
 # EXPLICIT, see pi-dispatch-valkey.network for why a container here must never rely on the default network.
 Network=pi-dispatch-valkey.network

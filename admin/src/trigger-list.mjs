@@ -6,6 +6,7 @@
 import cronParser from "cron-parser";
 const { parseExpression } = cronParser;
 import { windowEndAt } from "@edgehero/pi-dispatch/pause-windows";
+import { cronRunOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { foldTriggerCosts, meteredRunMicros, refusedBeforeSpend } from "./costs.mjs";
 import { recordReason } from "./words.mjs";
 import { newerSkippedSentence, readableRecords } from "./newer-release.mjs";
@@ -44,11 +45,14 @@ function ruleOf(t) {
   return out;
 }
 
-/** A record needs the persisted raw index AND kind/type, or the cron id. A shared flow alone is never attribution. */
+/**
+ * A record needs the persisted raw index AND kind/type, or the cron id (`cronRunOf`, any id length: a record is this
+ * deployment's own history). A shared flow alone is never attribution.
+ */
 export function recordMatchesTrigger(record, trigger) {
   if (trigger.type === "cron") {
-    const match = /^(?:repeat|manual):([A-Za-z0-9._-]+):\d+$/.exec(record?.jobId ?? "");
-    return record?.kind === "local" && match !== null && match[1] === trigger.id;
+    const run = cronRunOf(record?.jobId);
+    return record?.kind === "local" && run !== null && run.id === trigger.id;
   }
   return Number.isSafeInteger(record?.triggerIndex) && record.triggerIndex === trigger.index && record.triggerType === trigger.type && record.kind === trigger.forge;
 }

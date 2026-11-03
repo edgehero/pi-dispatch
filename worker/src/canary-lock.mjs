@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { metaKeyPattern, queueNameOfMetaKey } from "./bullmq-internals.mjs";
 
 export const CANARY_LOCK_KEY = "dispatch:canary:exclusive";
 export const CANARY_LEASE_MS = 60_000;
@@ -26,12 +27,14 @@ export async function canaryQueueNames(redis) {
 	do {
 		// MATCH limits returned keys, not the work SCAN does across a shared database.
 		if (++pages > 512) throw new Error("canary queue discovery exceeded its bound");
-		const next = await redis.scan(cursor, "MATCH", "bull:pi-jobs*:meta", "COUNT", 100);
+		const next = await redis.scan(cursor, "MATCH", metaKeyPattern("pi-jobs"), "COUNT", 100);
 		cursor = next[0];
 		for (const key of next[1]) {
 			if (++scanned > 4096) throw new Error("canary queue discovery exceeded its bound");
-			const name = key.slice(5, -5);
-			if (/^pi-jobs(?:@[A-Za-z0-9._-]{1,64})?$/.test(name)) names.add(name);
+			// The queue's name between BullMQ's `bull:` and `:meta`, or null for a key the pattern's `*` matched that is no
+			// queue's meta key: a job's own hash whose three-part custom id ends in `meta` (`bull:pi-jobs:a:b:meta`).
+			const name = queueNameOfMetaKey(key);
+			if (name !== null && /^pi-jobs(?:@[A-Za-z0-9._-]{1,64})?$/.test(name)) names.add(name);
 		}
 	} while (cursor !== "0");
 	return [...names];

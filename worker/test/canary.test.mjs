@@ -161,6 +161,13 @@ test("canary admission is exclusive and a stale owner cannot erase or renew a su
 	assert.deepEqual(await canaryQueueNames(redis), ["pi-jobs", "pi-jobs@host"]);
 });
 
+test("canary queue discovery takes a queue's meta key only, never a job hash the pattern's star also matched", async () => {
+	// `bull:pi-jobs*:meta` matches a job's own hash whose three-part custom id ends in `meta` (`bull:pi-jobs:a:b:meta`),
+	// and a key of another prefix or none: only `bull:<queue>:meta` with a queue's name is a queue.
+	const keys = ["bull:pi-jobs:meta", "bull:pi-jobs:a:b:meta", "bull:pi-jobs@h1:meta", "bull:pi-jobs@h1:x:meta", "bull::meta", "pi-jobs@h2:meta"];
+	assert.deepEqual(await canaryQueueNames({ async scan(cursor, ...args) { assert.deepEqual(args, ["MATCH", "bull:pi-jobs*:meta", "COUNT", 100]); return ["0", keys]; } }), ["pi-jobs", "pi-jobs@h1"]);
+});
+
 test("local runtime restores only base objects, passes only provider credentials and reserves through runJob", async () => {
 	const root = tempDir("canary-runtime-"), workspace = join(root, "original"), retained = join(root, "sandboxes", "one"), logs = join(root, "logs"), jobs = join(root, "jobs");
 	mkdirSync(workspace); mkdirSync(retained, { recursive: true }); mkdirSync(logs);
