@@ -53,6 +53,68 @@ export const EXIT_KEY_PATTERN = /^[0-9a-f]{64}$/;
 export const EXIT_TERMINATED = 143;
 /** The suffix a signed exit line ends with, before the closing brace. */
 const AUTH_KEY = '"auth":"';
+/**
+ * How many characters of a container's stdout the worker keeps to read this line from (TAIL_CAP_BYTES in
+ * worker/src/run-history.mjs, which is not in the image, so it cannot be imported; exit-line.test.mjs drives the real
+ * sink at this boundary, so the two cannot part unnoticed). A line whose head leaves the tail fails its MAC, and with no
+ * verified line every field reads null and the dollars settle at the floor.
+ */
+export const EXIT_TAIL_BYTES = 8 * 1024;
+/**
+ * The most one exit line may take, its two newlines and its signature included (issue #800,
+ * INT-RUNNER-EXIT-CODE-PROTOCOL): the tail, less the supervisor's longest line at a 44-character job id (493), which can
+ * follow it when the runner is killed after writing, less 19 to spare. Held here at the writer, on every path, because
+ * no one field's cap can hold it: the fields a run can carry together passed the tail before this existed.
+ * REJECTED: raising the worker's tail. It does nothing for an older worker reading a newer image, and that pairing is
+ * exactly what a host mid-upgrade runs.
+ */
+export const EXIT_LINE_MAX_BYTES = 7680;
+/**
+ * The supervisor's longest line with its job id taken out: `oom-killed` beside `SIGKILL`, every `resources` key at the
+ * largest safe integer, signed, with both newlines. Pinned against the real writer in exit-line.test.mjs.
+ */
+export const SUPERVISOR_LINE_BYTES = 449;
+
+/**
+ * The most this job's line may take. EXIT_LINE_MAX_BYTES holds up to a 63-character id, and a cron trigger's id alone
+ * may be 176 (worker/src/triggers.mjs CRON_ID_MAX), which makes `pi-job-repeat_<id>_<millis>` 207: past 63, each
+ * character the supervisor's line grows by comes off this one, so the pair still fits the tail.
+ */
+export function exitLineMaxBytes(jobId) {
+	return Math.min(EXIT_LINE_MAX_BYTES, EXIT_TAIL_BYTES - SUPERVISOR_LINE_BYTES - Buffer.byteLength(typeof jobId === "string" ? jobId : "", "utf8"));
+}
+
+/**
+ * A value as the line's JSON, in ASCII: every code unit past 0x7f spelled `\\uXXXX`, which JSON.parse reads back as the
+ * same string. The worker's sink decodes each stdout chunk alone (`chunk.toString("utf8")`), so a multi-byte character
+ * that a pipe hands over in two chunks becomes U+FFFD twice, and the MAC, taken over the bytes the runner wrote, no
+ * longer verifies: one curly quote in a provider's error could cost the whole line. Escaped BEFORE signing, so the
+ * bytes signed, the bytes written and the text the worker verifies are one string, and a line is as many bytes as it
+ * is characters, the measure the tail cuts by.
+ */
+export function exitLineJson(value) {
+	return JSON.stringify(value).replace(/[\u0080-\uffff]/g, (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/**
+ * `message` cut to fit `room` bytes of the line, on whole code points, with capExitMessage's marker. The marker's longest
+ * spelling is set aside before the walk, so the count it ends up printing cannot overrun; a room too small for even
+ * that is the empty string. The walk stops at the room, so a message of any length costs no more than the room does.
+ */
+function cutExitMessage(message, room) {
+	const marker = (cut) => `... [truncated ${cut} chars]`;
+	const reserved = marker(message.length).length;
+	if (reserved > room) return "";
+	let kept = "";
+	let spent = 0;
+	for (const char of message) {
+		const cost = exitLineJson(char).length - 2;
+		if (spent + cost + reserved > room) return `${kept}${marker(message.length - kept.length)}`;
+		kept += char;
+		spent += cost;
+	}
+	return message;
+}
 
 /** HMAC-SHA256 of the line's unsigned bytes, keyed by the key's own 64 characters. */
 export function exitLineMac(key, body) {
@@ -146,6 +208,26 @@ export function writeAllSync(fd, text, { write = writeSync, sleep = (ms) => Atom
 	}
 }
 
+/** What a line keeps when nothing else fits: its verdict and what the settlement reads, each only when the line had it. */
+function lastResortFields(fields) {
+	return Object.fromEntries(["code", "reason", "why", "by", "tokens"].filter((name) => fields?.[name] !== undefined).map((name) => [name, fields[name]]));
+}
+
+/**
+ * The line to write: as composed when it fits, else with `message` cut to the room left, else the last resort. Measured
+ * in bytes on the whole write, signature and newlines included, because that is what has to stay inside the tail.
+ */
+function fitExitLine({ compose, message, maxBytes, lastResort }) {
+	const size = (line) => Buffer.byteLength(line, "utf8");
+	const whole = compose();
+	if (size(whole) <= maxBytes) return whole;
+	if (typeof message === "string") {
+		const room = maxBytes - size(compose({ message: "" }));
+		if (room >= 0) return compose({ message: cutExitMessage(message, room) });
+	}
+	return lastResort();
+}
+
 /**
  * The one writer of the exit line, and the SIGTERM path that uses it (issue #545).
  *
@@ -156,8 +238,12 @@ export function writeAllSync(fd, text, { write = writeSync, sleep = (ms) => Atom
  * container's stop grace period; with a line already written it exits with THAT line's code, so the container's
  * exit code and the last line still agree. Before this the runner had no handler, so a `docker stop` killed it
  * mid-run and no genuine line followed whatever a tool had written.
+ *
+ * The line it writes always fits `maxBytes` (exitLineMaxBytes): a `message` too long for the room left is cut, and, past
+ * that, only what the settlement reads is kept, marked `lineCut`, because such a line still verifies and an oversized
+ * one reads as no line at all. `maxBytes` is a seam for the harness that proves a write past a pipe's buffer survives.
  */
-export function createExitWriter({ key = null, jobId, write, exit, resources = () => null }) {
+export function createExitWriter({ key = null, jobId, write, exit, resources = () => null, maxBytes = exitLineMaxBytes(jobId) }) {
 	let written = false;
 	// Facts learned along the way, on the line however the run ends (issue #796: whether a canary's candidate loaded, on every exit path after the load).
 	let noted = {};
@@ -178,8 +264,13 @@ export function createExitWriter({ key = null, jobId, write, exit, resources = (
 		} catch {
 			used = null;
 		}
-		const body = JSON.stringify({ event: "exit", jobId, ...noted, ...fields, ...(used !== null && typeof used === "object" ? { resources: used } : {}) });
-		write(`\n${key ? signExitLine(body, key) : body}\n`);
+		const usedField = used !== null && typeof used === "object" ? { resources: used } : {};
+		const lineOf = (value) => {
+			const body = exitLineJson(value);
+			return `\n${key ? signExitLine(body, key) : body}\n`;
+		};
+		const compose = (over = {}) => lineOf({ event: "exit", jobId, ...noted, ...fields, ...over, ...usedField });
+		write(fitExitLine({ compose, message: fields?.message, maxBytes, lastResort: () => lineOf({ event: "exit", jobId, ...lastResortFields(fields), lineCut: true }) }));
 		return true;
 	}
 	function terminate(fields = {}) {

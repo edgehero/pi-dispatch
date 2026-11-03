@@ -785,9 +785,33 @@ refactor apart.
   **One mitigation beside them, which is not a residual:** the exit line's `message` is capped at 1700
   characters AS SERIALIZED (2000 until issue #596's `swapPeak` grew the worst-case line past the budget, then 1900 until the test was made to measure the signed line at the longest runner policy reason, then 1800 until issue #796's `providerBilled` grew every ledger row) (a quote or newline costs two, a control byte six), cut on whole code points,
   with a `... [truncated N chars]` marker, on both exit-line paths. An HTML error page therefore cannot
-  push the line's `code` and `reason` out of the worker's 8 KiB tail: the worst-case line (the maximal
-  ledger, `context`, the longest session reason, every `resources` key at its largest, the longest runner policy reason, the `auth` signature and a capped message) is held
-  under 6 KiB by a test that pins the 1700 literal.
+  push the line's `code` and `reason` out of the worker's 8 KiB tail by itself. A test that pins the 1700 literal holds under 6 KiB
+  a line of the maximal ledger, `context`, the longest session reason, every `resources` key at its largest, the
+  longest runner policy reason, the `auth` signature and a capped message. **The 6 KiB is that line's and not every line's**: it does not
+  include `modelRoles`, `steer`, `recovery`, `providerFailure`, `replaySafe`, `toolsStarted`, `approval`, the two digests, `canaryLoad`,
+  a job id past 44 characters, a nonzero `providerBilled`, or what a non-ASCII `message` costs on the line (six bytes a
+  code unit, where the cap counts it as one).
+
+  **The whole line has a limit of its own (issue #800): `EXIT_LINE_MAX_BYTES`, 7680 bytes for the whole write**, its
+  two newlines and its signature included. Every field above can ride one line, and measured at the pin that line is
+  7,961 characters; a supervisor's line after it (493 at a 44-character job id) makes 8,454, past the 8,192-character tail, so
+  the MAC of a genuine line could already be lost and with it every field, the dollars settling at the floor. 7680
+  is 8192 less those 493 less 19 to spare. A job id past 63 characters takes its excess off the limit
+  (`exitLineMaxBytes`), because a cron trigger's id can make `PI_JOB_ID` 207 characters and the supervisor's line grows with it. The
+  one writer (`createExitWriter`, `image/runner/src/exit-line.mjs`) holds this on every path, and the result always
+  verifies:
+  - **ASCII.** The body is written with every code unit past `0x7f` escaped as `\uXXXX`, before it is signed. The
+    worker's sink decodes each stdout chunk alone, so a multi-byte character a pipe hands over in two chunks became
+    U+FFFD and failed the MAC. The bytes signed, the bytes written and the text the worker verifies are one string, and
+    `JSON.parse` reads back the same value, so an older worker needs no change.
+  - **A cut, not a loss.** A line past its limit has `message` cut to the room left, on whole code points and with the same marker.
+    A room too small for the marker leaves it empty. A line that still does not fit keeps only `code`, `reason`,
+    `why`, `by` and `tokens`, with `lineCut: true`: no reader needs that key, and it says in the job's log that this happened. It takes
+    a field nothing bounds to get there; nothing a run produces today does.
+  - **Raising the tail is rejected.** It does nothing for an older worker reading a newer image, which is what a host
+    mid-upgrade runs. `TAIL_CAP_BYTES` is UNCHANGED, checked, and so are the 1700 cap and its 6 KiB test.
+
+  Numeric exit codes, the MAC framing and `authenticExitLines` are UNCHANGED, checked.
 
   **The job user cannot read its own inputs (issue #341)** is a named reason under the EXISTING policy code,
   for every job, prompt or command:
@@ -13614,3 +13638,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-02 (#754, #792, security review) | INT-SANDBOX-GATEWAY-CONTRACT gains the bootstrap receipt, the same-origin launch gesture and the session heartbeat; refused upgrades close outright; the console stops renewing attachments nobody holds; driver authority is bounded by its room's TTL; a lapsed watcher is no longer told the driver removed it. Found by an independent review of the final diff, each with a regression test. No watcher write path was found. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |
 | 2026-11-02 (#796, pi 1.5.0) | `INT-RUN-HISTORY-FILE-CONTRACT`: each `usage.models` row gains `providerBilled`, the count of its calls whose cost is the provider's billed total (pi-ai 1.5.0's `usage.cost.totalFromProvider`), a count because a row aggregates calls; an older record reads 0, and a present value that is not a non-negative number refuses the block as for every other counter. The exit line's `message` cap moves from 1800 to 1700 serialized characters so that the worst-case line stays under 6 KiB, the same trade as before: the diagnostic gives way, never the label. Trap (g): since 1.5.0 an extension gets a view of pi-ai rather than the compat namespace itself, so the compat half is accepted by identity of the five registry and stream functions, with names still proving nothing. UNCHANGED, checked: the exit line's other keys, `tokens`, the ledger partition rule (rows sum to the totals, and `providerBilled` is not a total), and the child ledger's version, since parent and child always run the same image. |
 | 2026-11-02 (#796) | New `INT-UPDATES-KEYS`: the look, the desired generation and each host's applied state; the `packageCanary` job field and run-record field, `canaryLoad` on the exit line, `PI_PACKAGE_CANARY`, and the image capability `packageCanary`. `INT-PI-PACKAGES-FILE-CONTRACT`: a host applying a person's Adopt or Undo also writes the file, and the stage manifest's `dir` now names a directory per stage rather than per package. A manifest from before keeps working: `dir` was always only a plain path segment. `INT-SDK-SESSION-OPTIONS`: staged packages stay off `/job`, with a canary's one candidate as the only exception. |
+| 2026-11-03 (#800, exit line limit) | `INT-RUNNER-EXIT-CODE-PROTOCOL`: the 6 KiB sentence said what the worst-case line was, and it was not: it left out `modelRoles`, `steer`, `recovery`, `providerFailure` and more, and every field together measures 7,961 characters, 8,454 with a supervisor's line after it, past the 8,192-character tail. Restated as what that test holds, and the whole line now has a limit: `EXIT_LINE_MAX_BYTES`, 7680, less any job id's excess past 63 characters. The writer ASCII-escapes the body, which also closes a MAC lost to a non-ASCII character split across two stdout chunks, cuts `message` to fit, and past that keeps only the verdict and the tokens, marked `lineCut`. `TAIL_CAP_BYTES`, the 1700 cap and its test, the exit codes and the MAC framing are UNCHANGED, checked. |

@@ -8,9 +8,10 @@ import { spawn } from "node:child_process";
 import { createExitWriter, readExitKey, signExitLine, writeAllSync } from "../../src/exit-line.mjs";
 
 const exitKey = readExitKey(process.env);
-const exitWriter = createExitWriter({ key: exitKey.key, jobId: "harness-1", write: (line) => writeAllSync(1, line), exit: (code) => process.exit(code) });
-// HARNESS_BIG_MESSAGE: an exit line far past a pipe's buffer, written and exited on at once (PR #555's review).
+// HARNESS_BIG_MESSAGE: an exit line far past a pipe's buffer, written and exited on at once (PR #555's review). The
+// write is what that proves, so the writer's own limit (issue #800) is lifted here: it would cut the line first.
 const big = process.env.HARNESS_BIG_MESSAGE ? { message: "m".repeat(Number(process.env.HARNESS_BIG_MESSAGE)) } : {};
+const exitWriter = createExitWriter({ key: exitKey.key, jobId: "harness-1", write: (line) => writeAllSync(1, line), exit: (code) => process.exit(code), ...(process.env.HARNESS_BIG_MESSAGE ? { maxBytes: Number.POSITIVE_INFINITY } : {}) });
 const metered = { tokens: { input: 900, output: 100, total: 1000, cost: 1.8, metered: true, calls: 3, unresolved: 0, unpriced: 0 } };
 process.on("SIGTERM", () => exitWriter.terminate({ turns: 2, ...metered, ...big }));
 
