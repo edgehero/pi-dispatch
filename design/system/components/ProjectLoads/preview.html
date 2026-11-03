@@ -1,4 +1,4 @@
-<!-- @dsCard group="Configuration" height=1070 width=1440 subtitle="The project page’s What its runs load: one line per kind, and a warning when runs differ by host" -->
+<!-- @dsCard group="Configuration" height=1820 width=1440 subtitle="The project page’s What its runs load: one line per kind, and a warning when runs differ by host" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -89,8 +89,12 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
 [data-page="trigger"] pre{white-space:pre-wrap;overflow-wrap:anywhere}
 @media(min-width:1000px){[data-page="trigger-add"] .config-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}[data-page="trigger-add"] .config-form h3,[data-page="trigger-add"] .config-form fieldset,[data-page="trigger-add"] .config-form>p{grid-column:1/-1}}
 
-.code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.ld-st { display: inline-flex; align-items: flex-start; gap: 6px; color: var(--tone-ink); font-weight: 600; line-height: 18px; }
+.ld-st .ic { margin-top: 2px; }
+.ld-st > span { min-width: 0; }
+.ld-st .code, .ld-v .code, .ld-more .code, .ld-foot .code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .ld-top { display: block; margin-bottom: var(--space-4); font-size: 14px; }
+.ld-top small { display: block; margin-top: 2px; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
 .ld-list { display: grid; gap: 12px; }
 .ld-row { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 2px 14px; align-items: baseline; font-size: 14px; line-height: 20px; }
 .ld-k { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 650; color: var(--ink-muted); }
@@ -98,15 +102,28 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
 .ld-v { min-width: 0; color: var(--ink); }
 .ld-v b { font-weight: 650; }
 .ld-v small { display: block; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
-.ld-v .c2-st { font-weight: 600; }
 .ld-more { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
 .ld-more summary { cursor: pointer; font-size: 13px; color: var(--ink-muted); }
 .ld-more .tbl-wrap { margin-top: var(--space-3); }
 .ld-foot { display: flex; gap: 8px; align-items: flex-start; margin-top: var(--space-4); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
 .ld-foot .ic { flex: none; margin-top: 2px; }
+.ld-host td { vertical-align: top; }
+@media (max-width: 760px) {
+  .ld-row { grid-template-columns: minmax(0, 1fr); }
+  /* The bundle's stacked row is a shrinking column beside an auto one. A long name in the auto column takes the whole
+     width and leaves the kind laid over it, so the kind gets its own line and the name the shrinking column. These
+     select on .tbl--stack and name no card rule, because the console pastes this block beside the bundle alone. */
+  .tbl--stack.ld-fold td:first-child { grid-column: 1 / -1; font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+  .tbl--stack.ld-fold .ld-fold__n { grid-column: 1; min-width: 0; overflow-wrap: anywhere; }
+  .tbl--stack.ld-fold td:empty { display: none; }
+}
+
+.code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .ld-tbl td { vertical-align: middle; }
+.ld-tbl td:first-child .code { white-space: nowrap; }
 .ld-tbl .ld-line { min-width: 280px; font-size: 13px; line-height: 20px; }
-.ld-tbl .ld-line .c2-st { font-weight: 550; }
+.ld-tbl .ld-line .ld-st { font-weight: 550; }
+.ld-tbl .ld-line small { display: block; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
 .ld-tbl .ld-act { text-align: right; white-space: nowrap; }
 .ld-tbl .muted { font-size: 13px; }
 .ld-lead { display: flex; gap: 8px; align-items: flex-start; margin-bottom: var(--space-4); font-size: 13px; line-height: 20px; color: var(--ink-muted); }
@@ -114,20 +131,20 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
 .ld-h3 { margin: var(--space-6) 0 var(--space-3); font-size: 15px; font-weight: 700; }
 .ld-new { box-shadow: inset 3px 0 0 var(--running); padding-left: 10px; }
 .ld-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); }
-.ld-host td { vertical-align: top; }
-.ld-host .ld-names { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.ld-pair + .ld-pair { margin-top: var(--space-5); }
+.ld-foot--flush { margin: 0; padding: var(--space-3) var(--space-5) var(--space-4); }
+.ld-banners { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
 @media (max-width: 1100px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 760px) {
-  .ld-row { grid-template-columns: minmax(0, 1fr); }
   .ld-pair { grid-template-columns: minmax(0, 1fr); }
   .ld-tbl .ld-line { min-width: 0; }
   .ld-tbl .ld-act { text-align: left; }
   .ld-tbl .ld-act:has(> .muted:only-child) { display: none; }
 }
 
-#p-proj-members .rowpill { min-width: 0; flex-wrap: wrap; }
+#p-proj-members .rowpill { min-width: 0; flex-wrap: wrap; padding: 8px 12px; border-radius: var(--radius-md); }
 #p-proj-members .rowpill .end { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
-@media (max-width: 760px) { #p-proj-members .rowpill { flex-wrap: wrap; padding: 8px 12px; border-radius: var(--radius-md); } #p-proj-members .rowpill .end { margin-left: 26px; } }
+@media (max-width: 760px) { #p-proj-members .rowpill .end { margin-left: 26px; } }
 </style>
 <style data-ds-status>
 .ds-status { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin: var(--space-4) var(--space-6) 0; padding: 8px 14px; border-radius: var(--radius-md); border: 1.5px dashed var(--tone); background: var(--tone-tint); font-size: 13px; line-height: 18px; color: var(--ink); }
@@ -159,16 +176,25 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
   <div class="titlebar__end"><a class="btn" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg>Open in Runs</a></div>
 </div>
 <p class="ld-lead"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>A new card on the project page, beside the ones ProjectDetail draws. The rest of the page is unchanged.</span></p><div class="cols"><div class="stack"><section class="card" id="p-proj-loads" data-panel>
-  <div class="card__head"><h2>What its runs load</h2><span class="card__sub">24 runs, last 7 days</span></div>
-  <p class="ld-top"><span class="c2-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span>Runs differ by host: build3 also loads git-guard from its overlay.</span></span> <a class="link" href="#">Open build3</a></p><ul class="ld-list"><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"/></svg>pi</span><span class="ld-v">pi 1.5.0 in <span class="code">pi-job:4.3.1</span><small>every run</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-bolt"/></svg>Models</span><span class="ld-v">anthropic / claude-sonnet-5-5<small>every run</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-layers"/></svg>Extensions</span><span class="ld-v">pi-lint 1.4.2, pi-test-runner 0.9.0<small>every run, and git-guard in the 18 on build3</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>Flows</span><span class="ld-v"><span class="code">fix</span> in 18, <span class="code">review</span> in 6<small>fix from acme/billing’s .pi/skills; review from trigger 4’s skills folder</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"/></svg>MCP</span><span class="ld-v">none<small>no trigger of this project names a server</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg>Missing</span><span class="ld-v">nothing<small>every run that started found its flow and loaded every extension</small></span></li></ul><div class="ld-more"><div class="tbl-wrap"><table class="tbl ld-host tbl--stack"><caption class="sr">What billing’s runs load, by host</caption><thead><tr><th scope="col">Host</th><th scope="col" class="num">Runs</th><th scope="col">Extensions</th><th scope="col">Flow</th></tr></thead><tbody><tr><td><b class="code">build3</b> <span class="vtag">podman</span></td><td class="num" data-l="Runs">18</td><td class="wide" data-l="Extensions">pi-lint 1.4.2, pi-test-runner 0.9.0, git-guard <span class="muted">(overlay)</span></td><td data-l="Flow"><span class="code">fix</span></td></tr><tr><td><b class="code">mini2</b> <span class="vtag">local</span></td><td class="num" data-l="Runs">6</td><td class="wide" data-l="Extensions">pi-lint 1.4.2, pi-test-runner 0.9.0</td><td data-l="Flow"><span class="code">review</span></td></tr></tbody></table></div></div><p class="ld-foot"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>From the records of its runs, last 7 days. The overlay and staged packages are each host’s own, so runs of one project can load different things on different hosts.</span></p>
+  <div class="card__head"><h2>What its runs load</h2><span class="card__sub">24 runs this week</span></div>
+  <p class="ld-top"><span class="ld-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span>Runs differ by host: build3 also loads git-guard from its overlay.</span></span> <a class="link" href="#">Open build3</a></p><ul class="ld-list"><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"/></svg>pi</span><span class="ld-v">pi 1.5.0 in <span class="code">pi-job:4.3.1</span><small>all 21 recorded runs</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-bolt"/></svg>Models</span><span class="ld-v">anthropic / claude-sonnet-5-5<small>all 21 recorded runs</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-layers"/></svg>Extensions</span><span class="ld-v">pi-lint 1.4.2, pi-test-runner 0.9.0<small>all 21 recorded runs, and git-guard in the 15 recorded on build3; 3 did not load or were not recorded</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"/></svg>Flows</span><span class="ld-v"><span class="code">fix</span> in 15, <span class="code">review</span> in 6<small>fix from acme/billing’s .pi/skills; review from the overlay</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"/></svg>MCP</span><span class="ld-v">none<small>no trigger of this project names a server</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg>Missing</span><span class="ld-v">nothing<small>every recorded run found its flow and loaded every extension</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-minus"/></svg>Not read</span><span class="ld-v">3 of 24 runs<small>gh-e9a0 was refused before its container started; gh-4a7e’s stop did not take, so it left no exit line; an older release wrote gh-c3f8’s record</small></span></li></ul><div class="ld-more"><div class="tbl-wrap"><table class="tbl ld-host tbl--stack"><caption class="sr">What billing’s runs load, by host</caption><thead><tr><th scope="col">Host</th><th scope="col" class="num">Runs</th><th scope="col" class="num">Recorded</th><th scope="col">Extensions</th><th scope="col">Flow</th></tr></thead><tbody><tr><td><b class="code">build3</b> <span class="vtag">podman</span></td><td class="num" data-l="Runs">18</td><td class="num" data-l="Recorded">15</td><td class="wide" data-l="Extensions">pi-lint 1.4.2, pi-test-runner 0.9.0, git-guard <span class="muted">(overlay)</span></td><td data-l="Flow"><span class="code">fix</span></td></tr><tr><td><b class="code">mini2</b> <span class="vtag">local</span></td><td class="num" data-l="Runs">6</td><td class="num" data-l="Recorded">6</td><td class="wide" data-l="Extensions">pi-lint 1.4.2, pi-test-runner 0.9.0</td><td data-l="Flow"><span class="code">review</span></td></tr></tbody></table></div></div><p class="ld-foot"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>From the records of its runs this week. The overlay and staged packages are each host’s own, so runs of one project can load different things on different hosts.</span></p>
+</section><section class="card" id="p-proj-loads-incomplete" data-panel>
+  <div class="card__head"><h2>What its runs load</h2><span class="card__sub">the same card, while most runs have no record</span></div>
+  <p class="ld-top"><span class="ld-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span>Read from 9 of its 24 runs this week, so runs may differ in ways this does not show.</span></span><small>15 did not load or were not recorded: 12 from an older release, 2 refused, 1 cancelled with no exit line.</small></p><ul class="ld-list"><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"/></svg>pi</span><span class="ld-v">pi 1.5.0 in <span class="code">pi-job:4.3.1</span><small>the 9 recorded</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-layers"/></svg>Extensions</span><span class="ld-v">pi-lint 1.4.2, pi-test-runner 0.9.0<small>the 9 recorded; unknown for the other 15</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg>Missing</span><span class="ld-v">nothing in the 9 recorded<small>a run with no record cannot say</small></span></li></ul>
+</section><section class="card" id="p-proj-loads-same" data-panel>
+  <div class="card__head"><h2>What its runs load</h2><span class="card__sub">the same card, on web, when no host differs</span></div>
+  <p class="ld-top"><span class="ld-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Runs load the same on each host: mini1 and mini2.</span></span></p><ul class="ld-list"><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"/></svg>pi</span><span class="ld-v">pi 1.5.0 in <span class="code">pi-job:4.3.1</span><small>every recorded run</small></span></li><li class="ld-row"><span class="ld-k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-layers"/></svg>Extensions</span><span class="ld-v">pi-lint 1.4.2, pi-test-runner 0.9.0<small>every recorded run, but for trigger 2’s, which withhold them, and the canary gh-c0a7, which tried pi-lint 1.4.3</small></span></li></ul>
+</section><section class="card" id="p-proj-loads-none" data-panel>
+  <div class="card__head"><h2>What its runs load</h2><span class="card__sub">the same card, on shop, with no record</span></div>
+  <p class="ld-top"><span class="ld-st tone-idle"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-minus"/></svg><span>Nothing to read: no run of this project has a record this week.</span></span><small>Either none ran, or an older release wrote their records.</small></p>
 </section></div><div class="stack"><section class="card" id="p-proj-members" data-panel>
   <div class="card__head"><h2>Members</h2><span class="card__sub">2 repositories</span></div>
   <ul class="rows"><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-git"/></svg><b class="code">github:acme/billing</b><span>repository</span><span class="end">18 runs this week · last 15:30 UTC</span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-git"/></svg><b class="code">gitlab:acme/billing-ui</b><span>repository</span><span class="end">6 runs this week · last 13:49 UTC</span></li></ul>
 </section><section class="card" id="p-proj-triggers" data-panel>
-  <div class="card__head"><h2>Triggers that ran here</h2><span class="card__sub">last 7 days</span></div>
+  <div class="card__head"><h2>Triggers that ran here</h2><span class="card__sub">last 24 hours</span></div>
   <ul class="rows">
-  <li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-comment"/></svg><b>3</b><span>comment <span class="code">&quot;@pi&quot;</span> → fix</span><span class="end">18 runs</span></li>
-  <li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pr"/></svg><b>4</b><span>pull request on gitlab → review</span><span class="end">6 runs</span></li>
+  <li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-comment"/></svg><b>3</b><span>comment <span class="code">&quot;@pi&quot;</span> → fix</span><span class="end">9 runs</span></li>
+  <li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pr"/></svg><b>4</b><span>pull request on gitlab → review</span><span class="end">2 runs</span></li>
 </ul>
 </section></div></div>
 </main>

@@ -1,4 +1,4 @@
-<!-- @dsCard group="Runs" height=1360 width=1440 subtitle="The Loaded card’s top line run by run, and the same record in a sandbox and on a trigger" -->
+<!-- @dsCard group="Runs" height=3200 width=1440 subtitle="The Loaded card’s top line run by run, and the same record in a sandbox and on a trigger" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -46,6 +46,46 @@
 .run-act__h p { flex: 1 1 200px; font-size: 13px; color: var(--ink-muted); }
 .run-act__h p b { color: var(--ink); font-weight: 650; }
 .run-act + .run-act { padding-top: var(--space-4); border-top: 1px solid var(--line); }
+
+.runs-kpis { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; padding: 8px; }
+.runs-k { display: flex; flex-direction: column; gap: 2px; padding: 12px 16px; border-radius: 18px; text-decoration: none; }
+.runs-k:hover { background: var(--surface-2); }
+.runs-k b { font-size: 28px; line-height: 32px; font-weight: 800; letter-spacing: -0.02em; color: var(--tone-ink, var(--ink)); }
+.runs-k.tone-idle b { color: var(--ink); }
+.runs-k span { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+.runs-k span .ic { color: var(--tone-ink, var(--ink-muted)); }
+.runs-filters { display: grid; gap: 10px; }
+.runs-search { flex: 1 1 320px; max-width: 420px; }
+.runs-applied { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.runs-x { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin-right: -4px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--ink-muted); cursor: pointer; }
+.runs-tbl td.c-out { min-width: 240px; }
+.runs-tbl .c-model { color: var(--ink-muted); white-space: nowrap; font-size: 12px; }
+.runs-tbl .c-flow, .runs-tbl .c-host, .runs-tbl .tgt { white-space: nowrap; }
+.runs-tbl .c-cost, .runs-tbl .c-cap, .runs-tbl .c-tok { color: var(--ink-muted); }
+.runs-tbl tr:not(.runs-quiet):not(.runs-day) .c-cost { color: var(--ink); }
+.runs-quiet .id a { font-weight: 600; }
+.runs-day td { padding: 14px var(--space-5) 8px !important; background: var(--surface-2); font-size: 12px; font-weight: 700; color: var(--ink-muted); }
+.runs-tbl tbody tr.runs-day:hover td { background: var(--surface-2); }
+@media (max-width: 760px) {
+  .runs-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 4px; gap: 0; }
+  .runs-k { padding: 10px; }
+  .runs-k b { font-size: 22px; line-height: 26px; }
+  .runs-k:nth-child(2), .runs-k:nth-child(n+6) { display: none; }
+  #p-runs.card--flush { padding: 0; }
+  #p-runs .card__head { padding: var(--space-4) var(--space-4) 0; }
+  .runs-search { max-width: none; }
+  .runs-tbl tr.runs-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .runs-tbl .c-job { order: 1; } .runs-tbl .c-when { order: 2; text-align: right; }
+  .runs-tbl .c-out { order: 3; grid-column: 1 / -1; min-width: 0; }
+  .runs-tbl .c-tgt { order: 4; } .runs-tbl .c-proj { order: 5; text-align: right; }
+  .runs-tbl .c-host { order: 6; font-size: 12px; color: var(--ink-muted); } .runs-tbl .c-cost { order: 7; font-size: 12px; text-align: right; }
+  .runs-tbl .c-when[data-l]::before { content: none; }
+  .runs-tbl .reason { max-width: none; }
+  .runs-tbl tr.runs-day { display: block; padding: 0; }
+  .runs-tbl tr.runs-day td { padding: 10px var(--space-4) !important; }
+  .tbl-foot { flex-wrap: wrap; }
+  .tbl-foot .pager { margin-left: 0; }
+}
 
 .c2-yes { display: inline-flex; align-items: flex-start; gap: 5px; font-weight: 650; color: var(--ok-ink); }
 .c2-no { color: var(--ink-muted); }
@@ -130,8 +170,12 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
 [data-page="trigger"] pre{white-space:pre-wrap;overflow-wrap:anywhere}
 @media(min-width:1000px){[data-page="trigger-add"] .config-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}[data-page="trigger-add"] .config-form h3,[data-page="trigger-add"] .config-form fieldset,[data-page="trigger-add"] .config-form>p{grid-column:1/-1}}
 
-.code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.ld-st { display: inline-flex; align-items: flex-start; gap: 6px; color: var(--tone-ink); font-weight: 600; line-height: 18px; }
+.ld-st .ic { margin-top: 2px; }
+.ld-st > span { min-width: 0; }
+.ld-st .code, .ld-v .code, .ld-more .code, .ld-foot .code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .ld-top { display: block; margin-bottom: var(--space-4); font-size: 14px; }
+.ld-top small { display: block; margin-top: 2px; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
 .ld-list { display: grid; gap: 12px; }
 .ld-row { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 2px 14px; align-items: baseline; font-size: 14px; line-height: 20px; }
 .ld-k { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 650; color: var(--ink-muted); }
@@ -139,15 +183,28 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
 .ld-v { min-width: 0; color: var(--ink); }
 .ld-v b { font-weight: 650; }
 .ld-v small { display: block; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
-.ld-v .c2-st { font-weight: 600; }
 .ld-more { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
 .ld-more summary { cursor: pointer; font-size: 13px; color: var(--ink-muted); }
 .ld-more .tbl-wrap { margin-top: var(--space-3); }
 .ld-foot { display: flex; gap: 8px; align-items: flex-start; margin-top: var(--space-4); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
 .ld-foot .ic { flex: none; margin-top: 2px; }
+.ld-host td { vertical-align: top; }
+@media (max-width: 760px) {
+  .ld-row { grid-template-columns: minmax(0, 1fr); }
+  /* The bundle's stacked row is a shrinking column beside an auto one. A long name in the auto column takes the whole
+     width and leaves the kind laid over it, so the kind gets its own line and the name the shrinking column. These
+     select on .tbl--stack and name no card rule, because the console pastes this block beside the bundle alone. */
+  .tbl--stack.ld-fold td:first-child { grid-column: 1 / -1; font-size: 12px; font-weight: 650; color: var(--ink-muted); }
+  .tbl--stack.ld-fold .ld-fold__n { grid-column: 1; min-width: 0; overflow-wrap: anywhere; }
+  .tbl--stack.ld-fold td:empty { display: none; }
+}
+
+.code { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .ld-tbl td { vertical-align: middle; }
+.ld-tbl td:first-child .code { white-space: nowrap; }
 .ld-tbl .ld-line { min-width: 280px; font-size: 13px; line-height: 20px; }
-.ld-tbl .ld-line .c2-st { font-weight: 550; }
+.ld-tbl .ld-line .ld-st { font-weight: 550; }
+.ld-tbl .ld-line small { display: block; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
 .ld-tbl .ld-act { text-align: right; white-space: nowrap; }
 .ld-tbl .muted { font-size: 13px; }
 .ld-lead { display: flex; gap: 8px; align-items: flex-start; margin-bottom: var(--space-4); font-size: 13px; line-height: 20px; color: var(--ink-muted); }
@@ -155,11 +212,11 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
 .ld-h3 { margin: var(--space-6) 0 var(--space-3); font-size: 15px; font-weight: 700; }
 .ld-new { box-shadow: inset 3px 0 0 var(--running); padding-left: 10px; }
 .ld-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); }
-.ld-host td { vertical-align: top; }
-.ld-host .ld-names { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.ld-pair + .ld-pair { margin-top: var(--space-5); }
+.ld-foot--flush { margin: 0; padding: var(--space-3) var(--space-5) var(--space-4); }
+.ld-banners { display: grid; gap: var(--space-3); margin-top: var(--space-4); }
 @media (max-width: 1100px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 760px) {
-  .ld-row { grid-template-columns: minmax(0, 1fr); }
   .ld-pair { grid-template-columns: minmax(0, 1fr); }
   .ld-tbl .ld-line { min-width: 0; }
   .ld-tbl .ld-act { text-align: left; }
@@ -195,13 +252,53 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
   <div class="titlebar__lead"><a class="back" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chev-l"/></svg>Runs</a><h1>What each run loaded</h1><p class="titlebar__sub">The top line of each run’s Loaded card, and where it is fixed.</p></div>
   
 </div>
-<p class="ld-lead"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>A problem line also goes in the outcome, as “Completed, without its flow”, so a run that exits 0 without what it needed does not read as fine.</span></p><section class="card card--flush" id="p-loaded" data-panel aria-labelledby="ld-h"><div class="card__head"><h2 id="ld-h">Loaded, by run</h2><span class="card__sub">the line at the top of each run’s Loaded card</span></div><div class="tbl-wrap"><table class="tbl tbl--stack ld-tbl"><thead><tr><th>Run</th><th>Outcome</th><th>What the card says</th><th class="ld-act">Where it is fixed</th></tr></thead><tbody><tr><td><span class="code">gh-9575</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="c2-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Everything trigger 3 asks for loaded.</span></span></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-8251-r2</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="c2-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Everything trigger 2 asks for loaded. <b>Left out, as it asks:</b> bash, and the staged packages.</span></span></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-03a9</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="c2-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span><b>Ran without its flow.</b> acme/api has no fix skill at its base commit, and no skills folder or staged package ships one.</span></span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Open trigger 3</a></td></tr><tr><td><span class="code">gh-444c</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="c2-st tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><span><b>1 of acme/api’s 2 extensions failed to load.</b> The run went on without it.</span></span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-git"/></svg>Open the base commit</a></td></tr><tr><td><span class="code">gh-2f6a</span></td><td><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Awaiting input</span></td><td class="ld-line wide"><span class="c2-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span><b>linear did not connect</b> (no answer in 30 s). The run went on without its tools.</span></span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"/></svg>Open Connections</a></td></tr><tr><td><span class="code">gh-ebd7</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="c2-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span><b>Also loaded git-guard</b> from build3’s overlay. Runs of trigger 3 on mini1 and mini2 do not have it.</span></span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-fleet"/></svg>Open build3</a></td></tr><tr><td><span class="code">gh-b3d7</span></td><td><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></td><td class="ld-line wide"><span class="muted">Shown when it ends, from its record. Trigger 3 says what it asks for.</span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Open trigger 3</a></td></tr><tr><td><span class="code">gh-c3f8</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="muted">Not recorded: an older release wrote this run’s record.</span></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-e9a0</span></td><td><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span></td><td class="ld-line wide"><span class="muted">Nothing loaded: it was refused before its container started.</span></td><td class="ld-act wide"><span class="muted">none</span></td></tr></tbody></table></div></section><h3 class="ld-h3">The same record, in two more places</h3><div class="ld-pair"><section class="card" id="p-loaded-sandbox" data-panel>
+<p class="ld-lead"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>A problem line also goes in the outcome, as “Completed, without its flow” or “Completed, with a failed extension”, so a run that exits 0 without what it needed does not read as fine. A server that cannot be used, or does not answer, stops the run instead, so it never reads as completed.</span></p><section class="card card--flush" id="p-loaded" data-panel aria-labelledby="ld-h"><div class="card__head"><h2 id="ld-h">Loaded, by run</h2><span class="card__sub">the line at the top of each run’s Loaded card</span></div><div class="tbl-wrap"><table class="tbl tbl--stack ld-tbl"><thead><tr><th>Run</th><th>Outcome</th><th>What the card says</th><th class="ld-act">Where it is fixed</th></tr></thead><tbody><tr><td><span class="code">gh-9575</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="ld-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Everything trigger 3 asks for loaded.</span></span></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-8251-r2</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="ld-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Everything trigger 2 asks for loaded. <b>Left out, as it asks:</b> bash, and the staged packages.</span></span></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gl-af91</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="ld-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Everything trigger 4 asks for loaded. <b>Left out, as this host asks:</b> its overlay’s extensions.</span></span></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-2f6a</span></td><td><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Awaiting input</span></td><td class="ld-line wide"><span class="ld-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Everything trigger 7 asks for loaded.</span></span><small>MCP: linear connected, with 12 tools.</small></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-4add</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="ld-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Everything trigger 3 asks for loaded.</span></span><small>In the fold, and nowhere else: 1 repository extension the recursion guard dropped.</small></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-a3ac</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="ld-st tone-ok"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-done"/></svg><span>Everything trigger 3 asks for loaded.</span></span><small>Cut to fit: this record keeps the counts and leaves out the tool names.</small></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-03a9</span></td><td><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Completed, without its flow</span></td><td class="ld-line wide"><span class="ld-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span><b>Ran without its flow.</b> acme/api has no fix skill at its base commit, and no skills folder, overlay or staged package ships one.</span></span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Open trigger 3</a></td></tr><tr><td><span class="code">gh-444c</span></td><td><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Completed, with a failed extension</span></td><td class="ld-line wide"><span class="ld-st tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><span><b>1 of acme/api’s 2 extensions failed to load.</b> The run went on without it.</span></span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-git"/></svg>Open the base commit</a></td></tr><tr><td><span class="code">gh-6b0d</span></td><td><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span></td><td class="ld-line wide"><span class="ld-st tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg><span><b>linear could not be used.</b> The run stopped before the agent started, after its extensions and skills had loaded.</span></span><small>Not retried: the next attempt would find it the same.</small></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"/></svg>Open Connections</a></td></tr><tr><td><span class="code">gh-4b12</span></td><td><span class="badge tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg>Failed</span></td><td class="ld-line wide"><span class="ld-st tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><span><b>linear did not answer in time.</b> The run stopped before the agent started.</span></span><small>Retried, as any infrastructure failure; this was its last attempt.</small></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"/></svg>Open Connections</a></td></tr><tr><td><span class="code">gh-ebd7</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="ld-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span><b>Also loaded git-guard</b> from build3’s overlay. mini1 does not have it; mini2 has published nothing.</span></span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-fleet"/></svg>Open build3</a></td></tr><tr><td><span class="code">gh-b3d7</span></td><td><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></td><td class="ld-line wide"><span class="muted">Shown when it ends, from its record. Trigger 3 says what it asks for.</span></td><td class="ld-act wide"><a class="btn btn--sm" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Open trigger 3</a></td></tr><tr><td><span class="code">gh-c3f8</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="muted">Not recorded: an older release wrote this run’s record.</span></td><td class="ld-act wide"><span class="muted">none</span></td></tr><tr><td><span class="code">gh-e9a0</span></td><td><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span></td><td class="ld-line wide"><span class="muted">Nothing loaded: it was refused before its container started.</span></td><td class="ld-act wide"><span class="muted">none</span></td></tr></tbody></table></div></section><h3 class="ld-h3">In the Runs list and the outcome banner</h3><section class="card card--flush" id="p-loaded-runs" data-panel aria-labelledby="ld-rh"><div class="card__head"><h2 id="ld-rh">Runs</h2><span class="card__sub">the two rows that change</span></div><div class="tbl-wrap"><table class="tbl tbl--stack runs-tbl"><caption class="sr">The Runs list’s rows for a run that lacked what it needed</caption><thead><tr><th>Ended</th><th>Job</th><th>Target</th><th>Project</th><th>Flow</th><th>Host</th><th>Venue</th><th>Outcome</th><th>Model</th><th class=num>Tokens</th><th class=num>Cost</th><th class=num>Job cap</th></tr></thead><tbody><tr class="runs-row">
+  <td class="when c-when" data-l="Ended">12:43</td>
+  <td class="id c-job"><a href="#">gh-03a9</a></td>
+  <td class="tgt c-tgt"><a href="#">acme/api#122</a></td>
+  <td class="c-proj"><span class="ptag">api</span></td>
+  <td class="c-flow hide-phone">fix</td>
+  <td class="c-host" data-l="Host">mini2</td>
+  <td class="c-venue hide-phone"><span class="vtag">local</span></td>
+  <td class="c-out wide"><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Completed, without its flow</span></td>
+  <td class="c-model hide-phone">claude-sonnet-5-5</td>
+  <td class="num c-tok hide-phone">120,476</td>
+  <td class="num c-cost" data-l="Cost">$0.25</td>
+  <td class="num c-cap hide-phone">$2.00</td>
+</tr><tr class="runs-row">
+  <td class="when c-when" data-l="Ended">09:45</td>
+  <td class="id c-job"><a href="#">gh-444c</a></td>
+  <td class="tgt c-tgt"><a href="#">acme/api#120</a></td>
+  <td class="c-proj"><span class="ptag">api</span></td>
+  <td class="c-flow hide-phone">fix</td>
+  <td class="c-host" data-l="Host">mini2</td>
+  <td class="c-venue hide-phone"><span class="vtag">local</span></td>
+  <td class="c-out wide"><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Completed, with a failed extension</span></td>
+  <td class="c-model hide-phone">claude-sonnet-5-5</td>
+  <td class="num c-tok hide-phone">152,220</td>
+  <td class="num c-cost" data-l="Cost">$0.30</td>
+  <td class="num c-cap hide-phone">$2.00</td>
+</tr></tbody></table></div></section><div class="ld-banners"><section class="outcome tone-attention" id="p-outcome-no-flow" data-panel aria-labelledby="p-outcome-no-flow-t">
+  <span class="outcome__mark"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg></span>
+  <div><p class="outcome__w">Completed, without its flow</p><h2 id="p-outcome-no-flow-t" class="outcome__t">Finished on mini2, without the flow it was told to run</h2><p class="outcome__n">acme/api has no fix skill at its base commit, and no skills folder, overlay or staged package ships one. Read what it did before you trust it.</p></div>
+  <div class="outcome__act"><a class="btn" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Open trigger 3</a></div>
+</section><section class="outcome tone-attention" id="p-outcome-extension-failed" data-panel aria-labelledby="p-outcome-extension-failed-t">
+  <span class="outcome__mark"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg></span>
+  <div><p class="outcome__w">Completed, with a failed extension</p><h2 id="p-outcome-extension-failed-t" class="outcome__t">Finished on mini2, without 1 of acme/api’s 2 extensions</h2><p class="outcome__n">The extension threw while it loaded and the run went on without it. Read what it did before you trust it.</p></div>
+  <div class="outcome__act"><a class="btn" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-git"/></svg>Open the base commit</a></div>
+</section></div><h3 class="ld-h3">The same record, in two more places</h3><div class="ld-pair"><section class="card" id="p-loaded-sandbox" data-panel>
   <div class="card__head"><h2>What opens</h2><span class="card__sub">Sandboxes, from gh-9575</span></div>
-  <dl class="facts facts--1"><div class="fact"><dt>Image</dt><dd>pi-job:4.3.1, as its manifest records it</dd></div><div class="fact"><dt>/workspace</dt><dd>its retained clone</dd></div><div class="fact"><dt><span class="ld-new">pi and what it loads</span></dt><dd><span class="ld-new">As <a class="link code" href="#">gh-9575</a> loaded: pi 1.5.0, pi-lint 1.4.2, pi-test-runner 0.9.0, and the workspace’s own .pi/</span></dd></div><div class="fact"><dt>Processes</dt><dd>none until you start them</dd></div></dl><p class="ld-foot"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>A fresh sandbox says what its trigger would load on that host now. Nothing loads until you start pi in the shell.</span></p>
-</section><section class="card" id="p-loaded-trigger" data-panel>
+  <dl class="facts facts--1"><div class="fact"><dt>Image</dt><dd>pi-job:4.3.1, as its manifest records it</dd></div><div class="fact"><dt>/workspace</dt><dd>its retained clone</dd></div><div class="fact"><dt>/job</dt><dd>read only, with retained job inputs</dd></div><div class="fact"><dt><span class="ld-new">pi and what it loads</span></dt><dd><span class="ld-new">pi 1.5.0 in the image. No overlay is mounted, so pi started here loads only the workspace’s own .pi/. <a class="link code" href="#">gh-9575</a> itself also loaded pi-lint 1.4.2 and pi-test-runner 0.9.0.</span></dd></div><div class="fact"><dt>Processes</dt><dd>none until you start them</dd></div><div class="fact"><dt>Credentials</dt><dd>none, on purpose</dd></div><div class="fact"><dt>Network</dt><dd>the host’s current job egress policy</dd></div></dl><p class="ld-foot"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>Nothing loads until you start pi in the shell.</span></p>
+</section><section class="card" id="p-loaded-sandbox-fresh" data-panel>
+  <div class="card__head"><h2>What opens</h2><span class="card__sub">Sandboxes, a fresh one</span></div>
+  <dl class="facts facts--1"><div class="fact"><dt><span class="ld-new">On mini1</span></dt><dd><span class="ld-new">pi 1.5.0 in the image. No overlay is mounted, so pi started here loads only the workspace’s own .pi/. A job of trigger 3 on this host would load pi-lint 1.4.2 and pi-test-runner 0.9.0, from its last doctor run at 14:39 UTC.</span></dd></div><div class="fact"><dt><span class="ld-new">On mini2</span></dt><dd><span class="ld-new">pi 1.5.0 in the image. No overlay is mounted, so pi started here loads only the workspace’s own .pi/. What a job of trigger 3 would load on this host is unknown: it has published no doctor run.</span></dd></div></dl><p class="ld-foot"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>A fresh sandbox has no run to quote, so it says what a job would load there, from the host’s last doctor run, or unknown. The repository’s part is decided at its base commit.</span></p>
+</section></div><div class="ld-pair"><section class="card" id="p-loaded-trigger" data-panel>
   <div class="card__head"><h2>MCP servers</h2><span class="card__sub">trigger 7, a run field</span></div>
-  <dl class="facts facts--1"><div class="fact"><dt><span class="code">run.mcp</span></dt><dd>linear</dd></div><div class="fact"><dt><span class="ld-new">Its last run</span></dt><dd><span class="ld-new"><a class="link code" href="#">gh-2f6a</a> connected none: linear did not answer.</span></dd></div></dl><p class="ld-foot"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>Each run field the record covers gets this line: what the trigger asks for, beside what its last run had.</span></p>
-</section></div>
+  <dl class="facts facts--1"><div class="fact"><dt><span class="code">run.mcp</span></dt><dd>linear</dd></div><div class="fact"><dt><span class="ld-new">Its last run</span></dt><dd><span class="ld-new"><a class="link code" href="#">gh-2f6a</a> connected linear, with 12 tools. Before it, <a class="link code" href="#">gh-4b12</a> connected none: linear did not answer.</span></dd></div></dl><p class="ld-foot"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span>Each run field the record covers gets this line: what the trigger asks for, beside what its last run had.</span></p>
+</section></div><h3 class="ld-h3">For a viewer</h3><section class="card card--flush" id="p-loaded-viewer" data-panel>
+  <div class="card__head"><h2>As a viewer sees it</h2><span class="card__sub">the lines that carry a button for an operator</span></div>
+  <div class="tbl-wrap"><table class="tbl tbl--stack ld-tbl"><caption class="sr">The same lines, as a viewer reads them</caption><thead><tr><th>Run</th><th>Outcome</th><th>What the card says</th></tr></thead><tbody><tr><td><span class="code">gh-03a9</span></td><td><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Completed, without its flow</span></td><td class="ld-line wide"><span class="ld-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"/></svg><span><b>Ran without its flow.</b> acme/api has no fix skill at its base commit, and no skills folder, overlay or staged package ships one.</span></span></td></tr><tr><td><span class="code">gh-444c</span></td><td><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Completed, with a failed extension</span></td><td class="ld-line wide"><span class="ld-st tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><span><b>1 of acme/api’s 2 extensions failed to load.</b> The run went on without it.</span></span></td></tr><tr><td><span class="code">gh-6b0d</span></td><td><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span></td><td class="ld-line wide"><span class="ld-st tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg><span><b>linear could not be used.</b> The run stopped before the agent started, after its extensions and skills had loaded.</span></span><small>Not retried: the next attempt would find it the same.</small></td></tr><tr><td><span class="code">gh-4b12</span></td><td><span class="badge tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg>Failed</span></td><td class="ld-line wide"><span class="ld-st tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><span><b>linear did not answer in time.</b> The run stopped before the agent started.</span></span><small>Retried, as any infrastructure failure; this was its last attempt.</small></td></tr><tr><td><span class="code">gh-ebd7</span></td><td><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span></td><td class="ld-line wide"><span class="ld-st tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg><span><b>Also loaded git-guard</b> from build3’s overlay. mini1 does not have it; mini2 has published nothing.</span></span></td></tr><tr><td><span class="code">gh-b3d7</span></td><td><span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span></td><td class="ld-line wide"><span class="muted">Shown when it ends, from its record. Trigger 3 says what it asks for.</span></td></tr></tbody></table></div><p class="ld-foot ld-foot--flush"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-eye"/></svg><span>The same words, with no button: a viewer reads the top line, the card and its fold. The project page’s top line loses Open build3 the same way.</span></p>
+</section>
 </main>
 </body>
 </html>

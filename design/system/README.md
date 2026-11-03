@@ -111,8 +111,8 @@ What this design asks the repo for, because the repo cannot do it yet:
 - dispatchers: a trigger whose job reads git changes and infra streams and may only start listed jobs and propose triggers, with wider outbox chaining than today (other folders and repositories, more than 2 requests) and a Jev loop engine that runs like the GitHub poller;
 - Triggers as a page of its own, with Watch as its second tab;
 - delivery health for webhooks, which the receiver does not publish;
-- what a run loaded, kept in its run record from the runner's exit line, so a run page, a sandbox, a trigger and a project can say what the job had (#800);
-- what a trigger's jobs get, resolved per host, and a person-only edit of it from the trigger page, with `run.excludeExtensions` and extension tools in the exclusions (#800);
+- what a run loaded, kept in its run record from the runner's exit line, so a run page, a sandbox, a trigger and a project can say what the job had, and a new doctor publication per host (`doctor:loads:<name>`) for what a job would load there (#800);
+- what a trigger's jobs get, resolved per host, and a person-only edit of it from the trigger page, with `run.excludeExtensions` and `run.excludeExtensionTools` (#800);
 
 The original #753 proposals are implemented by #770 (Zero touch), #771 (native sandbox handoff and preparation) and #772 (cited answer drafts a person sends). Their integration counts a confirmed draft, including an edited one, once on its source workload run in the selected covered interval. Unsent drafts and helper runs add none.
 

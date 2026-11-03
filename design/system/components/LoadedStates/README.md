@@ -1,26 +1,36 @@
-The top line of each run's Loaded card, run by run, and the two places the same record is repeated: a sandbox and a trigger.
+The top line of each run's Loaded card, run by run, what the outcome says in the Runs list and on the run page, the two places the same record is repeated (a sandbox and a trigger), and what a viewer reads.
 
 **How a person uses it.**
 - **Everything loaded** (gh-9575): one green line, nothing to do.
 - **Left out, as the trigger asks** (gh-8251-r2): trigger 2 removes bash and withholds the staged packages. Still green: what a trigger turns off is not a problem.
-- **Ran without its flow** (gh-03a9): the trigger names fix, and neither the repository at its base commit nor a skills folder nor a staged package ships it. *Open trigger 3*. The outcome says *Completed, without its flow*.
-- **An extension failed to load** (gh-444c): one of the repository's own extensions threw while loading. *Open the base commit*, where it is fixed.
-- **An MCP server did not connect** (gh-2f6a): *Open Connections*.
-- **A host differs** (gh-ebd7): build3's overlay adds an extension the other hosts lack. *Open build3*.
+- **Left out, as the host asks** (gl-af91): *Left out, as this host asks: its overlay's extensions*, where `PI_GLOBAL_ALLOW_EXTENSIONS=0`. Still green, for the same reason.
+- **An MCP server connected** (gh-2f6a): each server the trigger names, with its state and how many tools it brought.
+- **An extension was dropped** (gh-4add): the recursion guard dropped one of the repository's extensions. A count in the fold, with no sentence and no warning.
+- **A record was cut** (gh-a3ac): the record ran past its bound, so it says what it left out. *Cut to fit: this record keeps the counts and leaves out the tool names.* It says nothing about whether the run was fine, so it sits under the line that does.
+- **Ran without its flow** (gh-03a9): the trigger names fix, and neither the repository at its base commit nor a skills folder, the overlay or a staged package ships it. *Open trigger 3*. The outcome says *Completed, without its flow*.
+- **An extension failed to load** (gh-444c): one of the repository's own extensions threw while loading. *Open the base commit*, where it is fixed. The outcome says *Completed, with a failed extension*.
+- **An MCP server could not be used** (gh-6b0d): it failed at start, so the run stopped before the agent started, after its extensions and skills had loaded, and its outcome is refused. It is not retried. *Open Connections*.
+- **An MCP server did not answer** (gh-4b12): the wait ran out, so the run stopped before the agent started. It is retried as any infrastructure failure, and this was its last attempt, so its outcome is failed. *Open Connections*.
+- **A host differs** (gh-ebd7): build3's overlay adds an extension mini1 does not have, and mini2 has published nothing. *Open build3*.
 - **Running** (gh-b3d7): shown when it ends, from its record.
 - **No record** (gh-c3f8): an older release wrote it. **Refused** (gh-e9a0): nothing loaded.
-- **In a sandbox,** What opens gains one row: what the run loaded, linked to it. A fresh sandbox says what its trigger would load on that host now.
-- **On a trigger,** each run field the record covers gains *Its last run*: what the trigger asks for, beside what its last run had.
+- **In the Runs list and the banner** (`p-loaded-runs`, and `p-outcome` drawn twice): the record's outcome stays completed, and the word a person reads is *Completed, without its flow* or *Completed, with a failed extension*.
+- **In a sandbox,** What opens gains one row. A shell has no overlay, so pi started there loads only the workspace's own `.pi/`, whatever the run loaded; the row says that first, then what the run itself had, linked to it. A fresh sandbox has no run to quote, so it says what a job of the trigger would load on that host, from its last doctor run with the time, or that this is unknown.
+- **On a trigger,** each run field the record covers gains *Its last run*: what the trigger asks for, beside what its last run had, and the one before it when that one did not get it.
+- **As a viewer sees it:** the same words with no button.
 
-**Panels.** `p-loaded`, `p-loaded-sandbox`, `p-loaded-trigger`.
+**Panels.** `p-loaded`, `p-loaded-runs`, `p-outcome-no-flow`, `p-outcome-extension-failed`, `p-loaded-sandbox`, `p-loaded-sandbox-fresh`, `p-loaded-trigger`, `p-loaded-viewer`. On a run page the two outcome panels are `p-outcome`.
 
-**The server provides.** The run record's new `loaded` field (RunLoaded). For a fresh sandbox, what the host's overlay and staged packages hold now, which the doctor record already carries. For a trigger, its last run's record.
+**The server provides.** The run record's new `loaded` field (RunLoaded). For a trigger, its last run's record. For a fresh sandbox: What the host's last doctor run published, with its time, or unknown. The repository's part is decided at its base commit. The publication is a new key, `doctor:loads:<name>`, and it is also what the gh-ebd7 line reads for mini1 and mini2. pi's version and the image come from what every live host already publishes, `host:h:<name>` (`image`, `imageDigest`, `piVersion`, `INT-HOST-REGISTRY-CONTRACT`), so mini2's fresh row still has them. For a shell, nothing about the overlay: `worker/src/sandbox.mjs` mounts no `/opt/pi-global`, and `worker/src/sandbox-store.mjs` says a reopened workspace loads neither the candidate nor the overlay.
 
-**Who sees what.** As RunLoaded: viewers see the lines; the buttons are operator actions.
+**Who sees what.** As RunLoaded: viewers read the same words, and the buttons are operator actions, so a viewer has none (`p-loaded-viewer`).
 
 **Why it works this way.**
 - **The problem goes where the next step is.** A missing flow is fixed on the trigger or in the repository, an MCP server in Connections, a host's overlay on its host page.
-- **The outcome says it too,** so a run list read at a glance does not show a run that lacked its flow as plainly completed.
+- **The outcome says it too,** so a run list read at a glance does not show a run that lacked its flow, or lost an extension, as plainly completed.
+- **An MCP server that fails stops the job.** One that failed at start is `mcp-unavailable` (exit 2, not retried, so the outcome is refused), and one still pending after the wait is `mcp-unreachable` (exit 1, retried). Both come from `lifecycle.start`, which runs after the session is created, so what loaded is still in the record. The wait is 15 seconds by default, longer for a server whose own `timeout` is longer, so the line says *in time* and names no duration.
+- **A dropped extension is quiet on purpose.** This repository ships `dispatch.ts` in `.pi/extensions`, so a warning would fire on every run on itself.
+- **A host's publication proves that host, and only one that published.** The gh-ebd7 line says what build3's run had, that mini1's publication lacks the extension, and that mini2 has published nothing, which is not the same as lacking it. It does not say other runs went without it.
 - **Shown when it ends.** The record is written from the exit line; a live line would need the worker to trust a second line during the run.
 
-**Fixture note.** From the fixture: every run with its outcome and host (gh-8251-r2, gh-03a9 and gh-444c on mini2, gh-2f6a and gh-b3d7 on mini1, gh-ebd7 and gh-c3f8 on build3). Sample: trigger 2's removed bash and withheld packages, acme/api's missing fix skill and failed extension, linear as trigger 7's MCP server and its timeout, and build3's overlay extension git-guard (as on ProjectLoads).
+**Fixture note.** From the fixture: every run with its outcome and host (gh-8251-r2, gl-af91, gh-03a9 and gh-444c on mini2; gh-2f6a, gh-4add, gh-a3ac, gh-6b0d, gh-4b12 and gh-b3d7 on mini1; gh-ebd7 and gh-c3f8 on build3). The cut record is on mini1 because every recorded run on build3 reads the git-guard line. A merge between gh-444c at 09:45 and gh-03a9 at 12:43 removed acme/api's fix skill, so the earlier run has no flow warning. gh-2f6a is the fixture's parked job, so it connected, and it ended after gh-4b12, which did not; gh-6b0d is earlier still. mini1's doctor run at 14:39 UTC is Fleet's "1h ago" against the fixture's 15:39. Sample: trigger 2's removed bash and withheld packages, gl-af91's overlay off (yesterday, so today's mini2 runs do not carry the line), that merge, acme/api's failed extension, linear as trigger 7's MCP server with its 12 tools, build3's overlay extension git-guard (as on ProjectLoads), the extension dropped on gh-4add, the record cut on gh-a3ac, the two banners' sentences, and pi 1.5.0 in pi-job:4.3.1 (RunLoaded's note says why).

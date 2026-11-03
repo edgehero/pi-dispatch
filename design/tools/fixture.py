@@ -90,6 +90,8 @@ OTHER_RUNS = {
     "gh-5a02": ("14:31", "acme/web#498", "fix", None, None, "completed"),        # planned: ParkedAnswerer
     "sb-3c1f": ("open", "acme/web", None, "mini1", "local", "sandbox"),          # proposed: SandboxesScreen
     "gh-d40e": ("09:12", "acme/web#484", "fix", "mini1", "local", "failed"),     # RunWorkspaceStates, out of memory
+    "gh-4b12": ("14:52", "acme/api#132", "triage", "mini1", "local", "failed"),  # proposed: LoadedStates, linear did not answer, retried
+    "gh-6b0d": ("14:21", "acme/api#133", "triage", "mini1", "local", "refused"), # proposed: LoadedStates, linear could not be used, not retried
     "gh-0c4e": (None, None, None, None, None, None),     # first drawn on ApprovalRequest; fill in when a second card draws it
     "gh-38aa": (None, None, None, None, None, None),     # first drawn on OverviewScreen; fill in when a second card draws it
     "gh-3c90": (None, None, None, None, None, None),     # first drawn on ApprovalRequest; fill in when a second card draws it
@@ -107,7 +109,7 @@ OTHER_RUNS = {
     "gh-91d4": (None, None, None, None, None, None),     # first drawn on ParkedAnswerer; fill in when a second card draws it
     "gh-9d14": (None, None, None, None, None, None),     # first drawn on ConfirmStates; fill in when a second card draws it
     "gh-a07c": (None, None, None, None, None, None),     # first drawn on ParkedAnswerer; fill in when a second card draws it
-    "gh-c9e1": (None, None, None, None, None, None),     # first drawn on TriggerDetail; fill in when a second card draws it
+    "gh-c9e1": ("waiting", None, "fix", "build3", "podman", "delayed"),          # trigger 3's one job in line: TriggerDetail, Overview, TriggerEnvironmentChange
     "gh-c0a7": ("15:02", "acme/web#493", "fix", "mini1", "local", "completed"),  # proposed: UpdatesScreen, a canary with pi-lint 1.4.3
 }
 

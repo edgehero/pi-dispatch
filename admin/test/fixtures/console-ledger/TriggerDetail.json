@@ -1,7 +1,7 @@
 {
   "card": "TriggerDetail",
   "pr": 750,
-  "words": "9aeb36d2a9529b18bd460ccb1455df4faf2103d2aabb0e8f73a24d71b89b9dd3",
+  "words": "ce5540e99572eb6215ad3f21a0d0d943a37b30ad5de0be54bedbfa5968f49771",
   "elements": [
     {"el":"p-trigger-on","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerOn","golden":["trigger.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
     {"el":"p-trigger-runs","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerRuns","golden":["trigger.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},

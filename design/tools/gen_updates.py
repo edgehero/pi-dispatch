@@ -39,10 +39,10 @@ def jobs_table():
         [(what("pi", "in every job, pinned by pi-dispatch"), ""), (ver("1.5.0", "1.6.0"), ""),
          (state_line("failed", "failed", "Checks fail. Jobs stay on 1.5.0 until pi-dispatch’s bump is green and released."), "up-line wide"),
          (btn("Open the bump pull request", "", "pr"), "up-act wide")],
-        [(what("pi-lint", "extension, staged on every host"), ""), (ver("1.4.2", "1.4.3"), ""),
+        [(what("pi-lint", "extension, staged"), ""), (ver("1.4.2", "1.4.3"), ""),
          (state_line("ok", "done", 'Canary completed, read the run: <a class="link code" href="#">gh-c0a7</a> ran as trigger 3, $0.19.'), "up-line wide"),
          (btn("Adopt", "primary", "done"), "up-act wide")],
-        [(what("pi-test-runner", "extension, staged on every host"), ""), (ver("0.9.0", "0.10.0"), ""),
+        [(what("pi-test-runner", "extension, staged"), ""), (ver("0.9.0", "0.10.0"), ""),
          ('<span class="muted">Not tried yet. A canary runs one job of trigger 3 with it, up to $2.00.</span>', "up-line wide"),
          (btn("Run a canary", "paid", "rerun"), "up-act wide")],
     ]
