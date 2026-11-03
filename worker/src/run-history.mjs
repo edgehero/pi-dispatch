@@ -1,5 +1,5 @@
 import { CANARY_LOADS, recordedPackageCanary } from "./package-canary-record.mjs";
-import { recordedLoaded } from "./loaded-record.mjs";
+import { LOADED_LINE_CUT, recordedLoaded } from "./loaded-record.mjs";
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 import { ANSWER_ID_RE, ANSWER_RUN_RE } from "./answerer.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
@@ -700,13 +700,15 @@ export function parseExitCanaryLoad(text) {
 }
 
 /**
- * The decisive exit line's `loaded` as the runner wrote it (issue #800), or null when it has none, which is a line from an
- * older image or from the supervisor. Handed on unread: every check is `rebuildLoaded`'s (loaded-record.mjs), which knows
- * what the line is checked against, and the sink knows none of that. A value that is no object is still handed on, so it
- * reads as a line that failed its checks and not as a line that said nothing. Never throws.
+ * The decisive exit line's `loaded` as the runner wrote it (issue #800), `LOADED_LINE_CUT` when the line says the runner had
+ * one and no room for it (`loadedCut: true`), or null when it says neither, which is a line from an older image or from the
+ * supervisor. Handed on unread: every check is `rebuildLoaded`'s (loaded-record.mjs), which knows what the line is checked
+ * against, and the sink knows none of that. A value that is no object is still handed on, so it reads as a line that failed
+ * its checks and not as a line that said nothing. Never throws.
  */
 export function parseExitLoaded(text) {
-	return decisiveExitLine(text)?.loaded ?? null;
+	const line = decisiveExitLine(text);
+	return line?.loaded ?? (line?.loadedCut === true ? LOADED_LINE_CUT : null);
 }
 
 /** The decisive exit line's `steer` block (`steerCounts`), or null. Never throws. */

@@ -7,16 +7,17 @@ import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
  * reads the runner's `loaded` field (INT-RUNNER-EXIT-CODE-PROTOCOL), so a change to that field changes this file alone.
  *
  * THE MAC DOES NOT VOUCH FOR THE CONTENT, and that is the whole reason this file exists rather than a copy of the field.
- * A repository's extension runs in the runner's process and can patch `JSON.stringify` before the line is signed, so a
- * line that verifies says only that it came out of that process. Everything on it is checked against what the worker
- * itself knows (the packages it handed over, the overlay's folder, the trigger's servers, pi's own tool names), and any
- * one violation makes the whole field `runner: "invalid"`: half of a line that lied about something is not a fact. What
- * the worker knows by itself stays either way. REJECTED: dropping only the bad part, which would let a forged line choose
- * what the record is silent about.
+ * A repository's extension runs in the runner's process and can patch `JSON.stringify`, `RegExp.prototype.test` or
+ * `Array.prototype.map` before the line is signed, so a line that verifies can hold ANY string, and the runner's own shape
+ * checks cover ordinary API use and no more (the OQ-003 residual). THIS FILE IS THE BOUNDARY: every string kept is checked
+ * here, in the worker's process, against a closed list, a closed pattern or what the worker itself knows (the packages it
+ * handed over, the overlay's folder, the trigger's servers, pi's own tool names), and any one violation makes the whole
+ * field `runner: "invalid"`: half of a line that lied about something is not a fact. What the worker knows by itself stays
+ * either way. REJECTED: dropping only the bad part, which would let a forged line choose what the record is silent about.
  *
- * WHAT CANNOT BE CHECKED, said plainly. An extension tool's name comes from the runner alone and the worker holds nothing
- * to compare it with, so a repository extension in the same process could forge a token of the right shape. The shape is
- * all it gets (`LOADED_TOOL_NAME_RE`: no space, no markup, no path), and a chip made from such a name can only narrow
+ * WHAT SURVIVES IT, said plainly. A token of a closed shape. For an extension tool's name the worker holds nothing to
+ * compare it with, so a repository extension in the same process can forge one. The shape is all it gets
+ * (`LOADED_TOOL_NAME_RE`: no space, no markup, no path), and a chip made from such a name can only narrow
  * what a job has, while a wrong one refuses the job. One thing the shape would let through is refused anyway, a word that
  * is one of the job's secrets (`known.redact`); a secret transformed or cut across two names is not, as everywhere the
  * redactor stands (redact-secrets.mjs, NOT DEFENDED).
@@ -32,8 +33,12 @@ import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
 export const LOADED_RECORD_VERSION = 1;
 /** The version of the runner's field this file can read. */
 export const LOADED_LINE_VERSION = 1;
-/** Whether the runner said, in three words: it said and it held up, it never said, it said and it did not hold up. */
-export const LOADED_RUNNER_WORDS = Object.freeze(["reported", "absent", "invalid"]);
+/**
+ * Whether the runner said: it said and it held up (`reported`), it never said (`absent`), it said and it did not hold up
+ * (`invalid`), or it had something to say and its line had no room for any of it (`cut`). `cut` is not `absent`: the job got
+ * as far as noting what it loaded, and a reader saying "an older release wrote this" would be wrong about the run.
+ */
+export const LOADED_RUNNER_WORDS = Object.freeze(["reported", "absent", "invalid", "cut"]);
 /** The most the field may take on a record, serialized. Measured against every cap in the tests. */
 export const LOADED_RECORD_MAX_BYTES = 16 * 1024;
 
@@ -114,6 +119,12 @@ export function leavesOut(leftOut) {
 function workerOnly(runner, { image = null, imageDigest = null, imagePi = null, leftOut = null } = {}) {
 	return { v: LOADED_RECORD_VERSION, runner, at: null, cut: null, image, imageDigest, imagePi, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null, leftOut };
 }
+
+/**
+ * What the sink hands on for a line that says `loadedCut: true` and holds no `loaded`: the runner noted one and the line had
+ * no room for even its smallest form. One object, compared by identity, so nothing a line writes can be taken for it.
+ */
+export const LOADED_LINE_CUT = Object.freeze({ cut: true });
 
 /** Raised inside `readLine` with a fixed word, never line text, and caught by `rebuildLoaded`. */
 class LineViolation extends Error {
@@ -293,8 +304,8 @@ function readLine(raw, known) {
 
 /**
  * The record's `loaded` from the line's field and what the worker knows. `raw` undefined or null (an older image, a line
- * the supervisor wrote, no verified line at all) is `absent`, and anything that fails a check is `invalid`, each with the
- * worker's own facts kept. Never throws.
+ * the supervisor wrote, no verified line at all) is `absent`, `LOADED_LINE_CUT` is `cut`, and anything that fails a check
+ * is `invalid`, each with the worker's own facts kept. Never throws.
  *
  *   known.packages           one `{ name, version }` or null per path in this job's PI_PACKAGES, in that order, the
  *                            candidate of a canary at its place. Rows are positional, so this is what names them
@@ -308,6 +319,7 @@ function readLine(raw, known) {
 export function rebuildLoaded(raw, known = {}) {
 	const facts = { leftOut: isObject(known?.leftOut) ? known.leftOut : null };
 	if (raw === undefined || raw === null) return workerOnly("absent", facts);
+	if (raw === LOADED_LINE_CUT) return workerOnly("cut", facts);
 	let runner;
 	try {
 		runner = readLine(raw, known);
@@ -444,8 +456,8 @@ function recordedRunnerPart(value) {
 /**
  * The record's `loaded` (issue #800), REBUILT, never the source's object, the posture of every other field of the record:
  * or null on any violation, and then the record has no such key. What reaches this was made by `rebuildLoaded` and
- * `loadedWithImage`, so null here is a hand-built source and no ordinary run. `absent` and `invalid` carry no runner part
- * whatever the source said. Never throws.
+ * `loadedWithImage`, so null here is a hand-built source and no ordinary run. Only `reported` carries a runner part, whatever
+ * the source said. Never throws.
  */
 export function recordedLoaded(value) {
 	if (!isObject(value) || value.v !== LOADED_RECORD_VERSION || !LOADED_RUNNER_WORDS.includes(value.runner)) return null;

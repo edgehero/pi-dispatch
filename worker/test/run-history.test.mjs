@@ -2723,6 +2723,22 @@ test("`loaded` is read off a signed line only: an unsigned or forged one is not 
 	assert.equal(parseExitLoaded("not a line"), null);
 });
 
+test("a signed line saying `loadedCut` hands on the marker, and the field beats it if a line somehow says both", async () => {
+	const KEY = "0".repeat(64);
+	const { signExitLine } = await import("../../image/runner/src/exit-line.mjs");
+	const { LOADED_LINE_CUT } = await import("../src/loaded-record.mjs");
+	const body = (fields) => JSON.stringify({ event: "exit", jobId: "j", code: 0, ...fields });
+	const close = async (text) => {
+		const log = makeLogSink({ logsDir: "/logs", enabled: false, fs: makeFakeFs({ stream: makeFakeStream() }) })("j", { exitKey: KEY });
+		log.write(Buffer.from(text));
+		return await log.close();
+	};
+	assert.equal((await close(`${signExitLine(body({ loadedCut: true }), KEY)}\n`)).loaded, LOADED_LINE_CUT);
+	assert.deepEqual((await close(`${signExitLine(body({ loadedCut: true, loaded: { v: 1 } }), KEY)}\n`)).loaded, { v: 1 });
+	assert.equal(Object.hasOwn(await close(`${signExitLine(body({ loadedCut: "yes" }), KEY)}\n`), "loaded"), false, "true and nothing else");
+	assert.equal(Object.hasOwn(await close(`${body({ loadedCut: true })}\n`), "loaded"), false, "printed by a tool");
+});
+
 test("a line the supervisor wrote says nothing of what loaded, and a runner's line before it still decides", async () => {
 	const KEY = "0".repeat(64);
 	const { signExitLine } = await import("../../image/runner/src/exit-line.mjs");
