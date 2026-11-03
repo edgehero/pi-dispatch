@@ -12807,6 +12807,81 @@ test("doctor publishes one record per run: unique ids, named where the console q
 	assert.doesNotMatch(json, /"(?:\/|[A-Za-z]:\\\\)[^"]*"|[\s(]\/(?:Users|home|srv|tmp|var|private)\//, "no absolute path anywhere in it");
 });
 
+// Issue #800 (`INT-DOCTOR-RESULTS-KEY`'s `doctor:loads:<name>`): the same run says what this host's jobs can load, off the same
+// answers as its check lines, and a host that publishes less never reads as the same (worker/test/host-loads.test.mjs).
+test("doctor publishes what this host's jobs can load beside its record, and each flow row says what its check line says (#800)", { skip: skipNoPi }, async () => {
+	const dir = overlay({ skills: ["review", "deploy"], packages: [{ name: "wf-tools", version: "1.0.0", dir: "wf-tools", skills: ["packed"] }] });
+	mkdirSync(join(dir, "extensions", "guard"), { recursive: true });
+	writeFileSync(join(dir, "extensions", "guard", "index.js"), "export default () => {};\n");
+	writeFileSync(join(dir, "extensions", "git-guard.ts"), "export default () => {};\n");
+	writeFileSync(join(dir, "extensions", "README.md"), "not an extension\n");
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { linear: { url: "https://mcp.linear.app/mcp/${LINEAR_PATH}?key=${LINEAR_KEY}", description: "Linear", headers: { Authorization: "Bearer ${LINEAR_TOKEN}" } }, local: { command: "/usr/local/bin/my-server", args: ["--secret-arg=${ARG_KEY}"], description: "A local one", enabled: false } } }));
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ triggers: [
+		{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t" } },
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "packed" } },
+		{ on: { type: "label", any: ["pi:lost"] }, run: { kind: "github", flow: "nowhere" } },
+		{ on: { type: "cron", id: "absent", pattern: "0 4 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "nowhere", task: "t", packages: false } },
+	] }));
+	const published = [];
+	const { out, text } = capture();
+	await runDoctor({ ...publishEnv(triggers), PI_GLOBAL_PI_DIR: dir }, publishDeps(out, { publish: true, fileExists: existsSync, cwd: tmpdir(), agentDir: NO_AGENT_DIR, spawn: fakeSpawn({ ...green, [gitKey("/srv/repo", "rev-parse")]: { code: 0, output: `${"a".repeat(40)}\n` }, [gitKey("/srv/repo", "ls-tree")]: { code: 0, output: "" } }), publishDoctor: async (url, name, record, loads) => published.push({ url, name, record, loads }) }));
+	const [{ record, loads }] = published;
+	assert.equal(loads.v, 1);
+	assert.equal(loads.at, record.at, "one run, one time");
+	assert.equal(loads.every, record.every);
+	assert.deepEqual(loads.by, record.by);
+	assert.equal(loads.overlayExtensionsAllowed, true);
+	assert.deepEqual(loads.extensions, [{ name: "git-guard.ts", kind: "file" }, { name: "guard", kind: "dir" }], "what a job would load, and no README");
+	assert.deepEqual(loads.skills, ["deploy", "review"]);
+	assert.deepEqual(loads.mcp, [
+		{ name: "linear", transport: "http", where: "mcp.linear.app", exposure: "codemode", enabled: true, keys: ["LINEAR_KEY", "LINEAR_PATH", "LINEAR_TOKEN"] },
+		{ name: "local", transport: "stdio", where: "my-server", exposure: "codemode", enabled: false, keys: ["ARG_KEY"] },
+	]);
+	assert.deepEqual(loads.packages, [{ name: "wf-tools", version: "1.0.0" }]);
+	assert.deepEqual(loads.flows, [
+		{ trigger: 0, flow: "review", tier: "overlay", package: null, repo: "absent" },
+		{ trigger: 1, flow: "packed", tier: "package", package: "wf-tools", repo: "unknown" },
+		{ trigger: 2, flow: "nowhere", tier: "unknown", package: null, repo: "unknown" },
+		{ trigger: 3, flow: "nowhere", tier: "none", package: null, repo: "absent" },
+	], "a forge's repository is not on a host, so a forge trigger found nowhere reads unknown; a local one checked everywhere reads none");
+	assert.deepEqual(loads.more, {});
+	assert.equal(Object.hasOwn(loads, "unread"), false);
+	// The lines this run printed say what the rows say.
+	assert.match(text(), /✓ Trigger flow "review" resolves \(cron "nightly": the overlay skills\/\)/);
+	assert.match(text(), /✓ Trigger flow "packed" resolves \(label trigger #1: staged package wf-tools\)/);
+	assert.match(text(), /⚠ Trigger flow "nowhere" resolves in NO tier visible here \(label trigger #2\)/);
+	const json = JSON.stringify(loads);
+	for (const leak of [dir, "/usr/local/bin", "/mcp/", "Bearer", "--secret-arg", SEEDED_KEY, SEEDED_PASSWORD]) assert.ok(!json.includes(leak), `${leak} reached the published loads`);
+});
+
+test("a part this run cannot read is named `unread`, a flow that fails the charset is not published, and the doctor record goes out whatever happens (#800)", { skip: skipNoPi }, async () => {
+	const dir = overlay({});
+	writeFileSync(join(dir, "mcp.json"), "{ not json");
+	mkdirSync(join(dir, "packages"), { recursive: true });
+	writeFileSync(join(dir, "packages", "packages.json"), "{ not json");
+	mkdirSync(join(dir, "extensions"), { recursive: true });
+	writeFileSync(join(dir, "extensions", ".ignore"), "secret.ts\n");
+	writeFileSync(join(dir, "extensions", "secret.ts"), "export default () => {};\n");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ triggers: [{ on: { type: "cron", id: "bad", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "Not A Skill", task: "t" } }] }));
+	const published = [];
+	await runDoctor({ ...publishEnv(triggers), PI_GLOBAL_PI_DIR: dir, PI_GLOBAL_ALLOW_EXTENSIONS: "0" }, publishDeps(capture().out, { publish: true, fileExists: existsSync, cwd: tmpdir(), agentDir: NO_AGENT_DIR, publishDoctor: async (url, name, record, loads) => published.push({ record, loads }) }));
+	const [{ record, loads }] = published;
+	assert.ok(record.v === 1);
+	assert.deepEqual(loads.unread, ["extensions", "mcp", "packages"], "an ignore file the host cannot read as a job does, a file that does not parse, a manifest that does not read");
+	assert.deepEqual([loads.extensions, loads.mcp, loads.packages], [[], [], []]);
+	assert.equal(loads.overlayExtensionsAllowed, false, "PI_GLOBAL_ALLOW_EXTENSIONS=0");
+	assert.deepEqual(loads.flows, [{ trigger: 0, flow: null, tier: "none", package: null, repo: "unknown" }]);
+	assert.ok(!JSON.stringify(loads).includes("Not A Skill") && !JSON.stringify(loads).includes("secret.ts"));
+
+	// A host with no overlay has nothing to hide and nothing it could not read.
+	const none = [];
+	await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: true, fileExists: existsSync, cwd: tmpdir(), agentDir: NO_AGENT_DIR, publishDoctor: async (url, name, record, loads_) => none.push(loads_) }));
+	assert.deepEqual([none[0].extensions, none[0].skills, none[0].mcp, none[0].packages, none[0].overlayExtensionsAllowed], [[], [], [], [], true]);
+	assert.equal(Object.hasOwn(none[0], "unread"), false);
+});
+
 test("publishing is best effort: a refused write or no usable Valkey is one stderr line and the same exit code (#712)", { skip: skipNoPi }, async () => {
 	const dir = tempDir("pi-doctor-publish-");
 	const triggers = join(dir, "triggers.json");

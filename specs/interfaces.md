@@ -10301,8 +10301,8 @@ report until the next beat, and no decision. A Redis-side toggle fails that test
 deleting it loses the operator's edit -- which is precisely why `OQ-008` refuses one, and why this
 keyspace is not that.
 
-**Doctor's published results are a separate keyspace** (AMENDED 2026-10-21, #712): `doctor:hosts` and
-`doctor:h:<name>` (`INT-DOCTOR-RESULTS-KEY`), named by the same worker name as `host:h:<name>` but written by doctor,
+**Doctor's published results are a separate keyspace** (AMENDED 2026-10-21, #712; 2026-11-03, #800): `doctor:hosts`,
+`doctor:h:<name>` and `doctor:loads:<name>` (`INT-DOCTOR-RESULTS-KEY`), named by the same worker name as `host:h:<name>` but written by doctor,
 not by the beat, and kept 7 days rather than 90 seconds, so a host that stopped beating still says what its last
 doctor run found. They obey the same falsification test: deleting every `doctor:*` key while the fleet runs changes
 no host's behaviour, because nothing reads them to decide anything. A registry row gains no field for them, and the
@@ -12424,9 +12424,60 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   (`INT-CONSOLE-STATE-API` UNCHANGED, checked: its body is built field by field and names no doctor field).
 - **Deleting it changes nothing**: no decision reads `doctor:*`; a reader that finds nothing says no result was
   published, never that a host is healthy.
+- **What a host's jobs can load** (issue #800, `worker/src/host-loads.mjs`, exported as
+  `@edgehero/pi-dispatch/host-loads`): a healthy host's overlay extensions, overlay skills and MCP servers were published
+  nowhere, because a record keeps labels only for a warn or a fail. Each host has its own, so one more key beside the
+  doctor record:
+  ```
+  doctor:loads:<name>   STRING, one JSON record, written whole by SET <key> <json> PX 604800000 (7 days)
+  ```
+  ```json
+  {"v":1,"at":0,"every":24,"by":{"uid":501,"worker":true},"overlayExtensionsAllowed":true,
+  "extensions":[{"name":"git-guard.ts","kind":"file"}],"skills":["deploy"],
+  "mcp":[{"name":"linear","transport":"http","where":"mcp.linear.app","exposure":"codemode","enabled":true,"keys":["LINEAR_KEY"]}],
+  "packages":[{"name":"pi-lint","version":"1.4.2"}],
+  "flows":[{"trigger":3,"flow":"fix","tier":"overlay","package":null,"repo":"unknown"}],
+  "unread":["mcp"],"more":{}}
+  ```
+  - **Written by** doctor's `publishResults`, in the one client of its doctor record and right after it, so the record's
+    write has just put this host under `doctor:hosts`, the index both share. No
+    index of its own. `at`, `every` and `by` are that record's: one run. Same best effort: a fault is the one stderr line, and the exit code and stdout are unchanged;
+    `--no-publish` reads none of it. `--json` still prints the doctor record alone.
+  - **Content, names and closed words only**, each held to a charset at the builder and again at the parser: `extensions`,
+    each a first path segment and `file` or `dir`, by the rule a job discovers them (`discoverExtensionEntries`, held to it by a test on one tree); `skills`,
+    folder names holding a `SKILL.md`, doctor's flow line's reading; `mcp`, as Connections reads the overlay's accepted
+    servers, `where` from `mcpServerWhere` (a url's host and port or a command's base name, null if it fails the charset or holds a secret value), `enabled` per server so a disabled one
+    reads "off", `keys` the variable NAMES it references; `packages` from the stage manifest; `flows` below. **No path, no
+    value and no tool name.** What these rows disclose is what Connections shows a viewer; the typed model projection
+    (`modelConnections`) carries counts in place of `where` and key names, and a tool's read of this record must too.
+    Not here: the image and pi's version, which `host:h:<name>` already publishes (`INT-HOST-REGISTRY-CONTRACT`).
+  - **`flows`**, one row per trigger naming a flow: `trigger` its position in the file; `flow` its name, null when it fails the skill charset; `tier`, one of
+    `repository`, `trigger`, `overlay`, `package`, `none`, `unknown`; `package` the staged package's name for `package`;
+    `repo` what that tier answered, `present`, `absent` or `unknown`. `flowTierOf` is the one reading behind this row and
+    doctor's check line, so they agree. `none` means every tier was checked. A forge trigger found nowhere else reads
+    `unknown`, never `none`, because a forge's repository is not on a host.
+  - **Bounded**: 32 extensions, 64 skills, 32 servers with 4 keys each, 64 packages, 128 flows, each counted past its cap in
+    `more` (`extensions`, `skills`, `mcp`, `keys`, `packages`, `flows`, a key only when above 0), and 64 KiB in all
+    (`HOST_LOADS_MAX_BYTES`). Every name at its longest at every cap is past that, so rows go until it holds, flows first, a
+    server last, each counted. Worst case measured: 65,460 bytes, with 41 flow rows kept (`worker/test/host-loads.test.mjs`).
+  - **`unread`**, present only when not empty: a part the run could not read (`extensions` when an ignore file holds a
+    pattern, since the job honours it with a matcher the host does not have; `mcp` for a file that does not read; `packages`
+    for a manifest that is there and does not read). Its list is empty and that does not mean none. No overlay at all is
+    every list empty and no `unread`.
+  - **Reading** (`readHostLoads(redis, { names, now, timeoutMs })`): `readDoctorResults`' order and bound, one `MGET`, and it
+    writes nothing. Each row through `parseHostLoads`, an allowlist that drops a failing row and counts it in `more`. A row is
+    `{ name, state, ageMs, ...record }`, `state` `current` or `old`, or `{ name, state: "unknown", why }`.
+  - **An older host never reads as the same.** Absent, expired and never published are `unknown` (`why: "absent"`), and JSON that
+    does not parse and a newer `v` are `unknown` (`why: "unreadable"`). Past two of its host's own intervals a record is `old`
+    (`loadsFreshness`, `DOCTOR_STALE_INTERVALS`'s rule, pinned to it: a host whose interval is 0 or unknown is never old).
+    `hostsAgree(rows)` is true only when every host named is `current`, has no `unread` and nothing in `more`, and all list the same, in any
+    order but package order, which is pi's load order. It is null when any host is not, and false only among hosts it can read: it never says true without everything.
+  - **Approximate, in the safe direction**, as the rest of doctor's flow reading: folders on the host and nothing run. What a
+    run really loaded is its record's `loaded` (`INT-RUN-HISTORY-FILE-CONTRACT`).
+  - **Falsification**: deleting these keys changes no host's behaviour; a reader says unknown.
 - **Acceptance**: worker/test/doctor-results.test.mjs (ids, sections and named ids pinned, redaction, the record, the
   write's one `SET ... PX` and the refreshed TTL, the read's allowlist, prune and bounds), worker/test/doctor.test.mjs
-  ("doctor publishes one record per run", "publishing is best effort"), worker/test/doctor-spawner.test.mjs,
+  ("doctor publishes one record per run", "publishing is best effort", "doctor publishes what this host's jobs can load"), worker/test/host-loads.test.mjs, worker/test/doctor-spawner.test.mjs,
   admin/test/doctor-view.test.mjs, admin/test/console-pages.test.mjs (the Fleet fixtures).
 
 ## INT-DEFER-REASON-KEY
@@ -13745,3 +13796,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-03 (#800, exit line limit) | `INT-RUNNER-EXIT-CODE-PROTOCOL`: the 6 KiB sentence said what the worst-case line was, and it was not: it left out `modelRoles`, `steer`, `recovery`, `providerFailure` and more, and every field together measures 7,961 characters, 8,454 with a supervisor's line after it, past the 8,192-character tail. Restated as what that test holds, and the whole line now has a limit: `EXIT_LINE_MAX_BYTES`, 7680, less any job id's excess past 63 characters. The writer ASCII-escapes the body, which also closes a MAC lost to a non-ASCII character split across two stdout chunks, cuts `message` to fit, and past that keeps only the verdict and the tokens, marked `lineCut`. `TAIL_CAP_BYTES`, the 1700 cap and its test, the exit codes and the MAC framing are UNCHANGED, checked. |
 | 2026-11-03 (#800, what a job loaded) | `INT-RUNNER-EXIT-CODE-PROTOCOL`: the runner's exit line carries `loaded`, noted at five stages through the `canaryLoad` route so every path the runner writes carries the latest, with a `finally` around `lifecycle.start`, so a job a server stopped still names which server, as a position in `PI_MCP_SERVERS`. Counts and closed words: no string a repository chose reaches it, failures and drops come from teeing the loader's log so record and log cannot disagree, and a repository extension's tool is a count. Named here with its residual: `extTools`, the tools a staged package or an overlay extension brought. Bounded by caps that raise `cut`, in three forms the writer picks from by measuring the line. Beyond the example the issue drew, `cut` also counts `servers`, since a cap with nowhere to say it would drop silently. Also the theme count, which read `filePath` at `run-job.mjs` where pi 1.5.0's `Theme` has `sourcePath`. An MCP failure still stops the job (`mcp-unavailable`, `mcp-unreachable`), and the exit codes, the signature and the `RUNNER_POLICY_REASONS` set are UNCHANGED, checked. The worker's half (`INT-RUN-HISTORY-FILE-CONTRACT`) comes with the record, so an older worker ignores the key, checked through its real sink. |
 | 2026-11-03 (#800, what a run loaded) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a new conditional key `loaded`, the last before `v`, which stays 1. Named at most 16 KiB (worst case measured, 14,533 bytes). `runner` is `reported`, `absent` or `invalid`; every part of the runner's field is checked against what the worker knows, since a repository extension shares the signer's process, and any violation keeps only the worker's facts. The worker adds the image's reference, local id and declared pi version from its preflight, and `leftOut`, which the runner cannot say. The tool-name residual is stated. `imageDigest` is said to be a local id. A pre-container refusal holds the image's facts where one was found and is otherwise byte-identical. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `tools` gains `job`, the active tools of the job's own factories, held to the closed `LOADED_JOB_TOOLS`, so the card's "report_progress, the job's own" has a source; the `full` form's worst case is now 4,177 characters. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked (a new field never raises a record's version). `RECORD_CORE_FIELDS` UNCHANGED, checked. Exit codes, the MAC and the settlement UNCHANGED, checked: nothing reads this field to decide. **Code evidence**: worker/src/loaded-record.mjs -> rebuildLoaded, recordedLoaded, leftOutOf, loadedWithImage; worker/src/run-history.mjs -> parseExitLoaded, buildRecord; worker/src/run-container.mjs -> runContainer's `loadedKnown`; worker/src/processor.mjs -> runJob; worker/src/start.mjs -> getPackagePaths.rowOf; image/runner/src/loaded.mjs -> LOADED_JOB_TOOLS. |
+| 2026-11-03 (#800, what a host's jobs can load) | **`INT-DOCTOR-RESULTS-KEY` AMENDED**: a new key `doctor:loads:<name>`, `v: 1`, one `SET ... PX` of 7 days, written by doctor's `publishResults` right after its record and under the same `doctor:hosts` index: a host's overlay extensions and skills, its MCP servers by name with where, exposure, whether on and key names, its staged packages and each flow trigger's tier. Bounded, with `more` counting the rest (64 KiB, worst case measured 65,460 bytes). No paths, values or tool names. `unread` names a part that could not be read. An absent, expired, unparseable or newer record reads `unknown`, past two intervals `old`, and `hostsAgree` is null unless every host is current and lists everything: an older host never reads as the same. The doctor record's own shape, id rules and `--json` output UNCHANGED, checked. **`INT-HOST-REGISTRY-CONTRACT`'s falsification note AMENDED** to name the key: it obeys the same test, and a registry row gains no field for it. `INT-CONSOLE-STATE-API` UNCHANGED, checked: nothing reads this yet. **Code evidence**: worker/src/host-loads.mjs -> buildHostLoads, parseHostLoads, readHostLoads, hostsAgree, flowTierOf; worker/src/doctor.mjs -> doctorHostLoads, publishResults, defaultPublishDoctor; worker/package.json -> ./host-loads. |
