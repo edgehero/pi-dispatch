@@ -1,7 +1,7 @@
 import { setDesired } from "../src/updates.mjs";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { makeBackendRegistry as realRegistry } from "../src/backend-registry.mjs";
 import { makePodmanBackend as realPodmanBackend } from "../src/backend-podman.mjs";
@@ -131,7 +131,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, durable = {} } = {}) {
+async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, durable = {} } = {}) {
 	// Every real socket in this helper must use the injected test service, including callers that only override other settings.
 	env = { VALKEY_URL, ...env };
 	const secretsResolverCalls = [];
@@ -341,6 +341,7 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 			...(makeGitLabHost ? { makeGitLabHost } : {}),
 			...(now ? { now } : {}),
 			...(sleep ? { sleep } : {}),
+			...(watchFs ? { watchFs } : {}),
 			...(watchScopedLimits ? { watchScopedLimits } : {}),
 			...(watchProjects ? { watchProjects } : {}),
 			...(readMirroredRecord ? { readMirroredRecord } : {}),
@@ -3895,8 +3896,8 @@ test("all SEVEN live-edit watches apply the boot-race rule, not just the one wit
 		"worker/src/start.mjs": readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8"),
 		"receiver/src/start.mjs": readFileSync(new URL("../../receiver/src/start.mjs", import.meta.url), "utf8"),
 	};
-	// One watch per `watch(dir, ...)` arming, which is how all four are written.
-	const armings = Object.entries(sources).map(([name, src]) => [name, (src.match(/handles\.watcher = watch\(/g) ?? []).length]);
+	// One watch per `watch(dir, ...)` arming, which is how all four are written (two through the `watchFs` seam).
+	const armings = Object.entries(sources).map(([name, src]) => [name, (src.match(/handles\.watcher = watch(?:Fn)?\(/g) ?? []).length]);
 	// Five since issue #503 added the model-endpoints watch, which reads before arming and compares after like the rest
 	// (read again, as the message below asks, and its caller is checked at the end).
 	// Six since issue #499 added the projects watch, read again: it reads before arming and compares after, and its caller
@@ -3905,7 +3906,7 @@ test("all SEVEN live-edit watches apply the boot-race rule, not just the one wit
 	// seam defaults to the real watcher, and its caller hands it the envelope's own boot baseline (checked at the end).
 	assert.deepEqual(armings, [["worker/src/start.mjs", 6], ["receiver/src/start.mjs", 1]], "seven watches, and if that count moves this test must be read again rather than updated");
 	for (const [name, src] of Object.entries(sources)) {
-		const arms = (src.match(/handles\.watcher = watch\(/g) ?? []).length;
+		const arms = (src.match(/handles\.watcher = watch(?:Fn)?\(/g) ?? []).length;
 		assert.equal((src.match(/readBeforeArming\(/g) ?? []).length, arms, `${name}: every watch reads before it arms`);
 		assert.equal((src.match(/changedWhileArming\(/g) ?? []).length, arms, `${name}: and compares after`);
 		// THE THIRD ARGUMENT IS THE WHOLE POINT, and its absence is the design error a review pass caught in
@@ -3928,6 +3929,7 @@ test("all SEVEN live-edit watches apply the boot-race rule, not just the one wit
 	// so they are covered here.
 	const worker = sources["worker/src/start.mjs"];
 	// The scoped-limits watcher is armed through its injectable seam (PR #549's review), which defaults to the real one.
+	assert.match(worker, /watchFs = watch,/, "the fs.watch seam defaults to the real one");
 	assert.match(worker, /watchScopedLimits: watchScopedLimitsFn = watchScopedLimitsFile,/, "the seam defaults to the real watcher");
 	assert.match(worker, /watchProjects: watchProjectsFn = watchProjectsFile,/, "the projects seam defaults to the real watcher");
 	assert.match(worker, /watchEnvelope: watchEnvelopeFn = watchEnvelopeFile,/, "the envelope seam defaults to the real watcher");
@@ -5384,31 +5386,30 @@ test("issue #761: a running worker's watchers carry a newer pause windows or tri
 	const today = (doc) => `${JSON.stringify(doc, null, 2)}\n`;
 	writeFileSync(pausePath, today({ windows: [] }));
 	writeFileSync(triggersPath, today({ triggers: [] }));
-	// Each step writes its files, then waits for the watchers' debounce, a read and a reload, WRITING THE SAME BYTES AGAIN
-	// every half second until the reload is seen. One write is not enough on macOS: `fs.watch` there is libuv's single
-	// FSEvents stream, rebuilt from "now" for every watch armed (watch-closer.mjs, issue #386), and a write that lands
-	// before the rebuilt stream is live is never delivered, to this watcher or any other in the process. The boot arms
-	// both watchers just before `whileRunning`, so the first write lands in that gap whenever the machine's file events
-	// are busy: measured with four processes renaming files elsewhere on the disk, a write right after arming was lost
-	// 10 times in 10 and the first re-write half a second later was seen every time, and this test then timed out 4 runs
-	// in 5 with no event reaching even a watch the test had armed before the boot. A write after the stream is live is
-	// not lost, so the step no longer rests on one event; the half second outlasts the 150 ms debounce, so a re-write
-	// never holds back the reload it is waiting for. Linux's inotify is live before `fs.watch` returns.
+	// The change is delivered through the seam, not by `fs.watch`. What this test is about is what a reload hands the
+	// processor. On macOS a real event can be lost outright (libuv's one FSEvents stream, rebuilt from "now" for every watch
+	// armed, watch-closer.mjs, issue #386), and re-writing until one arrived still reddened this test on a busy machine.
+	// `changes` is every callback the boot armed; each ignores a name that is not its own file, as it does for real.
+	const changes = [];
+	const watchFs = (_dir, onChange) => {
+		changes.push(onChange);
+		return { close() {}, unref() {} };
+	};
 	const until = async (what, predicate, files) => {
+		for (const [path, text] of files) {
+			writeFileSync(path, text);
+			for (const onChange of changes) onChange("change", basename(path));
+		}
 		const deadline = Date.now() + 10_000;
-		let rewriteAt = 0;
 		while (!predicate()) {
 			if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-			if (Date.now() >= rewriteAt) {
-				for (const [path, text] of files) writeFileSync(path, text);
-				rewriteAt = Date.now() + 500;
-			}
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
 	};
 	let seen = null;
 	await runStart({
 		env: { PI_PAUSE_WINDOWS_FILE: pausePath, PI_TRIGGERS_FILE: triggersPath },
+		watchFs,
 		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
 		makeHost: () => fakeHost(),
 		whileRunning: async ({ captured }) => {

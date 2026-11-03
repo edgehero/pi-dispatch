@@ -82,9 +82,9 @@ export function parseReceiverStatus(raw) {
 	return { v: 1, name: d.name, version: d.version, startedAt: d.startedAt, at: d.at, port: d.port, bind: d.bind, forges: [...d.forges], deliveries };
 }
 
-function bounded(p, timeoutMs) {
+function bounded(p, timeoutMs, onTimeout = () => {}) {
 	return new Promise((resolve, reject) => {
-		const timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+		const timer = setTimeout(() => { onTimeout(); reject(new Error("timeout")); }, timeoutMs);
 		Promise.resolve(p).then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
 	});
 }
@@ -134,12 +134,16 @@ export function makeReceiverPublisher({ client, name, version, port, bind, forge
 }
 
 /** Read-only, live names first. Incomplete reads cannot prove no receiver or a zero delivery count. */
-export async function readReceiverStatus(redis, { names = [], now = Date.now, timeoutMs = 2000 } = {}) {
-	const deadline = performance.now() + timeoutMs;
+export async function readReceiverStatus(redis, { names = [], now = Date.now, timeoutMs = 2000, clock = () => performance.now() } = {}) {
+	const deadline = clock() + timeoutMs;
+	// Spent for good once a bound fires. `left <= 0` alone is not enough: the bound's timer and this clock are different
+	// clocks, and a timer can fire a fraction of a millisecond before the deadline it was set from, so the next check would
+	// still see time left and start the row reads this deadline already ruled out.
+	let spent = false;
 	const within = (fn) => {
-		const left = deadline - performance.now();
-		if (left <= 0) return Promise.reject(new Error("timeout"));
-		try { return bounded(fn(), Math.max(1, Math.ceil(left))); } catch { return Promise.reject(new Error("unavailable")); }
+		const left = deadline - clock();
+		if (spent || left <= 0) return Promise.reject(new Error("timeout"));
+		try { return bounded(fn(), Math.max(1, Math.ceil(left)), () => { spent = true; }); } catch { return Promise.reject(new Error("unavailable")); }
 	};
 	let indexed;
 	let complete = true;
