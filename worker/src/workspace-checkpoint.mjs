@@ -84,6 +84,25 @@ export const DEFAULT_CHECKPOINT_LIMITS = Object.freeze({
 	repackEvery: 20,
 });
 
+/**
+ * The manifest version this build WRITES (issue #761): one of `CHECKPOINT_MANIFEST_READS`, the newest or the one before
+ * it. A manifest is closed at every level, so one of a version above the newest this build reads (a newer release's: a
+ * new key, a new `v`) cannot be read here; `readManifest` then says `newer` rather than only `invalid`, and every caller
+ * that would DELETE on an unreadable checkpoint (the recovery pickup's cleanup, the salvage's removal of the lost
+ * attempt's directory) keeps it and waits instead.
+ */
+export const CHECKPOINT_MANIFEST_VERSION = 1;
+
+/**
+ * Every manifest version this build reads: exactly the newest and the one before it, with the version written among
+ * them. The one before keeps a checkpoint the previous release took restoring for one checkpoint lifetime
+ * (`DEFAULT_CHECKPOINT_LIMITS.ttlMs`) after an upgrade. A newest above the version written is a release that READS the
+ * next version before any release writes it, so the release that then writes it shares a fleet, and a rollback, with
+ * readers of it: readers ship first, the writer a release later. A test pins both rules, so a bump that forgets the
+ * previous reader, or writes a version it does not read, fails there.
+ */
+export const CHECKPOINT_MANIFEST_READS = Object.freeze([1]);
+
 const MAX_LINK_BYTES = 4096;
 const HEX = { sha1: /^[0-9a-f]{40}$/, sha256: /^[0-9a-f]{64}$/ };
 const ANY_HEX_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -232,6 +251,8 @@ function byteReader(stream) {
  * @param {string} [deps.hostName] recorded in the manifest
  * @param {Function} [deps.statfs] `(dir) => { bavail, bsize, blocks }`
  * @param {string|null} [deps.procFdDir] where the open-file links live (Linux); a test points it at a fake
+ * @param {number[]} [deps.manifestReads] the manifest versions `readManifest` reads (`CHECKPOINT_MANIFEST_READS`); a
+ *   seam for a test of the version policy with a two-version table, never set by a wiring
  */
 export function makeWorkspaceCheckpointer({
 	storeDir,
@@ -245,8 +266,13 @@ export function makeWorkspaceCheckpointer({
 	hostName = osHostname(),
 	statfs = (dir) => nodeFsp.statfs(dir),
 	procFdDir = "/proc/self/fd",
+	manifestReads = CHECKPOINT_MANIFEST_READS,
 } = {}) {
 	const L = { ...DEFAULT_CHECKPOINT_LIMITS, ...limits };
+	const manifestVersions = new Set(manifestReads);
+	// A version above every one this build reads is a newer release's; one below the oldest (or between two it reads) is
+	// a version this build stopped reading, which is a manifest it cannot use, not one to wait for.
+	const newestManifest = Math.max(...manifestVersions);
 	const host = HOST_RE.test(String(hostName)) ? String(hostName) : String(hostName).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) || "unknown";
 	/** Per run, in memory: the stat cache and the object format. Lost on restart, which only costs re-reading. */
 	const runs = new Map();
@@ -1191,7 +1217,7 @@ export function makeWorkspaceCheckpointer({
 			throw err;
 		}
 		const manifest = {
-			v: 1,
+			v: CHECKPOINT_MANIFEST_VERSION,
 			runId: sanitizeJobId(runId).slice(0, 200),
 			seq,
 			attempt,
@@ -1273,12 +1299,19 @@ export function makeWorkspaceCheckpointer({
 		return have.length === want.length && have.every((k, i) => k === want[i]);
 	}
 
-	/** Every field typed, every string an enum, hex, a host name or a short token. A reason, or null. */
+	/**
+	 * Every field typed, every string an enum, hex, a host name or a short token. A reason, or null.
+	 *
+	 * `newer` (issue #761) is judged BEFORE the closed key set: a newer release may add keys, and read as `keys` its
+	 * manifest would look broken, where it is only unreadable HERE and is kept for a worker that reads it. Only an integer
+	 * `v` above every version this build reads is newer; `0`, `"1"` or `1.5` is a broken manifest (`v`).
+	 */
 	function manifestProblem(m) {
 		const keys = ["v", "runId", "seq", "attempt", "host", "kind", "quiesced", "at", "transcript", "workspace", ...META_FIELDS];
 		if (!m || typeof m !== "object" || Array.isArray(m)) return "not-object";
+		if (Number.isSafeInteger(m.v) && m.v > newestManifest) return "newer";
 		if (!closed(m, keys)) return "keys";
-		if (m.v !== 1) return "v";
+		if (!Number.isSafeInteger(m.v) || !manifestVersions.has(m.v)) return "v";
 		if (typeof m.runId !== "string" || !RUN_ID_RE.test(m.runId)) return "runId";
 		if (!isInt(m.seq, 1, 999_999_999)) return "seq";
 		if (!isInt(m.attempt, 0, 10_000)) return "attempt";
@@ -1329,7 +1362,9 @@ export function makeWorkspaceCheckpointer({
 	 * The checkpoint CURRENT names, validated: `{ ok, manifest, transcriptPath }`, `{ absent }` when there
 	 * is none, `{ invalid, reason }` when what is there cannot be trusted. The transcript's bytes are hashed
 	 * against the manifest, because the resume feeds it to a paid model and a truncated one resumes a
-	 * different conversation.
+	 * different conversation. A manifest a newer pi-dispatch wrote is `{ invalid, reason: "field:newer", newer }`
+	 * (issue #761): still `invalid` to every caller that only asks whether it can use it, and `newer` to the ones that
+	 * would otherwise delete what they could not read.
 	 */
 	async function readManifest(runId, { seq } = {}) {
 		try {
@@ -1352,6 +1387,7 @@ export function makeWorkspaceCheckpointer({
 				return { invalid: true, reason: "manifest-json" };
 			}
 			const problem = manifestProblem(manifest);
+			if (problem === "newer") return { invalid: true, reason: "field:newer", newer: true };
 			if (problem) return { invalid: true, reason: `field:${problem}` };
 			if (manifest.seq !== cur.seq) return { invalid: true, reason: "seq-mismatch" };
 			const transcriptPath = join(paths.cp(cur.seq), "transcript.jsonl");

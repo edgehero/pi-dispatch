@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { CONSOLE_USAGE, consoleCommand, consolePagePath, parseConsoleArgs, probeLine } from "../src/console-command.mjs";
-import { loginCodesDir } from "../src/console/login-codes.mjs";
+import { keptTokenLinkRefusal, loginCodesDir } from "../src/console/login-codes.mjs";
+import { parseTokensFile } from "@edgehero/pi-dispatch/console-tokens";
 
 // Issue #708: `/dispatch console`, driven through its seams. Every word goes to `notify`; the probe, the tokens file,
 // the audit log, the mint and the opener are fakes that record what was asked of them, in order.
@@ -163,6 +164,26 @@ test("--link chooses among operator tokens: a name given, one alone, several by 
     assert.match(text(h), why);
     assert.ok(!h.order.includes("mint"), "nothing minted");
   }
+});
+
+test("--link <name> of a token kept for a role this console does not know: refused as pi-dispatch-console link refuses it, never as a missing token (issue #761)", async () => {
+  // The tokens file as a newer release wrote it, through the real parser: the entry is kept apart from `tokens`.
+  const raw = JSON.stringify({ version: 1, generation: 1, tokens: [{ name: "alice", role: "operator", sha256: SHA, createdAt: "2026-10-01T00:00:00.000Z" }, { name: "aud", role: "auditor", sha256: "f".repeat(64), createdAt: "2026-10-02T00:00:00.000Z" }] });
+  const file = parseTokensFile(raw, TOKENS_PATH);
+  const h = harness();
+  h.deps.readTokens = () => (h.order.push("read"), { file });
+  const r = await consoleCommand(["--link", "aud"], h.deps);
+  assert.equal(r.refused, "link");
+  assert.ok(text(h).endsWith('no sign-in link was made: the token "aud" has the role `auditor`, which this pi-dispatch-console does not know, so it signs in nowhere here and no link is made for it'), text(h));
+  assert.equal(text(h).split("\n").at(-1), `no sign-in link was made: ${keptTokenLinkRefusal(file.carry.kept[0])}`, "the CLI's own sentence");
+  assert.ok(!text(h).includes("no token named"));
+  assert.ok(!h.order.includes("mint") && !h.order.some((o) => o.startsWith("audit")), "nothing audited, nothing minted");
+  // A name the file does not hold at all is still the missing token, kept entries beside it or not.
+  const gone = harness();
+  gone.deps.readTokens = () => ({ file });
+  assert.equal((await consoleCommand(["--link", "nobody"], gone.deps)).refused, "link");
+  assert.ok(text(gone).endsWith('no token named "nobody"; see pi-dispatch-console token list'), text(gone));
+  assert.ok(!gone.order.includes("mint"), "nothing minted");
 });
 
 test("--link: an audit row that cannot be appended means no code; a refused mint is recorded as failed", async () => {

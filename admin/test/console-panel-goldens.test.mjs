@@ -54,7 +54,7 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   const runs = ["runs-mirror-off.operator", "runs-mirror-degraded.operator", "runs-truncated.operator", "runs-unreadable.viewer", "runs-empty.viewer", "runs-unknown-reason.viewer"];
   const parked = ["parked-approval.operator", "parked-approval.viewer", "parked-answerable.operator", "parked-unanswerable.operator", "parked-being-answered.operator", "parked-unknown.operator", "parked-empty.viewer"];
   const more = ["run-not-found.operator", "run-not-found.viewer", "confirm-refused-timeout.operator", "confirm-preview-resume-incomplete.operator", "confirm-preview-many-queues.operator"];
-  assert.deepEqual([...PANEL_STATES], [...SETUP_PANEL_STATES, ...ANSWERER_PANEL_STATES, ...Object.keys(AGENT_OVERVIEW_DRAW), ...SANDBOX_PANEL_STATES, ...MODELS_PANEL_STATES, ...ZERO_TOUCH_PANEL_STATES, ...CONFIGURATION_PANEL_STATES,...TRIGGER_LIST_PANEL_STATES, ...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
+  assert.deepEqual([...PANEL_STATES], [...SETUP_PANEL_STATES, ...ANSWERER_PANEL_STATES, ...Object.keys(AGENT_OVERVIEW_DRAW), ...SANDBOX_PANEL_STATES, ...MODELS_PANEL_STATES, ...ZERO_TOUCH_PANEL_STATES, ...CONFIGURATION_PANEL_STATES,...TRIGGER_LIST_PANEL_STATES, ...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", "audit-newer.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
   // `<state>.<role>`, the role one the width check knows (`console-width-check.mjs` `GOLDEN_ROLES`).
   for (const state of PANEL_STATES) assert.match(state, /^[a-z0-9][a-z0-9-]*\.(?:operator|viewer|anonymous)$/, state);
 });
@@ -206,6 +206,14 @@ test("the read-only banner for both roles, with no form and no slot; the damaged
   assert.equal(after.split("Not verified: it follows the damaged row.").length - 1, 2, "both rows written after it say so");
   assert.equal(after.split("Not verified: the link to the row after it does not hold.").length - 1, 1, "and the row before it");
   assert.ok(after.includes('<tr id="line-2026-10-4" class="row--failed">') && after.includes('<tr id="seq-6">') && after.includes('<tr id="seq-5">') && after.includes('<tr id="seq-3">'), "the damaged row, then the two after it and the one before it by their seq");
+  // Issue #761: rows with a shaped action or outcome this console does not know are linked, so the chain is intact; each
+  // verified one names the word it does not know, and About counts them.
+  const newer = pages["audit-newer.operator"];
+  assert.ok(newer.includes("Chain verified through row 6") && !newer.includes("row--failed"), "intact");
+  assert.ok(newer.includes("Not known to this console: the action token-expired (a newer release writes such rows).") && newer.includes("Not known to this console: the outcome deferred (a newer release writes such rows)."), "each row's note");
+  assert.ok(newer.includes('<span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"></use></svg>deferred</span>'), "the unknown outcome as written, on the attention badge");
+  assert.ok(newer.includes("<dt>Not known to this console</dt><dd>2 rows (a newer release writes such rows)</dd>"), "About counts them");
+  for (const page of [damaged, after]) assert.ok(!page.includes("newer release") && !page.includes("Not known to this console"), "nothing of it on a chain of known rows");
 });
 
 /** A panel's section in a page, its inner HTML, or null. */

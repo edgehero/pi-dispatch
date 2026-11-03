@@ -6,6 +6,7 @@ import { ZERO_TOUCH_DRAW } from "./zero-touch-goldens.mjs";
 import { CONFIGURATION_DRAW } from "./configuration-goldens.mjs";
 import { TRIGGER_LIST_DRAW } from "./trigger-list-goldens.mjs";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { TRIGGER_DRAW } from "./trigger-goldens.mjs";
 import { SPEND_DRAW } from "./spend-goldens.mjs";
 import { FLEET_DRAW } from "./fleet-goldens.mjs";
@@ -375,6 +376,20 @@ function auditDeps({ rows, tamper }) {
 function relink(lines, index) {
   const row = JSON.parse(lines[index]);
   return lines.map((l, i) => (i === index ? JSON.stringify({ ...row, prev: "f".repeat(64) }) : l));
+}
+
+/**
+ * The lines with `rows` appended, each linked to the line before it as the writer links them (seq one more, prev the
+ * sha256 of that line), at the fixture's instant: rows a newer console wrote (issue #761), whose action or outcome this
+ * console's writer would refuse to write.
+ */
+function appendLinked(lines, rows) {
+  const out = [...lines];
+  for (const extra of rows) {
+    const last = out.at(-1);
+    out.push(JSON.stringify({ at: new Date(NOW).toISOString(), seq: JSON.parse(last).seq + 1, prev: createHash("sha256").update(last).digest("hex"), ...extra }));
+  }
+  return out;
 }
 
 /** The audit page an operator opens over `deps`. */
@@ -938,9 +953,15 @@ const DRAW = {
   // AccessStates: a console started read-only, for each role.
   "read-only.operator": async () => fleetLive({ readOnly: true }),
   "read-only.viewer": async () => fleetLive({ session: VIEWER, readOnly: true }),
-  // AuditScreen: the newest row's link to the one before does not hold; then a damaged row with two written after it.
+  // AuditScreen: the newest row's link to the one before does not hold; then a damaged row with two written after it;
+  // then an intact chain a newer console wrote into.
   "audit-damaged.operator": async () => auditPage(auditDeps({ rows: 5, tamper: (lines) => relink(lines, 4) })),
   "audit-not-verified.operator": async () => auditPage(auditDeps({ rows: 6, tamper: (lines) => relink(lines, 3) })),
+  // Issue #761: an intact chain with two rows a newer console wrote, an action and an outcome this console does not know.
+  "audit-newer.operator": async () => auditPage(auditDeps({ rows: 4, tamper: (lines) => appendLinked(lines, [
+    { actor: { name: "ops", role: "operator", session: "a1b2c3d4" }, action: "token-expired", target: "ci-bot", outcome: "ok" },
+    { actor: { name: "ops", role: "operator", session: "a1b2c3d4" }, action: "write", kind: "fleet-pause", target: "fleet", outcome: "deferred", ticket: "def012345678" },
+  ]) })),
   // OverviewAllClear: nothing needs a person, the same panels as the problem state; SetupScreen: the first run's
   // checklist with nothing ready but the console itself, then the card's own moment, for both roles; the waitlists
   // with each kind of wait alone (TimelineAndWaitlists, the OverviewScreen card's Waitlists); a host whose clock is out

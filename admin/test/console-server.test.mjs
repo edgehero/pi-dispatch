@@ -17,6 +17,7 @@ import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM } from "..
 import { makeSessionStore, readSessionCookies } from "../src/console/sessions.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { writePauseWindows as realWritePauseWindows } from "../src/read-model.mjs";
+import { findToken as realFindToken, parseTokensFile } from "@edgehero/pi-dispatch/console-tokens";
 import { STATUS_KINDS } from "../src/words.mjs";
 
 // The console's dispatcher over a real node:http server on 127.0.0.1:0 (issue #640, REQ-CONSOLE-SECURITY). Requests
@@ -240,7 +241,7 @@ async function start(overrides = {}) {
     limiter: overrides.limiter ?? makeLoginLimiter({ now }),
     log: (line) => seen.logs.push(line),
     readTokens: overrides.readTokens ?? (() => ({ file: FILE })),
-    findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha256(presented)) ?? null,
+    findToken: overrides.findToken ?? ((file, presented) => file.tokens.find((e) => e.sha256 === sha256(presented)) ?? null),
     consumeLoginCode: overrides.consumeLoginCode ?? ((code) => {
       codesTried.push(code);
       const name = codes.get(code);
@@ -2259,4 +2260,33 @@ test("browser invitation redemption refuses rotation, role escalation, recreatio
     else assert.equal(result.headers["set-cookie"], undefined, "no session cookie for a replacement");
     assert.equal((await c.post("/login/code", { code })).status, 401, "consumption is one use even on mismatch");
   }
+});
+
+test("a token kept for a role this console does not know signs in nowhere: its secret and its one-time code are both 401 (issue #761)", async () => {
+  // The tokens file a newer release wrote, read by the real parser and matched by the real `findToken`: the entry is in
+  // `carry.kept`, apart from `tokens`, so neither sign-in path can meet it. The harness hands the server no
+  // `keptTokens`, so the code's refusal below is the server's default, the tokens module's own.
+  const AUD_TOKEN = `pdc_${"u".repeat(43)}`;
+  secrets.add(AUD_TOKEN);
+  const text = JSON.stringify({ ...FILE, tokens: [...FILE.tokens, { name: "aud", role: "auditor", sha256: sha256(AUD_TOKEN), createdAt: "2026-10-02T00:00:00.000Z" }] });
+  const file = parseTokensFile(text, "/dep/console-tokens.json");
+  assert.deepEqual(file.carry.kept.map((t) => t.name), ["aud"], "kept, not dropped");
+  const code = "k".repeat(43);
+  const c = await start({ readTokens: () => ({ file }), findToken: realFindToken, codes: [[code, "aud"]] });
+  const password = await c.post("/login", { token: AUD_TOKEN });
+  assert.equal(password.status, 401);
+  assert.equal(password.headers["set-cookie"], undefined);
+  assert.deepEqual([c.audit.rows.at(-1).action, c.audit.rows.at(-1).outcome, c.audit.rows.at(-1).reason], ["login-failed", "refused", "no token matched"]);
+  const byCode = await c.post("/login/code", { code });
+  assert.equal(byCode.status, 401);
+  assert.equal(byCode.headers["set-cookie"], undefined);
+  // The row names a kept entry for what it is, never as a token that no longer exists.
+  assert.deepEqual([c.audit.rows.at(-1).action, c.audit.rows.at(-1).outcome, c.audit.rows.at(-1).reason], ["login-code", "refused", "the link named a token whose role this console does not know"]);
+  assert.equal(c.sessions.live.size, 0, "no session");
+  // A code for a name the file does not hold at all is still the missing token.
+  const gone = await start({ readTokens: () => ({ file }), findToken: realFindToken, codes: [[code, "nobody"]] });
+  assert.equal((await gone.post("/login/code", { code })).status, 401);
+  assert.equal(gone.audit.rows.at(-1).reason, "the link named a token that no longer exists");
+  // The known entries in the same file still sign in.
+  assert.equal((await c.post("/login", { token: OP_TOKEN })).status, 200);
 });

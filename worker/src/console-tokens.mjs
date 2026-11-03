@@ -2,9 +2,18 @@
  * The operator console's tokens file (issue #640, INT-CONSOLE-TOKENS-FILE-CONTRACT).
  *
  * One JSON file, `{version: 1, generation, tokens: [{name, role, sha256, createdAt}]}`, at PI_CONSOLE_TOKENS_FILE
- * (default `console-tokens.json` in the deployment directory). The console reads it to sign a browser in; the CLI
- * (`pi-dispatch-console token ...`) is its only writer, and doctor judges it. Only the SHA-256 of each token is kept,
- * so a copy of the file signs nobody in.
+ * (default `console-tokens.json` in the deployment directory). The console reads it to sign a browser in; its writers
+ * are the CLI (`pi-dispatch-console token ...`), `pi-dispatch console bootstrap` (`console-bootstrap.mjs`, the first
+ * operator) and the console's setup page (`admin/src/setup-actions.mjs`, a viewer and its undo), all through the
+ * writers below, and doctor judges it. Only the SHA-256 of each token is kept, so a copy of the file signs nobody in.
+ *
+ * ACROSS VERSIONS (issue #761). Within version 1 a later release may add only what an older reader can safely ignore:
+ * a role (an entry whose role this build does not know signs nobody in here, which is narrower) and a field or a
+ * top-level key (carried and ignored). Such an entry is KEPT, never dropped: `parseTokensFile` puts it in `carry.kept`,
+ * apart from `tokens`, so every reader of `tokens` (the sign-in, the login code, the operator count, the setup grants,
+ * doctor) never meets it, and every writer writes it back. A field of an entry or a key of the file that would NARROW
+ * who may sign in (an expiry, a scope, another hash, a file-wide minimum role) raises `version`, which every older
+ * reader refuses as a whole file: carried and ignored, it would widen access on an older console.
  *
  * WHY SHA-256 AND NOT A PASSWORD KDF (bcrypt, scrypt, argon2): a KDF exists to make guessing a LOW-entropy secret slow.
  * These tokens are 32 random bytes (256 bits) from the CSPRNG, which no amount of guessing reaches, so a slow hash adds
@@ -33,6 +42,18 @@ export const TOKEN_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 /** The roles a token can carry: an operator may write, a viewer only reads. */
 export const TOKEN_ROLES = Object.freeze(["operator", "viewer", "agent"]);
 
+/**
+ * The shape of a role (issue #761): every role above has it, and a role a later release adds must keep it. An entry
+ * whose role this build does not know but has this shape is kept and signs in nowhere here; any other role is a file
+ * this build cannot read, refused as before.
+ */
+export const TOKEN_ROLE_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** An entry's four fields, the only ones `tokens` holds; the rest of a known entry is carried (`carry.extras`). */
+const ENTRY_FIELDS = Object.freeze(["name", "role", "sha256", "createdAt"]);
+/** The top-level keys this build reads; any other is carried (`carry.top`). */
+const FILE_KEYS = Object.freeze(["version", "generation", "tokens"]);
+
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const DEFAULT_FILE = "console-tokens.json";
 const ADD_HINT = "`pi-dispatch-console token add --name <name> --role operator`";
@@ -53,12 +74,24 @@ export function tokensFilePath(env, dir) {
 	return resolve(dir, configured || DEFAULT_FILE);
 }
 
+/** `key` set on `target` as an own data property, whatever its name (`__proto__` included): a carried key from a file. */
+function defineOwn(target, key, value) {
+	Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+	return target;
+}
+
 /**
- * Parse and validate the file's text. Returns `{version: 1, generation, tokens}` with each entry reduced to its four
- * fields, or THROWS an Error whose message is a sentence an operator can act on. A version other than 1 is refused
- * (a newer pi-dispatch wrote it, and reading it as 1 could drop a rule it added). Duplicate names are refused (a revoke
- * would remove only one), and so are duplicate hashes (two names for one secret make the audit row's actor ambiguous).
- * The message never quotes a hash.
+ * Parse and validate the file's text. Returns `{version: 1, generation, tokens}` with each entry of a known role reduced
+ * to its four fields, or THROWS an Error whose message is a sentence an operator can act on. A version other than 1 is
+ * refused (a newer pi-dispatch wrote it, and reading it as 1 could drop a rule it added). Duplicate names are refused (a
+ * revoke would remove only one), and so are duplicate hashes (two names for one secret make the audit row's actor
+ * ambiguous), across the known and the kept entries alike. The message never quotes a hash.
+ *
+ * What a later release wrote that this one does not read (issue #761, the header) is in `carry`, present only when it
+ * holds something, so a file with nothing to carry parses to exactly the shape it always did: `carry.kept`, each entry
+ * whose role has `TOKEN_ROLE_RE`'s shape but is not in `TOKEN_ROLES`, as it was written (its name, sha256 and createdAt
+ * are judged as a known entry's are); `carry.extras`, a known entry's fields beyond its four, by the entry's name; and
+ * `carry.top`, the top-level keys beyond `version`, `generation` and `tokens`. `serialize` writes all three back.
  */
 export function parseTokensFile(text, path) {
 	let raw;
@@ -83,7 +116,10 @@ export function parseTokensFile(text, path) {
 	}
 	const names = new Set();
 	const hashes = new Set();
-	const tokens = raw.tokens.map((entry, i) => {
+	const tokens = [];
+	const kept = [];
+	const extras = {};
+	raw.tokens.forEach((entry, i) => {
 		const at = `entry ${i + 1} of the console tokens file ${path}`;
 		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`${at} is not an object`);
 		if (typeof entry.name !== "string" || !TOKEN_NAME_RE.test(entry.name)) {
@@ -91,7 +127,10 @@ export function parseTokensFile(text, path) {
 		}
 		if (names.has(entry.name)) throw new Error(`${at} repeats the name "${entry.name}"; remove one of them (token revoke removes both)`);
 		names.add(entry.name);
-		if (!TOKEN_ROLES.includes(entry.role)) throw new Error(`${at} ("${entry.name}") has a role other than ${TOKEN_ROLES.join(" or ")}`);
+		const known = TOKEN_ROLES.includes(entry.role);
+		if (!known && !(typeof entry.role === "string" && TOKEN_ROLE_RE.test(entry.role))) {
+			throw new Error(`${at} ("${entry.name}") has a role other than ${TOKEN_ROLES.join(" or ")}, and not the shape of one a later pi-dispatch adds (a-z, 0-9 and '-', starting with a letter, at most 32)`);
+		}
 		if (typeof entry.sha256 !== "string" || !SHA256_HEX_RE.test(entry.sha256)) {
 			throw new Error(`${at} ("${entry.name}") has a sha256 that is not 64 lowercase hex characters; rotate it with \`pi-dispatch-console token rotate --name ${entry.name}\``);
 		}
@@ -100,9 +139,36 @@ export function parseTokensFile(text, path) {
 		if (typeof entry.createdAt !== "string" || Number.isNaN(Date.parse(entry.createdAt))) {
 			throw new Error(`${at} ("${entry.name}") has a createdAt that is not an ISO date`);
 		}
-		return { name: entry.name, role: entry.role, sha256: entry.sha256, createdAt: entry.createdAt };
+		if (!known) {
+			// As written, never rebuilt: the release that added its role reads every field of it.
+			kept.push(entry);
+			return;
+		}
+		tokens.push({ name: entry.name, role: entry.role, sha256: entry.sha256, createdAt: entry.createdAt });
+		const more = Object.keys(entry).filter((k) => !ENTRY_FIELDS.includes(k));
+		if (more.length > 0) defineOwn(extras, entry.name, more.reduce((out, k) => defineOwn(out, k, entry[k]), {}));
 	});
-	return { version: 1, generation, tokens };
+	const top = Object.keys(raw).filter((k) => !FILE_KEYS.includes(k)).reduce((out, k) => defineOwn(out, k, raw[k]), {});
+	const carried = kept.length > 0 || Object.keys(extras).length > 0 || Object.keys(top).length > 0;
+	return carried ? { version: 1, generation, tokens, carry: { kept, extras, top } } : { version: 1, generation, tokens };
+}
+
+/**
+ * The entries `parseTokensFile` kept for a role this build does not know (issue #761), as written: none when the file
+ * carries nothing. They sign in nowhere, count as no operator and match no setup grant, because no reader of `tokens`
+ * sees them; `token list` and doctor name them.
+ */
+export function keptTokens(file) {
+	return Array.isArray(file?.carry?.kept) ? file.carry.kept : [];
+}
+
+/**
+ * Every name the file holds, known and kept (issue #761): a new entry must not take a name a kept entry holds, or the
+ * file would hold the name twice and the release that knows its role would refuse it. Not a list of names that may sign
+ * in: that is `tokens` alone.
+ */
+export function tokenNames(file) {
+	return [...(Array.isArray(file?.tokens) ? file.tokens : []), ...keptTokens(file)].map((t) => t.name);
 }
 
 /** The uid the file must belong to by default: this process's, or undefined where there is none (Windows). */
@@ -215,9 +281,15 @@ export function operatorCount(file) {
 	return Array.isArray(file?.tokens) ? file.tokens.filter((t) => t?.role === "operator").length : 0;
 }
 
-/** The serialized file, the one shape every writer produces. */
+/**
+ * The serialized file, the one shape every writer produces: the known entries (each with its carried fields after its
+ * four), then the kept ones as they were read, then the carried top-level keys (issue #761). A file that carries nothing
+ * is written byte for byte as before; a kept entry moves after the known ones, which means nothing to any reader.
+ */
 function serialize(file) {
-	return `${JSON.stringify({ version: 1, generation: file.generation, tokens: file.tokens }, null, 2)}\n`;
+	const extras = file.carry?.extras ?? {};
+	const tokens = file.tokens.map((t) => (Object.hasOwn(extras, t.name) ? { ...t, ...extras[t.name] } : t));
+	return `${JSON.stringify({ version: 1, generation: file.generation, tokens: [...tokens, ...keptTokens(file)], ...(file.carry?.top ?? {}) }, null, 2)}\n`;
 }
 
 /**
@@ -308,7 +380,8 @@ function iso(now) {
 /**
  * Add a token named `name` with `role`: `{token, entry}` (the plaintext, to print ONCE, and the stored entry) or
  * `{invalid}`. Creates the file at 0600 when it is missing. An existing name is refused: rotate it instead, so a typo
- * never silently replaces someone's secret.
+ * never silently replaces someone's secret. So is a name an entry kept for a role this build does not know holds (issue
+ * #761): the file would then hold the name twice, which the release that knows that role refuses.
  */
 export function addToken({ path, name, role, fs = nodeFs, now = () => Date.now(), random = randomBytes, uid = processUid(), expect = undefined }) {
 	if (typeof name !== "string" || !TOKEN_NAME_RE.test(name)) {
@@ -321,6 +394,8 @@ export function addToken({ path, name, role, fs = nodeFs, now = () => Date.now()
 	if (loaded.file.tokens.some((t) => t.name === name)) {
 		return { invalid: `a token named "${name}" already exists; give it a new secret with \`pi-dispatch-console token rotate --name ${name}\`, or choose another name` };
 	}
+	const keptEntry = keptTokens(loaded.file).find((t) => t.name === name);
+	if (keptEntry) return { invalid: `a token named "${name}" already exists, with the role \`${keptEntry.role}\` that this pi-dispatch-console does not know; choose another name` };
 	const token = newToken(random);
 	const entry = { name, role, sha256: hashToken(token), createdAt: iso(now) };
 	const written = writeTokens(path, { ...loaded.file, tokens: [...loaded.file.tokens, entry] }, loaded.text, fs, random);
@@ -328,25 +403,40 @@ export function addToken({ path, name, role, fs = nodeFs, now = () => Date.now()
 	return { token, entry };
 }
 
-/** Remove the token named `name`: `{ok}` or `{invalid}`. Every session signed in with it ends on its next request. */
+/**
+ * Remove the token named `name`, a kept one (issue #761) included: `{ok}` or `{invalid}`. Every session signed in with it
+ * ends on its next request.
+ */
 export function revokeToken({ path, name, fs = nodeFs, random = randomBytes, uid = processUid(), expect = undefined, identity = undefined }) {
 	const loaded = loadForWrite(path, fs, uid, { create: false });
 	if (loaded.invalid) return loaded;
 	if (expect !== undefined && loaded.text !== expect) return { invalid: "the console tokens file changed after preview; nothing was written" };
 	const entry = loaded.file.tokens.find((t) => t.name === name);
+	// `identity` (the setup page's undo of the viewer it made) names a known entry only, so a kept one never matches it.
 	if (identity !== undefined && (!entry || entry.sha256 !== identity.sha256 || entry.createdAt !== identity.createdAt || entry.role !== identity.role)) return { invalid: "the viewer entry changed; the replacement was not revoked" };
-	if (!entry) return { invalid: `there is no token named "${String(name)}"; \`pi-dispatch-console token list\` shows the names` };
-	return writeTokens(path, { ...loaded.file, tokens: loaded.file.tokens.filter((t) => t.name !== name) }, loaded.text, fs, random);
+	const kept = keptTokens(loaded.file);
+	// A kept entry (issue #761) can be removed here: taking access away is safe whatever the role means.
+	if (!entry && !kept.some((t) => t.name === name)) return { invalid: `there is no token named "${String(name)}"; \`pi-dispatch-console token list\` shows the names` };
+	const carry = loaded.file.carry;
+	const next = { ...loaded.file, tokens: loaded.file.tokens.filter((t) => t.name !== name) };
+	// Its carried fields go with it, so a token added later under the same name does not inherit them.
+	if (carry) next.carry = { ...carry, kept: kept.filter((t) => t.name !== name), extras: Object.keys(carry.extras).filter((k) => k !== name).reduce((out, k) => defineOwn(out, k, carry.extras[k]), {}) };
+	return writeTokens(path, next, loaded.text, fs, random);
 }
 
 /**
- * Give the token named `name` a new secret, keeping its role: `{token, entry}` or `{invalid}`. The old secret stops
- * working, and every session signed in with it ends on its next request (its hash is gone from the file).
+ * Give the token named `name` a new secret, keeping its role and its carried fields (issue #761): `{token, entry}` or
+ * `{invalid}`. The old secret stops working, and every session signed in with it ends on its next request (its hash is
+ * gone from the file). An entry kept for a role this build does not know is refused.
  */
 export function rotateToken({ path, name, fs = nodeFs, now = () => Date.now(), random = randomBytes, uid = processUid() }) {
 	const loaded = loadForWrite(path, fs, uid, { create: false });
 	if (loaded.invalid) return loaded;
 	const old = loaded.file.tokens.find((t) => t.name === name);
+	const keptEntry = old ? null : keptTokens(loaded.file).find((t) => t.name === name);
+	// A kept entry (issue #761) keeps the secret it has: a new one written by this build could lose a field of the entry
+	// the release that knows its role relies on, and a rotate that cannot say what the token can do is not one to make.
+	if (keptEntry) return { invalid: `the token "${keptEntry.name}" cannot be rotated here: its role \`${keptEntry.role}\` is not one this pi-dispatch-console knows; rotate it with the release that added that role, or revoke it` };
 	if (!old) return { invalid: `there is no token named "${String(name)}"; \`pi-dispatch-console token list\` shows the names` };
 	const token = newToken(random);
 	const entry = { name, role: old.role, sha256: hashToken(token), createdAt: iso(now) };

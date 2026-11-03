@@ -32,8 +32,9 @@
  * A STEERED COMMENT IS NEVER ENQUEUED, so the queue's delivery-GUID shield (REQ-DEDUP-BY-DELIVERY-GUID) never sees its
  * id. Without a stand-in, a redelivery of the same GUID after its run ended (a forge redelivery, a poller cycle
  * retried after a crash) would find no live run, fall through and start the paid job the steer replaced. So a steer
- * sets `steer:steered:<delivery job id>` (NX, 31 days, the GUID job id's own retention), and every fall-through that
- * reached Valkey asks for it first: present, the delivery is answered as steered (`redelivered`) and never enqueued.
+ * sets `steer:steered:<delivery job id>` (NX, for `FORGE_JOB_RETENTION_S`, the GUID job id's own retention), and every
+ * fall-through that reached Valkey asks for it first: present, the delivery is answered as steered (`redelivered`) and
+ * never enqueued.
  * Set AFTER a push succeeded, never before: a marker for a comment that was then enqueued would be harmless while the
  * enqueue holds, but one whose enqueue failed (a 503 the forge redelivers) would swallow the redelivery, a lost job.
  *
@@ -53,9 +54,13 @@ import { forgeDeliveryJobId } from "@edgehero/pi-dispatch/job-id";
 import { withJobDataVersion } from "@edgehero/pi-dispatch/job-data-version";
 import { steerTargetOf } from "@edgehero/pi-dispatch/inbox-relay";
 import { STEER_MODES, boundSteerText, forgeMessageId, liveRunsForTarget, normalizeSteerEntry, pushSteer, scrubSteerText, storeFallback } from "@edgehero/pi-dispatch/steer-inbox";
+import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
 
-/** How long a steered delivery's marker lives: the GUID job id's own 31-day retention (`enqueueForgeJob`). */
-export const STEER_MARKER_TTL_S = 31 * 24 * 3600;
+/**
+ * How long a steered delivery's marker lives, in SECONDS (`EX`): the GUID job id's own retention (`enqueueForgeJob`,
+ * `FORGE_JOB_RETENTION_S`), since the marker stands in for that job key and must refuse a redelivery exactly as long.
+ */
+export const STEER_MARKER_TTL_S = FORGE_JOB_RETENTION_S;
 
 /** The marker a steered delivery leaves, keyed by the job id the comment would have been enqueued under; null without one. */
 export function steeredMarkerKey(kind, deliveryId) {

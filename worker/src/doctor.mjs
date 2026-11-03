@@ -133,7 +133,8 @@ import { dayKey, monthKey, weekKey } from "./budget.mjs";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
 import { cronPlacement, envelopeJobPaths } from "./schedules.mjs";
 import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
-import { operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.mjs";
+import { keptTokens, operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.mjs";
+import { RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RUNS_MIN, runMirrorMaxRunsOf } from "./retention.mjs";
 import { verifyConsoleAudit } from "./console-audit.mjs";
 import { OTHER } from "./priorities.mjs";
 import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
@@ -715,8 +716,10 @@ export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "P
  *  the key's path, neither a secret); the inline key is only ever sniffed for its first bytes. */
 export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_PRIVATE_KEY"]);
 /** Issue #471: the worker's settings doctor judges, which it read from this shell alone while the service read them from
- *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+ *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json.
+ *  Issue #761: PI_CONSOLE_AUDIT_RETENTION_DAYS is here and not in `CONSOLE_ENV_KEYS` although it is named for the
+ *  console: the worker reads it (it runs the audit reaper), and a console key set alone makes doctor judge a console. */
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_CONSOLE_AUDIT_RETENTION_DAYS", "PI_RUN_MIRROR_MAX_RUNS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -4472,6 +4475,9 @@ export async function collectChecks(shellVars, seams) {
 	}
 
 	section("state");
+	// Issue #761: how long the console audit trail is kept and how many runs the shared run index holds, each a ✗ where
+	// the worker refuses to boot on its value (`WORKER_INT_SETTINGS`).
+	checks.push(...workerIntSettingChecks(env, (key) => fromFileNote(fileSays(key))));
 	// issue #290. The two DURABLE stores -- the run history everything folds over, and the overlay holding
 	// every cap the operator tuned from the panel -- used to default under the OS temp dir, which macOS
 	// sweeps on its own schedule and which is tmpfs (RAM) on several Linux distros. They now default under
@@ -5345,6 +5351,34 @@ export function consoleListenOf(value, platform = process.platform) {
 }
 
 /**
+ * Issue #761: the worker settings read with `config.mjs`'s `nonNegativeInt` or `boundedInt` whose bad value doctor
+ * names, by that same rule (unset or empty is the default; any other value must be exactly the integer, spaces around
+ * it allowed, inside the bounds): a value the worker refuses to boot on (exit 2, a configuration error naming the key)
+ * fails here too, and nothing else does. `want` is the loader's own phrase for the rule.
+ */
+export const WORKER_INT_SETTINGS = Object.freeze({
+	PI_CONSOLE_AUDIT_RETENTION_DAYS: Object.freeze({ min: 0, max: undefined, want: "a non-negative integer", fix: "set it to a whole number of days (0 keeps the console audit trail forever), or delete the line so the trail is kept as long as PI_LOG_RETENTION_DAYS keeps run history" }),
+	PI_RUN_MIRROR_MAX_RUNS: Object.freeze({ min: RUN_MIRROR_MAX_RUNS_MIN, max: RUN_MIRROR_MAX_RUNS_MAX, want: `an integer ${RUN_MIRROR_MAX_RUNS_MIN}-${RUN_MIRROR_MAX_RUNS_MAX}`, fix: `set it to a whole number from ${RUN_MIRROR_MAX_RUNS_MIN} to ${RUN_MIRROR_MAX_RUNS_MAX}, or delete the line for the default (${RUN_MIRROR_MAX_RUNS_DEFAULT})` }),
+});
+
+/** Whether `raw` is a value `config.mjs`'s `boundedInt` takes for `rule` (see `WORKER_INT_SETTINGS`). */
+function workerIntAccepted(raw, { min, max }) {
+	if (raw === undefined || raw === "") return true;
+	const n = Number.parseInt(raw, 10);
+	return Number.isInteger(n) && n >= min && (max === undefined || n <= max) && String(n) === String(raw).trim();
+}
+
+/**
+ * A ✗ for each `WORKER_INT_SETTINGS` key `env` sets to a value the worker refuses to boot on; `note(key)` says where it
+ * came from. The keys are the table's own, so a setting added there is judged here with nothing else to change.
+ */
+export function workerIntSettingChecks(env, note = () => "") {
+	return Object.entries(WORKER_INT_SETTINGS)
+		.filter(([key, rule]) => !workerIntAccepted(env[key], rule))
+		.map(([key, rule]) => ({ ok: false, label: `${key} is ${quotedShown(env[key])}, which is not ${rule.want}: the worker refuses to boot on it (exit 2)${note(key)}`, fix: rule.fix }));
+}
+
+/**
  * The console's lines (issue #640, REQ-CONSOLE-SECURITY). NONE for a deployment that never set the console up: no
  * tokens file at the resolved path (nothing at all there, by lstat) and no PI_CONSOLE_* key set. Otherwise:
  *   - the tokens file as the console reads it (`readTokensFile`: owner-only regular file, valid), ✗ with its own fix;
@@ -5353,8 +5387,12 @@ export function consoleListenOf(value, platform = process.platform) {
  *     read-write, so a job there could read the file or add a token of its own. Judged by `envelopeInsideJobPaths`, the
  *     envelope's identity-based containment check (a firmlink or bind alias of a folder is caught), on the file's real
  *     path, with the local folders, skills dirs, absolute run roots and the overlay;
+ *   - entries kept for a role this release does not know (issue #761, `keptTokens`), ⚠: a newer release writes such
+ *     entries, and a console of this release signs them in nowhere;
  *   - PI_CONSOLE_LISTEN parseable (✗, the console refuses to start) and PI_CONSOLE_BIND_PUBLIC=1 (⚠, plain HTTP);
- *   - the audit chain (`verifyConsoleAudit`), ⚠ when broken, nothing while the log holds no row.
+ *   - the audit chain (`verifyConsoleAudit`), ⚠ when broken, nothing while the log holds no row; an intact chain with
+ *     rows whose shaped action or outcome this release does not know (issue #761, `unknown`; a newer console writes
+ *     such rows) is still ok, and its line counts them.
  * `env` must already carry the console keys resolved (`collectChecks` does it). Seams: `cwd` (the deployment folder),
  * `fs`, `uid`, `home`, `platform`, `folders` (canonical local run.folders), `skillsDirs`, `realpath`.
  */
@@ -5385,6 +5423,11 @@ export function consoleChecks(env, { cwd = process.cwd(), fs = nodeFs, uid = pro
 		} else if (operators > 0) {
 			checks.push({ ok: true, label: `console: tokens file ${shownPath} is owner-only and outside every job folder (${operators} operator${operators === 1 ? "" : "s"}, ${viewers} viewer${viewers === 1 ? "" : "s"})` });
 		}
+		const kept = keptTokens(read.file).length;
+		if (kept > 0) {
+			const said = kept === 1 ? "1 token carries a role this pi-dispatch does not know, so a console of this release signs it in nowhere" : `${kept} tokens carry a role this pi-dispatch does not know, so a console of this release signs them in nowhere`;
+			checks.push({ ok: false, warn: true, label: `console: ${said}`, fix: "upgrade pi-dispatch and the console" });
+		}
 	}
 	const listen = consoleListenOf(env.PI_CONSOLE_LISTEN, platform);
 	const bindPublic = env.PI_CONSOLE_BIND_PUBLIC === "1";
@@ -5405,7 +5448,10 @@ export function consoleChecks(env, { cwd = process.cwd(), fs = nodeFs, uid = pro
 		checks.push({ ok: false, warn: true, label: `console: the audit log chain is broken${where}: ${escapeControls(audit.broken.reason)}`, fix: `a row was changed, removed or moved after it was written, or the file was damaged. Keep a copy of ${join(logsDir, "console-audit")} for review; \`pi-dispatch-console audit verify\` names the same link, and a damaged LAST line makes the console refuse every write until that file is moved aside` });
 	} else if (audit.rows > 0) {
 		const start = audit.startsAt ? `, starting at seq ${audit.startsAt.seq} in ${audit.startsAt.file} (older rows reaped)` : "";
-		checks.push({ ok: true, label: `console: audit log chain intact (${audit.rows} row${audit.rows === 1 ? "" : "s"}${start})` });
+		// Issue #761: what the check knows of such rows, that their words are unknown here and shaped, never who wrote them.
+		// Last, since its colon would otherwise run into the start's clause.
+		const unknown = audit.unknown > 0 ? `, ${audit.unknown} not known to this pi-dispatch: a newer console writes such rows` : "";
+		checks.push({ ok: true, label: `console: audit log chain intact (${audit.rows} row${audit.rows === 1 ? "" : "s"}${start}${unknown})` });
 	}
 	return checks;
 }
@@ -9025,22 +9071,26 @@ export const CAPACITY_DOCTOR_TIMEOUT_MS = 5_000;
 
 /**
  * The capacity lines (issue #599, phase 2): the report over the last 7 days (`capacity.mjs`, the CLI's function), read
- * by `seams.readCapacity` (default: `readCapacityRecords` through a fail-fast client, `prune`-free and writing nothing).
- * Never throws and never warns: an unreadable history is one line saying so.
+ * by `seams.readCapacity` (default: `readCapacityRecords` through a fail-fast client, `prune`-free and writing nothing;
+ * `seams.readCapacityRecords` stands in for `readCapacityRecords` alone, see `defaultReadCapacity`). Never throws and
+ * never warns: an unreadable history is one line saying so.
  */
 export async function doctorCapacity({ seams, env, home, url, hosts, localHost }) {
 	try {
 		const window = CAPACITY_WINDOWS["7d"];
 		const nowMs = (typeof seams.wallClock === "function" ? seams.wallClock : Date.now)();
 		const retention = typeof env.PI_LOG_RETENTION_DAYS === "string" && /^\d{1,6}$/.test(env.PI_LOG_RETENTION_DAYS) ? Number(env.PI_LOG_RETENTION_DAYS) : 30;
+		// The mirror's cap (PI_RUN_MIRROR_MAX_RUNS, issue #761), so an index the workers may grow past the built-in cap is not
+		// read as one a trim cut short. Lenient: a bad value is the worker's refusal, which `workerIntSettingChecks` names.
+		const indexMax = runMirrorMaxRunsOf(env.PI_RUN_MIRROR_MAX_RUNS).value;
 		// The read is told to stop when the bound passes (`signal`): giving up on it is not enough, since a client still
 		// waiting on its connection would keep this process alive after doctor has printed everything.
 		const stop = new AbortController();
-		const args = { url, logsDir: logsDirPath(env, home), sinceMs: nowMs - window.ms, nowMs, retentionDays: retention, localHost, signal: stop.signal };
+		const args = { url, logsDir: logsDirPath(env, home), sinceMs: nowMs - window.ms, nowMs, retentionDays: retention, localHost, indexMax, signal: stop.signal };
 		let timer;
 		const read = await Promise.race([
 			Promise.resolve()
-				.then(() => (seams.readCapacity ?? defaultReadCapacity)(args))
+				.then(() => (seams.readCapacity ?? ((a) => defaultReadCapacity(a, seams.readCapacityRecords)))(args))
 				.finally(() => clearTimeout(timer)),
 			new Promise((resolve) => {
 				timer = setTimeout(() => {
@@ -9075,11 +9125,14 @@ export const CAPACITY_CONNECT_TIMEOUT_MS = 2_000;
 /**
  * The default capacity read: a fail-fast client, its connection bounded (`connectWithin`: a server that accepts TCP and
  * never answers holds ioredis in its ready check forever) and DISCONNECTED when `signal` aborts, so a read doctor gave
- * up on cannot keep the process alive.
+ * up on cannot keep the process alive. `readRecords` (doctor's `seams.readCapacityRecords`, for a test) stands in for
+ * `readCapacityRecords` and receives exactly what it would, the mirror's cap included. The forbidden-read guard still
+ * runs first, whether or not it is given: it is a seam for a test process that never forbade the real read, and it
+ * lifts the guard for no other test.
  */
-async function defaultReadCapacity({ url, logsDir, sinceMs, nowMs, retentionDays, localHost, signal }) {
+async function defaultReadCapacity({ url, logsDir, sinceMs, nowMs, retentionDays, localHost, indexMax, signal }, readRecords = undefined) {
 	if (defaultCapacityReadForbidden) throw Object.assign(new Error("doctor reached its real capacity read in a test: pass readCapacity"), { [FORBIDDEN_READ]: true });
-	const { readCapacityRecords } = await import("./capacity-records.mjs");
+	const readCapacityRecords = readRecords ?? (await import("./capacity-records.mjs")).readCapacityRecords;
 	let client = null;
 	// Measured on ioredis 5.11: `disconnect()` ends the socket and arms a timer (`disconnectTimeout`, 2 s by default)
 	// that destroys it unless the socket's `close` clears it first, and the client's own failed ready check disconnects
@@ -9108,7 +9161,7 @@ async function defaultReadCapacity({ url, logsDir, sinceMs, nowMs, retentionDays
 		}
 	}
 	try {
-		return await readCapacityRecords({ redis: client, logsDir, sinceMs, nowMs, retentionDays, localHost, noMirrorReason: url ? "the Valkey did not answer: only this host's files were read" : "no Valkey to read: only this host's files were read" });
+		return await readCapacityRecords({ redis: client, logsDir, sinceMs, nowMs, retentionDays, localHost, indexMax, noMirrorReason: url ? "the Valkey did not answer: only this host's files were read" : "no Valkey to read: only this host's files were read" });
 	} finally {
 		signal?.removeEventListener?.("abort", drop);
 		drop();

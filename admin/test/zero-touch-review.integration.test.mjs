@@ -9,6 +9,7 @@ import { buildRecord } from "@edgehero/pi-dispatch/run-history";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
 import { makeZeroTouchFixStore } from "@edgehero/pi-dispatch/zero-touch-fixes";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
+import { RUNS_INDEX, RUNS_SINCE, runRecordKey } from "@edgehero/pi-dispatch/run-mirror";
 import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
 
 const base = process.env.VALKEY_TEST_URL;
@@ -39,13 +40,14 @@ async function fixture(t) {
   const touches = makeTouchStore({ redis, now, retentionDays: 365 });
   await touches.initialize();
   clock = NOW;
-  const service = makeZeroTouchService({ paths, env: { PI_LOG_RETENTION_DAYS: "365" }, now, redisFn, triggerBindingFn: async ({ jobId, index }) => ({ ok: true, runId: jobId, index, triggerDigest: hash(JSON.stringify(JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")).triggers[index])) }) });
+  const serviceWith = env => makeZeroTouchService({ paths, env: { PI_LOG_RETENTION_DAYS: "365", ...env }, now, redisFn, triggerBindingFn: async ({ jobId, index }) => ({ ok: true, runId: jobId, index, triggerDigest: hash(JSON.stringify(JSON.parse(fs.readFileSync(paths.triggersPath, "utf8")).triggers[index])) }) });
+  const service = serviceWith({});
   function record(jobId, scopeId, { project = null, reason = null } = {}) {
     const value = buildRecord({ job: { id: jobId, data: { kind: "github", repo: "acme/api", touchScopeId: scopeId, trigger: { matched: { index: 0, type: "label", label: "fix" } } } }, result: { outcome: "completed", reason }, startedAt: new Date(NOW - DAY - 1000).toISOString(), endedAt: new Date(NOW - DAY).toISOString(), host: "review-host", project, touchTracking: true });
     fs.writeFileSync(join(paths.logsDir, `${jobId}.json`), JSON.stringify(value));
     return value;
   }
-  return { paths, redis, service, touches, record, now, advance: () => clock += 1000 };
+  return { paths, redis, service, serviceWith, touches, record, now, advance: () => clock += 1000 };
 }
 
 test("the actual touched-run service keeps missing and literally unassigned projects separate", { skip }, async t => {
@@ -117,4 +119,19 @@ test("applying the identical instruction after Undo records a new current fix", 
   assert.equal(fixes.fixes.find(row => row.id === second.fixId).undoneAt, undefined);
   assert.equal((await f.service.read()).groups.find(row => row.id === assigned.groupId).status, "fixed");
   assert.equal(JSON.parse(fs.readFileSync(f.paths.triggersPath)).triggers[0].run.instructions, params.sentence);
+});
+
+test("the service reads the shared run index against PI_RUN_MIRROR_MAX_RUNS, so an index at that cap starts no earlier than its oldest run (issue #761)", { skip }, async t => {
+  const f = await fixture(t), oldest = NOW - 20 * DAY, start = NOW - 60 * DAY;
+  // 1,000 runs in the shared index, each with a body, and a start 60 days back that its first run vouches for. Told the
+  // built-in cap (5,000), the index was never cut by count, so the mirror's history begins at its start; told a cap of
+  // 1,000, it may have been, so it begins no earlier than its oldest run (capacity-records.mjs readMirrorWindow).
+  const runs = Array.from({ length: 1000 }, (_, i) => [`cap-${String(i).padStart(4, "0")}`, oldest + i * 60_000]);
+  await f.redis.zadd(RUNS_INDEX, ...runs.flatMap(([id, score]) => [score, id]));
+  await f.redis.mset(...runs.flatMap(([id]) => [runRecordKey(id), "null"]));
+  await f.redis.hset(RUNS_SINCE, "at", String(start), "member", runs[0][0]);
+  const uncapped = await f.service.read({ windowDays: 90 });
+  const capped = await f.serviceWith({ PI_RUN_MIRROR_MAX_RUNS: "1000" }).read({ windowDays: 90 });
+  assert.equal(uncapped.coverage.fromMs, start, "the built-in cap: the index's own start");
+  assert.equal(capped.coverage.fromMs, oldest, "the configured cap reaches the run records read");
 });

@@ -18,6 +18,8 @@ import {
 	runIdOf,
 	sweepOrphanJobDirs,
 } from "../src/recovery-queue.mjs";
+import { FORGE_JOB_RETENTION_S } from "../src/retention.mjs";
+import { JOB_DIR_RE } from "../src/run-checkpoint.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #645, durable runs: the queue half. The routing, the id scheme, the options, the cap, the claim's two branches,
@@ -163,7 +165,10 @@ test("the recovery's data, id and options: attempts 1, no deduplication, the for
 	await enqueue({ job: bullJob("gh-9"), cause: "infra", pointer: POINTER() });
 	const [add] = hosts.get("pi-jobs@h1").adds;
 	assert.equal(add.jobName, "github");
-	assert.deepEqual(add.opts, { jobId: "gh-9.r1", attempts: 1, removeOnComplete: { age: 31 * 24 * 3600 }, removeOnFail: { age: 31 * 24 * 3600 } });
+	// Kept as long as the forge job it recovers (issue #761): compared with the constant, so a literal the queue kept when
+	// the retention changes fails here, and with today's 31 days in seconds, so a changed retention is read again.
+	assert.deepEqual(add.opts, { jobId: "gh-9.r1", attempts: 1, removeOnComplete: { age: FORGE_JOB_RETENTION_S }, removeOnFail: { age: FORGE_JOB_RETENTION_S } });
+	assert.deepEqual([add.opts.removeOnComplete, add.opts.removeOnFail], [{ age: 31 * 24 * 3600 }, { age: 31 * 24 * 3600 }]);
 	assert.equal("deduplication" in add.opts, false, "the original's semantic key would swallow the recovery");
 	assert.deepEqual(add.data, { ...ARMED, recoveryOf: "gh-9", recovery: 1, recoverBy: NOW + 60_000 });
 	// The pending set holds it until its deadline, scored by that deadline.
@@ -515,19 +520,72 @@ test("the boot sweep removes orphaned job dirs older than the job timeout, keepi
 	assert.deepEqual(await sweepOrphanJobDirs({ jobsDir: join(jobsDir, "absent"), olderThanMs: 1, now: () => NOW }), { removed: 0, kept: 0, failed: 0 });
 });
 
-test("pointedJobDirs: this host's valid pointers only, and a refusal over the bound rather than a partial answer", async () => {
+test("pointedJobDirs: this host's pointers of any version only, and a refusal over the bound rather than a partial answer", async () => {
 	const pointers = {
 		"run:checkpoint:a": JSON.stringify(POINTER({ jobDir: "job-aaaaaa" })),
 		"run:checkpoint:b": JSON.stringify(POINTER({ host: "h2", jobDir: "job-bbbbbb" })),
 		"run:checkpoint:c": "not json",
+		// A key this build's reader does not know (issue #761): not a pointer to route by, still a directory to keep.
 		"run:checkpoint:d": JSON.stringify({ ...POINTER({ jobDir: "job-dddddd" }), extra: 1 }),
 	};
 	const redis = {
 		scan: async (cursor) => (cursor === "0" ? ["7", ["run:checkpoint:a", "run:checkpoint:b"]] : ["0", ["run:checkpoint:c", "run:checkpoint:d"]]),
 		mget: async (...keys) => keys.map((k) => pointers[k]),
 	};
-	assert.deepEqual([...(await pointedJobDirs({ redis, hostName: "h1" }))], ["job-aaaaaa"]);
+	assert.deepEqual([...(await pointedJobDirs({ redis, hostName: "h1" }))], ["job-aaaaaa", "job-dddddd"]);
 	await assert.rejects(() => pointedJobDirs({ redis, hostName: "h1", maxKeys: 1 }), /too many checkpoint pointers/);
+});
+
+test("a newer release's pointer keeps its job dir through the boot sweep: pointed at from this host it is kept, from another host or as v0 it is not (issue #761)", async () => {
+	const jobsDir = tempDir("pi-jobsweep-");
+	const old = new Date(NOW - 2 * 3600 * 1000);
+	for (const name of ["job-newer1", "job-other1", "job-zero01"]) {
+		mkdirSync(join(jobsDir, name, "workspace"), { recursive: true });
+		utimesSync(join(jobsDir, name), old, old);
+	}
+	const newer = (over) => JSON.stringify({ ...POINTER(over), v: 2, lease: { until: NOW }, seq: "x" });
+	const pointers = {
+		"run:checkpoint:n": newer({ jobDir: "job-newer1" }),
+		"run:checkpoint:o": newer({ host: "h2", jobDir: "job-other1" }),
+		"run:checkpoint:z": JSON.stringify(POINTER({ v: 0, jobDir: "job-zero01" })),
+	};
+	const redis = { scan: async () => ["0", Object.keys(pointers)], mget: async (...keys) => keys.map((k) => pointers[k]) };
+	const keep = await pointedJobDirs({ redis, hostName: "h1" });
+	assert.deepEqual([...keep], ["job-newer1"]);
+	assert.deepEqual(await sweepOrphanJobDirs({ jobsDir, olderThanMs: 35 * 60 * 1000, now: () => NOW, keep }), { removed: 2, kept: 1, failed: 0 });
+	assert.equal(existsSync(join(jobsDir, "job-newer1", "workspace")), true, "the directory a newer release's salvage still needs");
+	assert.equal(existsSync(join(jobsDir, "job-other1")), false);
+	assert.equal(existsSync(join(jobsDir, "job-zero01")), false);
+});
+
+test("salvage meeting a checkpoint a newer release wrote takes nothing and removes nothing: checkpoint-newer, the job dir and its beside-files stay (issue #761)", async () => {
+	const jobsDir = tempDir("pi-salvage-");
+	const dir = staleJobDir(jobsDir, "job-ab12cd");
+	writeFileSync(`${dir}.cid`, "abc123");
+	const logs = [];
+	const reads = [];
+	const checkpointer = {
+		readManifest: async (runId) => (reads.push(runId), { invalid: true, reason: "field:newer", newer: true }),
+		snapshot: async () => assert.fail("nothing is taken from a run this build cannot continue"),
+	};
+	const runCheckpointer = { open: () => assert.fail("nor through the run checkpointer") };
+	const salvage = makeSalvager({ jobsDir, hostName: "h1", workspaceCheckpointer: checkpointer, runCheckpointer, log: (e, f) => logs.push([e, f]) });
+	assert.deepEqual(await salvage({ runId: "gh-s", pointer: POINTER(), attempt: 2 }), { skipped: "checkpoint-newer" });
+	assert.deepEqual(reads, ["gh-s"], "read once");
+	assert.equal(readFileSync(join(dir, "workspace", "f.txt"), "utf8"), "x", "the job dir is left whole");
+	assert.equal(existsSync(`${dir}.cid`), true, "and what lies beside it");
+	assert.deepEqual(logs, [["checkpoint_salvage", { runId: "gh-s", skipped: "checkpoint-newer" }]]);
+	// An unreadable checkpoint that is NOT newer still goes as before: no-checkpoint, and the stale dir removed.
+	const other = makeSalvager({ jobsDir, hostName: "h1", workspaceCheckpointer: { readManifest: async () => ({ invalid: true, reason: "field:keys" }) } });
+	assert.deepEqual(await other({ runId: "gh-s", pointer: POINTER() }), { skipped: "no-checkpoint" });
+	assert.equal(existsSync(dir), false);
+});
+
+test("one job-dir pattern: recovery-queue.mjs judges names by run-checkpoint.mjs's JOB_DIR_RE and keeps no copy of its own (issue #761)", () => {
+	const source = readFileSync(new URL("../src/recovery-queue.mjs", import.meta.url), "utf8");
+	assert.equal(/\/\^job-/.test(source), false, "no job-dir regex literal in recovery-queue.mjs");
+	assert.match(source, /import \{[^}]*\bJOB_DIR_RE\b[^}]*\} from "\.\/run-checkpoint\.mjs"/);
+	assert.ok(JOB_DIR_RE.test("job-ab12cd") && !JOB_DIR_RE.test("../job-x") && !JOB_DIR_RE.test("job-"));
 });
 
 // --- index.mjs: the keys follow the run ---------------------------------------------------------------------------

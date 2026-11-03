@@ -10,6 +10,7 @@ import { makeZeroTouchFixStore } from "@edgehero/pi-dispatch/zero-touch-fixes";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
 import { makeTouchOutbox } from "@edgehero/pi-dispatch/touch-outbox";
 import { readZeroTouch, ZERO_TOUCH_NO_PROJECT, zeroTouchProjectMatches } from "@edgehero/pi-dispatch/zero-touch";
+import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
 import { readRunById } from "./read-model.mjs";
 import { checkTriggerFixSource } from "./job-actions.mjs";
 import { runMatches } from "./run-filter.mjs";
@@ -18,6 +19,9 @@ const hash = (text) => createHash("sha256").update(text).digest("hex");
 
 export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.now, redisFn = makeRedisClient, queueFn = makeQueue, triggerBindingFn = checkTriggerFixSource, log = () => {} } = {}) {
   const retentionDays = /^\d+$/.test(String(env.PI_LOG_RETENTION_DAYS ?? "30")) ? Number(env.PI_LOG_RETENTION_DAYS ?? 30) : 30;
+  // The mirror's cap (PI_RUN_MIRROR_MAX_RUNS, issue #761), read as the capacity report reads it, so an index the workers
+  // were allowed to grow past the built-in cap does not read as a history a trim cut short.
+  const indexMax = runMirrorMaxRunsOf(env.PI_RUN_MIRROR_MAX_RUNS).value;
   const config = () => parseTriggersDocument(fs.readFileSync(paths.triggersPath, "utf8"), paths.triggersPath).zeroTouch;
   const repairFiles = new Set(Object.entries(paths).filter(([key, value]) => /(?:File|Path)$/.test(key) && typeof value === "string").map(([, value]) => value));
   const using = async (fn) => {
@@ -57,7 +61,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
         const [questions, changes] = await Promise.all([groups.publicSnapshot({ names: cfg?.names ?? {} }), fixes.publicSnapshot()]);
         const selectedGroups = questions.groups.filter((g) => zeroTouchProjectMatches(g.project, project) && (!scopeId || g.scopeId === scopeId));
         const selectedSources = questions.rows.filter((r) => zeroTouchProjectMatches(r.project, project) && (!scopeId || r.scopeId === scopeId));
-        const report = await readZeroTouch({ redis, logsDir: paths.logsDir, retentionDays, localHost: env.PI_WORKER_NAME ?? null, now, windowDays, project, scopeId, groups: selectedGroups, fixes: changes.fixes, fs, includeRecords: true });
+        const report = await readZeroTouch({ redis, logsDir: paths.logsDir, retentionDays, indexMax, localHost: env.PI_WORKER_NAME ?? null, now, windowDays, project, scopeId, groups: selectedGroups, fixes: changes.fixes, fs, includeRecords: true });
         const knownSources = new Set(questions.rows.map((r) => r.runId));
         const missingSources = cfg?.capture && questions.state === "ok" ? report.records.filter((r) => r.reason === "awaiting-input" && zeroTouchProjectMatches(r.project, project) && (!scopeId || r.touchScopeId === scopeId) && !knownSources.has(r.jobId)).map((r) => ({ runId: r.jobId, status: "source-unavailable" })) : [];
         report.grouping = { enabled: cfg?.capture === true, state: configUnavailable ? "configuration-unavailable" : questions.state, partial: questions.partial, pending: selectedSources.filter((r) => r.status === "pending").length, unassigned: selectedSources.filter((r) => !r.groupId).length };

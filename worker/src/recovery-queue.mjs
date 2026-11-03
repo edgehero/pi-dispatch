@@ -32,7 +32,8 @@ import * as nodeFsp from "node:fs/promises";
 import { join } from "node:path";
 import { QUEUE, hostQueueName as defaultHostQueueName } from "./queue.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
-import { lastCompleteLineEnd, normalizeHost, validPointer } from "./run-checkpoint.mjs";
+import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
+import { JOB_DIR_RE, lastCompleteLineEnd, normalizeHost, pointerKeepEntry } from "./run-checkpoint.mjs";
 
 /** The most recoveries one run gets: the original, then `.r1`, then `.r2`. A third crash fails the run as before. */
 export const RECOVERY_CAP = 2;
@@ -94,8 +95,6 @@ const NOT_STARTED_STATES = new Set(["waiting", "delayed", "prioritized", "paused
 /** The worker-name charset (config.mjs), duplicated for queue.mjs's reason: a pointer is peer-written data. */
 const HOST_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-/** A job directory's basename as `mkdtemp(join(jobsDir, "job-"))` makes it. Nothing else is ever joined to jobsDir. */
-const JOB_DIR_RE = /^job-[A-Za-z0-9_-]{1,64}$/;
 /**
  * What a run writes BESIDE its job directory, swept with it (issue #683): the cidfile (#345), and the openshell venue's
  * policy file and upload and download staging directories (worker/src/backend-openshell.mjs), which a worker that died
@@ -212,8 +211,8 @@ export function makeRecoveryEnqueuer({ redis, queues, hostQueueName = defaultHos
 				jobId,
 				attempts: 1,
 				// The forge jobs' retention (queue.mjs enqueueForgeJob), so a recovery is as visible as the run it continues.
-				removeOnComplete: { age: 31 * 24 * 3600 },
-				removeOnFail: { age: 31 * 24 * 3600 },
+				removeOnComplete: { age: FORGE_JOB_RETENTION_S },
+				removeOnFail: { age: FORGE_JOB_RETENTION_S },
 			});
 			// Whoever ADDED records it pending, the winner or a loser that found the job missing: a loser's add is the only
 			// add a stranded run gets, and without its member the host-lost backstop would never look at it. Two members for
@@ -344,6 +343,9 @@ export function makeHostLostSweep({ redis, queues, now = () => Date.now(), log =
  * venue, model) come from it, because a crashed attempt left nothing else this host can trust for them, and a salvage
  * whose meta differed from the restore's gate would only be refused there. Paths: the only thing ever joined to jobsDir
  * is a basename matching `job-<chars>`, lstat'd as a real directory, so a pointer cannot name `..`, a link or a file.
+ * A checkpoint a newer pi-dispatch wrote (`readManifest`'s `newer`) is `{ skipped: "checkpoint-newer" }` with the
+ * directory left in place: with `sandbox-alive`, one of the two skips after the directory was found that remove nothing
+ * (issue #761).
  *
  * RESIDUAL, stated: the crashed attempt's secret VALUES (its forge token, its resolved run.secrets) died with it, so the
  * snapshot's secret scan runs without them. The store is host-private (0700) and never mounted, a forge token expires
@@ -380,9 +382,19 @@ export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runChec
 				log("checkpoint_salvage", { runId: sanitizeJobId(runId), skipped: "sandbox-alive" });
 				return { skipped: "sandbox-alive" };
 			}
+			// Read BEFORE the `try` whose `finally` removes the directory (issue #761): a checkpoint a newer pi-dispatch wrote
+			// is one this build cannot continue from, and the recovery waits for a worker that can (`newer-release`, the
+			// processor's pickup). That worker's salvage needs this very directory, so nothing is removed and nothing taken;
+			// the keep-list (`pointerKeepEntry`) holds the directory until the pointer's TTL. A read that throws lands in the
+			// outer catch, which removes nothing either.
+			const read = await workspaceCheckpointer.readManifest(runId);
+			if (read?.newer === true) {
+				log("checkpoint_salvage", { runId: sanitizeJobId(runId), skipped: "checkpoint-newer" });
+				return { skipped: "checkpoint-newer" };
+			}
 			let result;
 			try {
-				result = await snapshotFrom(dir);
+				result = await snapshotFrom(dir, read);
 			} finally {
 				// Removed whatever the snapshot said: the run continues from the newest checkpoint either way, and a stale job
 				// directory left behind is disk nothing will ever read again.
@@ -398,8 +410,7 @@ export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runChec
 			return { skipped: "internal-error" };
 		}
 
-		async function snapshotFrom(dir) {
-			const read = await workspaceCheckpointer.readManifest(runId);
+		async function snapshotFrom(dir, read) {
 			if (!read?.ok) return { skipped: "no-checkpoint" };
 			const m = read.manifest;
 			const transcriptFile = join(dir, "session", "current.jsonl");
@@ -449,7 +460,9 @@ export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runChec
 /**
  * The job directories a checkpoint pointer of THIS host still names: a crashed run's stale directory, kept for its
  * recovery's salvage. SCAN over `run:checkpoint:*`, bounded; throws on a Valkey fault, so the caller skips the orphan
- * sweep rather than delete a directory a recovery was about to salvage.
+ * sweep rather than delete a directory a recovery was about to salvage. A pointer of ANY version counts
+ * (`pointerKeepEntry`, issue #761): this list's "no" deletes, so a pointer a newer release wrote must keep its directory
+ * here even though this build would not route by it.
  */
 export async function pointedJobDirs({ redis, hostName, maxKeys = 10_000, count = 500 } = {}) {
 	const keep = new Set();
@@ -463,7 +476,7 @@ export async function pointedJobDirs({ redis, hostName, maxKeys = 10_000, count 
 			const values = await redis.mget(...keys);
 			for (const raw of values) {
 				try {
-					const p = validPointer(JSON.parse(raw));
+					const p = pointerKeepEntry(JSON.parse(raw));
 					if (p?.host === normalizeHost(hostName)) keep.add(p.jobDir);
 				} catch {}
 			}

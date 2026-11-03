@@ -11,7 +11,7 @@ import * as realFsp from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { STORE_GIT_FLAGS, storeGitEnv } from "../src/git-hardening.mjs";
-import { checkpointKey, DEFAULT_CHECKPOINT_LIMITS, defaultSpawnGit, makeWorkspaceCheckpointer } from "../src/workspace-checkpoint.mjs";
+import { CHECKPOINT_MANIFEST_VERSION, checkpointKey, DEFAULT_CHECKPOINT_LIMITS, defaultSpawnGit, makeWorkspaceCheckpointer } from "../src/workspace-checkpoint.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /** A fixed clock: the checkpointer's lock staleness and sweep TTL read it, so it is always injected. */
@@ -595,7 +595,9 @@ test("readManifest: absent, a transcript sha mismatch, every bad field, closed n
 		["model", (x) => (x.model = "a model with spaces"), "field:model"],
 		["extra", (x) => (x.path = "/etc/passwd"), "field:keys"],
 		["seq", (x) => (x.seq = 1.5), "field:seq"],
-		["v", (x) => (x.v = 2), "field:v"],
+		["v 0", (x) => (x.v = 0), "field:v"],
+		["v a string", (x) => (x.v = "1"), "field:v"],
+		["v a fraction", (x) => (x.v = 1.5), "field:v"],
 		["runId", (x) => (x.runId = "run 1/.."), "field:runId"],
 		["quiesced", (x) => (x.quiesced = "paused"), "field:quiesced"],
 		["transcript extra key", (x) => (x.transcript.path = "/tmp/t"), "field:transcript"],
@@ -614,6 +616,14 @@ test("readManifest: absent, a transcript sha mismatch, every bad field, closed n
 		realFs.writeFileSync(mpath, JSON.stringify(copy));
 		assert.deepEqual(await ck.readManifest("run-1"), { invalid: true, reason }, label);
 	}
+	// Issue #761: a version above every one this build reads is a newer release's, judged BEFORE the closed key set, so
+	// one that also adds a key is still `newer` (kept and waited on), never `keys` (broken).
+	for (const [label, mutate] of [["v 2", (x) => (x.v = 2)], ["v 2 with a key this build does not know", (x) => ((x.v = 2), (x.lease = { until: 1 }))], ["v 7", (x) => (x.v = 7)]]) {
+		const copy = structuredClone(m);
+		mutate(copy);
+		realFs.writeFileSync(mpath, JSON.stringify(copy));
+		assert.deepEqual(await ck.readManifest("run-1"), { invalid: true, reason: "field:newer", newer: true }, label);
+	}
 	realFs.writeFileSync(mpath, good);
 	realFs.writeFileSync(join(run, "CURRENT"), "../1\n");
 	assert.deepEqual(await ck.readManifest("run-1"), { invalid: true, reason: "current-malformed" }, "a CURRENT that is not a bare seq");
@@ -623,6 +633,44 @@ test("readManifest: absent, a transcript sha mismatch, every bad field, closed n
 	realFs.cpSync(join(run, "cp-1"), join(run, "cp-2"), { recursive: true });
 	realFs.writeFileSync(join(run, "CURRENT"), "2\n");
 	assert.deepEqual(await ck.readManifest("run-1"), { invalid: true, reason: "seq-mismatch" });
+});
+
+test("the manifest version policy, through its seam: a build that reads 1 and 2 and writes 1 (readers first) restores a v2 checkpoint, refuses v0 and waits on v3; this build's own table waits on v2 (issue #761)", async () => {
+	const env = setup();
+	// The readers-first build: its table holds versions 1 and 2, and its writer still writes CHECKPOINT_MANIFEST_VERSION.
+	const { ck: both } = await primed(env, { manifestReads: [1, 2] });
+	realFs.writeFileSync(join(env.ws, "a.txt"), "two\n");
+	const transcript = join(env.root, "t.jsonl");
+	realFs.writeFileSync(transcript, "abc\n");
+	const snap = await both.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1, transcript: { srcFile: transcript, offset: 4 } });
+	assert.equal(snap.manifest.v, CHECKPOINT_MANIFEST_VERSION);
+	assert.equal(CHECKPOINT_MANIFEST_VERSION, 1, "so this build writes 1, the older of the two versions it reads");
+	const mpath = join(env.storeDir, checkpointKey("run-1"), "cp-1", "manifest.json");
+	const good = JSON.parse(realFs.readFileSync(mpath, "utf8"));
+	assert.equal(good.v, CHECKPOINT_MANIFEST_VERSION, "and on disk");
+	const at = (v) => realFs.writeFileSync(mpath, JSON.stringify({ ...good, v }));
+	// Both versions read; a v2 checkpoint (as the next release would take it) restores into a fresh base.
+	for (const v of [1, 2]) {
+		at(v);
+		const read = await both.readManifest("run-1");
+		assert.equal(read.ok, true, `v${v}: ${JSON.stringify(read)}`);
+		assert.equal(read.manifest.v, v);
+		const into = freshBase(both, "run-1", env.baseSha);
+		assert.deepEqual(await both.restore({ runId: "run-1", manifest: read.manifest, intoWorkspace: into }), { written: 1, removed: 0 }, `v${v} restores`);
+		assert.equal(realFs.readFileSync(join(into, "a.txt"), "utf8"), "two\n");
+	}
+	at(0);
+	assert.deepEqual(await both.readManifest("run-1"), { invalid: true, reason: "field:v" });
+	at(3);
+	assert.deepEqual(await both.readManifest("run-1"), { invalid: true, reason: "field:newer", newer: true }, "v3 is above the newest it reads");
+	// This build's own table: v2 is newer, kept and waited on, and never restored.
+	const { ck } = checkpointer(env.storeDir);
+	at(2);
+	assert.deepEqual(await ck.readManifest("run-1"), { invalid: true, reason: "field:newer", newer: true });
+	assert.deepEqual(await ck.restore({ runId: "run-1", manifest: { ...good, v: 2 }, intoWorkspace: freshBase(ck, "run-1", env.baseSha) }), { refused: "bad-manifest" });
+	// A version a table stopped reading is broken, never newer: nothing will ever come to read it.
+	at(1);
+	assert.deepEqual(await checkpointer(env.storeDir, { manifestReads: [2, 3] }).ck.readManifest("run-1"), { invalid: true, reason: "field:v" });
 });
 
 // ── sweep, remove, usage ────────────────────────────────────────────────────────────────────────────────

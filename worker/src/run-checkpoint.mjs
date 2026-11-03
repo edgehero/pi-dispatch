@@ -59,9 +59,32 @@ const SEQ_TRIES = 8;
 
 const HOST_RE = /^[A-Za-z0-9._-]{1,64}$/;
 const QUEUE_RE = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,199}$/;
-/** A job directory's basename as `mkdtemp(join(jobsDir, "job-"))` mints it. Never a path. */
-const JOB_DIR_RE = /^job-[A-Za-z0-9_-]{1,64}$/;
+/**
+ * A job directory's basename as `mkdtemp(join(jobsDir, "job-"))` mints it. Never a path, and nothing else is ever joined
+ * to jobsDir. Exported so the salvage and the boot sweep (recovery-queue.mjs) judge a name by this one pattern: a second
+ * copy that drifted would let the sweep delete a directory a pointer names in a spelling it no longer matches.
+ */
+export const JOB_DIR_RE = /^job-[A-Za-z0-9_-]{1,64}$/;
 const POINTER_KEYS = ["v", "host", "hostQueue", "seq", "attempt", "at", "jobDir"];
+
+/**
+ * The pointer version this build WRITES (issue #761): one of the versions `CHECKPOINT_POINTER_SHAPES` reads, the newest
+ * or the one before it. A pointer is peer-written, so its reader is closed: a version the shapes do not hold is no
+ * pointer at all for routing, salvage and the next seq. What keeps a newer pointer's job directory alive is
+ * `pointerKeepEntry`, which reads any version.
+ */
+export const CHECKPOINT_POINTER_VERSION = 1;
+
+/**
+ * The closed key set of every pointer version this build reads, by `v`: exactly the newest and the one before it, with
+ * the version written among them. The one before keeps a pointer the previous release wrote routing for one pointer
+ * lifetime (`CHECKPOINT_POINTER_TTL_MS`) after an upgrade. A newest above the version written is a release that READS the
+ * next version before any release writes it, so the release that then writes it shares a fleet, and a rollback, with
+ * readers of it: readers ship first, the writer a release later. Written and read as one number, that order could not
+ * be followed, since a release could not read a version without also writing it. A test pins both rules, so a bump
+ * that forgets the previous reader, or writes a version it does not read, fails there.
+ */
+export const CHECKPOINT_POINTER_SHAPES = Object.freeze({ 1: Object.freeze([...POINTER_KEYS]) });
 
 /**
  * A pause answer that will never change for this container: live checkpoints are turned off at once rather
@@ -84,20 +107,47 @@ export function normalizeHost(hostName) {
 }
 
 /**
- * The pointer, validated: a plain object with EXACTLY the pointer's keys, every value typed and every string a
- * host token, a queue name or a job directory basename. Null otherwise. It is read by another host's worker
- * and decides where a recovery is queued and which directory a salvage looks at, so nothing loose rides along.
+ * The pointer, validated: a plain object with EXACTLY the keys of its own version's shape (`shapes[p.v]`), every value
+ * typed and every string a host token, a queue name or a job directory basename. Null otherwise, and null for a version
+ * the shapes do not hold (older than the oldest this build reads, or newer). It is read by another host's worker and
+ * decides where a recovery is queued and which directory a salvage looks at, so nothing loose rides along.
+ *
+ * `shapes` is a seam for a test of the version policy (a two-version table); every caller uses the default. A shape
+ * may only ADD keys to the fields typed here: one that lacks a field is refused by that field's own check.
  */
-export function validPointer(p) {
+export function validPointer(p, { shapes = CHECKPOINT_POINTER_SHAPES } = {}) {
 	if (!p || typeof p !== "object" || Array.isArray(p)) return null;
+	const want = Number.isSafeInteger(p.v) && Object.hasOwn(shapes, p.v) ? shapes[p.v] : null;
+	if (!Array.isArray(want)) return null;
 	const keys = Object.keys(p).sort();
-	if (keys.length !== POINTER_KEYS.length || ![...POINTER_KEYS].sort().every((k, i) => k === keys[i])) return null;
-	if (p.v !== 1) return null;
+	if (keys.length !== want.length || ![...want].sort().every((k, i) => k === keys[i])) return null;
 	if (typeof p.host !== "string" || !HOST_RE.test(p.host)) return null;
 	if (p.hostQueue !== null && (typeof p.hostQueue !== "string" || !QUEUE_RE.test(p.hostQueue))) return null;
 	if (!isInt(p.seq, 1, 999_999_999) || !isInt(p.attempt, 0, 10_000) || !isInt(p.at)) return null;
 	if (typeof p.jobDir !== "string" || !JOB_DIR_RE.test(p.jobDir)) return null;
-	return { v: 1, host: p.host, hostQueue: p.hostQueue, seq: p.seq, attempt: p.attempt, at: p.at, jobDir: p.jobDir };
+	return { v: p.v, host: p.host, hostQueue: p.hostQueue, seq: p.seq, attempt: p.attempt, at: p.at, jobDir: p.jobDir };
+}
+
+/**
+ * `{ host, jobDir }` for the boot sweep's keep-list from a pointer of ANY version, or null (issue #761). Only what the
+ * keep-list needs is judged: an integer `v` of 1 or more, a host token and a job directory basename; every other key,
+ * a missing one, or the type of any other field is ignored. `validPointer` stays the reader for routing, salvage and the
+ * next seq, so a newer pointer is never MISREAD; this only keeps the directory it names from being deleted under it.
+ *
+ * Why not `validPointer` here: the keep-list is the one reader whose "no" DELETES. A pointer a newer release wrote (a
+ * new key, a new `v`) would read as no pointer, and the boot sweep of an older worker on the same host (a rollback, a
+ * mixed fleet) would remove the crashed attempt's directory the newer release's salvage still needs. Kept, it costs
+ * disk until the pointer's own TTL, after which the sweep takes it as any orphan.
+ *
+ * Every later pointer version keeps `host` and `jobDir` with these meanings and these patterns; a version that cannot
+ * uses a new key prefix rather than a new `v`, so this reader stays true for every version it will ever meet.
+ */
+export function pointerKeepEntry(p) {
+	if (!p || typeof p !== "object" || Array.isArray(p)) return null;
+	if (!Number.isSafeInteger(p.v) || p.v < 1) return null;
+	if (typeof p.host !== "string" || !HOST_RE.test(p.host)) return null;
+	if (typeof p.jobDir !== "string" || !JOB_DIR_RE.test(p.jobDir)) return null;
+	return { host: p.host, jobDir: p.jobDir };
 }
 
 function bounded(promise, ms) {
@@ -377,7 +427,7 @@ export function makeRunCheckpointer({
 
 		/** The pointer for a committed checkpoint, AFTER the commit. A failure is logged and leaves the old one. */
 		const publish = async (result) => {
-			const pointer = { v: 1, host: typeof result.manifest?.host === "string" ? result.manifest.host : host, hostQueue: queue, seq: result.seq, attempt, at: Math.floor(now()), jobDir: jobDirName };
+			const pointer = { v: CHECKPOINT_POINTER_VERSION, host: typeof result.manifest?.host === "string" ? result.manifest.host : host, hostQueue: queue, seq: result.seq, attempt, at: Math.floor(now()), jobDir: jobDirName };
 			if (!redis) return false;
 			const ok = await writeCheckpointPointer({ redis, runId, pointer, timeoutMs: pointerTimeoutMs });
 			if (!ok) log("checkpoint_pointer_failed", { runId: id, seq: result.seq, reason: validPointer(pointer) ? "write" : "invalid" });

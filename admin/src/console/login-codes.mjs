@@ -21,6 +21,15 @@ const CODE_FILE_RE = /^[0-9a-f]{64}\.json$/;
 /** How far a code's `expiresAt` may sit past `now + ttlMs` (a clock stepped between mint and consume). */
 const EXPIRY_SKEW_MS = 5000;
 
+/**
+ * Why no sign-in link is made for a token the tokens file keeps for a role this console does not know (issue #761,
+ * `keptTokens`): a code for it would only be refused at sign-in, since no reader of `tokens` meets it. One sentence for
+ * both makers of a link, `pi-dispatch-console link` and the panel's `/dispatch console --link`, so the two never drift.
+ */
+export function keptTokenLinkRefusal(entry) {
+  return `the token "${entry.name}" has the role \`${entry.role}\`, which this pi-dispatch-console does not know, so it signs in nowhere here and no link is made for it`;
+}
+
 /** The drop directory: `console-login-codes` beside the tokens file. */
 export function loginCodesDir(tokensPath) {
   return join(dirname(tokensPath), "console-login-codes");

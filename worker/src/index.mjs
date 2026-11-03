@@ -11,7 +11,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { cleanTouch } from "./touch-state.mjs";
 import { BACKEND_NOT_REGISTERED } from "./backend-registry.mjs";
 import { CANCEL_ACK_TTL_MS, cancelAckKey, cancelReqKey, agentCancelReqKey, agentCancelAckKey } from "./cancel-state.mjs";
-import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, TERMINAL_COMMENTS, runJob, checkDraftAnswerSource } from "./processor.mjs";
+import { InfraRetry, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, NewerReleaseHold, TERMINAL_COMMENTS, runJob, checkDraftAnswerSource } from "./processor.mjs";
 import { CANCELLED_BEFORE_START_COMMENT, SIZE_REFUSAL_COMMENTS } from "./comment-tables.mjs";
 import { NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperCrashLoopSentence, netnsKeeperLoopAgainSentence } from "./netns-keeper.mjs";
 import { PODMAN_RESTART_HOLD_EXPIRED, PODMAN_RESTART_HOLD_MAX_MS, PODMAN_RESTART_HOLD_RECHECK_MS } from "./runtime-observations.mjs";
@@ -1124,6 +1124,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						if (!deps?.workspaceCheckpointer) { const error = new Error("the recovery store is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
 						const read = await deps.workspaceCheckpointer.readManifest(effective.recoveryOf);
 						if (read?.ok && read.manifest?.provider && read.manifest?.model) recoveryModel = `${read.manifest.provider}/${read.manifest.model}`;
+						// Issue #761: a checkpoint a newer pi-dispatch wrote is not a missing one. The recovery waits for a worker
+						// that reads it (`newer-release`, deferred below as the processor's own pickup would), never refused here,
+						// where the refusal would use up its one attempt over a checkpoint nothing is wrong with.
+						else if (read?.newer === true) throw new NewerReleaseHold("the run's checkpoint");
 						// A missing checkpoint is refused by runJob's existing free gate, never replaced by a fresh model.
 						else { const error = new Error("the recovery model is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
 						const ref = splitModelEntry(recoveryModel);
@@ -1943,9 +1947,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				await deferTo(job, token, now() + error.recoveryWaitMs, "recovery-wait", { project, holder: job.data?.recoveryOf });
 			}
 			// Issue #761: a free gate of the processor read something a newer pi-dispatch wrote (`NewerReleaseHold`: the live
-			// triggers file, for the one-shot, skew and approval checks), before the mint and every reserve. Deferred like the
-			// recovery hold above, without spending an attempt, and with nothing settled, recorded or posted: the job waits
-			// for a worker that reads the file. The log names the store, never the error's words.
+			// triggers file, for the one-shot, skew and approval checks, or a recovery's checkpoint), before the mint and every
+			// reserve. Deferred like the recovery hold above, without spending an attempt, and with nothing settled, recorded or
+			// posted: the job waits for a worker that reads the file. The log names the store, never the error's words.
 			if (error?.newerRelease === true) {
 				deps?.log?.("newer_release_hold", { jobId: job.id, what: typeof error.what === "string" ? error.what : null, delayMs: NEWER_RELEASE_RECHECK_MS });
 				await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", { project });
@@ -2031,8 +2035,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 	return async function processor(job, token, signal) {
 		// First, before any gate reads the data: a job queued by a newer pi-dispatch, whose fields this build would drop
 		// or misread, waits for a worker that can read it (issue #761). A deferral, never a refusal: a refusal would use up
-		// a forge delivery (its id deduplicates a redelivery for 31 days) and spend a one-shot trigger, and its record
-		// would be built from data this build cannot read. Nothing is spent, recorded or posted.
+		// a forge delivery (its id deduplicates a redelivery for `FORGE_JOB_RETENTION_DAYS`) and spend a one-shot
+		// trigger, and its record would be built from data this build cannot read. Nothing is spent, recorded or posted.
 		if (jobDataNewer(job.data)) {
 			deps?.log?.("newer_release_hold", { jobId: job.id, what: "job data", delayMs: NEWER_RELEASE_RECHECK_MS });
 			await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});

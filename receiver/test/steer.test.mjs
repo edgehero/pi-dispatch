@@ -10,7 +10,8 @@ import { filterForgejo } from "../src/filter-forgejo.mjs";
 import { filterGitLab } from "../src/filter-gitlab.mjs";
 import { steerModeOf } from "../src/predicate.mjs";
 import { parseSubset, makeReceiver } from "../src/receiver.mjs";
-import { FORGE_GATE_ASSOCIATION, STEER_FANOUT_LIMIT, trySteer } from "../src/steer.mjs";
+import { FORGE_GATE_ASSOCIATION, STEER_FANOUT_LIMIT, STEER_MARKER_TTL_S, trySteer } from "../src/steer.mjs";
+import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
 import { startPoller as startPollerReal } from "../src/poller.mjs";
 import { parseGitLabSubset } from "../src/gitlab-subset.mjs";
 import { parseForgejoSubset } from "../src/forgejo-subset.mjs";
@@ -406,6 +407,11 @@ test("trySteer: one run erroring and one gone is a mixed fall-through, not a loo
 	const line = logs.find((l) => l.event === "steer_fell_through");
 	assert.equal(line.reason, "mixed");
 	assert.deepEqual(line.outcomes, { error: 1, gone: 1 });
+});
+
+test("the steered marker lives exactly the GUID job id's retention, in seconds (EX) (#761)", () => {
+	assert.equal(STEER_MARKER_TTL_S, FORGE_JOB_RETENTION_S);
+	assert.equal(STEER_MARKER_TTL_S, 31 * 24 * 3600);
 });
 
 test("trySteer: a steer leaves the delivery's marker, NX with the 31-day retention", async () => {

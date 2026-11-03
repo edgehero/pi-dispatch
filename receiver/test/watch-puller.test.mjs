@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { main } from "../src/cli.mjs";
-import { pollWatchSources, startWatchPuller } from "../src/watch-puller.mjs";
+import { WATCH_PULL_CURSOR_TTL_MS, pollWatchSources, startWatchPuller } from "../src/watch-puller.mjs";
 const NOW = Date.parse("2026-01-01T00:00:00Z"); const now = () => NOW;
 const finding = { fields: { service: "checkout" }, severity: "error", count: 1, firstSeen: "2026-01-01T00:00:00Z", lastSeen: "2026-01-01T00:00:00Z", samples: ["private source text"] };
 function setup() {
@@ -16,6 +16,12 @@ test("pull checkpoint follows successful ingest and enqueue; collector text is r
 	const deps = setup(); await pollWatchSources(deps);
 	assert.equal(deps.enqueued.length, 1); assert.deepEqual(JSON.parse([...deps.values.entries()].find(([key]) => key.includes(":cursor:"))[1]), { offset: 12 });
 	assert.equal(deps.calls.find(value => value.finding).finding.samples[0], "[redacted]"); assert.equal(deps.calls.find(value => value.finding).sourceMaxPerDay, 1000);
+});
+test("a checkpoint keeps the cursor 35 days, in milliseconds (PX): a resume point, not the forge job retention (#761)", async () => {
+	const deps = setup(); const ttls = []; const evaluate = deps.redis.eval;
+	deps.redis.eval = async (script, count, ...args) => { if (count === 2) ttls.push(args.at(-1)); return evaluate(script, count, ...args); };
+	await pollWatchSources(deps);
+	assert.deepEqual(ttls, [WATCH_PULL_CURSOR_TTL_MS]); assert.equal(WATCH_PULL_CURSOR_TTL_MS, 35 * 86_400_000);
 });
 test("failed enqueue retains old cursor; retry reuses the same source delivery", async () => {
 	const deps = setup(); await assert.rejects(pollWatchSources({ ...deps, enqueue: async () => { throw new Error("failed"); } })); assert.equal([...deps.values.keys()].some(key => key.includes(":cursor:")), false);

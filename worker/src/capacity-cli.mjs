@@ -16,11 +16,15 @@ import { parseArgs } from "node:util";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
 import { readCapacityRecords } from "./capacity-records.mjs";
 import { formatCpus, formatMemory } from "./job-size.mjs";
+import { RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RUNS_MIN, runMirrorMaxRunsOf } from "./retention.mjs";
 
 /** How long the CLI waits on the host registry, the kill switch's budget. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
-/** The deployment keys this command reads beside the Valkey URL. */
-export const CAPACITY_ENV_KEYS = Object.freeze(["PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_WORKER_NAME"]);
+/**
+ * The deployment keys this command reads beside the Valkey URL. `PI_RUN_MIRROR_MAX_RUNS` (issue #761) is the run index's
+ * cap, which tells an index cut by count from one that is only large (`readMirrorWindow`).
+ */
+export const CAPACITY_ENV_KEYS = Object.freeze(["PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_WORKER_NAME", "PI_RUN_MIRROR_MAX_RUNS"]);
 
 /**
  * Run the command. Returns the exit code. Every collaborator is a seam with the production default.
@@ -45,7 +49,7 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 	if (deployment.problem) return fail(deployment.problem);
 	const facts = await deploymentFacts(deployment.env);
 	if (facts.problem) return fail(facts.problem);
-	const { logsDir, retentionDays, localHost } = facts;
+	const { logsDir, retentionDays, localHost, runMirrorMaxRuns } = facts;
 
 	const { killSwitchValkeyUrls, makeRedisClient, urlShown } = await import("./connection.mjs");
 	const picked = (pickUrls ?? killSwitchValkeyUrls)({ env, flagUrl: parsed.values["valkey-url"] ?? null });
@@ -75,7 +79,7 @@ export async function runCapacity(args, { env = process.env, write = (chunk) => 
 		// report's clock: a row's age decides how far its running jobs count (`LIVE_FRESH_MS`).
 		const [fleet, read] = await Promise.all([
 			redis ? (readLiveHostsFn ?? readLiveHosts)(redis, { now, timeoutMs: FLEET_READ_TIMEOUT_MS, prune: false }).catch((error) => ({ unreachable: error?.message ?? "registry unreadable" })) : { unreachable: null },
-			readCapacityRecords({ redis, logsDir, sinceMs: windowStartMs, nowMs, retentionDays, localHost, noMirrorReason: refusedNote, timeoutMs: FLEET_READ_TIMEOUT_MS, ...(fs ? { fs } : {}) }),
+			readCapacityRecords({ redis, logsDir, sinceMs: windowStartMs, nowMs, retentionDays, localHost, indexMax: runMirrorMaxRuns, noMirrorReason: refusedNote, timeoutMs: FLEET_READ_TIMEOUT_MS, ...(fs ? { fs } : {}) }),
 		]);
 		if (named && (fleet.unreachable || read.mirrorState.startsWith("unreachable"))) return fail(`could not read Valkey at ${urlShown(url)}: ${fleet.unreachable ? `host registry ${fleet.unreachable}` : `run mirror ${read.mirrorState}`}`);
 		const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
@@ -105,15 +109,18 @@ export function onlyHost(report, host) {
 
 /**
  * What this command reads of the deployment: the logs directory (config.mjs `logsDirPath`, the worker's rule), the
- * retention (30 days unless set; 0 keeps the files) and this host's name (`PI_WORKER_NAME`, else the hostname), or
- * `{ problem }` for a retention the worker would refuse to boot with.
+ * retention (30 days unless set; 0 keeps the files), this host's name (`PI_WORKER_NAME`, else the hostname) and the run
+ * index's cap (`runMirrorMaxRuns`, `PI_RUN_MIRROR_MAX_RUNS`, 5,000 unless set; issue #761), or `{ problem }` for a
+ * retention or a cap the worker would refuse to boot with.
  */
 export async function deploymentFacts(env) {
 	const raw = env.PI_LOG_RETENTION_DAYS;
 	if (raw !== undefined && raw !== "" && !/^\d{1,6}$/.test(raw)) return { problem: `PI_LOG_RETENTION_DAYS must be a non-negative integer (got ${JSON.stringify(raw)})` };
+	const cap = runMirrorMaxRunsOf(env.PI_RUN_MIRROR_MAX_RUNS);
+	if (cap.problem) return { problem: `PI_RUN_MIRROR_MAX_RUNS must be an integer ${RUN_MIRROR_MAX_RUNS_MIN}-${RUN_MIRROR_MAX_RUNS_MAX} (got ${JSON.stringify(env.PI_RUN_MIRROR_MAX_RUNS)})` };
 	const { logsDirPath, defaultWorkerName, WORKER_NAME_RE } = await import("./config.mjs");
 	const named = env.PI_WORKER_NAME;
-	return { logsDir: logsDirPath(env), retentionDays: raw === undefined || raw === "" ? 30 : Number(raw), localHost: typeof named === "string" && WORKER_NAME_RE.test(named) ? named : defaultWorkerName() };
+	return { logsDir: logsDirPath(env), retentionDays: raw === undefined || raw === "" ? 30 : Number(raw), localHost: typeof named === "string" && WORKER_NAME_RE.test(named) ? named : defaultWorkerName(), runMirrorMaxRuns: cap.value };
 }
 
 /** A span in the largest whole units that say it: `40s`, `6m`, `2h 5m`, `3d 4h`. */

@@ -2,7 +2,7 @@ import { sessionKeyFor } from "../src/session-key.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { forgeDeliveryJobId } from "../src/job-id.mjs";
-import { InfraRetry, RECOVERY_CAP, RECOVERY_COMMENTS, RECOVERY_ENQUEUED, RECOVERY_RETRY_WAIT_MS, RecoveryWaitHold, runJob } from "../src/processor.mjs";
+import { InfraRetry, NewerReleaseHold, RECOVERY_CAP, RECOVERY_COMMENTS, RECOVERY_ENQUEUED, RECOVERY_RETRY_WAIT_MS, RecoveryWaitHold, runJob } from "../src/processor.mjs";
 import { makeRunningJobs } from "../src/index.mjs";
 import { buildRecord } from "../src/run-history.mjs";
 
@@ -235,6 +235,34 @@ test("a missing pointer beside a store that is still there (a Valkey blip reads 
 	await assert.rejects(runJob(recoveryJob(1), d), (e) => e instanceof InfraRetry && e.reason === "container-never-started");
 	assert.ok(!names(calls).includes("mint"));
 	assert.ok(!names(calls).includes("store-remove"));
+});
+
+test("a checkpoint a newer release wrote is waited on, never refused: a NewerReleaseHold before the mint, no comment, the store, the pointer and the run budget left in place (issue #761)", async () => {
+	const NEWER = { invalid: true, reason: "field:newer", newer: true };
+	// Read through the pointer, and with the pointer gone beside a store that is still there (unreadable HERE, so neither
+	// superseded nor a blip to retry in a minute).
+	for (const pointerGone of [false, true]) {
+		const label = pointerGone ? "no pointer" : "a pointer";
+		const store = [];
+		const newerStore = { ...fakeCheckpointer(store), readManifest: async (runId) => (store.push(["readManifest", runId]), NEWER) };
+		const { deps: d, calls, pointers, ledger, redis } = deps({ workspaceCheckpointer: newerStore });
+		if (pointerGone) pointers.clear();
+		await assert.rejects(runJob(recoveryJob(1), d), (e) => {
+			assert.ok(e instanceof NewerReleaseHold && e instanceof InfraRetry, `${label}: a hold any path that does not know it still retries`);
+			assert.deepEqual([e.newerRelease, e.what], [true, "the run's checkpoint"], label);
+			// Not converted into a recovery wait (that conversion takes `container-never-started` only): index.mjs defers
+			// it `newer-release` by its `newerRelease` flag, without spending the recovery's one attempt.
+			assert.ok(!(e instanceof RecoveryWaitHold) && e.reason !== "container-never-started", label);
+			return true;
+		});
+		assert.ok(!names(calls).includes("comment"), `${label}: no comment`);
+		assert.ok(!names(calls).includes("mint") && !names(calls).includes("prepare"), `${label}: before the mint and the clone`);
+		assert.ok(!names(store).includes("store-remove") && !names(store).includes("restore"), `${label}: the store is neither removed nor restored`);
+		assert.ok(!names(calls).includes("pointer-remove"), `${label}: no pointer delete`);
+		assert.equal(pointers.has(RUN), !pointerGone);
+		assert.ok(!ledger.calls.some((c) => ["claimSlot", "nextSeq", "settleCrashed", "remove"].includes(c[0])), `${label}: the run budget ledger untouched`);
+		assert.equal(redis.ops.filter((o) => o[0] === "incr" || o[0] === "incrby").length, 0, `${label}: nothing reserved`);
+	}
 });
 
 test("a pointer read that throws is retried, never read as superseded", async () => {

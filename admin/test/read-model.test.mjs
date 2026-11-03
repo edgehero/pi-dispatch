@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
+import { RUN_MIRROR_MAX_RUNS_DEFAULT } from "@edgehero/pi-dispatch/retention";
 import {
   resolvePaths,
   panelEnv,
@@ -227,6 +228,7 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     schedulerStallMax: 2,
     chainDepthMax: 1,
     chainMaxPerJob: 2,
+    runMirrorMaxRuns: 5000,
     pauseWindowsPath: "./pause-windows.json",
     scopedLimitsPath: "./scoped-limits.json",
     projectsPath: "./projects.json",
@@ -234,6 +236,14 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     envelopeFile: null,
     subscriptionsPath: "/subs.json",
   });
+});
+
+test("resolvePaths: the mirror cap is PI_RUN_MIRROR_MAX_RUNS within the worker's bounds, else the default, never a throw; the panel's .env carries the key (issue #761)", () => {
+  assert.equal(RUN_MIRROR_MAX_RUNS_DEFAULT, 5000);
+  for (const [raw, want] of [[undefined, 5000], ["", 5000], ["1000", 1000], ["12000", 12000], ["20000", 20000], ["999", 5000], ["20001", 5000], ["abc", 5000], ["1.5", 5000], ["-1", 5000], ["1e4", 5000], ["0x2000", 5000]]) {
+    assert.equal(resolvePaths(raw === undefined ? {} : { PI_RUN_MIRROR_MAX_RUNS: raw }).runMirrorMaxRuns, want, JSON.stringify(raw));
+  }
+  assert.ok(PANEL_SERVICE_KEYS.includes("PI_RUN_MIRROR_MAX_RUNS"), "the worker reads it from its .env, so the panel's local index and capacity read take it the same way");
 });
 
 test("resolvePaths: the projects file is PI_PROJECTS_FILE, else init's cwd scaffold, and the panel's .env carries the key (#499)", () => {

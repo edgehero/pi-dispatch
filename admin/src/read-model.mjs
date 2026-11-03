@@ -79,6 +79,7 @@ import { peakSeries, refusalWords, sizeRefusal, suggestSize, suggestionCall, sug
 import { readSizingRecords } from "@edgehero/pi-dispatch/size-records";
 import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueuesReporting, unionQueueNames } from "@edgehero/pi-dispatch/queue";
 import { RUNS_INDEX, RUNS_INDEX_MAX, UNREAD_RECORD, hostsIn, mergeRuns, readMirroredPage, readMirroredRecord, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
+import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
 import { modelFrom, providerFrom, jobImageFrom, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
@@ -192,6 +193,11 @@ export function resolvePaths(env = process.env) {
     // GRAPH view exists to remove.
     chainDepthMax: parseNonNegInt(env.PI_CHAIN_DEPTH_MAX, CHAIN_DEPTH_MAX_DEFAULT),
     chainMaxPerJob: parseNonNegInt(env.PI_CHAIN_MAX_PER_JOB, CHAIN_MAX_PER_JOB_DEFAULT),
+    // Issue #761: the shared run index's cap the workers trim to (PI_RUN_MIRROR_MAX_RUNS), which bounds how many of this
+    // host's own run files the local index holds (`makeLocalRunIndex`), so the runs page reaches as far back here as the
+    // mirror does. LENIENT (`runMirrorMaxRunsOf`, the worker's own bounds): a value out of bounds is the default here,
+    // because this function never throws and the worker already refused to start on it (doctor names the key).
+    runMirrorMaxRuns: runMirrorMaxRunsOf(env.PI_RUN_MIRROR_MAX_RUNS).value,
   };
 }
 
@@ -210,7 +216,7 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_RUN_MIRROR_MAX_RUNS", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 // The console's address (the insights move to the console): `/dispatch insights` and the `i` key print the spend
 // screen's URL from the PI_CONSOLE_LISTEN the console itself reads from this `.env` (`console/link.mjs`).
 // The session store (issue #647, part 2): `/dispatch chat` forks a finished run from the PI_SESSIONS_DIR the worker
@@ -2025,8 +2031,13 @@ const HELD_HYDRATE_MAX = 200;
  * The capacity report for `dispatch_capacity` (issue #599, phase 2, INT-CAPACITY-REPORT): the CLI's read and the CLI's
  * function (`readCapacityRecords`, `computeCapacity`, `onlyHost`, `capacityText`), so the tool, `pi-dispatch capacity`
  * and doctor cannot disagree. READ-ONLY: the registry is read with `prune: false` and the mirror reader prunes nothing.
- * `{ report, text }`, or `{ error }` for a window it does not offer, a host the report does not have, or a retention the
- * worker would refuse. An unreachable Valkey is not an error: the report reads this host's files and says why.
+ * `{ report, text }`, or `{ error }` for a window it does not offer, a host the report does not have, or a retention or a
+ * mirror cap the worker would refuse. An unreachable Valkey is not an error: the report reads this host's files and says
+ * why.
+ *
+ * The mirror's cap (PI_RUN_MIRROR_MAX_RUNS, issue #761) comes from the same `env` through `deploymentFacts`, as the CLI
+ * reads it, so an index the workers were allowed to grow past the built-in `RUNS_INDEX_MAX` is not read as one a trim cut
+ * short. `env` is the deployment's (`panelEnv` and the console's read side carry the key, `PANEL_SERVICE_KEYS`).
  */
 export async function readCapacity({ url, env = process.env, window = "7d", host, now = () => Date.now(), redisFn = makeRedisClient, timeoutMs = 2000, fs, span } = {}) {
   // `span` is the insights page's own window (issue #599, phase 4): `{ sinceMs(nowMs), bucketMs }`, a start that may be a
@@ -2053,7 +2064,7 @@ export async function readCapacity({ url, env = process.env, window = "7d", host
   try {
     const [fleet, read] = await Promise.all([
       redis ? readLiveHosts(redis, { now, timeoutMs, prune: false }).catch((e) => ({ unreachable: e?.message ?? "registry unreadable" })) : { unreachable: null },
-      readCapacityRecords({ redis, logsDir: facts.logsDir, sinceMs, nowMs, retentionDays: facts.retentionDays, localHost: facts.localHost, noMirrorReason, timeoutMs, ...(fs ? { fs } : {}) }),
+      readCapacityRecords({ redis, logsDir: facts.logsDir, sinceMs, nowMs, retentionDays: facts.retentionDays, localHost: facts.localHost, indexMax: facts.runMirrorMaxRuns, noMirrorReason, timeoutMs, ...(fs ? { fs } : {}) }),
     ]);
     const coverage = { ...read.coverage, reason: [read.coverage.reason, fleet.unreachable ? `host registry unreadable (${fleet.unreachable})` : null].filter(Boolean).join("; ") || null };
     const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs: sinceMs, nowMs, bucketMs, coverage });
@@ -4371,8 +4382,9 @@ export function createFleetReader(
   };
 
   // Issue #641: this host's run records, indexed once per DOLLAR_RECORDS_TTL_MS (the dollar records' rhythm), for the
-  // wide window here and for `runsPage` below, so neither walks the logs directory on every tick or every request.
-  const localIndex = makeLocalRunIndex({ logsDir: paths.logsDir, fs, now: nowFn });
+  // wide window here and for `runsPage` below, so neither walks the logs directory on every tick or every request. Held
+  // to the deployment's mirror cap (issue #761, `resolvePaths`), the built-in one for paths that name none.
+  const localIndex = makeLocalRunIndex({ logsDir: paths.logsDir, fs, now: nowFn, ...(Number.isSafeInteger(paths.runMirrorMaxRuns) ? { max: paths.runMirrorMaxRuns } : {}) });
   // The wide window, `{ at, runs, mirror }`, refreshed at the same rhythm. The mirror is read READ-ONLY (`prune:
   // false`) on every reader: the TUI's per-tick `mergedRunsOn` already prunes, and a second pruning read would only
   // race it.
@@ -5974,8 +5986,9 @@ export async function readWaitingRow(redis, { q, jobId, state, now = () => Date.
 /**
  * This host's run records, newest first, read at most once per `ttlMs` (issue #641; the dollar records' 15 s rhythm).
  * `records()` returns `{ records, capped }` or `{ unreachable }` (an unreadable directory, never a throw; a missing one
- * is an empty history). At most `RUNS_INDEX_MAX` records are kept, the mirror's own cap, so the index costs what the
- * fleet view already does; `capped` says older ones exist on disk that no page reaches.
+ * is an empty history). At most `max` records are kept, the mirror's own cap (`RUNS_INDEX_MAX` by default; the fleet
+ * reader passes the deployment's PI_RUN_MIRROR_MAX_RUNS), so the index costs what the fleet view already does; `capped`
+ * says older ones exist on disk that no page reaches.
  */
 export function makeLocalRunIndex({ logsDir, fs = nodeFs, now = () => Date.now(), ttlMs = DOLLAR_RECORDS_TTL_MS, max = RUNS_INDEX_MAX } = {}) {
   let cache = null;

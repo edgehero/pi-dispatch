@@ -783,6 +783,15 @@ test("createFleetReader: activeLimit asks each queue for one active job by defau
   }
 });
 
+test("createFleetReader: the local run index holds the deployment's mirror cap (paths.runMirrorMaxRuns), the built-in one when paths name none (issue #761)", async () => {
+  const logsDir = tempDir("pd-761-cap-");
+  for (const [id, ago] of [["gh-c1", 3], ["gh-c2", 2], ["gh-c3", 1]]) writeLocal(logsDir, rec(id, AT - ago * MIN));
+  const readerOf = (extra) => createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2, ...extra }, { makeQueueFn: quietQueue(), parseConnectionFn: () => ({}), redisFn: () => emptyRedis(), readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => [], nowFn: () => AT });
+  const capped = await readerOf({ runMirrorMaxRuns: 2 }).runsPage({ limit: 10 });
+  assert.deepEqual(capped.runs.map((r) => r.jobId), ["gh-c3", "gh-c2"], "the oldest file is past the cap, as it is past the mirror's");
+  assert.deepEqual((await readerOf({}).runsPage({ limit: 10 })).runs.map((r) => r.jobId), ["gh-c3", "gh-c2", "gh-c1"], "no cap named: RUNS_INDEX_MAX, which three files are well inside");
+});
+
 test("createFleetReader: an unreachable run mirror makes the parked list unknown, never an empty list said to be whole", async () => {
   const logsDir = tempDir("pd-641-mirror-down-");
   writeLocal(logsDir, rec("gh-p", AT - MIN, { target: "acme/web#2", reason: "awaiting-input" }));
