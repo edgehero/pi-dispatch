@@ -1,16 +1,7 @@
 {
   "card": "RunWorkspace",
   "pr": 790,
-  "panels": [
-    "p-outcome",
-    "p-workspace",
-    "p-run",
-    "p-actions",
-    "p-cost",
-    "p-resources",
-    "p-session",
-    "p-chain"
-  ],
+  "words": "f9afc132bab27788fdb1a9fe757c73a1954d235e26a5df159862cbeab675ab1a",
   "elements": [
     {
       "el": "p-outcome",

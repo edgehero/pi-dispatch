@@ -6,8 +6,18 @@
  *   node launch/render-images.mjs --png     the same, plus the .png copies the npm page shows (dashboard, hosts,
  *                                           allocation) and docs/images/insights-view.png
  *
+ *   node launch/render-images.mjs --console          docs/images/console/: the operator console images the READMEs show
+ *                                                    (`launch/console-picks.mjs`)
+ *   node launch/render-images.mjs --console --all    docs/images/console/all/: every golden, page and panel, at 1440 and
+ *                                                    375, light and dark, as each is drawn (viewer, operator, signed out).
+ *                                                    Not committed: about 2,000 images would weigh down every clone for good
+ *   node launch/render-images.mjs --console --only <golden>   the same, for one golden, as `run-live.operator` or
+ *                                                    `panels/confirm-done.operator`
+ *
  *   --out <dir>   write there instead of docs/images
  *   --url <url>   use this Valkey instead of starting one; its database must be empty, and is emptied again at the end
+ *
+ * `--console` reads the committed goldens (`launch/console-render.mjs`), so it needs Chrome and no server at all.
  *
  * WHAT RUNS. A temporary `valkey-server` (or `redis-server`, whichever is on PATH) on a free port of 127.0.0.1, with no
  * persistence and its files in a temporary directory, removed with everything else when the script ends. The fixture
@@ -66,16 +76,19 @@ const SHOWN_DEPLOYMENT = "~/pi-work";
 const SVG_PNG_SCALE = 2.5;
 
 // ---- arguments and the machine's two binaries, read BEFORE the environment is emptied ------------------------------
-const USAGE = `usage: node launch/render-images.mjs [--png] [--out <dir>] [--url <redis://host:port/db>]
+const USAGE = `usage: node launch/render-images.mjs [--png] [--console [--all | --only <golden>]] [--out <dir>] [--url <redis://host:port/db>]
   --png    also write the PNGs (needs Google Chrome; set CHROME to its executable where it is not
            ${MAC_CHROME})
+  --console  the operator console's images, from the committed goldens (needs Google Chrome, no server):
+           the READMEs' picks into docs/images/console, or with --all every golden at 1440 and 375, light and
+           dark, into docs/images/console/all, or with --only <golden> that one golden there
   --out    the directory to write to (default docs/images)
   --url    an existing, empty Valkey database to seed instead of starting valkey-server or redis-server
            from PATH; it is emptied again at the end`;
 
 /** The options, or `{ help }`, or `{ error }` (a sentence for the operator, never a stack). */
 function parseArgs(argv) {
-	const opts = { png: false, out: join(REPO, "docs", "images"), url: null };
+	const opts = { png: false, console: false, all: false, only: null, out: null, url: null };
 	// A value is the next argument unless that is missing or is itself a flag, so `--out --png` is an error rather
 	// than a directory named --png.
 	const value = (i, flag) => {
@@ -87,7 +100,9 @@ function parseArgs(argv) {
 		const a = argv[i];
 		if (a === "--help" || a === "-h") return { help: true };
 		if (a === "--png") opts.png = true;
-		else if (a === "--out" || a === "--url") {
+		else if (a === "--console") opts.console = true;
+		else if (a === "--all") opts.all = true;
+		else if (a === "--out" || a === "--url" || a === "--only") {
 			const got = value(i, a);
 			if (got.error) return got;
 			opts[a.slice(2)] = got.v;
@@ -95,6 +110,10 @@ function parseArgs(argv) {
 		} else return { error: `unexpected argument: ${a}` };
 	}
 	if (opts.url !== null && !/^rediss?:\/\/[^/\s]/.test(opts.url)) return { error: "--url takes a redis:// or rediss:// URL" };
+	if ((opts.all || opts.only !== null) && !opts.console) return { error: "--all and --only go with --console" };
+	if (opts.all && opts.only !== null) return { error: "--all and --only are two different lists; pick one" };
+	if (opts.console && (opts.png || opts.url !== null)) return { error: "--console takes neither --png nor --url: it reads the committed goldens" };
+	if (opts.out === null) opts.out = opts.console ? join(REPO, "docs", "images", "console", ...(opts.all || opts.only !== null ? ["all"] : [])) : join(REPO, "docs", "images");
 	return opts;
 }
 
@@ -107,8 +126,8 @@ if (opts.error) {
 	console.error(`render-images: ${opts.error}\n${USAGE}`);
 	process.exit(2);
 }
-const serverBin = opts.url ? null : findOnPath(["valkey-server", "redis-server"]);
-if (!opts.url && !serverBin) {
+const serverBin = opts.url || opts.console ? null : findOnPath(["valkey-server", "redis-server"]);
+if (!opts.url && !opts.console && !serverBin) {
 	console.error("render-images: needs valkey-server or redis-server on PATH (brew install valkey, apt install valkey-server), or --url to an empty database");
 	process.exit(2);
 }
@@ -122,11 +141,11 @@ try {
 }
 const chrome = process.env.CHROME || MAC_CHROME;
 const gitPath = process.env.PATH ?? "";
-if (opts.png) {
+if (opts.png || opts.console) {
 	try {
 		accessSync(chrome, constants.X_OK);
 	} catch {
-		console.error(`render-images: --png needs Google Chrome (looked for ${chrome}; set CHROME to its executable)`);
+		console.error(`render-images: ${opts.console ? "--console" : "--png"} needs Google Chrome (looked for ${chrome}; set CHROME to its executable)`);
 		process.exit(2);
 	}
 }
@@ -500,7 +519,19 @@ async function insightsPage({ env, RM }) {
 }
 
 // ---- main ---------------------------------------------------------------------------------------------------------
+/** `--console`: the goldens in a browser, no server and no fixture deployment (`launch/console-render.mjs`). */
+async function mainConsole() {
+	const { goldenKey, matrixOf, picksPlan, renderConsole } = await import("./console-render.mjs");
+	const widthCheck = await import("../.github/scripts/console-width-check.mjs");
+	const keys = [widthCheck.readGoldens(widthCheck.FIXTURES, ""), widthCheck.readGoldens(join(widthCheck.FIXTURES, "panels"), "panels/")].flatMap((read) => read.docs.map(goldenKey));
+	if (opts.only !== null && !keys.includes(opts.only)) throw new Refusal(`--only ${opts.only}: no such golden (a page as run-live.operator, a panel as panels/confirm-done.operator)`);
+	const shots = opts.all ? matrixOf(keys) : opts.only !== null ? matrixOf([opts.only]) : picksPlan();
+	const written = await renderConsole({ chrome, shots, out: opts.out, work, children, Refusal, widthCheck, clockMs: NOW + 60_000, log: (line) => { if (opts.all) console.error(line); } });
+	for (const file of written) console.log(file);
+}
+
 async function main() {
+	if (opts.console) return mainConsole();
 	const W = {
 		connection: await import("../worker/src/connection.mjs"),
 		queue: await import("../worker/src/queue.mjs"),

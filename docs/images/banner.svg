@@ -1,41 +1,74 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-label="pi-dispatch — run the pi coding agent as a self-hosted service, triggered by cron, GitHub, GitLab, Forgejo or Azure DevOps">
-  <rect x="1" y="1" width="1198" height="358" rx="18" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-label="pi-dispatch: hand software work to an AI coding agent, and decide how closely you watch it">
+  <rect x="1" y="1" width="1198" height="358" rx="18" fill="#0f1011" stroke="#2c2e30" stroke-width="2"/>
 
-  <!-- wordmark + tagline -->
-  <text x="72" y="132" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="66" font-weight="700" fill="#58a6ff">pi-dispatch</text>
-  <text x="75" y="182" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="23" fill="#c9d1d9">Run the pi coding agent as a self-hosted service —</text>
-  <text x="75" y="214" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="23" fill="#c9d1d9">on demand, on a cron, or on an issue on any of four forges.</text>
+  <!-- wordmark and tagline -->
+  <g font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+    <text x="64" y="118" font-size="62" font-weight="800" letter-spacing="-1.5" fill="#f4f4f2">pi-dispatch</text>
+    <text x="66" y="168" font-size="24" fill="#c9cac8">Hand software work to an AI coding agent,</text>
+    <text x="66" y="200" font-size="24" fill="#c9cac8">and decide how closely you watch it.</text>
 
-  <!-- differentiator chips -->
-  <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="17">
-    <text x="75" y="278" fill="#3fb950">●</text><text x="95" y="278" fill="#8b949e">container-isolated</text>
-    <text x="256" y="278" fill="#d6a531">●</text><text x="276" y="278" fill="#8b949e">spend-capped before tokens</text>
-    <text x="520" y="278" fill="#58a6ff">●</text><text x="540" y="278" fill="#8b949e">cron · CLI · webhook</text>
-    <text x="75" y="312" fill="#a371f7">●</text><text x="95" y="312" fill="#8b949e">GitHub · GitLab · Forgejo · Azure DevOps</text>
-  </g>
+    <!-- the three stages -->
+    <g font-size="16" font-weight="650">
+      <rect x="66" y="240" width="118" height="34" rx="17" fill="#23334f"/>
+      <text x="125" y="262" text-anchor="middle" fill="#a8c4ff">in the loop</text>
+      <path d="M194 257h14m-5-5 5 5-5 5" fill="none" stroke="#7d7f81" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="218" y="240" width="134" height="34" rx="17" fill="#35285a"/>
+      <text x="285" y="262" text-anchor="middle" fill="#c9b8ff">near the loop</text>
+      <path d="M362 257h14m-5-5 5 5-5 5" fill="none" stroke="#7d7f81" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="386" y="240" width="142" height="34" rx="17" fill="#1b3a2b"/>
+      <text x="457" y="262" text-anchor="middle" fill="#8ee0b0">out of the loop</text>
+    </g>
+    <text x="66" y="312" font-size="15" fill="#8d8f91">Spending limits that hold, a sealed box for every job, and a person still merges.</text>
 
-  <!-- mini /dispatch panel -->
-  <g transform="translate(772,66)">
-    <rect width="366" height="228" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
-    <circle cx="24" cy="24" r="6" fill="#ff5f57"/>
-    <circle cx="46" cy="24" r="6" fill="#febc2e"/>
-    <circle cx="68" cy="24" r="6" fill="#28c840"/>
-    <text x="183" y="29" text-anchor="middle" font-family="Consolas, monospace" font-size="13" fill="#8b949e">pi — /dispatch</text>
-    <g font-family="Consolas, monospace" font-size="14.5">
-      <text x="24" y="74" fill="#3fb950" font-weight="700">● RUNNING</text>
-      <text x="150" y="74" fill="#8b949e">2 waiting · 1 active</text>
-      <text x="24" y="112" fill="#8b949e">day</text>
-      <rect x="62" y="100" width="196" height="15" rx="3" fill="#21262d"/>
-      <rect x="62" y="100" width="80" height="15" rx="3" fill="#3fb950"/>
-      <text x="270" y="112" fill="#8b949e">6/25</text>
-      <text x="24" y="150" fill="#58a6ff">label</text>
-      <text x="92" y="150" fill="#c9d1d9">pi:fix</text>
-      <text x="152" y="150" fill="#6e7681">→</text>
-      <text x="172" y="150" fill="#c9d1d9">fix</text>
-      <text x="212" y="150" fill="#58a6ff">[gitlab]</text>
-      <text x="24" y="182" fill="#7ee787">✔ done</text>
-      <text x="112" y="182" fill="#8b949e">gl-7c21 · fix · 54k</text>
-      <text x="24" y="210" fill="#6e7681">↑↓ select · ↵ open · a add · q quit</text>
+    <!-- the console, in small -->
+    <g transform="translate(726 42)">
+      <rect width="424" height="276" rx="16" fill="#ececea"/>
+      <rect x="14" y="14" width="86" height="22" rx="11" fill="#ffffff"/>
+      <circle cx="26" cy="25" r="7" fill="#161718"/>
+      <text x="38" y="30" font-size="11" font-weight="700" fill="#161718">pi-dispatch</text>
+      <rect x="350" y="14" width="60" height="22" rx="11" fill="#ffffff"/>
+      <circle cx="363" cy="25" r="4" fill="#0a7a3f"/>
+      <text x="372" y="29" font-size="11" font-weight="650" fill="#0a7a3f">Live</text>
+      <g font-size="10" font-weight="650">
+        <rect x="14" y="44" width="62" height="20" rx="10" fill="#161718"/><text x="45" y="58" text-anchor="middle" fill="#ffffff">Overview</text>
+        <rect x="80" y="44" width="42" height="20" rx="10" fill="#ffffff"/><text x="101" y="58" text-anchor="middle" fill="#55575a">Runs</text>
+        <rect x="126" y="44" width="50" height="20" rx="10" fill="#ffffff"/><text x="151" y="58" text-anchor="middle" fill="#55575a">Parked</text>
+        <rect x="180" y="44" width="44" height="20" rx="10" fill="#ffffff"/><text x="202" y="58" text-anchor="middle" fill="#55575a">Fleet</text>
+        <rect x="228" y="44" width="46" height="20" rx="10" fill="#ffffff"/><text x="251" y="58" text-anchor="middle" fill="#55575a">Spend</text>
+      </g>
+      <text x="14" y="94" font-size="22" font-weight="800" letter-spacing="-.5" fill="#161718">Overview</text>
+      <text x="14" y="110" font-size="10" fill="#55575a">Needs you: 1 question. 4 jobs running.</text>
+      <g>
+        <rect x="14" y="120" width="94" height="72" rx="12" fill="#ffffff"/>
+        <text x="24" y="138" font-size="10" font-weight="700" fill="#161718">Needs you</text>
+        <text x="24" y="166" font-size="24" font-weight="800" fill="#6a3fd6">1</text>
+        <text x="24" y="182" font-size="10" fill="#55575a">question</text>
+        <rect x="114" y="120" width="94" height="72" rx="12" fill="#ffffff"/>
+        <text x="124" y="138" font-size="10" font-weight="700" fill="#161718">In line</text>
+        <text x="124" y="166" font-size="24" font-weight="800" fill="#161718">5</text>
+        <text x="124" y="182" font-size="10" fill="#55575a">waiting</text>
+        <rect x="214" y="120" width="94" height="72" rx="12" fill="#ffffff"/>
+        <text x="224" y="138" font-size="10" font-weight="700" fill="#161718">Running</text>
+        <text x="224" y="166" font-size="24" font-weight="800" fill="#2b5fd9">4</text>
+        <text x="224" y="182" font-size="10" fill="#55575a">in 9 slots</text>
+        <rect x="314" y="120" width="96" height="72" rx="12" fill="#ffffff"/>
+        <text x="324" y="138" font-size="10" font-weight="700" fill="#161718">Spend today</text>
+        <text x="324" y="166" font-size="20" font-weight="800" fill="#161718">$15.03</text>
+        <text x="324" y="182" font-size="10" fill="#0a7a3f">60% of limit</text>
+      </g>
+      <rect x="14" y="198" width="396" height="66" rx="12" fill="#ffffff"/>
+      <g>
+        <rect x="58" y="210" width="84" height="14" rx="7" fill="#7a55e0"/>
+        <rect x="148" y="210" width="96" height="14" rx="7" fill="#2b5fd9"/>
+        <rect x="58" y="230" width="156" height="14" rx="7" fill="#d9dad7"/>
+        <rect x="220" y="230" width="60" height="14" rx="7" fill="#2b5fd9"/>
+        <rect x="58" y="250" width="110" height="8" rx="4" fill="#d9dad7"/>
+        <line x1="284" y1="204" x2="284" y2="260" stroke="#2b5fd9" stroke-width="2"/>
+        <rect x="292" y="210" width="108" height="14" rx="7" fill="none" stroke="#9a9c9e" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <rect x="292" y="230" width="72" height="14" rx="7" fill="none" stroke="#9a9c9e" stroke-width="1.5" stroke-dasharray="4 3"/>
+      </g>
+      <text x="22" y="221" font-size="9" font-weight="700" fill="#55575a">api</text>
+      <text x="22" y="241" font-size="9" font-weight="700" fill="#55575a">web</text>
     </g>
   </g>
 </svg>

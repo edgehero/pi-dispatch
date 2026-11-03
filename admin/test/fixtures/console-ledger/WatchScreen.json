@@ -1,0 +1,19 @@
+{
+  "card": "WatchScreen",
+  "pr": 763,
+  "words": "8e811f8ac384c9f3be226a9668b8d7abb8f6e83fa1c118d48adf18aefa6f149f",
+  "elements": [
+    {"el":"p-watch","kind":"panel","status":"real","source":"admin/src/console/watch.mjs#watchPanel","golden":["watch.operator","watch.viewer"]},
+    {"el":"Sources: signatures, latest delivery, refusal counters and explicitly unknown credential health","kind":"readme","status":"real","panel":"p-watch","source":"admin/src/console/watch.mjs#watchPanel","holds":"Credential health is unknown","golden":["watch.operator","watch.viewer"],"shows":"Credential health is unknown here"},
+    {"el":"Rules show source, reviewed flow, mode and daily cap","kind":"readme","status":"real","panel":"p-watch","source":"admin/src/console/watch.mjs#watchPanel","golden":["watch.operator","watch.viewer"],"shows":"at most 4 findings per day"},
+    {"el":"Findings: outcome, count and cooldown left","kind":"readme","status":"real","panel":"p-watch","source":"admin/src/console/watch.mjs#cooldownLeft","golden":["watch.operator","watch.viewer"],"shows":"Cooldown"},
+    {"el":"Open Watch from Configuration's Triggers section","kind":"readme","status":"real","source":"admin/src/console/panels/triggers.mjs#triggersNavigation","holds":"watch","golden":["triggers.operator","triggers.viewer"],"shows":"href=\"/watch\"","reason":"the Watch tab of Triggers, and a link in Configuration's Triggers section when a rule is configured"},
+    {"el":"The terminal panel's z key opens Watch findings and outcome counters","kind":"readme","status":"real","source":"admin/src/dashboard.ts#makeDashboard","holds":"\"z\""},
+    {"el":"Watch configuration is hand written; the trigger editor does not author it","kind":"readme","status":"real","panel":"p-watch","source":"admin/src/console/watch.mjs#watchPanel","golden":["watch.operator","watch.viewer"],"shows":"written by hand in triggers.json"},
+    {"el":"Sources and rules, retained findings and counters","kind":"provides","status":"real","source":"admin/src/console/watch.mjs#loadWatchData"},
+    {"el":"The earlier multi panel live dashboard","kind":"readme","status":"illustrative","reason":"the card's future design, which it says is not delivered: the page is static and Reload reads again"},
+    {"el":"Counts and timestamps","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."},
+    {"el":"Configuration active in the navigation","kind":"readme","status":"illustrative","reason":"the page lives under Triggers, whose tab it is"},
+    {"el":"Times as words","kind":"readme","status":"illustrative","reason":"the page prints the instant in full, as the retained record holds it"}
+  ]
+}

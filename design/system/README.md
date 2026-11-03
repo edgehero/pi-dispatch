@@ -25,14 +25,14 @@ Start with **Start here**: the concept map shows how the pieces connect, the glo
 |---|---|
 | Start here | How pi-dispatch fits together (concept map), Glossary, The sample deployment, Journeys: a run asks a question, a run fails, set up a new deployment |
 | Overview | Overview, Overview all clear, First run setup (in the browser, after one command) |
-| Runs | Runs, Sandboxes (#771, operator only; optional separate gateway #754), Sandbox workbench with tabs and splits, Sandbox terminal, Sandbox gateway sign-in and states, a run's workspace on its page and outcome by outcome with per-terminal run context (#793), watching a shell (observer mode, #792), Zero touch with its viewer view (#770), Parked with answer rules and its viewer view (#772), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
+| Runs | Runs, Sandboxes (#771, operator only; optional separate gateway #754), Sandbox workbench with tabs and splits, Sandbox terminal, Sandbox gateway sign-in and states, a run's workspace on its page and outcome by outcome with per-terminal run context (#793), watching a shell (observer mode, #792), Zero touch with its viewer view (#770), Parked with answer rules and its viewer view (#772), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer, Approval request (#649), Fork a run (#648) |
 | Fleet | Fleet, Fleet part paused (bulk actions, held, delayed), Host detail (registry row, budget, capacity, doctor), Venue detail (14 properties), Fleet as a viewer |
-| Spend | Spend, Budget split, Capacity, Breakdown, Flows map, as tabs of one page |
-| Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, Add a trigger, Triggers as a viewer |
+| Spend | Spend, Budget split, Capacity, Breakdown, Flows map, as tabs of one page; Models: roles, cooldowns and canary (#773) |
+| Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, Add a trigger, Triggers as a viewer, Watch and a finding (#735, a tab of Triggers), Watch board: why each finding did what it did, every query and decision, Jev in the job and in shadow at the gate, and a board jobs propose and you adopt (#735, #743) |
 | Configuration | Configuration, Secrets, Connections, Project detail, Updates |
 | Access and audit | Sign-in, Access states (one-time link, operator, viewer, read-only), Audit, Error |
 | Phone | Overview, Runs, Parked, Spend, Run live, Fleet, Triggers, Parked with a draft, Zero touch |
-| Planned and proposed | Approval request (#649), Fork a run (#648), Models: roles, cooldowns and canary (#716, #717, #693), Watch and a finding (#735, a tab of Triggers), Watch board: why each finding did what it did, every query and decision, Jev in the job and in shadow at the gate, and a board jobs propose and you adopt (#735, #743), Dispatchers (#776, specs only): durable services with fresh Jev decision containers or bounded ordinary LLM jobs, only starting listed local read-only jobs and proposing triggers for a person; resident model containers and forge starts are rejected, long LLM runs deferred |
+| Planned and proposed | Dispatchers (#776, specs only): durable services with fresh Jev decision containers or bounded ordinary LLM jobs, only starting listed local read-only jobs and proposing triggers for a person; resident model containers and forge starts are rejected, long LLM runs deferred |
 | Components | Shell, Status, Actions and confirm, Cards and banners, Data table, Facts and levels, Timeline and waitlists, Transcript, Fields, diff and command, Confirm states, Live states |
 
 Each screen is built only from `components/bundle.css`, the page kit's helpers and a small page style. Its README says how a person uses it, which panels it has, what the server provides, what a viewer sees, and which data is sample.
@@ -56,7 +56,7 @@ Each screen is built only from `components/bundle.css`, the page kit's helpers a
 
 ## Coverage of the console in the repo
 
-Every page, panel, state and write of the console at `ce5338f`, plus the 5.0.0 issues, has a place here.
+Every page, panel, state and write of the console has a place here.
 
 | In the repo | Where it is designed |
 |---|---|

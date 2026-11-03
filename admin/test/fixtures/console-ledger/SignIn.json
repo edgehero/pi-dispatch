@@ -1,7 +1,7 @@
 {
   "card": "SignIn",
   "pr": 2,
-  "panels": ["p-signin"],
+  "words": "deb3d1e3f814082a5ba7c864fa1e588a9da950b71a64121b86c92e714598cd4a",
   "elements": [
     {"el":"p-signin","kind":"panel","status":"new","source":"admin/src/console/signin.mjs#signInContent","golden":["login.anonymous"]},
     {"el":"A single centered card","kind":"readme","status":"new","panel":"p-signin","source":"admin/src/console/signin.mjs#signInContent","holds":"class=\"card signin\"","golden":["login.anonymous"],"shows":"class=\"card signin\""},

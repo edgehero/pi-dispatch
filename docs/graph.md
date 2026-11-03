@@ -8,7 +8,7 @@ informs; it changes nothing — no port, no database, no new dependency.
 
 ## Where it renders
 
-![The topology pane: triggers wired to their flows Node-RED style across the four skill tiers, a /wf command trigger with no flow edge, an amber not-at-HEAD flow, an observed chain edge with its count and recency, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/graph-view.png?v=1.0.0)
+![The flows map: triggers wired to their flows Node-RED style across the four skill tiers, a /wf command trigger with no flow edge, an amber not-at-HEAD flow, an observed chain edge with its count and recency, a potential mention, cron re-arm loops, an orphan skill dimmed, and the legend](images/console/console-flows.png?v=2026-11-03)
 
 The Flows map is `/insights/flows` on the [operator console](console.md), one of the five [Spend views](insights.md). It draws trigger nodes, flows, observed and potential chain edges, grouped folders and forges, unresolved targets and spend badges. Map runs cover 30 days; spend follows `range=7d|30d|mtd`, with both windows stated.
 

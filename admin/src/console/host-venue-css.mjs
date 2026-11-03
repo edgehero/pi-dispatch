@@ -111,6 +111,7 @@ export const HOST_DETAIL_CSS = `
 `;
 
 export const VENUE_DETAIL_CSS = `
+#p-venue-fix .code { white-space: normal; overflow-wrap: anywhere; }
 .fl-bar { display: grid; gap: var(--space-4); }
 .fl-bar__row { display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap; }
 .fl-bar__t { min-width: 0; flex: 1 1 340px; }

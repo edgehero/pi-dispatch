@@ -1,7 +1,7 @@
 {
   "card": "CardsAndBanners",
   "pr": 2,
-  "panels": [],
+  "words": "34af3f855452da4bc411c2feb6709ffacf09d63cce9a55115d7380451dfd6f4f",
   "elements": [
     {"el":"p-needs","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewNeeds","golden":["overview.operator","overview.viewer"],"reason":"PR 3's (the OverviewScreen ledger)"},
     {"el":"p-waiting","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaiting","golden":["overview.operator","overview.viewer"],"reason":"PR 3's (the OverviewScreen ledger)"},

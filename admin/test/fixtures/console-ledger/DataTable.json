@@ -1,7 +1,7 @@
 {
   "card": "DataTable",
   "pr": 4,
-  "panels": [],
+  "words": "c420ec24443019ece848d288ede63a880049a465d6655796ff3031bd8f1df320",
   "elements": [
     {"el":"Tables sit in a flush card","kind":"readme","status":"real","panel":"p-runs","source":"admin/src/console/kit.mjs#card","holds":"card--flush","golden":["runs.operator","runs.viewer"],"shows":"class=\"card card--flush\""},
     {"el":"Tables scroll inside their own box","kind":"readme","status":"real","panel":"p-runs","source":"admin/src/console/kit.mjs#tbl","holds":"tbl-wrap","golden":["runs.operator","runs.viewer"],"shows":"class=\"tbl-wrap\""},

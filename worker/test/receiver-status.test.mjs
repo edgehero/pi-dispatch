@@ -154,6 +154,16 @@ test("one deadline bounds the entire discovery and starts no row commands after 
 	assert.equal(read.complete, false); assert.equal(read.moreUnknown, true); assert.ok(scans <= 2); assert.equal(gets, 0);
 });
 
+test("a bound that fires while the clock still shows time left ends the read too: a timer and a clock can disagree (#775)", async () => {
+	let gets = 0;
+	const redis = { sscan: () => new Promise(() => {}), mget() { gets++; return []; }, pttl() { return -2; } };
+	// The clock never moves, as when a timer fires a fraction of a millisecond before the deadline it was set from.
+	const read = await readReceiverStatus(redis, { names: ["mini1"], now: () => AT, timeoutMs: 1, clock: () => 0 });
+	assert.equal(gets, 0, "no row command starts once a bound has fired");
+	assert.deepEqual(read.hosts, [{ name: "mini1", unreadable: true }]);
+	assert.equal(read.complete, false);
+});
+
 test("an index member republished while a prune starts cannot lose its fresh membership (#775)", async () => {
 	const redis = redisFake(); redis.members.add("restarted");
 	const scan = redis.sscan; redis.sscan = async (...args) => { const answer = await scan(...args); redis.values.set(receiverKey("restarted"), JSON.stringify(record("restarted"))); return answer; };

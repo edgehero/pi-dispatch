@@ -1,25 +1,19 @@
-import { MODELS_PANEL_STATES } from "./helpers/models-goldens.mjs";
-import { UPDATES_CONFIRM_STATES, UPDATES_PANEL_STATES } from "./helpers/updates-goldens.mjs";
-import { ZERO_TOUCH_PANEL_STATES } from "./helpers/zero-touch-goldens.mjs";
-import { WORKSPACE_PANEL_STATES } from "./helpers/workspace-goldens.mjs";
-import { CONFIGURATION_PANEL_STATES } from "./helpers/configuration-goldens.mjs";
 import { TRIGGER_LIST_PANEL_STATES } from "./helpers/trigger-list-goldens.mjs";
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { html } from "../src/console/html.mjs";
-import { cardDocument, cardText } from "./helpers/card-structure.mjs";
+import { cardDocument, cardPanels, cardText, cardWords } from "./helpers/card-structure.mjs";
 import { ROLES as PAGE_ROLES, SHOTS, STATIC_SHOTS } from "./helpers/console-pages-harness.mjs";
 import { SPEND_PANEL_STATES } from "./helpers/spend-goldens.mjs";
 import { FLEET_PANEL_STATES } from "./helpers/fleet-goldens.mjs";
 import { PANEL_STATES } from "./helpers/panel-goldens.mjs";
 
 // Issue #737: every design card in scope has an element ledger, `fixtures/console-ledger/<Card>.json`, and
-// each thing the card draws is accounted for in it. A ledger copies what it needs of its card (the README's panel list,
-// and one element per README bullet, panel id, "server provides" item, browser state and sample value) rather than
-// reading design/system: it was written while the design lived outside this repository, and a card the design rebuilds
-// must not move a console test unseen. Reading the cards here is a later bolt (#752).
+// each thing the card draws is accounted for in it (one element per README bullet, panel id, "server provides" item,
+// browser state and sample value). Issue #752: the panels come from the card itself, and `words` records the hash of the
+// card's words when its ledger was last reconciled with them, so a rebuilt card cannot drift from its ledger unseen.
 //
 // AN ELEMENT: `{ el, kind, status, as?, panel?, source?, holds?, sentence?, roles?, golden?, shows?, reason? }`.
 //   - `el` the card's own words for it; `kind` where the card has it: `readme` (its README or what its preview draws
@@ -49,6 +43,7 @@ const GOLDEN_DIR = new URL("./fixtures/console/", import.meta.url);
 
 /** The cards whose ledgers are in, each with the pull request of issue #737 that builds it. Each page's pull request adds its own. */
 const IN_SCOPE_CARDS = Object.freeze({
+  WatchScreen: 763, WatchBoard: 763,
   ModelsScreen: 780,
   ParkedAnswerer: 779, ParkedDraftViewer: 779, ParkedDraftPhone: 779,
   SandboxesScreen: 771,
@@ -86,58 +81,16 @@ const IN_SCOPE_CARDS = Object.freeze({
 const ISSUE_OWNED_CARDS = Object.freeze({
   ApprovalRequest: Object.freeze([649]),
   ForkRun: Object.freeze([648]),
-  WatchScreen: Object.freeze([735]),
-  WatchBoard: Object.freeze([743]),
 });
 
 /**
  * THE REVERSE CHECK: every panel a golden draws is named by some card's ledger, so no screen grows a panel that no card
- * accounts for. It runs over the goldens whose screens are drawn from cards that have their ledgers (the audit log, the
- * sign-in and link pages, the error pages, since PR 3 the overview, and since PR 4 the runs list and the parked inbox);
- * the other screens' cards land with their own pull requests, and PR 8 makes this list every golden, page and panel
- * alike.
+ * accounts for. Every golden the harnesses draw, computed, so a new one is covered without another edit here.
  */
 const REVERSE_CHECKED = Object.freeze([
-  ...WORKSPACE_PANEL_STATES.map((key) => `panels/${key}`),
-  "models.operator", "models.viewer", ...MODELS_PANEL_STATES.map((key) => `panels/${key}`),
-  "sandboxes.operator", "panels/sandboxes-populated.operator",
-  ...ZERO_TOUCH_PANEL_STATES.map((key) => `panels/${key}`),
-  ...UPDATES_PANEL_STATES.map((key) => `panels/${key}`),
-  ...UPDATES_CONFIRM_STATES.map((key) => `panels/${key}`),
-  ...CONFIGURATION_PANEL_STATES.map((key) => `panels/${key}`),
-  "secrets.operator", "secrets.viewer", "connections.operator", "connections.viewer", "project.operator", "project.viewer",
-  "triggers.operator", "triggers.viewer", "triggers-filtered.operator", "triggers-filtered.viewer", "trigger-check.operator", "trigger-check.viewer",
-  ...TRIGGER_LIST_PANEL_STATES.map(key => `panels/${key}`),
-  "config.operator", "config.viewer", "trigger.operator", "trigger.viewer", "trigger-add.operator",
-  ...["trigger-editor-no-webhook.operator", "trigger-cron.operator", "trigger-spent.operator", "trigger-file-invalid.operator", "trigger-readonly.viewer", "trigger-editor-refusals.operator"].map(key=>`panels/${key}`),
-  ...SPEND_PANEL_STATES.map((key) => `panels/${key}`),
-  ...FLEET_PANEL_STATES.map((key) => `panels/${key}`),
-  "fleet.operator", "fleet.viewer", "host.operator", "host.viewer", "venue.operator", "venue.viewer",
-  "run.operator", "run.viewer", "run-live.operator", "run-live.viewer",
-  "overview.operator",
-  "overview.viewer",
-  "overview-host.operator",
-  "overview-host.viewer",
-  "runs.operator",
-  "runs.viewer",
-  "runs-filtered.operator",
-  "runs-filtered.viewer",
-  "runs-problems.operator",
-  "runs-problems.viewer",
-  "runs-search.operator",
-  "runs-search.viewer",
-  "parked.operator",
-  "parked.viewer",
-  "audit.operator",
-  "audit.viewer",
-  "login.anonymous",
-  "login-code.anonymous",
-  "error-404.operator",
-  "error-404.viewer",
-  "error-400.operator",
-  "error-403.viewer",
-  "error-421.anonymous",
-  "error-503.anonymous",
+  ...SHOTS.flatMap(([shot]) => PAGE_ROLES.map((role) => `${shot}.${role}`)),
+  ...STATIC_SHOTS,
+  ...PANEL_STATES.map((state) => `panels/${state}`),
 ]);
 
 const KINDS = Object.freeze(["readme", "panel", "provides", "state", "sample"]);
@@ -263,12 +216,9 @@ test("cards outside the console redesign are their issues' (by number) and carry
 
 test("each ledger's shape: its card, its pull request, the README's panels and closed element fields", () => collect((expect) => {
   for (const [name, { ledger }] of LEDGERS) {
-    expect(JSON.stringify(Object.keys(ledger)) === JSON.stringify(["card", "pr", "panels", "elements"]), `${name}: the ledger's keys are card, pr, panels, elements, in that order`);
+    expect(JSON.stringify(Object.keys(ledger)) === JSON.stringify(["card", "pr", "words", "elements"]), `${name}: the ledger's keys are card, pr, words, elements, in that order`);
     expect(ledger.card === name, `${name}.json names its card`);
     expect(ledger.pr === IN_SCOPE_CARDS[name], `${name}: built in PR ${IN_SCOPE_CARDS[name]}`);
-    const panels = Array.isArray(ledger.panels) ? ledger.panels : [];
-    expect(Array.isArray(ledger.panels) && panels.every((p) => typeof p === "string" && p !== ""), `${name}: panels is the README's list`);
-    expect(new Set(panels).size === panels.length, `${name}: each panel listed once`);
     expect(Array.isArray(ledger.elements) && ledger.elements.length > 0, `${name}: elements`);
     const els = (ledger.elements ?? []).map((e) => e.el);
     expect(new Set(els).size === els.length, `${name}: each element once`);
@@ -317,10 +267,26 @@ test("every golden a ledger names is one the harnesses draw: a page, a static pa
   for (const key of REVERSE_CHECKED) expect(drawn.has(key), `REVERSE_CHECKED: ${key} is a golden the harnesses draw`);
 }));
 
-test("every panel the card's README lists is accounted for by a panel element", () => collect((expect) => {
+test("every panel a card names or draws is accounted for by a panel element, read from the card", () => collect((expect) => {
   for (const [name, { ledger }] of LEDGERS) {
     const panels = new Set((ledger.elements ?? []).filter((e) => e.kind === "panel").map((e) => e.el));
-    for (const p of ledger.panels ?? []) expect(panels.has(p), `${name}: the README's panel ${p} is an element of kind panel`);
+    for (const p of cardPanels(name)) expect(panels.has(p), `${name}: the card's panel ${p} is an element of kind panel`);
+  }
+}));
+
+test("a panel element its card does not name says why it is in this ledger", () => collect((expect) => {
+  for (const [name, { ledger }] of LEDGERS) {
+    const named = new Set(cardPanels(name));
+    for (const e of (ledger.elements ?? []).filter((el) => el.kind === "panel" && !named.has(el.el))) {
+      expect("reason" in e, `${name}: "${e.el}" is not a panel of this card, so its element carries a reason`);
+    }
+  }
+}));
+
+test("each ledger was reconciled with its card's words as they are now", () => collect((expect) => {
+  for (const [name, { ledger }] of LEDGERS) {
+    const now = cardWords(name);
+    expect(ledger.words === now, `${name}: the card's words moved since its ledger was last reconciled. Re-read design/system/components/${name}, correct the ledger's elements, then set "words" to ${now}`);
   }
 }));
 

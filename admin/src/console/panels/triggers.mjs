@@ -162,7 +162,7 @@ export function triggersSpend(v) {
         "attributed to these rules",
       )}
       <p class="tr-kp">
-        ${countText(m?.stats?.weekRuns, m?.stats?.incomplete)} run records since
+        ${countText(m?.stats?.weekRuns, m?.stats?.incomplete)} ${m?.stats?.weekRuns === 1 ? "run record" : "run records"} since
         ${m?.weekStart == null
           ? "the start of this UTC week"
           : timeHtml(m.weekStart)}.

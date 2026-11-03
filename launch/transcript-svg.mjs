@@ -3,7 +3,7 @@
  * Render a captured terminal transcript as the framed SVG the READMEs show (docs/images/cli-*.svg).
  *
  *   node launch/transcript-svg.mjs --title "~/pi-work · pi-dispatch up --yes" --prompt "$ pi-dispatch up --yes" \
- *     [--cols 118 | --fit] [--fold-doctor] < up.txt > docs/images/cli-up.svg
+ *     [--cols 118 | --fit] [--fold-doctor] < up.txt > up.svg
  *
  * Input is the command's output as it printed it (ANSI SGR colours are kept, every other escape is dropped).
  * Long lines are hard-wrapped at --cols characters, as a terminal of that width would show them; --fit sizes

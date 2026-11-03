@@ -9,7 +9,7 @@ from paths import COMPONENTS as ROOT
 GROUPS = {
     "Start here": ["ConceptMap", "Glossary", "SampleStory", "JourneyAnswer", "JourneyFailure", "JourneySetup"],
     "Overview": ["OverviewScreen", "OverviewAllClear", "SetupScreen"],
-    "Runs": ["SandboxesScreen", "SandboxTerminal", "SandboxGatewaySignIn", "SandboxGatewayStates", "SandboxWorkbench", "RunWorkspace", "RunWorkspaceStates", "SandboxTerminalRun", "SandboxWatch", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
+    "Runs": ["SandboxesScreen", "SandboxTerminal", "SandboxGatewaySignIn", "SandboxGatewayStates", "SandboxWorkbench", "RunWorkspace", "RunWorkspaceStates", "SandboxTerminalRun", "SandboxWatch", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ApprovalRequest", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
     "Fleet": ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail", "FleetViewer"],
     "Spend": ["ModelsScreen", "SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen"],
     "Triggers": ["TriggersScreen", "TriggerDetail", "TriggerEditor", "TriggersViewer", "WatchScreen", "WatchBoard"],
@@ -17,7 +17,7 @@ GROUPS = {
     "Access and audit": ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"],
     "Phone": ["OverviewPhone", "RunsPhone", "ParkedPhone", "SpendPhone", "RunLivePhone", "FleetPhone", "TriggersPhone",
               "ParkedDraftPhone", "ZeroTouchPhone"],
-    "Planned and proposed": ["ApprovalRequest", "DispatchersScreen", "DispatcherScreen"],
+    "Planned and proposed": ["DispatchersScreen", "DispatcherScreen"],
     "Components": ["Shell", "Status", "Actions", "CardsAndBanners", "DataTable", "FactsAndLevels", "TimelineAndWaitlists",
                    "Transcript", "FieldsDiffCommand", "ConfirmStates", "LiveStates"],
 }

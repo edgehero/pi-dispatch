@@ -1,14 +1,7 @@
 {
   "card": "ModelsScreen",
   "pr": 780,
-  "panels": [
-    "p-model-problems",
-    "p-roles",
-    "p-cooldowns",
-    "p-models",
-    "p-subscription-quota",
-    "p-proposals"
-  ],
+  "words": "8a01e2dd3539ba755198d7b76026ad20df9a19219e7bb029123fd6cf809de95b",
   "elements": [
     {
       "el": "p-model-problems",

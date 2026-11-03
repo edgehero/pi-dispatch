@@ -1,7 +1,7 @@
 Triggers on a phone. Each rule is a short block that reads as a sentence, the week strip becomes a list of next fires, and the check is the one action.
 
 **How a person uses it.**
-- **Tabs** scroll in their own row: Rules, Watch (planned) and Dispatchers (proposed).
+- **Tabs** scroll in their own row: Rules, Watch and Dispatchers (proposed).
 - **At a glance**: 7 rules, the time to the next fire, and what the rules started this week.
 - **Which rule would run?** One button, *Check an event*, opens the check on its own page.
 - **Next fires**: nightly-tidy at 03:00 tomorrow (on time), pm-weekly on Monday at 06:00, and tonight's quiet hours for acme/web forge jobs.

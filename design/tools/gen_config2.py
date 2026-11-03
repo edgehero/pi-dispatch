@@ -732,7 +732,7 @@ A viewer sees the same facts and runs, and no Edit, Delete or Fire now.
 **Fixture note.**
 - **From the fixture:** trigger 3 (comment "@pi", flow fix, github, keeps a session, has instructions) and the runs gh-e9a0, gh-9575, gh-ebd7, gh-7cdf and gh-4a7e. Every card numbers triggers from 1, as this page does.
 - **Sample values:** progress and statusComment on trigger 3, the instructions text, the 24-hour totals, gh-c9e1 as a job from it, the cron timings, the slip example, the spent one-shot gh-40a1, and the doctor quote.
-- **Proposed, not in the console today:** Fire now (the CLI has `pi-dispatch run --trigger`).""",
+- **Fire now** previews a paid start of a cron trigger, as `pi-dispatch run --trigger` does from the terminal.""",
 
 "TriggerEditor": """Add a trigger with a form that knows the five kinds and each forge's own words, then preview it as the lines it adds to the triggers file.
 

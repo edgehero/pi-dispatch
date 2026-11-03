@@ -1,13 +1,7 @@
 {
   "card": "VenueDetail",
   "pr": 6,
-  "panels": [
-    "p-venue",
-    "p-venue-serves",
-    "p-venue-hosts",
-    "p-venue-props",
-    "p-venue-compare"
-  ],
+  "words": "cf9b6f8d1cf424395ae63ad3935acb3000e34db61c94b78fdcca9459a7602a70",
   "elements": [
     {
       "el": "p-venue",

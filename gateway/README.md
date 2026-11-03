@@ -1,6 +1,7 @@
 # pi-dispatch sandbox gateway
 
-An optional browser terminal for an existing pi-dispatch sandbox. Install it on the sandbox's host, then enable it
+An optional browser terminal for an existing sandbox of [pi-dispatch](https://github.com/edgehero/pi-dispatch#readme), which runs the pi
+coding agent for you in the background. You do not need this package to use pi-dispatch. Install it on the sandbox's host, then enable it
 with protected configuration. It is off until explicitly started:
 
 ```sh

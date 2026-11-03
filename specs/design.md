@@ -13438,7 +13438,7 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   `REQ-CONSOLE-SECURITY` (e), (f) and (m)).** Every page is drawn in the Pulse design system, `design/` in this
   repository since 2026-10-28 (tokens for light and dark, one stylesheet, `bundle.css`, and the cards), shell
   first: PR 1 gives every page the shell and the look, and each page's panels convert in that page's own pull
-  request. Until then a page's panels are the old markup, byte for byte, inside a legacy wrapper.
+  request. The last page converted with #750, and the legacy wrapper and its stylesheet are gone (`console-compat.test.mjs`).
   - **Pasted, not restated.** The console never reads the design folder, so its two files are copied and each copy
     is pinned by its file's content hash, AGENTS.md's rule for a copy: `PULSE_TOKENS`
     (`pulse-tokens.mjs`) is `tokens.json` as a deep-frozen literal (same keys, order, values and `usage` sentences)
@@ -13456,14 +13456,15 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     `PULSE_TOKENS_SHA256`. It holds `bundle.css` to `PULSE_CSS_SHA256` or to exactly one version recorded as waiting
     (`DESIGN_CSS_WAITING_SHA256`), because a change to the look lands in the design first and is pasted by a console
     pull request that measures it on the console's pages. A third version fails until it is pasted or recorded.
-    - **Waiting now:** tabular figures on numbers only. `bundle.css` set them on `body`, and on running text they widen
-      a hyphen, so an id like gh-2f6a read "gh - 2f6a". The design now sets them only on the classes that hold
-      counts, money, times, table figures and the timeline's times (`.kpi b`, `.count`, `.tbl td.num`, `.wb-t`,
-      `.tax`, `.tp-sub` and the like; `.tnum` for any other number), and not on running text such as a waitlist's
-      sentence (`.wl__t`). The paste waits for #752's pass against the cards, because the console sizes some text by
-      hand on the assumption that digits are tabular, and no CI check measures it: the timeline's `SANS_CLASSES`
-      (`timeline.mjs`), the drawn widths in `console-timeline.test.mjs` (`DRAWN`) and a wait bar segment's least
-      share (`segmentPct`, `kit.mjs`). The pass re-measures those three with the pasted stylesheet.
+    - **Pasted with #750, re-measured with #752:** tabular figures on numbers only. `bundle.css` set them on `body`, and
+      on running text they widen a hyphen, so an id like gh-2f6a read "gh - 2f6a". The design now sets them only on the
+      classes that hold counts, money, times, table figures and the timeline's times (`.kpi b`, `.count`, `.tbl td.num`,
+      `.wb-t`, `.tax`, `.tp-sub` and the like; `.tnum` for any other number), and not on running text such as a
+      waitlist's sentence (`.wl__t`). `DESIGN_CSS_WAITING_SHA256` is null. Nothing in CI measures the console's hand
+      sizing, so #752 measured it in Chromium 141 under the pasted stylesheet, and all three stand unchanged: the 40
+      `DRAWN` widths (`console-timeline.test.mjs`) are within 0.05 px of what is drawn; a digit at 12 px, 500 in `.tp-sub` is
+      7.72 px against `SANS_CLASSES`' 7.9 (`timeline.mjs`), which stays on the wide side as it must; and a digit at 13 px,
+      800 in `.wb-t` is 8.83 px against the 9 `segmentPct` takes (`kit.mjs`).
     - **Not in the stylesheet:** the design status ribbon on each card (built, planned, proposed, needs a decision)
       is a note on the design, so its rules are added to the cards by `design/tools/fix_markers.py` and never enter
       `bundle.css`.
@@ -15098,7 +15099,8 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   move to the console): pages.mjs and panels.mjs (the what-if panel, the window line, `paths=full`), script.mjs (the
   interactive topology), admin/src/insights-html.mjs (the sections only), admin/src/index.ts (`/dispatch insights`
   prints the URL), .github/scripts/label-fit-check.mjs (now checks the console's renderers) and
-  launch/render-images.mjs (renders `docs/images/insights-view.png` from the console page). Since #647:
+  launch/render-images.mjs (renders `docs/images/insights-view.png` from the console page, and since #752, with
+  `--console`, any golden at 1440 and 375 in both themes through `launch/console-render.mjs`). Since #647:
   admin/src/console/run-api.mjs (`getRun`, `runDocument`, `chatFactsOf`, `safeRunOf`, `parseRunQuery`), panels.mjs
   (`runChat`, `steerForms` and `chatDrawsSteer`, since #737 in panels/run.mjs, and `parkedAnswerForm`, in
   panels/common.mjs), pages.mjs (the `chat` read), server.mjs (the
@@ -17499,3 +17501,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-02 (#796) | New `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`. It reverses "restage for me" and "not as a `/job` input", the latter for one canary job only, each with the reason it stood and why that reason does not reach this. `DES-DOCTOR-RESULTS-PUBLISHED` UNCHANGED, checked: the look publishes beside doctor, not through it, and nothing reads either to decide anything. |
 | 2026-11-03 (#796, a canary on another host) | `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`: records the rejected alternative of reading a canary's result from this host's run records alone, and `scanFleetRunRecords` in its place. Found while checking the pull request's own claims, not by a test: every fixture had handed the page its records. The run mirror and `INT-UPDATES-KEYS` UNCHANGED, checked: the mirror already carried the record whole. |
 | 2026-11-03 (#754, a slow attach) | `DES-SANDBOX-GATEWAY-ATTACH-ONLY`: a first lease shorter than a poll is renewed at once. Found by the rootless Podman lane: a slow attach could leave under a second of authority, and the session's first renewal came one second later, so a healthy terminal said Connected and then ended as "could not confirm its authority". Reproduced through the real server with a real clock, on the old code and not the new. `INT-SANDBOX-GATEWAY-CONTRACT`, the five-second bound and every revocation path UNCHANGED, checked: this asks sooner and never extends a lease without the store's answer. |
+| 2026-11-03 (#752, #692, #737) | **`DES-OPERATOR-CONSOLE` AMENDED**, "The visual system": the waiting stylesheet was pasted with #750 and the constant is null; the re-measure it owed was done in Chromium 141 and all three hand sizings stand (`DRAWN` within 0.05 px, a digit at 7.72 against 7.9 and 8.83 against 9). The legacy wrapper is recorded as gone. Images are drawn from the goldens by `render-images.mjs --console`, rejected: a console started in process against a seeded Valkey, because a steer-armed job needs a key on a real 30 second expiry, which can flip a golden mid render, and a new fixture job moves every later run's numbers. Rejected: moving the width check's server to share it, which is tangled with a required check's bookkeeping. Rejected: committing all 1,952 images, 959 MB for good, against 18 that a README shows. `insights-view.png` stays until the next publish, because the published admin README loads it from `main`. The live run page orders by `:has()` rather than a second layout, so a stream's panel swap is unchanged. UNCHANGED, checked: the tokens, `PULSE_CSS` and its hash, and every panel id. |

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ACTIONS } from "../src/console/actions.mjs";
+import { PAGES } from "../src/console/pages.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { ENDED_REASONS, endedNotices } from "../src/console/session-ends.mjs";
 import { RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES } from "../src/run-filter.mjs";
@@ -72,4 +73,16 @@ test("docs/triggers.md's example refusal for a pull_request trigger is the trigg
   assert.deepEqual(said[2].split(", "), [...TRIGGER_ADD_FIELDS.pull_request]);
   const planned = planTriggerAdd({ params: { kind: "pull_request", repository: "acme/web", flow: "review" }, paths: { triggersPath: "/deploy/triggers.json" }, env: {} });
   assert.equal(planned.refusal, said[1]);
+});
+
+test("docs/console.md's table of the screens: a row for every page's route, and no row for a route that is not one", () => {
+  const rows = tableRows(read("docs/console.md"), "| Page | What it shows |");
+  const routed = new Map(rows.map(([route, says]) => [/^`([^`?]+)/.exec(route)?.[1], says]));
+  const paths = Object.values(PAGES).map((page) => page.path);
+  // Spend's four other views share its row, which names each, since they are tabs of one page.
+  const insights = routed.get("/insights");
+  for (const path of paths) {
+    assert.ok(routed.has(path) || (path.startsWith("/insights/") && insights.includes(path)), `${path} has a row`);
+  }
+  for (const route of routed.keys()) assert.ok(paths.includes(route), `${route} is a page`);
 });

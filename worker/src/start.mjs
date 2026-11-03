@@ -324,7 +324,7 @@ export async function reloadTriggersFile(config, queue, state, { reload = reload
  * the worker keeps its boot-time schedulers. The FSWatcher is unref'd (the debounce it arms is NOT), and the returned
  * closer is what `startWorker` registers so the watch dies with the worker that armed it (issue #295).
  */
-function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot, afterReload = () => {}, state = { newer: false }) {
+function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot, afterReload = () => {}, state = { newer: false }, watchFn = watch) {
 	const path = config.triggersFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -336,7 +336,7 @@ function watchTriggersFile(config, queue, log, ref, registry, tz, fleet, atBoot,
 	// (issue #386). A baseline taken here would measure the arming instead.
 	readBeforeArming(handles, readFile, atBoot);
 	try {
-		handles.watcher = watch(dir, (_event, changed) => {
+		handles.watcher = watchFn(dir, (_event, changed) => {
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return; // only our file (a null name -> reload to be safe)
 			clearTimeout(handles.timer);
@@ -391,7 +391,7 @@ export function reloadPauseWindows(config, ref, log, { load = loadPauseWindows }
  * and hot-swap the in-memory windows in `ref.current` on change (`reloadPauseWindows`). Best-effort; the
  * FSWatcher is unref'd and the returned closer stops the watch with the worker (issue #295).
  */
-function watchPauseWindowsFile(config, ref, log, atBoot) {
+function watchPauseWindowsFile(config, ref, log, atBoot, watchFn = watch) {
 	const path = config.pauseWindowsFile;
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -401,7 +401,7 @@ function watchPauseWindowsFile(config, ref, log, atBoot) {
 	const readFile = () => readFileSync(path, "utf8");
 	readBeforeArming(handles, readFile, atBoot); // the BOOT LOAD's own bytes; see watch-closer (issue #386)
 	try {
-		handles.watcher = watch(dir, (_event, changed) => {
+		handles.watcher = watchFn(dir, (_event, changed) => {
 			if (handles.closed) return; // see makeWatchCloser: by construction, not by a delivery rule
 			if (changed && changed !== file) return;
 			clearTimeout(handles.timer);
@@ -885,6 +885,9 @@ export async function startWorker(
 		// literal address every Valkey client of this worker then connects to. A seam: the real one reads /proc, probes
 		// this host's addresses and resolves the name, none of which belongs in a wiring test.
 		judgeValkey = defaultJudgeValkey,
+		// `fs.watch` for the triggers and pause-windows watchers, so a test can deliver a change itself: macOS can lose a
+		// real event outright (the rebuilt FSEvents stream, watch-closer.mjs), which is not what those tests are about.
+		watchFs = watch,
 		// The scoped-limits watcher, injectable so a test can see what it is armed with (PR #549's review: the cap
 		// thunk the reload warning reads). Production passes nothing and gets the real watcher.
 		watchScopedLimits: watchScopedLimitsFn = watchScopedLimitsFile,
@@ -3538,13 +3541,13 @@ export async function startWorker(
 		// Only when a triggers file is configured; best-effort; a bad edit keeps the running schedulers. The
 		// closer each of the three returns joins `extraClosers`, so the watch stops with the worker (issue #295).
 		if (config.triggersFile) {
-			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers, checkEnvelopePlace, triggersState));
+			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers, checkEnvelopePlace, triggersState, watchFs));
 		}
 
 		// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so
 		// an operator's add/delete of a pause window takes effect without a worker restart. A bad edit is kept out.
 		if (config.pauseWindowsFile) {
-			extraClosers.push(watchPauseWindowsFile(config, pauseWindows, log, atBoot.pauseWindows));
+			extraClosers.push(watchPauseWindowsFile(config, pauseWindows, log, atBoot.pauseWindows, watchFs));
 		}
 
 		// Issue #499 part B: the two files a project row joins reload as a pair; the deployment cap rides along so a limits

@@ -28,7 +28,7 @@ import { RUNS_CSS, RUNS_PHONE_MAX, RUNS_TABLE } from "../src/console/runs-css.mj
 import { PARKED_CSS, PARKED_LAYOUT, PARKED_PHONE_MAX, QCARD_CSS } from "../src/console/parked-css.mjs";
 
 // The console's one stylesheet (issue #737): the design's tokens and bundle.css, pinned to the design files by hash, the
-// shell's own rules and page rules. The last converted configuration screen retires the compatibility layer (#750).
+// shell's own rules and page rules.
 
 const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 

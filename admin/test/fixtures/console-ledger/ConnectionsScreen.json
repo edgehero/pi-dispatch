@@ -1,337 +1,39 @@
 {
   "card": "ConnectionsScreen",
   "pr": 784,
-  "panels": [
-    "p-connection-problems",
-    "p-provider-keys",
-    "p-forges",
-    "p-egress",
-    "p-endpoints",
-    "p-subscription-auth",
-    "p-notify",
-    "p-mcp",
-    "p-env",
-    "p-packages"
-  ],
+  "words": "8aab6bb1e6b23c053463786ce81c42847ca28e254a294c74df3bb6a911d1ca8d",
   "elements": [
-    {
-      "el": "p-connection-problems",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsProblems",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-forges",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsForges",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ],
-      "shows": [
-        "X-GitHub-Delivery",
-        "HMAC-SHA256",
-        "Developer or above"
-      ]
-    },
-    {
-      "el": "p-egress",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsEgress",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ],
-      "shows": [
-        "and 1 more",
-        "egress-allowlist.conf"
-      ]
-    },
-    {
-      "el": "p-endpoints",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ],
-      "shows": [
-        "1 of 2",
-        "0 of 4"
-      ]
-    },
-    {
-      "el": "p-notify",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsNotify",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-mcp",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsMcp",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-env",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsEnvironment",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ],
-      "shows": [
-        "this shell and the .env differ",
-        "unknown (worker env or default)"
-      ]
-    },
-    {
-      "el": "p-packages",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsPackages",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ]
-    },
-    {
-      "el": "Forge activation, token source, verification, delivery identity, polling and authority",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsForges"
-    },
-    {
-      "el": "Posture, allowlist, host proxy state and dated doctor evidence",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsEgress"
-    },
-    {
-      "el": "Fleet leases, actual per-host slot occupancy, scope, beat age and shared bound disagreements",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints"
-    },
-    {
-      "el": "Fixed comments, status comments, last per-host hook result and retained detail counts",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsNotify"
-    },
-    {
-      "el": "Overlay MCP states and refusals, image-owned forge server",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsMcp"
-    },
-    {
-      "el": "Typed deployment key projection, unknown caps and shell/file conflict",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsEnvironment"
-    },
-    {
-      "el": "Exact versions, staging receipt and opt-out count",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsPackages"
-    },
-    {
-      "el": "The server provides only the existing worker facts, with unknown/unread states retained",
-      "kind": "provides",
-      "status": "new",
-      "source": "admin/src/connections-view.mjs#readConnections"
-    },
-    {
-      "el": "A failed proxy names the host and latest refused run with the fix",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsProblems",
-      "panel": "p-connection-problems",
-      "golden": [
-        "panels/connections-proxy.operator"
-      ],
-      "shows": [
-        "build3",
-        "gh-e9a0",
-        "pi-dispatch up"
-      ]
-    },
-    {
-      "el": "Card sample names, amounts, runs and counts",
-      "kind": "sample",
-      "status": "illustrative",
-      "reason": "The published card uses illustrative data; the production fixture and behavioral counterexamples verify actual source semantics, not these sample values."
-    },
-    {
-      "el": "p-subscription-auth",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/subscription-auth.mjs#connectionsSubscriptionAuth",
-      "golden": [
-        "panels/connections-subscription.operator"
-      ]
-    },
-    {
-      "el": "p-provider-keys",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys",
-      "golden": [
-        "panels/connections-proxy.operator",
-        "panels/connections-populated.viewer"
-      ],
-      "shows": [
-        "Provider API keys",
-        "Find or create a key at the provider"
-      ]
-    },
-    {
-      "el": "Permanent multiple-provider Add and Replace with an unchanged default",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys"
-    },
-    {
-      "el": "Official key acquisition guides remain readable without JavaScript",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys"
-    },
-    {
-      "el": "Claude subscription connections are community integrations, separate from official setup-token",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/subscription-auth.mjs#connectionsSubscriptionAuth"
-    },
-    {
-      "el": "OpenAI owning-host Sign in with ChatGPT acquisition guide",
-      "kind": "readme",
-      "status": "new",
-      "panel": "p-subscription-auth",
-      "source": "admin/src/console/panels/subscription-auth.mjs#subscriptionGuides",
-      "golden": [
-        "panels/connections-subscription.operator",
-        "panels/connections-subscription.viewer"
-      ],
-      "shows": [
-        "Sign in with ChatGPT on the owning host",
-        "Host connection guide",
-        "Official provider guidance"
-      ]
-    },
-    {
-      "el": "Claude community acquisition guide distinguishes official setup-token",
-      "kind": "readme",
-      "status": "new",
-      "panel": "p-subscription-auth",
-      "source": "admin/src/console/panels/subscription-auth.mjs#subscriptionGuides",
-      "golden": [
-        "panels/connections-subscription.operator",
-        "panels/connections-subscription.viewer"
-      ],
-      "shows": [
-        "Claude subscription and community compatibility",
-        "Official claude setup-token is for Claude Code"
-      ]
-    },
-    {
-      "el": "Shared endpoint bounds disagree without hiding host occupancy",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsEndpoints",
-      "panel": "p-endpoints",
-      "golden": [
-        "panels/connections-endpoint-bounds.operator"
-      ],
-      "shows": [
-        "One server, one id",
-        "1 of 2",
-        "2 of 3"
-      ]
-    },
-    {
-      "el": "Hook timeout retains typed outcomes without a delivery claim",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsNotify",
-      "panel": "p-notify",
-      "golden": [
-        "panels/connections-hook-timeout.operator",
-        "panels/connections-hook-timeout.viewer"
-      ],
-      "shows": [
-        "timeout",
-        "An exit code describes the hook, not notification delivery"
-      ]
-    },
-    {
-      "el": "Unreadable hook history stays unknown rather than healthy",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsNotify",
-      "panel": "p-notify",
-      "golden": [
-        "panels/connections-hook-unreadable.viewer"
-      ],
-      "shows": [
-        "hook history unavailable",
-        "Retained runs by detail"
-      ]
-    },
-    {
-      "el": "Receiver placement and per-forge delivery observations",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsForges",
-      "panel": "p-forges",
-      "golden": [
-        "panels/connections-populated.viewer"
-      ],
-      "shows": [
-        "Receiver on",
-        "Port 3000",
-        "all interfaces",
-        "Last taken",
-        "Last refused",
-        "24 UTC hours"
-      ]
-    },
-    {
-      "el": "No live receiver, unauthorized-only and unknown observation states",
-      "kind": "state",
-      "status": "new",
-      "source": "admin/src/console/panels/connections.mjs#connectionsForges",
-      "panel": "p-forges",
-      "golden": [
-        "panels/connections-receiver-none.operator",
-        "panels/connections-receiver-unauthorized.viewer",
-        "panels/connections-receiver-unknown.viewer"
-      ]
-    },
-    {
-      "el": "Versioned, bounded, display-only receiver source",
-      "kind": "provides",
-      "status": "new",
-      "source": "worker/src/receiver-status.mjs#readReceiverStatus",
-      "holds": "RECEIVER_HOSTS_MAX"
-    }
+    {"el":"p-connection-problems","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsProblems","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
+    {"el":"p-forges","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["X-GitHub-Delivery","HMAC-SHA256","Developer or above"]},
+    {"el":"p-egress","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEgress","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["and 1 more","egress-allowlist.conf"]},
+    {"el":"p-endpoints","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEndpoints","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["1 of 2","0 of 4"]},
+    {"el":"p-notify","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsNotify","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
+    {"el":"p-mcp","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsMcp","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
+    {"el":"p-env","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEnvironment","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["this shell and the .env differ","unknown (worker env or default)"]},
+    {"el":"p-packages","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsPackages","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
+    {"el":"Forge activation, token source, verification, delivery identity, polling and authority","kind":"readme","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsForges"},
+    {"el":"Posture, allowlist, host proxy state and dated doctor evidence","kind":"readme","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEgress"},
+    {"el":"Fleet leases, actual per-host slot occupancy, scope, beat age and shared bound disagreements","kind":"readme","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEndpoints"},
+    {"el":"Fixed comments, status comments, last per-host hook result and retained detail counts","kind":"readme","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsNotify"},
+    {"el":"Overlay MCP states and refusals, image-owned forge server","kind":"readme","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsMcp"},
+    {"el":"Typed deployment key projection, unknown caps and shell/file conflict","kind":"readme","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEnvironment"},
+    {"el":"Exact versions, staging receipt and opt-out count","kind":"readme","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsPackages"},
+    {"el":"The server provides only the existing worker facts, with unknown/unread states retained","kind":"provides","status":"new","source":"admin/src/connections-view.mjs#readConnections"},
+    {"el":"A failed proxy names the host and latest refused run with the fix","kind":"readme","status":"new","panel":"p-connection-problems","source":"admin/src/console/panels/connections.mjs#connectionsProblems","golden":["panels/connections-proxy.operator"],"shows":["build3","gh-e9a0","pi-dispatch up"]},
+    {"el":"Card sample names, amounts, runs and counts","kind":"sample","status":"illustrative","reason":"The published card uses illustrative data; the production fixture and behavioral counterexamples verify actual source semantics, not these sample values."},
+    {"el":"p-subscription-auth","kind":"panel","status":"new","source":"admin/src/console/panels/subscription-auth.mjs#connectionsSubscriptionAuth","golden":["panels/connections-subscription.operator"]},
+    {"el":"p-provider-keys","kind":"panel","status":"new","source":"admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["Provider API keys","Find or create a key at the provider"]},
+    {"el":"Permanent multiple-provider Add and Replace with an unchanged default","kind":"readme","status":"new","source":"admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys"},
+    {"el":"Official key acquisition guides remain readable without JavaScript","kind":"readme","status":"new","source":"admin/src/console/panels/provider-keys.mjs#connectionsProviderKeys"},
+    {"el":"Claude subscription connections are community integrations, separate from official setup-token","kind":"readme","status":"new","source":"admin/src/console/panels/subscription-auth.mjs#connectionsSubscriptionAuth"},
+    {"el":"OpenAI owning-host Sign in with ChatGPT acquisition guide","kind":"readme","status":"new","panel":"p-subscription-auth","source":"admin/src/console/panels/subscription-auth.mjs#subscriptionGuides","golden":["panels/connections-subscription.operator","panels/connections-subscription.viewer"],"shows":["Sign in with ChatGPT on the owning host","Host connection guide","Official provider guidance"]},
+    {"el":"Claude community acquisition guide distinguishes official setup-token","kind":"readme","status":"new","panel":"p-subscription-auth","source":"admin/src/console/panels/subscription-auth.mjs#subscriptionGuides","golden":["panels/connections-subscription.operator","panels/connections-subscription.viewer"],"shows":["Claude subscription and community compatibility","Official claude setup-token is for Claude Code"]},
+    {"el":"Shared endpoint bounds disagree without hiding host occupancy","kind":"readme","status":"new","panel":"p-endpoints","source":"admin/src/console/panels/connections.mjs#connectionsEndpoints","golden":["panels/connections-endpoint-bounds.operator"],"shows":["One server, one id","1 of 2","2 of 3"]},
+    {"el":"Hook timeout retains typed outcomes without a delivery claim","kind":"readme","status":"new","panel":"p-notify","source":"admin/src/console/panels/connections.mjs#connectionsNotify","golden":["panels/connections-hook-timeout.operator","panels/connections-hook-timeout.viewer"],"shows":["timeout","An exit code describes the hook, not notification delivery"]},
+    {"el":"Unreadable hook history stays unknown rather than healthy","kind":"readme","status":"new","panel":"p-notify","source":"admin/src/console/panels/connections.mjs#connectionsNotify","golden":["panels/connections-hook-unreadable.viewer"],"shows":["hook history unavailable","Retained runs by detail"]},
+    {"el":"Receiver placement and per-forge delivery observations","kind":"readme","status":"new","panel":"p-forges","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-populated.viewer"],"shows":["Receiver on","Port 3000","all interfaces","Last taken","Last refused","24 UTC hours"]},
+    {"el":"No live receiver, unauthorized-only and unknown observation states","kind":"state","status":"new","panel":"p-forges","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-receiver-none.operator","panels/connections-receiver-unauthorized.viewer","panels/connections-receiver-unknown.viewer"]},
+    {"el":"Versioned, bounded, display-only receiver source","kind":"provides","status":"new","source":"worker/src/receiver-status.mjs#readReceiverStatus","holds":"RECEIVER_HOSTS_MAX"},
+    {"el":"build3's proxy banner in the sample","kind":"readme","status":"illustrative","reason":"the fixture's worst problem is WEBHOOK_SECRET, so the page leads with that"}
   ]
 }

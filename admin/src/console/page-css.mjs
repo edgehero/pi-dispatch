@@ -8,9 +8,8 @@ import { ZERO_TOUCH_CSS } from "./zero-touch-css.mjs";
  * does not draw (`SHELL_CSS`), each page's own rules (`PAGE_CSS`), and the one function that confines a block of rules
  * to a part of the document (`scopeCss`).
  *
- * WHY A SCOPER AND NOT HAND-PREFIXED RULES. A page's rules must not reach another page, and the compatibility layer's
- * must not reach the shell or a converted panel. Both are written as plain CSS and confined by one function: a rule
- * that forgets its prefix cannot exist, and a rule the function cannot confine (a selector that names the document
+ * WHY A SCOPER AND NOT HAND-PREFIXED RULES. A page's rules must not reach another page. They are written as plain CSS and
+ * confined by one function: a rule that forgets its prefix cannot exist, and a rule the function cannot confine (a selector that names the document
  * below its start, an `@import`, a nested at-rule, `@keyframes`, whose names are global) THROWS when the module loads,
  * so it fails the build instead of leaking. `html`, `body` and `:root` at a selector's start stand for the scope
  * itself, which is how a page's "whole page" rule (`body{...}`) reads once confined.
@@ -579,6 +578,7 @@ const AUDIT_CSS = `
 .filterbar .search:focus-within{outline:2px solid var(--focus);outline-offset:2px}
 .filterbar .select{flex:0 1 auto;width:auto;max-width:100%;height:var(--control-h);padding-left:18px;border-radius:var(--radius-pill);background-color:var(--surface);background-position:right 18px center,right 13px center;box-shadow:none}
 .tbl tbody tr:target td{background:var(--running-tint)}
+.tbl td>time,.tbl td>.code{white-space:nowrap;overflow-wrap:normal}
 .banner__s .code{white-space:normal;overflow-wrap:anywhere}
 .banner__s .code>span{display:inline-block;max-width:100%}
 @media (max-width: ${AUDIT_LAYOUT.stackMax}px){${stackRules()}

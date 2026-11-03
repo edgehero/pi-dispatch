@@ -524,7 +524,7 @@ export const configProjects = fromSnapshot("Projects", (s, view) => {
 });
 
 /** The detail pages own these panels and writes; Configuration keeps one useful line per source. */
-export const configMcp = fromSnapshot("MCP servers", (s) => html`<p>${s.overlayMcp?.servers?.length ?? "Unknown"} overlay servers. <a class="link" href="/config/connections#p-mcp">Open Connections</a></p>`);
+export const configMcp = fromSnapshot("MCP servers", (s) => html`<p>${s.overlayMcp?.servers?.length ?? "Unknown"} overlay ${s.overlayMcp?.servers?.length === 1 ? "server" : "servers"}. <a class="link" href="/config/connections#p-mcp">Open Connections</a></p>`);
 export const configPackages = fromSnapshot("Staged pi packages", (s) => html`<p>${s.stagedPackages?.packages?.length ?? "Unknown"} packages staged. <a class="link" href="/config/connections#p-packages">Open Connections</a>. <a class="link" href="/config/updates">See what is newer</a></p>`);
 export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => html`<p>${s.secretProfiles?.profiles?.length ?? 0} profiles in view. <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p>`);
 export const configSecretBundles = fromSnapshot("Secret bundles", (s) => html`<p>${s.secretBundles?.bundles?.length ?? 0} project bundles in view. <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p>`);

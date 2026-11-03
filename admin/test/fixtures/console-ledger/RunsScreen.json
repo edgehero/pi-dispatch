@@ -1,7 +1,7 @@
 {
   "card": "RunsScreen",
   "pr": 4,
-  "panels": ["p-filters", "p-summary", "p-runs"],
+  "words": "ef130cff91fecd35c332e3978a9de56f4681d73ab401753bfa24d1ae321171f4",
   "elements": [
     {"el":"p-filters","kind":"panel","status":"new","source":"admin/src/console/panels/runs.mjs#runsFilters","golden":["runs.operator","runs.viewer","runs-filtered.operator","runs-search.operator"],"reason":"the runs page's filter panel was p-filter; it takes the card's id, and it is the first panel under the title bar, since the title bar is static markup that no live panel replaces"},
     {"el":"p-summary","kind":"panel","status":"new","source":"admin/src/console/panels/runs.mjs#runsSummary","golden":["runs.operator","runs.viewer"]},
@@ -46,6 +46,6 @@
     {"el":"gh-e9a0 and gh-f0c2 under billing and web","kind":"sample","status":"illustrative","reason":"the card follows the projects config; the console tags a run with its record's project"},
     {"el":"Row values: times, ids, tokens, costs and the counts (27 runs, $6.13)","kind":"sample","status":"illustrative","reason":"the card's fixture list; the goldens draw the fixture deployment's own records"},
     {"el":"The rows' reason sentences, in the catalog's style","kind":"sample","status":"illustrative","reason":"sample copy (the card's note); a row says its reason's own short catalog sentence"},
-    {"el":"The nav's Watch and More: Models","kind":"sample","status":"illustrative","reason":"not built (the Shell ledger)"}
+    {"el":"In-pill filters","kind":"readme","status":"illustrative","reason":"the page uses labelled selects and Apply, which work without the script"}
   ]
 }

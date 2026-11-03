@@ -68,7 +68,7 @@ export const CLIENT_STATES = Object.freeze([
   row("LiveStates", "\"Newer data is waiting\"", T.held),
   row("LiveStates", "Older data dimmed under its time", T.stale),
   row("LiveStates", "The console stopping (shutdown)", T.shutdown),
-  row("LiveStates", "One token may hold 4 live tabs, a run with its transcript counts as one; past that the tab stays still and says why", T.bothClosed),
+  row("LiveStates", "One token may hold 4 live tabs, a run with its transcript counts as two; past that the tab stays still and says why", T.bothClosed),
   // SignIn
   row("SignIn", "\"Console not reachable, retrying\" keeps the page", T.signIn),
   row("SignIn", "One notice at a time above the field", T.signIn),

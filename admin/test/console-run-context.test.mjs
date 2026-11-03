@@ -120,8 +120,8 @@ test("continuation progress pairs the lost attempt summary with live recovery nu
   const progress = { v: 1, turn: 7, steps: 10, failed: 2, interrupted: 1, replayed: 3, running: [{ tool: "bash", since: AT - 1000 }], recent: [], phase: { index: 0, done: 1, total: 2 }, phases: ["PRIVATE-PHASE"], note: "PRIVATE-NOTE", prior: null, startedAt: AT - 10_000, updatedAt: AT, ended: false, outcome: null };
   const data = { run: { record: own }, progressContinues: { as: `${own.jobId}.r1` }, recoveryProgress: { progress }, recoveryLive: { host: "mini2", maxTurns: 40 } };
   const op = String(runProgress(view(data))), viewer = String(runProgress(view(data, "viewer")));
-  assert.match(op, /This run continues as/); assert.match(op, /Recovery progress/); assert.match(op, /7 of 40/); assert.match(op, /Replayed calls/); assert.match(op, /PRIVATE-PHASE/); assert.match(op, /PRIVATE-NOTE/);
-  assert.match(viewer, /7 of 40/); assert.doesNotMatch(viewer, /PRIVATE-PHASE|PRIVATE-NOTE/);
+  assert.match(op, /This run continues as/); assert.match(op, /Recovery progress/); assert.match(op, /<b>7<\/b> of 40/); assert.match(op, /Replayed calls/); assert.match(op, /PRIVATE-PHASE/); assert.match(op, /PRIVATE-NOTE/);
+  assert.match(viewer, /<b>7<\/b> of 40/); assert.doesNotMatch(viewer, /PRIVATE-PHASE|PRIVATE-NOTE/);
 });
 
 

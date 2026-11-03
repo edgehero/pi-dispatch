@@ -5,6 +5,7 @@ import { DEFER_BUCKETS } from "@edgehero/pi-dispatch/defer-reasons";
 import { isSafeHtml } from "../src/console/html.mjs";
 import { PAGE_CSS } from "../src/console/page-css.mjs";
 import { ICON_NAMES } from "../src/console/pulse-icons.mjs";
+import { onCard } from "./helpers/card-structure.mjs";
 import { PULSE_CSS } from "../src/console/pulse-css.mjs";
 import { OUTCOME_WORDS, REASON_WORDS } from "../src/words.mjs";
 import {
@@ -29,8 +30,8 @@ import {
 } from "../src/console/timeline.mjs";
 
 // Issue #737: the overview's timeline, a pure module. The model is pinned by its numbers and words, the markup by the
-// TimelineAndWaitlists card's own sample (copied here as the card's bytes from design/system, which this test does not read),
-// with only what a drawing of other data must change taken out (positions, titles) and the kit's one spelling applied
+// TimelineAndWaitlists card's own sample (kept here as the card's bytes, each held to the card in design/system by `onCard`,
+// issue #752), with only what a drawing of other data must change taken out (positions, titles) and the kit's one spelling applied
 // (the card closes `<use>` with `/>`, the console with `</use>`).
 
 /** The instant every test draws at: 15:39 UTC, the card's now. */
@@ -1091,7 +1092,7 @@ test("the frame is the card's: the wrapper, the band, a head per row, the lanes'
   assert.ok(out.startsWith(`<div class="tl-wrap"><div class="tl" role="group" aria-label="Runs by project"><span></span>`));
   assert.ok(out.endsWith("</svg></div></div>"));
   // The band, as the card draws it.
-  const band = `<span></span><svg class="tl__r" height="24" aria-hidden="true"><rect class="tl-future" x="68.57%" y="0" width="31.43%" height="24"/><text class="tband" x="68.57%" dx="-10" y="16" text-anchor="end">Ran and running</text><text class="tband tband--in" x="68.57%" dx="10" y="16">In line</text></svg>`;
+  const band = onCard("TimelineAndWaitlists", `<span></span><svg class="tl__r" height="24" aria-hidden="true"><rect class="tl-future" x="68.57%" y="0" width="31.43%" height="24"/><text class="tband" x="68.57%" dx="-10" y="16" text-anchor="end">Ran and running</text><text class="tband tband--in" x="68.57%" dx="10" y="16">In line</text></svg>`);
   assert.ok(shapeOf(out).includes(shapeOf(band)));
   // A row's head, as the card draws it, with the name whole in its title (the page's rules cut it to the column).
   assert.ok(out.includes(`<span class="tl__h tl__h--first"><span class="ptag" title="api">api</span><span class="tl__repo">acme/api</span></span>`));
@@ -1104,7 +1105,7 @@ test("the frame is the card's: the wrapper, the band, a head per row, the lanes'
   // The axis: UTC beside the times, the times as HH:MM, none under the now cap, and the cap as the card draws it.
   assert.deepEqual(m.axis.map((a) => a.label), ["13:00", "13:30", "14:00", "14:30", "15:00", null, "16:00", "16:30", "17:00"]);
   assert.ok(out.includes(`<span></span><svg class="tl__r" height="24" aria-hidden="true"><text class="tax" x="0" dx="-8" y="14" text-anchor="end">UTC</text><text class="tax" x="7.78%" y="14" text-anchor="middle">13:00</text>`));
-  const cap = `<rect class="tnowcap" x="68.57%" y="2" width="46" height="18" rx="9" transform="translate(-23 0)"/><text class="tnowcap-t" x="68.57%" y="15" text-anchor="middle">15:39</text></svg>`;
+  const cap = onCard("TimelineAndWaitlists", `<rect class="tnowcap" x="68.57%" y="2" width="46" height="18" rx="9" transform="translate(-23 0)"/><text class="tnowcap-t" x="68.57%" y="15" text-anchor="middle">15:39</text></svg>`);
   assert.ok(shapeOf(out).endsWith(`${shapeOf(cap)}</div></div>`));
 });
 
@@ -1113,13 +1114,13 @@ test("each item is drawn as the card draws it", () => {
   const out = shapeOf(draw(m));
   // The card's fragments, byte for byte but for positions and titles.
   const card = {
-    held: `<rect class="tp--held" x="0" y="9" width="68.57%" height="26" rx="13"><title>gh-4a7e cancelled at 10:59; still holds a build3 slot</title></rect><text class="tp-l tp-l--hold" x="0" dx="14" y="27">gh-4a7e<tspan class="tp-sub3" dx="8">cancelled 10:59, still holds a build3 slot</tspan></text>`,
-    arrowWait: `<line class="dep" x1="68.57%" x2="70.00%" y1="22" y2="22" marker-end="url(#arrow)"/><rect class="tp--wait" x="70.00%" y="9" width="30.00%" height="26" rx="13"><title>gh-c9e1: needs this slot</title></rect><g transform="translate(9 15)"><use class="tp-wait-g" href="#i-slot" x="70.00%" width="14" height="14"/></g><text class="tp-l" x="70.00%" dx="28" y="27">gh-c9e1<tspan class="tp-sub2" dx="6">needs this slot</tspan></text>`,
-    gapWait: `<line class="gapline" x1="68.57%" x2="70.95%" y1="22" y2="22"/><rect class="tp--wait" x="70.95%" y="9" width="29.05%" height="26" rx="13"><title>gh-71b2: retry in 4m</title></rect><g transform="translate(9 15)"><use class="tp-wait-g" href="#i-rerun" x="70.95%" width="14" height="14"/></g><text class="tp-l" x="70.95%" dx="28" y="27">gh-71b2<tspan class="tp-sub2" dx="6">retry in 4m</tspan></text>`,
-    okLabelled: `<rect class="tp--ok" x="31.90%" y="9" width="12.38%" height="26" rx="13"><title>gh-ebd7 acme/billing#259 completed</title></rect><text class="tp-l" x="31.90%" dx="12" y="27">gh-ebd7</text>`,
-    okQuiet: `<rect class="tp--ok" x="10.00%" y="9" width="6.19%" height="26" rx="13"><title>gl-9a2c acme/billing-ui#405 completed</title></rect>`,
+    held: onCard("TimelineAndWaitlists", `<rect class="tp--held" x="0" y="9" width="68.57%" height="26" rx="13"><title>gh-4a7e cancelled at 10:59; still holds a build3 slot</title></rect><text class="tp-l tp-l--hold" x="0" dx="14" y="27">gh-4a7e<tspan class="tp-sub3" dx="8">cancelled 10:59, still holds a build3 slot</tspan></text>`),
+    arrowWait: onCard("TimelineAndWaitlists", `<line class="dep" x1="68.57%" x2="70.00%" y1="22" y2="22" marker-end="url(#arrow)"/><rect class="tp--wait" x="70.00%" y="9" width="30.00%" height="26" rx="13"><title>gh-c9e1: needs this slot</title></rect><g transform="translate(9 15)"><use class="tp-wait-g" href="#i-slot" x="70.00%" width="14" height="14"/></g><text class="tp-l" x="70.00%" dx="28" y="27">gh-c9e1<tspan class="tp-sub2" dx="6">needs this slot</tspan></text>`),
+    gapWait: onCard("TimelineAndWaitlists", `<line class="gapline" x1="68.57%" x2="70.95%" y1="22" y2="22"/><rect class="tp--wait" x="70.95%" y="9" width="29.05%" height="26" rx="13"><title>gh-71b2: retry in 4m</title></rect><g transform="translate(9 15)"><use class="tp-wait-g" href="#i-rerun" x="70.95%" width="14" height="14"/></g><text class="tp-l" x="70.95%" dx="28" y="27">gh-71b2<tspan class="tp-sub2" dx="6">retry in 4m</tspan></text>`),
+    okLabelled: onCard("TimelineAndWaitlists", `<rect class="tp--ok" x="31.90%" y="9" width="12.38%" height="26" rx="13"><title>gh-ebd7 acme/billing#259 completed</title></rect><text class="tp-l" x="31.90%" dx="12" y="27">gh-ebd7</text>`),
+    okQuiet: onCard("TimelineAndWaitlists", `<rect class="tp--ok" x="10.00%" y="9" width="6.19%" height="26" rx="13"><title>gl-9a2c acme/billing-ui#405 completed</title></rect>`),
     refused: `<circle class="tp-ref" cx="64.29%" cy="22" r="12"><title></title></circle><g transform="translate(-7 15)"><use class="tp-ref-g" href="#i-refused" x="64.29%" width="14" height="14"/></g><text class="tp-l tp-l--ref" x="64.29%" dx="-18" y="27" text-anchor="end">gh-e9a0 refused</text>`,
-    runIn: `<rect class="tp--run" x="30.48%" y="9" width="38.10%" height="26" rx="13"><title>gh-e802  running on build3</title></rect><text class="tp-l tp-l--run" x="30.48%" dx="12" y="27">gh-e802<tspan class="tp-sub" dx="8">build3</tspan></text>`,
+    runIn: onCard("TimelineAndWaitlists", `<rect class="tp--run" x="30.48%" y="9" width="38.10%" height="26" rx="13"><title>gh-e802  running on build3</title></rect><text class="tp-l tp-l--run" x="30.48%" dx="12" y="27">gh-e802<tspan class="tp-sub" dx="8">build3</tspan></text>`),
   };
   for (const [name, frag] of Object.entries(card)) assert.ok(out.includes(shapeOf(frag)), `${name}: ${shapeOf(frag)}`);
   // The card's park, 26 minutes old, is drawn on a lane wider than the narrowest: there its id fits in its pill and its
@@ -1143,17 +1144,17 @@ test("the card's labelled park and its run labelled outside, from parts that fit
     parked: [{ jobId: "gh-2f6a", parkedAt: t(-60), answered: false }],
   });
   const out = shapeOf(draw(m));
-  const parked = `<rect class="tp--parked" x="46.19%" y="9" width="10.00%" height="26" rx="13"><title>gh-2f6a parked at 15:13</title></rect><text class="tp-l tp-l--parked" x="46.19%" dx="12" y="27">gh-2f6a</text><line class="tail" x1="56.19%" x2="68.57%" y1="28" y2="28"/><text class="tail-t" x="56.19%" dx="6" y="20">waiting for you</text>`;
-  const runOut = `<rect class="tp--run" x="65.71%" y="9" width="2.86%" height="26" rx="13"><title>local-9e20  running on mini2</title></rect><text class="tp-l tp-l--out-run" x="65.71%" dx="-8" y="27" text-anchor="end">local-9e20<tspan class="tp-sub2" dx="6">mini2</tspan></text>`;
+  const parked = onCard("TimelineAndWaitlists", `<rect class="tp--parked" x="46.19%" y="9" width="10.00%" height="26" rx="13"><title>gh-2f6a parked at 15:13</title></rect><text class="tp-l tp-l--parked" x="46.19%" dx="12" y="27">gh-2f6a</text><line class="tail" x1="56.19%" x2="68.57%" y1="28" y2="28"/><text class="tail-t" x="56.19%" dx="6" y="20">waiting for you</text>`);
+  const runOut = onCard("TimelineAndWaitlists", `<rect class="tp--run" x="65.71%" y="9" width="2.86%" height="26" rx="13"><title>local-9e20  running on mini2</title></rect><text class="tp-l tp-l--out-run" x="65.71%" dx="-8" y="27" text-anchor="end">local-9e20<tspan class="tp-sub2" dx="6">mini2</tspan></text>`);
   assert.ok(out.includes(shapeOf(parked)), "parked");
   assert.ok(out.includes(shapeOf(runOut)), "run labelled before its pill");
 });
 
 test("the legend is the card's key", () => {
-  const card = `<p class="keyrow">
+  const card = onCard("TimelineAndWaitlists", `<p class="keyrow">
   <span><i class="lg lg--ok"></i>Completed</span><span><i class="lg lg--run"></i>Running</span><span><i class="lg lg--parked"></i>Awaiting input</span>
   <span><i class="lg lg--failed"></i>Failed</span><span><i class="lg lg--ref"></i>Refused</span><span><i class="lg lg--hold"></i>Slot held</span>
-  <span><i class="lg lg--wait"></i>In line</span><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"/></svg>waits for a run</span></p>`;
+  <span><i class="lg lg--wait"></i>In line</span><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"/></svg>waits for a run</span></p>`);
   const out = timelineLegend();
   assert.ok(isSafeHtml(out));
   assert.equal(String(out), shapeOf(card));

@@ -38,6 +38,8 @@ import { SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, run
 
 const titled = (title, body) => ui.card({ title, body });
 const facts = (pairs) => ui.facts(pairs.filter(([, value]) => value !== null && value !== undefined));
+/** Facts whose values are sentences, which three narrow columns would split mid-word. */
+const factsOne = (pairs) => ui.facts(pairs.filter(([, value]) => value !== null && value !== undefined), { cols: 1 });
 const recordOf = (view) => view.data?.run?.record ?? null;
 /**
  * The run card's label for the record's `kind`: "Forge" where it names a forge (its value then says which), "Kind" for
@@ -277,7 +279,7 @@ function phaseBody(g, operator) {
   const f = g.phase;
   if (!f && g.phases.length === 0) return ui.noProgress("The worker reports no phase progress.");
   const total = f ? Math.max(g.phases.length, f.index + 1) : g.phases.length;
-  return html`${f ? html`<p>Phase ${f.index + 1} of ${count(total)}${f.done !== null ? `: ${count(f.done)}${f.total !== null ? ` of ${count(f.total)}` : ""} done` : ""}</p>` : null}${ui.phases({ names: Array.from({ length: total }, (_, i) => operator ? g.phases[i] ?? `Phase ${i + 1}` : `Phase ${i + 1}`), index: f?.index ?? 0, done: f?.done, total: f?.total })}${operator ? g.note !== null ? html`<h3>Note</h3><p class="run-note">${g.note}</p>` : null : html`<p class="card__sub">Phase names and the run's note are shown to operators only.</p>`}`;
+  return html`${f ? html`<p class="run-phase">Phase ${f.index + 1} of ${count(total)}${f.done !== null ? `: ${count(f.done)}${f.total !== null ? ` of ${count(f.total)}` : ""} done` : ""}</p>` : null}${ui.phases({ names: Array.from({ length: total }, (_, i) => operator ? g.phases[i] ?? `Phase ${i + 1}` : `Phase ${i + 1}`), index: f?.index ?? 0, done: f?.done, total: f?.total })}${operator ? g.note !== null ? html`<p class="run-note">${ui.icon("runs", { size: "sm" })}<span>Note from the run: ${g.note}</span></p>` : null : html`<p class="card__sub">Phase names and the run's note are shown to operators only.</p>`}`;
 }
 
 /**
@@ -292,17 +294,21 @@ function liveProgressBody(g, view) {
   const open = (r) => (stale === null ? `running ${Number.isFinite(now) && now >= r.since ? ageText(now - r.since) : "-"}` : `open ${g.updatedAt >= r.since ? ageText(g.updatedAt - r.since) : "-"} at the last update`);
   const running = g.running.length === 0 ? html`<p class="note">${g.ended ? `The run has ended (${typeof g.outcome === "string" ? (outcomeWord(recordOf(view)?.outcome ?? g.outcome, recordReason(recordOf(view))).word ?? recordOf(view)?.outcome ?? g.outcome) : "unknown"}).` : "No step is running."}</p>` : html`<ul class="plain">${g.running.map((r) => html`<li><span class="mono">${r.tool}</span> ${open(r)}</li>`)}</ul>`;
   const recent = [...g.recent].reverse().slice(0, 3);
-  return html`${stale !== null ? html`<p class="warn">Stale: ${staleText(stale)}${view.data?.activeRun?.host ? ` on ${view.data.activeRun.host}` : ""}. <a href="/fleet">Open Fleet</a>.</p>` : null}${facts([
-    ["Elapsed", Number.isFinite(now) && now >= g.startedAt ? timecode(now - g.startedAt) : "-"],
-    ["Turn", `${count(g.turn)}${Number.isSafeInteger(view.data?.activeRun?.maxTurns) ? ` of ${view.data.activeRun.maxTurns}` : ""}`],
-    ["Steps", `${count(g.steps)}${g.failed > 0 ? ` (${count(g.failed)} failed)` : ""}`],
+  const max = view.data?.activeRun?.maxTurns;
+  const stepRow = (r) => ui.rowPill({
+    icon: r.status === "ok" ? "done" : "failed",
+    status: r.status === "ok" ? "ok" : "failed",
+    items: [html`<span class="code">${r.tool}</span>`, html`<span class="run-st tinted">${r.status}</span>`],
+    end: html`<span>${stepDuration(r.durationMs)}</span><span class="run-at">${timeHtml(r.at)}</span>`,
+  });
+  // The rare rows stay facts: on most runs none of them draws, and the run's own numbers lead (the RunLive card).
+  const rare = [
     ["Interrupted steps", g.interrupted > 0 ? count(g.interrupted) : null],
     ["Replayed calls", Number.isSafeInteger(g.replayed) ? count(g.replayed) : null],
     // The resume prior: what the session's earlier runs did before this run resumed it, not this job's retries.
     ["Earlier runs of this session", g.prior ? `${count(g.prior.turns)} turns, ${count(g.prior.steps)} steps before this run resumed the session` : null],
-    ["Started", timeHtml(g.startedAt)],
-    ["Updated", timeHtml(g.updatedAt)],
-  ])}<h3>Running now</h3>${running}<h3>Phase</h3>${phaseBody(g, operator)}<h3>Recent steps</h3>${table("Recent steps", ["Tool", "Status", { num: "Took" }, "At"], recent.map((r) => html`<tr${r.status === "ok" ? null : html` class="warn"`}><td class="mono">${r.tool}</td><td>${r.status}</td><td class="num">${stepDuration(r.durationMs)}</td><td>${timeHtml(r.at)}</td></tr>`), "No step has finished yet.")}`;
+  ].filter(([, value]) => value !== null);
+  return html`${stale !== null ? html`<p class="warn">Stale: ${staleText(stale)}${view.data?.activeRun?.host ? ` on ${view.data.activeRun.host}` : ""}. <a href="/fleet">Open Fleet</a>.</p>` : null}<div class="run-prog"><div class="run-big"><p class="kpi"><b class="run-tc">${Number.isFinite(now) && now >= g.startedAt ? timecode(now - g.startedAt) : "-"}</b><span>elapsed since ${timeHtml(g.startedAt)}</span></p></div><dl class="run-stats"><div><dt>Turn</dt><dd><span><b>${count(g.turn)}</b>${Number.isSafeInteger(max) ? ` of ${max}` : ""}</span></dd></div><div><dt>Steps</dt><dd><span><b>${count(g.steps)}</b>${g.failed > 0 ? `, ${count(g.failed)} failed` : ""}</span></dd></div><div class="tone-running"><dt>Running now</dt><dd>${running}</dd></div></dl></div>${rare.length ? facts(rare) : null}${phaseBody(g, operator)}<h3 class="run-sub">Recent steps</h3>${recent.length ? html`<ul class="rows">${recent.map(stepRow)}</ul>` : html`<p class="note">No step has finished yet.</p>`}<p class="run-at">Updated ${timeHtml(g.updatedAt)}</p>`;
 }
 
 /**
@@ -369,7 +375,7 @@ export function runProgress(view) {
     }
     return titled(title, html`${body ?? html`<p class="note">This run's record holds no progress.</p>`}${names}`);
   }
-  if (live) return titled(title, liveProgressBody(live, view));
+  if (live) return ui.card({ title, end: !live.ended && progressStaleFor(live, view.now) === null ? ui.chip("live", { status: "running", icon: "running" }) : null, body: liveProgressBody(live, view) });
   if (g?.unreachable) return titled(title, html`<p class="warn">The run's progress could not be read (is Valkey reachable?).</p>`);
   if (g?.invalid) return titled(title, html`<p class="warn">The run's progress key is not one this console reads (a newer or older worker?).</p>`);
   // No record and no snapshot: a queued job, or no run at all, which the banner names. A running job keeps the sentence.
@@ -421,19 +427,21 @@ export function runInbox(view) {
   const act = canAct(view) && typeof jobId === "string" && RUN_ID_RE.test(jobId);
   const withdraw = (e) => {
     if (!act) return null;
-    if ((e.state !== "queued" && e.state !== "written") || typeof e.id !== "string" || !MESSAGE_ID_RE.test(e.id)) return html`<td>-</td>`;
-    return html`<td>${actForm("steer-withdraw", { hidden: [["jobId", jobId], ["id", e.id]], label: "Withdraw" })}</td>`;
+    if ((e.state !== "queued" && e.state !== "written") || typeof e.id !== "string" || !MESSAGE_ID_RE.test(e.id)) return null;
+    return actForm("steer-withdraw", { hidden: [["jobId", jobId], ["id", e.id]], label: "Withdraw" });
   };
   const entries = Array.isArray(box.entries) ? box.entries : null;
   const list =
     entries === null
       ? html`<p class="warn">The messages could not be read this time; the next refresh tries again.</p>`
-      : table(
-          "Inbox",
-          ["Message", "Mode", "Source", "State", "Sent", { num: "Bytes" }, ...(act ? ["Action"] : [])],
-          entries.map((e) => html`<tr><td class="mono">${cell(e.id)}</td><td>${cell(MODE_WORD[e.mode])}</td><td>${cell(e.source)}</td><td>${ui.chip(e.state, { icon: e.state === "delivered" ? "done" : e.state === "withdrawn" ? "cancel" : "clock" })}</td><td>${Number.isSafeInteger(e.at) ? timeHtml(e.at) : "-"}</td><td class="num">${count(e.bytes)}</td>${withdraw(e)}</tr>`),
-          "No message has been sent to this run.",
-        );
+      : entries.length === 0
+        ? html`<p class="note">No message has been sent to this run.</p>`
+        : html`<ul class="rows">${entries.map((e) => ui.rowPill({
+            icon: e.state === "delivered" ? "done" : "clock",
+            items: [html`<span class="run-inbox"><strong>${cell(MODE_WORD[e.mode])}</strong> <span class="muted">${cell(e.source)}, ${e.bytes === 1 ? "1 byte" : `${count(e.bytes)} bytes`}</span><br><span class="run-at">${Number.isSafeInteger(e.at) ? timeHtml(e.at) : "-"}</span> <span class="code">${cell(e.id)}</span></span>`],
+            end: ui.chip(e.state, { icon: e.state === "delivered" ? "done" : e.state === "withdrawn" ? "cancel" : "clock" }),
+            action: withdraw(e),
+          }))}</ul>`;
   // Issue #647: when the Chat panel draws the message forms (a live run an operator can steer), they are drawn THERE and
   // not here, so the page holds one steer form per mode, never two copies of the same action.
   const forms = act && takes && !chatDrawsSteer(view) ? steerForms(jobId) : null;
@@ -782,7 +790,7 @@ export const runCostPanel = withRun("Tokens and dollars", (r, view) => {
     ["Model calls", t ? cell(t.calls) : "-"],
     ["Job cap", usdText(capMicrosOf(r))],
     ["Reserved", d ? usdText(d.reservedMicros) : "no dollar window applied"],
-    ["Settled", d ? `${usdText(d.settledMicros)}: ${settlementText(d.basis)}` : null],
+    ["Settled", d && d.settledMicros !== null && d.settledMicros !== undefined ? `${usdText(d.settledMicros)}: ${settlementText(d.basis)}` : null],
     ["Released at the end", d && Number.isFinite(d.reservedMicros) && Number.isFinite(d.settledMicros) ? usdText(Math.max(0, d.reservedMicros - d.settledMicros)) : null],
     ["Token split", t && (t.rootTotal != null || t.otherTotal != null || t.childTotal != null) ? `${count(t.rootTotal ?? 0)} this run, ${count(t.otherTotal ?? 0)} other sessions, ${count(t.childTotal ?? 0)} subprocesses` : null],
     ["Unmetered children", t?.unmeteredChildren],
@@ -904,7 +912,7 @@ export function runSandbox(view) {
   const o = recordOpenshell(r);
   const workspace = refusedBeforeStart(r) ? "No workspace was made: the run was refused before it started." : sandboxShellRefusal(venue) ? `Its workspace is ${sandboxShellRefusal(venue)}.` : check?.retained === true && Number.isFinite(check.until) ? html`Kept on ${r.host} until ${timeHtml(check.until)}. PI_SANDBOX_RETENTION_HOURS controls this window (24 hours by default; 0 keeps none).` : check?.retained === false ? check.why === "past-window" ? "Past its retention window: the sandbox command needs --pin." : SANDBOX_KEPT_TEXT[check.why] ?? check.reason ?? "Its workspace cannot be reopened." : "Kept on its host for PI_SANDBOX_RETENTION_HOURS after the run (24 hours by default, when retention is on there). This console cannot read another host's retention setting; the CLI on that host decides.";
   const siblings = Array.isArray(view.data?.siblings) ? view.data.siblings : [];
-  return titled(`Sandbox: ${venue}${r.host ? ` on ${r.host}` : ""}`, html`${r.backend ? null : html`<p>A local run from before venues were recorded.</p>`}${facts([...(serves ? SERVES.map((key) => [key === "liveTranscript" ? "Live transcript" : key === "sandboxShell" ? "Sandbox shell" : capitalised(key), SERVES_TEXT[key]?.[serves[key]]]) : [[VENUE_LABEL, "This console does not know this venue yet."]]), [VENUE_LABEL, BACKENDS[venue]?.describe ?? "This console does not know this venue yet."], ["Who holds the credentials", custody ? CUSTODY_TEXT[custody] : "unknown"], ["Sandbox policy", o ? openshellCountsText(o) : null], ["Rule hosts", o ? o.ruleHostCount === 0 ? openshellHostsText(o) : html`${o.ruleHostCount} rule hosts: ${o.ruleHosts.map((name) => ui.chip(name))}${o.ruleHostCount > o.ruleHosts.length ? ` and ${o.ruleHostCount - o.ruleHosts.length} more` : ""}` : null], ["Workspace", workspace], ["Replica", Number.isInteger(r.replica) ? `replica ${r.replica} of ${r.replicas}: each replica is its own sandbox, racing the others on the same event` : null]])}${siblings.length ? html`<p>Sibling replicas: ${siblings.map((s) => html`${runLink(s.jobId)} ${ui.outcomeBadge(s.outcome, recordReason(s))} `)}</p>` : null}`);
+  return titled(`Sandbox: ${venue}${r.host ? ` on ${r.host}` : ""}`, html`${r.backend ? null : html`<p>A local run from before venues were recorded.</p>`}${factsOne([...(serves ? SERVES.map((key) => [key === "liveTranscript" ? "Live transcript" : key === "sandboxShell" ? "Sandbox shell" : capitalised(key), SERVES_TEXT[key]?.[serves[key]]]) : [[VENUE_LABEL, "This console does not know this venue yet."]]), [VENUE_LABEL, BACKENDS[venue]?.describe ?? "This console does not know this venue yet."], ["Who holds the credentials", custody ? CUSTODY_TEXT[custody] : "unknown"], ["Sandbox policy", o ? openshellCountsText(o) : null], ["Rule hosts", o ? o.ruleHostCount === 0 ? openshellHostsText(o) : html`${o.ruleHostCount} rule hosts: ${o.ruleHosts.map((name) => ui.chip(name))}${o.ruleHostCount > o.ruleHosts.length ? ` and ${o.ruleHostCount - o.ruleHosts.length} more` : ""}` : null], ["Workspace", workspace], ["Replica", Number.isInteger(r.replica) ? `replica ${r.replica} of ${r.replicas}: each replica is its own sandbox, racing the others on the same event` : null]])}${siblings.length ? html`<p>Sibling replicas: ${siblings.map((s) => html`${runLink(s.jobId)} ${ui.outcomeBadge(s.outcome, recordReason(s))} `)}</p>` : null}`);
 }
 
 export function runSecrets(view) {

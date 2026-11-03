@@ -1,7 +1,7 @@
 {
   "card": "TimelineAndWaitlists",
   "pr": 3,
-  "panels": [],
+  "words": "ec25bb2f7090dc0dbe141e8e0a931d04ca62eee10fe963d2fd7b8ac86e227973",
   "elements": [
     {"el":"p-timeline","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewTimeline","golden":["overview.operator","overview.viewer"]},
     {"el":"p-waitlists","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"]},

@@ -1,12 +1,7 @@
 {
   "card": "ParkedDraftPhone",
   "pr": 779,
-  "panels": [
-    "p-yours",
-    "p-drafted",
-    "p-answered",
-    "p-answerer"
-  ],
+  "words": "43de534d35cf720520566c9f81ac1dbd082f44d6bb91290de1251e32b6fa1158",
   "elements": [
     {
       "el": "p-yours",

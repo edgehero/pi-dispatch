@@ -1,7 +1,7 @@
 {
   "card": "AccessStates",
   "pr": 2,
-  "panels": ["p-link-wait","p-link-used","p-link-nocode","p-role-operator","p-role-viewer","p-role-read-only"],
+  "words": "da0dca3fc1022264e17fd1475b11c768e949dfe6291a433a0a8972130fc492a2",
   "elements": [
     {"el":"p-link-wait","kind":"panel","status":"new","as":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["login-code.anonymous","panels/login-code-refused-rate.anonymous"],"shows":"data-link-state=\"wait\" hidden data-reveal>","reason":"the state the page opens in, drawn for the script to reveal: without a script it never signs in, and the page says only that it needs one"},
     {"el":"p-link-used","kind":"panel","status":"new","as":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["panels/login-code-used.anonymous","panels/login-code-refused-tokens.anonymous","panels/login-code-refused-audit.anonymous","panels/login-code-refused-other.anonymous"],"shows":"data-link-state=\"used\" hidden data-reveal>","reason":"a golden draws the state the script switches to as the state the page opens in; after a 503, 500 or another status the used state carries the notice that says why; a 429 is the limiter's, answered before the code is read, so the page stays in the wait state with the rate notice"},
@@ -22,14 +22,13 @@
     {"el":"Read-only console: operators keep every detail, but no page has a form","kind":"readme","status":"real","source":"admin/src/console/panels/common.mjs#canAct","holds":"readOnly"},
     {"el":"The read-only Fleet's own line, \"Every change is refused here, so there is no Retry or Remove.\"","kind":"readme","status":"absent","sentence":"admin/src/console/shell.mjs#READ_ONLY_TITLE","roles":["operator"],"golden":["panels/read-only.operator"],"reason":"said once for the whole page, by the read-only banner (no page shows a form), not on each panel"},
     {"el":"Read-only console: talking to a run points to the terminal command","kind":"readme","status":"real","source":"admin/src/console/panels/run.mjs#runChat","holds":"This console is read-only, so it sends nothing.","golden":["run-live.operator"],"shows":"Terminal chat"},
-    {"el":"The terminal command in a copy box","kind":"readme","status":"illustrative","reason":"the run page's Chat panel is PR 4's (RunChatStates); until then the command is code text in the panel, with no copy box"},
+    {"el":"The terminal command in a copy box","kind":"readme","status":"real","panel":"p-chat","source":"admin/src/console/kit.mjs#cmd","golden":["panels/run-chat-reply.operator"],"shows":"class=\"cmd\""},
     {"el":"The signed-in token's name and role, and the read-only flag","kind":"provides","status":"real","source":"admin/src/console/shell.mjs#shellHtml","holds":"readOnly"},
     {"el":"The link page's closed answer: signing in, used/expired/unknown, or no code","kind":"provides","status":"new","source":"admin/src/console/signin.mjs#LINK_STATES"},
     {"el":"A role decides on the server which panels and fields are sent; a viewer's page never carries the hidden text","kind":"provides","status":"real","source":"admin/src/console/panels/common.mjs#canAct"},
     {"el":"p-role-operator","kind":"panel","status":"illustrative","reason":"a card-only comparison; each role's real page is that page's golden for the role"},
     {"el":"p-role-viewer","kind":"panel","status":"illustrative","reason":"a card-only comparison; each role's real page is that page's golden for the role"},
     {"el":"p-role-read-only","kind":"panel","status":"illustrative","reason":"a card-only comparison; the read-only frame is panels/read-only.<role>"},
-    {"el":"The navigation lists Watch and Models","kind":"sample","status":"illustrative","reason":"not built: Watch is #735's and Models #716's (planned cards), left out of the nav until they land"},
     {"el":"gh-f0c2 (failed on mini1) and gh-b3d7 (running, phase 2 of 4), their failure text and phase name","kind":"sample","status":"illustrative","reason":"fixture runs and sample copy (the card's own note)"}
   ]
 }

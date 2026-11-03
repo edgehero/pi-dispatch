@@ -20,12 +20,14 @@ import { ACTIONS } from "../src/console/actions.mjs";
 import { HEADLINE_ID, SHELL_PANEL_IDS, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
 import { forgeLinkOf } from "../src/read-model.mjs";
 import { DOCS_ROOT, OUTCOME_WORDS, REASON_WORDS, STATUS_KINDS, docsHref, outcomeWord } from "../src/words.mjs";
+import { onCard } from "./helpers/card-structure.mjs";
 import { assertOwnReferences } from "./helpers/console-pages-harness.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #737: the console's kit and its icon sprite. Each helper is pinned to its component card's own sample, written
-// here as the card's bytes (copied from design/system, which this test does not read, and `fromCard`
-// applies the one spelling the kit writes differently everywhere). Where the kit adds to a card on purpose (a column
+// here as the card's bytes. `onCard` proves each sample is still on its card in design/system (issue #752), so a rebuilt
+// card fails here rather than leaving a test pinned to a screen the design no longer has, and `fromCard` applies the
+// one spelling the kit writes differently everywhere. Where the kit adds to a card on purpose (a column
 // head's scope, a meter's minimum, the Copy button's reveal hook) the difference is spelled out beside the sample.
 // The sweeps at the end run over every fragment the tests above built.
 
@@ -123,14 +125,14 @@ test("STATUS is keyed by words.mjs STATUS_KINDS, in its order, with the Status c
 });
 
 test("icon: the sprite's symbol by name, hidden, in the three sizes", () => {
-  assert.equal(out(ui.icon("running")), `<svg class="ic" aria-hidden="true"><use href="#i-running"></use></svg>`);
-  assert.equal(out(ui.icon("rerun", { size: "sm" })), `<svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>`);
+  assert.equal(out(ui.icon("running")), onCard("Status", `<svg class="ic" aria-hidden="true"><use href="#i-running"></use></svg>`));
+  assert.equal(out(ui.icon("rerun", { size: "sm" })), onCard("Actions", `<svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"></use></svg>`));
   assert.equal(out(ui.icon("refused", { size: "lg" })), `<svg class="ic ic--lg" aria-hidden="true"><use href="#i-refused"></use></svg>`);
   for (const name of ICON_NAMES) out(ui.icon(name));
 });
 
 test("badge: the Status card's outcome and state badges, and the solid one", () => {
-  const card = `<span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Awaiting input</span><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg>Awaiting approval</span><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="badge tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg>Failed</span><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Needs a look</span><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-cancel"/></svg>Cancelled</span><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>Held</span><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg>Delayed</span><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Healthy</span>`;
+  const card = onCard("Status", `<span class="badge tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>Running</span><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg>Awaiting input</span><span class="badge tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg>Awaiting approval</span><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Completed</span><span class="badge tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg>Failed</span><span class="badge tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg>Refused</span><span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg>Needs a look</span><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-cancel"/></svg>Cancelled</span><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>Held</span><span class="badge tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg>Delayed</span><span class="badge tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg>Healthy</span>`);
   const kit = [
     ui.badge("running", "Running"),
     ui.badge("parked", "Awaiting input"),
@@ -162,7 +164,7 @@ test("outcomeBadge: words.mjs's word and status for a record's outcome and reaso
 });
 
 test("ptag and vtag: the Status card's project and venue tags", () => {
-  const card = `<span class="ptag">web</span><span class="ptag">api</span><span class="ptag">billing</span><span class="ptag">ops</span><span class="vtag">local</span><span class="vtag">podman</span><span class="vtag">openshell</span><span class="vtag">openshell-bind</span>`;
+  const card = onCard("Status", `<span class="ptag">web</span><span class="ptag">api</span><span class="ptag">billing</span><span class="ptag">ops</span><span class="vtag">local</span><span class="vtag">podman</span><span class="vtag">openshell</span><span class="vtag">openshell-bind</span>`);
   assert.equal([...["web", "api", "billing", "ops"].map(ui.ptag), ...["local", "podman", "openshell", "openshell-bind"].map(ui.vtag)].map(out).join(""), card);
   // Where a page's rules cut a tag to its column (the timeline's row heads), the tag carries its name whole in a title.
   assert.equal(out(ui.ptag("frontend-platform-team-eu", { title: "frontend-platform-team-eu" })), `<span class="ptag" title="frontend-platform-team-eu">frontend-platform-team-eu</span>`);
@@ -170,28 +172,28 @@ test("ptag and vtag: the Status card's project and venue tags", () => {
 });
 
 test("chip, count, dot and tile: the Status card's row, the Shell's nav count and ConfirmStates' small tile", () => {
-  const chips = `<span class="chip tone-ok">60% of cap</span><span class="chip">longest 2h 14m</span><span class="chip tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>live</span>`;
+  const chips = onCard("Status", `<span class="chip tone-ok">60% of cap</span><span class="chip">longest 2h 14m</span><span class="chip tone-running"><svg class="ic" aria-hidden="true"><use href="#i-running"/></svg>live</span>`);
   assert.equal([ui.chip("60% of cap", { status: "ok" }), ui.chip("longest 2h 14m"), ui.chip("live", { status: "running", icon: "running" })].map(out).join(""), fromCard(chips));
-  assert.equal([ui.count(1, "parked"), ui.count(4, "attention")].map(out).join(""), `<span class="count tone-parked">1</span><span class="count tone-attention">4</span>`);
+  assert.equal([ui.count(1, "parked"), ui.count(4, "attention")].map(out).join(""), onCard("Status", `<span class="count tone-parked">1</span><span class="count tone-attention">4</span>`));
   // The Shell's Parked count, whose card names it with `aria-label` on the span: the kit says it in visually hidden
   // text instead (a plain span may not be named), and hides the number it repeats from a screen reader.
   assert.equal(out(ui.count(1, "parked", { label: "1 waiting" })), `<span class="count tone-parked"><span aria-hidden="true">1</span><span class="sr">1 waiting</span></span>`, "the Shell's Parked count");
   assert.equal(out(ui.count(1204, null, { label: "1204 rows" })), `<span class="count"><span aria-hidden="true">1,204</span><span class="sr">1204 rows</span></span>`);
   assert.equal(out(ui.count(13)), `<span class="count">13</span>`, "the Configuration tabs' neutral count");
   assert.equal(out(ui.count(85577)), `<span class="count">85,577</span>`);
-  assert.equal([ui.dot("ok"), ui.dot("attention"), ui.dot("failed")].map(out).join(""), `<span class="dot tone-ok"></span><span class="dot tone-attention"></span><span class="dot tone-failed"></span>`);
+  assert.equal([ui.dot("ok"), ui.dot("attention"), ui.dot("failed")].map(out).join(""), onCard("Status", `<span class="dot tone-ok"></span><span class="dot tone-attention"></span><span class="dot tone-failed"></span>`));
   assert.equal(out(ui.dot("ok", { label: "beating" })), `<span class="dot tone-ok" role="img" aria-label="beating"></span>`);
-  const tiles = `<span class="tile tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg></span><span class="tile tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg></span><span class="tile tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg></span><span class="tile tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg></span><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg></span><span class="tile tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg></span>`;
+  const tiles = onCard("Status", `<span class="tile tone-parked"><svg class="ic" aria-hidden="true"><use href="#i-parked"/></svg></span><span class="tile tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg></span><span class="tile tone-refused"><svg class="ic" aria-hidden="true"><use href="#i-refused"/></svg></span><span class="tile tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg></span><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg></span><span class="tile tone-idle"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg></span>`);
   assert.equal([ui.tile("parked"), ui.tile("failed"), ui.tile("refused"), ui.tile("attention", { icon: "fleet" }), ui.tile("ok", { icon: "spend" }), ui.tile("idle")].map(out).join(""), fromCard(tiles));
-  assert.equal(out(ui.tile("attention", { icon: "spend", sm: true })), fromCard(`<span class="tile tile--sm tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg></span>`));
+  assert.equal(out(ui.tile("attention", { icon: "spend", sm: true })), fromCard(onCard("ConfirmStates", `<span class="tile tile--sm tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-spend"/></svg></span>`)));
   // The OverviewScreen card's waitlist head: the small tile with the small icon.
-  assert.equal(out(ui.tile("idle", { icon: "slot", sm: true, iconSm: true })), fromCard(`<span class="tile tile--sm tone-idle"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-slot"/></svg></span>`));
+  assert.equal(out(ui.tile("idle", { icon: "slot", sm: true, iconSm: true })), fromCard(onCard("TimelineAndWaitlists", `<span class="tile tile--sm tone-idle"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-slot"/></svg></span>`)));
 });
 
 // ---- actions -----------------------------------------------------------------------------------------------------------------
 
 test("btn: the Actions card's buttons, the confirm bar's, a round icon button, a submit and a disabled link", () => {
-  const card = `<a class="btn btn--primary" href="#">Open Fleet</a><a class="btn" href="#">Spend</a><a class="btn btn--answer" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Answer</a><a class="btn btn--paid" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg>Re-run</a><a class="btn btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg>Pause fleet</a><a class="btn btn--ghost" href="#">See why</a><button class="btn" type="button" disabled>Re-run</button>`;
+  const card = onCard("Actions", `<a class="btn btn--primary" href="#">Open Fleet</a><a class="btn" href="#">Spend</a><a class="btn btn--answer" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg>Answer</a><a class="btn btn--paid" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg>Re-run</a><a class="btn btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg>Pause fleet</a><a class="btn btn--ghost" href="#">See why</a><button class="btn" type="button" disabled>Re-run</button>`);
   const kit = [
     ui.btn({ kind: "primary", label: "Open Fleet", href: "/fleet" }),
     ui.btn({ label: "Spend", href: "/insights" }),
@@ -205,7 +207,7 @@ test("btn: the Actions card's buttons, the confirm bar's, a round icon button, a
   const act = `<button class="btn btn--confirm" type="button">Confirm</button><button class="btn btn--ghost" type="button">Cancel</button><button class="btn btn--confirm-paid" type="button">Re-run for up to $2.00</button><button class="btn btn--confirm-danger" type="button">Pause the fleet</button>`;
   assert.equal([ui.btn({ kind: "confirm", label: "Confirm" }), ui.btn({ kind: "ghost", label: "Cancel" }), ui.btn({ kind: "confirm-paid", label: "Re-run for up to $2.00" }), ui.btn({ kind: "confirm-danger", label: "Pause the fleet" })].map(out).join(""), act);
   // FleetScreen's round pause button: the icon alone, its label the accessible name.
-  assert.equal(out(ui.btn({ kind: ["sm", "round"], icon: "pause", label: "Pause build3" })), fromCard(`<button class="btn btn--sm btn--round" type="button" aria-label="Pause build3"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg></button>`));
+  assert.equal(out(ui.btn({ kind: ["sm", "round"], icon: "pause", label: "Pause build3" })), fromCard(onCard("OverviewScreen", `<button class="btn btn--sm btn--round" type="button" aria-label="Pause build3"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg></button>`)));
   assert.equal(out(ui.btn({ kind: ["primary", "lg"], label: "Sign in", type: "submit", id: "sign-in", name: "go", value: "1" })), `<button class="btn btn--primary btn--lg" type="submit" id="sign-in" name="go" value="1">Sign in</button>`);
   assert.equal(out(ui.btn({ kind: ["sm", "ghost"], label: "Undo", href: "/config", disabled: true })), `<a class="btn btn--sm btn--ghost" aria-disabled="true">Undo</a>`, "a disabled link has no target");
 });
@@ -245,28 +247,28 @@ test("card, kpi and big: CardsAndBanners' cards drawn inside a panel, never as i
 });
 
 test("banner, empty and collapsed: CardsAndBanners' notices", () => {
-  const done = `<div class="banner tone-ok" role="status">
+  const done = onCard("CardsAndBanners", `<div class="banner tone-ok" role="status">
   <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg></span>
   <div><p class="banner__t">Changed maxTurns from 30 to 40</p><p class="banner__s">Audit row 7. <b>Undo:</b> set maxTurns back to 30.</p></div>
   <div class="banner__act"><a class="btn btn--sm btn--ghost" href="#">Undo</a></div>
-</div>`;
+</div>`);
   assert.equal(out(ui.banner({ status: "ok", title: "Changed maxTurns from 30 to 40", body: html`Audit row 7. <b>Undo:</b> set maxTurns back to 30.`, actions: ui.btn({ kind: ["sm", "ghost"], label: "Undo", href: "/config" }) })), tight(hrefs(done, "/config")));
-  const retry = `<div class="banner banner--sm tone-attention" role="status">
+  const retry = onCard("CardsAndBanners", `<div class="banner banner--sm tone-attention" role="status">
   <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-beat"/></svg></span>
   <div><p class="banner__t">Console not reachable, retrying</p><p class="banner__s">The page stays as it was. Live panels resume when the console answers.</p></div>
 
-</div>`;
+</div>`);
   assert.equal(out(ui.banner({ status: "attention", sm: true, icon: "beat", title: "Console not reachable, retrying", body: "The page stays as it was. Live panels resume when the console answers." })), tight(retry));
-  const noWorker = `<div class="banner banner--sm tone-failed" role="status">
+  const noWorker = onCard("CardsAndBanners", `<div class="banner banner--sm tone-failed" role="status">
   <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-fleet"/></svg></span>
   <div><p class="banner__t">No worker online</p><p class="banner__s">No host has sent a heartbeat for 2 minutes, so nothing will start.</p></div>
   <div class="banner__act"><a class="btn btn--sm" href="#">Open Fleet</a></div>
-</div>`;
+</div>`);
   assert.equal(out(ui.banner({ status: "failed", sm: true, icon: "fleet", title: "No worker online", body: "No host has sent a heartbeat for 2 minutes, so nothing will start.", actions: [ui.btn({ kind: "sm", label: "Open Fleet", href: "/fleet" })] })), tight(hrefs(noWorker, "/fleet")));
   assert.equal(out(ui.banner({ status: "cancelled", title: "Signed out", actions: [] })), `<div class="banner tone-idle" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-cancel"></use></svg></span><div><p class="banner__t">Signed out</p></div></div>`);
-  const allClear = `<div class="empty"><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg></span><b>All clear</b><span>No questions, failures or refusals in the last 24 hours.</span></div>`;
+  const allClear = onCard("CardsAndBanners", `<div class="empty"><span class="tile tone-ok"><svg class="ic" aria-hidden="true"><use href="#i-done"/></svg></span><b>All clear</b><span>No questions, failures or refusals in the last 24 hours.</span></div>`);
   assert.equal(out(ui.empty({ status: "ok", title: "All clear", body: "No questions, failures or refusals in the last 24 hours." })), fromCard(allClear));
-  const lines = `<p class="collapsed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg><b>Chain</b> no parent, no children</p><p class="collapsed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-queue"/></svg><b>Run record, tokens and resources</b> are written when the run ends</p>`;
+  const lines = onCard("CardsAndBanners", `<p class="collapsed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-runs"/></svg><b>Chain</b> no parent, no children</p><p class="collapsed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-queue"/></svg><b>Run record, tokens and resources</b> are written when the run ends</p>`);
   assert.equal([ui.collapsed({ icon: "runs", title: "Chain", body: "no parent, no children" }), ui.collapsed({ icon: "queue", title: "Run record, tokens and resources", body: "are written when the run ends" })].map(out).join(""), fromCard(lines));
 });
 
@@ -344,7 +346,7 @@ test("tbl: day rows, each the header of a body of its own, as the RunsScreen car
 
 test("tblFoot and pager: the DataTable card's foot, and a pager at the first page", () => {
   // The card writes the foot as a `<p>`; the kit's is a `div`, so a foot may hold more than a line of text.
-  const card = `<p class="tbl-foot">5 of 27 runs<span class="pager"><a class="btn btn--sm btn--ghost" href="#">Newer</a><a class="btn btn--sm" href="#">Older</a></span></p>`;
+  const card = onCard("DataTable", `<p class="tbl-foot">5 of 27 runs<span class="pager"><a class="btn btn--sm btn--ghost" href="#">Newer</a><a class="btn btn--sm" href="#">Older</a></span></p>`);
   const kit = out(ui.tblFoot("5 of 27 runs", ui.pager({ newer: "/runs?before=b", older: "/runs?after=a" })));
   assert.equal(kit, hrefs(card, "/runs?before=b", "/runs?after=a").replace(/^<p /, "<div ").replace(/<\/p>$/, "</div>"));
   assert.equal(out(ui.pager({ older: "/audit?before=41", olderLabel: "Older rows" })), `<span class="pager"><a class="btn btn--sm btn--ghost" aria-disabled="true">Newer</a><a class="btn btn--sm" href="/audit?before=41">Older rows</a></span>`);
@@ -353,7 +355,7 @@ test("tblFoot and pager: the DataTable card's foot, and a pager at the first pag
 // ---- facts and levels ---------------------------------------------------------------------------------------------------------
 
 test("facts: the FactsAndLevels card's grid, and its one- and three-column forms", () => {
-  const card = `<dl class="facts"><div class="fact"><dt>Job</dt><dd><span class="code">gh-b3d7</span></dd></div><div class="fact"><dt>Target</dt><dd><a class="link" href="#">acme/web#415</a></dd></div><div class="fact"><dt>Project</dt><dd><span class="ptag">web</span></dd></div><div class="fact"><dt>Venue</dt><dd><span class="vtag">local</span></dd></div><div class="fact"><dt>Host</dt><dd>mini1</dd></div><div class="fact"><dt>Model</dt><dd>anthropic / claude-sonnet-5-5</dd></div><div class="fact"><dt>Started</dt><dd>15:27 UTC</dd></div><div class="fact"><dt>Size</dt><dd>2,048 MiB, 1 CPU</dd></div></dl>`;
+  const card = onCard("FactsAndLevels", `<dl class="facts"><div class="fact"><dt>Job</dt><dd><span class="code">gh-b3d7</span></dd></div><div class="fact"><dt>Target</dt><dd><a class="link" href="#">acme/web#415</a></dd></div><div class="fact"><dt>Project</dt><dd><span class="ptag">web</span></dd></div><div class="fact"><dt>Venue</dt><dd><span class="vtag">local</span></dd></div><div class="fact"><dt>Host</dt><dd>mini1</dd></div><div class="fact"><dt>Model</dt><dd>anthropic / claude-sonnet-5-5</dd></div><div class="fact"><dt>Started</dt><dd>15:27 UTC</dd></div><div class="fact"><dt>Size</dt><dd>2,048 MiB, 1 CPU</dd></div></dl>`);
   const pairs = [["Job", html`<span class="code">gh-b3d7</span>`], ["Target", html`<a class="link" href="https://github.com/acme/web/issues/415">acme/web#415</a>`], ["Project", ui.ptag("web")], ["Venue", ui.vtag("local")], ["Host", "mini1"], ["Model", "anthropic / claude-sonnet-5-5"], ["Started", "15:27 UTC"], ["Size", "2,048 MiB, 1 CPU"]];
   assert.equal(out(ui.facts(pairs)), hrefs(card, "https://github.com/acme/web/issues/415"));
   assert.equal(out(ui.facts([["Host", null], ["Turns", 0]], { cols: 1 })), `<dl class="facts facts--1"><div class="fact"><dt>Host</dt><dd>-</dd></div><div class="fact"><dt>Turns</dt><dd>0</dd></div></dl>`);
@@ -362,9 +364,9 @@ test("facts: the FactsAndLevels card's grid, and its one- and three-column forms
 
 test("meter: the FactsAndLevels card's three meters against caps, the hold tick at 80%, the tone by the meter rule", () => {
   const card = [
-    `<svg class="pbar tone-ok" height="10" role="meter" aria-valuenow="63" aria-valuemax="100" aria-label="Jobs today: 25 of 40"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="62.5%" height="10" rx="5"/><line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/></svg>`,
-    `<svg class="pbar tone-attention" height="10" role="meter" aria-valuenow="86" aria-valuemax="100" aria-label="Dollars deployment today: $21.50 of $25.00"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="86.0%" height="10" rx="5"/><line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/></svg>`,
-    `<svg class="pbar tone-failed" height="10" role="meter" aria-valuenow="100" aria-valuemax="100" aria-label="Tokens today: 8.00M of 8.00M"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="100.0%" height="10" rx="5"/><line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/></svg>`,
+    onCard("FactsAndLevels", `<svg class="pbar tone-ok" height="10" role="meter" aria-valuenow="63" aria-valuemax="100" aria-label="Jobs today: 25 of 40"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="62.5%" height="10" rx="5"/><line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/></svg>`),
+    onCard("FactsAndLevels", `<svg class="pbar tone-attention" height="10" role="meter" aria-valuenow="86" aria-valuemax="100" aria-label="Dollars deployment today: $21.50 of $25.00"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="86.0%" height="10" rx="5"/><line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/></svg>`),
+    onCard("FactsAndLevels", `<svg class="pbar tone-failed" height="10" role="meter" aria-valuenow="100" aria-valuemax="100" aria-label="Tokens today: 8.00M of 8.00M"><rect class="pbar__bed" width="100%" height="10" rx="5"/><rect class="pbar__fill" width="100.0%" height="10" rx="5"/><line class="pbar__hold" x1="80%" x2="80%" y1="-3" y2="13"/></svg>`),
   ];
   // What the kit adds: the meter's minimum, and every number through the one formatter (`rx="5.0"`, `80.0%`).
   const kitOf = (s) => s.replace(" aria-valuemax", ` aria-valuemin="0" aria-valuemax`).replace(/rx="5"/g, `rx="5.0"`).replace(/"80%"/g, `"80.0%"`);
@@ -411,9 +413,9 @@ test("meter and ring at their edges: exactly at the hold, a zero cap, a hold, a 
 
 test("ring: the FactsAndLevels card's three rings, as meters", () => {
   const card = [
-    `<svg class="ring tone-ok" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="60%"><circle class="ring__track" cx="48.0" cy="48.0" r="43.5" stroke-width="9"/><circle class="ring__arc" cx="48.0" cy="48.0" r="43.5" stroke-width="9" pathLength="100" stroke-dasharray="60.0 100" transform="rotate(-90 48.0 48.0)"/><line class="ring__hold" x1="11.9" y1="36.3" x2="1.4" y2="32.9"/></svg>`,
-    `<svg class="ring tone-attention" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="86%"><circle class="ring__track" cx="48.0" cy="48.0" r="43.5" stroke-width="9"/><circle class="ring__arc" cx="48.0" cy="48.0" r="43.5" stroke-width="9" pathLength="100" stroke-dasharray="86.0 100" transform="rotate(-90 48.0 48.0)"/><line class="ring__hold" x1="11.9" y1="36.3" x2="1.4" y2="32.9"/></svg>`,
-    `<svg class="ring tone-failed" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="100%"><circle class="ring__track" cx="48.0" cy="48.0" r="43.5" stroke-width="9"/><circle class="ring__arc" cx="48.0" cy="48.0" r="43.5" stroke-width="9" pathLength="100" stroke-dasharray="100.0 100" transform="rotate(-90 48.0 48.0)"/><line class="ring__hold" x1="11.9" y1="36.3" x2="1.4" y2="32.9"/></svg>`,
+    onCard("FactsAndLevels", `<svg class="ring tone-ok" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="60%"><circle class="ring__track" cx="48.0" cy="48.0" r="43.5" stroke-width="9"/><circle class="ring__arc" cx="48.0" cy="48.0" r="43.5" stroke-width="9" pathLength="100" stroke-dasharray="60.0 100" transform="rotate(-90 48.0 48.0)"/><line class="ring__hold" x1="11.9" y1="36.3" x2="1.4" y2="32.9"/></svg>`),
+    onCard("FactsAndLevels", `<svg class="ring tone-attention" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="86%"><circle class="ring__track" cx="48.0" cy="48.0" r="43.5" stroke-width="9"/><circle class="ring__arc" cx="48.0" cy="48.0" r="43.5" stroke-width="9" pathLength="100" stroke-dasharray="86.0 100" transform="rotate(-90 48.0 48.0)"/><line class="ring__hold" x1="11.9" y1="36.3" x2="1.4" y2="32.9"/></svg>`),
+    onCard("FactsAndLevels", `<svg class="ring tone-failed" width="96" height="96" viewBox="0 0 96 96" role="img" aria-label="100%"><circle class="ring__track" cx="48.0" cy="48.0" r="43.5" stroke-width="9"/><circle class="ring__arc" cx="48.0" cy="48.0" r="43.5" stroke-width="9" pathLength="100" stroke-dasharray="100.0 100" transform="rotate(-90 48.0 48.0)"/><line class="ring__hold" x1="11.9" y1="36.3" x2="1.4" y2="32.9"/></svg>`),
   ];
   // The card's rings are images with a percentage for a name; the kit's are meters, with the value and its range.
   const kitOf = (s, v) => s.replace(`role="img"`, `role="meter" aria-valuenow="${v}" aria-valuemin="0" aria-valuemax="100"`);
@@ -435,13 +437,13 @@ test("svgNum: finite, clamped, fixed decimals, and never a negative zero", () =>
 // ---- forms ----------------------------------------------------------------------------------------------------------------------
 
 test("field, input, select and textarea: the FieldsDiffCommand card's fields, the error tied to its control", () => {
-  assert.equal(out(ui.field({ label: "Key", id: "f1", control: ui.select({ id: "f1", options: ["maxTurns"] }) })), `<div class="field"><label for="f1">Key</label><select id="f1" class="select"><option>maxTurns</option></select></div>`);
-  assert.equal(out(ui.field({ label: "Value", id: "f2", control: ui.input({ id: "f2", value: "40" }) })), `<div class="field"><label for="f2">Value</label><input id="f2" class="input" value="40"></div>`);
+  assert.equal(out(ui.field({ label: "Key", id: "f1", control: ui.select({ id: "f1", options: ["maxTurns"] }) })), onCard("FieldsDiffCommand", `<div class="field"><label for="f1">Key</label><select id="f1" class="select"><option>maxTurns</option></select></div>`));
+  assert.equal(out(ui.field({ label: "Value", id: "f2", control: ui.input({ id: "f2", value: "40" }) })), onCard("FieldsDiffCommand", `<div class="field"><label for="f2">Value</label><input id="f2" class="input" value="40"></div>`));
   // The card's error field, with the error's id and the control's `aria-invalid` and `aria-describedby` added.
   const err = `<div class="field field--err"><label for="f3">Key</label><input id="f3" class="input input--code" value="colour"><p class="field__err"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg>Unknown key colour. Valid keys: model, provider, maxTurns.</p></div>`;
   const kitErr = out(ui.field({ label: "Key", id: "f3", control: ui.input({ id: "f3", value: "colour", code: true, invalid: true, describedBy: "f3-err" }), error: "Unknown key colour. Valid keys: model, provider, maxTurns." }));
   assert.equal(kitErr, fromCard(err).replace(`value="colour">`, `value="colour" aria-invalid="true" aria-describedby="f3-err">`).replace(`<p class="field__err">`, `<p class="field__err" id="f3-err">`));
-  assert.equal(out(ui.field({ label: "Your answer", id: "f4", control: ui.textarea({ id: "f4", placeholder: "Write your answer" }) })), `<div class="field"><label for="f4">Your answer</label><textarea id="f4" class="textarea" placeholder="Write your answer"></textarea></div>`);
+  assert.equal(out(ui.field({ label: "Your answer", id: "f4", control: ui.textarea({ id: "f4", placeholder: "Write your answer" }) })), onCard("FieldsDiffCommand", `<div class="field"><label for="f4">Your answer</label><textarea id="f4" class="textarea" placeholder="Write your answer"></textarea></div>`));
   // A hint, the other input types and attributes, a select of values with one chosen.
   // (`#token` itself is the sign-in page's, which the script finds by name: a kit id may not be it.)
   assert.equal(out(ui.field({ label: "Token", id: "console-token", hint: "From pi-dispatch console token.", control: ui.input({ id: "console-token", name: "token", type: "password", autocomplete: "off", spellcheck: false, required: true, describedBy: ["console-token-hint", "notice"] }) })), `<div class="field"><label for="console-token">Token</label><input id="console-token" class="input" type="password" name="token" autocomplete="off" spellcheck="false" required aria-describedby="console-token-hint notice"><p class="field__hint" id="console-token-hint">From pi-dispatch console token.</p></div>`);
@@ -459,7 +461,7 @@ test("cmd: the FieldsDiffCommand card's copy box, its Copy button hidden until t
   // each argument in a span of its own (`words`), the spaces between them text, so the code's text is the card's line
   // and a wrapped line breaks between arguments, never after the dashes of `--name`.
   const words = (line) => line.split(" ").map((w) => `<span>${w}</span>`).join(" ");
-  const card = `<div class="cmd"><code>pi-dispatch chat gh-b3d7</code><button class="btn btn--sm" type="button">Copy</button></div><p class="card__sub">Run this on a host that holds the session store.</p>`;
+  const card = onCard("FieldsDiffCommand", `<div class="cmd"><code>pi-dispatch chat gh-b3d7</code><button class="btn btn--sm" type="button">Copy</button></div><p class="card__sub">Run this on a host that holds the session store.</p>`);
   assert.equal(out(ui.cmd(["pi-dispatch", "chat", "gh-b3d7"], { host: "Run this on a host that holds the session store." })), card.replace(`type="button">Copy`, `type="button" data-copy hidden>Copy`).replace("pi-dispatch chat gh-b3d7", words("pi-dispatch chat gh-b3d7")));
   assert.equal(out(ui.cmd(["pi-dispatch", "sandbox", "gh-e9a0"])), `<div class="cmd"><code><span>pi-dispatch</span> <span>sandbox</span> <span>gh-e9a0</span></code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div>`);
   // The run-id charset, a recovery's id and a URL are plain words; nothing else is.
@@ -707,10 +709,10 @@ test("pageHref: a page's path with its query, from a PAGES-shaped table, null fo
 const slotsOf = (s, name) => s.replace(/<span class="sls"(?: aria-label="slots")?>/, `<span class="sls" role="img" aria-label="${name}">`);
 
 test("slots: the Status card's dots, running, held and free in that order, as a named image", () => {
-  const status = `<span class="sls"><i class="sl sl--run"></i><i class="sl sl--hold"></i><i class="sl"></i></span>`;
+  const status = onCard("Status", `<span class="sls"><i class="sl sl--run"></i><i class="sl sl--hold"></i><i class="sl"></i></span>`);
   assert.equal(out(ui.slots({ run: 1, hold: 1, free: 1 })), slotsOf(status, "1 running, 1 held, 1 free"), "by default the name says the three counts");
   // OverviewScreen's host rows name theirs "slots" without a role, which a span may not carry; the kit's is an image.
-  const host = `<span class="sls" aria-label="slots"><i class="sl sl--run"></i><i class="sl sl--run"></i><i class="sl"></i><i class="sl"></i></span>`;
+  const host = onCard("OverviewScreen", `<span class="sls" aria-label="slots"><i class="sl sl--run"></i><i class="sl sl--run"></i><i class="sl"></i><i class="sl"></i></span>`);
   assert.equal(out(ui.slots({ run: 2, free: 2, label: "mini1: 2 running, 2 free" })), slotsOf(host, "mini1: 2 running, 2 free"));
   assert.equal(out(ui.slots({ label: "no slots" })), `<span class="sls" role="img" aria-label="no slots"></span>`);
   // At most SLOTS_MAX dots, then the rest as a count; the held are kept first, then the running, then the free.
@@ -729,12 +731,12 @@ test("slots: the Status card's dots, running, held and free in that order, as a 
 });
 
 test("rowPill: CardsAndBanners' Needs you and In line rows, OverviewScreen's Running rows, and a write as a row's action", () => {
-  const needs = `<ul class="rows">
+  const needs = onCard("CardsAndBanners", `<ul class="rows">
     <li class="rowpill tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg><span class="ptag">api</span><span class="code">gh-2f6a</span><a class="rowpill__act" href="#">Answer</a></li>
     <li class="rowpill tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg><span class="ptag">web</span><span class="code">gh-f0c2</span><a class="rowpill__act" href="#">Re-run</a></li>
     <li class="rowpill tone-refused"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-refused"/></svg><span class="ptag">billing</span><span class="code">gh-e9a0</span><a class="rowpill__act" href="#">Open</a></li>
     <li class="rowpill tone-failed"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-hourglass"/></svg><span class="ptag">api</span><span class="code">gh-5d10</span><a class="rowpill__act" href="#">Retry</a></li>
-  </ul>`;
+  </ul>`);
   const id = (s) => html`<span class="code">${s}</span>`;
   const needRows = [
     ["parked", "parked", "api", "gh-2f6a", "Answer"],
@@ -743,15 +745,15 @@ test("rowPill: CardsAndBanners' Needs you and In line rows, OverviewScreen's Run
     ["hourglass", "failed", "api", "gh-5d10", "Retry"],
   ].map(([icon, status, project, job, label]) => ui.rowPill({ icon, status, items: [ui.ptag(project), id(job)], action: { label, href: `/run?id=${job}` } }));
   assert.equal(`<ul class="rows">${needRows.map(out).join("")}</ul>`, tight(hrefs(needs, "/run?id=gh-2f6a", "/run?id=gh-f0c2", "/run?id=gh-e9a0", "/run?id=gh-5d10")));
-  const inLine = `<ul class="rows"><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-slot"/></svg><span>Free slot</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"/></svg><span>Another run</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg><span>Time or check</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg><span>Retry backoff</span><span class="end"><b>2</b></span></li></ul>`;
+  const inLine = onCard("CardsAndBanners", `<ul class="rows"><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-slot"/></svg><span>Free slot</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"/></svg><span>Another run</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-clock"/></svg><span>Time or check</span><span class="end"><b>1</b></span></li><li class="rowpill"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-rerun"/></svg><span>Retry backoff</span><span class="end"><b>2</b></span></li></ul>`);
   const lineRows = [["slot", "Free slot", 1], ["chain", "Another run", 1], ["clock", "Time or check", 1], ["rerun", "Retry backoff", 2]].map(([icon, label, n]) => ui.rowPill({ icon, items: [label], end: n }));
   assert.equal(`<ul class="rows">${lineRows.map(out).join("")}</ul>`, fromCard(inLine));
   // Running's rows: a host's name in bold, its slot dots (the kit's are a named image), and the held or the free.
-  const running = `<ul class="rows">
+  const running = onCard("OverviewScreen", `<ul class="rows">
     <li class="rowpill"><b>build3</b><span class="sls"><i class="sl sl--run"></i><i class="sl sl--hold"></i><i class="sl"></i></span><span class="end tinted tone-attention"><b class="tinted">1 held</b></span></li>
     <li class="rowpill"><b>mini1</b><span class="sls"><i class="sl sl--run"></i><i class="sl sl--run"></i><i class="sl"></i><i class="sl"></i></span><span class="end faint">2 free</span></li>
     <li class="rowpill"><b>mini2</b><span class="sls"><i class="sl sl--run"></i><i class="sl"></i></span><span class="end faint">1 free</span></li>
-  </ul>`;
+  </ul>`);
   const runRows = [
     ui.rowPill({ items: [html`<b>build3</b>`, ui.slots({ run: 1, hold: 1, free: 1, label: "build3" })], end: { text: "1 held", status: "attention" } }),
     ui.rowPill({ items: [html`<b>mini1</b>`, ui.slots({ run: 2, free: 2, label: "mini1" })], end: { text: "2 free", faint: true } }),
@@ -780,7 +782,7 @@ test("rowPill: CardsAndBanners' Needs you and In line rows, OverviewScreen's Run
 test("capsule: the overview's Caps (FactsAndLevels' capsules), its tone where the printed percent reads it", () => {
   // OverviewScreen's eight. The card prints whole percents of levels it does not give; these are levels that give its
   // heights (a pill is round(150 * level / 100) high, its percent 21 below its top).
-  const card = `<div class="capbars"><div class="cap" title="Jobs today: 63%">
+  const card = onCard("OverviewScreen", `<div class="capbars"><div class="cap" title="Jobs today: 63%">
   <svg width="40" height="150" viewBox="0 0 40 150" role="img" aria-label="Jobs today: 63 percent of cap">
     <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
     <rect class="cap__pill tone-ok" x="4" y="56" width="32" height="94" rx="16"/>
@@ -820,7 +822,7 @@ test("capsule: the overview's Caps (FactsAndLevels' capsules), its tone where th
     <line class="cap__rail" x1="20" x2="20" y1="0" y2="150"/><circle class="cap__hold" cx="20" cy="30" r="4"/>
     <rect class="cap__pill tone-ok" x="4" y="89" width="32" height="61" rx="16"/>
     <text class="cap__v" x="20" y="110" text-anchor="middle">41</text></svg>
-  <p class="cap__l"><b>sonnet $</b>week</p></div></div>`;
+  <p class="cap__l"><b>sonnet $</b>week</p></div></div>`);
   // The kit's changes to the card, each on purpose:
   //   - the tone is on the <svg>, not on the pill: bundle.css paints the pill `--tone` and the percent `--on-tone`, and
   //     the percent is the pill's sibling, so on the card it read no tone and was drawn in SVG's default black;
@@ -860,7 +862,7 @@ test("capsule: the overview's Caps (FactsAndLevels' capsules), its tone where th
 });
 
 test("spendDots: CardsAndBanners' Spend today, one column of 7 dots per hour, lit from the bottom, and its axis", () => {
-  const card = `<div class="sd" role="img" aria-label="Metered spend by hour today"><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div><p class="axis"><span>00:00</span><span>08:00</span><span>15:00</span></p>`;
+  const card = onCard("CardsAndBanners", `<div class="sd" role="img" aria-label="Metered spend by hour today"><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i></span><span class="sd__c"><i class="on"></i><i class="on"></i><i class="on"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div><p class="axis"><span>00:00</span><span>08:00</span><span>15:00</span></p>`);
   // The kit writes an unlit dot without the card's empty class attribute.
   const hours = [0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 2, 1, 4, 2, 6, 3];
   assert.equal(out(ui.spendDots({ hours, max: 7, label: "Metered spend by hour today" })), card.replace(/<i class=""><\/i>/g, "<i></i>"));
@@ -898,7 +900,7 @@ test("schedulerRunOf: a cron trigger's run from its id, BullMQ's repeat:<trigger
 });
 
 test("waitBar: the Waitlists card's bar, a segment per reason in proportion, alternating greys, every segment wide enough to read", () => {
-  const card = `<svg class="wbar" height="30" role="img" aria-label="In line by reason"><rect class="wb wb--0" x="0.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-slot" x="0.00%" width="14" height="14"/></g><text class="wb-t" x="0.00%" dx="30" y="20">1</text><rect class="wb wb--1" x="20.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-chain" x="20.00%" width="14" height="14"/></g><text class="wb-t" x="20.00%" dx="30" y="20">1</text><rect class="wb wb--2" x="40.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-clock" x="40.00%" width="14" height="14"/></g><text class="wb-t" x="40.00%" dx="30" y="20">1</text><rect class="wb wb--3" x="60.00%" y="0" width="40.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-rerun" x="60.00%" width="14" height="14"/></g><text class="wb-t" x="60.00%" dx="30" y="20">2</text></svg>`;
+  const card = onCard("TimelineAndWaitlists", `<svg class="wbar" height="30" role="img" aria-label="In line by reason"><rect class="wb wb--0" x="0.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-slot" x="0.00%" width="14" height="14"/></g><text class="wb-t" x="0.00%" dx="30" y="20">1</text><rect class="wb wb--1" x="20.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-chain" x="20.00%" width="14" height="14"/></g><text class="wb-t" x="20.00%" dx="30" y="20">1</text><rect class="wb wb--2" x="40.00%" y="0" width="20.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-clock" x="40.00%" width="14" height="14"/></g><text class="wb-t" x="40.00%" dx="30" y="20">1</text><rect class="wb wb--3" x="60.00%" y="0" width="40.00%" height="30" rx="8"/><g transform="translate(10 8)"><use class="wb-g" href="#i-rerun" x="60.00%" width="14" height="14"/></g><text class="wb-t" x="60.00%" dx="30" y="20">2</text></svg>`);
   // The kit closes `<use>` with `</use>`, as it writes every icon.
   const kitOf = (s) => s.replace(/(<use class="wb-g"[^>]*?)\/>/g, "$1></use>");
   const segments = [{ icon: "slot", count: 1 }, { icon: "chain", count: 1 }, { icon: "clock", count: 1 }, { icon: "rerun", count: 2 }];
@@ -958,9 +960,9 @@ test("actForm: a write's form, its hidden fields typed as the script reads them,
   // Needs you's Retry, a paid act (the card's plain link is the console's two-step write).
   assert.equal(out(ui.actForm({ action: "retry-failed", hidden: [["jobId", "gh-5d10"], ["queue", "pi-jobs"]], label: "Retry", kind: ["sm", "paid"] })), `<form class="act" data-action="retry-failed" autocomplete="off"><input type="hidden" name="jobId" value="gh-5d10"><input type="hidden" name="queue" value="pi-jobs"><button class="btn btn--sm btn--paid" type="submit">Retry</button></form>`);
   // OverviewScreen's Pause fleet, the card's link as the form's button, and a host's round pause, destructive both.
-  const fleet = fromCard(`<a class="btn btn--sm btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg>Pause fleet</a>`).replace(`<a `, `<button `).replace(` href="#"`, ` type="submit"`).replace(`</a>`, `</button>`);
+  const fleet = fromCard(onCard("OverviewScreen", `<a class="btn btn--sm btn--danger" href="#"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg>Pause fleet</a>`)).replace(`<a `, `<button `).replace(` href="#"`, ` type="submit"`).replace(`</a>`, `</button>`);
   assert.equal(out(ui.actForm({ action: "fleet-pause", label: "Pause fleet", kind: ["sm", "danger"], icon: "pause" })), `<form class="act" data-action="fleet-pause" autocomplete="off">${fleet}</form>`);
-  const host = fromCard(`<button class="btn btn--sm btn--round" type="button" aria-label="Pause build3"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg></button>`).replace(`btn--round"`, `btn--round btn--danger"`).replace(`type="button"`, `type="submit"`);
+  const host = fromCard(onCard("OverviewScreen", `<button class="btn btn--sm btn--round" type="button" aria-label="Pause build3"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-pause"/></svg></button>`)).replace(`btn--round"`, `btn--round btn--danger"`).replace(`type="button"`, `type="submit"`);
   assert.equal(out(ui.actForm({ action: "queue-pause", hidden: [{ name: "queue", value: "pi-jobs@build3" }], label: "Pause build3", kind: ["sm", "round", "danger"], icon: "pause" })), `<form class="act" data-action="queue-pause" autocomplete="off"><input type="hidden" name="queue" value="pi-jobs@build3">${host}</form>`);
   assert.equal(out(ui.actForm({ action: "cancel-queued", hidden: [["jobId", "gh-c9e1"], ["queue", "pi-jobs@build3"]], label: "Cancel" })), `<form class="act" data-action="cancel-queued" autocomplete="off"><input type="hidden" name="jobId" value="gh-c9e1"><input type="hidden" name="queue" value="pi-jobs@build3"><button class="btn btn--sm" type="submit">Cancel</button></form>`, "small by default");
   // A field's type is one the browser script reads (`bodyOf`'s `data-type`), and an action's name passes its check.
@@ -986,13 +988,13 @@ test("actForm: a write's form, its hidden fields typed as the script reads them,
 test("searchPill and filterToggle: the RunsScreen card's search pill and the RunsPhone card's Filters button", () => {
   // The card's pill, its hidden word "Search" as the console names the field, with the field's id, name and value, and
   // its search left to the person (no autocomplete, no spell check).
-  const card = `<label class="search runs-search"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="sr">Search</span><input type="search" placeholder="Repository, target or job id"></label>`;
+  const card = onCard("RunsScreen", `<label class="search runs-search"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span class="sr">Search</span><input type="search" placeholder="Repository, target or job id"></label>`);
   const want = fromCard(card).replace(" runs-search", "").replace(">Search<", ">Search runs<").replace(`<input type="search"`, `<input id="q" type="search" name="q" value="gh-2f6a"`).replace(`job id">`, `job id" autocomplete="off" spellcheck="false">`);
   assert.equal(out(ui.searchPill({ id: ui.SEARCH_ID, name: "q", value: "gh-2f6a" })), want);
   assert.equal(out(ui.searchPill({ id: "au-q", name: "q", label: "Search the log", placeholder: null })), `<label class="search"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg><span class="sr">Search the log</span><input id="au-q" type="search" name="q" autocomplete="off" spellcheck="false"></label>`, "any kit id, no value and no placeholder");
   // The card's Filters button with its count, drawn hidden for the script to reveal (the type, the hook and the state
   // added; the card's `(1)` is the number of filters it folds).
-  const toggle = `<button class="fpill filterbar__toggle" type="button" aria-expanded="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Filters <b>(1)</b></button>`;
+  const toggle = onCard("RunsScreen", `<button class="fpill filterbar__toggle" type="button" aria-expanded="false"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"/></svg>Filters <b>(1)</b></button>`);
   assert.equal(out(ui.filterToggle({ count: 1 })), fromCard(toggle).replace(` aria-expanded="false"`, ` data-filter-toggle aria-expanded="false" hidden data-reveal`));
   assert.equal(out(ui.filterToggle()), `<button class="fpill filterbar__toggle" type="button" data-filter-toggle aria-expanded="false" hidden data-reveal><svg class="ic ic--sm" aria-hidden="true"><use href="#i-config"></use></svg>Filters</button>`, "no filter applied, no count");
   assert.equal(out(ui.filterToggle({ count: 0 })), out(ui.filterToggle()));
@@ -1025,9 +1027,9 @@ test("fpill, fchip and chipRow: the RunsScreen card's project chips and applied 
 test("sumStrip: the RunsScreen card's counts by outcome, each a link to its runs, a lower bound said in words, an item off a phone", () => {
   // The card's `.runs-k` items under the kit's names: the count in bold over its label with the status's icon, the
   // tone on the item; a neutral item (the spend) has no tone and no icon.
-  const card = `<a class="runs-k tone-failed" href="#"><b>1</b><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg>failed</span></a><a class="runs-k" href="#"><b>$6.13</b><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg>metered spend</span></a>`;
+  const card = onCard("RunsScreen", `<a class="runs-k tone-failed" href="#"><b>1</b><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-failed"/></svg>failed</span></a>`) + onCard("RunsScreen", `<a class="runs-k" href="#"><b>$6.13</b><span><svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"/></svg>metered spend</span></a>`);
   const strip = out(ui.sumStrip([{ n: 1, label: "failed", status: "failed", href: "/runs?outcome=failed" }, { n: "$6.13", label: "metered spend", href: "/insights" }], { label: "Runs that ended in the last 24 hours" }));
-  const items = fromCard(hrefs(card, "/runs?outcome=failed", "/insights")).replaceAll("runs-k", "sumstrip__i").replace(`<svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"></use></svg>`, "");
+  const items = fromCard(hrefs(card, "/runs?outcome=failed", "/insights")).replaceAll("runs-k", "sumstrip__i").replace(onCard("RunsScreen", `<svg class="ic ic--sm" aria-hidden="true"><use href="#i-spend"></use></svg>`), "");
   assert.equal(strip, `<ul class="sumstrip" aria-label="Runs that ended in the last 24 hours">${items.replace(/<a /g, "<li><a ").replace(/<\/a>/g, "</a></li>")}</ul>`);
   // A count is grouped; a lower bound says "at least" before it; an item with no link is text; one off a phone says so.
   const more = out(ui.sumStrip([{ n: 2000, label: "completed", status: "ok", floor: true }, { n: 3, label: "awaiting input", status: "parked", hidePhone: true }], { label: "s" }));
@@ -1047,8 +1049,8 @@ test("questionCard and answerForm: the ParkedPhone card's question card, its ans
   // the caller puts there (the console's callers say where the question is read: no question text is on any panel).
   const answer = ui.answerForm({ jobId: "gh-2f6a", id: "answer-gh-2f6a", hint: "Posted to acme/api#131 after you confirm. It resumes the run.", runHref: "/run?id=gh-2f6a" });
   const card = out(ui.questionCard({ jobId: "gh-2f6a", runHref: "/run?id=gh-2f6a", waited: "26m", project: "api", target: html`<a class="link" href="/runs?q=acme%2Fapi%23131">acme/api#131</a>`, where: "triage, mini1", body: "The question is on its issue.", answer }));
-  const top = fromCard(`<p class="pp-top"><span class="tile tile--sm tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg></span><b id="pp-q"><span class="code">gh-2f6a</span> asks</b><span class="pp-wait">26m</span></p>`)
-    .replaceAll("pp-", "qcard__").replace(` id="qcard__q"`, "").replace(`<span class="code">gh-2f6a</span>`, `<a class="code" href="/run?id=gh-2f6a">gh-2f6a</a>`).replace(">26m<", `><span class="sr">waiting </span>26m<`);
+  const top = fromCard(onCard("ParkedPhone", `<p class="pp-top"><span class="tile tile--sm tone-parked"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-parked"/></svg></span><b id="pp-q"><span class="code">gh-2f6a</span> asks</b><span class="pp-wait">26m</span></p>`))
+    .replaceAll("pp-", "qcard__").replace(` id="qcard__q"`, "").replace(onCard("CardsAndBanners", `<span class="code">gh-2f6a</span>`), `<a class="code" href="/run?id=gh-2f6a">gh-2f6a</a>`).replace(">26m<", `><span class="sr">waiting </span>26m<`);
   const meta = `<p class="qcard__meta"><span class="ptag">api</span><a class="link" href="/runs?q=acme%2Fapi%23131">acme/api#131</a><span>triage, mini1</span></p>`;
   assert.equal(card, `<article class="card card--ring tone-parked qcard" aria-label="gh-2f6a asks">${top}${meta}<div class="qcard__body">The question is on its issue.</div>${answer}</article>`);
   // The answer box: the card's hidden label and field, its buttons, its hint, as the parked answer's form. The field

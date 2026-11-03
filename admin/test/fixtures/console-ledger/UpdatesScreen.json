@@ -1,13 +1,7 @@
 {
   "card": "UpdatesScreen",
   "pr": 790,
-  "panels": [
-    "p-up-problems",
-    "p-up-jobs",
-    "p-up-hosts",
-    "p-up-how",
-    "p-up-recent"
-  ],
+  "words": "ac333497c6678fac64b61454539abaf9fb8929b22c8fd813032fa9daedf06517",
   "elements": [
     {
       "el": "p-up-problems",

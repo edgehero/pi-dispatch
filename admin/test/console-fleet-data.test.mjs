@@ -65,9 +65,9 @@ test("the pause preview names queues and says which work keeps running and which
   const lines = preview.summary.join("\n");
   assert.match(lines, /Queues: pi-jobs, pi-jobs:build3/);
   assert.match(lines, /3 running jobs keep running/);
-  assert.match(lines, /7 delayed jobs and 1 held jobs wait until a resume/);
+  assert.match(lines, /7 delayed jobs and 1 held job waits until a resume/);
   assert.match(lines, /Audited as fleet-pause/);
-  assert.match(lines, /Undo: Resume the fleet/);
+  assert.doesNotMatch(lines, /Undo:/, "the bar draws the undo line, once");
 });
 
 

@@ -1,7 +1,7 @@
 {
   "card": "Transcript",
   "pr": 5,
-  "panels": [],
+  "words": "062ccfcd07176acd07b06ed215293f89f8faefb01f5cf84a9c50db0ab9a9ce16",
   "elements": [
     {
       "el": "Transcript entries for every kind: user, assistant, tool call, tool result, steer, compaction, note, restart, skipped and end.",

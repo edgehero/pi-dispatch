@@ -997,7 +997,7 @@ test("the Progress panel of an attempt whose run continues as a recovery (issue 
   }
   // A recovery's own page (no record yet) shows its run's key live, as any running job.
   const own = String(runProgress({ ...view({ run: { missing: true }, progress: recoveryKey }), query: { id: "gh-1.r1" } }));
-  assert.match(own, /<dt>Turn<\/dt><dd>2<\/dd>/);
+  assert.match(own, /<dt>Turn<\/dt><dd><span><b>2<\/b><\/span><\/dd>/);
 });
 
 // An infra retry keeps the job id: attempt 1 writes its record, then attempt 2 rewrites the progress key. The key
@@ -1010,7 +1010,7 @@ test("the Progress panel of a retried job (issue #644): a key newer than the rec
   const view = (role, data) => ({ page: "run", role, readOnly: false, query: { id: "gh-1" }, env: {}, now: NOW, data: { now: NOW, ...data } });
   const op = String(runProgress(view("operator", { run: { record }, progress: attempt2 })));
   assert.match(op, /An earlier attempt of this run ended \(failed\); this is the attempt after it\./);
-  assert.match(op, /<dt>Turn<\/dt><dd>2<\/dd>/, "attempt 2's live counters");
+  assert.match(op, /<dt>Turn<\/dt><dd><span><b>2<\/b><\/span><\/dd>/, "attempt 2's live counters");
   assert.match(op, /<span class="mono">bash<\/span> running 20s/);
   assert.match(op, /<span class="name">ATTEMPT-2-PHASE<\/span>/);
   assert.doesNotMatch(op, /Last phase/, "attempt 1's lastPhaseIndex is not set beside attempt 2's names");
@@ -1118,9 +1118,9 @@ test("the run page's Inbox panel (issue #646): the list for both roles without t
   const view = (role, inbox, readOnly = false, id = "gh-1") => ({ page: "run", role, readOnly, query: { id }, env: {}, now: NOW, data: { now: NOW, inbox } });
   const op = String(runInbox(view("operator", box)));
   assert.match(op, /<h2>Inbox<\/h2>/);
-  assert.match(op, new RegExp(`<td class="mono">${q}</td><td>steer</td><td>console</td><td><span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>queued</span></td><td><time datetime="2026-10-08T15:38:38.000Z">2026-10-08 15:38 UTC</time></td><td class="num">18</td>`));
-  assert.match(op, new RegExp(`<td class="mono">${w}</td><td>follow-up</td><td>forge</td><td><span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>written</span></td>`));
-  assert.match(op, /<td class="num">2,048<\/td>/);
+  assert.match(op, new RegExp(`<strong>steer</strong> <span class="muted">console, 18 bytes</span><br><span class="run-at"><time datetime="2026-10-08T15:38:38.000Z">2026-10-08 15:38 UTC</time></span> <span class="code">${q}</span>.*?<span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>queued</span>`));
+  assert.match(op, new RegExp(`<strong>follow-up</strong> <span class="muted">forge.*?${w}.*?<span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>written</span>`));
+  assert.match(op, /, 2,048 bytes/);
   assert.equal((op.match(/data-action="steer-withdraw"/g) ?? []).length, 2, "a withdraw for the queued and the written message only, never the delivered one or an id outside the charset");
   assert.match(op, new RegExp(`name="id" value="${q}"`));
   assert.ok(!op.includes(`value="${d}"`));
@@ -1132,7 +1132,7 @@ test("the run page's Inbox panel (issue #646): the list for both roles without t
   assert.ok(!op.includes("<script>") && op.includes("&lt;script&gt;"), "escaped");
   for (const role of ["operator", "viewer"]) for (const html of [String(runInbox(view(role, box))), String(runInbox(view(role, box, true)))]) assert.ok(!html.includes("INBOX-TEXT-CANARY"), `${role}: no text anywhere in the list`);
   const viewer = String(runInbox(view("viewer", box)));
-  assert.match(viewer, new RegExp(`<td class="mono">${q}</td>`), "a viewer sees the list");
+  assert.match(viewer, new RegExp(`<span class="code">${q}</span>`), "a viewer sees the list");
   assert.ok(!viewer.includes("data-action") && !viewer.includes("<textarea"), "and no control");
   assert.ok(!String(runInbox(view("operator", box, true))).includes("data-action"), "none on a read-only console");
   // Active but not open: the list and the withdraw buttons, no message form, and the sentence naming every cause.
@@ -1157,11 +1157,11 @@ test("the Inbox panel's edges (issue #646, review round 1): no form without a ru
   const base = { found: true, steer: true, state: "active", open: true, entries, closed: false };
   const view = (role, inbox, id2 = "gh-1") => ({ page: "run", role, readOnly: false, query: { id: id2 }, env: {}, now: NOW, data: { now: NOW, inbox } });
   const op = String(runInbox(view("operator", base)));
-  assert.match(op, new RegExp(`<td class="mono">${id}</td><td>steer</td><td>console</td><td><span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>queued</span></td><td>-</td>`), "a missing time is -");
+  assert.match(op, new RegExp(`<strong>steer</strong> <span class="muted">console.*?<span class="run-at">-</span> <span class="code">${id}</span>.*?<span class="chip"><svg class="ic" aria-hidden="true"><use href="#i-clock"></use></svg>queued</span>`), "a missing time is -");
   assert.equal((op.match(/>Withdraw<\/button>/g) ?? []).length, 1, "the Withdraw label, once: only the well-formed id; a 33-character or non-hex id gets none");
   assert.equal((op.match(/maxlength="8192"/g) ?? []).length, 2, "each textarea is bounded at the inbox's 8 KiB");
-  assert.match(op, /<th scope="col">Action<\/th>/);
-  assert.doesNotMatch(String(runInbox(view("viewer", base))), /Action/, "no Action column for a viewer");
+  assert.match(op, /class="rows"/, "a row per message, since seven columns cannot fit the side column");
+  assert.doesNotMatch(String(runInbox(view("viewer", base))), /Withdraw/, "no Withdraw for a viewer");
   // Not active with open true (the open key outlives a job by its hold), and active with the open key unread: no form.
   const done = String(runInbox(view("operator", { ...base, state: "completed", open: true })));
   assert.ok(!done.includes('data-action="steer"'), "no form for a job that is not running, open or not");
