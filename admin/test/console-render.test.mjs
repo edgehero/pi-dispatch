@@ -42,10 +42,14 @@ test("the live run page's pick gets the transcript, and the transcript holds not
   const live = picksPlan().find((shot) => shot.file === "console-run-live.png");
   assert.equal(live.key, "panels/run-live-armed.operator");
   assert.equal(live.transcript, "gh-b3d7", "the run id the page's stream asks by");
-  assert.ok(CONSOLE_TRANSCRIPT.length > 0);
-  assert.deepEqual(CONSOLE_TRANSCRIPT.map((entry) => entry.id), CONSOLE_TRANSCRIPT.map((_, at) => String(at + 1)), "ids in order, as the stream's cursor needs");
-  const at = CONSOLE_TRANSCRIPT.map((entry) => entry.ts);
-  assert.deepEqual(at, [...at].sort((a, b) => a - b), "times in order");
+  assert.equal(picksPlan().find((shot) => shot.file === "console-question.png").transcript, "gh-2f6a");
+  for (const shot of picksPlan().filter((pick) => pick.transcript)) assert.ok(Array.isArray(CONSOLE_TRANSCRIPT[shot.transcript]), `${shot.file}: its run has a transcript`);
+  for (const entries of Object.values(CONSOLE_TRANSCRIPT)) {
+    assert.ok(entries.length > 0);
+    assert.deepEqual(entries.map((entry) => entry.id), entries.map((_, at) => String(at + 1)), "ids in order, as the stream's cursor needs");
+    const at = entries.map((entry) => entry.ts);
+    assert.deepEqual(at, [...at].sort((a, b) => a - b), "times in order");
+  }
 });
 
 test("the flags refuse what makes no sense, in a sentence, before anything starts", () => {

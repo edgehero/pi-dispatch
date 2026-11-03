@@ -810,6 +810,9 @@ const LIVE_ARMED = Object.freeze({
 });
 const RUN_CARD_STATES = {
   "run-live-armed.operator": () => runCard(LIVE_ARMED),
+  // Issue #692: a run that stopped to ask, the page the READMEs open their second stage with. The question is the
+  // transcript's last assistant entry, so it arrives over the stream as on any parked run (`launch/console-render.mjs`).
+  "run-parked-question.operator": () => runCard({ id: "gh-2f6a", rec: record({ jobId: "gh-2f6a", target: "acme/api#131", project: "api", flow: "triage", reason: "awaiting-input", session: { resumed: false, reason: "absent", bytes: 4096 }, startedAt: new Date(NOW - 52 * MIN).toISOString(), endedAt: new Date(NOW - 26 * MIN).toISOString() }), chat: { state: "parked", mode: "reply", jobState: "completed" }, transcript: { exists: true, ended: true, outcome: "completed" } }),
   "run-steer-confirm.operator": async () => {
     const planSteer = async ({ jobId, text, mode }) => ({ plan: { jobId, id: "e5f6a7b8", mode, text, bytes: Buffer.byteLength(text), digest: "c".repeat(64) } });
     const answer = await actionWorld({ rm: { planSteer } }).preview("steer", { jobId: "gh-b3d7", mode: "steer", text: STEER_TEXT });

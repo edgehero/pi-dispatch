@@ -77,11 +77,12 @@ same work twice. ([Steering](docs/steering.md), [chat](docs/chat.md))
 
 Now it works alone, and you hear from it only when it has a question or needs permission. A job with a question stops
 and waits. Nothing runs and no model is paid for while it waits, and your answer picks the work up where it stopped. A
-gate can make it ask before a named action, and a rule you write can have an answer drafted for you to read and send.
+gate can make it ask before a named action, and a rule you write can have an answer drafted for you to read and send. A
+question is the agent's own words, so your instructions decide how it asks: what it found, your options, what it recommends.
 ([Parked questions](docs/sessions.md#parked-jobs-the-agent-asks-then-waits), [approval gates](docs/approval-gates.md),
 [answer rules](docs/answer-rules.md))
 
-![The parked page: a run that stopped to ask a question, how long it has waited, where to read the question, and a box to answer in](docs/images/console/console-parked.png?v=2026-11-03)
+![A run that stopped to ask: what it found, three options with what each costs, what it recommends, and a box for your answer](docs/images/console/console-question.png?v=2026-11-03)
 
 ### 3. Out of the loop: you review what comes back
 

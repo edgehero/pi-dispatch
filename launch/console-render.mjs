@@ -36,8 +36,8 @@ export function picksPlan(picks = CONSOLE_PICKS) {
 }
 
 /** The canned transcript as the stream's frames, each drawn by the console's own `transcriptEntryHtml`. */
-function transcriptFrames(transcriptEntryHtml) {
-	return CONSOLE_TRANSCRIPT.map((entry) => `id: ${entry.id}\nevent: entry\ndata: ${JSON.stringify({ html: String(transcriptEntryHtml(entry)) })}\n\n`).join("");
+function transcriptFrames(transcriptEntryHtml, runId) {
+	return CONSOLE_TRANSCRIPT[runId].map((entry) => `id: ${entry.id}\nevent: entry\ndata: ${JSON.stringify({ html: String(transcriptEntryHtml(entry)) })}\n\n`).join("");
 }
 
 /** The golden pages over http, with the console's headers; the stream holds open, and for `frames` first sends them. */
@@ -88,7 +88,7 @@ export async function renderConsole({ chrome, shots, out, work, children, Refusa
 	const byKey = new Map(docs.map((doc) => [goldenKey(doc), doc]));
 	for (const shot of shots) if (!byKey.has(shot.key)) throw new Refusal(`${shot.file}: no golden ${shot.key} (admin/test/fixtures/console/${shot.key}.html)`);
 	const { transcriptEntryHtml } = await import("../admin/src/console/transcript.mjs");
-	const frames = new Map(shots.filter((shot) => shot.transcript).map((shot) => [shot.transcript, transcriptFrames(transcriptEntryHtml)]));
+	const frames = new Map(shots.filter((shot) => shot.transcript).map((shot) => [shot.transcript, transcriptFrames(transcriptEntryHtml, shot.transcript)]));
 	mkdirSync(out, { recursive: true });
 	const server = await servePages({ docs, css: m.CONSOLE_CSS, script: m.CONSOLE_SCRIPT, applyHeaders: m.applySecurityHeaders, frames });
 	const queue = [...shots];
@@ -110,7 +110,7 @@ export async function renderConsole({ chrome, shots, out, work, children, Refusa
 				});
 				try {
 					// The stream's entries arrive after the page settles, and the status says when the last one landed.
-					if (shot.transcript) await page.evaluate(`new Promise((done) => { const look = () => (document.querySelectorAll("[data-transcript] .tx__entry").length >= ${CONSOLE_TRANSCRIPT.length} || performance.now() > 5000 ? done() : setTimeout(look, 50)); look(); })`, true);
+					if (shot.transcript) await page.evaluate(`new Promise((done) => { const look = () => (document.querySelectorAll("[data-transcript] .tx__entry").length >= ${CONSOLE_TRANSCRIPT[shot.transcript].length} || performance.now() > 5000 ? done() : setTimeout(look, 50)); look(); })`, true);
 					const clip = await clipOf(page, shot);
 					const { data } = await page.t.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip });
 					writeFileSync(join(out, shot.file), Buffer.from(data, "base64"));

@@ -19,7 +19,7 @@ export const CONSOLE_PICKS = Object.freeze([
 	{ name: "console-overview-phone", golden: "overview.operator", width: 375, height: 1500, scale: 2 },
 	{ name: "console-run-live", golden: "panels/run-live-armed.operator", height: 1500, transcript: "gh-b3d7" },
 	{ name: "console-steer-confirm", golden: "panels/run-steer-confirm.operator", selector: "#confirm-slot" },
-	{ name: "console-parked", golden: "panels/parked-answerable.operator", height: 900 },
+	{ name: "console-question", golden: "panels/run-parked-question.operator", height: 975, transcript: "gh-2f6a" },
 	{ name: "console-zero-touch", golden: "zero-touch.operator", height: 1000 },
 	{ name: "console-setup", golden: "panels/setup-starting.operator", height: 1240 },
 	{ name: "console-spend", golden: "insights.operator", height: 1100 },
@@ -41,8 +41,12 @@ export const CONSOLE_PICKS = Object.freeze([
 	{ name: "console-project", golden: "panels/project-populated.operator", height: 960 },
 ]);
 
-/** What the agent of the fixture's running job (the schema migration) has said so far, as `readTranscriptSince` hands it to the page. */
-export const CONSOLE_TRANSCRIPT = Object.freeze([
+/**
+ * What each pick's run has said, by run id, as `readTranscriptSince` hands it to the page. A question is the agent's own
+ * words, so its options are text: a flow asks for them in its instructions, and the person answers in the box.
+ */
+export const CONSOLE_TRANSCRIPT = Object.freeze({
+	"gh-b3d7": Object.freeze([
 	{ id: "1", kind: "user", ts: NOW - 12 * MIN, text: "Migrate the billing tables to the new schema. Keep the old columns until every reader has moved." },
 	{ id: "2", kind: "assistant", ts: NOW - 11 * MIN, text: "I will survey the ten tables first, then migrate them one at a time and run the tests after each." },
 	{ id: "3", kind: "tool-call", ts: NOW - 10 * MIN, tool: "read", text: JSON.stringify({ path: "db/schema.sql" }) },
@@ -52,4 +56,16 @@ export const CONSOLE_TRANSCRIPT = Object.freeze([
 	{ id: "7", kind: "steer", ts: NOW - 70 * SEC, text: "Leave the payments reader for a later pull request, and say so in this one." },
 	{ id: "8", kind: "assistant", ts: NOW - 60 * SEC, text: "Understood. Three of ten tables are migrated. I will skip the payments reader and note it in the pull request." },
 	{ id: "9", kind: "tool-call", ts: NOW - 40 * SEC, tool: "bash", text: JSON.stringify({ command: "npm test -- db/migrations/orders" }) },
-]);
+	]),
+	"gh-2f6a": Object.freeze([
+		{ id: "1", kind: "user", ts: NOW - 52 * MIN, text: "Issue acme/api#131: customers see a failed payment when the new rate limit is hit during checkout." },
+		{ id: "2", kind: "tool-call", ts: NOW - 44 * MIN, tool: "read", text: JSON.stringify({ path: "src/checkout/retry.ts" }) },
+		{ id: "3", kind: "tool-result", ts: NOW - 44 * MIN + 2 * SEC, tool: "read", text: "export async function retryPayment(order) { ... }" },
+		{
+			id: "4",
+			kind: "assistant",
+			ts: NOW - 26 * MIN,
+			text: "I found the cause, and there are three ways to fix it. The choice changes what customers see, so I am asking rather than guessing.\n\nCheckout retries a failed payment at once, and the new rate limit blocks those retries for 60 seconds.\n\nA. Exempt payment retries from the limit. About 10 lines. Customers see no difference, but a client stuck in a loop could still hammer the API.\nB. Queue retries until the limit resets. About 80 lines. The safest for the API, but a retry can take up to a minute.\nC. Leave it and show a clear error. No code to speak of, but some customers will see a failed payment.\n\nI recommend A, with its own small limit on retries. Reply with A, B or C, or tell me what I have missed.",
+		},
+	]),
+});
