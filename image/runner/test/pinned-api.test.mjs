@@ -895,6 +895,15 @@ test("CreateAgentSessionOptions declares the tools trio, and INT-SDK-SESSION-OPT
 	assert.match(sessionDts, /setActiveToolsByName\(toolNames: string\[\]\): void;/, "AgentSession.setActiveToolsByName moved -- the loader acceptance proves exclusion survives it");
 });
 
+test("a loaded theme names its file as sourcePath, the field run-job.mjs counts a package's themes by (issue #800)", { skip }, () => {
+	// A reader of `filePath`, which skills and prompts have and a Theme does not, counted 0 themes for every package with
+	// no error anywhere: the same silent zero a rename here would bring back.
+	const dts = agentDistFile("modes", "interactive", "theme", "theme.d.ts");
+	const theme = dts.match(/export declare class Theme \{([\s\S]*?)\n\}/)?.[1] ?? "";
+	assert.match(theme, /readonly sourcePath\?: string;/, "Theme.sourcePath moved -- packages_loaded and the record's theme counts read it");
+	assert.doesNotMatch(theme, /\bfilePath\b/, "Theme gained a filePath: check which of the two is the file now");
+});
+
 test("the pinned built-in tool set matches the loader's constant and the runner's factory derivation", { skip }, async () => {
 	// The exports map constrains bare specifiers only, so a file URL reaches the canonical set the root
 	// does not export -- the meter's own resolver trick. Three spellings must agree: pi's allToolNames,

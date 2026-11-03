@@ -524,7 +524,8 @@ async function main() {
 				// per-root visibility until now, and a package prompt template changes what a /name
 				// dispatches even when it shadows nothing.
 				promptPaths: resourceLoader.getPrompts().prompts.map((prompt) => prompt.filePath),
-				themePaths: resourceLoader.getThemes().themes.map((theme) => theme.filePath),
+				// `sourcePath`, not `filePath`: pi's Theme names no `filePath`, so this count read 0 for every package.
+				themePaths: resourceLoader.getThemes().themes.map((theme) => theme.sourcePath),
 			}),
 		});
 	}
