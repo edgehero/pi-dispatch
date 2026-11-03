@@ -3,11 +3,11 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { runGatewaySession, GATEWAY_LIMITS } from "../src/session.mjs";
 
-function fixture({ kind = "drive", room = null, controls = {}, idleMinutes = 30, renew = async () => ({ ok: true, authRemainingMs: 5000 }), inspect = async () => ({ ok: true }), resize = async () => {} } = {}) {
+function fixture({ kind = "drive", room = null, controls = {}, idleMinutes = 30, authRemainingMs = 5000, renew = async () => ({ ok: true, authRemainingMs: 5000 }), inspect = async () => ({ ok: true }), resize = async () => {} } = {}) {
 	let at = 0, timer; const sends = [], input = [], audits = [], ends = [], resized = []; let detaches = 0;
 	const ws = Object.assign(new EventEmitter(), { readyState: 1, bufferedAmount: 0, send: (data, _opts, callback) => { sends.push(data); callback?.(); }, close() { this.readyState = 3; }, terminate() { this.readyState = 3; } });
 	const stream = Object.assign(new EventEmitter(), { writableLength: 0, write: s => { input.push(s); return true; } });
-	const session = runGatewaySession({ ws, channel: { stream, detach: () => { detaches++; }, resize: async geometry => { resized.push(geometry); await resize(geometry); } }, store: { renewAttachment: renew, release: async () => ({ ok: true }), ...controls }, intent: { intentId: "intent", kind, ...(kind === "watch" ? { driver: { connectionId: "driver" } } : {}), target: {} }, room, connectionId: "connection", browserHash: "browser", authRemainingMs: 5000, idleMinutes, runtime: { inspect }, audit: async (...a) => { audits.push(a); }, now: () => at, setTimer: fn => (timer = fn, {}), clearTimer: () => {}, onEnd: result => { ends.push(result); } });
+	const session = runGatewaySession({ ws, channel: { stream, detach: () => { detaches++; }, resize: async geometry => { resized.push(geometry); await resize(geometry); } }, store: { renewAttachment: renew, release: async () => ({ ok: true }), ...controls }, intent: { intentId: "intent", kind, ...(kind === "watch" ? { driver: { connectionId: "driver" } } : {}), target: {} }, room, connectionId: "connection", browserHash: "browser", authRemainingMs, idleMinutes, runtime: { inspect }, audit: async (...a) => { audits.push(a); }, now: () => at, setTimer: fn => (timer = fn, {}), clearTimer: () => {}, onEnd: result => { ends.push(result); } });
 	return { ws, stream, session, sends, input, audits, ends, resized, setAt: value => { at = value; }, timer: () => timer(), get detaches() { return detaches; } };
 }
 test("input, control characters and binary output cross the live lease without being logged or interpreted", async () => {
@@ -35,6 +35,50 @@ test("a watch uses the shorter driver authority receipt and cannot forward bytes
 	f.setAt(1000); await f.session.tick(); f.setAt(1700); f.timer();
 	f.stream.emit("data", Buffer.from("PRIVATE_AFTER_EXPIRY"));
 	assert.equal(f.sends.filter(Buffer.isBuffer).length, 0); assert.equal(f.detaches, 1);
+});
+test("a slow attach leaves a lease shorter than a poll: it is renewed before it lapses, so a healthy terminal is not ended", async () => {
+	const settle = () => new Promise(resolve => setImmediate(resolve));
+	let renews = 0;
+	const f = fixture({ authRemainingMs: 800, renew: async () => { renews++; return { ok: true, authRemainingMs: 5000 }; } });
+	assert.equal(renews, 1, "asked at once, rather than one poll later, when the deadline would already have passed");
+	await settle();
+	f.setAt(900); f.timer();
+	f.stream.emit("data", Buffer.from("still here"));
+	assert.equal(f.sends.filter(Buffer.isBuffer).length, 1, "the store's answer carried the lease past where the attach left it");
+	assert.deepEqual(f.ends, []);
+	await f.session.finish();
+
+	// The lease grows only by what the store says. A store that does not answer ends it at the same deadline as before.
+	const hung = fixture({ authRemainingMs: 800, renew: () => new Promise(() => {}) });
+	hung.setAt(799); hung.timer(); hung.stream.emit("data", Buffer.from("before"));
+	assert.equal(hung.sends.filter(Buffer.isBuffer).length, 1);
+	hung.setAt(800); hung.timer(); hung.stream.emit("data", Buffer.from("PRIVATE_AFTER_EXPIRY"));
+	assert.equal(hung.sends.filter(Buffer.isBuffer).length, 1, "nothing crosses after the last real authority");
+	assert.equal(hung.detaches, 1);
+	assert.equal(JSON.parse(hung.sends.find(s => !Buffer.isBuffer(s))).reason, "authorization-unavailable", "and that is what it says: nothing confirmed it");
+
+	// Asking sooner finds a revocation sooner, and names it for what it is.
+	const revoked = fixture({ authRemainingMs: 800, renew: async () => ({ ok: false, refused: "authorization-expired" }) });
+	await settle();
+	assert.equal(revoked.detaches, 1);
+	assert.equal(JSON.parse(revoked.sends.find(s => !Buffer.isBuffer(s))).reason, "session-ended");
+
+	// A lease with room left keeps the fixed poll: this asks sooner only when it must.
+	let steady = 0;
+	const normal = fixture({ renew: async () => { steady++; return { ok: true, authRemainingMs: 5000 }; } });
+	assert.equal(steady, 0);
+	for (const at of [100, 500, 900]) { normal.setAt(at); normal.timer(); await settle(); }
+	assert.equal(steady, 0, "no extra questions while the lease is long");
+	normal.setAt(1000); normal.timer(); await settle();
+	assert.equal(steady, 1);
+	await normal.session.finish();
+
+	// A lease that stays short is asked about one question at a time, however often the timer fires.
+	let inFlight = 0, most = 0; const answers = [];
+	const short = fixture({ authRemainingMs: 800, renew: () => new Promise(resolve => { inFlight++; most = Math.max(most, inFlight); answers.push(() => { inFlight--; resolve({ ok: true, authRemainingMs: 800 }); }); }) });
+	for (const at of [100, 200, 300]) { short.setAt(at); short.timer(); }
+	assert.equal(most, 1);
+	answers.shift()(); await settle(); await short.session.finish();
 });
 test("large daemon output is losslessly partitioned into the browser's bounded binary frames", async () => {
 	const f = fixture(), bytes = Buffer.alloc(65536 * 2 + 17, 0x42);

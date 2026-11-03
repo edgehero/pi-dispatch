@@ -139,9 +139,18 @@ export function runGatewaySession({ ws, channel, store, intent, connectionId, br
 	channel.stream.once("close", lost);
 	channel.stream.once("error", lost);
 	let lastPoll = now();
+	// The first lease is what the attach left of its authority, and a slow runtime can leave less than one poll. The fixed
+	// poll alone would then end a healthy terminal as "could not confirm its authority", just after it said Connected and
+	// without ever having asked. So a lease shorter than a poll is asked about now. This only asks sooner: the lease grows
+	// by the store's answer and nothing else, so a real lapse ends it at the same deadline and a revocation shows up earlier.
+	const poll = () => {
+		if (now() - lastPoll < GATEWAY_LIMITS.pollMs && deadline - now() > GATEWAY_LIMITS.pollMs) return;
+		lastPoll = now();
+		void tick();
+	};
 	timer = setTimer(() => {
 		if (!authorized()) return;
-		if (now() - lastPoll >= GATEWAY_LIMITS.pollMs) { lastPoll = now(); void tick(); }
+		poll();
 		// A peer lost without a FIN, on a silent shell, would otherwise hold its slot and its window until idle expiry, or for
 		// ever at idle zero. A browser's network stack answers pings even in a hidden or frozen tab.
 		if (typeof ws.ping === "function" && now() - lastPing >= GATEWAY_LIMITS.pingMs) {
@@ -152,5 +161,6 @@ export function runGatewaySession({ ws, channel, store, intent, connectionId, br
 	}, GATEWAY_LIMITS.timerMs);
 	timer.unref?.();
 	if (ended) clearTimer(timer); // The first observe can already have ended this session, before the timer existed to clear.
+	else poll();
 	return { finish, tick, get ended() { return ended; } };
 }

@@ -82,6 +82,19 @@ test("a deferred runtime attach keeps its reserved slot and successful open foll
 	ws.close(); await once(ws, "close");
 });
 
+test("a terminal whose attach used up most of its lease stays open: the first renewal comes before that lease lapses", async t => {
+	let renews = 0, f;
+	// A slow runtime: the upgrade's authority has 900 ms left by the time the terminal is ready, and the console is healthy.
+	f = await fixture(t, { now: () => performance.now(), renewAttachment: async () => { renews++; return { ok: true, intent: f.intent, room: f.room, authRemainingMs: renews === 1 ? 900 : 5000, rosterSeen: true }; } });
+	const ws = f.socket((await f.connect()).body.connectionId), frames = [];
+	const ready = new Promise(resolve => ws.on("message", data => { const text = String(data); if (text.startsWith("{")) frames.push(JSON.parse(text)); if (text === '{"type":"ready"}') resolve(); }));
+	await ready;
+	await new Promise(resolve => setTimeout(resolve, 1300));
+	assert.deepEqual(frames.filter(m => m.type === "ended"), [], "no 'could not confirm its authority' on a healthy terminal");
+	assert.equal(ws.readyState, WebSocket.OPEN);
+	assert.ok(renews >= 2, "and the lease was carried by asking the store, not by assuming");
+	ws.close(); await once(ws, "close");
+});
 test("a failed runtime attach writes compensation but never a successful opening or terminal stream", async t => {
 	const f = await fixture(t, { attach: async () => { throw new Error("PRIVATE_RUNTIME_ERROR"); } });
 	const first = await f.connect(), ws = f.socket(first.body.connectionId); ws.on("error", () => {}); await new Promise(resolve => ws.once("close", resolve));
