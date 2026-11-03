@@ -42,7 +42,7 @@ gate can make it ask before a named action, and a rule you write can have an ans
 ([Parked questions](docs/sessions.md#parked-jobs-the-agent-asks-then-waits), [approval gates](docs/approval-gates.md),
 [answer rules](docs/answer-rules.md))
 
-![The parked page: a question from a running job, who asked, how long it has waited, where to read it, and a box to answer in](docs/images/console/console-parked.png?v=2026-11-03)
+![The parked page: a run that stopped to ask a question, how long it has waited, where to read the question, and a box to answer in](docs/images/console/console-parked.png?v=2026-11-03)
 
 ### 3. Out of the loop: you review what comes back
 
@@ -143,7 +143,7 @@ It asks before it starts anything, then prints a sign in link that works for 60 
 the queue, a worker, the network rules, your provider key and a first trigger. It offers recipes for a first trigger:
 fix an issue when it gets a label, tidy every night, or answer a comment.
 
-![The setup page: each step of a new deployment marked ready, starting or to do, with the next action beside it](docs/images/console/console-setup.png?v=2026-11-03)
+![The setup page: each step of a new deployment marked ready, starting, not yet or to do, with a button for the next action and recipes for a first trigger](docs/images/console/console-setup.png?v=2026-11-03)
 
 <details>
 <summary>Prefer the terminal? What <code>pi-dispatch doctor</code> checks</summary>
@@ -373,7 +373,7 @@ reads as idle ([`docs/sizing.md`](docs/sizing.md), [`docs/insights.md`](docs/ins
 
 **Flows map.** Which triggers start which flows, what chained to what, and what each cost ([`docs/graph.md`](docs/graph.md)).
 
-![The flows map: triggers wired to the flows they start, with spend on each](docs/images/console/console-flows.png?v=2026-11-03)
+![The flows map: triggers wired to the flows they start, grouped by repository, with how often each ran](docs/images/console/console-flows.png?v=2026-11-03)
 
 The console also has [Models](docs/console.md#the-screens), [Watch](docs/watch.md), an [audit log](docs/console.md#the-audit-log)
 of every write, and Configuration. Each write is a preview and a confirm, and paid and destructive ones look different.
