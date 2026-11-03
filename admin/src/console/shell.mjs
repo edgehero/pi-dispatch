@@ -5,9 +5,8 @@
  * frame with a top bar of two things only (the SignIn card's): the pi-dispatch pill and the theme button, since nobody
  * is signed in yet.
  *
- * WHY HERE AND NOT IN `pages.mjs` OR `html.mjs`. Those two hold the old markup until each page converts, and the
- * stylesheet's compatibility test reads them as such (`console-compat.test.mjs`): a class the Pulse bundle styles,
- * written there, would couple the document and shell modules. And `html.mjs` cannot import this
+ * WHY HERE AND NOT IN `pages.mjs` OR `html.mjs`. A class the Pulse bundle styles, written in `pages.mjs`, would couple the
+ * document and shell modules. And `html.mjs` cannot import this
  * module: the sprite is built with `html` while `pulse-icons.mjs` loads, which would be before `html.mjs` had run.
  *
  * WHAT THE SCRIPT RELIES ON, kept by every page: `#logout` (sign-out), `#live-status` with its `[data-live-word]`

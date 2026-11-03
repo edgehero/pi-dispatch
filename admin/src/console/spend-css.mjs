@@ -1400,5 +1400,5 @@ for (const [hex, [fill, stroke]] of Object.entries(SVG_EXTRA))
   );
 export const SPEND_CSS = SPEND_DESIGN_CSS + adapters + paints.join("\n");
 
-// Pinned in console-spend.test: the copies keep page-css free of a cycle through the temporary compatibility layer.
+// Pinned in console-spend.test: the copies keep page-css free of an import cycle.
 export { PD_TOKENS as SPEND_PAINT_TOKENS, SVG_EXTRA as SPEND_EXTRA_PAINTS };

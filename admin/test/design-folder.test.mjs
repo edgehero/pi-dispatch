@@ -16,13 +16,8 @@ import { PULSE_TOKENS_SHA256 } from "../src/console/pulse-tokens.mjs";
 // it, or record it as waiting and say what it changes. When the console pastes the waiting version, its hash becomes
 // PULSE_CSS_SHA256 and this constant goes back to null.
 
-/**
- * The design's bundle.css waiting to be pasted, or null when the paste is current. Waiting since #737's design moved
- * into the repository: tabular figures on numbers only (counts, money, times, table figures and the timeline's times),
- * because on running text they also widen hyphens, so an id like gh-2f6a read "gh - 2f6a". Before, `body` set them
- * for all text. The paste re-measures what the console sizes by hand on tabular digits (DES-OPERATOR-CONSOLE).
- */
-const DESIGN_CSS_WAITING_SHA256 = "db8ec1ddcbf41ff5161648ac8d25ddebf3a27bc51b939177caa3478ce667d2db";
+/** The design's bundle.css waiting to be pasted, or null when the paste is current. */
+const DESIGN_CSS_WAITING_SHA256 = null;
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const designFile = (path) => readFileSync(new URL(`../../design/system/${path}`, import.meta.url));

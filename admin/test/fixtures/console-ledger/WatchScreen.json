@@ -1,7 +1,7 @@
 {
   "card": "WatchScreen",
   "pr": 763,
-  "words": "cec52942887c89b03cf07dbfddb12df22fba55105482e534ec97d2aca319112c",
+  "words": "8e811f8ac384c9f3be226a9668b8d7abb8f6e83fa1c118d48adf18aefa6f149f",
   "elements": [
     {"el":"p-watch","kind":"panel","status":"real","source":"admin/src/console/watch.mjs#watchPanel","golden":["watch.operator","watch.viewer"]},
     {"el":"Sources: signatures, latest delivery, refusal counters and explicitly unknown credential health","kind":"readme","status":"real","panel":"p-watch","source":"admin/src/console/watch.mjs#watchPanel","holds":"Credential health is unknown","golden":["watch.operator","watch.viewer"],"shows":"Credential health is unknown here"},

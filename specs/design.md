@@ -13438,7 +13438,7 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   `REQ-CONSOLE-SECURITY` (e), (f) and (m)).** Every page is drawn in the Pulse design system, `design/` in this
   repository since 2026-10-28 (tokens for light and dark, one stylesheet, `bundle.css`, and the cards), shell
   first: PR 1 gives every page the shell and the look, and each page's panels convert in that page's own pull
-  request. Until then a page's panels are the old markup, byte for byte, inside a legacy wrapper.
+  request. The last page converted with #750, and the legacy wrapper and its stylesheet are gone (`console-compat.test.mjs`).
   - **Pasted, not restated.** The console never reads the design folder, so its two files are copied and each copy
     is pinned by its file's content hash, AGENTS.md's rule for a copy: `PULSE_TOKENS`
     (`pulse-tokens.mjs`) is `tokens.json` as a deep-frozen literal (same keys, order, values and `usage` sentences)

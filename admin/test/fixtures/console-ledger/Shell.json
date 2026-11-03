@@ -1,7 +1,7 @@
 {
   "card": "Shell",
   "pr": 1,
-  "words": "3c8173bc3b093b7af12af8819c79d3b90e0d102c0aa52b0d3bfd0b7a916cd88f",
+  "words": "4b5c45b52c58a2daa646cc33d144e105a30b2c2ee2d12182250d33e4fa830af0",
   "elements": [
     {"el":"shell(active, inner, title, sub, end) from the kit","kind":"readme","status":"real","as":"shellHtml","source":"admin/src/console/shell.mjs#shellHtml","reason":"the repo's frame is shellHtml(name, ctx, inner): the page table names the active pill, the title and the sub, and the page draws its own end"},
     {"el":"Top bar with the pi-dispatch pill","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#shellHtml","holds":"signedInBar(","golden":["overview.operator","overview.viewer"],"shows":"class=\"brandpill\""},

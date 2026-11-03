@@ -1,6 +1,6 @@
 Watch shows configured sources and rules before the first finding, retained finding outcomes, cooldown left, and suppressed or capped counts. Built by #735.
 
-**How a person uses it.** Open Watch from Configuration's Triggers section when a watch rule is configured. The compact static screen lists source signatures, latest delivery, refusal counters and explicitly unknown credential health. Doctor checks source credentials on their owning host. Rules show source, reviewed flow, mode and daily cap. Select a rule's board for retained findings and operator-only evidence. The terminal panel's z key opens Watch findings and outcome counters.
+**How a person uses it.** Open Watch from its tab on Triggers, or from Configuration's Triggers section when a watch rule is configured. The compact static screen lists source signatures, latest delivery, refusal counters and explicitly unknown credential health. Doctor checks source credentials on their owning host. Rules show source, reviewed flow, mode and daily cap. Select a rule's board for retained findings and operator-only evidence. The terminal panel's z key opens Watch findings and outcome counters.
 
 **Panels.** The delivered console has `p-watch`, containing Sources, Watch rules and Findings.
 

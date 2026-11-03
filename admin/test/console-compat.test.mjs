@@ -12,7 +12,9 @@ test("all console pages use Pulse without the compatibility adapter", async () =
     const out = await renderPage(name, { query: {}, session: { name: "operator", role: "operator" }, data: { now: 0, snapshot: {} } });
     assert.doesNotMatch(String(out.html), /class="legacy"|--pd-/);
   }
-  for (const name of readdirSync(new URL("./fixtures/console/", import.meta.url)).filter((n) => n.endsWith(".html"))) {
-    assert.doesNotMatch(readFileSync(new URL(`./fixtures/console/${name}`, import.meta.url), "utf8"), /class="legacy"|--pd-/, name);
+  for (const dir of ["./fixtures/console/", "./fixtures/console/panels/"]) {
+    for (const name of readdirSync(new URL(dir, import.meta.url)).filter((n) => n.endsWith(".html"))) {
+      assert.doesNotMatch(readFileSync(new URL(`${dir}${name}`, import.meta.url), "utf8"), /class="legacy"|--pd-/, `${dir}${name}`);
+    }
   }
 });
