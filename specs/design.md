@@ -12225,9 +12225,10 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   - **Counts, never names, for credentials.** The record already names a bundle's variables (`bundle.variables`); the
     job's own secrets are the provider key, the forge token and `run.secrets`, whose names `doctor` prints and the
     trigger view counts, so a count is what the run page needs and a name list would add nothing it can act on.
-  - **Not recorded**: MCP connection state. #684 made the venue's MCP preflight and the sandbox's policy admit the
-    servers, and records nothing of a server's connection on any venue; the run record's MCP facts are the runner's
-    refusal reasons alone (`MCP_RUNNER_REASONS`). Nothing is invented for it here.
+  - **Not in this field**: MCP connection state. #684 made the venue's MCP preflight and the sandbox's policy admit the
+    servers, and `openshell` records nothing of a server's connection. CORRECTED 2026-11-03 (#800): the record's
+    `loaded.mcp` now says each server's state, on any venue whose exit line verifies (`INT-RUN-HISTORY-FILE-CONTRACT`).
+    Nothing is invented for it here.
   - **Read by** the console's run page ("Sandbox policy", "Rule hosts") and the panel's RUN_DETAIL ("policy", "rule
     hosts", wrapped at most four lines and the rest counted), and by the model-callable `dispatch_runs`: a run read by
     its `jobId` carries the record's host names and counts (operator config, the class `backend` and `host` already
@@ -12332,6 +12333,39 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   worker/src/run-container.mjs, worker/src/processor.mjs (`peakReachedLimit`), image/verify-image.sh.
 
 ## DES-OPERATOR-CONSOLE
+
+- **What a run loaded (AMENDED 2026-11-03, #800, `REQ-OPERATOR-CONSOLE-SCREENS` (b1), (b5), (c), (g7)):**
+  - **The words live in one place.** A run page, a row of the Runs list, the problems filter, `/api/run`, the `/dispatch`
+    panel, a sandbox and a project all read one record, so `admin/src/loaded-words.mjs` is the only place a surface gets
+    what that record means, as `model-words.mjs` is for models: pure, with no I/O and no clock, and `panels/loaded-parts.mjs`
+    only draws what it returns. A line that needs a code span or a link says so as a part, because a sentence holding
+    markup would be a second escaping rule. REJECTED: each panel reading the field itself, which is how one record comes
+    to read as fine on a list and as a problem on its page.
+  - **It reads the record, never today's triggers file.** What ran is the point. A host's overlay, its staged packages and the
+    repository each change on their own, and a line built from today's configuration would describe a run that never
+    happened. So `trigger 3` on the card is only the number the record kept. The one exception is a running job, which
+    has no record yet: its line says when the card arrives and links the trigger, and claims nothing of what it loaded.
+  - **The outcome stays `completed`.** `outcomeNote` is a word over the record, speaks only of a completed run, the one outcome
+    that would otherwise read as fine, and changes no field. REJECTED: a new outcome or reason, which would move every
+    count, window and rate that reads one, for a report nothing decides on.
+  - **The words say less rather than guess.** The record keeps no kind of failure, and pi keeps an extension with a
+    conflicting tool name loaded while reporting it, so it counts in both `extensions` and `failed` while one that threw
+    counts only in `failed`. So a tier's total is said only when nothing of that tier loaded. `absent` is said without a
+    cause, since an older image never says and a runner that died did not get to. A dropped extension is no warning, because
+    this repository ships `dispatch.ts` and the guard drops it on every run on itself.
+  - **Its stylesheet is page CSS, not a paste of the bundle.** `LOADED_CSS` (`loaded-css.mjs`) is `design/tools/gen_loaded.py`'s
+    block of that name, the rules these panels ship, with its hash, and `PAGE_CSS` serves it on the two pages that draw
+    them (`run`, `project`), confined by `pageCss`; a sandbox's line is its page's own facts row and needs none of it.
+    REJECTED: pasting into `bundle.css`, which would move `PULSE_CSS_SHA256` and ask for the sizing every page reads to
+    be measured again, for rules two pages use. `PULSE_CSS` and `DESIGN_CSS_WAITING_SHA256` are UNCHANGED, checked.
+  - **No tool and no agent gets it.** `modelRunRecord` strips `loaded` (so `dispatch_runs`, by id and as a list),
+    `agentReadProjection` withholds `loaded`, `outcomeNote`, `hostLoads`, `loads` and `sandboxRun` from the agent role, and
+    `projectViewForAgent` names its keys. A person reads this to decide what to fix. A model reads text as something
+    that may be addressed to it, and an extension's tool name survives the worker's rebuild on its shape alone (`INT-RUN-HISTORY-FILE-CONTRACT`'s
+    residual: `ignore-all-previous` passes), so a name a package's author or a merge-gated repository extension chose
+    must not reach model context through a run's record, where the admin's rule is that it reads only fixed-enum facts.
+    The price, stated: a model that reads such a run reads `completed` and no note, because a person's surfaces carry the word and
+    a model's do not.
 
 - **AMENDED AND IMPLEMENTED 2026-11-02 (#792, #793)**: Workspace reuses existing native links,
   copy, exact-incarnation End and preparation/fork/instruction confirmation flows. The separate full-viewport
@@ -12794,7 +12828,8 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     and the what-if's own extension admitted a leading `@` or `~` followed by anything other than a letter or digit
     (`provider/@`, `provider/~`, `@.x`, `~/x`; none of them a priced id) that the filter did not. AMENDED 2026-10-26
     (#737 PR 4a): twelve fields, `backend` (#712) and `problems` (`1`, every run whose word is not completed, so a run
-    awaiting input is one, though its record says completed) among them; `q` is a fragment of the target or the job id,
+    awaiting input is one, though its record says completed, and since #800 a completed run that lacked its flow or an
+    extension, `loadedProblems`) among them; `q` is a fragment of the target or the job id,
     since the runs page's one search pill takes either, of at most 200 characters, the run id's own bound, so every id
     the run page takes is a search the runs page takes whole; and `outcome` takes
     the five words a row's badge says (`OUTCOME_KEYS`, matched by `outcomeKey`) and the record's own `policy`, where it
@@ -13539,7 +13574,8 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   any it does not list) and its "Secrets profile" (the profile NAME `run.secrets` resolved through), from the record's
   new `openshell` and `secretsProfile` (`INT-RUN-HISTORY-FILE-CONTRACT`), each rebuilt by the worker's own function
   before it is drawn, and the panel's RUN_DETAIL the same, the hosts wrapped under the label at most four lines and the
-  rest counted. MCP connection state is recorded nowhere, so no row claims it. The configuration's secret profiles gain
+  rest counted. MCP connection state is no part of these fields, so none of these rows claims it; since #800 the record's
+  `loaded.mcp` holds it, and the Loaded card says it. The configuration's secret profiles gain
   a "Secret profiles in use" table (`secretProfilesView`, the snapshot's `secretProfiles`), one row per profile a source
   declares or a trigger names: its source (`PI_SECRET_PROFILES`, the overlay, both, which is the worker's ambiguity, or
   neither visible source); where an overlay resolver stands against `PI_SECRET_RESOLVER_ROOTS` on this host
@@ -17693,3 +17729,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-03 (#800, what a host's jobs can load) | **`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS` AMENDED** further: doctor's layer publishes its answer per trigger, by one extracted reading (`flowTierOf`), so its check line and the published row cannot disagree, and a forge trigger found nowhere else reads `unknown`, never `none`. The probe order, the existential ✓ past an unknown tier and the ⚠-never-✗ rule are as written. **`DES-DOCTOR-RESULTS-PUBLISHED` UNCHANGED, checked**: the published record's content rule stands, and what an ok check publishes stays its id and level; the new key is a separate record with its own allowlist, and its test is the same one (delete it and nothing changes). `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: a new key with its own `v`, read as unknown by anything that does not know it. **Code evidence**: worker/src/host-loads.mjs -> flowTierOf; worker/src/doctor.mjs -> collectChecks. |
 | 2026-11-03 (#800, the record's boundary) | **`DES-OPENSHELL-VENUE` CORRECTED** in one clause: the exit line's tail is 8 KiB (`TAIL_CAP_BYTES`), not 64 KiB. The rejection of stdout it argues for stands, and more so. Its decision UNCHANGED, checked. **Code evidence**: worker/src/run-history.mjs -> TAIL_CAP_BYTES. |
 | 2026-11-03 (#800, what a second independent check found) | **`DES-CLI-SURFACE` CORRECTED** in one sentence: doctor "writes one thing" and "no other key" were false once `doctor:loads:<host>` existed, and of the `doctor:hosts` index before it. It still writes only its own results, and nothing decides on them, so the tier it sits on is UNCHANGED, checked. **`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`** UNCHANGED, checked, in what it decides: doctor's check line keeps its words on an unread part, since "visible here" stays true, and only the published row reads `unknown` (`INT-DOCTOR-RESULTS-KEY`). **Code evidence**: worker/src/doctor.mjs. |
+| 2026-11-03 (#800, what a run loaded, in the console) | **`DES-OPENSHELL-VENUE` CORRECTED** in one bullet, and **`DES-OPERATOR-CONSOLE`** in one sentence: each said MCP connection state is recorded nowhere, which the record's `loaded.mcp` made false on this branch. The OpenShell decision UNCHANGED, checked: `openshell` still holds nothing of a server's connection. **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet, what a run loaded. `loaded-words.mjs` is the one place its words are derived, and it reads the record, never today's triggers file. The outcome stays `completed`, with a word over it. The panels' stylesheet is page CSS and not a paste of the bundle. No tool or agent reads the field, and why. **The screens**: `problems` also keeps a completed run that lacked its flow or an extension. `PULSE_CSS`, `PULSE_TOKENS` and `DESIGN_CSS_WAITING_SHA256` UNCHANGED, checked. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: no trigger field or job field is added, `TRIGGER_RUN_FIELD_VERSIONS` stays empty, `JOB_DATA_FIELD_VERSIONS` stays as it was, and the record's `v` stays 1. `DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS` UNCHANGED, checked: this reads what it already said. `DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: the tool list and every tool's scope stand, and the panel's row reads the same word. **Code evidence**: admin/src/loaded-words.mjs; admin/src/read-model.mjs -> modelRunRecord; admin/src/agent-read.mjs -> PRIVATE; admin/src/console/page-css.mjs -> PAGE_CSS; admin/src/console/loaded-css.mjs -> LOADED_CSS. |

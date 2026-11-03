@@ -5,8 +5,10 @@ import { ACTIONS } from "../src/console/actions.mjs";
 import { PAGES } from "../src/console/pages.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { ENDED_REASONS, endedNotices } from "../src/console/session-ends.mjs";
+import { LOADED_STATES, outcomeNote } from "../src/loaded-words.mjs";
 import { RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES } from "../src/run-filter.mjs";
 import { planTriggerAdd, TRIGGER_ADD_FIELDS } from "../src/write-plans.mjs";
+import { LOADED_SAMPLES as S } from "./helpers/loaded-samples.mjs";
 
 /**
  * The console's hand-written lists in the docs and the specs, each held to the code it restates (AGENTS.md: a table
@@ -85,4 +87,25 @@ test("docs/console.md's table of the screens: a row for every page's route, and 
     assert.ok(routed.has(path) || (path.startsWith("/insights/") && insights.includes(path)), `${path} has a row`);
   }
   for (const route of routed.keys()) assert.ok(paths.includes(route), `${route} is a page`);
+});
+
+test("docs/console.md's table of the Loaded card's top lines: one row per LOADED_STATES member, in order, each saying what to do", () => {
+  const rows = tableRows(read("docs/console.md"), "| State | The top line says | What to do |");
+  assert.deepEqual(rows.map(([state]) => state), LOADED_STATES.map((state) => `\`${state}\``));
+  for (const [state, says, todo] of rows) {
+    assert.ok(says.length > 0 && todo.length > 0, `${state} says what it means and what to do`);
+  }
+});
+
+// The console's other sentences are left to the card (the docs point there, and a test here would only freeze them). These
+// two words are the ones a person searches for after reading a row, so each file that quotes one quotes what the code says.
+test("the docs and the requirements quote a run that lacked something in outcomeNote's own words", () => {
+  const noFlow = outcomeNote(S.noFlow());
+  const failed = outcomeNote(S.extensionFailed());
+  assert.ok(noFlow && failed, "the samples are runs that lacked something, or this proves nothing");
+  for (const path of ["docs/console.md", "docs/reasons.md", "specs/requirements.md"]) {
+    const text = flat(read(path)).replaceAll("**", "");
+    assert.ok(text.includes(noFlow), `${path} says ${noFlow}`);
+    assert.ok(text.includes(failed), `${path} says ${failed}`);
+  }
 });

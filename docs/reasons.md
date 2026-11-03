@@ -16,6 +16,8 @@ The run record's `outcome` says how the run ended:
   same answer. Most refusals happen before anything is spent; the entry says when that is not so.
 - `failed`: something in the infrastructure went wrong. The queue retried it, and the record is the last attempt.
 - `completed`: the run finished. Completed runs may carry `awaiting-input` or `awaiting-approval` while waiting for a person.
+  A completed run's page and row can also read "Completed, without its flow" or "Completed, with a failed extension".
+  Those are not reasons: the outcome stays `completed`, and [console.md](console.md#what-a-run-loaded) says what to do.
 
 A record may also carry `why`, a second fixed word with more detail (for example `overlay-link` beside
 `model-unknown`). Some records carry nested reasons as well: why a conversation did not continue, why a run was not
@@ -987,7 +989,8 @@ What to do: allow the registry in the egress allowlist, or install the server in
 
 A server did not start, failed its handshake, or refused the connection (an authentication error among them).
 
-What to do: check that the server starts and accepts the job's credentials. The job log names it on the `exit` line.
+What to do: check that the server starts and accepts the job's credentials. The run's Loaded card and the job log's `exit`
+line name it.
 
 ### mcp-config-mismatch
 

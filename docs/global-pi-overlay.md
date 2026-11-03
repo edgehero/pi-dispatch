@@ -64,6 +64,38 @@ refines but never removes the one above:
   [`SECURITY.md`](../SECURITY.md) for what that posture costs and how to turn it off if you service repos you
   do not control.
 
+## What a run loaded, and where to read it
+
+The table above says what can load. A run's record says what did: the job's runner reports it on its signed exit line,
+the worker checks it against what it knows, and the record keeps it as `loaded` (`INT-RUN-HISTORY-FILE-CONTRACT`). Read it
+on the run's page, in the **Loaded** card. [console.md](console.md#what-a-run-loaded) says what each line means and what
+to do about it. The record holds, by tier:
+
+- **Staged packages:** each by name and version, from what the worker handed the job, with its counts of extensions,
+  skills, prompts, themes and tools, and the names of those tools.
+- **The overlay:** each extension by its first path segment, each that failed, and the tools each brought; its skills
+  as a count.
+- **A trigger's `run.skillsDir`:** counts.
+- **The repository's `.pi/`:** counts, and nothing else. A repository picks its own names, so its skills and extensions
+  are numbers on the record, and you read them in the repository. On a run with a forge link, the page opens the base commit
+  from a repository extension's problem and from its row of repository skills: the code that ran, which the repository may
+  have moved on from. A record that names no commit (an older worker's) opens the repository and says so.
+- **The flow:** the tier it was found in, or that none held it. It is still a report: a job with no flow runs and can exit 0,
+  which is why the run's outcome says so.
+- **What was left out on purpose:** `run.excludeTools`, `"packages": false`, this job's overlay switch
+  (`PI_GLOBAL_ALLOW_EXTENSIONS=0` on its host, or a canary's replay) and a kind of job that never gets the overlay. Each is
+  said as chosen, never as missing.
+
+**What the host's publication says.** Each host also says what its jobs can load. Every doctor run writes
+`doctor:loads:<host>` beside its results, for 7 days (`INT-DOCTOR-RESULTS-KEY`): the overlay's extensions and skills by name;
+each MCP server's name, transport, where it runs, how its tools are reached, whether it is on and the names of the
+variables it uses; each staged package and its version; and, for each trigger that names a flow, where that flow resolves.
+No path, no value and no tool name. It comes from reading folders with nothing run, so it says what a job
+would get, and a run's record says what a job had. The console reads it twice: a run's card compares what the run loaded from its
+host against what the other hosts publish, and a fresh sandbox says what a job would load there. A host that has published
+nothing, one whose last publication is old or could not be read, and a host on an older release never read as the same:
+each is said, or left unknown.
+
 ## What is copied — and what never is
 
 An explicit [subscription connection](subscription-auth.md) may select a content-verified community OAuth
@@ -189,7 +221,8 @@ present but dormant is a deployment missing the setup its flows were written aga
    dormant. Unset, empty and the legacy `1` all mean load, so an existing `.env` keeps working and still
    says what it always said. **Any other value fails loudly** — the worker refuses to boot, `doctor`
    reports it, the runner refuses the job — because the damaging misreading is now "I thought I had turned
-   these off", where before a typo merely left them dormant.
+   these off", where before a typo merely left them dormant. A run with them off reads so on its page, as
+   left out for that job and not as missing ([What a run loaded](#what-a-run-loaded-and-where-to-read-it)).
 
 **What in `extensions/` loads.** The same files pi loads from `~/.pi/agent/extensions` on your machine:
 
@@ -222,7 +255,8 @@ is present and pi's own matcher cannot be loaded, no overlay extension loads, an
   the folder, and move or ignore what is not an extension.
 
 **A failed load is logged.** An extension that fails to load (a syntax error, a missing import, a throw
-while it loads) is skipped, the job runs without it, and the run log has an `extension_load_failed` line.
+while it loads) is skipped, the job runs without it, and the run log has an `extension_load_failed` line. The run's outcome says so too,
+and its page counts the failure by tier ([What a run loaded](#what-a-run-loaded-and-where-to-read-it)).
 The line names each failed extension by its path inside `extensions/` (for example `broken.js`) and the
 folder it came from. It never carries the file's content or pi's error text. `kind` is `load` for a failed
 load, `conflict` for an extension that loaded but shares a tool or flag name with another, and
@@ -344,7 +378,8 @@ file.
 `doctor` also answers, per trigger, **whether its `run.flow` resolves anywhere** -- the serviced repo's
 `.pi/skills` at HEAD, an injected `run.skillsDir`, the overlay's `skills/`, or a staged package -- and warns
 (never fails) when it resolves in no tier this host can see: such a job runs without the flow it names, logs
-`flow_not_loaded` in the container, and still exits 0. A flow that resolves only in a staged package is a
+`flow_not_loaded` in the container, and still exits 0, and its outcome says so on its page and in the Runs list
+([What a run loaded](#what-a-run-loaded-and-where-to-read-it)). A flow that resolves only in a staged package is a
 plain checkmark naming the package. The insights topology tells the same story visually
 ([`graph.md`](graph.md)): overlay and staged-package skills render as their own node groups when the
 session can see `PI_GLOBAL_PI_DIR`, and a trigger whose flow lives in one gets its edge drawn there

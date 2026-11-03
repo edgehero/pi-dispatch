@@ -631,10 +631,10 @@ readers ([Live updates](#live-updates)).
 |---|---|
 | `/` | The overview ([The overview](#the-overview)): a line under the title that says what needs you, then four cards (Needs you: the questions nobody has answered, the failed jobs the queue keeps and the registered hosts whose doctor fails, with the day's failed and refused runs under them; In line: how many jobs wait to start and why; Running: the jobs in each host's slots; Spend today), then the timeline of what ran and what is in line ([The overview's timeline](#the-overviews-timeline)) with the caps under it, and beside them the waiting jobs by reason ([Waitlists](#waitlists)) and the hosts. A deployment that has never run a job sees what stands before its first job instead ([First run](#first-run)). `?rows=`, `?zoom=` and `?project=` choose how the timeline is drawn. |
 | `/setup` | The live first-run checklist, bounded person-only host setup when explicitly granted, and terminal alternatives ([First run](#first-run)). |
-| `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
+| `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)), and a completed run that lacked its flow or an extension says so on its badge ([What a run loaded](#what-a-run-loaded)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
 | `/runs/sandboxes` | Operators only: kept workspaces and registered shells across hosts, terminal handoff and copy commands, confirmed preparation/pin/End requests. See [Opening a sandbox](#opening-a-sandbox). |
 | `/runs/zero-touch` | How often workload runs needed a person over 7, 30 or 90 days, by project and by cause ([Zero touch](#zero-touch)). |
-| `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status and numbers with a banner explaining what is hidden. |
+| `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. A **Loaded** card says what the run had ([What a run loaded](#what-a-run-loaded)). Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status and numbers with a banner explaining what is hidden. |
 | `/parked` | A card for each run waiting for an answer: who asked (the run, linked to its page), how long it has waited, its project, a link to where the question was asked, its forge and how many times the session was resumed, and where to read the question (on its issue or pull request, or on its run page while the live transcript is kept); the card never shows the question itself. Then how it can be answered: being answered by a run (linked), not known, an answer box, or why it cannot be answered here ([A parked run](#outcomes-and-reasons)). |
 | `/parked/rules` | Operators only: the answer rules, read only, as `triggers.json` declares them ([Answer rules](answer-rules.md)). |
 | `/insights?range=30d` | Spend's five linked views: Spend, Budget split (`/insights/budget-split`), Capacity (`/insights/capacity`), Breakdown (`/insights/breakdown`) and Flows map (`/insights/flows`, also `view=list`). All are viewer-readable, drawn once per load, with supported range/project/path choices preserved. Budget split actions and plan reasons are operator-only. See [Spend views](insights.md). |
@@ -1225,7 +1225,8 @@ the record's (`outcome`, `backend`).
 
 In the runs list, a run that did not complete shows its reason as a short sentence after its badge, for example
 "Refused" and `This project's run cap for the window was already reached…`, except where the word already says why
-(awaiting input, cancelled); a completed run shows a quiet badge alone, so the runs that need you stand out. The
+(awaiting input, cancelled); a completed run shows a quiet badge alone, so the runs that need you stand out, unless it
+lacked its flow or an extension, when its badge says so ([What a run loaded](#what-a-run-loaded)). The
 sentence is the reason catalog's explanation ([reasons.md](reasons.md)), cut to fit a row: the leading verdict
 ("Refused:") is dropped, the first sentence is kept, and a longer one first loses its asides (a part in parentheses, a
 ", which ...," clause) and is then cut at a word with an ellipsis: never on a word like "so" or "the" (except where
@@ -1340,6 +1341,67 @@ started collapses the unused panels into one sentence, explains the host rule an
 A viewer banner explains the hidden transcript, phase names, notes, failure details and actions; no form or command
 is sent to a viewer. Every reason shown on this page must be a reason token, so an older worker's error text is hidden.
 
+### What a run loaded
+
+A job starts with what four places give it, and each changes on its own: the host's overlay and staged packages
+([global-pi-overlay.md](global-pi-overlay.md)), the repository at its base commit, the trigger, and the image. So two runs
+of one trigger can start differently, and a job that lost its flow or an extension can still finish cleanly. Each run's
+record keeps what it actually had, and the console reads that record, never today's triggers file, so what a page says
+is what ran.
+
+**Where to read it:**
+
+- **A run's page**, in the **Loaded** card under the Run card. Its top line says whether everything the trigger asks for
+  loaded, or names what did not, with a button to where that is fixed. Under it is one line per kind: pi and its image,
+  the model, extensions, skills, MCP servers and tools. A fold holds each item and where it came from, and what no top
+  line mentions: a skill a package had replaced, prompt templates and themes, an extension the recursion guard dropped,
+  and what was left out.
+- **The Runs list and the run's outcome banner.** A run that completed without its flow reads **Completed, without its
+  flow**, and one with an extension that failed to load reads **Completed, with a failed extension**, or says how many,
+  or says both. Its record still says `completed`, so no count moves and `outcome=completed` still finds it, and **Only
+  problems** lists it too ([Finding runs](#finding-runs)). The `/dispatch` panel's row and a project's recent runs say the
+  same.
+- **A project's page**, in **What its runs load**: this week's records, and whether they differ from host to host
+  ([One project](#one-project)).
+- **Sandboxes**, in **What opens** ([Opening a sandbox](#opening-a-sandbox)).
+- **`GET /api/run`**, as `run.loaded` and `run.outcomeNote` ([The state API](#the-state-api)).
+
+A running job's card says it arrives when the run ends, because the record is written from the job's exit line. A run
+from an older release, or one that never reached its container, has no list, and the card says so rather than guess.
+
+**What it can name.** Names and versions only of what you staged and configured: a staged package, an overlay extension
+by its first path segment, a server the trigger names, pi's own tools, and the tools a package or an overlay extension
+brought. What the repository holds is counts, because a repository picks its own names. On a run with a forge link, the
+button on a repository extension's problem and the fold's row of repository skills open the base commit, the code that
+ran. A failure's path and error stay in the job's log. A repository's extension shares the
+process that reports this, so the worker checks every name against what it knows, and holds a tool's name, which it has
+nothing to compare with, to one closed shape (`INT-RUN-HISTORY-FILE-CONTRACT`). A viewer reads the same lines and gets no
+button. No tool and no agent reads any of it, so a model that reads such a run reads `completed` with no note.
+
+**What each top line means, and what to do.** The card's own words say more, including which name, host or commit. Each
+line is one of these states:
+
+| State | The top line says | What to do |
+|---|---|---|
+| `everything` | Everything the trigger asks for loaded, and each MCP server that connected. | Nothing. |
+| `left-out` | Everything loaded, and what the trigger's `run.excludeTools` or `"packages": false`, this job's overlay switch or this kind of run left out, in green, as a choice and never as missing. | Nothing, unless you did not mean it: change the trigger, or `PI_GLOBAL_ALLOW_EXTENSIONS` on the host. |
+| `host-differs` | This run loaded something from its host's overlay or staged packages that another host's publication lacks, and which hosts have published nothing. | Open the host. If they should match, run `import-pi` on the one that is behind, or Adopt the version on [Updates](#updates). A trigger's own choice and a canary's candidate are never counted as a difference. |
+| `no-flow` | The job ran, and no tier held its flow, so it went on without its instructions. | Read what it did before you trust it. Open the trigger and correct `run.flow`, or add the skill to the repository's default branch, the overlay, the skills folder or a staged package. |
+| `extension-failed` | An extension failed to load, by whose it was, and that the run went on. Its path and error are in the job's log. | The button goes where it is fixed: a repository's opens the base commit, an overlay's the host's page, a package's [Updates](#updates), a skills folder's the trigger. |
+| `mcp-stopped` | An MCP server did not answer in time, so the run stopped before the agent started. The queue retries it as any infrastructure failure. | Open Connections, and check that the server answers from that host. |
+| `mcp-failed` | An MCP server could not be used, so the run stopped before the agent started. It is not retried, because the next attempt would find it the same ([`mcp-unavailable`](reasons.md#mcp-unavailable)). | Open Connections, and check that the server starts and accepts its credentials. |
+| `mcp-off` | A server the trigger names is turned off on this host, and the run went on without it. | Open Connections. Turn it on, or take it out of the trigger. |
+| `stopped` | It stopped before anything loaded, while its extensions and skills loaded, or while its MCP servers connected. | Read the outcome above it, which says why it stopped. |
+| `no-agent` | This kind of run has no agent, so it has nothing to load. | Nothing. |
+| `running` | The card arrives when the run ends. | Nothing yet. The trigger's page says what it asks for. |
+| `not-recorded` | There is no list: an older release wrote this record, or the run ended before its container reported. | Nothing for this run. Later runs of an upgraded worker have one. |
+| `refused` | Nothing loaded: the run was refused or cancelled before its container started. | Read the outcome's reason ([reasons.md](reasons.md)). |
+| `absent` | The runner ended before it said, or a stop did not take. An older image never says and a runner that died did not get to, and the record cannot tell them apart. | If every run on a host says this, check that its job image is this release's. |
+| `invalid` | What the runner said did not hold up, so the page keeps only what the worker knows. | Find `loaded_invalid` in the worker's log, which names the check by a fixed word. A re-stage during the run can cause it. Otherwise, read what the repository's extensions do. |
+| `cut` | What the run loaded had no room, on its exit line or in its record. | Nothing: the rest of the record stands. |
+
+A smaller line under any of these says when a record was cut to fit and what it left out.
+
 ### Doctor results
 
 Every `pi-dispatch doctor` run publishes what it found to the deployment's Valkey, one result per host, and each
@@ -1432,7 +1494,8 @@ or not started yet."
   mode, how many credential providers the sandbox was given and how many placeholders they bound) and a "Rule hosts"
   row (the hosts its network policy admitted, from your allowlist, model endpoints and the forge; up to 32 listed, the
   rest counted). A run that armed `run.secrets` shows a "Secrets profile" row with the profile's name. The `/dispatch`
-  panel's run detail has the same lines. Whether an MCP server connected is not recorded on any venue, so no row says it.
+  panel's run detail has the same lines. Whether an MCP server connected is the Loaded card's to say, on any venue
+  ([What a run loaded](#what-a-run-loaded)), so none of these rows says it.
 - The transcript shares the run page's one live connection. A queued run attaches when its transcript appears, without reload. Reconnect resumes entries from their cursor and refreshes every panel. Transcript completion leaves the page connection open for later state updates.
 
 The `/dispatch` panel's live tail (`l`) reads the same transcript.
@@ -1454,7 +1517,9 @@ cancelled (a phone leaves out the completed count), each number a link to those 
 dollars. With a project chosen the counts are that project's. A count says "at least" when the console could not read
 every run of the day (a busy day past the newest 1,000 runs, or a host's history it could not read). **Only problems**
 lists every run the page does not call completed: the refused, failed and cancelled runs, the runs awaiting input
-(which wait on you, though their record says completed) and any outcome this console does not know. The counts are of
+(which wait on you, though their record says completed) and any outcome this console does not know. It also lists a
+completed run that lacked its flow or an extension, whose record still says completed, so `outcome=completed` finds it
+too ([What a run loaded](#what-a-run-loaded)). The counts are of
 the runs that ended in the last 24 hours; the list below them goes back through the whole history.
 
 The same filters can be written in the query string. Each one is matched exactly, except `q`:
@@ -1472,7 +1537,7 @@ The same filters can be written in the query string. Each one is matched exactly
 | `reason` | reason, such as `awaiting-input` or `over-budget` |
 | `model` | model id |
 | `q` | target or job id, any part of it, ignoring case (`web#12`, `gh-2f6a`) |
-| `problems` | `1`: every run the page does not call completed, a run awaiting input included |
+| `problems` | `1`: every run the page does not call completed, a run awaiting input included, and a completed run that lacked its flow or an extension |
 
 For example, `/runs?kind=gitlab&outcome=failed`, `/runs?q=web%2312` (a `#` in a query is written `%23`) or
 `/runs?problems=1`. A value is checked against the characters that field can hold and refused by name if it does not
@@ -1767,6 +1832,14 @@ the host and opening time of live shells, and a form to prepare a fresh workspac
 the tab, its event stream or the opener configuration export. Private inventory and shell registrations do not join
 `/api/state`.
 
+**What opens** names the image and the workspace, and says what pi can load in the shell. A shell has no overlay, so
+pi started there loads only the workspace's own `.pi/`, whatever the run loaded. The line says that first, then what the
+run itself loaded, from its record, linked to it. Reviewing a fresh sandbox for a trigger says what a job of that trigger
+would load on that host, from the host's last doctor run and with its time. A host that has published nothing, or whose
+last doctor run could not read a part that job loads from, reads as unknown, never as nothing. The repository's part is
+decided at its base commit ([What a run loaded](#what-a-run-loaded), and
+[what the host's publication says](global-pi-overlay.md#what-a-run-loaded-and-where-to-read-it)).
+
 On a desktop, **Open in Terminal** follows a credential-free `pi-dispatch-open://` link naming only an `open` or
 `attach` verb, workspace id and host. The locally installed opener checks its own approved host configuration and
 opens a terminal with the command shown. **Nothing runs until you press Enter.** The copied command stays available;
@@ -2041,7 +2114,9 @@ numbers, its forge link, whether a newer run on its target exists, and for a par
 its target that takes its answer (`pendingRunOnTarget`). `steer.armed` is null when the run's inbox could not be read
 (unknown, not "off"). A link finds the same run whatever the case of the repository path or leading zeros in the
 number, among the newest 2000 runs it searches. Both roles may read it: it carries ids, fixed
-words, times and numbers only, never a record's free text, a job's data, transcript text or a session key. This is what
+words, times and numbers, and in `run.loaded` the names and versions of what the deployment staged and configured,
+never a record's free text, a job's data, transcript text or a session key. `run.outcomeNote` is the word a row says for
+a completed run that lacked its flow or an extension ([What a run loaded](#what-a-run-loaded)). An agent's copy has neither key. This is what
 `pi-dispatch chat` asks. The fields are `INT-CONSOLE-STATE-API`'s. A run id is a `404` only when everywhere a run is
 kept was read and holds none of it, the run page's run-not-found rule; when one of those could not be read, the answer
 is a `503` whose sentence names what the console could not read ("whether a run with that id exists could not be
@@ -2301,6 +2376,13 @@ of names, hosts, receiver counts/times and key presence, with no credentials, re
 Open a project row's link, `/config/project?id=<id>`. The title gives its name/id, member count and projects
 filename, with **Open in Runs** filtered to that id. An unknown id in a readable projects file has its own
 not-found page; an unreadable file is an unavailable state.
+
+**What its runs load**, first in the main column, reads this week's records of the project's runs, the same window as
+Members beside it. It says the runs differ by host, and how, when two hosts it can read differ. It says they load the same only
+when every host that ran something has a record that says so and the history could be read whole; otherwise it says how
+many runs it read. A trigger that withholds its packages and a canary's candidate are said by name and never count as a
+host's difference. A difference also draws a table of each host's runs, extensions and flows. A run from an older
+release, or one refused before its container, is counted as not read ([What a run loaded](#what-a-run-loaded)).
 
 Three cards show spend against the current share (settled and held separately), 24-hour runs and jobs in line,
 and job size with each dimension's source. When combined spend is known but the settled/held split is not,
