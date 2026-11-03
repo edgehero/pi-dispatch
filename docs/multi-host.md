@@ -107,6 +107,12 @@ that produced it. The files stay the record; the mirror is a view of them, and i
 outlive them: its retention is the shorter of your `PI_LOG_RETENTION_DAYS` and ninety-two days, so it can
 never show a run whose file has already been reaped.
 
+The mirror also holds at most `PI_RUN_MIRROR_MAX_RUNS` runs (5,000 unless set, 1,000 to 20,000). Every worker trims
+the one shared index to its own setting, so in a fleet the lowest one wins, and a worker from before this setting
+trims at 5,000: set the same value on every host. Each trim is recorded, so `pi-dispatch capacity` and doctor read the
+time before it as missing history, never as idle time. The panel and the console read the setting from the
+deployment's `.env` too, so their runs lists reach as far back as the mirror does.
+
 If Valkey is unreachable the panel shows this host's runs and says `RUNS · this host only` rather than
 quietly presenting a third of your deployment as all of it. A worker below the version floor mirrors
 nothing, so its runs are visible only on its own panel.
@@ -334,14 +340,17 @@ something rather than merely confusing something, which is why it gets a trap of
 ### 4. Sharing the logs directory is a real option, with a real cost
 
 If `PI_LOGS_DIR` is a shared mount, the run history is merged with no further machinery, and it is merged
-more deeply than the Valkey mirror manages: the mirror holds at most ninety-two days and five thousand
-runs, while a shared directory holds whatever your retention keeps. You also get every host's raw logs
+more deeply than the Valkey mirror manages: the mirror holds at most ninety-two days and `PI_RUN_MIRROR_MAX_RUNS`
+runs (5,000 unless set), while a shared directory holds whatever your retention keeps. You also get every host's raw logs
 readable from every panel, which the mirror deliberately never does.
 
 What it costs: the raw job logs, which hold issue and comment text, then live on that mount too, and a
 mount outage becomes a *lost record* rather than a missing panel row. Retention also becomes fleet-wide by
 accident, because each host prunes by its own `PI_LOG_RETENTION_DAYS` and the shortest setting wins for
-everybody.
+everybody. The console's audit log lives there too (`console-audit/`), and every host's worker prunes it by its own
+`PI_CONSOLE_AUDIT_RETENTION_DAYS` (the run history's retention when unset), so the shortest of those wins for the
+audit log: set it the same on every host. A worker from before this setting that shares `PI_LOGS_DIR` prunes
+`console-audit/` by `PI_LOG_RETENTION_DAYS`, so upgrade every host before relying on a longer audit retention.
 
 **You can now arrive here without choosing it.** `PI_LOGS_DIR` and `PI_SETTINGS_FILE` default under the
 home directory, so on a fleet whose home directories are one NFS or SMB mount, every host shares one run
@@ -491,6 +500,8 @@ produce different digests legitimately. It means "check", not "broken".
 | `PI_CONCURRENCY` | 3 | Containers at once **on this machine**, across every queue it drains. |
 | `PI_HOST_MEMORY_BUDGET`, `PI_HOST_CPU_BUDGET` | `auto` | The memory and CPU this machine's jobs may hold together ([the host budget](#the-host-budget)). |
 | `PI_WAIT_CHECK_SLOTS` | 1 | Wait checks at once, fleet-wide when a name is declared. |
+| `PI_RUN_MIRROR_MAX_RUNS` | 5000 | Runs the shared run index keeps, 1000 to 20000. Every host trims it to its own value, so the lowest wins: set the same on every host. |
+| `PI_CONSOLE_AUDIT_RETENTION_DAYS` | `PI_LOG_RETENTION_DAYS`'s value | Days the console audit log is kept, `0` forever. On a shared `PI_LOGS_DIR` the shortest of the hosts' values wins. |
 
 | Key | What it holds |
 |---|---|
@@ -503,7 +514,7 @@ produce different digests legitimately. It means "check", not "broken".
 | `slot:s:<hash>:<i>` | the fleet-wide slots for a limited forge scope |
 | `runs:index` | the merged run history's index, newest first |
 | `runs:rec:<jobId>` | one run's record, a copy of the sidecar on its host's disk |
-| `runs:horizon` | the fleet's history horizon: the newest instant before which any host's trim removed runs from `runs:index` (each host trims by its own `PI_LOG_RETENTION_DAYS`), read by `pi-dispatch capacity` so that time reads as missing, not idle |
+| `runs:horizon` | the fleet's history horizon: the newest instant before which any host's trim removed runs from `runs:index` (each host trims by its own `PI_LOG_RETENTION_DAYS` and to its own `PI_RUN_MIRROR_MAX_RUNS`), read by `pi-dispatch capacity` so that time reads as missing, not idle |
 | `runs:since` | when the merged run history started (`at`), and a run of `runs:index` that vouches for it (`member`): set by the write that creates the index, or on an index without a start it can trust to the index's oldest run, expiring with it, and trusted only while that run is in the index; read by `pi-dispatch capacity` so that time before it reads as missing, not idle |
 
 Deleting the whole `host:*` keyspace while the fleet is running is safe: every host falls back to

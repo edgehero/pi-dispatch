@@ -321,6 +321,15 @@ and a session that ended in the meantime (its idle limit, say) ends then, with i
 
 Each of these except `token list` appends a row to the audit log, with the actor `shell`.
 
+From this release on, a token with a role a later pi-dispatch added (one a newer console wrote into a file this
+console shares) is kept in the file and signs in nowhere here: its token, and a one-time link for it, are refused at
+sign-in, and it never counts as an operator. `token list` shows it with
+`(not known to this pi-dispatch-console: signs in nowhere here)` after its role, `token revoke` removes it, and
+`token rotate` and `link` refuse it (rotate it with the release that added its role, or revoke it). `token add`
+refuses its name too. Whatever else a later release wrote in the file (a field of an entry, a key of the file) is
+kept by every command that writes it. Doctor warns while such a token is there; upgrading pi-dispatch and the console
+lets it sign in. A release before this one refuses the whole file when it holds a role it does not know.
+
 Your pi session's `write` and `edit` tools cannot touch the tokens file or anything in `console-login-codes/`: the
 `/dispatch` extension guards both (a code file planted there would be a sign-in), so a prompt injection in the
 operator's session cannot mint itself a login that way. Its `bash` tool can, which is the
@@ -470,8 +479,15 @@ missing or malformed, or it is another row's), whatever else is wrong with it, i
 vouched for either ("Row 7 before it (2026-10.jsonl line 7) is not vouched for either: the link between the two does
 not hold, so the chain cannot tell whether row 7 was changed.") and that the rows through the one before that are
 intact. When the line's link matched and it fails another check,
-the row before it is intact. The worker's retention sweep (`PI_LOG_RETENTION_DAYS`)
-removes month files past the retention, never the newest one; when it has removed older months, it says where the chain now starts rather than calling that a break. The chain shows an edit;
+the row before it is intact. The worker's retention sweep removes month files older than
+`PI_CONSOLE_AUDIT_RETENTION_DAYS` days (unset, the run history's `PI_LOG_RETENTION_DAYS`; `0` keeps them forever),
+never the newest one; when it has removed older months, it says where the chain now starts rather than calling that a
+break. The worker reads that setting, not the console, because the worker runs the sweep: set it in the worker's
+`.env`, the same on every host that shares `PI_LOGS_DIR`, since each host's sweep prunes the one folder and the
+shortest setting wins. Before rolling a host back to a release from before this setting with it set longer than
+`PI_LOG_RETENTION_DAYS`, copy `console-audit/` aside or raise `PI_LOG_RETENTION_DAYS`: an older worker prunes the log
+by `PI_LOG_RETENTION_DAYS`. The same holds mid-upgrade: a worker from before this setting that shares `PI_LOGS_DIR`
+prunes the log that way, so upgrade every host before relying on a longer audit retention. The chain shows an edit;
 it does not prevent one, since whoever can write the file can rewrite every line after the one they changed. The rows
 `serve` writes are also copied to the Valkey list `console:audit` (the newest 500), best effort; the file is the
 record.
@@ -487,8 +503,9 @@ changed. Its "Show the damaged line" button opens the page at that line. When li
 matches row 7 (it is not a row, its link is missing or malformed, or it is another row's, whatever else is wrong
 with it), the banner also says that row 7 cannot be trusted either: an edit to row 7 leaves its own line well formed
 and shows only in row 8's link, so nothing says whether row 7 was changed, and the verified range ends at row 6.
-Only a line whose link matched and that is damaged in another way (a seq out of order, an action, outcome or field the
-console never writes) leaves the row before it verified. The newest row has no line after it, so nothing vouches for
+Only a line whose link matched and that is damaged in another way (a seq out of order, an action or outcome that is
+not a word of the console's shape, lowercase letters, digits and dashes, or a field the console never writes) leaves
+the row before it verified. The newest row has no line after it, so nothing vouches for
 it, and the next row the console writes links to it as it then is on disk: an edit made to the newest row before
 another row is written is never seen ([`SECURITY.md`](../SECURITY.md)).
 
@@ -503,13 +520,29 @@ and a line that is not a row at all is shown as damaged in its place, never skip
 so the page reuses it for 30 seconds, and **About this log** says when it last ran, the verified range, the damaged
 line and what is not verified.
 
+**Rows with a word this console does not know.** A console of a later release may write an action or an outcome
+this one does not know. A row whose word has the console's shape is part of the chain like any other: `audit verify`
+calls the chain intact and adds how many rows name an action or outcome it does not know ("..., and 3 of them name an
+action or outcome this pi-dispatch-console does not know (a newer release writes such rows)"), doctor's line stays a
+pass and counts them ("3 not known to this pi-dispatch: a newer console writes such rows"), and the page keeps the
+row's state and shows an outcome it does not know as its word on the attention badge. Only a verified row gets a note
+under its reason ("Not known to this console: the action ... (a newer release writes such rows)."), and About counts
+such rows under **Not known to this console** only when the chain is intact: a row the chain does not vouch for may
+say anything about itself, so its words are never labelled, and a broken chain counts none. The check knows only that
+the word has the console's shape and that the row links, not who wrote it: whoever can write the log can add such a
+row, as they always could one with a word this console knows ([`SECURITY.md`](../SECURITY.md)). An action or outcome
+that is not a word of that shape is still damage. A console from before this release calls such a row damaged; upgrade
+it.
+
 The filters are a search over targets and reasons (at most 64 characters) and three lists: who, the action and the
 outcome; the search matches in any case. A filtered view is a plain link. It searches 500 rows at a time and stops
 after 2,000, saying once how many rows matched among how many it searched ("20 rows match among the 2,000 rows
 searched", "from here" on an Older page); its Older link searches on from there, so a search never claims "no match"
 for rows it did not read. A damaged line or row is shown under every filter, in its place, and is not counted as a
 match: the chain does not vouch for what it says, and a filtered view that hid it would look clean. A filter value
-outside its list or its characters is refused by the parameter's name, never repeated back.
+outside its list or its characters is refused by the parameter's name, never repeated back. The action and outcome
+lists are this console's own, so a row with an action or outcome they do not hold is found unfiltered, and under
+who, role and the search.
 
 `/audit?seq=<n>` opens the page that holds row n, at the row (`/audit?seq=41#seq-41`), however many rows were written
 since: the banner after a write links its row this way. The page finds the row by its number, from where the last check
@@ -528,15 +561,18 @@ is the row's own, unfiltered.
 
 ## What doctor checks
 
-`pi-dispatch doctor` checks the console only once you have set it up (a tokens file exists, or any `PI_CONSOLE_*` is
-set). It then checks:
+`pi-dispatch doctor` checks the console only once you have set it up (a tokens file exists, or any `PI_CONSOLE_*`
+setting the console reads is set: `PI_CONSOLE_AUDIT_RETENTION_DAYS` is the worker's, and doctor checks it with the
+worker's settings). It then checks:
 
 - the tokens file is a regular file, mode 0600, yours, and holds at least one operator;
 - the tokens file is not inside any path a job container can see (a local trigger's `run.folder` or
   `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`);
+- no token carries a role this release does not know (a warning: it signs in nowhere until you upgrade);
 - `PI_CONSOLE_LISTEN` is a value `serve` would accept;
 - `PI_CONSOLE_BIND_PUBLIC=1` (a warning, every time);
-- the audit chain verifies (a warning when it does not).
+- the audit chain verifies (a warning when it does not; rows with an action or outcome of the console's shape that
+  this release does not know are counted on an intact chain, not warned about).
 - whether a console service is installed for this folder (`pi-dispatch service install --console`) and whether the
   console answers on its address: a failure when the service is installed and nothing answers, a warning when there
   is no service and nothing runs.
@@ -1957,6 +1993,7 @@ through the same code, so the two never disagree about what is waiting.
 | `PI_CONSOLE_IDLE_MINUTES` | 60 | Idle limit of a session, 5 to 1440. |
 | `PI_CONSOLE_MAX_HOURS` | 12 | Absolute limit of a session, 1 to 168. |
 | `PI_CONSOLE_MAX_STREAMS` | 4 | Live pages one token may hold open across its sign-ins, 1 to 32. The whole console holds at most 32, 8 of them kept for operators. |
+| `PI_CONSOLE_AUDIT_RETENTION_DAYS` | `PI_LOG_RETENTION_DAYS`'s value | Days the audit log's month files are kept; `0` keeps them forever, and the newest is never removed. Read by the worker, which prunes them, not by the console; a value that is not a whole number of days (0 or more) stops the worker from starting. |
 
 The console also reads, from the same deployment, `VALKEY_URL` (the queues, hosts and run mirror), `PI_LOGS_DIR`
 (this host's run records and the audit log), `PI_PAUSE_WINDOWS_FILE`, the files the configuration page shows and
@@ -2215,6 +2252,8 @@ link their confirmed changes to that refusal. Ordinary record-field filters rema
 
 Upgrade the console and the host’s `pi-dispatch` before adding an agent token. Older versions reject the whole
 access file when it contains an unknown role, which also blocks sign-in, doctor and console service installation.
+From issue #761's release on, a role a console does not know is kept and signs in nowhere instead
+([Managing tokens](#managing-tokens)), so the order matters only for hosts and consoles older than that.
 Create the token on the host, print it once and keep it outside job-visible folders:
 
 ```sh
