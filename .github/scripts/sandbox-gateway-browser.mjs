@@ -123,6 +123,11 @@ try {
       catch (e) { if (n >= 15 || !/context|navigat/.test(e.message)) throw e; await sleep(40); }
     }
   };
+  // Revoked authority reaches the page by whichever comes first: the store's answer ("Operator session ended") or this
+  // process's own lease deadline ("Authorization could not be checked"), and under a loaded runner the deadline can win
+  // (gateway/test/two-process.test.mjs says the same of silence). Both disconnect and both fail closed, so which word lands
+  // is a race, not a property. What a revocation must do is asserted beside each wait: no terminal, and the shell alive.
+  const AUTHORITY_ENDED = "['Operator session ended','Authorization could not be checked'].includes((document.querySelector('.wb-pane[data-active=true] [data-terminal-state-title]')||document.getElementById('gateway-state-title')).textContent)";
   const until = async (expression, ms = 12000) => {
     const end = performance.now() + ms;
     while (performance.now() < end) { if (await evaluate(`Boolean(${expression})`)) return; await sleep(30); }
@@ -435,7 +440,7 @@ try {
   await capture("phone-fallback");
   await sleep(200); assert.equal(JSON.parse((await exec(bin, ["inspect", name])).stdout)[0].State.Running, true);
   stage = "revocation"; await launch("dark"); file.generation++;
-  await until("(document.querySelector('.wb-pane[data-active=true] [data-terminal-state-title]')||document.getElementById('gateway-state-title')).textContent==='Operator session ended'", 6500);
+  await until(AUTHORITY_ENDED, 6500);
   assert.equal(await evaluate("document.querySelectorAll('.xterm').length"), 0); await capture("revoked-dark");
   assert.equal(JSON.parse((await exec(bin, ["inspect", name])).stdout)[0].State.Running, true);
   stage = "roles and read-only";
@@ -479,7 +484,7 @@ try {
     await tab.send("Emulation.setScriptExecutionDisabled", { value: false });
   }
   stage = "read-only transition"; await launch("dark"); config.readOnly = true;
-  await until("(document.querySelector('.wb-pane[data-active=true] [data-terminal-state-title]')||document.getElementById('gateway-state-title')).textContent==='Operator session ended'", 6500);
+  await until(AUTHORITY_ENDED, 6500);
   await capture("read-only-transition-dark"); config.readOnly = false;
   assert.equal(ctaLaunches, 2, "both Sandboxes and Run use their actual rendered own-tab CTA");
   stage = "four actual sandbox terminals";
