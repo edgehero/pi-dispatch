@@ -10,7 +10,7 @@
  *                                                    (`launch/console-picks.mjs`)
  *   node launch/render-images.mjs --console --all    docs/images/console/all/: every golden, page and panel, at 1440 and
  *                                                    375, light and dark, as each is drawn (viewer, operator, signed out).
- *                                                    Not committed: 1,944 images would weigh down every clone for good
+ *                                                    Not committed: about 2,000 images would weigh down every clone for good
  *   node launch/render-images.mjs --console --only <golden>   the same, for one golden, as `run-live.operator` or
  *                                                    `panels/confirm-done.operator`
  *

@@ -2,7 +2,7 @@
  * The operator console images the READMEs show, each a state the console's goldens already draw
  * (`admin/test/fixtures/console/`), and the transcript the live run page shows them with. Only these are committed, to
  * `docs/images/console/`: `render-images.mjs --console --all` renders every golden at both widths and themes on demand,
- * which is 1,944 images and would weigh down every clone for good.
+ * which is about 2,000 images and a gigabyte, and would weigh down every clone for good.
  *
  * A pick is `{ name, golden, width, theme, height, selector, scale, transcript }`. The theme defaults to light, the width
  * to 1440 and the scale to 1.5. `height` keeps the top of the page, `selector` keeps one element, and neither keeps the

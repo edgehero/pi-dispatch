@@ -126,7 +126,8 @@ try {
   // Revoked authority reaches the page by whichever comes first: the store's answer ("Operator session ended") or this
   // process's own lease deadline ("Authorization could not be checked"), and under a loaded runner the deadline can win
   // (gateway/test/two-process.test.mjs says the same of silence). Both disconnect and both fail closed, so which word lands
-  // is a race, not a property. What a revocation must do is asserted beside each wait: no terminal, and the shell alive.
+  // is a race, not a property. What a revocation must do is asserted after the revocation stage's wait: no terminal, and the
+  // shell alive.
   const AUTHORITY_ENDED = "['Operator session ended','Authorization could not be checked'].includes((document.querySelector('.wb-pane[data-active=true] [data-terminal-state-title]')||document.getElementById('gateway-state-title')).textContent)";
   const until = async (expression, ms = 12000) => {
     const end = performance.now() + ms;
