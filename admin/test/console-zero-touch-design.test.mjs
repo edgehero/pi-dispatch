@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { cardPanels } from "./helpers/card-structure.mjs";
 import { ZERO_TOUCH_CSS } from "../src/console/zero-touch-css.mjs";
 import { ZERO_TOUCH_PANELS } from "../src/console/panels/zero-touch.mjs";
 import { QUESTION_GROUP_STATUSES } from "@edgehero/pi-dispatch/question-groups";
@@ -25,10 +26,10 @@ test("all three cards have ledgers and the phone's merged KPI panels stay explic
   for (const card of ["ZeroTouchScreen", "ZeroTouchViewer", "ZeroTouchPhone"]) {
     const ledger = JSON.parse(readFileSync(new URL(`./fixtures/console-ledger/${card}.json`, import.meta.url), "utf8"));
     assert.equal(ledger.pr, 777);
-    for (const id of ledger.panels) assert.ok(panels.includes(id));
+    for (const id of cardPanels(card)) assert.ok(panels.includes(id), `${card}: ${id}`);
     assert.ok(ledger.elements.some((e) => /Standing answers/.test(e.el) && e.status === "absent"));
   }
   const phone = JSON.parse(readFileSync(new URL("./fixtures/console-ledger/ZeroTouchPhone.json", import.meta.url), "utf8"));
-  assert.deepEqual(phone.panels, ["p-zt-rate", "p-zt-projects", "p-zt-causes", "p-zt-questions", "p-zt-fixes"]);
+  assert.deepEqual(cardPanels("ZeroTouchPhone"), ["p-zt-rate", "p-zt-projects", "p-zt-causes", "p-zt-questions", "p-zt-fixes"]);
   assert.ok(phone.elements.some((e) => e.reason?.includes("Three desktop KPI panels")));
 });

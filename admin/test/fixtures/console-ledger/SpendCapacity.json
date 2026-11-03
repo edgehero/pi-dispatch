@@ -1,18 +1,7 @@
 {
   "card": "SpendCapacity",
   "pr": 749,
-  "panels": [
-    "p-cap-busy",
-    "p-cap-peak",
-    "p-cap-wait",
-    "p-cap-mem",
-    "p-cap-build3",
-    "p-cap-mini1",
-    "p-cap-mini2",
-    "p-cap-key",
-    "p-cap-coverage",
-    "p-cap-states"
-  ],
+  "words": "695019c30c7a17731591f0763231389fff1513de8a96e3ae2e5bb343183eaa8e",
   "elements": [
     {
       "el": "p-cap-busy",

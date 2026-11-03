@@ -1,13 +1,7 @@
 {
   "card": "ZeroTouchPhone",
   "pr": 777,
-  "panels": [
-    "p-zt-rate",
-    "p-zt-projects",
-    "p-zt-causes",
-    "p-zt-questions",
-    "p-zt-fixes"
-  ],
+  "words": "16f1eecdf1b32d47c4c2d45a72cf042677e0796fd413fab48d37575527165281",
   "elements": [
     {
       "el": "p-zt-rate",

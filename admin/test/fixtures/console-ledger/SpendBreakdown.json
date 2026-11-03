@@ -1,18 +1,7 @@
 {
   "card": "SpendBreakdown",
   "pr": 749,
-  "panels": [
-    "p-bk-spend",
-    "p-bk-runs",
-    "p-bk-plans",
-    "p-bk-top",
-    "p-daily",
-    "p-daily-flow",
-    "p-breakdown",
-    "p-whatif-flow",
-    "p-plans",
-    "p-bk-states"
-  ],
+  "words": "07c462d016c5a91adfaf7a951d70741fe8d3122c923af3835b7cc63c3eff4afd",
   "elements": [
     {
       "el": "p-bk-spend",

@@ -1,14 +1,7 @@
 {
   "card": "ParkedAnswerer",
   "pr": 779,
-  "panels": [
-    "p-yours",
-    "p-drafted",
-    "p-answered",
-    "p-standing",
-    "p-answerer",
-    "p-level"
-  ],
+  "words": "bbe1870ab26ca2c7b3d5e2ce57543543261dadeacb4bfa362234edccdcc8560d",
   "elements": [
     {
       "el": "p-yours",

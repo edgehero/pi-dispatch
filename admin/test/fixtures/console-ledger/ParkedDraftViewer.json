@@ -1,9 +1,7 @@
 {
   "card": "ParkedDraftViewer",
   "pr": 779,
-  "panels": [
-    "p-answered"
-  ],
+  "words": "b9c5da55cbb2acaa54d93edb1e63d2937b445ef69cb2dc549dc44026b7b8b0a9",
   "elements": [
     {
       "el": "p-answered",

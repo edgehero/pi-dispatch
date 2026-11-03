@@ -1,7 +1,7 @@
 {
   "card": "FieldsDiffCommand",
   "pr": 2,
-  "panels": [],
+  "words": "f2c4591b554f71d355b9c8cb4d51aca4a6b77d105df992f5a06178e9ba658821",
   "elements": [
     {
       "el": "Fields refuse unknown input by name and list what is valid",

@@ -1,9 +1,7 @@
 {
   "card": "RunWorkspaceStates",
   "pr": 790,
-  "panels": [
-    "p-workspace"
-  ],
+  "words": "72a12b4af09494d961f2688a27600e0e8fac9f008c1d1f5ff2d832e0b478d5fe",
   "elements": [
     {
       "el": "p-workspace",

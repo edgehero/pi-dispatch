@@ -1,16 +1,7 @@
 {
   "card": "ZeroTouchViewer",
   "pr": 777,
-  "panels": [
-    "p-zt-rate",
-    "p-zt-streak",
-    "p-zt-wait",
-    "p-zt-handled",
-    "p-zt-projects",
-    "p-zt-questions",
-    "p-zt-fixes",
-    "p-zt-causes"
-  ],
+  "words": "cc88fb5bc7e201bd15cdd593f14ffa419ec51ebe3d9af66a9b3aefcc1c8207c0",
   "elements": [
     {
       "el": "p-zt-rate",

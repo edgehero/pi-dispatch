@@ -1,15 +1,7 @@
 {
   "card": "TriggerDetail",
   "pr": 750,
-  "panels": [
-    "p-trigger-on",
-    "p-trigger-runs",
-    "p-trigger-run",
-    "p-trigger-edit",
-    "p-trigger-trust",
-    "p-trigger-kinds",
-    "p-trigger-change"
-  ],
+  "words": "b2de20c3a1086af30729d61b04a005d92932f603b6d3e20a144aa0d81a36146d",
   "elements": [
     {
       "el": "p-trigger-on",

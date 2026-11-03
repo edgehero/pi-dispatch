@@ -1,7 +1,7 @@
 {
   "card": "ErrorPage",
   "pr": 2,
-  "panels": ["p-error","p-error-421"],
+  "words": "e032ebdd3fe0aea83f974a52d358b3b3e09fdb4da426e920ffcc84d55d5fce98",
   "elements": [
     {"el":"p-error","kind":"panel","status":"new","source":"admin/src/console/error-pages.mjs#errorPage","golden":["error-404.operator","error-404.viewer","error-400.operator","error-403.viewer","error-503.anonymous","audit.viewer","panels/run-not-found.operator","panels/run-not-found.viewer"]},
     {"el":"p-error-421","kind":"panel","status":"new","source":"admin/src/console/error-pages.mjs#errorPage","golden":["error-421.anonymous"]},

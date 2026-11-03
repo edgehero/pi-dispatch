@@ -1,7 +1,7 @@
 {
   "card": "RunsPhone",
   "pr": 4,
-  "panels": ["p-filters", "p-summary", "p-runs"],
+  "words": "30a8924600093213a004e839de7000dd0cce32f7d1017fecf2b2029ce695c21a",
   "elements": [
     {"el":"p-filters","kind":"panel","status":"new","source":"admin/src/console/panels/runs.mjs#runsFilters","golden":["runs.operator","runs.viewer"],"reason":"the RunsScreen ledger's: one page at every width"},
     {"el":"p-summary","kind":"panel","status":"new","source":"admin/src/console/panels/runs.mjs#runsSummary","golden":["runs.operator","runs.viewer"]},

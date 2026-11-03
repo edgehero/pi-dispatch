@@ -1,17 +1,7 @@
 {
   "card": "FleetScreen",
   "pr": 6,
-  "panels": [
-    "p-fleetbar",
-    "p-queues",
-    "p-active",
-    "p-held",
-    "p-failed",
-    "p-schedules",
-    "p-hosts",
-    "p-doctor",
-    "p-venues"
-  ],
+  "words": "0bf2522779c49882c9afbe0bf0a2df1ac8047e57a38464bd848d6df28a110210",
   "elements": [
     {
       "el": "p-fleetbar",

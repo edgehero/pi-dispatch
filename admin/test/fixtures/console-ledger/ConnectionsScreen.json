@@ -1,18 +1,7 @@
 {
   "card": "ConnectionsScreen",
   "pr": 784,
-  "panels": [
-    "p-connection-problems",
-    "p-provider-keys",
-    "p-forges",
-    "p-egress",
-    "p-endpoints",
-    "p-subscription-auth",
-    "p-notify",
-    "p-mcp",
-    "p-env",
-    "p-packages"
-  ],
+  "words": "8aab6bb1e6b23c053463786ce81c42847ca28e254a294c74df3bb6a911d1ca8d",
   "elements": [
     {
       "el": "p-connection-problems",

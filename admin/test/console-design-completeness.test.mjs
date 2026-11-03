@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { PAGES, panelIds } from "../src/console/pages.mjs";
+import { cardPreviewPanels, cardReadmePanels } from "./helpers/card-structure.mjs";
 
 // Every published-source card is either a checked element ledger or has an explicit disposition. This is a scope
 // check, not proof that a screen works: each ledger and its behavioral/browser tests supply that evidence. Family
@@ -19,8 +20,6 @@ const OUTSIDE_LEDGERS = Object.freeze({
   RunLivePhone: "The built RunLive route at phone width (#747), covered by its family ledger and browser sweep.",
   ApprovalRequest: "Built separately by #649; approval request state belongs to the run and parked pages.",
   ForkRun: "Built separately by #648; managed forks belong to the run page.",
-  WatchScreen: "Built separately by #735; its existing /watch route stays separate.",
-  WatchBoard: "Built separately by #743; its existing /watch/board route stays separate.",
   SandboxWorkbench: "#754 maintained-library standalone gateway workbench, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
   SandboxTerminalRun: "#793 authorized per-terminal run context in the gateway, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
   SandboxWatch: "#792 standalone read-only observer surface, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
@@ -86,14 +85,9 @@ test("the three #751 cards map to real viewer routes and every README/preview pa
     assert.equal(PAGES[spec.page]?.auth, spec.auth ?? "viewer", card);
     assert.equal(PAGES[spec.page]?.live, spec.page === "sandboxes", `${card}: drawn on demand`);
     const ledger = JSON.parse(readFileSync(new URL(`${card}.json`, LEDGERS), "utf8"));
-    const readme = readFileSync(new URL(`${card}/README.md`, COMPONENTS), "utf8");
-    const panelLine = readme.match(/\*\*Panels\.\*\* ([^\n]+)/)?.[1];
-    assert.ok(panelLine, `${card}: the source card names its panels`);
-    const readmePanels = [...panelLine.matchAll(/`(p-[a-z-]+)`/g)].map((match) => match[1]);
-    const preview = readFileSync(new URL(`${card}/preview.html`, COMPONENTS), "utf8");
-    const previewPanels = [...preview.matchAll(/\bid="(p-[a-z-]+)"[^>]*\bdata-panel/g)].map((match) => match[1]);
-    assert.deepEqual(ledger.panels, readmePanels, `${card}: ledger covers the published README`);
-    assert.deepEqual(previewPanels, readmePanels, `${card}: source preview and README describe the same complete screen`);
+    const readmePanels = cardReadmePanels(card);
+    assert.ok(readmePanels.length, `${card}: the source card names its panels`);
+    assert.deepEqual(cardPreviewPanels(card), readmePanels, `${card}: source preview and README describe the same complete screen`);
     const mapped = ledger.elements.filter((element) => element.kind === "panel").map((element) => element.as ?? element.el);
     assert.deepEqual([...mapped].sort(), [...panelIds(spec.page)].filter((id) => !["p-nav-parked", "p-headline"].includes(id)).sort(),
       `${card}: every card panel reaches the implementation and every implementation panel is accounted for`);

@@ -1,0 +1,17 @@
+{
+  "card": "WatchBoard",
+  "pr": 763,
+  "words": "6d23dbbd561adf512c823e7a039a549b72a7a2bc4bd6a86a89aead110b8ad2b9",
+  "elements": [
+    {"el":"p-watch-board","kind":"panel","status":"real","source":"admin/src/console/watch.mjs#watchBoardPanel","golden":["watch-board.operator","watch-board.viewer"]},
+    {"el":"Open a finding to see the source, rule checks, decision options and the resulting job or issue","kind":"readme","status":"real","panel":"p-watch-board","source":"admin/src/console/watch.mjs#watchBoardPanel","golden":["watch-board.operator"],"shows":"Evidence and trace"},
+    {"el":"Read the adopted board version; jobs propose inert blocks","kind":"readme","status":"real","panel":"p-watch-board","source":"admin/src/console/watch.mjs#watchBoardPanel","golden":["watch-board.operator"],"shows":"Version 2"},
+    {"el":"Only an operator adopts, freezes, unfreezes, restores or clears, through Preview and Confirm","kind":"readme","status":"real","panel":"p-watch-board","source":"admin/src/console/watch.mjs#watchBoardPanel","golden":["watch-board.operator"],"shows":"Preview adoption"},
+    {"el":"Classifier totals for the loaded retained findings, a floor at the 1,000 finding bound","kind":"readme","status":"real","panel":"p-watch-board","source":"admin/src/console/watch.mjs#decisionTotals","golden":["watch-board.operator"],"shows":"at most 1,000"},
+    {"el":"An operator reads samples, query text and decision state as escaped text","kind":"readme","status":"real","panel":"p-watch-board","source":"admin/src/console/watch.mjs#watchBoardPanel","golden":["watch-board.operator"],"shows":"Samples"},
+    {"el":"A viewer sees counts and rule checks, never agent authored values","kind":"readme","status":"real","source":"admin/src/console/watch.mjs#publicBoardSummary"},
+    {"el":"The board, findings and evidence, the last for an explicit operator session","kind":"provides","status":"real","source":"admin/src/console/watch.mjs#loadWatchData","holds":"privateRead"},
+    {"el":"The earlier live shadow charts and projections","kind":"readme","status":"illustrative","reason":"the card's future design, which it says is not delivered"},
+    {"el":"Finding counts, probabilities, costs, proposals and trace entries","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."}
+  ]
+}

@@ -1,13 +1,7 @@
 {
   "card": "RunRefused",
   "pr": 5,
-  "panels": [
-    "p-outcome",
-    "p-run",
-    "p-rest",
-    "p-why",
-    "p-host"
-  ],
+  "words": "b148a956ee0dfafec03bd912c0c3842f5c1d63e67cef4a914977575b5da7964f",
   "elements": [
     {
       "el": "p-outcome",

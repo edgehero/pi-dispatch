@@ -1,19 +1,7 @@
 {
   "card": "ProjectDetail",
   "pr": 751,
-  "panels": [
-    "p-proj-spend",
-    "p-proj-runs",
-    "p-proj-size",
-    "p-proj-members",
-    "p-proj-sizing",
-    "p-proj-recent",
-    "p-proj-alloc",
-    "p-proj-limits",
-    "p-proj-bundle",
-    "p-proj-triggers",
-    "p-proj-delete"
-  ],
+  "words": "6582121a4a72cf6963427a77dbd5944eace02fe4043e6b7f5a3d20e36597c663",
   "elements": [
     {
       "el": "p-proj-spend",

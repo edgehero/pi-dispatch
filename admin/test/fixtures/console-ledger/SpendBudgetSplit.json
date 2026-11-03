@@ -1,19 +1,7 @@
 {
   "card": "SpendBudgetSplit",
   "pr": 749,
-  "panels": [
-    "p-env-kpi",
-    "p-alloc-kpi",
-    "p-spent-kpi",
-    "p-plan-kpi",
-    "p-split",
-    "p-split-history",
-    "p-priorities",
-    "p-envelope",
-    "p-plan-reasons",
-    "p-split-counts",
-    "p-split-states"
-  ],
+  "words": "e912904458546c412c7c7d322a5e031b5a69a98089f31f136d388e4e135abbda",
   "elements": [
     {
       "el": "p-env-kpi",

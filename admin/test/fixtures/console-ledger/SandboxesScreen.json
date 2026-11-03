@@ -1,13 +1,7 @@
 {
   "card": "SandboxesScreen",
   "pr": 771,
-  "panels": [
-    "p-sb-run",
-    "p-sb-new",
-    "p-sb-open",
-    "p-sb-kept",
-    "p-sb-browser"
-  ],
+  "words": "39bf557bedcf981a35155bc36b216aaadfa0ee976e0bb96cde2de13bb0639f24",
   "elements": [
     {
       "el": "p-sb-run",

@@ -1,21 +1,7 @@
 {
   "card": "SpendPhone",
   "pr": 749,
-  "panels": [
-    "p-week",
-    "p-today",
-    "p-tokens",
-    "p-avg",
-    "p-over",
-    "p-byflow",
-    "p-bymodel",
-    "p-byproject",
-    "p-sizes",
-    "p-caps",
-    "p-whatif",
-    "p-plan",
-    "p-split"
-  ],
+  "words": "84bdbf64dbfcd05f9807dfe7139be2a884d785f15dfab6ea20ee8e097eb21eef",
   "elements": [
     {
       "el": "p-week",

@@ -1,12 +1,7 @@
 {
   "card": "TriggerEditor",
   "pr": 750,
-  "panels": [
-    "p-trigger-add",
-    "p-kinds",
-    "p-forge-words",
-    "p-refusals"
-  ],
+  "words": "178546e37aaded758fb6a70f9d1be4d650a036d61ea12badec92096191b60840",
   "elements": [
     {
       "el": "p-trigger-add",

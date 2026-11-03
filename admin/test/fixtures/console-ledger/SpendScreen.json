@@ -1,21 +1,7 @@
 {
   "card": "SpendScreen",
   "pr": 749,
-  "panels": [
-    "p-week",
-    "p-today",
-    "p-tokens",
-    "p-avg",
-    "p-over",
-    "p-byflow",
-    "p-bymodel",
-    "p-byproject",
-    "p-sizes",
-    "p-caps",
-    "p-whatif",
-    "p-plan",
-    "p-split"
-  ],
+  "words": "2114599aae735d04181affda626e78c161ac8ad74ffacdf58e911693760a8934",
   "elements": [
     {
       "el": "p-week",

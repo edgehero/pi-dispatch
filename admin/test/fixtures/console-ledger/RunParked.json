@@ -1,12 +1,7 @@
 {
   "card": "RunParked",
   "pr": 5,
-  "panels": [
-    "p-chat",
-    "p-run",
-    "p-spend",
-    "p-tail"
-  ],
+  "words": "9218971bd65dd5bdef2cee9c7aa99b58dd850b04424ff7d4c979dbf35a1b870d",
   "elements": [
     {
       "el": "p-chat",

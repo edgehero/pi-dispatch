@@ -1,12 +1,7 @@
 {
   "card": "TopologyScreen",
   "pr": 749,
-  "panels": [
-    "p-flows",
-    "p-flows-key",
-    "p-flows-selected",
-    "p-flows-honesty"
-  ],
+  "words": "50bdb91a4232dac2e00d7fac23d5cef69486e278897ba42b6a3c9e053970653d",
   "elements": [
     {
       "el": "p-flows",

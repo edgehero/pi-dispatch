@@ -1,14 +1,7 @@
 {
   "card": "HostDetail",
   "pr": 6,
-  "panels": [
-    "p-hoststate",
-    "p-hostjobs",
-    "p-hostbudget",
-    "p-hostcap",
-    "p-hostrow",
-    "p-hostdoctor"
-  ],
+  "words": "fb0d5cd8631ee45fa7334f2e1c7e8751a5f82e2bb6fbea510da3440ee09e2e99",
   "elements": [
     {
       "el": "p-hoststate",

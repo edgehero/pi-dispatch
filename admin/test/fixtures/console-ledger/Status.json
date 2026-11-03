@@ -1,12 +1,12 @@
 {
   "card": "Status",
   "pr": 1,
-  "panels": [],
+  "words": "554c9ca563d081a4a07148db320cb5829adc94d0125f3572697c29f2c53bf2c6",
   "elements": [
     {"el":"badge(kind) for outcomes and states","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#badge"},
     {"el":"Outcome badges in the repo's words: Completed, Failed, Refused, Awaiting input, Cancelled","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#outcomeBadge"},
     {"el":"Never colour alone: one glyph, one word and one tone per state","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#STATUS"},
-    {"el":"The Awaiting approval badge","kind":"readme","status":"illustrative","reason":"approvals are #649's (ApprovalRequest, a planned card); the console has no approval state to badge"},
+    {"el":"The Awaiting approval badge","kind":"readme","status":"real","source":"admin/src/words.mjs#OUTCOME_KEYS","holds":"awaiting-approval","golden":["panels/parked-approval.operator"],"shows":"Awaiting approval"},
     {"el":"State badges in the kit's statuses (Running, Held, Parked, Attention)","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#STATUS","holds":"running"},
     {"el":"Held, Delayed, Healthy and Needs a look badges","kind":"sample","status":"illustrative","reason":"sample words: badge(status, word) draws any state in its status's glyph and tone, and each page's ledger names the words that page draws"},
     {"el":"Project tags: the project's name on a neutral pill","kind":"readme","status":"real","source":"admin/src/console/kit.mjs#ptag"},

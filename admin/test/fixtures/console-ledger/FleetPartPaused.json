@@ -1,13 +1,7 @@
 {
   "card": "FleetPartPaused",
   "pr": 6,
-  "panels": [
-    "p-fleetbar",
-    "p-queues",
-    "p-failed",
-    "p-held",
-    "p-delayed"
-  ],
+  "words": "df28c98944d954e5174778ebc88c2ca679d8fa319067261d5b1e82646e1bdbda",
   "elements": [
     {
       "el": "p-fleetbar",
