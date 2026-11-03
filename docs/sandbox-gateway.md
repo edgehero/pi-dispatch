@@ -63,6 +63,17 @@ For remote access, put TLS in front of its loopback listener and preserve the ex
 upgrade. Its own origin checks remain mandatory. For local development, `http://localhost:4790` for the console and
 `http://127.0.0.1:8788` for the gateway provide distinct hostnames.
 
+The gateway writes its audit rows to `<PI_LOGS_DIR>/console-audit/`, the audit log a console on the same host writes
+and shows, and its journal of the attachments open right now to `<PI_LOGS_DIR>/sandbox-gateway-active/`. Unset or
+blank, `PI_LOGS_DIR` is `~/.pi-dispatch/logs` of the account the gateway runs as, the default the worker and the
+console use too; a relative value resolves against the deployment folder. Run the gateway as the worker's account,
+as its unit file does: the audit folder is that account's alone, so another account cannot append to it. Where the
+worker's, the console's and the gateway's homes differ, set an absolute `PI_LOGS_DIR` in the deployment `.env`, which
+the worker reads as well, so all three use one folder. Otherwise the gateway's rows land in a folder that the worker
+does not prune, the console's Audit page does not show and [a backup](backup.md) does not copy. The gateway writes
+nothing to the deployment's `logs/` folder, where the service manager keeps the worker's own output, unless
+`PI_LOGS_DIR` names it.
+
 Use one gateway serving process per host by default. If a proxy balances multiple processes under the same enrolled
 origin, route each connection-admission request and its following WebSocket upgrade to the same process. An upgrade
 on another process refuses safely. Consent, watcher roster and driver-size metadata are shared through Valkey and
