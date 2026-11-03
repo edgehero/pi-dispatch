@@ -26,6 +26,7 @@ import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { HOST_VENUE_NAME_RE, UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
+import { cronRunOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { repoOfTarget } from "./costs.mjs";
 import { OUTCOME_KEYS, RECORD_REASON_RE, outcomeKey } from "./words.mjs";
 
@@ -122,11 +123,12 @@ export function parseRunFilter(searchParams) {
   return { filter: Object.freeze(filter) };
 }
 
-/** A record's scheduler id from its cron job id (`repeat:<id>:<millis>` or `manual:<id>:<millis>`), or null. */
+/**
+ * A record's scheduler id from its cron job id (`repeat:<id>:<millis>` or `manual:<id>:<millis>`), or null. Any id
+ * length: a record is this deployment's own history, and every release before issue #761 took a cron id of any length.
+ */
 function schedulerIdOf(jobId) {
-  if (typeof jobId !== "string") return null;
-  const m = /^(?:repeat|manual):(.+):\d+$/.exec(jobId);
-  return m ? m[1] : null;
+  return cronRunOf(jobId)?.id ?? null;
 }
 
 /**

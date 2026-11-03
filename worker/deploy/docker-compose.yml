@@ -30,7 +30,9 @@
 
 services:
   valkey:
-    image: valkey/valkey:8
+    # Pinned to a minor, never a floating major (issue #761): VALKEY_IMAGE in worker/src/valkey-auth.mjs says why, and a
+    # test holds this line to it.
+    image: valkey/valkey:8.1
     # The password (issue #468), from the deployment's .env through `--env-file .env`, into the container's ENVIRONMENT
     # and never onto a command line: the image's PID 1 is tini, which keeps its whole argv for the life of the container,
     # readable by every account on the host in /proc (measured). Empty or unset starts Valkey without one, as before.

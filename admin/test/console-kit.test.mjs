@@ -897,6 +897,10 @@ test("schedulerRunOf: a cron trigger's run from its id, BullMQ's repeat:<trigger
   for (const id of ["gh-71b2", "local-aa01", "repeat:hourly-sync", "repeat::1", `repeat:a b:${slot}`, "repeat:x:01", "repeat:x:-1", "repeat:x:99999999999999999", `repeat:${"a".repeat(201)}:1`, `xrepeat:x:1`, null, 7, undefined]) {
     assert.equal(ui.schedulerRunOf(id), null, String(id));
   }
+  // A surface bounds the scheduler's id at 200, as every reader of a scheduler key does.
+  assert.equal(ui.schedulerRunOf(`repeat:${"a".repeat(200)}:1`)?.scheduler, "a".repeat(200));
+  // A hand-fired run (and a canary's, issue #796) is its trigger's, but its number is the minute it was queued, no slot.
+  for (const id of [`manual:hourly-sync:${slot}`, `manual:hourly-sync:${slot + 1}`]) assert.equal(ui.schedulerRunOf(id), null, id);
 });
 
 test("waitBar: the Waitlists card's bar, a segment per reason in proportion, alternating greys, every segment wide enough to read", () => {

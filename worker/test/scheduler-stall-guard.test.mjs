@@ -240,3 +240,39 @@ test("a schedulerId with valid internal chars parses correctly", async () => {
 
 	assert.equal(redis.count("my.flow-1"), 1);
 });
+
+test("a hand-fired manual: run is an ordinary job: not counted, not logged, whatever its shape", async () => {
+	const redis = fakeRedis();
+	const removeJobScheduler = makeRemoveSpy();
+	const log = makeLog();
+	const onStalled = makeStallGuard({ redis, threshold: 0, removeJobScheduler, log });
+
+	for (const id of ["manual:nightly:1761400000000", "manual:nightly:1761400000001", "manual::1", "manual:x"]) await onStalled(id);
+
+	assert.equal(redis.calls.incr, 0);
+	assert.deepEqual(removeJobScheduler.removed, []);
+	assert.equal(log.entries.length, 0);
+});
+
+test("a repeat: id outside the scheduler's grammar is logged, never counted under a guessed scheduler", async () => {
+	const redis = fakeRedis();
+	const log = makeLog();
+	const onStalled = makeStallGuard({ redis, threshold: 3, removeJobScheduler: makeRemoveSpy(), log });
+
+	for (const id of ["repeat:a b:1", "repeat:a:b:1", "repeat:nightly:", "repeat:nightly:x"]) await onStalled(id);
+
+	assert.equal(redis.calls.incr, 0);
+	assert.deepEqual(log.of("scheduler_stall_unparsed").map((e) => e.fields.jobId), ["repeat:a b:1", "repeat:a:b:1", "repeat:nightly:", "repeat:nightly:x"]);
+});
+
+test("a scheduler id of any length is counted: one an earlier release made for a longer cron id still stalls", async () => {
+	const redis = fakeRedis();
+	const removeJobScheduler = makeRemoveSpy();
+	const onStalled = makeStallGuard({ redis, threshold: 1, removeJobScheduler, log: makeLog() });
+	const long = "x".repeat(300);
+
+	await onStalled(`repeat:${long}:1761400000000`);
+	assert.equal(redis.count(long), 1);
+	await onStalled(`repeat:${long}:1761400000000`);
+	assert.deepEqual(removeJobScheduler.removed, [long]);
+});

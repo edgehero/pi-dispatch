@@ -13,6 +13,8 @@
  * Custom: per-scheduler stall accounting; BullMQ's maxStalledCount does not cover scheduler jobs -- CONST-RETRY-INFRA-ONLY carve-out ("BullMQ will never do this for us")
  */
 
+import { cronRunOf, isSchedulerJobId } from "./bullmq-internals.mjs";
+
 // The prefix every stall counter lives under, so `KEYS pi-dispatch:sched-stalls*` still shows an operator
 // the whole feature -- the affordance `wait:`, `slot:` and `budget:` all assume. Exported alongside the
 // builder so the admin panel and the integration teardown compose keys through one definition and cannot
@@ -36,8 +38,8 @@ export const stallKey = (schedulerId) => `${STALL_KEY}:${schedulerId}`;
 // stalls, opposite outcome, decided by an unrelated trigger (issue #267).
 //
 // Per-field TTLs would have fixed it in place and are not available: `HEXPIRE` does not exist on the pinned
-// `valkey/valkey:8` (verified, `ERR unknown command`, recorded under DES-HOST-REGISTRY). A key per entity is
-// the only shape that gets per-entity expiry.
+// `valkey/valkey:8.1` (`VALKEY_IMAGE`; verified on 8.1.11, `ERR unknown command`, recorded under DES-HOST-REGISTRY).
+// A key per entity is the only shape that gets per-entity expiry.
 //
 // The EXPIRE still ROLLS on every stall, deliberately, and that is not `budget.mjs`'s set-once rule being
 // broken. A budget window is a CALENDAR window and must not be pushed forward by traffic or a busy day
@@ -59,16 +61,20 @@ const STALL_WINDOW_SECONDS = 24 * 60 * 60;
 export function makeStallGuard({ redis, threshold, removeJobScheduler, log }) {
 	return async function onStalled(jobId) {
 		try {
-			// Ordinary jobs are bounded by `maxStalledCount: 0`; only scheduler jobs reach this accounting.
-			if (!jobId.startsWith("repeat:")) return;
+			// Ordinary jobs are bounded by `maxStalledCount: 0`; only scheduler jobs reach this accounting. A hand-fired
+			// `manual:` run is an ordinary job, so it is not counted here either.
+			if (!isSchedulerJobId(jobId)) return;
 
-			const schedulerId = jobId.slice("repeat:".length, jobId.lastIndexOf(":"));
-			if (schedulerId === "") {
-				// Degenerate `repeat:<n>` / `repeat::<n>` with no scheduler segment: an empty hash field would
-				// pool every such id into one counter, so log and skip rather than hincrby an empty key.
+			// Any id length: a scheduler an earlier release made for a longer cron id still stalls, and this guard is the
+			// one that stops it re-paying.
+			const run = cronRunOf(jobId);
+			if (run === null) {
+				// A `repeat:` id with no scheduler segment (`repeat:<n>`, `repeat::<n>`) or none BullMQ mints: an empty or
+				// guessed counter would pool unrelated ids into one, so log and skip rather than count a key.
 				log("scheduler_stall_unparsed", { jobId });
 				return;
 			}
+			const schedulerId = run.id;
 
 			const key = stallKey(schedulerId);
 			const count = Number(await redis.incr(key));

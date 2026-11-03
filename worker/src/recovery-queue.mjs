@@ -10,12 +10,13 @@
  * `recoveryOf` (the run id, a string) and `recovery` (n, an integer). Nothing ever parses the id back: those two fields
  * carry it.
  *
- * THE ID, measured against the installed bullmq (5.80.4, `Job.validateOptions`): a custom id containing `:` is refused
- * ("Custom Id cannot contain :") unless it splits into exactly three parts, the legacy repeatable shape. A `.rN` suffix
- * adds no colon, so every run id the producers mint today maps to an accepted recovery id: the forge and local ids hold
- * none (`gh-<guid>`, `local-<hex>`, `chain-<hex>`), and the cron and manual ids hold exactly two (`repeat:<id>:<ms>`,
- * `manual:<id>:<ms>`), so `repeat:a:b.r1` is three parts. An id of any other colon count is refused HERE, before
- * anything is claimed, as `job-id-refused`, rather than by a throw out of `queue.add` after the claim.
+ * THE ID, by BullMQ's own rule (`customJobIdAllowed`, bullmq-internals.mjs): a custom id containing `:` is refused
+ * ("Custom Id cannot contain :") unless it splits into exactly three parts, the legacy repeatable shape, and one that
+ * is an integer's spelling is refused too, which a `.rN` suffix never is. The suffix adds no colon either, so every run
+ * id the producers mint today maps to an accepted recovery id: the forge and local ids hold none (`gh-<guid>`,
+ * `local-<hex>`, `chain-<hex>`), and the cron and manual ids hold exactly two (`repeat:<id>:<ms>`, `manual:<id>:<ms>`),
+ * so `repeat:a:b.r1` is three parts. An id of any other colon count is refused HERE, before anything is claimed, as
+ * `job-id-refused`, rather than by a throw out of `queue.add` after the claim.
  *
  * NO `deduplication` on the add, deliberately: the original forge job carried a semantic key (`repo#n:flow`, ten
  * minutes), and a recovery is the same target and flow by construction. With the key copied, a crash inside the
@@ -30,6 +31,7 @@
  */
 import * as nodeFsp from "node:fs/promises";
 import { join } from "node:path";
+import { customJobIdAllowed } from "./bullmq-internals.mjs";
 import { QUEUE, hostQueueName as defaultHostQueueName } from "./queue.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
@@ -118,12 +120,11 @@ export function isRecoveryArmed(data) {
 	return data?.recover === true && data?.kind !== "local";
 }
 
-/** The recovery job id; null when bullmq would refuse it (a colon count other than none or exactly two). */
+/** The recovery job id; null when bullmq would refuse it (`customJobIdAllowed`: a colon count other than none or two). */
 export function recoveryJobId(runId, n) {
 	if (typeof runId !== "string" || runId === "" || !Number.isSafeInteger(n) || n < 1) return null;
 	const id = `${runId}.r${n}`;
-	if (id.includes(":") && id.split(":").length !== 3) return null;
-	return id;
+	return customJobIdAllowed(id) ? id : null;
 }
 
 /** The claim key of recovery `n` of `runId`. Sanitized like every other per-run key, so one spelling per run. */

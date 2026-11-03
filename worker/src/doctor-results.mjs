@@ -125,7 +125,13 @@ export const DOCTOR_SECTIONS = Object.freeze([
  *   - `provider.key`: whether the provider's key is found where the worker looks.
  * Issue #761, for an upgrade: `settings.unknown-keys`, the overlay keys this build does not know (names only, a warning),
  * and `fleet.store-versions`, a peer that cannot read a store this host's files need a version above 1 for (a warning,
- * one per store and kind of peer, so a run may publish `-2` and on).
+ * one per store and kind of peer, so a run may publish `-2` and on). And for the upgrade path: `fleet.versions`, the
+ * pi-dispatch versions the live workers report and this doctor's own against this host's worker row (a warning when
+ * they differ or cannot all be read, an ok line when peers agree, absent on a single host that matches);
+ * `dollars.window-reset`, a deployment dollar window counter below what this host's own runs settled into it (a
+ * warning, absent otherwise); and `state.older`,
+ * a store an older release left in a shape this build no longer writes (a warning per finding, so a run may publish
+ * `state.older-2` and on). Each is written at one site.
  * No id names a forge's credentials, because no one check holds them: the `github` section alone prints about twenty
  * lines across its three auth sources, and the other forges print theirs under `forges`. A reader judges those by the
  * section part of their derived ids, which `DOCTOR_SECTIONS` pins.
@@ -147,6 +153,9 @@ export const NAMED_CHECK_IDS = Object.freeze([
 	"settings.overlay-dollars",
 	"settings.unknown-keys",
 	"fleet.store-versions",
+	"fleet.versions",
+	"dollars.window-reset",
+	"state.older",
 	"egress.proxy",
 	"provider.key",
 	"watch.sources",

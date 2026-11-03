@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import * as bullmqInternals from "../src/bullmq-internals.mjs";
 import { DEFER_BUCKETS, DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_ENDPOINT_RE, DEFER_FIELDS, DEFER_HOST_RE, DEFER_ID_RE, DEFER_KEY, DEFER_N_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, DEFER_TTL_SLACK_MS, DEFER_WHYS, DEFER_WHY_RE, DELAYED_SCORE_SHIFT, deferHsetArgs, deferKey, deferTtlMs, dueOfScore, isSchedulerNext, parseDefer } from "../src/defer-reasons.mjs";
 import { MODEL_ENDPOINT_ID_RE } from "../src/model-endpoints.mjs";
 import { PROJECT_ID_RE } from "../src/project-id.mjs";
@@ -45,10 +46,13 @@ test("the tables are closed: every reason's bucket is a bucket, every bucket has
 	assert.equal(new Set(DEFER_FIELDS).size, DEFER_FIELDS.length);
 });
 
-test("the leaf imports nothing, so the console's bundle takes it without the worker's dependencies", () => {
+test("the leaf imports nothing but the BullMQ leaf, so the console's bundle takes it without the worker's dependencies", () => {
 	const src = readFileSync(new URL("../src/defer-reasons.mjs", import.meta.url), "utf8")
 		.replace(/\/\*[\s\S]*?\*\//g, "")
 		.replace(/\/\/[^\n]*/g, "");
+	// Its one module is the BullMQ leaf (issue #761), which imports nothing itself, re-exported and never imported.
+	assert.deepEqual([...src.matchAll(/\bfrom\s*["'`]([^"'`]+)["'`]/g)].map((m) => m[1]), ["./bullmq-internals.mjs"]);
+	assert.match(src, /^export \{ DELAYED_SCORE_SHIFT, dueOfScore, isSchedulerNext \} from "\.\/bullmq-internals\.mjs";$/m);
 	assert.doesNotMatch(src, /^\s*import\b/m);
 	assert.doesNotMatch(src, /\bimport\s*\(/);
 	assert.doesNotMatch(src, /\brequire\s*\(/);
@@ -149,36 +153,18 @@ test("a record lives until its job is due plus a minute's slack, and never less 
 	assert.equal(deferTtlMs(1_000_000 - 30_000, 1_000_000), 60_000, "a due time already past still leaves the slack");
 });
 
-test("dueOfScore decodes BullMQ's delayed score (due * 4096 + a counter), and refuses anything else", () => {
-	assert.equal(DELAYED_SCORE_SHIFT, 4096);
-	const due = 1761400005000;
-	assert.equal(dueOfScore(due * 4096), due);
-	assert.equal(dueOfScore(due * 4096 + 4095), due, "the counter never reaches the next millisecond");
-	assert.equal(dueOfScore(String(due * 4096 + 17)), due, "a ZSCORE reply is a string");
-	assert.equal(dueOfScore("0"), 0);
-	assert.equal(dueOfScore("7.214592020480000e+15"), 1761375005000, "a score in exponent form");
-	// A ZSCORE of a missing member is null: no due time, never one at the epoch (Number(null) is 0).
-	for (const bad of [null, "", "  ", false, true, [4096], "-4096", "x", undefined, "Infinity", {}, Number.NaN, -1]) assert.equal(dueOfScore(bad), null, JSON.stringify(bad));
-	// A score anything with the URL wrote can be any double: a due time a console cannot draw is none, never a huge number.
-	assert.equal(dueOfScore(DEFER_TIME_MAX_MS * 4096), DEFER_TIME_MAX_MS, "the last instant a four-digit year writes");
-	assert.equal(dueOfScore(String(DEFER_TIME_MAX_MS * 4096)), DEFER_TIME_MAX_MS, "as a ZSCORE reply spells it");
-	for (const huge of [(DEFER_TIME_MAX_MS + 1) * 4096, String((DEFER_TIME_MAX_MS + 1) * 4096), 8.64e15 * 4096, "1e300", 1e300, Number.MAX_VALUE, "1.7976931348623157e308"]) assert.equal(dueOfScore(huge), null, String(huge));
-});
-
-test("isSchedulerNext is true only for the scheduler's CURRENT next run, never for a gate-deferred repeat: job", () => {
-	// BullMQ names a scheduler's run `repeat:<key>:<next>`, `<next>` its score in the repeat zset (isJobSchedulerJob.lua).
-	assert.equal(isSchedulerNext("repeat:nightly:1761400000000", "nightly", "1761400000000"), true);
-	assert.equal(isSchedulerNext("repeat:nightly:1761400000000", "nightly", 1761400000000), true, "a numeric score");
-	// The scheduler minted its successor at this run's pickup, so a deferred earlier run is a real run, in line.
-	assert.equal(isSchedulerNext("repeat:nightly:1761400000000", "nightly", "1761486400000"), false);
-	assert.equal(isSchedulerNext("repeat:nightly:1761400000000", "other", "1761400000000"), false);
-	// Each id is the one the case would match if its own guard were gone (`repeat::<next>`, `repeat:nightly:NaN`,
-	// `repeat:nightly:`, ...), so only the guard can answer false: an id that matched nothing would pass without it.
-	for (const [rjk, next] of [["", "1761400000000"], [null, "1"], [undefined, "1"], ["nightly", ""], ["nightly", null], ["nightly", undefined], ["nightly", Number.NaN], ["nightly", Number.POSITIVE_INFINITY], ["nightly", Number.NEGATIVE_INFINITY], ["nightly", {}]]) {
-		assert.equal(isSchedulerNext(`repeat:${rjk}:${next}`, rjk, next), false, `rjk=${String(rjk)} next=${String(next)}`);
-	}
-	assert.equal(isSchedulerNext(null, "nightly", "1"), false);
-	assert.equal(isSchedulerNext("gh-1", "nightly", "1"), false);
+test("the delayed score and the scheduler's next run are re-exported from the BullMQ leaf, the same functions", () => {
+	// Published here first (`@edgehero/pi-dispatch/defer-reasons`); they moved to bullmq-internals.mjs (issue #761), whose
+	// own test holds their behaviour, and every name a reader of this subpath imported is still here.
+	assert.equal(DELAYED_SCORE_SHIFT, bullmqInternals.DELAYED_SCORE_SHIFT);
+	assert.equal(dueOfScore, bullmqInternals.dueOfScore);
+	assert.equal(isSchedulerNext, bullmqInternals.isSchedulerNext);
+	// The BullMQ leaf's due bound is a copy of this leaf's, since it imports nothing.
+	assert.equal(bullmqInternals.SCORE_DUE_MAX_MS, DEFER_TIME_MAX_MS);
+	assert.equal(dueOfScore(DEFER_TIME_MAX_MS * DELAYED_SCORE_SHIFT), DEFER_TIME_MAX_MS);
+	assert.equal(dueOfScore((DEFER_TIME_MAX_MS + 1) * DELAYED_SCORE_SHIFT), null);
+	// A hand-fired run is never a scheduler's next run, whatever the scheduler's score.
+	assert.equal(isSchedulerNext("manual:nightly:1761400000000", "nightly", "1761400000000"), false);
 });
 
 // --- the spec's hand-written copies of the leaf's tables ------------------------------------------------------------

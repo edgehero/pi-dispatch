@@ -1372,3 +1372,13 @@ test("Fire now uses the served BullMQ scheduler, preserves the cron template, an
     assert.match(check.refused, /hourly limit \(3\)/);
   } finally { await v.done(); }
 });
+
+test("a cron run is rebuilt from its trigger whatever its id's length; only an id outside the cron grammar needs its data", () => {
+  // A record's cron id is read at any length (every release before issue #761 took one), so a run of a 177-character
+  // id, which the triggers loader now refuses, still reads as its trigger's run: the planner then names the trigger.
+  const long = "a".repeat(177);
+  for (const jobId of [`repeat:${long}:1760000000000`, `manual:${long}:1760000000000`, "manual:nightly:1760000000001"]) {
+    assert.equal(rerunRefusalOf({ jobId, kind: "local", outcome: "completed" }, Date.now(), null), null, jobId);
+  }
+  for (const jobId of ["repeat:a:b:1", "local-abc"]) assert.match(rerunRefusalOf({ jobId, kind: "local", outcome: "completed" }, Date.now(), null), /no longer holds/, jobId);
+});

@@ -21,7 +21,7 @@ import { hash16 } from "./fleet-lease.mjs";
 import { endpointsForModel } from "./model-endpoints.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
-import { dollarWindowCaps } from "./dollar-budget.mjs";
+import { dollarWindowCaps, valkeyEndpointTag } from "./dollar-budget.mjs";
 import { concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, projectDollarCapsFor, projectRowFor, rowScopeFor, scopedLedgers } from "./scoped-limits.mjs";
 import { memberScopeOf, projectOf } from "./projects.mjs";
 import { resolveJobSize } from "./job-size.mjs";
@@ -287,7 +287,7 @@ function makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs() }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -1614,6 +1614,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				deploymentMaxCostUsd: settings.maxCostUsd,
 				rawApprovalJob: job.data,
 				redis,
+				// Issue #761: the tag of the Valkey the dollar counters are in, for the record's `dollars.reservedIn`.
+				valkeyTag,
 				// The three spend windows (week/month null when disabled) and the soft-hold band, resolved this
 				// job-start under overlay > env. reserveBudget checks them before the container.
 				caps: { day: settings.dailyCap, week: settings.weeklyCap, month: settings.monthlyCap },
@@ -2232,6 +2234,10 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	for (const queueName of names) {
 		let worker; // referenced by cancelJob/applyConcurrency before assignment; only called later, so the TDZ is fine
 		const processor = makeProcessor({
+			// Issue #761: the endpoint tag of the Valkey this worker's clients dial (`valkeyEndpointTag`), from the judged
+			// connection's own options, the address `parseConnection` read off the pinned URL, so it is the tag doctor computes
+			// from the same URL. Null for a connection with none, which writes no `dollars.reservedIn`.
+			valkeyTag: valkeyEndpointTag(connection),
 			// Bound to THIS worker: a job on the host queue is cancelled by the worker draining that queue,
 			// and the shared handle could not reach it.
 			cancelJob: (id, reason) => worker.cancelJob(id, reason),

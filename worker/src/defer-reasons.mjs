@@ -1,8 +1,8 @@
 /**
  * Why a job waits (issue #737): the closed vocabulary the worker writes into `defer:job:<id>` when it puts a job back
- * on the delayed set, and the rules a reader holds each field to. A LEAF: it imports nothing, so the admin console can
- * import it (`@edgehero/pi-dispatch/defer-reasons`) without pulling the worker's dependencies into its bundle. The
- * writer is `defer-write.mjs`; the reader is the admin's `readWaiting`.
+ * on the delayed set, and the rules a reader holds each field to. A LEAF: it imports nothing but the BullMQ leaf below,
+ * so the admin console can import it (`@edgehero/pi-dispatch/defer-reasons`) without pulling the worker's dependencies
+ * into its bundle. The writer is `defer-write.mjs`; the reader is the admin's `readWaiting`.
  *
  * The record is the worker's own words for its own decision, written at the moment it defers, so a reader never has to
  * guess a reason from a job's data (which it must not read: `INT-WAIT-PROFILES-CONTRACT`) or from its timing. A job
@@ -113,40 +113,11 @@ export const DEFER_TTL_SLACK_MS = 60_000;
 /** A record's lifetime: until the job is due, plus the slack, and never less than the slack. */
 export const deferTtlMs = (untilMs, nowMs) => Math.max(DEFER_TTL_SLACK_MS, untilMs - nowMs + DEFER_TTL_SLACK_MS);
 
-/** BullMQ 5.80.4 stores a delayed job's score as `due * 4096 + counter` (getDelayedScore.lua); the due is the quotient. */
-export const DELAYED_SCORE_SHIFT = 4096;
 /**
- * A delayed zset score's due time in ms, or null for anything that is not a non-negative number whose quotient is an
- * instant a console can draw (at most `DEFER_TIME_MAX_MS`): a score anything with the URL wrote can be any double, and a
- * due time past that range has no date to show. Only a number or a non-empty string is a score: `Number(null)` and
- * `Number("")` are 0, and a ZSCORE of a missing member (null) must read as no due time, never as one at the epoch.
+ * The delayed set's score and a scheduler's next run are BullMQ's facts, so they live in `bullmq-internals.mjs` (issue
+ * #761) and are re-exported here, where they were first published: a reader of this subpath keeps every name.
  */
-export const dueOfScore = (score) => {
-	if (typeof score !== "number" && !(typeof score === "string" && score.trim() !== "")) return null;
-	const n = Number(score);
-	if (!Number.isFinite(n) || n < 0) return null;
-	const due = Math.floor(n / DELAYED_SCORE_SHIFT);
-	return Number.isSafeInteger(due) && due <= DEFER_TIME_MAX_MS ? due : null;
-};
-
-/**
- * Whether a `repeat:` job is its scheduler's CURRENT next run: BullMQ names that run `repeat:<key>:<next>`, where
- * `<next>` is the scheduler's score in the queue's repeat zset (`isJobSchedulerJob.lua`). Only that run is "scheduled,
- * not in line": a `repeat:` job a gate deferred after the scheduler minted its successor is a real run that waits.
- */
-export function isSchedulerNext(jobId, rjk, nextRaw) {
-	if (typeof jobId !== "string" || typeof rjk !== "string" || rjk === "") return false;
-	let next;
-	if (typeof nextRaw === "number") {
-		if (!Number.isFinite(nextRaw)) return false;
-		next = String(nextRaw);
-	} else if (typeof nextRaw === "string" && nextRaw !== "") {
-		next = nextRaw;
-	} else {
-		return false;
-	}
-	return jobId === `repeat:${rjk}:${next}`;
-}
+export { DELAYED_SCORE_SHIFT, dueOfScore, isSchedulerNext } from "./bullmq-internals.mjs";
 
 /** A decimal safe integer, from a number or its string form, or null. */
 function intOf(value) {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { MANUAL_JOB_PREFIX, customJobIdAllowed } from "./bullmq-internals.mjs";
 import { configError } from "./config.mjs";
 import { forgeSpec } from "./forges.mjs";
 
@@ -31,15 +32,18 @@ export function localJobId({ folder, flow, task, minute, provider, model, models
  * must not pay twice). A later minute is a new id, so a deliberate re-run is never blocked.
  *
  * The shape is BullMQ's, not a choice: a custom id that holds a `:` is refused unless it splits into exactly three
- * parts (bullmq `Job.addJob`, "Custom Id cannot contain :"), which is how its own `repeat:<id>:<millis>` passes. A cron
- * id can hold no `:` (the triggers loader refuses one), so this always splits into three. An ISO time would add two
- * more. The `manual:` prefix keeps it apart from a scheduled run's `repeat:` id, which is what tells the event writer
- * (`localEventContext`) there is no scheduled instant to report.
+ * parts (`customJobIdAllowed`, BullMQ's own rule), which is how its own `repeat:<id>:<millis>` passes. A cron id can
+ * hold no `:` (the triggers loader refuses one), so this always splits into three; one that does is refused here, by
+ * that rule, before the queue throws it. An ISO time would add two more. The `manual:` prefix keeps it apart from a
+ * scheduled run's `repeat:` id, which is what tells the event writer (`localEventContext`) there is no scheduled
+ * instant to report.
  */
 export function manualTriggerJobId({ triggerId, now }) {
-	if (typeof triggerId !== "string" || triggerId === "" || triggerId.includes(":")) throw new TypeError("a cron trigger id is a non-empty string with no ':'");
-	const millis = Math.floor(now.getTime() / 60_000) * 60_000;
-	return `manual:${triggerId}:${millis}`;
+	const refused = () => new TypeError("a cron trigger id is a non-empty string with no ':'");
+	if (typeof triggerId !== "string" || triggerId === "") throw refused();
+	const id = `${MANUAL_JOB_PREFIX}:${triggerId}:${Math.floor(now.getTime() / 60_000) * 60_000}`;
+	if (!customJobIdAllowed(id)) throw refused();
+	return id;
 }
 
 /**

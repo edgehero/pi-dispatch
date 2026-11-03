@@ -18,7 +18,7 @@ import { buildAzurePrompt } from "./azure-prompt.mjs";
 import { prepareLocalWorkspace } from "./prepare-local.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { recordedJobSize } from "./job-size.mjs";
-import { scheduledForMillis } from "./repeat-slot.mjs";
+import { scheduledForMillis } from "./bullmq-internals.mjs";
 import { stageLiveFile } from "./live-transcript.mjs";
 
 /**
@@ -242,7 +242,11 @@ function localEventContext(job, queueJobId, findPreviousRun) {
 	if (job.watch) return { source: "watch", trigger: { id: job.watch.ruleId }, fingerprint: job.watch.finding.fingerprint, severity: job.watch.finding.severity, count: job.watch.finding.count, firstSeen: job.watch.finding.firstSeen, lastSeen: job.watch.finding.lastSeen };
 	if (job.parentJobId !== undefined || job.chainDepth !== undefined) return { source: "chain" };
 	if (job.trigger) {
-		const millis = scheduledForMillis(queueJobId);
+		// A slot past a Date's last instant (8.64e15 ms; the id grammar takes 16 digits) is unparseable too: `toISOString`
+		// throws on it, and a hand-written `repeat:<id>:9999999999999999` must not fail the prepare (run-history.mjs's
+		// `queuedAtOf` guards its slot the same way).
+		const slot = scheduledForMillis(queueJobId);
+		const millis = Number.isSafeInteger(slot) && slot >= 0 && slot <= 8.64e15 ? slot : null;
 		return {
 			source: "cron",
 			trigger: job.trigger,

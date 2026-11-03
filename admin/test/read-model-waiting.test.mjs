@@ -254,6 +254,19 @@ test("readWaiting: a scheduler's next run is scheduled, not in line; a repeat: j
   assert.equal(got.byBucket.slot, 2, "the scheduled run is not counted in line");
 });
 
+test("readWaiting: a hand-fired manual: run is never a scheduler's next run, and waits since its own enqueue, never a slot", async () => {
+  const v = fakeValkey();
+  const minute = AT - 600_000;
+  // Even with a scheduler key in its hash and the scheduler's score equal to its number, a `manual:` run is no slot.
+  v.zadd("bull:pi-jobs:repeat", "nightly", minute);
+  addJob(v, "pi-jobs", `manual:nightly:${minute}`, { dueAt: AT + 30_000, fields: { name: "local", rjk: "nightly", timestamp: String(minute - 3_600_000) }, record: rec("host-slot") });
+  const got = await readWaiting(v.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT });
+  assert.deepEqual(got.scheduled, []);
+  const row = got.rows.find((r) => r.jobId === `manual:nightly:${minute}`);
+  assert.equal(row.schedulerNext, false);
+  assert.equal(row.queuedAt, minute - 3_600_000, "its hash's enqueue instant, not its number");
+});
+
 test("readWaiting: a paused queue's lists and its prioritized set wait on the pause; a running queue's prioritized jobs wait for a slot", async () => {
   const v = fakeValkey();
   addJob(v, "pi-jobs@mini1", "gh-p1", { state: "paused" });

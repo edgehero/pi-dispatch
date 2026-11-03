@@ -40,6 +40,7 @@ import { parseSandboxOpenUrl } from "@edgehero/pi-dispatch/opener-protocol";
  */
 import { ANSWER_TEXT_MAX_BYTES } from "@edgehero/pi-dispatch/console-answer";
 import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
+import { SCHEDULER_ID_MAX, SCHEDULER_JOB_PREFIX, cronRunOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { html, isSafeHtml } from "./html.mjs";
 import { ICON_NAMES, SPRITE } from "./pulse-icons.mjs";
 import { STATUS_KINDS, outcomeWord } from "../words.mjs";
@@ -633,21 +634,19 @@ export function spendDots({ hours, max = null, label, startHour = 0 }) {
   return html`<div class="sd" role="img" aria-label="${label}">${columns}</div><p class="axis">${marks.map((i) => html`<span>${hourAt(i)}</span>`)}</p>`;
 }
 
-/** A scheduler's run's id as BullMQ names it, `repeat:<scheduler>:<slot>`; a cron trigger's scheduler is its id. */
-const SCHEDULER_RUN_RE = /^repeat:([A-Za-z0-9._-]{1,200}):(0|[1-9][0-9]{0,15})$/;
-
 /**
  * A cron trigger's run, from its id alone: `{ scheduler, at }`, the scheduler's (the trigger's) id and the instant of
- * the run, its slot in ms (null for one no date can show, past `DEFER_TIME_MAX_MS`), or null for any other id. The id
- * is a key and a number, which says nothing to a person: the overview's waitlist and timeline name the run by its
- * trigger and its time, and keep the id for its title. One copy, here, since the timeline (which imports the kit
+ * the run, its slot in ms (null for one no date can show, past `DEFER_TIME_MAX_MS`), or null for any other id. Only a
+ * scheduler's run, `repeat:<scheduler>:<slot>` as BullMQ names it (`cronRunOf`), with the scheduler bounded as every
+ * surface bounds one (`SCHEDULER_ID_MAX`): a hand-fired `manual:` run's number is the minute it was queued, no slot.
+ * The id is a key and a number, which says nothing to a person: the overview's waitlist and timeline name the run by
+ * its trigger and its time, and keep the id for its title. One copy, here, since the timeline (which imports the kit
  * alone) and the overview's panels both read it.
  */
 export function schedulerRunOf(jobId) {
-  const m = typeof jobId === "string" ? SCHEDULER_RUN_RE.exec(jobId) : null;
-  if (m === null) return null;
-  const at = Number(m[2]);
-  return { scheduler: m[1], at: Number.isSafeInteger(at) && at <= DEFER_TIME_MAX_MS ? at : null };
+  const run = cronRunOf(jobId, { idMax: SCHEDULER_ID_MAX });
+  if (run === null || run.kind !== SCHEDULER_JOB_PREFIX) return null;
+  return { scheduler: run.id, at: Number.isSafeInteger(run.ms) && run.ms <= DEFER_TIME_MAX_MS ? run.ms : null };
 }
 
 /** The narrowest wait bar, px: the Waitlists card's at 375 px, against which a segment's room is judged. */

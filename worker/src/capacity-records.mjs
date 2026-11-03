@@ -164,8 +164,13 @@ export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPA
  * many records of the window from a newer pi-dispatch were left out, and `newerIds`, their job ids, only when there
  * were any. `fs` is `{ readdirSync,
  * statSync, readFileSync }`.
+ *
+ * `deadlineAt` (issue #761, doctor's dollar window check): an instant on `clock` past which no further file is opened,
+ * the result then carrying `cutShort: true`. The loop is synchronous, so a bound raced against it from outside could
+ * not stop it; this one is checked before each file. A read cut short returns fewer records, which for every caller
+ * that passes it only lowers what it adds up. Absent, every file is read, as before.
  */
-export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFileSync, statSync } } = {}) {
+export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFileSync, statSync }, deadlineAt = null, clock = Date.now } = {}) {
 	let names;
 	try {
 		names = fs.readdirSync(logsDir);
@@ -176,8 +181,13 @@ export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFile
 	const records = [];
 	let skipped = 0;
 	const newerIds = [];
+	let cutShort = false;
 	for (const name of names) {
 		if (typeof name !== "string" || !name.endsWith(".json")) continue;
+		if (Number.isFinite(deadlineAt) && clock() > deadlineAt) {
+			cutShort = true;
+			break;
+		}
 		try {
 			const path = join(logsDir, name);
 			const st = fs.statSync(path);
@@ -205,7 +215,7 @@ export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFile
 			// unparseable, or reaped between the listing and the read
 		}
 	}
-	return { records, skipped, unreachable: null, absent: false, ...newerOf(newerIds) };
+	return { records, skipped, unreachable: null, absent: false, ...newerOf(newerIds), ...(cutShort ? { cutShort: true } : {}) };
 }
 
 /**

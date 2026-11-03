@@ -44,7 +44,7 @@ import * as steerInbox from "@edgehero/pi-dispatch/steer-inbox";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { removeQueuedJob } from "@edgehero/pi-dispatch/cancel-state";
 import { jobKey } from "@edgehero/pi-dispatch/wait-state";
-import { isSchedulerNext } from "@edgehero/pi-dispatch/defer-reasons";
+import { QUEUE_KEY, SCHEDULER_ID_RE, cronRunOf, isSchedulerNext, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { scrubControls } from "./panel.mjs";
 import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, readFleetQueues, readPendingAnswer, readRunById, readWaitingRow, RUN_RECORD_UNREAD, targetKeyOf, WAITING_STATES } from "./read-model.mjs";
 import { RECORD_REASON_RE, recordReason } from "./words.mjs";
@@ -408,10 +408,12 @@ function folderRefusal(folder, { localRepoProblemFn, gitDirtyFn, cron = false })
   return null;
 }
 
-/** A cron run's trigger id, from its job id (`repeat:<id>:<millis>` from the scheduler, `manual:<id>:<minute>` by hand). */
+/**
+ * A cron run's trigger id, from its job id (`repeat:<id>:<millis>` from the scheduler, `manual:<id>:<minute>` by hand),
+ * of any length: the run is a record of this deployment's, and every release before issue #761 took any length.
+ */
 function cronTriggerId(jobId) {
-  const m = typeof jobId === "string" ? /^(?:repeat|manual):(.+):\d+$/.exec(jobId) : null;
-  return m ? m[1] : null;
+  return cronRunOf(jobId)?.id ?? null;
 }
 
 /**
@@ -611,9 +613,6 @@ function countOf(n) {
   return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
-/** A cron trigger's id as BullMQ's scheduler key carries it (the loader's charset), or null. */
-const SCHEDULER_KEY_RE = /^[A-Za-z0-9._-]{1,200}$/;
-
 /** A job's kind as BullMQ's job name carries it (`local`, `github`, ...), or null. */
 const JOB_KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -626,8 +625,7 @@ function recoveryRunOf(data) {
 
 /** The scheduler's current next instant for `rjk` in `queueName` (`ZSCORE <queue>:repeat <rjk>`), or null. */
 async function schedulerNextOf(redis, q, rjk) {
-  const key = typeof q?.toKey === "function" ? q.toKey("repeat") : `bull:${q?.name}:repeat`;
-  const got = await redis.zscore(key, rjk);
+  const got = await redis.zscore(queueKeyOf(q, QUEUE_KEY.repeat), rjk);
   return got === null || got === undefined ? null : got;
 }
 
@@ -637,7 +635,8 @@ async function schedulerNextOf(redis, q, rjk) {
  * Returns the refusal sentence, or null when the job is one the console cancels. Reads `.data` for `recoveryOf` alone.
  */
 async function neverStartedRefusal(job, jobId, { redis, q }) {
-  const rjk = typeof job?.repeatJobKey === "string" && SCHEDULER_KEY_RE.test(job.repeatJobKey) ? job.repeatJobKey : null;
+  // The scheduler key as every reader of one in Valkey bounds it (`SCHEDULER_ID_RE`), the console's read model included.
+  const rjk = typeof job?.repeatJobKey === "string" && SCHEDULER_ID_RE.test(job.repeatJobKey) ? job.repeatJobKey : null;
   if (rjk !== null && isSchedulerNext(jobId, rjk, await schedulerNextOf(redis, q, rjk))) return cancelQueuedRefusal("scheduled", { jobId, scheduler: rjk });
   const run = recoveryRunOf(job?.data);
   if (run !== null) return cancelQueuedRefusal("recovery", { jobId, run });

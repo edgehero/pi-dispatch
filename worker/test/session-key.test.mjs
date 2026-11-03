@@ -161,6 +161,11 @@ test("a record's key is the key its job resolved: a forge issue from its target,
 	const cron = sessionKeyFor({ kind: "local", trigger: { id: "nightly.docs" } });
 	assert.equal(sessionKeyOfRecord({ kind: "local", jobId: "repeat:nightly.docs:1760000000000" }), cron);
 	assert.equal(sessionKeyOfRecord({ kind: "local", jobId: "manual:nightly.docs:3" }), cron, "a manual fire of a schedule shares the schedule's session");
+	// Every release before issue #761 took a cron id of any length, so a record's id is read at any length.
+	const long = "n".repeat(500);
+	const longKey = sessionKeyFor({ kind: "local", trigger: { id: long } });
+	assert.equal(sessionKeyOfRecord({ kind: "local", jobId: `repeat:${long}:1760000000000` }), longKey);
+	assert.equal(sessionKeyOfRecord({ kind: "local", jobId: `manual:${long}:1759999980000` }), longKey);
 });
 
 test("a record that cannot name its key resolves none: a pull or merge request, a CLI run, a malformed target", () => {

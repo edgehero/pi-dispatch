@@ -2,6 +2,7 @@ import { makeApprovalStore } from "./approval-state.mjs";
 import { validateFork } from "./fork-job.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
+import { metaKeyPattern, queueNameOfMetaKey } from "./bullmq-internals.mjs";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
@@ -650,7 +651,7 @@ export async function discoverHostQueues(redis, opts = {}) {
  * The kill switch keeps `discoverHostQueues`, which fails open to what it read.
  */
 export async function discoverHostQueuesReporting(redis, { timeoutMs = 2_000, count = 500 } = {}) {
-	const prefix = `bull:${QUEUE}@`;
+	const prefix = `${QUEUE}@`;
 	const names = new Set();
 	let cursor = "0";
 	try {
@@ -667,14 +668,16 @@ export async function discoverHostQueuesReporting(redis, { timeoutMs = 2_000, co
 			// thing on the loop, which is the one case it exists for.
 			let timer;
 			const [next, keys] = await Promise.race([
-				redis.scan(cursor, "MATCH", `${prefix}*:meta`, "COUNT", count),
+				redis.scan(cursor, "MATCH", metaKeyPattern(prefix), "COUNT", count),
 				new Promise((_, reject) => {
 					timer = setTimeout(() => reject(new Error("scan timed out")), Math.max(1, deadline - Date.now()));
 				}),
 			]).finally(() => clearTimeout(timer));
 			cursor = next;
 			for (const key of keys ?? []) {
-				const name = String(key).slice(prefix.length, -":meta".length);
+				const queueName = queueNameOfMetaKey(String(key));
+				if (queueName === null || !queueName.startsWith(prefix)) continue;
+				const name = queueName.slice(prefix.length);
 				// Validated like every other peer-derived name: a key an operator hand-created could hold
 				// anything, and `new Queue` throws on a `:`, which would take the kill switch out entirely.
 				if (WORKER_NAME_RE.test(name)) names.add(name);

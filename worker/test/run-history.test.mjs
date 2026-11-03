@@ -2686,3 +2686,15 @@ test("ignored watch finding has a stable reporting target and public decision wi
 	assert.equal(RUN_KINDS.includes("watch"), false, "reporting a watch is not permission to fork, rerun or forge-dispatch one");
 	for (const ruleId of ["../private", "a".repeat(65), "", null]) assert.equal(buildRecord({ job: { id: "watch-job", data: { kind: "watch", watch: { ruleId } } }, result: { outcome: "policy" } }).target, null);
 });
+
+test("makeFindPreviousRun reads a scheduler of any id length, by both of its prefixes (issue #761)", () => {
+	// Every release before issue #761 took a cron id of any length, so a sidecar's name may be longer than any bound now.
+	const long = "n".repeat(300);
+	const fs = makeHistoryFs({
+		names: [`repeat_${long}_100.json`, `manual_${long}_200.json`, `repeat_${long}x_150.json`],
+		files: { [`repeat_${long}_100.json`]: '{"endedAt":"2026-07-26T01:00:00.000Z"}', [`manual_${long}_200.json`]: '{"endedAt":"2026-07-26T02:00:00.000Z"}', [`repeat_${long}x_150.json`]: '{"endedAt":"WRONG-another-scheduler"}' },
+	});
+	const findPreviousRun = makeFindPreviousRun({ logsDir: "/logs", fs });
+	assert.equal(findPreviousRun({ schedulerId: long, beforeMillis: 199 }), "2026-07-26T01:00:00.000Z");
+	assert.equal(findPreviousRun({ schedulerId: long, beforeMillis: 999 }), "2026-07-26T02:00:00.000Z");
+});

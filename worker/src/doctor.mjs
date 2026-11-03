@@ -97,7 +97,7 @@ import { JOB_NAME_PREFIX, endpointShown, makeDockerEndpointResolver, quotedShown
 import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, EGRESS_ENDPOINT_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEndpointProbe, egressEnv, egressProxyName, egressProxyUrl, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
-import { VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopbackHost, valkeyPasswordProblem, valkeyPortConflict } from "./valkey-auth.mjs";
+import { COMPOSE_VALKEY_OVERRIDE, VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopbackHost, valkeyContainerOwner, valkeyPasswordProblem, valkeyPortConflict } from "./valkey-auth.mjs";
 import { urlShown, valkeyContextFromResolution, valkeyPasswordFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
 import { installedConsoleUnitPath, installedUnitPaths, readUnitSeam, readUnitUser } from "./service.mjs";
@@ -128,7 +128,7 @@ import { doctorModelProposalChecks } from "./doctor-model-proposals.mjs";
  */
 const BUNDLE_DOCTOR_TIMEOUT_MS = 30_000;
 import { readOverlay, readOverlayDocument, resolveSettings, settingsVersionFor } from "./runtime-settings.mjs";
-import { DOLLAR_KEY_PREFIX } from "./dollar-budget.mjs";
+import { DEPLOYMENT_WINDOWS, DOLLAR_KEY_PREFIX, deploymentWindowsAt, dollarWindowCaps, dollarWindowFloors, valkeyEndpointTag } from "./dollar-budget.mjs";
 import { dayKey, monthKey, weekKey } from "./budget.mjs";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "./money.mjs";
 import { cronPlacement, envelopeJobPaths } from "./schedules.mjs";
@@ -139,6 +139,7 @@ import { verifyConsoleAudit } from "./console-audit.mjs";
 import { OTHER } from "./priorities.mjs";
 import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
 import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, secretValuesIn } from "./doctor-results.mjs";
+import { olderStateFindings as olderStateFindingsReal, VALKEY_CONTAINER } from "./older-state.mjs";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -250,6 +251,12 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// Issue #599, phase 2: the capacity line's read of the run history (the run mirror and the logs directory).
 		// Undefined means the default, which reads the deployment's real Valkey and files.
 		readCapacity,
+		// Issue #761: the dollar window check's two reads, this host's records and then the counters (`doctorDollarWindows`),
+		// and the stores an older release left behind (`olderStateFindings`, older-state.mjs). Undefined means the defaults,
+		// which read the deployment's real files, Valkey and Docker.
+		readDollarRecords,
+		readDollarCounters,
+		olderStateFindings,
 		// Issue #708: whether the operator console answers (`probeConsole`, console-probe.mjs). Undefined means the default,
 		// which sends one GET /healthz to a loopback address or the socket, so a test passes its own.
 		consoleProbe,
@@ -441,7 +448,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -3069,6 +3076,15 @@ export async function collectChecks(shellVars, seams) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
 		checks.push({ ok: true, label: `Fleet: could not read the host registry (${printable(fleet.unreachable)})` });
 	}
+	// Issue #761: the pi-dispatch versions the live workers report, and this doctor's own against this host's running
+	// worker, after the peers block so the second is said on a single host too. Workers only: a receiver's status row is
+	// never a doctor input (INT-RECEIVER-STATUS-KEY).
+	checks.push(...fleetVersionChecks({ installed: PACKAGE_VERSION, self: selfRow, selfName: workerNameOf(declaredWorkerName), peers }));
+	// Issue #761: a dollar window counter below what this host's own records settled into it (`doctorDollarWindows`).
+	// Re-opened here, where whether this command may talk to the Valkey is known, from the same Valkey at the address the
+	// worker pins.
+	section("dollars");
+	checks.push(...(await doctorDollarWindows({ seams, env, home, url: valkeyUsable ? valkeyTalkUrl : null, localHost: workerNameOf(declaredWorkerName), fileExists })));
 	section("capacity");
 	// Issue #599, phase 2: how busy each host was over the last 7 days, one fact line per host, never a warning (nothing
 	// decides on it). On every deployment, a single host too: its own files are read when the run mirror is not. Read from
@@ -4671,6 +4687,27 @@ export async function collectChecks(shellVars, seams) {
 					: `mkdir -p ${dirname(settingsFile)} && mv ${legacy}/settings.json ${settingsFile}`,
 			});
 		}
+	}
+	// Issue #761: a store an older release left in a shape this build no longer writes (older-state.mjs), one warning per
+	// finding, each published under this one id (a second is `state.older-2`, `assignCheckIds`). The id is set here, never
+	// in that module, so it is written at one site. The three older-location hints above keep their own words and places.
+	// The container is judged as `up` judges it (`upValkeyContainerImage`): this deployment's, in a folder not handed to
+	// compose, and only where VALKEY_URL names this host, the one place `up` runs a Valkey. The hand-over is read as `up`
+	// reads it, by the override's presence; null where it cannot be, which names no container.
+	// Only where the `.env` reads cleanly through the reader `up` judges its Valkey by (`readValkeyKeys`, under
+	// `deploymentValkeyEnv`), from the file's bytes, and its VALKEY_URL, where it sets one, is the URL judged here. Not
+	// when that reader errors, this shell's VALKEY_URL set or not: under systemd, a NUL or invalid UTF-8 anywhere in the
+	// file (it loads none of it), or, in a file that spells one of its three Valkey keys, a line the service's loader reads
+	// differently or one of those keys on a line it cannot read. `up` refuses each of those on Linux, and elsewhere judges
+	// this shell's value or the default in the file's place. Nor when the file's VALKEY_URL is not `valkeyUrl` (this
+	// shell sets another, which `up` refuses everywhere). Either way the port judged may not be the one the service
+	// dials, and the fix's `pi-dispatch up` would start no Valkey, so the container is not asked about at all.
+	const upValkeyRead = serviceEnvFile ? readValkeyKeys(serviceEnvFile.raw ?? serviceEnvFile.text, { loader: serviceEnvFile.loader, path: serviceEnvFile.path }) : { keys: {} };
+	const valkeyUrlRead = !upValkeyRead.error && (!Object.hasOwn(upValkeyRead.keys, "VALKEY_URL") || upValkeyRead.keys.VALKEY_URL === valkeyUrl);
+	const valkeyContainer = valkeyContainerReader({ spawn, runTimeouts, asked: localUsed && dockerCode === 0 && valkeyUrlRead, cwd, valkeyUrl });
+	const handedOver = typeof fileExists === "function" && typeof cwd === "string" && cwd !== "" ? Boolean(fileExists(join(cwd, COMPOSE_VALKEY_OVERRIDE))) : null;
+	for (const f of await olderStateOf(seams, { cwd, home, valkeyContainer, handedOver })) {
+		checks.push({ id: "state.older", ok: false, warn: true, label: f.label, fix: f.fix });
 	}
 
 	section("env");
@@ -6531,10 +6568,14 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet }) !== "elsewhere";
 		return {
 			// Issue #761: the version this file needs (the higher of what it declares and what its keys need), and the version
-			// the jobs its triggers queue need, from each entry's RAW run keys (`jobDataVersionFor`): for the fleet line that
-			// names a peer that cannot read either. The loader just accepted this text, so a declared version is an integer.
+			// the jobs its triggers queue need (`jobDataVersionFor`): for the fleet line that names a peer that cannot read
+			// either. The loader just accepted this text, so a declared version is an integer. The FILE's need is the raw
+			// keys', since an older loader reads the raw file; the JOBS' need is what the loader KEPT, each parsed entry's
+			// `run`, which is what the builders copy into job data (schedules.mjs, the receiver). A raw run key the loader
+			// drops (a hand-written `run.packageCanary`, which only the Updates page's canary job carries) reaches no job,
+			// so it needs no version, and a line claiming one would send an operator to upgrade for nothing.
 			triggersVersionNeed: Math.max(Number.isSafeInteger(rawDocument?.version) ? rawDocument.version : 1, triggersFileVersionFor(rawDocument, versionTables.triggers)),
-			jobDataVersionNeed: rawEntries.reduce((need, t) => Math.max(need, jobDataVersionFor(t?.run, versionTables.jobData)), 1),
+			jobDataVersionNeed: triggers.reduce((need, t) => Math.max(need, jobDataVersionFor(t?.run, versionTables.jobData)), 1),
 			watchSources,
 			watchRules: triggers.filter(t => t.on.type === "watch").length,
 			secretBundles,
@@ -9182,6 +9223,238 @@ export function connectWithin(client, ms, signal) {
 			(e) => (clearTimeout(t), signal?.removeEventListener?.("abort", stop), reject(e)),
 		);
 	});
+}
+
+// ---- issue #761: what an upgrade leaves behind ----------------------------------------------------------------------
+
+/** A version a registry row may carry: npm's characters, at most 32 of them. Anything else, `""` included, is unknown. */
+const ROW_VERSION_RE = /^[0-9A-Za-z.+-]{1,32}$/;
+const rowVersion = (v) => (typeof v === "string" && ROW_VERSION_RE.test(v) ? v : null);
+
+/**
+ * The fleet's versions (issue #761): one `fleet.versions` check, or none. PURE.
+ *   - `installed`: this doctor's own package version (`PACKAGE_VERSION`), null when it could not be read;
+ *   - `self`: this host's own registry row (its worker's), null when it publishes none; `selfName` its name;
+ *   - `peers`: every other live worker's row.
+ * A WARNING when the live workers do not all report one version (an unreadable one, which a worker publishes as `""`
+ * when it cannot read its own manifest, or a row's value outside the charset, is its own group, "unknown"), or when
+ * this doctor's version is not the one this host's worker row reports. The second is worded as exactly that, two facts,
+ * never "not restarted" and never "the running worker": doctor may run from another install (npx, another checkout),
+ * and then it is that, not the service, which differs; and a row outlives a worker that died without deleting it for up
+ * to its TTL (`HOST_TTL_MS`, 90 s), so what reports the version is the row, not a worker known to run. The headline says
+ * "differ" only of versions it read: two readable ones among the workers, or this doctor's against this host's row.
+ * Where the only other group is "unknown" it says the versions "cannot all be read", since an unread version may be the
+ * same one. The fix is the order of docs/upgrading.md for each host: pause, wait for no active job, restart, resume.
+ * Not `service restart --drain`, which pauses and watches the shared queue only, so a job running on a host queue
+ * (PI_WORKER_NAME) is not waited for. An ok line when peers exist and every one, this host's included, reports one known
+ * version, naming them as the workers with a live row (this host's worker may publish none); nothing on a single host
+ * whose worker row reports this doctor's version, or publishes none, so its output is unchanged. Workers only: the
+ * receiver's status row is never a doctor input (INT-RECEIVER-STATUS-KEY).
+ */
+export function fleetVersionChecks({ installed, self = null, selfName = null, peers = [] }) {
+	const others = Array.isArray(peers) ? peers : [];
+	const rows = [...(self ? [{ name: printable(String(selfName ?? self.name ?? "")), version: rowVersion(self.version) }] : []), ...others.map((p) => ({ name: printable(String(p?.name ?? "")), version: rowVersion(p?.version) }))];
+	const groups = new Map();
+	for (const r of rows) groups.set(r.version ?? "unknown", [...(groups.get(r.version ?? "unknown") ?? []), r.name]);
+	const parts = [];
+	if (groups.size > 1) parts.push(`the live workers report ${groups.size} versions: ${[...groups.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([v, names]) => `${v} (${names.sort().join(", ")})`).join(", ")}`);
+	const mine = rowVersion(installed);
+	const running = self ? rowVersion(self.version) : null;
+	const apart = mine !== null && running !== null && mine !== running;
+	if (apart) parts.push(`this doctor ${mine}, this host's worker row reports ${running}`);
+	const warn = parts.length > 0;
+	const differ = [...groups.keys()].filter((v) => v !== "unknown").length > 1 || apart;
+	const agreed = !warn && others.length > 0 && groups.size === 1 && !groups.has("unknown");
+	if (!warn && !agreed) return [];
+	const fix = `finish the upgrade in one window (docs/upgrading.md): the same version on every host; on each host \`pi-dispatch pause\`, wait until \`pi-dispatch status\` shows no active job, restart the worker, then \`pi-dispatch resume\`${apart ? ". If this doctor is not the install the service runs (npx, another checkout), run that install's doctor instead" : ""}`;
+	const one = rows.length === 1;
+	const ok = `Fleet versions: the ${rows.length} ${one ? "worker with a live row reports" : "workers with a live row report"} ${[...groups.keys()][0]}`;
+	return [{ id: "fleet.versions", ok: !warn, ...(warn ? { warn: true } : {}), label: warn ? `pi-dispatch versions ${differ ? "differ" : "cannot all be read"}: ${parts.join("; ")}` : ok, ...(warn ? { fix } : {}) }];
+}
+
+/** The most the dollar window check may take, its records read and its counter read together. */
+export const DOLLAR_WINDOWS_DOCTOR_TIMEOUT_MS = 5_000;
+
+const WINDOW_WORDS = Object.freeze({ day: { its: "today's", cap: "daily" }, week: { its: "this week's", cap: "weekly" }, month: { its: "this month's", cap: "monthly" } });
+/** A counter value as micro-dollars, sign kept: `-$2.00` for a counter a give-back took below 0. */
+const usdSigned = (micros) => (micros < 0 ? `-$${formatMicros(-micros)}` : `$${formatMicros(micros)}`);
+const utcMinute = (ms) => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+
+/**
+ * The dollar window reset check (issue #761, DES-DOLLAR-RESERVE-AND-SETTLE): whether a deployment dollar window's
+ * counter holds less than this host's own run records settled into it, which only lost history explains (a flushed,
+ * replaced or restored Valkey, an evicted key, a hand edit): the cap then counts from less than was spent and can let
+ * at least the difference more be spent. One warning for every such window, or nothing.
+ *
+ *   1. The deployment's day, week and month caps, overlay over env (`deploymentSettingsOf`, `dollarWindowCaps`, which
+ *      throws on a value the worker refuses: that is its own line, and this check says nothing). None set, or no Valkey
+ *      this command may talk to (`url` null): nothing is read.
+ *   2. This host's records FIRST (`seams.readDollarRecords`; default: `readLocalWindow` from the start of the earliest
+ *      active window, a file at a time until the bound passes), summed per window by `dollarWindowFloors` over this
+ *      host's name and the endpoint tag of `url` (`valkeyEndpointTag`, the worker's).
+ *   3. THEN the counters of the windows whose sum is above 0 (`seams.readDollarCounters`; default: one MGET). In this
+ *      order every record read was settled before its counter was read, so a counter read after it cannot be
+ *      legitimately below it.
+ *   4. A counter that is absent, or an integer below the sum (a negative one included), is a finding; one that is not
+ *      an integer is skipped.
+ * Both default reads share one bound (`DOLLAR_WINDOWS_DOCTOR_TIMEOUT_MS`) and are refused in tests
+ * (`forbidDefaultDollarWindowRead`). A read that fails or runs out of time says nothing: this check claims a reset only
+ * where it sees one, and its silence is never a claim that nothing was lost. It sees this host's share only (another
+ * host's records are not here) and only the deployment windows (a scoped, project or model key is a hash per ledger),
+ * from the records written since issue #761 (`dollars.reservedIn`).
+ */
+export async function doctorDollarWindows({ seams = {}, env = {}, home, url, localHost, fileExists = existsSync }) {
+	// Resolved first, then judged: `deploymentSettingsOf` never throws and hands back values as written, which
+	// `dollarWindowCaps` may refuse.
+	const settings = deploymentSettingsOf(env, settingsFilePath(env, home), fileExists);
+	let caps = null;
+	try {
+		caps = dollarWindowCaps(settings);
+	} catch {
+		return [];
+	}
+	const valkey = url ? valkeyEndpointTag(url) : null;
+	if (caps === null || valkey === null) return [];
+	try {
+		const nowMs = (typeof seams.wallClock === "function" ? seams.wallClock : Date.now)();
+		const at = deploymentWindowsAt(nowMs);
+		const active = DEPLOYMENT_WINDOWS.filter((w) => caps[w] !== null && caps[w] !== undefined && at[w].bucket !== null).map((w) => ({ window: w, cap: caps[w], ...at[w] }));
+		if (active.length === 0) return [];
+		// The bound runs on the real clock, never the injected one a test fixes: it measures how long this read takes.
+		const clock = typeof seams.dollarWindowsClock === "function" ? seams.dollarWindowsClock : Date.now;
+		const deadlineAt = clock() + (seams.dollarWindowsTimeoutMs ?? DOLLAR_WINDOWS_DOCTOR_TIMEOUT_MS);
+		const read = await (seams.readDollarRecords ?? defaultReadDollarRecords)({ logsDir: logsDirPath(env, home), sinceMs: Math.min(...active.map((w) => w.startMs)), deadlineAt, clock });
+		const floors = dollarWindowFloors(read?.records, { host: localHost, valkey, buckets: Object.fromEntries(active.map((w) => [w.window, w.bucket])) });
+		const due = active.filter((w) => floors[w.window] > 0);
+		if (due.length === 0) return [];
+		const counters = await (seams.readDollarCounters ?? defaultReadDollarCounters)({ url, keys: due.map((w) => w.key), deadlineAt, clock });
+		if (!Array.isArray(counters) || counters.length !== due.length) return [];
+		const found = [];
+		due.forEach((w, i) => {
+			const raw = counters[i];
+			if (raw === null || raw === undefined) return void found.push({ ...w, floor: floors[w.window], counter: null });
+			const text = typeof raw === "number" ? String(raw) : raw;
+			if (typeof text !== "string" || !/^-?\d{1,16}$/.test(text) || !Number.isSafeInteger(Number(text))) return;
+			if (Number(text) < floors[w.window]) found.push({ ...w, floor: floors[w.window], counter: Number(text) });
+		});
+		return dollarWindowResetChecks(found);
+	} catch (err) {
+		if (err?.[FORBIDDEN_READ]) throw err;
+		return [];
+	}
+}
+
+/**
+ * The one `dollars.window-reset` warning for `found` (`doctorDollarWindows`), each `{ window, key, cap, floor, counter,
+ * ttlSeconds, endMs }` (`counter` null for an absent key), or none for an empty list. PURE. It says "at least" and
+ * "this host's" wherever it gives an amount: the other hosts' records are not here, so the real shortfall can only be
+ * larger. The fix puts the shortfall back (`INCRBY`, then `EXPIRE` with the window's own TTL, printed, and without
+ * `NX`, which an operator's older Valkey may not take), lowers the cap, or pauses until the window ends. On a fleet
+ * the amount is the sum of every host's settled share less what the counter holds, never the sum of each host's
+ * shortfall: each shortfall subtracts the counter, so adding them subtracts it once per host and puts back too little.
+ * The sum is in micro-dollars, as `INCRBY` takes it, while the label names dollars.
+ */
+export function dollarWindowResetChecks(found) {
+	if (!Array.isArray(found) || found.length === 0) return [];
+	const parts = found.map((f) => {
+		const short = f.floor - (f.counter ?? 0);
+		const holds = f.counter === null ? "is missing" : `holds ${usdSigned(f.counter)}`;
+		return `${WINDOW_WORDS[f.window].its} (${f.key}) ${holds} while this host's own run records settled $${formatMicros(f.floor)} into it, so the $${formatMicros(f.cap)} ${WINDOW_WORDS[f.window].cap} cap counts at least $${formatMicros(short)} too little`;
+	});
+	const put = found.map((f) => `\`valkey-cli INCRBY ${f.key} ${f.floor - (f.counter ?? 0)}\` then \`valkey-cli EXPIRE ${f.key} ${f.ttlSeconds}\``);
+	const ends = found.map((f) => `${WINDOW_WORDS[f.window].its} at ${utcMinute(f.endMs)}`);
+	const one = found.length === 1;
+	return [
+		{
+			id: "dollars.window-reset",
+			ok: false,
+			warn: true,
+			label: `${one ? "A dollar window counter is" : "Dollar window counters are"} below what this host's own runs settled into ${one ? "it" : "them"}, so ${one ? "its" : "their"} history was lost (a flushed, replaced or restored Valkey, an evicted key, or a hand edit) and the cap can let at least that much more be spent: ${parts.join("; ")}. Other hosts' runs are not counted here`,
+			fix: `put back at least this host's share for the rest of the window: ${put.join("; ")} (on a fleet, run doctor on every host first, then \`INCRBY\` the sum, in micro-dollars, of what each says its records settled, less what the counter holds now), or lower the cap by what was already spent, or run \`pi-dispatch pause\` and resume once the window ends (${ends.join("; ")}). A counter lowered on purpose is named here until its window ends (docs/costs.md, "When a counter resets")`,
+		},
+	];
+}
+
+/**
+ * Set by the test helper (test/helpers/doctor.mjs), as `forbidDefaultCapacityRead` is: from then on the dollar window
+ * check's DEFAULT reads throw an error doctor does not swallow, so a test that reaches the developer's real logs
+ * directory and Valkey fails loudly instead of judging whatever that machine holds.
+ */
+let defaultDollarWindowReadForbidden = false;
+export function forbidDefaultDollarWindowRead() {
+	defaultDollarWindowReadForbidden = true;
+}
+const forbiddenDollarRead = () => Object.assign(new Error("doctor reached its real dollar window read in a test: pass readDollarRecords and readDollarCounters"), { [FORBIDDEN_READ]: true });
+
+/** The default records read: this host's files, a file at a time until `deadlineAt` (`readLocalWindow`). */
+async function defaultReadDollarRecords({ logsDir, sinceMs, deadlineAt, clock }) {
+	if (defaultDollarWindowReadForbidden) throw forbiddenDollarRead();
+	const { readLocalWindow } = await import("./capacity-records.mjs");
+	return readLocalWindow(logsDir, { sinceMs, deadlineAt, clock });
+}
+
+/**
+ * The default counters read: one MGET through a fail-fast client, its connection and its command each bounded by what
+ * is left before `deadlineAt`, so the whole check stays inside its bound. Null when it could not be read.
+ */
+async function defaultReadDollarCounters({ url, keys, deadlineAt, clock }) {
+	if (defaultDollarWindowReadForbidden) throw forbiddenDollarRead();
+	const left = () => Math.max(0, deadlineAt - clock());
+	if (left() === 0) return null;
+	try {
+		return await withDoctorClient(url, (client) => boundedOp(client.mget(...keys), left()), { connectTimeoutMs: left() });
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The findings of older-state.mjs (`olderStateFindings({ cwd, home, readFile, valkeyContainer, handedOver })`, a promise
+ * of `{ store, label, fix }` each), through `seams.olderStateFindings` when given. Never throws: an answer of another
+ * shape is no finding, and every label and fix is made printable here, the printer not relying on it.
+ */
+async function olderStateOf(seams, { cwd, home, valkeyContainer, handedOver }) {
+	try {
+		const find = typeof seams.olderStateFindings === "function" ? seams.olderStateFindings : olderStateFindingsReal;
+		const found = await find({ cwd, home, readFile: (path) => readFileSync(path, "utf8"), valkeyContainer, handedOver });
+		return (Array.isArray(found) ? found : []).filter((f) => typeof f?.label === "string" && typeof f?.fix === "string").map((f) => ({ label: printable(f.label), fix: printable(f.fix) }));
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * older-state.mjs's `valkeyContainer`: `valkeyContainerOwner`'s verdict on the container `up` starts the deployment's
+ * Valkey as (`docker container inspect pi-dispatch-valkey`, judged by up's own rule with this folder, as given and as its
+ * real path, and VALKEY_URL's port), or null; it never throws. A container docker cannot describe, or none, is a verdict
+ * that is not `ours`, which names nothing. Null itself, so the container is not asked about at all, unless:
+ *   - `asked`: this deployment runs jobs on Docker and the daemon answered `docker info`, since doctor spawns no docker
+ *     anywhere else (issue #433), and VALKEY_URL was read as the service reads it (the caller's gate);
+ *   - and VALKEY_URL names this host by an IPv4 loopback address or `localhost`, where `up` runs a Valkey (it adds none
+ *     for another host's, and refuses an IPv6 literal). Elsewhere a `pi-dispatch-valkey` here is not the queue the
+ *     worker dials, whatever port it publishes, and the fix would remove it.
+ */
+function valkeyContainerReader({ spawn, runTimeouts, asked, cwd, valkeyUrl }) {
+	if (!asked || typeof cwd !== "string" || cwd === "") return null;
+	const target = valkeyTarget(valkeyUrl);
+	if (target.error || !isLoopbackHost(target.host) || target.host.includes(":")) return null;
+	let deployment = cwd;
+	try {
+		deployment = realpathSync(cwd);
+	} catch {
+		// Unresolvable: the folder as given, as `up` does.
+	}
+	const query = async (cmd, args) => {
+		const r = await runCmdCapture(spawn, cmd, args, { stdoutOnly: true, timeoutMs: runTimeouts?.cmd ?? RUN_TIMEOUTS.cmd });
+		return { code: r.code, stdout: r.output, stderr: "" };
+	};
+	return async () => {
+		try {
+			return await valkeyContainerOwner(VALKEY_CONTAINER, { dirs: [deployment, cwd], port: target.port, query });
+		} catch {
+			return null;
+		}
+	};
 }
 
 /**

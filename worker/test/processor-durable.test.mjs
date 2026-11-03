@@ -402,6 +402,23 @@ test("a recorded hold is settled through the ledger; a 'not-held' answer leaves 
 	assert.equal(floor.redis.store.get(DAY), 2 * USD, "no window key moved");
 });
 
+test("issue #761: a hold the ledger did not move (settle or release) keeps every key at the floor, and reservedIn names them", async () => {
+	const tokens = { input: 1, output: 1, total: 2, cost: 0.5, metered: true, unresolved: 0, unpriced: 0, childTotal: 0, childProcesses: 0, unmeteredChildren: 0, costCapMicros: 2 * USD, costRefused: 0, boundExceeded: 0, longContext: 0, costUnjudged: 0, costUnanswered: 0, costUnreported: 0 };
+	const usage = { v: 1, piAi: null, truncated: 0, models: [{ provider: "anthropic", model: "m", calls: 1, input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 2, cost: 0.5, unpriced: 0 }] };
+	const valkeyTag = "0123456789abcdef";
+	const settled = fakeLedger();
+	settled.settle = async () => "not-held";
+	const s = deps({ dollarCaps: { day: 10 * USD, week: null, month: null }, valkeyTag, runContainer: async () => ({ code: 0, aborted: false, exitLineCode: 0, tokens, usage }), runBudgetLedger: settled });
+	const r = await runJob({ ...job, maxCostMicros: 2 * USD }, s.deps);
+	assert.deepEqual(r.dollars, { reservedMicros: 2 * USD, settledMicros: 2 * USD, basis: "floor", modelBasis: null, reservedIn: { day: "2026-10-07", valkey: valkeyTag } });
+	assert.equal(s.redis.store.get(DAY), 2 * USD);
+	const released = fakeLedger();
+	released.release = async () => "not-held";
+	const n = deps({ dollarCaps: { day: 10 * USD, week: null, month: null }, valkeyTag, runContainer: async () => ({ code: 125, aborted: false, tokens: null }), runBudgetLedger: released });
+	await assert.rejects(runJob({ ...job, maxCostMicros: 2 * USD }, n.deps), (e) => e instanceof InfraRetry && e.dollars?.basis === "floor" && e.dollars.reservedIn?.day === "2026-10-07");
+	assert.equal(n.redis.store.get(DAY), 2 * USD, "not given back: someone else finished the hold");
+});
+
 // ── exits ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 function checkpointHandle(calls, { exit = { seq: 5 }, close = { written: 3, failed: 1, skipped: 2, lastSeq: 5 } } = {}) {

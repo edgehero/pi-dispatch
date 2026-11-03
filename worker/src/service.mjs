@@ -61,7 +61,7 @@ import { resolveSetupWorkerEntry, setupCachePath } from "./setup-host-entry.mjs"
 import { deploymentServiceEnv } from "./service-env.mjs";
 import * as nodeFs from "node:fs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
-import { VALKEY_HEALTH_SCRIPT, VALKEY_PASSWORD_KEY, VALKEY_START_SCRIPT, dollarsDoubled, newValkeyPassword, valkeyPasswordDecision } from "./valkey-auth.mjs";
+import { VALKEY_HEALTH_SCRIPT, VALKEY_IMAGE, VALKEY_PASSWORD_KEY, VALKEY_START_SCRIPT, dollarsDoubled, newValkeyPassword, valkeyPasswordDecision } from "./valkey-auth.mjs";
 import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, MODEL_ENDPOINTS_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, valkeyEnvPath, valkeyPasswordRestartWarning, workerUnitDeps } from "./podman-stack.mjs";
 
 /** This command's default fs seam: its own calls, and every call the `.env` writer makes (`ENV_WRITER_FS`, issue #522). */
@@ -246,6 +246,8 @@ export const TEMPLATE_PINS = {
 	// (a containers.conf `netns = "host"` would otherwise put it in the host namespace, measured).
 	"pi-dispatch-valkey.network": ["NetworkName=pi-dispatch-valkey"],
 	"pi-dispatch-valkey.container": [
+		// Issue #761: the pinned Valkey, fully qualified for Podman's short-name rule, from the one constant.
+		`Image=docker.io/${VALKEY_IMAGE}`,
 		"ContainerName=pi-dispatch-valkey",
 		"Network=pi-dispatch-valkey.network",
 		"PublishPort=127.0.0.1:6379:6379",

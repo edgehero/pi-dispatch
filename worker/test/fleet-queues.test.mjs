@@ -133,6 +133,13 @@ test("host queues are discoverable from the keyspace, which outlives the host", 
 	});
 });
 
+test("the keyspace read asks for BullMQ's meta key of every host queue, and reads each name back off its key", async () => {
+	const asked = [];
+	const redis = { async scan(cursor, ...args) { asked.push(args); return ["0", ["bull:pi-jobs@mini1:meta", "bull:pi-jobs:meta", "bull:pi-jobs@:meta", "bull:pi-jobs@mini2:x:meta"]]; } };
+	assert.deepEqual(await discoverHostQueues(redis), [hostQueueName("mini1")]);
+	assert.deepEqual(asked, [["MATCH", "bull:pi-jobs@*:meta", "COUNT", 500]]);
+});
+
 test("a hand-created key with an illegal name is refused here too", async () => {
 	// `new Queue` throws on a `:`, and the throw would happen mid-enumeration -- so an unvalidated name
 	// read out of the keyspace takes the kill switch out just as surely as one read out of the registry.

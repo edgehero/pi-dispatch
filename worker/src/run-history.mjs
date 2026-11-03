@@ -8,6 +8,7 @@ import * as nodeFs from "node:fs";
 import { scrubCredentials } from "./redact.mjs";
 import { basename, join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
+import { reservedInOf } from "./dollar-budget.mjs";
 import { isForgeKind, targetSeparator } from "./forges.mjs";
 import { MODEL_REF_PATTERN as USAGE_ID_PATTERN } from "./model-ref.mjs";
 import { modelListProblem } from "./model-ref.mjs";
@@ -16,7 +17,7 @@ import { isProjectId } from "./project-id.mjs";
 import { HOST_CPUS_MAX, HOST_MEMORY_MAX_MIB, HOST_SLOTS_MAX, recordedJobSize } from "./job-size.mjs";
 import { waitArmed } from "./wait-for.mjs";
 import { secretProfileNeeded } from "./capabilities.mjs";
-import { scheduledForMillis } from "./repeat-slot.mjs";
+import { cronRunPrefixes, scheduledForMillis } from "./bullmq-internals.mjs";
 import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
 import { recordReasonOf } from "./record-reason.mjs";
 import { WATCH_ID_RE } from "./watch-contract.mjs";
@@ -1162,7 +1163,9 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// is the serialisation order. `{ reservedMicros, settledMicros, basis, modelBasis }`: two integers of micro-dollars,
 		// one fixed token (`metered` | `floor` | `refunded` | `unreserved`), and `modelBasis`, how the per-model windows
 		// settled (`metered` | `floor` | `refunded`, null when the job held none). Null when no dollar window applied to the job (no dollar setting, or a
-		// refusal before the reservation step), which is every record of a deployment that sets none.
+		// refusal before the reservation step), which is every record of a deployment that sets none. Issue #761: then
+		// `reservedIn`, `{ day?, week?, month?, valkey }`, only where the job's settled amount is in a deployment window
+		// (`deploymentWindowsOf`), for doctor's reset check; absent otherwise.
 		dollars: dollarsOf(source.dollars),
 		...(recordedWatchDecision(data.watch?.decision ?? source.decision) ? { decision: recordedWatchDecision(data.watch?.decision ?? source.decision) } : {}),
 		...(approvalRecordOf(source.approval) ? { approval: approvalRecordOf(source.approval) } : {}),
@@ -1443,11 +1446,17 @@ const DOLLAR_BASES = new Set(["metered", "floor", "refunded", "unreserved"]);
 // How the job's MODEL windows settled (issue #502 part 6); anything else, null included, records null.
 const MODEL_BASES = new Set(["metered", "floor", "refunded"]);
 
-/** The record's `dollars`, rebuilt from named fields only, or null when the source carries none or a malformed one. */
+/**
+ * The record's `dollars`, rebuilt from named fields only, or null when the source carries none or a malformed one.
+ * `reservedIn` (issue #761: which deployment windows the settled amount is in, and the Valkey's endpoint tag) is kept
+ * only as `reservedInOf` rebuilds it, dates and a hash, and is absent otherwise, so the record stays PII-free and a
+ * record of a job that reserved in no deployment window keeps the shape it had.
+ */
 function dollarsOf(d) {
 	if (d === null || typeof d !== "object") return null;
 	if (!Number.isSafeInteger(d.reservedMicros) || d.reservedMicros < 0 || !Number.isSafeInteger(d.settledMicros) || d.settledMicros < 0 || !DOLLAR_BASES.has(d.basis)) return null;
-	return { reservedMicros: d.reservedMicros, settledMicros: d.settledMicros, basis: d.basis, modelBasis: MODEL_BASES.has(d.modelBasis) ? d.modelBasis : null };
+	const reservedIn = reservedInOf(d.reservedIn);
+	return { reservedMicros: d.reservedMicros, settledMicros: d.settledMicros, basis: d.basis, modelBasis: MODEL_BASES.has(d.modelBasis) ? d.modelBasis : null, ...(reservedIn ? { reservedIn } : {}) };
 }
 
 /**
@@ -1803,7 +1812,7 @@ export function makeFindPreviousRun({ logsDir, fs = nodeFs }) {
 		try {
 			if (typeof beforeMillis !== "number" || !Number.isFinite(beforeMillis)) return null;
 			const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			const pattern = new RegExp(`^(?:${escape(sanitizeJobId(`repeat:${schedulerId}:`))}|${escape(sanitizeJobId(`manual:${schedulerId}:`))})(\\d+)\\.json$`);
+			const pattern = new RegExp(`^(?:${cronRunPrefixes(schedulerId).map((prefix) => escape(sanitizeJobId(prefix))).join("|")})(\\d+)\\.json$`);
 			let best = null;
 			for (const name of fs.readdirSync(logsDir)) {
 				const m = pattern.exec(name);

@@ -56,7 +56,7 @@ jobs:
     timeout-minutes: 40
     services:
       gateway-valkey:
-        image: valkey/valkey:8.0.2
+        image: valkey/valkey:8.1
         ports:
           - 16389:6379
         options: >-

@@ -59,6 +59,7 @@ import {
 } from "../src/read-model.mjs";
 import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
+import { SCHEDULER_ID_MAX } from "@edgehero/pi-dispatch/bullmq-internals";
 
 // In-memory fs for the triggers write tests, extended with the lock methods the shared writer took on
 // in #231 (openSync "wx" + statSync mtime + unlinkSync): the fake models the lock as a file entry with
@@ -505,7 +506,12 @@ test("readSchedulers computes overdueMs for a next in the past", async () => {
 test("a scheduler's id and job name are read in the cron id charset and at most SCHEDULER_NAME_MAX characters, else null, and the entry stays", async () => {
   // Anything holding the Valkey's URL can add a scheduler, and every surface prints its id in running text: a planted
   // 3,000-character one is no id the triggers loader takes, so it is read as no id, never cut to one that names nothing.
-  assert.equal(SCHEDULER_NAME_MAX, CRON_ID_MAX);
+  // The bound is every Valkey reader's (SCHEDULER_ID_MAX): wider than the loader's, so a scheduler an earlier release
+  // made for a longer cron id (any length before issue #761) is still named, and an operator can find it to remove it.
+  assert.equal(SCHEDULER_NAME_MAX, SCHEDULER_ID_MAX);
+  assert.ok(SCHEDULER_NAME_MAX > CRON_ID_MAX);
+  const earlier = mapSchedulers([{ key: "e".repeat(CRON_ID_MAX + 1), name: "local", pattern: "0 3 * * *", next: 1 }], 0);
+  assert.equal(earlier[0].key, "e".repeat(CRON_ID_MAX + 1), "a key the loader now refuses is still named");
   const now = 1_000_000;
   const at = (n) => "n".repeat(n);
   const raw = [
@@ -1792,6 +1798,16 @@ test("cronRunStats counts a hand-fired run (manual:<id>:<millis>, issue #505) as
   assert.deepEqual(byId.nightly, { runs: 2, lastOutcome: "failed", lastEndedAt: "2026-08-02T00:00:00.000Z" }, "the manual run counts and is the last; a prefix id, a non-digit tail and another prefix do not");
 });
 
+test("cronRunStats reads a record's cron id at any length: every release before issue #761 took one", () => {
+  const long = "n".repeat(500);
+  const records = [
+    runRec({ jobId: `repeat:${long}:100`, kind: "local", outcome: "completed", endedAt: "2026-08-01T00:00:00.000Z" }),
+    runRec({ jobId: `manual:${long}:200`, kind: "local", outcome: "failed", endedAt: "2026-08-02T00:00:00.000Z" }),
+  ];
+  const { byId } = cronRunStats({ records, schedulerIds: [long] });
+  assert.deepEqual(byId[long], { runs: 2, lastOutcome: "failed", lastEndedAt: "2026-08-02T00:00:00.000Z" });
+});
+
 test("cronRunStats degrades to an empty fold on bad input", () => {
   assert.deepEqual(cronRunStats({}), { byId: {} });
   assert.deepEqual(cronRunStats({ records: null, schedulerIds: ["a"] }), { byId: {} });
@@ -1868,6 +1884,14 @@ test("attributeRunsToTriggers: a hand-fired run (manual:<id>:<millis>, issue #50
   assert.deepEqual(byJobId["manual:nightly:1752480000000"], { key: "trigger:0", index: 0, type: "cron", label: "nightly 0 3 * * *" });
   assert.equal(byJobId["manual:nightlyx:1"], undefined, "a prefix id does not cross-match");
   assert.equal(byJobId["other:nightly:1"], undefined, "only repeat: and manual: name a scheduler");
+});
+
+test("attributeRunsToTriggers reads a record's cron id at any length: every release before issue #761 took one", () => {
+  const long = "n".repeat(500);
+  const triggers = [displayTrigger({ index: 0, type: "cron", id: long, pattern: "0 3 * * *" })];
+  const { byJobId } = attributeRunsToTriggers({ records: [runRec({ jobId: `repeat:${long}:1`, kind: "local" }), runRec({ jobId: `manual:${long}:60000`, kind: "local" })], triggers });
+  assert.equal(byJobId[`repeat:${long}:1`]?.key, "trigger:0");
+  assert.equal(byJobId[`manual:${long}:60000`]?.key, "trigger:0");
 });
 
 test("attributeRunsToTriggers: a disagreeing or missing index on a FORGE record is an explicit unattributed entry, never silence", () => {

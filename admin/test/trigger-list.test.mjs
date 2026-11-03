@@ -18,6 +18,10 @@ test("saved index, type and forge attribute history; a shared flow or mismatched
   assert.equal(recordMatchesTrigger(record({ jobId: "repeat:nightly:123", kind: "local" }), cron), true);
   assert.equal(recordMatchesTrigger(record({ jobId: "manual:nightly:456", kind: "local" }), cron), true);
   for (const over of [{ jobId: "repeat:other:123", kind: "local" }, { jobId: "repeat:nightly:123", kind: "github" }, { jobId: "local-cli", kind: "local" }]) assert.equal(recordMatchesTrigger(record(over), cron), false);
+  // A record's cron id is read at any length: every release before issue #761 took a cron id of any length.
+  const long = { ...cron, id: "n".repeat(500) };
+  assert.equal(recordMatchesTrigger(record({ jobId: `repeat:${long.id}:123`, kind: "local" }), long), true);
+  assert.equal(recordMatchesTrigger(record({ jobId: `manual:${long.id}:60000`, kind: "local" }), long), true);
 });
 
 test("statistics use the 30-day range and separate UTC Monday spend from the rolling strip, deduplicating newest records", () => {
