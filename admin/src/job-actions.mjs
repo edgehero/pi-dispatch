@@ -43,6 +43,7 @@ import { runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import * as steerInbox from "@edgehero/pi-dispatch/steer-inbox";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { removeQueuedJob } from "@edgehero/pi-dispatch/cancel-state";
+import { keepModelAttempt, modelAttemptIdOf } from "@edgehero/pi-dispatch/model-attempts";
 import { jobKey } from "@edgehero/pi-dispatch/wait-state";
 import { QUEUE_KEY, SCHEDULER_ID_RE, cronRunOf, isSchedulerNext, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { scrubControls } from "./panel.mjs";
@@ -200,9 +201,29 @@ function expectProblem(expect) {
  *
  * Found by id with `getJob` on every fleet queue, `queue` (the preview's, optional) first: a job far below the bulk
  * preview's newest-100 window is still found and acted on.
+ *
+ * The job's model attempt key (issue #812) keeps no expiry after the retry: `retryKeepingAttempt`.
  */
 export async function retryFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, touchStore = null, touchOutbox = null, now = Date.now } = {}) {
-  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", act: (job) => job.retry("failed") })).single;
+  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", act: (job, redis) => retryKeepingAttempt(job, redis, timeoutMs) })).single;
+}
+
+/**
+ * BullMQ's retry of a failed job, then its model attempt key kept (issue #812, worker model-attempts.mjs). The failure
+ * gave the key an expiry (`MODEL_ATTEMPT_FINISHED_TTL_MS`), and only the processor's next model selection writes it
+ * again without one; until then the retried job can wait for any time (a paused queue or pause window, a busy scope, a
+ * hold for a newer release), and a key that expired meanwhile refuses it `model-failover-no-candidate`. So the expiry is
+ * taken off (`PERSIST`, bounded by `timeoutMs`, never a throw) once BullMQ has put the job back, never before: a retry
+ * BullMQ refuses leaves the failed job's key to its expiry. The id is the processor's, the job's queue name and id. The
+ * client is the job's queue's own, the one the retry was sent on, so the `PERSIST` follows it. The residuals, stated: a
+ * `PERSIST` that fails leaves the expiry, as before this; one the processor's selection beats is a no-op (that write
+ * already kept none); and a job that ran and finished inside the one round trip between the two is left without the
+ * expiry its finish gave it.
+ */
+async function retryKeepingAttempt(job, redis, timeoutMs) {
+  await job.retry("failed");
+  if (typeof job?.queueName !== "string" || job.queueName === "") return;
+  await keepModelAttempt(redis, modelAttemptIdOf(job.queueName, job.id), timeoutMs);
 }
 
 /**
@@ -225,7 +246,7 @@ export async function removeFailedJob({ url, jobId, expect, queue = null, redisF
  * list that is not one, or `{ unreachable }` when the fleet could not be read at all.
  */
 export async function retryFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, touchStore = null, touchOutbox = null, now = Date.now } = {}) {
-  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", act: (job) => job.retry("failed") }));
+  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", act: (job, redis) => retryKeepingAttempt(job, redis, timeoutMs) }));
 }
 
 /** Remove every job a bulk preview listed (issue #642), `retryFailedJobs`' shapes and per-job re-check. */
@@ -246,7 +267,8 @@ function bulkOf(res) {
 
 /**
  * The one body behind the four failed-job actions: one fleet discovery, one re-check and one act per job, every queue
- * closed after. `single` is the first result for the single-job spellings.
+ * closed after. `single` is the first result for the single-job spellings. A tracked act (`touchCause`, the retries) is
+ * given the job's queue's client beside the job.
  */
 async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, timeoutMs, act, touchCause = null, touchStore = null, touchOutbox = null, now = Date.now }) {
   if (!Array.isArray(jobs)) return { invalid: "jobs must be the preview's list", single: { invalid: "jobs must be the preview's list" } };
@@ -272,7 +294,7 @@ async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, time
           const q = fleet.queueOf(found.queue);
           const redis = q.client ? await q.client : null;
           const store = touchStore ?? (redis ? makeTouchStore({ redis, now }) : null);
-          return trackTouchAction({ store, outbox: touchOutbox, event: { runId: jobId, cause: touchCause, at: now(), endedAt: entry.finishedOn ?? undefined, scopeId: touchScopeOf(job.data), nonce: `retry:${jobId}:${entry.attemptsMade}:${entry.finishedOn}` }, act: async () => { await act(job); return { ok: true }; } });
+          return trackTouchAction({ store, outbox: touchOutbox, event: { runId: jobId, cause: touchCause, at: now(), endedAt: entry.finishedOn ?? undefined, scopeId: touchScopeOf(job.data), nonce: `retry:${jobId}:${entry.attemptsMade}:${entry.finishedOn}` }, act: async () => { await act(job, redis); return { ok: true }; } });
         } : act;
         // Issue #796: a canary is third-party code a person chose to run once, after a preview that said so. A retry would install it again, its tree resolved again, behind a
         // dialog about retrying a job, and a model holds the retry tool. A person starts another from the Updates page.

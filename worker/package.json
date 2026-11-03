@@ -77,6 +77,7 @@
     "./model-proposal-protocol": "./src/model-proposal-protocol.mjs",
     "./model-ref": "./src/model-ref.mjs",
     "./model-failover-protocol": "./src/model-failover-protocol.mjs",
+    "./model-attempts": "./src/model-attempts.mjs",
     "./schedules": "./src/schedules.mjs",
     "./env-file": "./src/env-file.mjs",
     "./service-env": "./src/service-env.mjs",

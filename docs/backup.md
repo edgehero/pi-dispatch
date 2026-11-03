@@ -78,7 +78,7 @@ behaves as before; the rest is state that a lost or older volume takes with it.
 | `answerer:*` | Answer drafts for parked questions |
 | `touch:*`, `zero-touch:*` | Interventions for the zero-touch report, the grouped questions and the fixes |
 | `alloc:*` | The priorities plan in force, its lock, its log and the envelope it expects |
-| `dispatch:*` | Model failover attempts and cooldowns, subscription status and quota, and the model role canary's lease |
+| `dispatch:*` | Model failover attempts and cooldowns, subscription status and quota, and the model role canary's lease. A job's model attempt has no expiry while the queue may still retry the job, expires 32 days after the job finished, and is deleted when a cancel removes the job |
 | `host:*`, `receiver:*`, `doctor:*`, `hook:*` | The host registry, the receivers' and doctor's published results, and the failure hook history (`hook:h:<host>`, with the hosts that have one in `hook:hosts`). A display, except that a host's registry row is how other hosts route to it |
 | `runs:*` | The run mirror, a copy of every host's run records. The records on disk are the truth: a lost mirror fills again ([multi-host.md](multi-host.md#reference)) |
 | `console:audit`, `console:trail:*` | The newest 500 console audit rows (the files in `console-audit/` are the record), and the claim that keeps a console answer to one trail comment |

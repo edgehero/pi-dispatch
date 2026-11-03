@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
@@ -18,7 +17,8 @@ import { MODEL_COOLDOWN_MAX_MS, MODEL_RECHECK_MS, modelCooldownKey, readModelCoo
 import { FAILOVER_PRICED_APIS, failoverModelView, failoverPriceEligible } from "./model-status.mjs";
 export { MODEL_COOLDOWN_MAX_MS, MODEL_RECHECK_MS, modelCooldownKey, readModelCooldown, readModelCooldowns };
 export { FAILOVER_PRICED_APIS, failoverModelView };
-const modelAttemptKey = (id) => `dispatch:model-attempt:${createHash("sha256").update(id).digest("hex")}`;
+// The key and its life live in model-attempts.mjs (issue #812); re-exported, so an import of it from here keeps working.
+import { modelAttemptKey } from "./model-attempts.mjs";
 export { modelAttemptKey };
 
 export async function markModelCooldown(redis, ref, failure, { now = () => Date.now() } = {}) {

@@ -4,7 +4,7 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as retention from "../src/retention.mjs";
-import { FORGE_JOB_RETENTION_DAYS, FORGE_JOB_RETENTION_MS, FORGE_JOB_RETENTION_S, LOCAL_JOB_KEPT_COMPLETED_S, LOCAL_JOB_KEPT_FAILED_S, RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RUNS_MIN, runMirrorMaxRunsOf } from "../src/retention.mjs";
+import { FORGE_JOB_RETENTION_DAYS, FORGE_JOB_RETENTION_MS, FORGE_JOB_RETENTION_S, LOCAL_JOB_KEPT_COMPLETED_S, LOCAL_JOB_KEPT_FAILED_S, MODEL_ATTEMPT_FINISHED_TTL_MS, RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RUNS_MIN, runMirrorMaxRunsOf } from "../src/retention.mjs";
 import { APPROVAL_FINISHED_TTL_MS, makeApprovalStore } from "../src/approval-state.mjs";
 import { CONSOLE_TRAIL_CLAIM_MS } from "../src/processor.mjs";
 import { RUNS_INDEX_MAX } from "../src/run-mirror.mjs";
@@ -67,6 +67,15 @@ test("the approval's finished mark is a day past a forge job's retention, 32 day
 	assert.deepEqual(await store.finish({ requestId: "request-1", jobId: "job-1" }), { refused: "not-claimed" });
 	assert.equal(scripts.length, 1);
 	assert.ok(scripts[0].includes("if op == 'finish' or op == 'cancel' then redis.call('PEXPIRE', KEYS[1], 2764800000) end"), "the PEXPIRE line, byte for byte");
+});
+
+test("a finished job's model attempt key lives a day past a forge job's retention, 32 days, past every finished job the queue keeps", () => {
+	assert.equal(MODEL_ATTEMPT_FINISHED_TTL_MS, 32 * DAY_MS);
+	assert.equal(MODEL_ATTEMPT_FINISHED_TTL_MS, FORGE_JOB_RETENTION_MS + DAY_MS);
+	// A console retry can bring a failed job back for as long as its hash is kept: a forge job's, and a local job's week.
+	for (const [kept, what] of [[FORGE_JOB_RETENTION_S, "a forge job"], [LOCAL_JOB_KEPT_FAILED_S, "a failed local job"], [LOCAL_JOB_KEPT_COMPLETED_S, "a completed local job"]]) {
+		assert.ok(MODEL_ATTEMPT_FINISHED_TTL_MS > kept * 1000, `outlives ${what}`);
+	}
 });
 
 test("the console answer's trail claim lives exactly a forge job's retention, in milliseconds", () => {

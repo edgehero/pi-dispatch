@@ -193,7 +193,7 @@ const KEY_FAMILIES = new Map([
 	["touch:*", [["worker/src/touch-state.mjs", '"touch:index"']]],
 	["zero-touch:*", [["worker/src/question-groups.mjs", '"zero-touch:questions:'], ["worker/src/zero-touch-fixes.mjs", '"zero-touch:fixes:']]],
 	["alloc:*", [["worker/src/allocation.mjs", '"alloc:plan"']]],
-	["dispatch:*", [["worker/src/model-failover.mjs", "`dispatch:model-attempt:"], ["worker/src/model-cooldowns.mjs", "`dispatch:model-cooldown:"], ["worker/src/subscription-status.mjs", "`dispatch:subscription-status:"], ["worker/src/subscription-quota.mjs", "`dispatch:subscription-quota:"], ["worker/src/canary-lock.mjs", '"dispatch:canary:exclusive"']]],
+	["dispatch:*", [["worker/src/model-attempts.mjs", "`dispatch:model-attempt:"], ["worker/src/model-cooldowns.mjs", "`dispatch:model-cooldown:"], ["worker/src/subscription-status.mjs", "`dispatch:subscription-status:"], ["worker/src/subscription-quota.mjs", "`dispatch:subscription-quota:"], ["worker/src/canary-lock.mjs", '"dispatch:canary:exclusive"']]],
 	["host:*", [["worker/src/host-registry.mjs", '"host:live"']]],
 	["receiver:*", [["worker/src/receiver-status.mjs", '"receiver:live"']]],
 	["doctor:*", [["worker/src/doctor-results.mjs", '"doctor:hosts"']]],

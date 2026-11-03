@@ -6,9 +6,11 @@ import { test } from "node:test";
  * console's cancel-queued share, on the pinned BullMQ (5.80.4):
  *
  *   - a job in each state a job waits to start in (delayed, waiting, prioritized, and the paused list, which BullMQ
- *     reads as `waiting`) is removed, and its defer record with it;
- *   - a held job leaves no `wait:held` member, no `wait:job` hash and no supersede lease behind;
- *   - a job scheduler's next run is refused by BullMQ's remove, so it is answered as raced and stays, its record too;
+ *     reads as `waiting`) is removed, and its defer record and its model attempt key (issue #812) with it, the key named
+ *     by the real queue handle's `name`;
+ *   - a held job leaves no `wait:held` member, no `wait:job` hash, no supersede lease and no model attempt key behind;
+ *   - a job scheduler's next run is refused by BullMQ's remove, so it is answered as raced and stays, its record and its
+ *     model attempt key too;
  *   - the CLI's own output is the same bytes, and it now leaves no defer record behind either.
  *
  * Every queue name and job id has a unique tail, because `defer:job:*`, `wait:held` and `wait:job:*` are not
@@ -31,7 +33,9 @@ async function load() {
 	const { removeQueuedJob } = await import("../src/cancel-state.mjs");
 	const { deferHsetArgs, deferKey } = await import("../src/defer-reasons.mjs");
 	const { HELD_SET, jobKey, leaseKey } = await import("../src/wait-state.mjs");
-	return { Queue, parseConnection, makeRedisClient, removeQueuedJob, deferHsetArgs, deferKey, HELD_SET, jobKey, leaseKey };
+	const { modelAttemptIdOf, modelAttemptKey } = await import("../src/model-attempts.mjs");
+	const { writeModelAttempt } = await import("../src/model-failover.mjs");
+	return { Queue, parseConnection, makeRedisClient, removeQueuedJob, deferHsetArgs, deferKey, HELD_SET, jobKey, leaseKey, modelAttemptIdOf, modelAttemptKey, writeModelAttempt };
 }
 
 /** A world of its own: one client, the queues it opened, and every deployment-wide key it wrote, removed at the end. */
@@ -66,7 +70,15 @@ async function world(t) {
 		assert.equal(await redis.exists(key), 1, "the record was written (this test is vacuous otherwise)");
 		return key;
 	};
-	return { ...deps, redis, queue, keys, held, writeReason };
+	// A model attempt key under the id the processor writes it with (issue #812): the queue handle's own name and the job id.
+	const writeAttempt = async (q, jobId) => {
+		const key = deps.modelAttemptKey(deps.modelAttemptIdOf(q.name, jobId));
+		keys.add(key);
+		await deps.writeModelAttempt(redis, deps.modelAttemptIdOf(q.name, jobId), { ref: "anthropic/primary" });
+		assert.equal(await redis.exists(key), 1, "the attempt was written (this test is vacuous otherwise)");
+		return key;
+	};
+	return { ...deps, redis, queue, keys, held, writeReason, writeAttempt };
 }
 
 test("removeQueuedJob removes a delayed, a waiting, a prioritized and a paused-queue job, each with its defer record", { skip }, async (t) => {
@@ -85,12 +97,14 @@ test("removeQueuedJob removes a delayed, a waiting, a prioritized and a paused-q
 	assert.deepEqual(await w.redis.lrange(paused.toKey("paused"), 0, -1), [`cq-${id}-paused`], "the job is in the paused list");
 	for (const [q, added, state] of jobs) {
 		const record = await w.writeReason(added.id);
+		const attempt = await w.writeAttempt(q, added.id);
 		const job = await q.getJob(added.id);
 		assert.equal(await job.getState(), state, added.id);
 		const res = await w.removeQueuedJob({ redis: w.redis, queue: q, job, jobId: added.id });
 		assert.deepEqual(res, { ok: true, held: false, jobId: added.id, state, attemptsMade: 0 }, added.id);
 		assert.equal(await q.getJob(added.id), undefined, `${added.id} is gone`);
 		assert.equal(await w.redis.exists(record), 0, `${added.id}'s defer record is gone`);
+		assert.equal(await w.redis.exists(attempt), 0, `${added.id}'s model attempt key is gone`);
 	}
 	assert.deepEqual(await w.redis.lrange(paused.toKey("paused"), 0, -1), []);
 });
@@ -108,8 +122,10 @@ test("a held job leaves no wait:held member, no wait:job hash and no supersede l
 	await w.redis.sadd(w.HELD_SET, jobId);
 	await w.redis.set(w.leaseKey(dedupId), jobId, "PX", 600_000);
 	const record = await w.writeReason(jobId);
+	const attempt = await w.writeAttempt(q, jobId);
 	const res = await w.removeQueuedJob({ redis: w.redis, queue: q, job: await q.getJob(jobId), jobId });
 	assert.deepEqual(res, { ok: true, held: true, jobId, attemptsMade: 0 });
+	assert.equal(await w.redis.exists(attempt), 0, "no model attempt key");
 	assert.equal(await q.getJob(jobId), undefined);
 	assert.equal(await w.redis.sismember(w.HELD_SET, jobId), 0, "no wait:held member");
 	assert.equal(await w.redis.exists(w.jobKey(jobId)), 0, "no wait:job hash");
@@ -130,6 +146,7 @@ test("a job scheduler's next run is refused by BullMQ's remove: raced, with its 
 		const next = await q.upsertJobScheduler(schedulerId, repeat, { name: "t", data: {} });
 		assert.match(next.id, new RegExp(`^repeat:${schedulerId}:\\d+$`));
 		const record = await w.writeReason(next.id);
+		const attempt = await w.writeAttempt(q, next.id);
 		const job = await q.getJob(next.id);
 		assert.equal(await job.getState(), state);
 		const res = await w.removeQueuedJob({ redis: w.redis, queue: q, job, jobId: next.id });
@@ -138,6 +155,7 @@ test("a job scheduler's next run is refused by BullMQ's remove: raced, with its 
 		assert.match(res.error?.message ?? "", /belongs to a job scheduler and cannot be removed directly/);
 		assert.equal(await q.getJobState(next.id), state, "the job stays");
 		assert.equal(await w.redis.exists(record), 1, "and keeps its reason");
+		assert.equal(await w.redis.exists(attempt), 1, "and its model attempt key");
 	}
 });
 

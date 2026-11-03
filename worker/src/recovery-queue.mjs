@@ -32,6 +32,7 @@
 import * as nodeFsp from "node:fs/promises";
 import { join } from "node:path";
 import { customJobIdAllowed } from "./bullmq-internals.mjs";
+import { dropModelAttempt, modelAttemptIdOf } from "./model-attempts.mjs";
 import { QUEUE, hostQueueName as defaultHostQueueName } from "./queue.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
@@ -318,6 +319,9 @@ export function makeHostLostSweep({ redis, queues, now = () => Date.now(), log =
 				// the member back, and the next sweep finds it active and drops it.
 				await job.remove();
 				out.removed++;
+				// Issue #812: a recovery that chose a model before it was deferred holds a model attempt key, which nothing
+				// would read again. Bounded, and it never throws, so the run is still told below.
+				await dropModelAttempt(redis, modelAttemptIdOf(m.q, m.id));
 				log("job_recovery_host_lost", { jobId: m.id, runId: runIdOf(job), queue: m.q, state, reason: now() >= hard ? "max-wait" : "host-absent" });
 				try {
 					await onLost(job);

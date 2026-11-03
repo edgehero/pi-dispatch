@@ -131,7 +131,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, durable = {} } = {}) {
+async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, finishModelAttempt, durable = {} } = {}) {
 	// Every real socket in this helper must use the injected test service, including callers that only override other settings.
 	env = { VALKEY_URL, ...env };
 	const secretsResolverCalls = [];
@@ -322,6 +322,7 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 			...(makeLiveTranscriptOpener ? { makeLiveTranscriptOpener } : {}),
 			...(makeStatusCommenter ? { makeStatusCommenter } : {}),
 			...(readProgressKey ? { readProgressKey } : {}),
+			...(finishModelAttempt ? { finishModelAttempt } : {}),
 			...(makeRunMirror ? { makeRunMirror } : {}),
 			...(makePortfolioSnapshot ? { makePortfolioSnapshot } : {}),
 			// Issue #645: the durable-run seams (makeWorkspaceCheckpointer, loadRunCheckpoint, makeRunBudgetLedger,
@@ -3146,6 +3147,58 @@ async function lostLockBoot({ env = {}, readMirroredRecord } = {}) {
 	};
 	return { ...out, posted, drive };
 }
+
+test("a finished job's model attempt key gets its expiry in the listeners: completed, failed with finishedOn and the stall, never a retried failure (#812)", { skip }, async () => {
+	const logsDir = tempDir("pi-model-attempt-");
+	writeFileSync(join(logsDir, "gh-41.json"), `${JSON.stringify(lostLockRecord("gh-41"))}\n`);
+	const finished = [];
+	let refuse = false;
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { handlers } = await runStart({
+		env: { PI_LOGS_DIR: logsDir },
+		makeAuth,
+		makeHost: () => fakeHost(),
+		finishModelAttempt: async (redis, id) => {
+			assert.equal(typeof redis?.pexpire, "function", "the worker's own client");
+			finished.push(id);
+			if (refuse) throw new Error("ECONNRESET");
+		},
+	});
+	const queueName = "pi-jobs@mini1";
+	const data = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } };
+	const drive = async (fn) => {
+		finished.length = 0;
+		const from = bootLines.length;
+		fn();
+		await settleListeners();
+		return parseLines(bootLines.slice(from));
+	};
+	// The processor's id, `queueName:jobId`, for every outcome the queue settled.
+	await drive(() => handlers.completed({ id: "j1", queueName }, { outcome: "completed" }));
+	assert.deepEqual(finished, ["pi-jobs@mini1:j1"], "a completed job, whatever its outcome");
+	await drive(() => handlers.completed({ id: "j1", queueName }, { outcome: "policy", reason: "worker-abort" }));
+	assert.deepEqual(finished, ["pi-jobs@mini1:j1"], "a returned stop finished the job too");
+	await drive(() => handlers.failed({ id: "j1", queueName, data, attemptsMade: 2, finishedOn: 9 }, new Error("x")));
+	assert.deepEqual(finished, ["pi-jobs@mini1:j1"], "a terminal failure");
+	// A failure the queue will retry keeps its key without expiry: the retry reads it.
+	await drive(() => handlers.failed({ id: "j2", queueName, data, attemptsMade: 1 }, new Error("flake")));
+	assert.deepEqual(finished, [], "a retried attempt");
+	// The stall check's terminal failure, here of an attempt that completed and then lost its lock: the early return.
+	const stall = await stalledError();
+	const lost = await drive(() => handlers.failed(lostLockJob("gh-41", { queueName }), stall));
+	assert.deepEqual(finished, ["pi-jobs@mini1:gh-41"]);
+	assert.equal(lost.filter((l) => l.event === "job_lost_lock_after_completion").length, 1, "the lost-lock path ran as before");
+	// An expiry that fails is one fixed line, the job id and nothing of the error.
+	refuse = true;
+	const failedLines = await drive(() => handlers.completed({ id: "j3", queueName }, { outcome: "completed" }));
+	assert.deepEqual(failedLines.filter((l) => l.event === "model_attempt_finish_failed").map((l) => Object.keys(l)), [["event", "jobId", "host"]]);
+	assert.equal(failedLines.find((l) => l.event === "model_attempt_finish_failed").jobId, "j3");
+	assert.ok(failedLines.some((l) => l.event === "job_completed"), "the terminal line is unchanged");
+	// A job with no queue name to read (this harness's worker has none either) names no key, so nothing is sent.
+	refuse = false;
+	await drive(() => handlers.completed({ id: "j4" }, { outcome: "completed" }));
+	assert.deepEqual(finished, []);
+});
 
 test("a terminal stall failure of a job whose record says this attempt completed: one lost-lock line, no failure comment, no page", { skip }, async () => {
 	const logsDir = tempDir("pi-lost-lock-");

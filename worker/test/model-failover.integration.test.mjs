@@ -47,3 +47,30 @@ test("attempt safety survives a long queue pause without a TTL and locks the pre
 		await redis.del(modelAttemptKey(id));
 	}
 });
+
+test("a finished job's attempt gets a bounded expiry, a retry's write clears it, and finishing an absent key creates none (#812)", { skip, timeout: 30_000 }, async (t) => {
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const { readModelAttempt, writeModelAttempt } = await import("../src/model-failover.mjs");
+	const { dropModelAttempt, finishModelAttempt, modelAttemptKey } = await import("../src/model-attempts.mjs");
+	const { MODEL_ATTEMPT_FINISHED_TTL_MS } = await import("../src/retention.mjs");
+	const redis = makeRedisClient(url, {});
+	t.after(() => redis.disconnect());
+	const id = `integration:${randomBytes(8).toString("hex")}`;
+	const absent = `integration:${randomBytes(8).toString("hex")}`;
+	try {
+		await writeModelAttempt(redis, id, { ref: "openai/fallback", safe: false, modelWhy: "fallback-cooldown" });
+		assert.equal(await redis.pttl(modelAttemptKey(id)), -1, "no expiry while a retry may come");
+		await finishModelAttempt(redis, id);
+		const ttl = await redis.pttl(modelAttemptKey(id));
+		assert.ok(ttl > 0 && ttl <= MODEL_ATTEMPT_FINISHED_TTL_MS, `bounded: ${ttl}`);
+		assert.equal((await readModelAttempt(redis, id)).ref, "openai/fallback", "still read until it expires");
+		await writeModelAttempt(redis, id, { ref: "openai/fallback", modelWhy: "fallback-cooldown" });
+		assert.equal(await redis.pttl(modelAttemptKey(id)), -1, "a retry's plain SET clears the expiry");
+		await finishModelAttempt(redis, absent);
+		assert.equal(await redis.exists(modelAttemptKey(absent)), 0, "PEXPIRE on an absent key creates nothing");
+		await dropModelAttempt(redis, id);
+		assert.equal(await redis.exists(modelAttemptKey(id)), 0, "a drop deletes it");
+	} finally {
+		await redis.del(modelAttemptKey(id), modelAttemptKey(absent));
+	}
+});
