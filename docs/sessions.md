@@ -269,8 +269,9 @@ Rules:
   `parked_label_failed` line.
 - Only the job's own tool can park a run. A repository extension that registers the same name stops the job before
   its prompt (`await-input-shadowed`).
-- Upgrade the worker and the receiver together. A receiver from before this feature drops `awaitInput`, and the
-  worker then refuses the job before it spends (`trigger-skew`) rather than run it without the tool. Adding
+- Upgrade the worker and the receiver together ([the order](upgrading.md#the-order)). A receiver from before this
+  feature drops `awaitInput`, and the worker then refuses the job before it spends (`trigger-skew`) rather than run it
+  without the tool. Adding
   `awaitInput` to a trigger does the same to its jobs that were already queued: re-run them.
 
 An operator can also answer from the console's parked page or a run's **Chat** panel

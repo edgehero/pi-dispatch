@@ -209,7 +209,7 @@ Two consequences worth internalising before you design anything:
   `STORE_FLEET_LINES` to the four version fields a worker publishes (`worker/test/store-version.test.mjs`,
   `store-versions-files.test.mjs`, `start-wiring.test.mjs`, `admin/test/store-versions-admin.test.mjs`). The first
   row in any of those tables, field or value, ships only once every host and every panel and console runs issue #761's
-  release or later. The tolerant readers and the retention module of the same issue add these:
+  release or later. The tolerant readers, the retention module and the upgrade path of the same issue add these:
   - `INT-CONSOLE-AUDIT-LOG`'s action, outcome and actor role lists against `CONSOLE_AUDIT_ACTIONS`,
     `CONSOLE_AUDIT_OUTCOMES` and the roles the console writes, and every member of both code lists against
     `CONSOLE_AUDIT_ACTION_RE` and `CONSOLE_AUDIT_OUTCOME_RE` (`worker/test/console-audit.test.mjs`). The writer stays
@@ -238,9 +238,54 @@ Two consequences worth internalising before you design anything:
     with `_` between any digit groups and a capital `E` taken as well. The scan reads one line at a time and misses
     every other spelling (`8.64e+7`, a BigInt) and a product split across lines. Put a new retention-shaped value
     there, never in the file that uses it.
+  - BullMQ's internals, `worker/test/bullmq-internals.test.mjs`: a single-owner scan of `worker/src`, `receiver/src`,
+    `admin/src`, `image/runner` and `gateway/src` (comments stripped, a line at a time) refuses a second spelling of a
+    BullMQ key, job field, the delayed score, the `repeat:`/`manual:` run id grammar, the three-part custom id rule or
+    a scheduler key's bound outside `worker/src/bullmq-internals.mjs`, with named exemptions that must each match
+    exactly one line and a planted spelling per pattern so the scan is not vacuous; text pins hold every file the
+    module cites to the installed BullMQ, and `customJobIdAllowed` to BullMQ's own `validateOptions`; and the pins
+    agree ("BullMQ bumps" below). The scan catches the shapes the trees have used (each pattern is one found in them
+    before issue #761: quoted key prefixes and suffixes, quoted job fields, the parser shapes), not every spelling: a
+    meta flag read by name, a spelling built across lines or from variables, or one in a shape no tree has used is
+    caught only by reading the change.
+  - The Valkey image, `worker/test/valkey-image.test.mjs`: every place that names it (`up`'s `docker run` and owner
+    check, `deploy/docker-compose.yml` and the Quadlet unit and their `worker/deploy/` mirrors, `service.mjs`'s
+    `TEMPLATE_PINS`, CI's Valkey services, the image job's pull and the canary smoke script) is held to `VALKEY_IMAGE`,
+    the constant is a minor and is not in `OLDER_VALKEY_IMAGES`, and no source names a Valkey image anywhere else.
+  - The upgrade guide and the backup page. `worker/test/upgrading-doc.test.mjs`: every release notes step of
+    `release.yml` and `repo-release.yml` (found from the files, one per `gh release create`) appends the
+    `**Upgrading**` line to `docs/upgrading.md` at its own tag, after both the AI and the fallback path and outside
+    the `PREV` test; every guide with an upgrade heading or bold upgrade lead, plus a pinned list, links the guide
+    and is linked back from it; and every link out of it or into it resolves, anchors included. The release numbers
+    on it come from `git tag --contains` in a clone with tags, and no test can check them (only their shape and
+    order). `worker/test/backup-doc.test.mjs`: every `*_FILE`, `*_DIR`, `*_DIRS` or `*_PATH` setting in
+    `.env.example` or read from the environment by host-side source, every subfolder the source makes in the run
+    history or the session store, every store with a fixed file or folder name in `FIXED_STORES` (pinned by a source
+    file and a literal), and every Valkey key family (pinned the same way, every exported constant with a key's shape
+    inside one, whatever its name) is named in `docs/backup.md` or excluded with its reason. Two things it cannot see
+    are caught only by reading the change: a store with a fixed name `FIXED_STORES` does not list, and a key family
+    built inline with no exported constant.
   Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.
+
+## Stored state across releases
+
+- **A change to what pi-dispatch stores** (a file, a run record, job data, a Valkey key, the Valkey image, the BullMQ
+  pin) adds its row to `docs/upgrading.md` under the release it ships in. When the older shape stays readable it also
+  registers a detector in `worker/src/older-state.mjs` (doctor's `state.older`), gated so that it retires itself once
+  nothing is left in the older shape, and firing only on an exact older reference, never on something an operator
+  chose. A new store or key family goes in `docs/backup.md`. Its bolt fails until it does for a path setting, a
+  subfolder of the run history or the session store, and an exported constant with a key's shape; it cannot see a
+  store with a fixed file or folder name that its `FIXED_STORES` does not list, or a key family built inline, so add
+  those to its tables by hand.
+- **Valkey moves only by changing `VALKEY_IMAGE`** (`worker/src/valkey-auth.mjs`). Every other place that names the
+  image (`up`'s `docker run` and owner check, the compose file and the Quadlet and their `worker/deploy/` mirrors,
+  `service.mjs`'s `TEMPLATE_PINS`, the CI services and the canary smoke) is held to it by a test. A new minor is a
+  release with an upgrade guide row, never a floating tag: the value it leaves goes in `OLDER_VALKEY_IMAGES` in both
+  spellings, and the facts the specs measured on it (`HEXPIRE`, `/bin/sh`) and a volume loading in both directions
+  are measured again. A step that recreates the Valkey container stops it first (`docker stop`, never
+  `docker rm -f`): the normal stop is what makes Valkey write its AOF out and save a final snapshot.
 
 ## pi bumps
 
@@ -309,6 +354,22 @@ and merges it.
   expiry (90 days is a good default). Store it as the repository secret `PI_BUMP_TOKEN` (Settings, Secrets and
   variables, Actions). Without it the run warns and does nothing; once it has expired the push fails with an
   authentication error. Either way no pull request appears until a new token is stored.
+
+## BullMQ bumps
+
+Every BullMQ fact read past its public API (key names, job hash fields, the meta flags, the delayed score, the
+`repeat:`/`manual:` run id grammar, the custom id rules) lives in `worker/src/bullmq-internals.mjs`, each beside the
+shipped file it was read from; `worker/test/bullmq-internals.test.mjs` refuses a second spelling, in the shapes the
+trees have used, in `worker/src`, `receiver/src`, `admin/src`, `image/runner` and `gateway/src`. A bump moves
+together: the three exact `bullmq` pins (worker, receiver, admin), `ioredis` (those and gateway) and admin's
+`cron-parser` to bullmq's own dependencies, the lockfile (no nested copy), and `BULLMQ_VERIFIED_VERSION`. Then
+re-read every file the module cites in the new tarball (`npm pack bullmq@X`, `package/dist/esm/...`) and
+`moveStalledJobsToWait-9.lua` for `STALLED_FAILED_REASON`
+(`index.mjs`, pinned by `lost-lock.test.mjs`), and run the unit test (text pins, pins agree, BullMQ's own
+`validateOptions`) and `bullmq-internals.integration.test.mjs` (a real Valkey). A red pin is a fact that moved: fix
+the module, never the assertion. The meta `version` field flips in a mixed fleet; never build a warning on it. A
+bump is stored state too: it gets its row in `docs/upgrading.md`, which says never to roll back across it while jobs
+are queued.
 
 ## Commits and PRs
 

@@ -535,7 +535,9 @@ include `model-endpoints.conf` and it does not mount that file: remove it (`dock
 pi-dispatch-egress-proxy`, or `podman rm -f -v`) and start it again with the third mount (`pi-dispatch up` does
 this, or the recipe in [podman.md](podman.md)). With compose, the compose file must be the new one too: in a
 folder `/dispatch setup` laid out, `deploy/docker-compose.yml` is a create-only copy no upgrade refreshes, so copy
-it again from the installed package (or pull the clone), or use `pi-dispatch up` instead.
+it again from the installed package (or pull the clone), or use `pi-dispatch up` instead. The same copy names the
+Valkey image: since issue #761 the package's file pins `valkey/valkey:8.1`, and `pi-dispatch doctor` names a copy whose
+`valkey` service still says `valkey/valkey:8` in a `state.older` line ([upgrading.md](upgrading.md#valkey-and-bullmq)).
 
 **With the policy on, a forge must be served over `https://` on port 443.** A job gets the proxy variables in
 uppercase only, and git ignores `HTTP_PROXY` for an `http://` remote, so it never sends one through the proxy: from

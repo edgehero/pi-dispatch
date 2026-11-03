@@ -150,6 +150,8 @@ usage row. Outside it, `PI_MODEL` stops the worker at boot, a `dispatch_set mode
 already holding one refuses every job; `pi-dispatch doctor` names the setting first. Rename such a model's `id` in
 this file. The check ignores case, and the id runs exactly as you wrote it.
 
+These notes, with every other release's, are gathered in [upgrading.md](upgrading.md#what-each-release-changed-in-stored-state).
+
 ### The key is already in pi (on by default)
 
 Logged into pi already? You don't have to restate the key in `.env`. When the provider key is absent from

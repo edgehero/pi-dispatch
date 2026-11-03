@@ -103,8 +103,9 @@ A size lives on a project's row in the scoped-limits file, so first group the re
 - **A size needs `"version": 3`,** and only a `project:<id>` row may carry one. The tools (`dispatch_limit_add`,
   `dispatch_limit_edit`) write the version for you, behind your confirm. The panel's limit dialogs (`m`) keep a row's
   size as it is and cannot set one.
-- **Upgrade and restart every worker before you write a size.** An older worker refuses a version 3 file when it
-  starts, and one already running keeps its last good file, so neither the size nor any later edit applies on it.
+- **Upgrade and restart every worker before you write a size** ([the order](upgrading.md#the-order)). An older
+  worker refuses a version 3 file when it starts, and one already running keeps its last good file, so neither the
+  size nor any later edit applies on it.
   Doctor warns about such a worker on a fleet.
 - **An edit applies to the next pickup.** A running job keeps its size. A retry or a deferred job is a new pickup and
   takes the size in force then.

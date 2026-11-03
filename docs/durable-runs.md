@@ -159,7 +159,7 @@ lost attempt's job folder all stay. Upgrade that host and the run carries on. Th
 has: once seven days have passed since it was queued, it ends as `recovery-host-lost`, with that comment (which speaks
 of a worker that has not come back, not of a version) and `on_failure`. Each release reads checkpoints of two
 versions only, the newest it knows and the one before it, so when you upgrade across more than one release at a time,
-let durable runs finish first.
+let durable runs finish first ([upgrading.md](upgrading.md#the-order)).
 
 ## What is not covered
 

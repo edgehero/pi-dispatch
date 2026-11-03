@@ -598,6 +598,10 @@ From any terminal: `pi-dispatch pause` stops taking new jobs and survives restar
 These read only what they need, so a broken forge setting cannot stand between you and the stop
 ([`docs/service.md`](docs/service.md#control-the-worker)).
 
+Upgrading to a new release follows one order (pause, the job image, every worker, the receivers, the console and
+`/dispatch`, then resume), and [`docs/upgrading.md`](docs/upgrading.md) gives it, with what each release changed in
+what it stores and how to roll back.
+
 ## The pi panel
 
 `/dispatch` is the same information inside your own pi session, as a **pi extension**: no daemon, no network port. Install it with
@@ -640,7 +644,8 @@ These forges have one auth source each, a token you create, so setting theirs to
 ## Docs
 
 **Getting started and running it:** [console](docs/console.md), [panel](docs/panel.md), [service](docs/service.md),
-[backup](docs/backup.md), [multi host](docs/multi-host.md), [polling](docs/polling.md), [notifications](docs/notifications.md).
+[backup](docs/backup.md), [upgrading](docs/upgrading.md), [multi host](docs/multi-host.md), [polling](docs/polling.md),
+[notifications](docs/notifications.md).
 
 **Watching and steering:** [steering](docs/steering.md), [chat](docs/chat.md), [sessions](docs/sessions.md),
 [durable runs](docs/durable-runs.md), [approval gates](docs/approval-gates.md), [answer rules](docs/answer-rules.md),

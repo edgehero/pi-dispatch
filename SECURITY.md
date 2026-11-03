@@ -472,8 +472,9 @@ The threat model, and what answers each part:
   itself passes for a run record); any other is no host to any reader of the registry, the console's among them, and
   no reader removes it. A job scheduler, which the same URL could also add, is named by the admin's surfaces (the
   console, the `/dispatch` panel and its tools) only by an id and a job name in the cron trigger id's characters
-  (`[A-Za-z0-9._-]`) and at most 176 of them, the longest cron id the triggers file takes (`SCHEDULER_NAME_MAX` is
-  `CRON_ID_MAX`, `mapSchedulers`); any other is read as no name, never cut to one, and no other name stands in for
+  (`[A-Za-z0-9._-]`) and at most 200 of them (`SCHEDULER_NAME_MAX` is `SCHEDULER_ID_MAX`, `mapSchedulers`; since issue
+  #761, wider than the 176 the triggers file takes, so a schedule an earlier release made for a longer id is still
+  named and can be removed); any other is read as no name, never cut to one, and no other name stands in for
   it: the schedule is still shown by its pattern and next run, every surface takes a trigger's scheduler by its id
   alone (never by its job name or its pattern), and a planted id can neither widen a page nor pass for another
   trigger's.
