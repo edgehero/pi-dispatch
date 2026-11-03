@@ -185,22 +185,23 @@ you send it ([answer rules](docs/answer-rules.md)).
 **Picking up where it stopped:** if a machine restarts or a job's box dies, a job that opted in continues from its last checkpoint
 instead of paying for everything again ([durable runs](docs/durable-runs.md)).
 
-![A run that lost its first attempt and continues as a recovery job, with what it had done and what carries over](docs/images/console/console-recovery.png?v=2026-11-03)
+![A run that lost its first attempt and continues as a recovery job: the attempt that failed, the checkpoints it had written and the recovery job that goes on from them](docs/images/console/console-recovery.png?v=2026-11-03-800)
 
 **Trying it yourself:** reopen a finished job's workspace in a fresh box with no keys, or prepare one from scratch, and open it in your
-own terminal or your browser ([sandboxes](docs/sandbox.md), [browser terminal](docs/sandbox-gateway.md)).
+own terminal or your browser. The page says what pi can load there, which is only what the project holds
+([sandboxes](docs/sandbox.md), [browser terminal](docs/sandbox-gateway.md)).
 
-![The Sandboxes page: choose a kept workspace or start from a repository, see what opens and what it holds, and open it in your terminal](docs/images/console/console-sandboxes.png?v=2026-11-03)
+![The Sandboxes page: choose a kept workspace, see what opens and what pi can load there, and open it in your terminal, with a button for a new one](docs/images/console/console-sandboxes.png?v=2026-11-03-800)
 
 **Updates:** which version of pi and which extensions your jobs run, what is newer, a capped trial on a real job, and Adopt. Nothing
 updates by itself ([updates](docs/console.md#updates)).
 
 ![The Updates page: what jobs run now, what is newer, a button to run a canary, and which version each host holds](docs/images/console/console-updates.png?v=2026-11-03)
 
-**Projects:** group your repositories into a project, with its own limits, share of the budget and history
-([projects](docs/projects.md), [budget split](docs/allocation.md)).
+**Projects:** group your repositories into a project, with its own limits, share of the budget and history, and see what its runs
+loaded on each machine ([projects](docs/projects.md), [budget split](docs/allocation.md)).
 
-![One project: its members, its limits, what it has spent and its recent runs](docs/images/console/console-project.png?v=2026-11-03)
+![One project: what it has spent, its runs of the last day, what its runs loaded on each machine and where they differ, its members and its limits](docs/images/console/console-project.png?v=2026-11-03-800)
 
 **A trigger:** what starts it, what it runs and what it has cost. A schedule also gets a button that fires it now
 ([triggers](docs/triggers.md)).
@@ -238,7 +239,26 @@ extensions with `--no-extensions`, or keep one trigger's jobs out of your packag
 
 Your projects still win. A job layers your setup under the project's own `.pi/` folder, so a project's skill replaces yours of the same
 name, and a small safety floor sits under both, which neither can remove. To add a language or a system tool rather than a pi setting, build
-your own [job image](docs/job-image.md). The details are in [`docs/global-pi-overlay.md`](docs/global-pi-overlay.md).
+your own [job image](docs/job-image.md). The details are in [`docs/global-pi-overlay.md`](docs/global-pi-overlay.md), and each run says what it
+really got ([What a job gets](#what-a-job-gets)).
+
+## What a job gets
+
+A job starts with four things: your setup on the machine it runs on, what the repository holds, what its trigger says, and
+the box it runs in. Each changes on its own, so two jobs of one trigger can start differently.
+
+**Every run keeps a list of what it had:** the version of pi, the model, its skills, its extensions, the outside systems it
+connected to, and its tools. The run's page shows that list and says plainly when something is missing, so you can check a
+job you did not watch.
+
+![The Loaded card of a finished run: everything its trigger asks for loaded, then pi, the model, extensions, skills, outside systems and tools, one line each](docs/images/console/console-run-loaded.png?v=2026-11-03-800)
+
+**A clean finish can still be missing something:** a job that finishes without its instructions reads **Completed, without
+its flow**, and one with an extension that failed to load reads **Completed, with a failed extension**. The Runs list says the
+same, so it does not read as fine. A project's page says when its runs differ from machine to machine.
+
+**What the list holds:** the names of what you set up, the tools those brought, and counts. It keeps no text from an issue,
+and a repository's own skills and extensions are only counted: you read those in the repository. A run from an older release says its list was not recorded ([what each line means and what to do](docs/console.md#what-a-run-loaded)).
 
 ## How to use it
 
@@ -275,6 +295,9 @@ happening ends it sooner. After that, you need your token or a new link, which `
 | **Job**, or **run** | One piece of work, from start to finish |
 | **Trigger** | A rule for what starts a job: a schedule, a label, a comment |
 | **Flow** | A short text file in your project with the standing instructions for a kind of job |
+| **Extension** | An add-on for pi, which can give the agent new tools |
+| **MCP server** | An outside system a job can connect to |
+| **Tool** | One thing the agent can do, such as read a file |
 | **Container** | The sealed box a job runs in, thrown away afterwards |
 | **Forge** | The place your code lives: GitHub, GitLab, Forgejo or Azure DevOps |
 | **Repository** | A project's code and its history, on a forge or in a folder (a "git repository") |
@@ -533,9 +556,12 @@ Every trigger takes this path: spend is checked before the container starts, and
 ## Costs, projects and capacity
 
 **Costs.** A turn limit per job, job and token caps for the whole deployment, dollar caps per day, week and month, and a dollar
-cap per job. Caps can apply per repo, folder, model or project. Every job writes a durable record with ids only, never issue or
-comment text, with a usage ledger per model that the insights page prices ([`docs/costs.md`](docs/costs.md),
-[`docs/insights.md`](docs/insights.md)). A zero rate run with no declared plan reads `$0 (unrated)`, never "free".
+cap per job. Caps can apply per repo, folder, model or project. Every job writes a durable record of ids and the names you configured,
+never issue or comment text, with a usage ledger per model that the insights page prices ([`docs/costs.md`](docs/costs.md),
+[`docs/insights.md`](docs/insights.md)). What the job loaded is on that record: the names and versions of what you staged and configured,
+the tools those brought, and counts for what the repo holds. A repo's own extension runs in the process that reports this, so the
+worker checks each name against what it knows and holds a tool's name to one narrow shape
+([what a run loaded](docs/console.md#what-a-run-loaded)). A zero rate run with no declared plan reads `$0 (unrated)`, never "free".
 
 **Projects and split.** Group repos and folders into projects and cap each as one. Set a dollar total with a floor per project, and a
 flow can move money between projects inside it, never above the total or below a floor. Every move is logged and can be reverted
@@ -572,7 +598,8 @@ instructions ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
 
 - **Nothing installs at job time.** Every job runs with `PI_OFFLINE=1`, so pi's resolver cannot shell out to npm. A package is staged on the host, at an
   exact version, always with `--ignore-scripts` ([`docs/workflows.md`](docs/workflows.md)).
-- **A repo's own `.pi/extensions` do run**, because the checkout is the default branch and merging is the gate. Nothing installs packages because a repo asks.
+- **A repo's own `.pi/extensions` do run**, because the checkout is the default branch and merging is the gate. Nothing installs packages because a repo asks. On a run's
+  record they are counts, and a failed one's button opens the commit that ran ([what a run loaded](docs/console.md#what-a-run-loaded)).
 - **MCP servers are yours, not the repo's.** A repo's `.pi/mcp.json` is never read for a job, and a trigger names the servers its jobs connect
   ([`docs/mcp.md`](docs/mcp.md)).
 - **Sessions save the full transcript to disk**, which is a real disclosure: read [`docs/sessions.md`](docs/sessions.md) before you turn them on.

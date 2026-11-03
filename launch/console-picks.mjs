@@ -18,6 +18,7 @@ export const CONSOLE_PICKS = Object.freeze([
 	{ name: "console-overview-dark", golden: "overview.operator", height: 1180, theme: "dark" },
 	{ name: "console-overview-phone", golden: "overview.operator", width: 375, height: 1500, scale: 2 },
 	{ name: "console-run-live", golden: "panels/run-live-armed.operator", height: 1500, transcript: "gh-b3d7" },
+	{ name: "console-run-loaded", golden: "panels/run-loaded.operator", selector: "#p-loaded" },
 	{ name: "console-steer-confirm", golden: "panels/run-steer-confirm.operator", selector: "#confirm-slot" },
 	{ name: "console-question", golden: "panels/run-parked-question.operator", height: 975, transcript: "gh-2f6a" },
 	{ name: "console-zero-touch", golden: "zero-touch.operator", height: 1000 },
@@ -35,10 +36,10 @@ export const CONSOLE_PICKS = Object.freeze([
 	{ name: "console-subscription", golden: "panels/models-subscription.operator", selector: "#p-subscription-quota" },
 	{ name: "console-approval", golden: "panels/parked-approval.operator", height: 780 },
 	{ name: "console-draft", golden: "panels/answerer-populated.operator", height: 1160 },
-	{ name: "console-recovery", golden: "panels/run-recovering.operator", height: 1000 },
-	{ name: "console-sandboxes", golden: "panels/sandboxes-populated.operator", height: 1000 },
+	{ name: "console-recovery", golden: "panels/run-recovering.operator", height: 1745 },
+	{ name: "console-sandboxes", golden: "panels/sandbox-loaded-run.operator", height: 1250 },
 	{ name: "console-updates", golden: "panels/updates-newer-available.operator", height: 920 },
-	{ name: "console-project", golden: "panels/project-populated.operator", height: 960 },
+	{ name: "console-project", golden: "panels/project-populated.operator", height: 1470 },
 ]);
 
 /**

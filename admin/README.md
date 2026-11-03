@@ -236,17 +236,18 @@ One command puts a live terminal view over the whole deployment:
   read tools. Runs report local retention when known; hosts report budgets, holds, CPU reserve, orphans,
   kept sandboxes, doctor counts and qualified venue declarations. Costs include running holds and bounded
   what-if estimates. Model results omit private job/operator text, question and draft content, variable
-  names and host paths. Setup suggestions come from the trusted command catalogue.
+  names, host paths and what a run loaded. Setup suggestions come from the trusted command catalogue.
 - **Logs stay put.** Raw container output shows only in the panel's viewer, never in model context.
 
 **A web console as well.** The same package installs `pi-dispatch-console`, a separate process that serves a live web
 console for the deployment on loopback or on a private unix socket, behind a named token per person. It shows the
 whole fleet as it changes: an overview of what needs you, what waits and why, and the last hours as a timeline (on a
-deployment that has not run yet, what stands before its first job), every run with filters, one search by
+deployment that has not run yet, what stands before its first job), every run with filters and what it loaded (a run that
+finished without its flow or with a failed extension says so), one search by
 repository, target or job id, the last 24 hours counted by outcome and paging, a card for each run waiting for an
-answer, spend and insights by range, queues, hosts and schedules, the configuration and its own audit
+answer, spend and insights by range, queues, hosts and schedules, the configuration, what a project's runs load on each host, and its own audit
 log, plus `/api/state` as JSON for scripts. It also has Models (roles, fallbacks and canary comparisons), Updates (what jobs run and what is
-newer), Watch (findings from your alerts), Sandboxes (kept workspaces and shells), Zero touch (how often runs needed a person) and
+newer), Watch (findings from your alerts), Sandboxes (kept workspaces and shells, and what pi can load in one), Zero touch (how often runs needed a person) and
 Setup (a live checklist for a new deployment). It reads through the same code as the panel, so the two never disagree;
 the panel shows the waiting runs too.
 It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
