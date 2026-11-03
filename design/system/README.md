@@ -25,11 +25,11 @@ Start with **Start here**: the concept map shows how the pieces connect, the glo
 |---|---|
 | Start here | How pi-dispatch fits together (concept map), Glossary, The sample deployment, Journeys: a run asks a question, a run fails, set up a new deployment |
 | Overview | Overview, Overview all clear, First run setup (in the browser, after one command) |
-| Runs | Runs, Sandboxes (#771, operator only; optional separate gateway #754), Sandbox workbench with tabs and splits, Sandbox terminal, Sandbox gateway sign-in and states, a run's workspace on its page and outcome by outcome with per-terminal run context (#793), watching a shell (observer mode, #792), Zero touch with its viewer view (#770), Parked with answer rules and its viewer view (#772), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
+| Runs | Runs, Sandboxes (#771, operator only; optional separate gateway #754), Sandbox workbench with tabs and splits, Sandbox terminal, Sandbox gateway sign-in and states, a run's workspace on its page and outcome by outcome with per-terminal run context (#793), watching a shell (observer mode, #792), what a run loaded and the same record by run, in a sandbox and on a trigger (proposed, #800), Zero touch with its viewer view (#770), Parked with answer rules and its viewer view (#772), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
 | Fleet | Fleet, Fleet part paused (bulk actions, held, delayed), Host detail (registry row, budget, capacity, doctor), Venue detail (14 properties), Fleet as a viewer |
 | Spend | Spend, Budget split, Capacity, Breakdown, Flows map, as tabs of one page |
 | Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, Add a trigger, Triggers as a viewer |
-| Configuration | Configuration, Secrets, Connections, Project detail, Updates |
+| Configuration | Configuration, Secrets, Connections, Project detail, what a project's runs load by host (proposed, #800), Updates |
 | Access and audit | Sign-in, Access states (one-time link, operator, viewer, read-only), Audit, Error |
 | Phone | Overview, Runs, Parked, Spend, Run live, Fleet, Triggers, Parked with a draft, Zero touch |
 | Planned and proposed | Approval request (#649), Fork a run (#648), Models: roles, cooldowns and canary (#716, #717, #693), Watch and a finding (#735, a tab of Triggers), Watch board: why each finding did what it did, every query and decision, Jev in the job and in shadow at the gate, and a board jobs propose and you adopt (#735, #743), Dispatchers (#776, specs only): durable services with fresh Jev decision containers or bounded ordinary LLM jobs, only starting listed local read-only jobs and proposing triggers for a person; resident model containers and forge starts are rejected, long LLM runs deferred |
@@ -64,6 +64,7 @@ Every page, panel, state and write of the console at `ce5338f`, plus the 5.0.0 i
 | First run: no worker, no egress proxy, no provider key, no triggers, `/dispatch setup`, `pi-dispatch setup github` | First run setup, every step from the browser |
 | `/runs`: filters, outcome words, reason sentences, "no explanation yet", mirror and 2,000-run notes, pager | Runs, Runs on a phone |
 | `/run`: outcome, progress and phases, live transcript, chat, inbox, steer and follow-up, re-run with its reserve, sandbox command | Run live, Run ended, Run refused, Run parked, Run chat states, Run workspace and The workspace run by run (proposed) |
+| `/run`: what the run loaded, from its record: pi and its image, the model, extensions, skills and where each came from, MCP servers, tools, and what failed to load (proposed, #800) | Run loaded, Loaded states |
 | `/run` for durable runs: continues as, recovery facts, checkpoints, replayed, interrupted and not started calls, earlier attempts, replicas, stalled re-pick | Run recovered |
 | `/run` on OpenShell: sandbox policy, rule hosts, secret bundle variables, shadowed names, bundle skipped, cost floor and settled basis, per-model usage, resources, chain | Run in a sandbox |
 | `/run` for a viewer: numbers and tool names only, the operator-only sentences | Run as a viewer, Access states |
@@ -89,6 +90,7 @@ Every page, panel, state and write of the console at `ce5338f`, plus the 5.0.0 i
 | Forges, egress per host, model endpoints, provider keys by name, notifications, MCP, staged packages | Connections |
 | Pinned pi, staged extensions and each host's pi: what is newer, its checks, a canary and Adopt | Updates |
 | Projects: members, spend, limits, allocation, size suggestions with the exact call | Project detail |
+| Projects: what their runs load, and where runs differ by host (proposed, #800) | Project loads |
 | `/audit`: rows, roles, digests, reserve, bulk count, damaged rows | Audit |
 | `/login`, `/login/code`, session ends, roles, read-only console | Sign-in, Access states |
 | HTML error pages: 404, 421 | Error |
@@ -108,6 +110,7 @@ What this design asks the repo for, because the repo cannot do it yet:
 - dispatchers: a trigger whose job reads git changes and infra streams and may only start listed jobs and propose triggers, with wider outbox chaining than today (other folders and repositories, more than 2 requests) and a Jev loop engine that runs like the GitHub poller;
 - Triggers as a page of its own, with Watch as its second tab;
 - delivery health for webhooks, which the receiver does not publish;
+- what a run loaded, kept in its run record from the runner's exit line, so a run page, a sandbox, a trigger and a project can say what the job had (#800);
 
 The original #753 proposals are implemented by #770 (Zero touch), #771 (native sandbox handoff and preparation) and #772 (cited answer drafts a person sends). Their integration counts a confirmed draft, including an edited one, once on its source workload run in the selected covered interval. Unsent drafts and helper runs add none.
 
