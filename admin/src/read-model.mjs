@@ -5109,6 +5109,7 @@ export function createFleetReader(
           project: text(projectOf(data, projects), PROJECT_ID_RE), host: text(host?.name, WORKER_NAME_RE),
           queue: text(job.queueName ?? job.queue?.name, /^[A-Za-z0-9@._-]{1,200}$/),
           queuedAt: queuedAtOf(job), startedAt: instant(job.processedOn),
+          triggerIndex: Number.isSafeInteger(data.trigger?.matched?.index) && data.trigger.matched.index >= 0 ? data.trigger.matched.index : null,
         };
       } catch {
         return null;
@@ -7414,8 +7415,8 @@ export function recordBundle(record) {
  * `secretsProfile` are rebuilt the same way (names that are operator config, and counts; never a resolver path).
  * Issue #737: the `reason` is the one every surface shows (words.mjs `recordReason`): a token, else null, so an older
  * worker's error text (a forge's API path, an address, a library's words) reaches no model either. Every other key is
- * the record's own, and a record with none of the three whose reason is a token or null is returned as it is (the same
- * object), so every other run reads byte-identical.
+ * the record's own but `loaded`, which goes, and a record with none of them whose reason is a token or null is returned
+ * as it is (the same object), so every other run reads byte-identical.
  */
 export function modelRunRecord(record, { list = false } = {}) {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return record;
@@ -7424,13 +7425,15 @@ export function modelRunRecord(record, { list = false } = {}) {
   // model's own sentence: it names the fields it is given, where a page's names what the page shows.
   if (fromNewerRelease(record)) return { ...coreRecordOf(record), newer: true, note: NEWER_RECORD_MODEL_NOTE };
   const hasBundle = Object.hasOwn(record, "bundle");
+  // Issue #800: what a run loaded is for the console's operator and viewer views, and no model reads any of it.
+  const hasLoaded = Object.hasOwn(record, "loaded");
   const hasOpenshell = Object.hasOwn(record, "openshell");
   const hasProfile = Object.hasOwn(record, "secretsProfile");
   const hasRoles = Object.hasOwn(record, "modelRole") || Object.hasOwn(record, "modelRoles");
   const hasFailover = Object.hasOwn(record, "modelWhy") || Object.hasOwn(record, "providerFailure");
   const freeReason = Object.hasOwn(record, "reason") && record.reason !== null && recordReason(record) === null;
-  if (!hasBundle && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles) return record;
-  const { modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
+  if (!hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles) return record;
+  const { modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
   const out = { ...rest };
   if (freeReason) out.reason = null;
   if (modelRolesTelemetryOf(record.modelRoles)) out.modelRoles = modelRolesTelemetryOf(record.modelRoles);
@@ -7513,6 +7516,26 @@ function forgeBase(kind, env) {
  * instance URL that is not http(s), or an unknown host. Never a guessed host: a link an operator clicks to the wrong
  * place is worse than none.
  */
+/**
+ * The record's repository on its forge, or null: `forgeLinkOf`'s checks and instance rule, without the issue. For a problem
+ * fixed in the repository (issue #800), where the record keeps no base commit to link: this opens the repository and says so.
+ */
+export function forgeRepoLinkOf(record, env = {}) {
+  const kind = record?.kind;
+  const target = record?.target;
+  if (!isForgeKind(kind) || typeof target !== "string" || target.length > 300 || hasControls(target)) return null;
+  const repo = /^(.+)[#!]\d{1,12}$/.exec(target)?.[1];
+  if (repo === undefined || !FORGE_REPO_RE[kind]?.test(repo) || repo.split("/").some((seg) => seg === "." || seg === "..")) return null;
+  if (kind === "github") return `https://github.com/${repo}`;
+  const base = forgeBase(kind, env);
+  if (base === null) return null;
+  if (kind === "azure") {
+    const [project, name] = repo.split("/");
+    return `${base}/${project}/_git/${name}`;
+  }
+  return `${base}/${repo}`;
+}
+
 export function forgeLinkOf(record, env = {}) {
   const kind = record?.kind;
   const target = record?.target;

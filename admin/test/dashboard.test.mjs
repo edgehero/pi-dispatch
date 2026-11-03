@@ -4133,3 +4133,14 @@ test("the degraded plain panel carries the open input, so a narrow terminal show
   assert.equal(last(6), "[p]au\u2026", "closed again: the key hints");
   await comp.dispose();
 });
+
+test("a completed run that lacked its flow reads so in the panel's list, in a warning's glyph, and its record's outcome stays completed (#800)", async () => {
+  const lacking = { ...SNAPSHOT.runs[0], jobId: "j2", outcome: "completed", loaded: { v: 1, runner: "reported", at: "ready", cut: null, image: null, imageDigest: null, imagePi: null, pi: "1.5.0", flow: { tier: "none", package: null }, sources: [], mcp: [], tools: { active: 1, own: ["read"], job: [] }, problems: { failed: 0, dropped: 0, mcp: 0 }, leftOut: null } };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [lacking, SNAPSHOT.runs[0]] }) }) });
+  await flush();
+  const out = stripAnsi(comp.render(120).join("\n"));
+  await comp.dispose();
+  assert.match(out, /⚠ completed, without its flow/);
+  assert.match(out, /✔ completed/, "the run beside it reads as it did");
+  assert.equal(lacking.outcome, "completed");
+});

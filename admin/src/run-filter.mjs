@@ -19,7 +19,8 @@
  * an operator half-remembers (`web#12`), and the runs page's one search pill takes a repository, a target or a job id
  * (`gh-2f6a`), so a fragment of either finds its run. `outcome` reads the console's words (issue #737): a person filters
  * by what a row says, so `failed` finds a recovery end the record writes as `policy`. `problems=1` keeps every run that
- * did not complete.
+ * did not complete, and a completed run that lacked its flow or an extension (`loadedProblems`, issue #800), which
+ * `outcome=completed` still finds: the record's outcome stays completed, so nothing that counts outcomes moves.
  */
 import { RUN_KINDS } from "@edgehero/pi-dispatch/forges";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
@@ -28,6 +29,7 @@ import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { HOST_VENUE_NAME_RE, UNATTRIBUTED_BACKEND } from "@edgehero/pi-dispatch/backends";
 import { cronRunOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { repoOfTarget } from "./costs.mjs";
+import { loadedProblems } from "./loaded-words.mjs";
 import { OUTCOME_KEYS, RECORD_REASON_RE, outcomeKey } from "./words.mjs";
 
 /** The query parameters this filter reads, in the order a page states them. Anything else in the query is not its. */
@@ -182,7 +184,8 @@ export function runMatches(record, filter) {
     const has = (v) => typeof v === "string" && v.toLowerCase().includes(needle);
     if (!has(record.target) && !has(record.jobId)) return false;
   }
-  // Every run that did not complete, an outcome this release does not know included (its key is null).
-  if (f.problems !== undefined && outcomeKey(record.outcome, record.reason) === "completed") return false;
+  // Every run that did not complete, an outcome this release does not know included (its key is null), and a completed
+  // run its row marks as lacking something.
+  if (f.problems !== undefined && outcomeKey(record.outcome, record.reason) === "completed" && loadedProblems(record).length === 0) return false;
   return true;
 }

@@ -106,6 +106,7 @@ import {
   runChain, runHeadline, runRecord, runRest, runTranscriptState, runTerminal, runActionsPanel, runSandbox, runSecrets, runModels, runTail, runRecovery, runWhy, runHost, runViewer,
   runChat,
   runCostPanel,
+  runLoaded,
   runInbox,
   runOutcome,
   runWorkspace,
@@ -191,7 +192,7 @@ const PAGE_PANELS = Object.freeze({
   // swapping panels; on a phone, where the layout is one column, Needs you comes first once the checklist is gone.
   overview: [["p-setup", overviewSetup], ["p-setup-pi", overviewSetupPi], ["p-setup-empty", overviewSetupEmpty], ["p-needs", overviewNeeds], ["p-waiting", overviewWaiting], ["p-active", overviewActive], ["p-spend", overviewSpend], ["p-agent-writes", overviewAgentWrites], ["p-timeline", overviewTimeline], ["p-caps", overviewCaps], ["p-waitlists", overviewWaitlists], ["p-hosts", overviewHosts]],
   runs: [["p-filters", runsFilters], ["p-summary", runsSummary], ["p-runs", runsTable]],
-  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-workspace", runWorkspace], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-answer-draft", runAnswerDraft], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
+  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-workspace", runWorkspace], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-answer-draft", runAnswerDraft], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-loaded", runLoaded], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
   parked: [["p-questions", parkedQuestions]],
   "answer-rules": [["p-questions", parkedQuestions]],
   ...SPEND_PANELS,
@@ -253,7 +254,7 @@ const PAGE_LAYOUT = Object.freeze({
   fleet: [{ cls: "stack", items: ["p-fleetbar", "p-active"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-queues", "p-held", "p-failed", "p-delayed", "p-schedules"] }, { cls: "stack", items: ["p-hosts", "p-doctor"] }] }, { cls: "stack", items: ["p-venues"] }],
   host: [{ cls: "stack", items: ["p-hoststate"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-hostjobs", "p-hostsandboxes", "p-hostbudget", "p-hostcap"] }, { cls: "stack", items: ["p-hostrow", "p-hostdoctor"] }] }],
   venue: [{ cls: "cols", items: [{ cls: "stack", items: ["p-venue-props"] }, { cls: "stack", items: ["p-venue", "p-venue-serves", "p-venue-hosts", "p-venue-fix"] }] }, { cls: "stack", items: ["p-venue-compare"] }],
-  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-workspace", "p-run", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-answer-draft", "p-terminal", "p-inbox", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
+  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-workspace", "p-run", "p-loaded", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-answer-draft", "p-terminal", "p-inbox", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
   overview: Object.freeze([
     Object.freeze({ cls: "cols", items: Object.freeze(["p-setup", Object.freeze({ cls: "stack", items: Object.freeze(["p-setup-pi", "p-setup-empty"]) })]) }),
     Object.freeze({ cls: "cards-4", slotAfter: true, items: Object.freeze(["p-needs", "p-waiting", "p-active", "p-spend"]) }),
@@ -617,7 +618,7 @@ const PAGE_READS = Object.freeze({
   "zero-touch": ["parkedCount"],
   overview: ["snapshot", "waiting"],
   runs: ["runsPage", "subscriptions", "runsWindow", "parkedCount"],
-  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
+  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount", "hostLoads"],
   parked: ["snapshot", "parkedChecks"],
   "answer-rules": ["snapshot", "parkedCount"],
   insights: ["insights", "parkedCount"],
@@ -781,6 +782,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     if (name === "sandboxes") {
       try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }
     }
+  }
+  // What the hosts published (issue #800). A missing or failed read is unknown, never an error page and never "the same".
+  if (reads.includes("hostLoads")) {
+    try { data.hostLoads = typeof deps.hostLoads === "function" ? await deps.hostLoads() : null; } catch { data.hostLoads = null; }
   }
   if (name === "zero-touch") {
     try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role }) : null; } catch { data.zeroTouch = null; }
@@ -1052,7 +1057,7 @@ function viewOf(name, ctx) {
 }
 
 /** The viewer card's fixed visible panels. The other ids remain empty for live state swaps. */
-export const RUN_VIEWER_PANELS = Object.freeze(["p-viewer", "p-outcome", "p-progress", "p-transcript", "p-chat", "p-inbox", "p-run"]);
+export const RUN_VIEWER_PANELS = Object.freeze(["p-viewer", "p-outcome", "p-progress", "p-transcript", "p-chat", "p-inbox", "p-run", "p-loaded"]);
 
 /**
  * The run page's panels for a record a NEWER pi-dispatch wrote (issue #761), for both roles: the outcome banner and the

@@ -45,6 +45,7 @@ import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimit
 import { matchesKey } from "./keys.mjs";
 // The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
 import { HELD_LABEL, NO_EXPLANATION, SPEND_TITLE, VENUE_LABEL, outcomeWord, reasonWords, recordReason, rowNumber } from "./words.mjs";
+import { outcomeNote } from "./loaded-words.mjs";
 import { beatAgeOf, doctorByText, doctorCountsText, doctorHostsOf, doctorProblems, doctorStale } from "./doctor-view.mjs";
 import { box, clip, clipData, cutUnits, escapeInterpreted, fmtCost, hasControls, makeLineInput, meter, scrubControls, scrubKeepingStyle, sliceColumns } from "./panel.mjs";
 import { makeStyler, frame, RULE } from "./style.mjs";
@@ -3559,7 +3560,7 @@ function runRow(row: any, sel: boolean, inner: number, styler: any): string {
     targetCell,
     ...(project === null ? [] : [styler.fg("syntaxType", project)]),
     styler.fg("accent", cell(r.flow)),
-    outcomeColored(r.outcome, r.reason, styler),
+    loadedNoteColored(r, styler) ?? outcomeColored(r.outcome, r.reason, styler),
     styler.fg("dim", `${cell(r.turns)}t`),
     styler.fg("dim", Number.isFinite(r.tokens?.total) ? fmtTokens(r.tokens.total) : "-"),
     // Last, so a narrow frame clips the venue before the outcome; only a run off `local` carries it (`recordVenue`).
@@ -3583,6 +3584,15 @@ function outcomeColored(outcome: any, reason: any, styler: any): string {
   const w = outcomeWord(outcome, reason);
   const word = w.known ? w.word : scrubControl(String(outcome ?? "failed"));
   return styler.fg(w.tone, `${w.glyph} ${word}`);
+}
+
+/**
+ * Issue #800: a completed run that lacked its flow or an extension, in the console's words and a warning's glyph and tone,
+ * so a clean exit does not read as fine. Fixed words, and the record's outcome stays completed. Null for every other run.
+ */
+function loadedNoteColored(record: any, styler: any): string | null {
+  const note = outcomeNote(record);
+  return note === null ? null : styler.fg("warning", `⚠ ${note.charAt(0).toLowerCase()}${note.slice(1)}`);
 }
 
 /** The reason a list row names after its other cells: a reason the outcome's word does not already say, or null. */

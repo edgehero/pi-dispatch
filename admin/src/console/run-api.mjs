@@ -35,6 +35,7 @@ import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/ch
 import { repoOfTarget } from "../costs.mjs";
 import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
 import { recordReason } from "../words.mjs";
+import { loadedOf, outcomeNote } from "../loaded-words.mjs";
 import { coreRecordOf, fromNewerRelease, NEWER_RECORD_SENTENCE } from "../newer-release.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
 import { RUN_MODEL_RE, RUN_PROVIDER_RE } from "../run-filter.mjs";
@@ -121,6 +122,10 @@ export function safeRunOf(id, record) {
 /** `safeRunOf`'s field-by-field rebuild of one record. */
 function safeRunFields(id, record) {
   const r = record ?? {};
+  // Issue #800: what the run loaded, rebuilt, and the word its row reads. Names, versions, counts and states, for an
+  // operator and a viewer alike. `agentReadProjection` takes both out for an agent: a model reads no extension's name.
+  const loaded = loadedOf(record);
+  const note = outcomeNote(record);
   const watchTarget = r.kind === "watch" && typeof r.target === "string" && r.target.startsWith("watch:") && WATCH_RULE_ID_RE.test(r.target.slice(6));
   const target = r.kind === "watch" ? (watchTarget ? r.target : null) : str(r.target, TARGET_RE);
   const repo = target !== null && !watchTarget ? repoOfTarget(target) : null;
@@ -157,6 +162,8 @@ function safeRunFields(id, record) {
     // Whether the run kept a session (its trigger armed run.resume), and whether this run resumed one: two booleans, so
     // a terminal can say "this run keeps no session" before it looks for a directory. Never the key.
     session: { kept: r.session !== null && typeof r.session === "object", resumed: r.session?.resumed === true },
+    loaded,
+    outcomeNote: note,
   };
 }
 
