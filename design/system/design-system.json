@@ -17,7 +17,7 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-11-03T12:11:54Z",
-    "note": "Proposed (#800): what each run loaded. A run's Loaded card (pi and its image, model, extensions, skills, MCP, tools), its states with what was left out on purpose, the same record in a sandbox and on a trigger, and the project page's What its runs load by host."
+    "at": "2026-11-03T12:50:17Z",
+    "note": "Proposed (#802): what a trigger's jobs get on each host, changed in place by a person: model, flow and skills, extensions, MCP servers and tools, with one preview and Confirm. Also (#800): what each run loaded."
   }
 }
