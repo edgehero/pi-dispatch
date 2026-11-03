@@ -1,0 +1,212 @@
+{
+  "card": "RunWorkspaceStates",
+  "pr": 790,
+  "panels": [
+    "p-workspace"
+  ],
+  "elements": [
+    {
+      "el": "p-workspace",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-kept.operator"
+      ]
+    },
+    {
+      "el": "Completed",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-kept.operator"
+      ],
+      "shows": "Try it before you merge."
+    },
+    {
+      "el": "Shared with driver consent",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-shared.operator"
+      ],
+      "shows": "lets operators watch"
+    },
+    {
+      "el": "Failed, kept",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-failed.operator"
+      ],
+      "shows": "Reproduce it."
+    },
+    {
+      "el": "Awaiting input",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-awaiting.operator"
+      ],
+      "shows": "Look before you answer."
+    },
+    {
+      "el": "Cannot reopen on venue",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-unsupported.operator"
+      ],
+      "shows": "Prepare from this run"
+    },
+    {
+      "el": "Running",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-running.operator"
+      ],
+      "shows": "Opens when it ends."
+    },
+    {
+      "el": "Container never started",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-never-started.operator"
+      ],
+      "shows": "Nothing to open."
+    },
+    {
+      "el": "Refused",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-refused.operator"
+      ],
+      "shows": "Nothing to open."
+    },
+    {
+      "el": "Expired workspace",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-expired.operator"
+      ],
+      "shows": "Prepare from this run"
+    },
+    {
+      "el": "Swept workspace",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-swept.operator"
+      ],
+      "shows": "Prepare from this run"
+    },
+    {
+      "el": "Retention off",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-retention-off.operator"
+      ],
+      "shows": "Workspace retention is off"
+    },
+    {
+      "el": "Unknown or stale publication",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-stale.operator"
+      ],
+      "shows": "could not be verified"
+    },
+    {
+      "el": "Recovery active",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-recovery.operator"
+      ],
+      "shows": "Opens when it ends."
+    },
+    {
+      "el": "Prepare from run carries only the validated run id to the explicit current-policy form",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-unsupported.operator"
+      ],
+      "shows": "fromRun=gh-9575"
+    },
+    {
+      "el": "Source run repository/HEAD, historical trigger suggestion and deliberate compatible host/trigger choice",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/sandbox-data.mjs#makeSandboxService",
+      "holds": "query.fromRun ? null"
+    },
+    {
+      "el": "Viewer sees no Workspace panel contents",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "holds": "view.role !== \"operator\""
+    },
+    {
+      "el": "No browser terminal reaches the running paid container",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runWorkspaceState",
+      "holds": "running job's container is never"
+    },
+    {
+      "el": "Only registered existing shells receive browser controls",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/sandbox-links.mjs#sandboxBrowserLink",
+      "holds": "browserGateways.sessions"
+    },
+    {
+      "el": "Reference table assembles alternatives that production renders once for its current run",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "The reference table compares states; production draws one state, never a duplicate table on every run page."
+    },
+    {
+      "el": "Example job IDs, OOM reproduction and dates",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample IDs and dates are fixture data. The retained sandbox preserves recorded limits; no deterministic reproduction of an arbitrary failure is promised."
+    }
+  ]
+}

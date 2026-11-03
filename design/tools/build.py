@@ -16,8 +16,8 @@ sys.path.insert(0, str(TOOLS))
 # Order matters only where one generator imports another's helpers or reads its cards.
 GENERATORS = [
     "gen_components", "gen_overview", "gen_runs", "gen_runs2", "gen_parked", "gen_fleet", "gen_fleet2",
-    "gen_spend", "gen_spend2", "gen_triggers", "gen_config2", "gen_access", "gen_watchboard", "gen_dispatchers",
-    "gen_dispatcher", "gen_sandboxes", "gen_zerotouch", "gen_answerer", "gen_guide",
+    "gen_spend", "gen_spend2", "gen_triggers", "gen_config2", "gen_updates", "gen_access", "gen_watchboard", "gen_dispatchers",
+    "gen_dispatcher", "gen_sandboxes", "gen_gateway", "gen_gateway_workbench", "gen_workspace", "gen_zerotouch", "gen_answerer", "gen_guide",
     "gen_journeys",   # last: it screenshots panels of the cards above
 ]
 

@@ -7,6 +7,7 @@ on:
     paths:
       - "worker/src/opener-*.mjs"
       - "worker/src/sandbox-hosts.mjs"
+      - "admin/src/console/sandbox-links.mjs"
       - ".github/scripts/opener-native-smoke.mjs"
       - ".github/workflows/opener-native.yml"
   workflow_dispatch:

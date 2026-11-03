@@ -87,9 +87,10 @@ export function hostRefusal(hostHeader, allowedHosts = []) {
 /**
  * Refuse a write that did not come from the console's own origin. `headers` is node's lowercased header object.
  * `Sec-Fetch-Site`, when the browser sent it, must be exactly `same-origin`; `Origin` must then equal `http://<Host>`
- * in every case (the console speaks plain HTTP on loopback; TLS is the tunnel's job).
+ * in the default loopback case. Protected gateway enrollment may instead declare the browser-facing HTTPS
+ * origin; its Host must still match exactly. Forwarding headers never choose the scheme.
  */
-export function originRefusal(headers) {
+export function originRefusal(headers, { expectedOrigin = null } = {}) {
   const site = headers["sec-fetch-site"];
   if (site !== undefined && site !== "same-origin") {
     return `a write must come from the console's own page (Sec-Fetch-Site was ${String(site).slice(0, 20)}, and only same-origin is accepted)`;
@@ -99,6 +100,14 @@ export function originRefusal(headers) {
     return "a write must carry an Origin header naming the console, and this one carried none";
   }
   const host = headers.host;
+  // A protected gateway enrollment may name the browser-facing HTTPS console origin. Never infer TLS from
+  // Forwarded/X-Forwarded-* supplied by a peer; its canonical authority must still equal the actual Host.
+  if (expectedOrigin !== null) {
+    let declared;
+    try { declared = new URL(expectedOrigin); } catch { return "the configured console origin could not be read; inspect gateway enrollment on the console host"; }
+    if (declared.origin !== expectedOrigin || !["http:", "https:"].includes(declared.protocol) || typeof host !== "string" || declared.host !== host.trim().toLowerCase() || origin !== expectedOrigin) return "a write must come from the exact console origin recorded in protected gateway enrollment";
+    return null;
+  }
   if (typeof host !== "string" || origin.toLowerCase() !== `http://${host.trim().toLowerCase()}`) {
     return "a write must come from the console's own origin, and its Origin header named another";
   }

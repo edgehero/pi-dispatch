@@ -17,10 +17,13 @@
 import { neededVersion, valueNeededVersion } from "./store-version.mjs";
 
 /** The highest job data version this build reads. */
-export const JOB_DATA_VERSION = 1;
+export const JOB_DATA_VERSION = 2;
 
-/** Each job data field that needs a version above 1, with the version that introduced it. Empty until one does. */
-export const JOB_DATA_FIELD_VERSIONS = Object.freeze({});
+/**
+ * Each job data field that needs a version above 1, with the version that introduced it.
+ * `packageCanary` (issue #796): an older worker would ignore it and run the trigger's ordinary job in its place, a paid run that tried nothing and reported on nothing.
+ */
+export const JOB_DATA_FIELD_VERSIONS = Object.freeze({ packageCanary: 2 });
 
 /**
  * Each EXISTING top-level field whose range a later release widens, as `field -> (value) => version` (the shared rule,

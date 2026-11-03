@@ -66,4 +66,4 @@ export async function loadRenderer() {
  * marker such as CURSOR_MARKER at the "after" boundary; the width functions are byte-identical, and the panel draws
  * no APC sequence.
  */
-export const PI_TUI_UTILS_SHA256 = "275c8400c37c09a7cc106445e27f676aa320c6a024dc89b540b97e1357e90e55";
+export const PI_TUI_UTILS_SHA256 = "7f6db62ad0964d157ed4b26d54e86d0fb6ca168d4fa3bb43b76d09422983b37d";

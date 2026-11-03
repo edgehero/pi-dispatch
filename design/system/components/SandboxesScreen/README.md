@@ -10,7 +10,7 @@ The operator-only Sandboxes tab on Runs opens a kept workspace in the person’s
 - **Open now** shows the host, opening account and opening time. Attach opens the existing shell. End previews and confirms a request to the terminal that opened that exact shell; it cannot end a replacement shell. The workspace remains kept.
 - **Kept workspaces** shows each host’s published list, pin and deadline. Pin previews the host’s configured pin window. Stale, missing, unreadable and truncated publications are stated; none means an empty fleet.
 - Fleet’s host page edits a credential-free SSH target and explicit executable/deployment paths. Download and inspect the file, then import it into the opener on the person’s computer. A link cannot enroll a host or change this config.
-- **In this browser** is an off/proposed note linking #754. It opens no terminal, pty or WebSocket.
+- **In this browser** explains the optional separate gateway, off by default and enrolled per host. **Open in browser** is offered only for an existing shell on an enrolled host, to a writable operator session above phone width. Sign in again with the same token for each attachment; the terminal opens at the gateway’s own hostname. The console opens no shell or WebSocket.
 
 **Panels.** `p-sb-run`, `p-sb-new`, `p-sb-open`, `p-sb-kept`, `p-sb-browser`.
 
@@ -24,6 +24,6 @@ The operator-only Sandboxes tab on Runs opens a kept workspace in the person’s
 - The container boundary is the existing sandbox launcher, with read-only `/job`, a non-root user, no capabilities, no new privileges, resource limits and the host’s job network. The original run venue must support reopening; openshell and openshell-bind do not.
 - A kept workspace holds issue text and stays on its host. Sweeping, pinning and idle logout keep their existing lifecycle rules. Retention defaults to 24 hours, pinning to seven days and idle logout to 30 minutes, but the screen reads the selected host’s actual configuration.
 - A hostile page can only ask the locally configured opener to show a command that waits for Enter. No credentials or arbitrary executable string travel in the URI.
-- The browser-terminal rejection remains while #754 / OQ-050 is open.
+- #754 / OQ-050 admits only the separately hosted, ticketed attachment. The gateway cannot start a container, choose a command or attach elsewhere. Its single-use 60-second grant stays server side; one browser attachment is admitted per sandbox incarnation, and terminal bytes are never recorded.
 
 **Fixture note.** The pictured hosts, runs, paths, image tag and times are sample data. Its 24-hour retention and seven-day pin are the sample host’s settings. The implementation reads real publications and reports exceptional states instead of substituting these values.

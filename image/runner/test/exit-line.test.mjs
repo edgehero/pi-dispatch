@@ -271,3 +271,16 @@ test("readExitKey: PI_EXIT_AUTH=stdin-frames takes frame 1's key and how many by
 	assert.deepEqual(readExitKey({ PI_EXIT_AUTH: "stdin-frames" }, { readFrame: () => { throw new Error("x"); } }), { key: null, problem: "unreadable", frames: true, consumed: 0 });
 	assert.deepEqual(readExitKey({ PI_EXIT_AUTH: "stdin-lines" }), { key: null, problem: "unknown-channel" }, "any other value is still unknown");
 });
+
+test("a noted fact is on the line however the run ends, and a field the line itself sets wins (issue #796)", () => {
+	const lines = (act) => {
+		const out = [];
+		const writer = createExitWriter({ jobId: "j", write: (s) => out.push(s), exit: () => {} });
+		act(writer);
+		return JSON.parse(out.join("").trim());
+	};
+	assert.equal(lines((w) => { w.note({ canaryLoad: "loaded" }); w.writeExit({ code: 0, reason: "completed" }); }).canaryLoad, "loaded");
+	assert.equal(lines((w) => { w.note({ canaryLoad: "failed" }); w.terminate(); }).canaryLoad, "failed", "also on the SIGTERM path");
+	assert.equal(Object.hasOwn(lines((w) => w.writeExit({ code: 0, reason: "completed" })), "canaryLoad"), false, "nothing noted, nothing said: a line stays what it was");
+	assert.equal(lines((w) => { w.note({ code: 9 }); w.writeExit({ code: 0, reason: "completed" }); }).code, 0);
+});

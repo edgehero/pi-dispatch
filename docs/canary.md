@@ -1,5 +1,7 @@
 # Model-role canaries
 
+This page is about trying a **model**. To try a new version of a staged **extension** on one paid job, see [Updates](console.md#updates).
+
 `pi-dispatch canary --role editor --model anthropic/<model-id> --flow edit --cap-usd 1`
 replays recent completed jobs whose main session used the named role and flow. It prints each original
 run beside its candidate run, their recorded cost and outcome, and a link to the console's what-if

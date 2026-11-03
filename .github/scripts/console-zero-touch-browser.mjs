@@ -1,6 +1,9 @@
 /** Zero touch's rendered data, styles and native interactions under the console CSP (#770).
  * This fixture server does not execute writes. Endpoint guards, exact persistence and worker admission have
  * separate integration tests; here a canned refusal proves the browser sends the reviewed form schema. */
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 const ensure = (value, message) => { if (!value) throw new Error(message); };
 const ROLES = ["operator", "viewer"];
 const WIDTHS = [320, 390, 800, 1024, 1440];
@@ -23,12 +26,15 @@ export function zeroTouchMetrics() {
   const labels = [...document.querySelectorAll(".zt-cause-label")].filter(shown).map((e) => ({ value: e.textContent, ...box(e), font: parseFloat(getComputedStyle(e).fontSize), color: color(getComputedStyle(e).fill), expected: token(e, "on-tone") }));
   const bars = [...document.querySelectorAll(".zt-cause-svg")].filter(shown).map((e) => ({ label: e.getAttribute("aria-label"), height: box(e)?.height, rects: [...e.querySelectorAll(".zt-cause-rect")].map((r) => ({ color: color(getComputedStyle(r).fill), expected: token(r, "tone"), width: box(r)?.width })) }));
   const meters = [...document.querySelectorAll('[role="meter"]')].filter(shown).map((e) => ({ value: Number(e.getAttribute("aria-valuenow")), goal: e.querySelector(".zt-goal")?.getAttribute("x1"), bed: box(e.querySelector(".pbar__bed"))?.width, fill: box(e.querySelector(".pbar__fill"))?.width, label: e.getAttribute("aria-label") }));
+  const draft = [...document.querySelectorAll("#p-zt-handled .kpi>b,.ztp-now>li:nth-child(3)>b")].find(shown);
+  const draftContext = draft?.closest("li") ?? draft?.closest("#p-zt-handled");
   return {
-    width: innerWidth, scrollWidth: document.scrollingElement.scrollWidth, fonts: document.fonts.status, font: getComputedStyle(document.body).fontFamily,
+    canvas: token(document.body, "canvas"), width: innerWidth, scrollWidth: document.scrollingElement.scrollWidth, fonts: document.fonts.status, font: getComputedStyle(document.body).fontFamily,
     css: [...document.styleSheets].some((s) => s.href?.endsWith("/static/console.css") && s.cssRules.length > 100), sections,
     rate: rateValue?.textContent, rateFont: rateValue ? parseFloat(getComputedStyle(rateValue).fontSize) : 0, rateColor: rateValue ? color(getComputedStyle(rateValue).color) : null, ink: token(document.body, "ink"), rateText: rate?.textContent,
     spark: spark ? { label: spark.getAttribute("aria-label"), height: box(spark)?.height, stroke: color(getComputedStyle(spark.querySelector(".zt-spark__l")).stroke), ink: token(spark, "ink"), goalColor: goal ? color(getComputedStyle(goal).stroke) : null, goalExpected: token(spark, "ok"), dashed: goal ? getComputedStyle(goal).strokeDasharray : "none" } : null,
     project: box(project), fixes: box(fixes), legends, labels, bars, meters,
+    draft: draft ? { value: draft.textContent, text: draftContext.innerText, font: parseFloat(getComputedStyle(draft).fontSize), color: color(getComputedStyle(draft).color), ...box(draft) } : null,
     phoneProjects: shown(document.querySelector(".zt-phone-projects")), desktopProjects: shown(document.querySelector(".zt-desktop-projects")), phoneSummary: shown(document.querySelector(".zt-phone-summary")),
     groups: [...document.querySelectorAll(".zt-q,.ztp-q")].filter(shown).map((e) => ({ actions: [...e.querySelectorAll(".zt-q__act summary,.zt-q__act>a,.zt-q__act button,.ztp-q__a summary,.ztp-q__a>a,.ztp-q__a button")].filter(shown).length })),
     writeControls: [...document.querySelectorAll("form[data-action]")].length, questionsText: document.querySelector("#p-zt-questions")?.textContent,
@@ -37,7 +43,7 @@ export function zeroTouchMetrics() {
 }
 
 /** Pure verdicts have counterexample tests and a browser-side negative control. */
-export function zeroTouchProblems(m, { width, role, readOnly = false } = {}) {
+export function zeroTouchProblems(m, { width, role, readOnly = false, draftAnswers = 6 } = {}) {
   const out = [], phone = width <= 760;
   if (!m.css || m.fonts !== "loaded" || !/system-ui|Segoe UI|Arial/.test(m.font)) out.push("Shared stylesheet or system fonts are missing");
   if (m.scrollWidth > width + 0.5) out.push("The complete page exceeds its viewport");
@@ -61,11 +67,12 @@ export function zeroTouchProblems(m, { width, role, readOnly = false } = {}) {
   if (role === "viewer") {
     if (m.writeControls || /Test command|Rate limit scope|Package manager/.test(m.questionsText ?? "")) out.push("The viewer received question groups or write controls");
   } else if (readOnly && m.writeControls) out.push("The read-only console received write controls");
-  if (!m.text?.includes("#772") || m.actions.some((a) => /draft|standing-answer|sandbox/.test(a))) out.push("Deferred answer or sandbox features are presented as active");
+  if (!m.draft || m.draft.value !== (phone ? `${draftAnswers} ${draftAnswers === 1 ? "run" : "runs"}` : String(draftAnswers)) || m.draft.font < (phone ? 12 : 30) || m.draft.height < 12 || m.draft.color !== m.ink || !m.draft.text?.includes("edited or as drafted") || !m.draft.text?.includes("still counts as a touch")) out.push("The visible draft-answer count, hierarchy or human-touch explanation is wrong");
+  if (m.actions.some((a) => /draft|standing-answer|sandbox/.test(a))) out.push("The read-only draft count exposes an answer or sandbox action");
   return out;
 }
 
-export async function checkZeroTouchBrowser({ browser, docs, origin, openPage, clockMs }) {
+export async function checkZeroTouchBrowser({ browser, docs, origin, openPage, clockMs, shots = null }) {
   const results = [];
   const populated = (role) => docs.find((d) => d.file === `panels/zero-touch-populated.${role}.html`);
   const run = async (name, doc, check, { width = 1440, theme = "light", noScript = false } = {}) => {
@@ -77,6 +84,16 @@ export async function checkZeroTouchBrowser({ browser, docs, origin, openPage, c
       target = page.t; await page.evaluate("document.fonts.ready", true); await check(page);
       const errors = await page.evaluate("({csp:window.__pdCsp||[],errors:window.__pdErrors||[]})");
       ensure(!errors.csp.length && !errors.errors.length, JSON.stringify(errors));
+      ensure(await page.evaluate("getComputedStyle(document.body).getPropertyValue('--canvas').trim()") === (theme === "light" ? "#edeeec" : "#000000"), "The actual rendered theme differs from its requested palette");
+      if (shots && (name.startsWith("paint-") && [390, 800, 1024, 1440].includes(width) || ["readonly-keeps-reads", "native-keyboard-no-js", "native-phone-observations-no-js"].includes(name) || name.startsWith("zero-drafts-"))) {
+        mkdirSync(shots, { recursive: true });
+        await page.evaluate("window.scrollTo(0,0)");
+        const layout = await target.send("Page.getLayoutMetrics"), box = layout.cssContentSize ?? layout.contentSize;
+        ensure(box.width <= width + 1 && box.height > 0 && box.height < 30000, "The complete capture has valid bounds");
+        const png = await target.send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: true, clip: { x: 0, y: 0, width: box.width, height: box.height, scale: 1 } });
+        writeFileSync(join(shots, `zero-touch-${name}.png`), Buffer.from(png.data, "base64"));
+        writeFileSync(join(shots, `zero-touch-${name}.probe.json`), JSON.stringify({ theme, role: doc.role, noScript, csp: errors.csp, ...await page.evaluate(`(${zeroTouchMetrics})()`) }, null, 2));
+      }
     } catch (error) { result.failures.push(`${name}: ${error.message}`); }
     finally { if (target) await target.close().catch(() => {}); }
   };
@@ -134,5 +151,14 @@ export async function checkZeroTouchBrowser({ browser, docs, origin, openPage, c
     const problems = zeroTouchProblems(await evaluate(`(${zeroTouchMetrics})()`), { width: 1440, role: "operator" });
     ensure(problems.includes("Chart count labels are too small or use the wrong foreground"), "The chart negative control was not detected");
   });
+  await run("draft-count-negative-control", populated("operator"), async ({ evaluate }) => {
+    await evaluate("document.querySelector('#p-zt-handled .kpi>b').textContent='38'");
+    const problems = zeroTouchProblems(await evaluate(`(${zeroTouchMetrics})()`), { width: 1440, role: "operator" });
+    ensure(problems.includes("The visible draft-answer count, hierarchy or human-touch explanation is wrong"), "A draft count copied from all touches was not detected");
+  });
+  for (const width of [390, 800, 1440]) await run(`zero-drafts-${width}`, docs.find((d) => d.file === "panels/zero-touch-no-drafts.viewer.html"), async ({ evaluate }) => {
+    const problems = zeroTouchProblems(await evaluate(`(${zeroTouchMetrics})()`), { width, role: "viewer", draftAnswers: 0 });
+    ensure(!problems.length, problems.join("; "));
+  }, { width, theme: "dark" });
   return results;
 }

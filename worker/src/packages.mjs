@@ -27,6 +27,7 @@
  *     manifest must degrade to "no staged packages", not crash the worker mid-queue.
  */
 
+import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { configError } from "./config.mjs";
@@ -50,9 +51,7 @@ export const STAGE_MANIFEST = "packages.json";
 export const CONTAINER_PACKAGES_ROOT = `${CONTAINER_GLOBAL_PI_DIR}/${PACKAGES_SUBDIR}`;
 
 /** An exact semver -- prerelease and build metadata allowed, ranges/tags/wildcards are not. */
-export const EXACT_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
-/** An npm package name: lowercase, optionally `@scope/`-prefixed. */
-export const NPM_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+export { EXACT_VERSION_RE, NPM_NAME_RE };
 
 /**
  * The pi resource kinds a package may contribute by convention dir, when it carries no `pi` manifest.
@@ -61,8 +60,8 @@ export const NPM_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
  * would add an edge to the import-pi <-> packages cycle that only survives because both sides use their
  * bindings at call time.
  *
- * This list is pi's, not ours: at the 0.99.1 pin (as at 0.80.7) `collectPackageResources` falls through to exactly these
- * four directory names when `readPiManifest` returns null, so a package with no `pi` key and a `skills/`
+ * This list is pi's, not ours: at the pin `collectPackageResources` falls through to exactly these four directory
+ * names when `readPiManifest` returns null or lists no resource (1.5.0), so a package with no `pi` key and a `skills/`
  * dir IS a pi package. See host-pi.mjs's PINNED_PI_NEEDLES for the assertion that keeps that true.
  */
 export const RESOURCE_DIRS = ["extensions", "skills", "prompts", "themes"];
@@ -75,6 +74,12 @@ export const FROM_HOST = "host";
 const MAX_NAME_LENGTH = 214;
 /** The staged dir name doubles as a path segment in the container, so it stays short and flat. */
 const MAX_DIR_LENGTH = 64;
+
+/**
+ * A `dir` on the stage manifest: a plain path segment. Since issue #796 it names one stage (`package-stage.mjs`, name, version and a unique
+ * suffix) and may be longer than the package's own directory name, which `MAX_DIR_LENGTH` still bounds. A receipt from before is still valid.
+ */
+const STAGED_TREE_RE = /^[a-z0-9](?:[a-z0-9_.-]{0,142}[a-z0-9])?$/i;
 
 function isNonEmptyString(value) {
 	return typeof value === "string" && value.trim() !== "";
@@ -266,7 +271,7 @@ export function readStageManifest({ globalPiDir, readFile = readFileSync, fileEx
 			if (entry === null || typeof entry !== "object") return null;
 			const { name, version, dir } = entry;
 			if (!isNonEmptyString(name) || !isNonEmptyString(version) || !isNonEmptyString(dir)) return null;
-			if (!ENTRY_NAME_RE.test(dir) || dir.length > MAX_DIR_LENGTH) return null;
+			if (!STAGED_TREE_RE.test(dir)) return null;
 			packages.push({ name, version, dir, from: entry.from === FROM_HOST ? FROM_HOST : FROM_DECLARED });
 		}
 		return { stagedAt: typeof parsed.stagedAt === "string" ? parsed.stagedAt : null, packages };
@@ -281,12 +286,14 @@ export function readStageManifest({ globalPiDir, readFile = readFileSync, fileEx
  * readStageManifest's policy, because the consumers are advisory (doctor's per-trigger flow lines,
  * and issue #188's topology) and a half-staged tree must degrade to "nothing visible", not a crash.
  *
- * The semantics mirror pi's collectPackageResources at the 0.99.1 pin EXACTLY (unchanged since 0.80.7), because an enumerator
- * that agrees with pi by hand is how doctor comes to report a tier pi then ignores:
- *   - a `pi` manifest object means its `skills` entries are the ONLY sources -- a manifest WITHOUT a
- *     `skills` key contributes NO skills and gets NO convention fallback (readPiManifest short-circuits
- *     before the dir walk);
- *   - no `pi` key at all falls through to the convention `skills/` dir (RESOURCE_DIRS);
+ * The semantics mirror pi's collectPackageResources at the pin EXACTLY, and worker/test/packages.test.mjs holds them to
+ * pi's own package manager, because an enumerator that agrees with pi by hand is how doctor comes to report a tier pi then
+ * ignores:
+ *   - a `pi` object that lists a resource (a field that is an array of strings, which is all readPiManifest keeps) means
+ *     its `skills` entries are the ONLY sources -- one listing other resources but no `skills` contributes NO skills and
+ *     gets NO convention fallback;
+ *   - no `pi` key, or since 1.5.0 a `pi` object holding only metadata such as `changelogPath`, falls through to the
+ *     convention `skills/` dir (RESOURCE_DIRS);
  *   - a manifest entry may be a SKILL.md file, a skill dir, or a dir of skill dirs -- pi walks
  *     recursively, so this walks the same shape (bounded, it is host-advisory);
  *   - a glob (`*`/`?`) or override (`!`/`+`/`-` prefix) entry makes the whole package UNENUMERABLE
@@ -307,10 +314,11 @@ export function readStagedSkills({ globalPiDir, readFile = readFileSync, fileExi
 		const root = join(globalPiDir, PACKAGES_SUBDIR, pkg.dir);
 		let sources;
 		try {
-			const parsed = JSON.parse(readFile(join(root, "package.json"), "utf8"));
-			const pi = parsed !== null && typeof parsed === "object" && parsed.pi !== null && typeof parsed.pi === "object" ? parsed.pi : null;
-			if (pi) {
-				const entries = Array.isArray(pi.skills) ? pi.skills.filter((e) => typeof e === "string") : [];
+			const parsed = JSON.parse(readFile(join(root, "package.json"), "utf8").replace(/^\uFEFF/, ""));
+			const pi = parsed !== null && typeof parsed === "object" && parsed.pi !== null && typeof parsed.pi === "object" && !Array.isArray(parsed.pi) ? parsed.pi : null;
+			const listed = (field) => Array.isArray(pi?.[field]) && pi[field].every((e) => typeof e === "string");
+			if (RESOURCE_DIRS.some(listed)) {
+				const entries = listed("skills") ? pi.skills : [];
 				if (entries.some((e) => e.startsWith("!") || e.startsWith("+") || e.startsWith("-") || e.includes("*") || e.includes("?"))) {
 					out.unenumerable.push(pkg.name);
 					continue;

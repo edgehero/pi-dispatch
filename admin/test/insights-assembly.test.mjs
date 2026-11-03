@@ -35,15 +35,17 @@ async function reached(entry) {
   return Object.keys(res.metafile.inputs);
 }
 
-const PI_OR_TYPEBOX = /node_modules\/(?:@earendil-works\/pi-coding-agent|typebox)\//;
+// pi-schema is what pi-ai reaches where it reached TypeBox up to 1.4. pi-ai itself is deliberately not in the set: the
+// model catalog the worker's triggers read is pi-ai's, so this module has always reached it.
+const PI_OR_TYPEBOX = /node_modules\/(?:@earendil-works\/(?:pi-coding-agent|pi-schema)|typebox)\//;
 
 test("insights-assembly.mjs reaches neither the pi runtime nor typebox, and the walk would see them", async () => {
   const files = await reached("./insights-assembly.mjs");
   assert.ok(files.some((f) => f.endsWith("src/read-model.mjs")), "the walk followed the module's imports");
   assert.deepEqual(files.filter((f) => PI_OR_TYPEBOX.test(f)), []);
-  // The control: the pricing export this module takes as a parameter instead of importing reaches typebox through pi-ai,
+  // The control: the pricing export this module takes as a parameter instead of importing reaches pi-schema through pi-ai,
   // so a regression that imports it here turns this red.
-  assert.ok((await reached("@edgehero/pi-dispatch/pricing")).some((f) => PI_OR_TYPEBOX.test(f)), "the walk finds typebox where it is");
+  assert.ok((await reached("@edgehero/pi-dispatch/pricing")).some((f) => PI_OR_TYPEBOX.test(f)), "the walk finds pi-schema where it is");
 });
 
 // The facade's shape, canned like the costs tests' (no model is priced, so a metered run keeps its own cost).

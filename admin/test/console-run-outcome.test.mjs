@@ -36,8 +36,8 @@ const panelsOf = async (role, data, id) => pagePanels("run", ctxOf(role, data, i
 const joined = (panels) => panels.map((p) => p.html).join("");
 const count = (text, needle) => text.split(needle).length - 1;
 
-test("the viewer disclosure precedes the run's outcome, then its progress", () => {
-  assert.deepEqual(panelIds("run").slice(0, 3), ["p-viewer", "p-outcome", "p-progress"]);
+test("the viewer disclosure precedes the outcome and Workspace, then the run's progress", () => {
+  assert.deepEqual(panelIds("run").slice(0, 4), ["p-viewer", "p-outcome", "p-workspace", "p-progress"]);
 });
 
 test("a refused run: the banner says the outcome word, the catalog's sentence for its why, the next step and the docs link; Progress and Chat draw nothing", async () => {
@@ -207,19 +207,22 @@ test("SECURITY: the banner is the same for a viewer and an operator, and never c
 // ---- the actions ---------------------------------------------------------------------------------------------------------
 
 const summaryOf = async (record, data = {}, { role = "operator", readOnly = false } = {}) => (await pagePanels("run", ctxOf(role, { run: { record, source: "local" }, ...data }, record.jobId, readOnly))).find((p) => p.id === "p-actions").html.replace(/<\/?span[^>]*>/g, "");
+const workspaceOf = async (record, data = {}, { role = "operator", readOnly = false } = {}) => (await pagePanels("run", ctxOf(role, { run: { record, source: "local" }, ...data }, record.jobId, readOnly))).find((p) => p.id === "p-workspace").html.replace(/<\/?span[^>]*>/g, "");
 
 test("the sandbox action: hidden with a reason for a venue with no shell, a run refused before it started, and a manifest this host refuses; kept otherwise", async () => {
   const cmd = (id) => `<code>pi-dispatch sandbox ${id}</code>`;
-  assert.ok((await summaryOf(COMPLETED)).includes(cmd(COMPLETED.jobId)), "no check read: the command, as before");
-  const os = await summaryOf({ ...COMPLETED, backend: "openshell" });
-  assert.ok(!os.includes("pi-dispatch sandbox") && os.includes("Its workspace is not reopenable (openshell has no sandbox shell)."));
-  const refused = await summaryOf(REFUSED, { sandboxCheck: { retained: true, why: null } });
-  assert.ok(!refused.includes("pi-dispatch sandbox") && refused.includes("No workspace to reopen: the run was refused before it started, so none was made."));
-  const by = async (check) => summaryOf(COMPLETED, { sandboxCheck: check });
-  assert.ok((await by({ retained: false, why: "swept", reason: "swept" })).includes("Its workspace is no longer kept on this host"));
-  assert.ok((await by({ retained: false, why: "retention-off", reason: "retention off" })).includes("PI_SANDBOX_RETENTION_HOURS=0"));
-  assert.ok((await by({ retained: false, why: "workspace-gone", reason: "not reopenable (the workspace has moved or been deleted)" })).includes("Its workspace is not reopenable (the workspace has moved or been deleted)."));
-  assert.ok((await by({ retained: false, why: "past-window", reason: "x" })).includes(`<code>pi-dispatch sandbox ${COMPLETED.jobId} --pin</code>`), "past its window: the command with --pin");
+  assert.ok((await workspaceOf(COMPLETED)).includes(cmd(COMPLETED.jobId)), "no check read: the selectable command still lets its host decide");
+  const os = await workspaceOf({ ...COMPLETED, backend: "openshell" });
+  assert.ok(!os.includes("pi-dispatch sandbox") && os.includes("Its openshell venue cannot reopen a sandbox.") && os.includes("fromRun=gh-c1"));
+  const refused = await workspaceOf(REFUSED, { sandboxCheck: { retained: true, why: null } });
+  assert.ok(!refused.includes("pi-dispatch sandbox") && refused.includes("The run was refused before it started."));
+  const by = async (check) => workspaceOf(COMPLETED, { sandboxCheck: check });
+  for (const why of ["swept", "workspace-gone", "past-window"]) {
+    const noLongerOpen = await by({ retained: false, why });
+    assert.ok(noLongerOpen.includes("fromRun=gh-c1") && noLongerOpen.includes("Prepare from this run"), why);
+    assert.ok(!noLongerOpen.includes("pi-dispatch sandbox"), `${why}: no impossible open is offered`);
+  }
+  assert.ok((await by({ retained: false, why: "retention-off", reason: "retention off" })).includes("Workspace retention is off on its host."));
   for (const keep of [{ retained: true, why: null }, { elsewhere: true }, { unreachable: true }, { retained: false, why: "policy-unreadable", reason: "x" }]) assert.ok((await by(keep)).includes(cmd(COMPLETED.jobId)), JSON.stringify(keep));
 });
 
@@ -398,13 +401,13 @@ test("the console never hides the sandbox command on a venue policy it cannot se
   const reader = readerOn({ paths: { sandboxDir, sandboxRetentionHours: 24 }, env: { PI_WORKER_NAME: "mini1" } });
   const check = await reader.sandboxCheck("gh-p1", { jobId: "gh-p1", host: "mini1", backend: "podman" });
   assert.deepEqual(check, { retained: true, why: null, until: NOW + 23 * 3_600_000 });
-  const page = await summaryOf({ ...COMPLETED, jobId: "gh-p1", backend: "podman" }, { sandboxCheck: check });
+  const page = await workspaceOf({ ...COMPLETED, jobId: "gh-p1", backend: "podman" }, { sandboxCheck: check });
   assert.ok(page.includes('<code>pi-dispatch sandbox gh-p1</code>'), "the command, for the opener's shell to decide");
   // The panel's own verdict, with this process's env, still refuses it there: only the console asks with the policy unknown.
   assert.equal(sandboxRetentionOf({ sandboxDir, sandboxRetentionHours: 24 }, "gh-p1", { now: () => NOW, env: {} }).why, "unblessed");
   // Even a venue-policy word that reached the page keeps the command (the backstop).
   for (const why of ["unblessed", "policy-unreadable", "a-word-added-later"]) {
-    assert.ok((await summaryOf({ ...COMPLETED, jobId: "gh-p1", backend: "podman" }, { sandboxCheck: { retained: false, why, reason: "not reopenable here (PI_BACKENDS lacks podman)" } })).includes('<code>pi-dispatch sandbox gh-p1</code>'), why);
+    assert.ok((await workspaceOf({ ...COMPLETED, jobId: "gh-p1", backend: "podman" }, { sandboxCheck: { retained: false, why, reason: "not reopenable here (PI_BACKENDS lacks podman)" } })).includes('<code>pi-dispatch sandbox gh-p1</code>'), why);
   }
   // What is certain still hides it: a venue with no sandbox shell, whatever any shell blesses.
   const shellless = retainedRoot("gh-o1", { backend: "openshell" });

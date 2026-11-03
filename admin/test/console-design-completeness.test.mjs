@@ -21,6 +21,12 @@ const OUTSIDE_LEDGERS = Object.freeze({
   ForkRun: "Built separately by #648; managed forks belong to the run page.",
   WatchScreen: "Built separately by #735; its existing /watch route stays separate.",
   WatchBoard: "Built separately by #743; its existing /watch/board route stays separate.",
+  SandboxWorkbench: "#754 maintained-library standalone gateway workbench, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
+  SandboxTerminalRun: "#793 authorized per-terminal run context in the gateway, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
+  SandboxWatch: "#792 standalone read-only observer surface, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
+  SandboxTerminal: "#754 standalone gateway surface, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
+  SandboxGatewaySignIn: "#754 fresh operator reauthentication surface, checked by gateway/test/design.test.mjs and its element ledger; generic callback outside normal console panels.",
+  SandboxGatewayStates: "#754 standalone gateway states, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
   DispatchersScreen: "Proposed by #776; grew from #735, outside #751.",
   DispatcherScreen: "Proposed by #776; grew from #735, outside #751.",
 });
@@ -42,6 +48,7 @@ const CARDS = Object.freeze({
   ZeroTouchViewer: { page: "zero-touch", path: "/runs/zero-touch" },
   SecretsScreen: { page: "secrets", path: "/config/secrets" },
   ConnectionsScreen: { page: "connections", path: "/config/connections" },
+  UpdatesScreen: { page: "updates", path: "/config/updates" },
   ProjectDetail: { page: "project", path: "/config/project" },
 });
 

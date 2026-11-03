@@ -803,16 +803,16 @@ test("the stored fallback job is stamped with the version its fields need: nothi
 	const job = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", steerMode: "steer", waitFor: [{ profile: "jira", ticket: "PD-1" }], trigger: { deliveryId: "d-761", sender: { id: 1 } } };
 	const today = fallbackJobOf(job, "github");
 	assert.equal(JSON.stringify(today), '{"repo":"acme/web","target":{"type":"issue","number":7},"flow":"fix","waitFor":[{"profile":"jira","ticket":"PD-1"}],"trigger":{"deliveryId":"d-761","sender":{"id":1}},"kind":"github","jobId":"gh-d-761"}');
-	const v2 = { table: Object.freeze({ waitFor: 2 }), supported: 2 };
+	const v2 = { table: Object.freeze({ waitFor: 3 }), supported: 3 };
 	const stamped = fallbackJobOf(job, "github", { dataVersions: v2 });
-	assert.equal(stamped.dataVersion, 2);
+	assert.equal(stamped.dataVersion, 3);
 	const { waitFor: _w, ...without } = job;
 	assert.equal(Object.hasOwn(fallbackJobOf(without, "github", { dataVersions: v2 }), "dataVersion"), false);
-	// An older worker (this build, which reads version 1) refuses to rebuild the stamped fallback, and queues nothing.
+	// An older worker (this build, which reads a lower version) refuses to rebuild the stamped fallback, and queues nothing.
 	const adds = [];
 	await assert.rejects(enqueueLateForgeJob({ add: async (...a) => adds.push(a) }, "github", stamped), (e) => e instanceof RangeError && e.code === "newer-release");
 	assert.equal(adds.length, 0);
 	// A worker that reads it keeps the stamp.
 	await enqueueLateForgeJob({ add: async (...a) => adds.push(a) }, "github", stamped, { dataVersions: v2 });
-	assert.equal(adds[0][1].dataVersion, 2);
+	assert.equal(adds[0][1].dataVersion, 3);
 });

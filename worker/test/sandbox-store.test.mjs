@@ -138,6 +138,13 @@ test("retention records only a validated host base commit for canary replay (#71
 	}
 });
 
+test("a canary's candidate is deleted before the rename: reopening a retained run loads neither it nor the overlay (issue #796)", () => {
+	const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>", "/jobs/job-xyz/canary/a--1.0.0--aaaaaaaa/index.js": "third-party code" } });
+	retainJobDir(prepared(), { sandboxDir: "/sbx", fs });
+	assert.ok(fs.calls.removed.includes("/jobs/job-xyz/canary"));
+	assert.ok(!Object.keys(fs.files).some((k) => k.includes("canary")), "it does not survive into the retained tree");
+});
+
 test("the per-job transcript copy is deleted BEFORE the rename, never carried along", () => {
 	const fs = fakeFs({ files: { "/jobs/job-xyz": "<dir>", "/jobs/job-xyz/session/current.jsonl": "{}" } });
 	retainJobDir(prepared(), { sandboxDir: "/sbx", fs });

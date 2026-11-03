@@ -18,7 +18,7 @@ def routes():
 
 def from_run():
     picker = '<div class="sx-picker"><div class="field"><label for="sx-workspace">Kept workspace</label><select class="select" id="sx-workspace"><option>gh-9575 on mini1</option><option>gh-ebd7 on build3</option></select></div>' + btn('Show workspace') + '</div>'
-    head = f'<div class="sx-run"><span class="tile tone-ok">{ic("box")}</span><div><p class="sx-run__t">{code("gh-9575")}</p><p class="sx-run__s">mini1 {venue("local")}. Kept until 14:39 UTC tomorrow, 23h left.</p></div></div>'
+    head = f'<div class="sx-run"><span class="tile tone-ok">{ic("box")}</span><div><p class="sx-run__t">{code("gh-9575")}</p><p class="sx-run__s">mini1 {venue("local")}. Kept until 15:12 UTC tomorrow, 23h left.</p></div></div>'
     what = facts([('Image', 'pi-job:4.3.1, as its manifest records it'), ('/workspace', 'its retained clone'), ('/job', 'read only, with retained job inputs'), ('Processes', 'none until you start them'), ('Credentials', 'none, on purpose'), ('Network', "the host’s current job egress policy")], 3)
     foot = f'<div class="sx-foot"><p>{ic("info", "ic ic--sm")}<span>The shell uses a job’s isolation and network. A published host port is refused while egress is on. Pinning uses this host’s configured pin window.</span></p>{btn("Preview pin", "", "clock")}</div>'
     return card('From a run', picker + head + '<h3 class="sx-h3">What opens</h3>' + what + '<h3 class="sx-h3">How it opens</h3>' + routes() + foot, sub='the same image, workspace and isolation as the run', id_='p-sb-run')
@@ -35,12 +35,12 @@ def without_run():
     return card('Without a run', form + '<div class="sx-form-end">' + btn('Review settings') + '</div><h3 class="sx-h3">Given by the trigger, not chosen here</h3>' + given + '<p class="sx-p">Kept for 24 hours, on mini1. The worker clones on that host with a credential for this repository, then drops it. No container starts, no model runs, no dollars are spent and no run slot is taken.</p>' + btn('Preview preparation', 'primary', 'plus', sm=False) + cmd('pi-dispatch sandbox --new acme/web --ref HEAD --as 2'), sub='a fresh clone with a trigger’s image and a job’s isolation', id_='p-sb-new')
 
 def open_now():
-    body = f'<ul class="sx-opens"><li class="sx-open"><span class="dot tone-running"></span><div class="sx-open__b"><p class="sx-open__t">{code("gh-9575")}{venue("local")}</p><p class="sx-open__s">mini1, opened by ops. Open since 15:20 UTC.</p><div class="sx-open__a"><span class="sandbox-opener">{btn("Open in Terminal", "", "terminal")}</span><details><summary>Copy the command</summary>{command()}</details>{btn("Preview End", "danger", "cancel")}</div></div></li></ul>'
+    body = f'<ul class="sx-opens"><li class="sx-open"><span class="dot tone-running"></span><div class="sx-open__b"><p class="sx-open__t">{code("gh-9575")}{venue("local")}</p><p class="sx-open__s">mini1, opened by ops. Open since 15:20 UTC.</p><div class="sx-open__a"><span class="sandbox-opener">{btn("Open in Terminal", "", "terminal")}</span><span class="sandbox-browser">{btn("Open in browser", "", "globe")}</span><details><summary>Copy the command</summary>{command()}</details>{btn("Preview End", "danger", "cancel")}</div></div></li></ul>'
     body += f'<p class="sx-small">{ic("info", "ic ic--sm")}<span>One shell per workspace at a time. End asks the terminal that opened it to close the shell and keeps the workspace. What you type is not recorded.</span></p>'
     return card('Open now', body, end=badge('running', '1 open'), id_='p-sb-open')
 
 def kept():
-    rows = [('gh-9575','web','mini1','local','Kept until 14:39 UTC tomorrow, 23h left'), ('gh-ebd7','billing','build3','podman','Pinned until 15:39 UTC in 13 days'), ('billing-sweep','billing','mini2','openshell-bind','This venue has no sandbox shell')]
+    rows = [('gh-9575','web','mini1','local','Kept until 15:12 UTC tomorrow, 23h left'), ('gh-ebd7','billing','build3','podman','Pinned until 15:39 UTC in 13 days'), ('billing-sweep','billing','mini2','openshell-bind','This venue has no sandbox shell')]
     lis=[]
     for job,project,host,v,left in rows:
       controls = f'<div class="sx-kept__actions"><span class="sandbox-opener">{btn("Open in Terminal", "", "terminal")}</span><details><summary>Copy the command</summary>{command(job,host)}</details>{btn("Preview pin", "", "clock")}</div>' if v != 'openshell-bind' else ''
@@ -48,7 +48,12 @@ def kept():
     return card('Kept workspaces','<ul class="sx-kepts">'+''.join(lis)+'</ul>',sub='what each host still keeps',id_='p-sb-kept')
 
 def browser_card():
-    return card('In this browser','<p class="sx-p">A terminal in this browser needs a decision in #754. This console opens no shell and starts no container.</p><a class="link" href="#">Read the browser terminal proposal</a>',sub='proposed',end=chip('Needs a decision','attention','attention'),id_='p-sb-browser')
+    body = '<p class="sx-p">A separate gateway can attach to an already-open sandbox. It is off by default and enabled by hand per host. Open in Terminal and copy-command support remain available.</p>'
+    body += '<p class="sx-p">1 host is enrolled.<span class="sandbox-opener"> Choose Open in browser beside a registered shell in Open now.</span></p>'
+    body += '<p class="sx-p">Each opening needs your current operator token again. One browser window types at a time, and others can watch only if the person typing allows it. Closing it keeps the original sandbox; what you type is not recorded.</p>'
+    body += '<p class="sx-p">First open a kept or prepared workspace in your own terminal. The browser never starts a container.</p>'
+    body += '<p class="sx-p">Browser terminals require a window wider than 760 pixels. On a phone, copy the command for your own terminal.</p>'
+    return card('In this browser', body, sub='optional, separate gateway', end=chip('Enabled per host','ok','shield'), id_='p-sb-browser')
 
 def page():
     tabs = '<nav class="tabs sx-tabs" aria-label="Runs views"><a href="#">All runs</a><a href="#">Zero touch</a><a href="#" aria-current="page">Sandboxes</a></nav>'
@@ -73,7 +78,7 @@ CSS = """
 .sx-open__a { align-items: start; }
 .sx-ch > .cmd { margin-top: 8px; }
 .sx-ch details summary { cursor: pointer; }
-@media (max-width: 760px) { .sandbox-opener { display: none !important; } }
+@media (max-width: 760px) { .sandbox-opener, .sandbox-browser { display: none !important; } }
 
 .sx-tabs { margin: 0 0 var(--space-4); }
 .sx-tabs .count { background: var(--surface-3); color: var(--ink-muted); }
@@ -168,7 +173,7 @@ README = """The operator-only Sandboxes tab on Runs opens a kept workspace in th
 - **Open now** shows the host, opening account and opening time. Attach opens the existing shell. End previews and confirms a request to the terminal that opened that exact shell; it cannot end a replacement shell. The workspace remains kept.
 - **Kept workspaces** shows each host’s published list, pin and deadline. Pin previews the host’s configured pin window. Stale, missing, unreadable and truncated publications are stated; none means an empty fleet.
 - Fleet’s host page edits a credential-free SSH target and explicit executable/deployment paths. Download and inspect the file, then import it into the opener on the person’s computer. A link cannot enroll a host or change this config.
-- **In this browser** is an off/proposed note linking #754. It opens no terminal, pty or WebSocket.
+- **In this browser** explains the optional separate gateway, off by default and enrolled per host. **Open in browser** is offered only for an existing shell on an enrolled host, to a writable operator session above phone width. Sign in again with the same token for each attachment; the terminal opens at the gateway’s own hostname. The console opens no shell or WebSocket.
 
 **Panels.** `p-sb-run`, `p-sb-new`, `p-sb-open`, `p-sb-kept`, `p-sb-browser`.
 
@@ -182,7 +187,7 @@ README = """The operator-only Sandboxes tab on Runs opens a kept workspace in th
 - The container boundary is the existing sandbox launcher, with read-only `/job`, a non-root user, no capabilities, no new privileges, resource limits and the host’s job network. The original run venue must support reopening; openshell and openshell-bind do not.
 - A kept workspace holds issue text and stays on its host. Sweeping, pinning and idle logout keep their existing lifecycle rules. Retention defaults to 24 hours, pinning to seven days and idle logout to 30 minutes, but the screen reads the selected host’s actual configuration.
 - A hostile page can only ask the locally configured opener to show a command that waits for Enter. No credentials or arbitrary executable string travel in the URI.
-- The browser-terminal rejection remains while #754 / OQ-050 is open.
+- #754 / OQ-050 admits only the separately hosted, ticketed attachment. The gateway cannot start a container, choose a command or attach elsewhere. Its single-use 60-second grant stays server side; one browser attachment is admitted per sandbox incarnation, and terminal bytes are never recorded.
 
 **Fixture note.** The pictured hosts, runs, paths, image tag and times are sample data. Its 24-hour retention and seven-day pin are the sample host’s settings. The implementation reads real publications and reports exceptional states instead of substituting these values.
 """

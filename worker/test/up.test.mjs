@@ -1621,7 +1621,7 @@ test("the compose scan's own judgement: flags in any order, docker-compose, pros
 test("no source line names a docker compose command without --env-file; the prose mentions are the named ones (#480)", () => {
 	const commands = [];
 	const prose = [];
-	for (const dir of ["../src", "../../receiver/src", "../../admin/src"]) {
+	for (const dir of ["../src", "../../receiver/src", "../../admin/src", "../../gateway/src"]) {
 		const root = new URL(`${dir}/`, import.meta.url);
 		for (const name of realFs.readdirSync(root, { recursive: true })) {
 			if (!/\.(mjs|js|ts)$/.test(name)) continue;

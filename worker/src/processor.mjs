@@ -336,6 +336,8 @@ export async function runJob(job, deps) {
 	if (sourceRefusal) return sourceRefusal;
 	const touches = [];
 	let touchLineageSkipped = null;
+	// Issue #796: what the runner said of a canary's candidate, carried on every way out, since a job can load its candidate and still end any way at all.
+	const canaryFacts = { load: null };
 	const recordTouch = async (value) => {
 		const event = cleanTouch(value);
 		if (!event) return;
@@ -347,13 +349,18 @@ export async function runJob(job, deps) {
 		} catch { deps.log?.("touch_record_pending", {}); }
 	};
 	try {
-		const result = await runJobInner(job, { ...deps, recordTouch, recordTouchGap: () => { touchLineageSkipped = "source-unavailable"; } });
+		const result = withCanaryLoad(await runJobInner(job, { ...deps, recordTouch, recordTouchGap: () => { touchLineageSkipped = "source-unavailable"; }, canaryFacts }), canaryFacts);
 		return result && typeof result === "object" && (touches.length || touchLineageSkipped) ? { ...result, ...(touches.length ? { touches } : {}), ...(touchLineageSkipped ? { touchLineageSkipped } : {}) } : result;
 	} catch (error) {
+		if (canaryFacts.load !== null && error && typeof error === "object") error.canaryLoad = canaryFacts.load;
 		if (touches.length && error && typeof error === "object") error.touches = touches;
 		if (touchLineageSkipped && error && typeof error === "object") error.touchLineageSkipped = touchLineageSkipped;
 		throw error;
 	}
+}
+
+function withCanaryLoad(result, facts) {
+	return facts.load !== null && result !== null && typeof result === "object" ? { ...result, canaryLoad: facts.load } : result;
 }
 
 async function runJobInner(job, deps) {
@@ -1548,6 +1555,22 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			return { outcome: "policy", reason: "skills-dir-missing", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 		}
 
+		// Issue #796: a canary's refusals, free and determinate like the one above, so before the mint and everything after it. The registry read is free too; one that cannot
+		// be asked is infrastructure and retries (CONST-RETRY-INFRA-ONLY), since the same job can succeed. The ladder's narrowest gate, so it asks the network last.
+		let canaryPlan = null;
+		if (job.packageCanary !== undefined) {
+			if (!deps.packageCanary) return { outcome: "policy", reason: "package-canary-invalid", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			try {
+				canaryPlan = await deps.packageCanary.check(job);
+			} catch {
+				throw new InfraRetry("the registry could not be asked about the canary's version", { reason: "container-never-started", budgetReserved: false, provider: job.provider ?? null, model: job.model ?? null });
+			}
+			if (canaryPlan.refused) {
+				log("refused_package_canary", { reason: canaryPlan.refused });
+				return { outcome: "policy", reason: canaryPlan.refused, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			}
+		}
+
 		// REQ-MCP-OPERATOR-SERVERS. A trigger that named MCP servers its job cannot use would run its flow without them,
 		// or hand a server the job's own credentials, or open a connection the egress proxy refuses at its first call:
 		// each a plausible report and a clean exit. One read of the overlay's mcp.json, no credential and no network, so
@@ -1966,6 +1989,22 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		if (prepared?.outcome === "policy") {
 			return { ...prepared, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 		}
+		// Issue #796: the candidate goes under this job's own directory, before any reservation: a version that cannot be installed spends nothing. After the prepare, because that
+		// is what makes the directory, and on a forge job that is after the mint. The `finally` below removes the directory whichever way this goes.
+		if (canaryPlan) {
+			let installed;
+			try {
+				installed = await deps.packageCanary.install(job, prepared.jobDir, canaryPlan);
+			} catch {
+				throw new InfraRetry("the canary's candidate could not be installed", { reason: "container-never-started", budgetReserved: false, provider: job.provider ?? null, model: job.model ?? null });
+			}
+			if (installed.refused) {
+				log("refused_package_canary", { reason: installed.refused });
+				return { outcome: "policy", reason: installed.refused, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			}
+			prepared = { ...prepared, packageCanary: installed };
+		}
+
 
 		if (deps.approvalRequest && (prepared.session?.key !== deps.approvalRequest.sessionKey || prepared.session?.resume !== true)) {
 			await comment(job, APPROVAL_COMMENTS["approval-session-unavailable"]);
@@ -2366,7 +2405,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
 		if (subscriptionAuth.length > 0 && !(await validateSubscriptionAuth(subscriptionAuth))) throw new InfraRetry("subscription binding changed before container start", { reason: "container-never-started", budgetReserved: true });
-		const { code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		const { canaryLoad: canaryLoadOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
@@ -2406,6 +2445,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Issue #596: what the container used, off its exit line, rebuilt by the sink (null from a runContainer that predates
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
 		resources = ranResources ?? null;
+		if (deps.canaryFacts && job.packageCanary !== undefined) deps.canaryFacts.load = canaryLoadOfRun ?? null;
 		progress = ranProgress ?? null;
 		// Issue #596: CONFIRMED killed for memory. The image's supervisor (image/runner/src/supervise.mjs) outlives the runner,
 		// whose process tree it gives the highest OOM score, and when the runner dies of SIGKILL with the cgroup's

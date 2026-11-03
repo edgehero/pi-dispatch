@@ -1,0 +1,247 @@
+{
+  "card": "RunWorkspace",
+  "pr": 790,
+  "panels": [
+    "p-outcome",
+    "p-workspace",
+    "p-run",
+    "p-actions",
+    "p-cost",
+    "p-resources",
+    "p-session",
+    "p-chain"
+  ],
+  "elements": [
+    {
+      "el": "p-outcome",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runOutcome",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ]
+    },
+    {
+      "el": "p-workspace",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ]
+    },
+    {
+      "el": "p-run",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runSummary",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ]
+    },
+    {
+      "el": "p-actions",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runActionsPanel",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ]
+    },
+    {
+      "el": "p-cost",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runCostPanel",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ]
+    },
+    {
+      "el": "p-resources",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runResources",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ]
+    },
+    {
+      "el": "p-session",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runSession",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ]
+    },
+    {
+      "el": "p-chain",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runChain",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ]
+    },
+    {
+      "el": "Try it in its workspace beside the outcome action",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-outcome",
+      "source": "admin/src/console/panels/run.mjs#runOutcome",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ],
+      "shows": "Try it in its workspace"
+    },
+    {
+      "el": "Workspace: kept host and until, who opened it, browser and native actions",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ],
+      "shows": [
+        "kept on mini1 until",
+        "ops",
+        "Opening it joins that shell.",
+        "Open in browser",
+        "Open in Terminal"
+      ]
+    },
+    {
+      "el": "Copy the command and End fold under one disclosure",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ],
+      "shows": [
+        "Copy the command, or end the shell",
+        "Preview End"
+      ]
+    },
+    {
+      "el": "Found something: choose a current trigger and fork with a message",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-fork.operator"
+      ],
+      "shows": [
+        "Found something?",
+        "Add it to a trigger’s instructions",
+        "Fork it with a message"
+      ]
+    },
+    {
+      "el": "With no shell, Open in Terminal remains available",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-kept.operator"
+      ],
+      "shows": "Open in Terminal"
+    },
+    {
+      "el": "Native opener identity is distinct from authenticated browser driver and watchers",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-shared.operator"
+      ],
+      "shows": [
+        "ops",
+        "lee is driving",
+        "Watching now: sam"
+      ]
+    },
+    {
+      "el": "Private retained-workspace publication and exact live shell reads",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/sandbox-data.mjs#makeSandboxService",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ],
+      "shows": "kept on mini1 until"
+    },
+    {
+      "el": "Enrollment and private current driver summaries",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/gateway-broker.mjs#makeGatewayBroker",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ],
+      "shows": "Open in browser"
+    },
+    {
+      "el": "Read-only Workspace keeps command copying only",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-workspace",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "golden": [
+        "panels/run-workspace-readonly.operator"
+      ],
+      "shows": "Copy the command"
+    },
+    {
+      "el": "The run’s facts, Actions and side panels use existing RunEnded renderers",
+      "kind": "readme",
+      "status": "real",
+      "source": "admin/src/console/pages.mjs#pagePanels",
+      "golden": [
+        "panels/run-workspace-open.operator"
+      ],
+      "shows": [
+        "Tokens and dollars",
+        "Resources"
+      ]
+    },
+    {
+      "el": "Phone open buttons are hidden while commands remain selectable",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/workspace-css.mjs#WORKSPACE_CSS",
+      "holds": "@media (max-width: 760px)"
+    },
+    {
+      "el": "Operator only, viewer workspace facts absent",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runWorkspace",
+      "holds": "view.role !== \"operator\""
+    },
+    {
+      "el": "The shell has no automatic path to later run instructions or managed-fork messages",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runWorkspaceState",
+      "golden": [
+        "panels/run-workspace-awaiting.operator"
+      ],
+      "shows": "shell edits do not reach it"
+    },
+    {
+      "el": "Sample fixture job/project/host/trigger and date values",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Fixture values identify the reference deployment; production renders validated source facts and explicit historical trigger chooser, never a fabricated trigger identity or fixed date."
+    }
+  ]
+}

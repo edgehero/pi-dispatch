@@ -39,7 +39,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 
-/** The cookie's name. Not `__Host-`: that prefix needs `Secure`, which the lab has not yet shown to hold on http loopback. */
+/** The cookie's name stays compatible with the measured HTTP-loopback route, where WebKit drops Secure cookies. */
 export const COOKIE_NAME = "pdc_session";
 
 /** A session id: 32 random bytes as base64url, always exactly 43 characters. */
@@ -288,17 +288,17 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
 
 /**
  * The Set-Cookie value that hands a browser its session. `HttpOnly` (no page script reads it), `SameSite=Strict` (no
- * other site's page makes the browser send it), `Path=/`. No `Secure` yet: the console serves plain http on loopback,
- * and whether every browser keeps a Secure cookie there is the lab's question. The id is checked, so nothing that
- * could split the header ever reaches it.
+ * other site's page makes the browser send it), `Path=/`. A protected HTTPS enrollment adds `Secure`; the default
+ * HTTP-loopback route retains its measured WebKit compatibility. The id is checked, so nothing that could split
+ * the header ever reaches it.
  */
-export function sessionCookie(id, { maxAgeSec } = {}) {
+export function sessionCookie(id, { maxAgeSec, secure = false } = {}) {
   if (typeof id !== "string" || !SESSION_ID_RE.test(id)) throw new Error("a session id is 43 base64url characters");
   const age = Number.isSafeInteger(maxAgeSec) && maxAgeSec > 0 ? `; Max-Age=${maxAgeSec}` : "";
-  return `${COOKIE_NAME}=${id}; HttpOnly; SameSite=Strict; Path=/${age}`;
+  return `${COOKIE_NAME}=${id}; HttpOnly; SameSite=Strict; Path=/${age}${secure ? "; Secure" : ""}`;
 }
 
-/** The Set-Cookie value that makes the browser forget its session cookie (logout, a refused session). */
+/** Name, host and path identify a cookie even when Secure changes, so the same expiry clears either route's cookie. */
 export function clearSessionCookie() {
   return `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
 }

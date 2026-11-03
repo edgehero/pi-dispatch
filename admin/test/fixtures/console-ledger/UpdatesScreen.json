@@ -1,0 +1,63 @@
+{
+  "card": "UpdatesScreen",
+  "pr": 790,
+  "panels": [
+    "p-up-problems",
+    "p-up-jobs",
+    "p-up-hosts",
+    "p-up-how",
+    "p-up-recent"
+  ],
+  "elements": [
+    {
+      "el": "p-up-problems",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/updates.mjs#updatesProblems",
+      "golden": [
+        "panels/updates-checks-failing.operator",
+        "panels/updates-partial.operator"
+      ]
+    },
+    {
+      "el": "p-up-jobs",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/updates.mjs#updatesJobs",
+      "golden": [
+        "panels/updates-newer-available.operator",
+        "panels/updates-canary-completed.operator",
+        "panels/updates-canary-completed.viewer"
+      ]
+    },
+    {
+      "el": "p-up-hosts",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/updates.mjs#updatesHosts",
+      "golden": [
+        "panels/updates-checks-failing.operator",
+        "panels/updates-host-probes.operator"
+      ]
+    },
+    {
+      "el": "p-up-how",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/updates.mjs#updatesHow",
+      "golden": [
+        "panels/updates-newer-available.operator",
+        "panels/updates-not-looking.operator"
+      ]
+    },
+    {
+      "el": "p-up-recent",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/updates.mjs#updatesRecent",
+      "golden": [
+        "panels/updates-recent.operator"
+      ]
+    }
+  ]
+}

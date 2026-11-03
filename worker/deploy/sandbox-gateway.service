@@ -1,0 +1,23 @@
+# Optional example, installed by hand only. See docs/sandbox-gateway.md (#754).
+# Run as the account owning the sandbox runtime, never add privileges for the gateway.
+# No EnvironmentFile: the program reads only its explicit deployment key allowlist.
+[Unit]
+Description=pi-dispatch sandbox browser gateway
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/pi-dispatch
+ExecStart=/usr/bin/node /usr/lib/node_modules/@edgehero/pi-dispatch-sandbox-gateway/dist/cli.mjs --config /opt/pi-dispatch/sandbox-gateway.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

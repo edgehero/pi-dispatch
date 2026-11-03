@@ -111,8 +111,8 @@
 		"dBedrockCredentials(options.env); if (!skip": 1,
 		"rget(model.baseUrl, options.env); if (proxy": 1,
 		"ons.cacheRetention, options.env); const inf": 1,
-		"el, cacheRetention, options.env), syste": 1,
-		"el, cacheRetention, options.env), infer": 1,
+		"el, cacheRetention, options.env), s": 1,
+		"el, cacheRetention, options.env), i": 1,
 		"ion(cacheRetention, env) { if (cacheRetenti": 1,
 		"romptCaching(model, env) { const candidates": 1,
 		"el, cacheRetention, env) { if (!systemPromp": 1,
@@ -297,8 +297,8 @@
 		"aders, env: options.env, sessionId: opt": 1
 	},
 	"@earendil-works/pi-coding-agent/dist/core/compaction/branch-summarization.js": {
-		"l, apiKey, headers, env, signal, customInstruct": 1,
-		"{ apiKey, headers, env, signal }; const re": 1
+		"l, apiKey, headers, env, signal, thinkingLevel,": 1,
+		"{ apiKey, headers, env, signal }; if (mode": 1
 	},
 	"@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js": {
 		"l, apiKey, headers, env, sessionId }; if (m": 1
@@ -448,6 +448,10 @@
 		"ns.cwd, env: { ...process.env, ...t": 1,
 		"env: { ...process.env, ...this.options.env },": 1,
 		": { ...process.env, ...this.options.env }, stdio: [": 1
+	},
+	"@earendil-works/pi-coding-agent/dist/package-manager-cli.js": {
+		"_PACKAGE_DIR: _, ...env } = process.env; co": 1,
+		"\", \"pipe\"], env, }); return res": 1
 	},
 	"@earendil-works/pi-coding-agent/dist/rpc-entry.js": {
 		"`${APP_NAME}-rpc`; process.env.PI_CODING_AGENT = \"true": 1,

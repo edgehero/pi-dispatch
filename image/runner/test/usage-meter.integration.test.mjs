@@ -319,6 +319,7 @@ test("two concurrent sessions: the process-wide meter sees both, the session bus
 				total: 2 * SENTINEL_TOTAL,
 				cost: 2 * SENTINEL_COST,
 				unpriced: 0,
+				providerBilled: 0,
 			},
 		]);
 
@@ -646,7 +647,7 @@ test("cost cap: session.compact() is a provider call like any other, and is refu
 		await flush();
 		assert.equal(calls.length, 1);
 		assert.equal(capped.guard.state.spent, 400_000);
-		// pi 1.4 uses model.maxTokens (10000), not reserveTokens (2000), with reasoning off.
+		// pi uses model.maxTokens (10000), not reserveTokens (2000), with reasoning off.
 		// A summary bound therefore exceeds $1, and the settled $0.40 leaves too little under $1.30.
 		await session.compact();
 		await flush();
@@ -662,7 +663,7 @@ test("cost cap: session.compact() is a provider call like any other, and is refu
 		assert.equal(calls.length, 1, "the compaction's call never reached the provider");
 		assert.deepEqual([capped.guard.state.refused, capped.meter.state.stopReason], [1, "cost-cap"]);
 		assert.equal(capped.guard.state.spent, 400_000);
-		assert.equal(capped.bounds.at(-1).maxTokens, undefined, "pi 1.4 summaries send no explicit output cap");
+		assert.equal(capped.bounds.at(-1).maxTokens, undefined, "pi's summaries send no explicit output cap");
 		assert.equal(capped.bounds.at(-1).reasoning, undefined);
 		assert.equal(capped.bounds.at(-1).modelMax, 10_000);
 		assert.ok(capped.bounds.at(-1).bound > 1_000_000, "the summary reserves the model's whole output limit");
@@ -1688,7 +1689,7 @@ test("PR #547's final review: a fallback provider whose forward failed and that 
 for (const thinkingLevel of ["off", "high"]) {
 	for (const kind of ["compaction", "branch"]) {
 		for (const fits of [true, false]) {
-			test(`pi 1.4 ${kind} summary with reasoning ${thinkingLevel} ${fits ? "fits" : "refuses"} its full model bound (#693)`, { skip }, async () => {
+			test(`the pinned pi's ${kind} summary with reasoning ${thinkingLevel} ${fits ? "fits" : "refuses"} its full model bound (#693)`, { skip }, async () => {
 				const fx = await fixture(PRICED_API, { ...PRICED_MODEL, reasoning: true });
 				let session;
 				let installed;
@@ -1713,9 +1714,9 @@ for (const thinkingLevel of ["off", "high"]) {
 					const summaryBounds = capped.bounds.slice(2);
 					assert.ok(summaryBounds.length > 0, "the real SDK attempted a summary");
 					for (const bound of summaryBounds) {
-						assert.equal(bound.maxTokens, undefined, "reserveTokens is not an output cap in pi 1.4");
-						// Compaction forwards thinking; pi's branch summarizer intentionally builds options without it.
-						assert.equal(bound.reasoning, kind === "compaction" && thinkingLevel !== "off" ? thinkingLevel : undefined);
+						assert.equal(bound.maxTokens, undefined, "reserveTokens is not an output cap");
+						// Both forward the session's thinking level (branch summaries since pi 1.5.0), and callCostBound reads it.
+						assert.equal(bound.reasoning, thinkingLevel !== "off" ? thinkingLevel : undefined);
 						assert.equal(bound.modelMax, 10_000);
 						assert.ok(bound.bound > 1_000_000, "output alone reserves $1 despite reserveTokens=2000");
 					}

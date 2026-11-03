@@ -768,6 +768,48 @@ host that ignores case would write them as one.
 
 What to do: rename one of the two paths on the default branch.
 
+### package-canary-invalid
+
+Refused: this canary does not name one package at one exact version. No container started and nothing was spent.
+
+What to do: start the canary again from the [Updates](console.md#updates) page.
+
+### package-canary-packages-off
+
+Refused: this trigger sets `run.packages: false`, so it has no staged copy for a candidate to replace, and the run would say nothing about the jobs this package goes into. Nothing was spent.
+
+What to do: run the canary as a trigger that loads staged packages.
+
+### package-canary-resume
+
+Refused: this trigger resumes its transcript, so its next run would continue the candidate's work, and a canary is for one job. Nothing was spent.
+
+What to do: run the canary as a trigger that does not resume.
+
+### package-canary-not-staged
+
+Refused: this package is not staged on the host that took the canary, so there is nothing for the candidate to replace. Nothing was spent.
+
+What to do: stage the package on that host, or run the canary as a trigger served where it is staged.
+
+### package-canary-adapter
+
+Refused: this package is a reviewed subscription adapter, whose identity depends on its exact tree. Nothing was spent.
+
+What to do: update an adapter with a reviewed pi-dispatch release.
+
+### package-canary-version-missing
+
+Refused: the registry has no such version of this package. Nothing was spent.
+
+What to do: check the version on the [Updates](console.md#updates) page, and look again.
+
+### package-canary-refused
+
+Refused: the candidate installed, but failed staging's checks: it is not a pi package, its manifest leaves its own folder, or a dependency is not inside it. No container started and nothing was spent.
+
+What to do: run `pi-dispatch import-pi --with-packages` with that version on a test overlay to read the reason.
+
 ### skills-dir-missing
 
 The trigger sets `run.skillsDir`, and that path is not a directory on the worker host. The job would have run without
@@ -1609,6 +1651,12 @@ The draft’s private source or state could not be read or published. No answer 
 remain separate from a source that has passed to a person.
 
 What to do: check the deployment’s store and retained sources. Do not repeat a paid job merely to repair a metric.
+
+### job-image-package-canary-unsupported
+
+The job image does not declare package canaries, so it could not report whether the candidate loaded. No container started and nothing was spent.
+
+What to do: rebuild the job image from this release. See [job-image.md](job-image.md).
 
 ### job-image-answer-draft-unsupported
 

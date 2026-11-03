@@ -803,6 +803,39 @@ BEPROBE
 					&& ! echo "$ad_out" | grep -q 'ANSWER-DRAFT-EXTENSION-EXECUTED' \
 					|| fail "the image declares answerDraft but invalid inputs did not refuse before executable discovery"
 				;;
+			packageCanary)
+				# Issue #796. The claim is that the runner says whether a canary's candidate really loaded, since a failed load only logs and the job carries on. Proved
+				# through the real runner with fixture packages at a cap of 0 and no network, so nothing can spend: one that loads, one that throws at import, one that
+				# holds nothing, and a job that is not a canary, which must say nothing at all.
+				pc_dir=$(mktemp -d)
+				mkdir -p "$pc_dir/job/canary/good--1.0.0--aaaaaaaa" "$pc_dir/job/canary/bad--1.0.0--bbbbbbbb" "$pc_dir/job/canary/empty--1.0.0--cccccccc"
+				echo "Reply with the single word ok." >"$pc_dir/job/prompt.md"
+				echo '{"name":"good","version":"1.0.0","pi":{"extensions":["index.js"]}}' >"$pc_dir/job/canary/good--1.0.0--aaaaaaaa/package.json"
+				echo 'export default function () {}' >"$pc_dir/job/canary/good--1.0.0--aaaaaaaa/index.js"
+				echo '{"name":"bad","version":"1.0.0","pi":{"extensions":["index.js"]}}' >"$pc_dir/job/canary/bad--1.0.0--bbbbbbbb/package.json"
+				echo 'throw new Error("this candidate does not load");' >"$pc_dir/job/canary/bad--1.0.0--bbbbbbbb/index.js"
+				echo '{"name":"empty","version":"1.0.0","pi":{"extensions":[]}}' >"$pc_dir/job/canary/empty--1.0.0--cccccccc/package.json"
+				chmod -R a+rX "$pc_dir"
+				pc_run() {
+					docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$pc_dir/job:/job:ro" \
+						-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+						-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 "$@" "$IMAGE_REF" 2>&1 | grep '"event":"exit"' | tail -1
+				}
+				pc_as() { pc_run -e "PI_PACKAGES=/job/canary/$1" -e "PI_PACKAGE_CANARY=/job/canary/$1"; }
+				pc_good=$(pc_as good--1.0.0--aaaaaaaa)
+				pc_bad=$(pc_as bad--1.0.0--bbbbbbbb)
+				pc_empty=$(pc_as empty--1.0.0--cccccccc)
+				pc_plain=$(pc_run -e "PI_PACKAGES=/job/canary/good--1.0.0--aaaaaaaa")
+				rm -rf "$pc_dir"
+				echo "$pc_good" | grep -q '"canaryLoad":"loaded"' \
+					|| fail "the image declares packageCanary but a candidate that loads was not reported as loaded: $pc_good"
+				echo "$pc_bad" | grep -q '"canaryLoad":"failed"' \
+					|| fail "the image declares packageCanary but a candidate that throws at import was not reported as failed: $pc_bad"
+				echo "$pc_empty" | grep -q '"canaryLoad":"failed"' \
+					|| fail "the image declares packageCanary but a candidate that contributed nothing was not reported as failed: $pc_empty"
+				[ -n "$pc_plain" ] && ! echo "$pc_plain" | grep -q canaryLoad \
+					|| fail "the image reports a canary on a job that is not one: $pc_plain"
+				;;
 			questionGrouping)
 				# The dedicated classifier mode must reach the cost guard before any executable discovery.
 				# A zero cap and no network make this a real runner proof that cannot spend provider tokens.

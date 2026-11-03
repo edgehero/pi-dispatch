@@ -61,6 +61,7 @@
  * planners (`plans`), the deployment's `paths` and `env`, the fleet reader (`fleet`, built with `killSwitchPlanFn`) and
  * the kill switch's decision itself. This module imports none of them, so the server's tests run on small fakes.
  */
+import { parsePackageCanary } from "@edgehero/pi-dispatch/package-canary-record";
 import { createHash } from "node:crypto";
 import { DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_WHY_RE, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { formatMicros } from "@edgehero/pi-dispatch/money";
@@ -1971,6 +1972,27 @@ const PAUSE_FIELDS = Object.freeze(["scope", "from", "to", "tz", "days", "dateFr
 const WRITE_RULES = {
   ...SETUP_WRITE_RULES,
   ...ANSWERER_WRITE_RULES,
+  "package-canary": {
+    fields: ["index", "name", "version"], danger: false, atConfirm: true,
+    undo: (out, body, result) => (result === undefined ? UNDO_SENTENCES.rerunBefore : rerunCancel(result) ? `Cancel ${result.jobId} before it starts` : UNDO_SENTENCES.rerunUnnamed),
+    inverse: (out, body, result) => (rerunCancel(result) ? { action: "cancel-queued", body: { jobId: result.jobId, queue: result.queue } } : null),
+    confirmLabel: (out) => paidLabel("Run the canary", out.reserve),
+    done: (out) => `Queued a canary of ${out.target}`,
+  },
+  "package-adopt": {
+    fields: ["name", "version"], danger: false,
+    undo: (out) => `Put each host back as it was, at ${out.payload.from}`,
+    inverse: (out) => ({ action: "package-undo", body: { name: out.payload.name } }),
+    confirmLabel: (out) => `Adopt ${out.target}`,
+    done: (out) => `Asked every host to adopt ${out.target}`,
+  },
+  "package-undo": {
+    fields: ["name"], danger: false,
+    undo: () => "Adopt it again from the Updates page, while its canary's run is retained",
+    inverse: () => null,
+    confirmLabel: () => "Undo",
+    done: (out) => `Asked every host to go back to ${out.target}`,
+  },
   "model-role-edit": {
     fields: MODEL_ROLE_EDIT_FIELDS, danger: false,
     undo: out => `Restore the previous mapping for ${out.plan.scope}/${out.plan.role}; another role edit is refused if this mapping has changed`,
@@ -2210,9 +2232,104 @@ const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((ope
   },
 }));
 
+/**
+ * A person trying and adopting an extension version (issue #796, `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`). A canary is a Fire now with one more field, so it reuses that plan and that enqueue
+ * whole, and with them its preview, its reserve and its checks at the confirm. Adopt and Undo write one desired row, which each host reconciles to. All three are the agent rule `person`.
+ */
+function packageOf(body) {
+  const pkg = parsePackageCanary({ name: str(body, "name", { required: true, max: 214 }), version: str(body, "version", { required: true, max: 128 }) });
+  if (!pkg) throw new BadRequest("name and version must be one package at one exact version");
+  return pkg;
+}
+const stagedRow = (facts, name) => (facts?.packages ?? []).find((row) => row.name === name) ?? null;
+const packageActions = [
+  {
+    name: "package-canary", kind: "package-canary", paid: true, bulk: false, needs: [...JOB_NEEDS, "updates"],
+    async preview(body, ctx) {
+      const at = index(body);
+      const canary = packageOf(body);
+      const row = stagedRow(await ctx.a.updates.read(), canary.name);
+      if (!row) return { refusal: `${canary.name} is not staged on this host, so there is nothing for a candidate to replace. Nothing was queued.` };
+      if (row.adapter) return { refusal: `${canary.name} is a reviewed subscription adapter, whose identity depends on its exact tree. It moves with a pi-dispatch release. Nothing was queued.` };
+      if (row.version === canary.version) return { refusal: `${canary.version} is the version already staged, so a canary would try nothing new. Nothing was queued.` };
+      const result = await ctx.a.rm.planTriggerFire({ index: at, triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now });
+      if (result.unreachable) return { refusal: "The deployment's queue could not be read, so the canary could not be previewed. Nothing was changed." };
+      const got = planned(result);
+      if (!got.plan) return got;
+      const p = got.plan;
+      if (p.schedule.data?.packages === false) return { refusal: "This trigger sets run.packages to false, so it has no staged copy for a candidate to replace. Choose a trigger that loads staged packages. Nothing was queued." };
+      if (p.schedule.data?.resume === true) return { refusal: "This trigger resumes its transcript, so its next run would continue the candidate's work, and a canary is for one job. Choose a trigger that does not resume. Nothing was queued." };
+      return { target: `${canary.name}@${canary.version}`, payload: { plan: p, canary }, reserve: p.reserve, beforeDigest: p.fileDigest,
+        summary: [`Runs one paid job of cron trigger ${p.schedulerId} with ${canary.name} ${canary.version} in place of ${row.version}, for that job only`, "No other job loads it, and nothing stays staged", "This is third-party code in a job that holds that trigger's credentials, and what it does to that trigger's own folder or repository stays done", "Its result reads completed or failed. A job that completed does not prove the extension is good: read the run"] };
+    },
+    async apply(entry, ctx) {
+      const res = await ctx.a.rm.enqueueTriggerFire(entry.payload.plan, { triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, packageCanary: entry.payload.canary });
+      return funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? null });
+    },
+  },
+  {
+    name: "package-adopt", kind: "package-adopt", paid: false, bulk: false, needs: ["updates"],
+    async preview(body, ctx) {
+      const pkg = packageOf(body);
+      const checked = adoptable(await ctx.a.updates.read(), pkg);
+      if (checked.refusal) return checked;
+      const { row } = checked;
+      const fleet = row.standings?.length ? "every host" : "each host";
+      return { target: `${pkg.name}@${pkg.version}`, payload: { ...pkg, from: row.version },
+        summary: [`Stages ${pkg.name} at exactly ${pkg.version} on ${fleet}, and pins that version in each host's pi-packages.json`, `Jobs that start after this load it; running jobs keep ${row.version}`, "A host that is offline adopts it when it returns, and the page shows it as pending until then", "Triggers that set run.packages to false are not affected", "Dependencies are resolved again on each host, so a tree can differ from the one the canary ran. The page says when it does"] };
+    },
+    async apply(entry, ctx) {
+      const { name, version, from } = entry.payload;
+      const checked = adoptable(await ctx.a.updates.read(), { name, version });
+      if (checked.refusal) return { invalid: checked.refusal };
+      try {
+        const written = await ctx.a.updates.setDesired({ name, version, op: "adopt", from, by: ctx.session.name, at: ctx.now(), expectGeneration: checked.row.desired?.generation ?? 0 });
+        if (written === 0) return { invalid: "Someone changed this package since the preview. Preview it again." };
+      } catch {
+        return { invalid: "Valkey did not take the request. Nothing was changed; preview it again." };
+      }
+      return { ok: true };
+    },
+  },
+  {
+    name: "package-undo", kind: "package-undo", paid: false, bulk: false, needs: ["updates"],
+    async preview(body, ctx) {
+      const name = str(body, "name", { required: true, max: 214 });
+      const row = stagedRow(await ctx.a.updates.read(), name);
+      const desired = row?.desired;
+      if (desired?.op !== "adopt" || !desired.from) return { refusal: `There is no adoption of ${name} to undo. Nothing was changed.` };
+      return { target: `${name}@${desired.from}`, payload: { name, version: desired.from, undoOf: desired.generation, from: desired.version },
+        summary: [`Puts ${name} back as it was on each host: ${desired.from}, with that host's pi-packages.json restored`, "Jobs that start after this load it; running jobs keep what they have", "A host that never took the adoption changes nothing"] };
+    },
+    async apply(entry, ctx) {
+      const { name, version, undoOf, from } = entry.payload;
+      const row = stagedRow(await ctx.a.updates.read(), name);
+      if (row?.desired?.generation !== undoOf) return { invalid: "Someone changed this package since the preview. Preview it again." };
+      try {
+        const written = await ctx.a.updates.setDesired({ name, version, op: "undo", undoOf, from, by: ctx.session.name, at: ctx.now(), expectGeneration: undoOf });
+        if (written === 0) return { invalid: "Someone changed this package since the preview. Preview it again." };
+      } catch {
+        return { invalid: "Valkey did not take the request. Nothing was changed; preview it again." };
+      }
+      return { ok: true };
+    },
+  },
+];
+
+/** Adopt's gate, asked at the preview and again at the confirm: a version a person has seen a canary finish. The run record says so, not the page. */
+function adoptable(facts, { name, version }) {
+  const row = stagedRow(facts, name);
+  if (!row) return { refusal: `${name} is not staged on this host. Nothing was changed.` };
+  if (row.adapter) return { refusal: `${name} is a reviewed subscription adapter, whose identity depends on its exact tree. It moves with a pi-dispatch release. Nothing was changed.` };
+  if (row.desired?.op === "adopt" && row.desired.version === version) return { refusal: `${name} ${version} is already adopted. Each host's state is on the page. Nothing was changed.` };
+  if (row.version === version) return { refusal: `${version} is the version already staged. Nothing was changed.` };
+  if (row.newest !== version || row.canary?.state !== "completed") return { refusal: `Run a canary of ${name} ${version} first: adopting needs one that completed, on a retained run. Nothing was changed.` };
+  return { row };
+}
+
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
 export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...modelRoleActions, ...ANSWERER_ACTIONS, ...SETUP_HTTP_ACTIONS].map(withRules));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...packageActions, ...modelRoleActions, ...ANSWERER_ACTIONS, ...SETUP_HTTP_ACTIONS].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {

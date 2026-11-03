@@ -29,7 +29,8 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { FROM_HOST, PACKAGES_SUBDIR, RESOURCE_DIRS, STAGE_MANIFEST, mergeHostPackages, parsePackagesFile } from "./packages.mjs";
+import { FROM_HOST, PACKAGES_SUBDIR, mergeHostPackages, parsePackagesFile } from "./packages.mjs";
+import { newStagingDir, preparePackage, pruneStagedTrees, stagedTreeName, withStageLock, writeStageManifest } from "./package-stage.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
 import { ENTRY_NAME_RE, copyDirContents, copySkillTree } from "./copy-tree.mjs";
 import { MCP_CONFIG_FILE_NAME, MCP_CONFIG_MAX_BYTES, mcpServerWhere, overlayMcpText, parseOverlayMcp } from "./mcp-config.mjs";
@@ -489,8 +490,6 @@ async function stagePackages({ fs, exec, out, packagesFile, to, platform = proce
 			return { error: error.message };
 		}
 	}
-	const { entries, overrides, dropped } = mergeHostPackages(declared, discovered);
-
 	const packagesRoot = join(to, PACKAGES_SUBDIR);
 	const rootExisted = fs.existsSync(packagesRoot);
 	fs.mkdirSync(packagesRoot, { recursive: true });
@@ -498,189 +497,72 @@ async function stagePackages({ fs, exec, out, packagesFile, to, platform = proce
 	const npmBin = platform === "win32" ? "npm.cmd" : "npm";
 	const stagingDirs = [];
 	const prepared = [];
-	const renamed = [];
+	const moved = [];
 	const warnings = [];
 	const softDropped = [];
 
-	try {
-		for (const [index, entry] of entries.entries()) {
-			const staging = join(packagesRoot, `.staging-${index}`);
-			fs.rmSync(staging, { recursive: true, force: true }); // a crashed earlier run may have left one
-			stagingDirs.push(staging);
-			let source;
-			try {
-				source = await prepareOne({ fs, exec, out, entry, staging, npmBin, platform, warnings });
-			} catch (error) {
-				// The declared/discovered split: an entry the operator pinned is fatal, one we inferred from
-				// their pi setup is dropped by name so the rest of the stage still lands.
-				if (entry.from === FROM_HOST) {
-					softDropped.push({ name: entry.name, reason: error.message });
-					continue;
+	// One stage at a time on this overlay, also from another host on a shared home. Staging names are unique and nothing already
+	// staged is touched, so a failure below cannot damage what jobs are loading: the manifest still names the old trees.
+	let overrides = [], dropped = [];
+	const staged = await withStageLock({ fs, packagesRoot, holder: "import-pi" }, async ({ stillHeld }) => {
+		try {
+			// Read again under the lock: a person's Adopt on this overlay may have just pinned a version in this file, and staging what the file said a moment ago would undo it.
+			const current = haveFile ? parsePackagesFile(fs.readFileSync(packagesFile, "utf8"), packagesFile) : declared;
+			const merged = mergeHostPackages(current, discovered);
+			const entries = merged.entries;
+			({ overrides, dropped } = merged);
+			for (const entry of entries) {
+				const staging = newStagingDir(packagesRoot);
+				stagingDirs.push(staging);
+				let source;
+				try {
+					source = await preparePackage({ fs, exec, out, entry, staging, npmBin, platform, warnings });
+				} catch (error) {
+					// The declared/discovered split: an entry the operator pinned is fatal, one we inferred from
+					// their pi setup is dropped by name so the rest of the stage still lands.
+					if (entry.from === FROM_HOST) {
+						softDropped.push({ name: entry.name, reason: error.message });
+						continue;
+					}
+					throw error;
 				}
-				throw error;
+				prepared.push({ entry, source });
 			}
-			prepared.push({ entry, source });
+
+			// Moves happen only after EVERY package has passed. Each goes to a new directory, so a failure on the last one
+			// removes only what this run made, and what jobs are loading was never touched.
+			const trees = new Map();
+			for (const { entry, source } of prepared) {
+				const dir = stagedTreeName(entry.dir, entry.version);
+				// renameSync, never copyTree: copyTree's symlink guard uses statSync, which FOLLOWS links, so it
+				// would copy the target of every node_modules/.bin symlink instead of skipping it.
+				fs.renameSync(source, join(packagesRoot, dir));
+				moved.push(join(packagesRoot, dir));
+				trees.set(entry, dir);
+			}
+			// A dropped entry never made it into `prepared`, so it must not appear in the receipt either.
+			const landed = entries.filter((entry) => trees.has(entry)).map((entry) => ({ ...entry, dir: trees.get(entry) }));
+			// `from` and nothing more. This receipt is bind-mounted into every job container, so it must never carry
+			// an install path off the operator's machine -- provenance is the fact doctor needs, the host path is not.
+			const stageManifest = { stagedAt: new Date().toISOString(), packages: landed.map(({ name, version, dir, from }) => ({ name, version, dir, from })) };
+			if (!stillHeld()) throw new Error("another stage took over this overlay's lock while this one ran");
+			writeStageManifest({ fs, packagesRoot, manifest: stageManifest });
+			pruneStagedTrees({ fs, packagesRoot, manifest: stageManifest });
+			// A warning names its package's base directory, which only this stage knows the tree of.
+			for (const warning of warnings) warning.dir = [...trees].find(([entry]) => entry.dir === warning.dir)?.[1] ?? warning.dir;
+			return { landed };
+		} catch (error) {
+			for (const dest of moved) fs.rmSync(dest, { recursive: true, force: true });
+			return { failed: error };
+		} finally {
+			for (const staging of stagingDirs) fs.rmSync(staging, { recursive: true, force: true });
 		}
-
-		// Renames happen only after EVERY package has passed, so a failure on the last one cannot leave the
-		// earlier ones swapped in beside a stale manifest.
-		for (const { entry, source } of prepared) {
-			const dest = join(packagesRoot, entry.dir);
-			fs.rmSync(dest, { recursive: true, force: true }); // replace a previous stage of the same package
-			// renameSync, never copyTree: copyTree's symlink guard uses statSync, which FOLLOWS links, so it
-			// would copy the target of every node_modules/.bin symlink instead of skipping it.
-			fs.renameSync(source, dest);
-			renamed.push(dest);
-		}
-	} catch (error) {
-		for (const dest of renamed) fs.rmSync(dest, { recursive: true, force: true });
-		for (const staging of stagingDirs) fs.rmSync(staging, { recursive: true, force: true });
-		if (!rootExisted) fs.rmSync(packagesRoot, { recursive: true, force: true });
-		return { error: `${error.message}\n  Nothing was staged -- fix ${packagesFile} (or the package) and re-run with --with-packages.` };
+	}).catch((error) => ({ failed: error }));
+	if (staged.failed) {
+		if (!rootExisted && fs.readdirSync(packagesRoot).length === 0) fs.rmSync(packagesRoot, { recursive: true, force: true });
+		return { error: `${staged.failed.message}\n  Nothing was staged -- fix ${packagesFile} (or the package) and re-run with --with-packages.` };
 	}
-
-	for (const staging of stagingDirs) fs.rmSync(staging, { recursive: true, force: true });
-
-	// A dropped entry never made it into `prepared`, so it must not appear in the receipt either.
-	const staged = entries.filter((entry) => prepared.some((p) => p.entry === entry));
-	// `from` and nothing more. This receipt is bind-mounted into every job container, so it must never carry
-	// an install path off the operator's machine -- provenance is the fact doctor needs, the host path is not.
-	const stageManifest = { stagedAt: new Date().toISOString(), packages: staged.map(({ name, version, dir, from }) => ({ name, version, dir, from })) };
-	fs.writeFileSync(join(packagesRoot, STAGE_MANIFEST), `${JSON.stringify(stageManifest, null, 2)}\n`);
-	return { packages: staged, warnings, overrides, dropped: [...dropped, ...softDropped] };
-}
-
-/**
- * Install and ASSERT one package inside its private staging dir, returning the path to assert-clean source.
- * Throws on any failure; the caller decides whether that is fatal (a declared pin) or a drop (a discovered
- * one). Every assertion here is about one property: the staged dir must be SELF-CONTAINED, because at job
- * time it is resolved from a read-only mount with no network and no install step.
- */
-async function prepareOne({ fs, exec, out, entry, staging, npmBin, platform, warnings }) {
-	fs.mkdirSync(staging, { recursive: true });
-	// A private root package.json pins npm's idea of "the project" to the staging dir, so it cannot
-	// walk up and install into (or read config from) the operator's own checkout.
-	fs.writeFileSync(join(staging, "package.json"), `${JSON.stringify({ name: "pi-dispatch-staging", private: true, ...(entry.name === "pi-anthropic-oauth" && entry.version === "0.3.6" ? { overrides: { "@anthropic-ai/sdk": "0.124.0" } } : {}) }, null, 2)}\n`);
-
-	// ARRAY argv, never a shell string: the name and version come from a config file and must never be
-	// able to become shell syntax on the operator's host. The install target is the exec's `cwd`, NOT a
-	// `--prefix <staging>` pair -- npm installs into the cwd's node_modules by default, and dropping the
-	// flag removes the only filesystem PATH from argv. What is left is nothing but literal flags and one
-	// `name@version` token already validated against NPM_NAME_RE + EXACT_VERSION_RE; that is the property
-	// npmExecOptions relies on below.
-	//
-	// --ignore-scripts is load-bearing: without it the lifecycle scripts of this package AND of every
-	// transitive dependency would run as the operator, on the operator's host, at stage time.
-	// --omit=peer because pi aliases its own packages for extensions at load time, so a staged peer
-	// copy is ignored dead weight -- and a floating pi version at that (CONST-PI-VERSION-PINNED).
-	// --install-strategy=nested asks npm to keep every dependency inside the package dir; step 4 below
-	// ASSERTS the result rather than trusting the flag, whose name and default have moved across npm
-	// versions.
-	const args = [
-		"install",
-		`${entry.name}@${entry.version}`,
-		"--omit=dev",
-		"--omit=peer",
-		"--omit=optional",
-		"--ignore-scripts",
-		"--install-strategy=nested",
-		"--no-audit",
-		"--no-fund",
-		"--loglevel=error",
-	];
-	out(`  staging ${entry.name}@${entry.version} -> packages/${entry.dir}\n`);
-	try {
-		await exec(npmBin, args, npmExecOptions(platform, staging));
-	} catch (error) {
-		const detail = String(error?.stderr ?? error?.message ?? "").trim();
-		throw new Error(`npm install failed for ${entry.name}@${entry.version}: ${detail}`);
-	}
-
-	const source = join(staging, "node_modules", entry.name);
-	let pkg;
-	try {
-		pkg = JSON.parse(fs.readFileSync(join(source, "package.json"), "utf8"));
-	} catch {
-		throw new Error(`${entry.name}@${entry.version}: npm reported success but there is no readable package.json at ${join(source, "package.json")}`);
-	}
-	if (pkg.version !== entry.version) {
-		throw new Error(`${entry.name}: npm staged version ${JSON.stringify(pkg.version)}, not the pinned ${JSON.stringify(entry.version)} (CONST-PI-VERSION-PINNED)`);
-	}
-
-	// Dependency completeness -- catches hoisting whatever npm's flag defaults do this month. A
-	// hoisted dependency would only surface as an import failure inside a job, hours later.
-	for (const dep of Object.keys(pkg.dependencies ?? {})) {
-		if (!fs.existsSync(join(source, "node_modules", dep))) {
-			throw new Error(`${entry.name}: dependency "${dep}" is not inside the package dir -- npm hoisted it out, so the staged copy could not import it at run time (no network, no install)`);
-		}
-	}
-
-	// A package that contributes no pi resources loads as a silent no-op; staging exists to turn that
-	// run-time nothing into a stage-time error the operator can act on.
-	const manifest = pkg.pi !== null && typeof pkg.pi === "object" ? pkg.pi : null;
-	const hasResourceDir = RESOURCE_DIRS.some((name) => fs.existsSync(join(source, name)));
-	if (!manifest && !hasResourceDir) {
-		throw new Error(`${entry.name} is not a pi package -- no "pi" manifest in package.json and none of ${RESOURCE_DIRS.join("/")}; it would load as a silent no-op`);
-	}
-
-	// Containment: manifest entries are resolved relative to the package dir at job time, so one that
-	// climbs out of it would reach the rest of the read-only overlay.
-	const escaping = manifest && findEscapingEntry(manifest);
-	if (escaping) {
-		throw new Error(`${entry.name}: pi manifest entry ${JSON.stringify(escaping)} leaves the package dir (no ".." segment, no leading "/")`);
-	}
-
-	// Warn, do not refuse: --ignore-scripts means a build/postinstall step did NOT run and an optional
-	// dependency was NOT fetched, so such a package is staged INCOMPLETE and may fail at run time.
-	const scriptKeys = ["install", "preinstall", "postinstall"].filter((key) => typeof pkg.scripts?.[key] === "string");
-	const hasOptional = Object.keys(pkg.optionalDependencies ?? {}).length > 0;
-	if (scriptKeys.length > 0 || hasOptional) {
-		const declares = [...scriptKeys.map((key) => `scripts.${key}`), ...(hasOptional ? ["optionalDependencies"] : [])].join(", ");
-		warnings.push({ dir: entry.dir, reason: `${entry.name} declares ${declares} -- staged with --ignore-scripts, so it is INCOMPLETE and may fail at run time` });
-	}
-
-	if (["pi-anthropic-oauth@0.3.6", "@gotgenes/pi-anthropic-auth@3.4.3"].includes(`${entry.name}@${entry.version}`)) {
-		// Read-only host-pi consumers, including the scratch canary, have no lifecycle dependencies installed.
-		const { prepareCommunityAuthAdapter } = await import("./community-auth-patches.mjs");
-		const receipt = prepareCommunityAuthAdapter({ adapter: `${entry.name}@${entry.version}`, root: source, fs });
-		out(`  reviewed subscription adapter ${receipt.adapter}: ${receipt.digest}\n`);
-	}
-	return source;
-}
-
-/**
- * The exec options for one `npm install`: always `cwd: <staging>` (that IS the install target now that
- * `--prefix` is gone), plus `shell: true` on win32 and nowhere else.
- *
- * WHY shell:true is REQUIRED on win32: npm ships there as `npm.cmd`, and since Node 18.20.2 / 20.12.2
- * (CVE-2024-27980) spawning a `.cmd`/`.bat` WITHOUT a shell throws EINVAL outright. This package floors at
- * Node >=22.19, so every Node it can run on has that behaviour -- without this, `--with-packages` fails on
- * every Windows host with a misleading "spawn npm.cmd EINVAL" and the branch above is dead on arrival.
- *
- * WHY shell:true is SAFE HERE SPECIFICALLY, which it would NOT be in general: with `--prefix` replaced by
- * `cwd`, argv holds no filesystem path at all -- only literal flags this file spells out, plus the single
- * `name@version` token, and BOTH halves of that token were validated before anything was created (packages.mjs
- * rejects any name failing NPM_NAME_RE and any version failing EXACT_VERSION_RE, neither of which admits a
- * space, quote, or cmd metacharacter). So no operator-supplied string that could survive as shell syntax ever
- * reaches the command line. Re-introducing a path -- or loosening either regex -- breaks that argument, so
- * this option must be revisited together with them.
- */
-function npmExecOptions(platform, staging) {
-	return platform === "win32" ? { cwd: staging, shell: true } : { cwd: staging };
-}
-
-/** The first string anywhere in a `pi` manifest that leaves the package dir, or null when all are contained. */
-function findEscapingEntry(value) {
-	if (typeof value === "string") {
-		return /^[\\/]/.test(value) || value.split(/[\\/]/).includes("..") ? value : null;
-	}
-	if (Array.isArray(value) || (value !== null && typeof value === "object")) {
-		for (const child of Object.values(value)) {
-			const hit = findEscapingEntry(child);
-			if (hit) return hit;
-		}
-	}
-	return null;
+	return { packages: staged.landed, warnings, overrides, dropped: [...dropped, ...softDropped] };
 }
 
 function flagValue(argv, flag) {

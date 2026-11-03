@@ -29,6 +29,7 @@ on:
       - "worker/**"
       - "receiver/**"
       - "admin/**"
+      - "gateway/**"
       - "guardrails/**"
       - "package.json"
       - "pi-packages.example.json"
@@ -49,6 +50,9 @@ on:
       # Issue #737: admin/test/design-folder.test.mjs reads design/system, so a design change can turn it red.
       - "design/**"
       - ".github/scripts/console-width-check.mjs"
+      - ".github/scripts/sandbox-gateway-browser.mjs"
+      - ".github/scripts/sandbox-gateway-tls-fixture.mjs"
+      - ".github/scripts/sandbox-gateway-runtime-smoke.mjs"
       - ".github/chrome-for-testing.json"
   # DELIBERATELY UNFILTERED, unlike the push trigger above. Five of the jobs below are REQUIRED status
   # checks on main (issue #105), and a required check that never reports blocks the merge FOREVER -- a
@@ -287,7 +291,7 @@ jobs:
           # grep exits 0 on a match, 1 on none and 2 on an error, a missing path among them. Only 1 is clean: an `if grep`
           # would read a renamed or deleted path in scope as "no match" and pass. worker/test/no-automatic-merge.test.mjs
           # runs this script on a planted tree and on the real one.
-          runtime=(worker/src image/runner receiver/src)
+          runtime=(worker/src image/runner receiver/src gateway/src)
           bump=(.github/workflows/pi-bump.yml .github/scripts)
           found=0
           check() {
@@ -321,7 +325,7 @@ jobs:
           # Every entry point takes an injected `write`, so there is no legitimate reason left to reassign
           # the global and this grep carries no allowlist. stderr is deliberately not matched: it is not the
           # channel the runner reports on.
-          if grep -rnE '^[^/]*process\.stdout\.write *=' worker/test receiver/test admin/test image/runner/test; then
+          if grep -rnE '^[^/]*process\.stdout\.write *=' worker/test receiver/test admin/test image/runner/test gateway/test; then
             echo "::error::A test reassigns process.stdout.write. Inject the code under test's own `write` seam instead (issue #266)."
             exit 1
           fi
@@ -572,6 +576,13 @@ jobs:
   image:
     name: the job image holds its contract
     runs-on: ubuntu-latest
+    services:
+      gateway-valkey:
+        image: valkey/valkey:8.0.2
+        ports:
+          - 16389:6379
+        options: >-
+          --health-cmd "valkey-cli ping" --health-interval 10s --health-timeout 3s --health-retries 5
     # CORE vs RUNNER, and the line matters. CORE is what ANY image must satisfy to be nameable in a
     # trigger's `run.image` -- it lives in image/verify-image.sh, which this job calls, so the portable
     # checklist has ONE definition rather than a copy here and a copy in the docs. RUNNER asserts properties
@@ -603,6 +614,34 @@ jobs:
 
       - name: "Sandbox SSH loads deployment settings and holds detach, attach and End (#771)"
         run: PI_JOB_IMAGE="$IMAGE_REF" PI_EGRESS=0 node .github/scripts/sandbox-ssh-smoke.mjs
+
+      - name: "Verify and install pinned Chrome for the separate sandbox gateway (#754)"
+        timeout-minutes: 3
+        run: |
+          zip="$RUNNER_TEMP/gateway-chrome-linux64.zip"
+          url="$(node .github/scripts/console-width-check.mjs --check-pin --platform linux64)"
+          curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$zip" "$url"
+          node .github/scripts/console-width-check.mjs --verify-zip "$zip" --platform linux64
+          unzip -q "$zip" -d "$RUNNER_TEMP/gateway-cft"
+
+      - name: "Browser gateway holds the real Docker shell and both CSPs (#753, #754)"
+        timeout-minutes: 16
+        env:
+          PI_SANDBOX_GATEWAY_VENUE: local
+          PI_SANDBOX_GATEWAY_SOCKET: /var/run/docker.sock
+          VALKEY_TEST_URL: "redis://127.0.0.1:16389"
+        run: PI_JOB_IMAGE="$IMAGE_REF" CHROME="$RUNNER_TEMP/gateway-cft/chrome-linux64/chrome" node .github/scripts/sandbox-gateway-browser.mjs --tls
+
+      - name: "Maintained terminal layout preserves panes, keyboard and both themes (#754, #792)"
+        timeout-minutes: 3
+        run: CHROME="$RUNNER_TEMP/gateway-cft/chrome-linux64/chrome" node gateway/test/browser/workbench-browser.mjs
+
+      - name: "Gateway and native Docker attachments preserve input, detach and sandbox lifecycle (#754)"
+        timeout-minutes: 5
+        env:
+          PI_SANDBOX_GATEWAY_VENUE: local
+          PI_SANDBOX_GATEWAY_SOCKET: /var/run/docker.sock
+        run: PI_JOB_IMAGE="$IMAGE_REF" node .github/scripts/sandbox-gateway-runtime-smoke.mjs
 
       # --- CORE: nothing may make docker fetch an image (INT-CONTAINER-RUNTIME-CONTRACT) ---
       # The argv-side proof is the frozen-intent deepEqual in worker/test/docker-run.test.mjs, which runs in
@@ -988,7 +1027,8 @@ jobs:
       # nested pi-ai under it; pi 1.0.1 dropped the shrinkwrap, and at the 1.0.3 pin (issue #587) pi-ai sits at
       # /app/node_modules beside it. resolvePiAiCompat finds pi's copy by pi-coding-agent's own node_modules
       # lookup (piOwnPackageDir), whatever the layout, and image/runner/test/pinned-api.test.mjs pins that the
-      # first candidate IS the module pi's VIRTUAL_MODULES hands an extension.
+      # first candidate is what pi's VIRTUAL_MODULES hands an extension: since pi 1.5.0 a view of it, whose
+      # registry functions are the candidate's own.
       #
       # So assert what IS load-bearing here, and assert it by running OUR OWN resolver inside the built
       # image rather than re-deriving the layout in shell -- a shell re-derivation encodes a rule the

@@ -159,6 +159,8 @@ export function writeAllSync(fd, text, { write = writeSync, sleep = (ms) => Atom
  */
 export function createExitWriter({ key = null, jobId, write, exit, resources = () => null }) {
 	let written = false;
+	// Facts learned along the way, on the line however the run ends (issue #796: whether a canary's candidate loaded, on every exit path after the load).
+	let noted = {};
 	// The code the process exits with once the line is out: the line's own, or 1 (the runner's catch-path default,
 	// `outcome.code ?? EXIT_INFRA`) for a line that named none.
 	let writtenCode = 1;
@@ -176,7 +178,7 @@ export function createExitWriter({ key = null, jobId, write, exit, resources = (
 		} catch {
 			used = null;
 		}
-		const body = JSON.stringify({ event: "exit", jobId, ...fields, ...(used !== null && typeof used === "object" ? { resources: used } : {}) });
+		const body = JSON.stringify({ event: "exit", jobId, ...noted, ...fields, ...(used !== null && typeof used === "object" ? { resources: used } : {}) });
 		write(`\n${key ? signExitLine(body, key) : body}\n`);
 		return true;
 	}
@@ -184,5 +186,5 @@ export function createExitWriter({ key = null, jobId, write, exit, resources = (
 		if (!written) writeExit({ code: EXIT_TERMINATED, reason: "terminated", ...fields });
 		exit(writtenCode);
 	}
-	return { writeExit, terminate, written: () => written };
+	return { writeExit, terminate, written: () => written, note: (fields) => { noted = { ...noted, ...fields }; } };
 }

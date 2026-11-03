@@ -563,8 +563,77 @@ The threat model, and what answers each part:
   mixed deployment does not call an intact trail tampered with. The check knows only that the word has that shape and
   the row links, not who wrote it: whoever can write the file can add such a row, as they always could one of a word
   the console lists.
-- **No terminal in the browser.** The run page shows the `pi-dispatch sandbox <job>` command to copy; the console
-  never starts a container or a shell.
+- **No terminal in the console process.** The native opener and `pi-dispatch sandbox <job>` command remain available.
+  An optional, separately enrolled [sandbox browser gateway](#the-sandbox-browser-gateway) may attach to an existing
+  sandbox through its own process and hostname. The console gains no runtime socket, pty or WebSocket and never starts
+  a container or shell; its CSP remains unchanged.
+
+## The sandbox browser gateway
+
+The optional [gateway](docs/sandbox-gateway.md) is disabled until an operator enrolls and starts it on the sandbox
+host. It uses a separate hostname and tab; another port on the console hostname would receive the host-only console
+cookie and is refused. Public origins require HTTPS. The explicit local development exception uses distinct
+loopback hosts. Protected enrollment supplies the exact canonical console Origin for login and writes, matching
+Host and the existing same-origin fetch-site policy. Protected HTTPS enrollment also adds Secure to the host-only
+console session cookie; the named HTTP-loopback exception retains its measured compatibility. No forwarded header
+or request-selected origin can select either authority or cookie security.
+
+Only a person in the original operator session and console tab can authorize an opening, after freshly presenting
+that session's same operator token. A one-use handoff verifier binds the gateway's own HttpOnly browser cookie;
+public request IDs cannot prebind another browser. The subsequent attachment grant stays server-side, lives at most
+60 seconds, and binds that browser, gateway, host and immutable tracked container/nonce. Viewer, agent, tool and
+read-only access cannot mint it. The gateway receives neither a console session ID nor the operator token.
+HTTPS browser binding uses only `__Host-pdg_browser` with Secure, HttpOnly, Path=/ and no Domain. Browsers reject
+sibling-domain attempts to set that prefixed cookie; an unprefixed preseed is never adopted. The explicit local
+HTTP development cookie is a separate compatibility exception. A host-only response alone would not establish
+that an incoming cookie had not been planted by a sibling domain.
+
+The gateway's runtime methods inspect, attach and resize that exact existing local/Podman sandbox TTY. They cannot
+start/create/restart/exec/stop containers or proxy arbitrary runtime operations. One writing driver is admitted
+per sandbox incarnation, with bounded protocol/input/output/rates/backpressure and no automatic reconnect or replay.
+The console rechecks live authority without extending idle time; revoke, sign-out, generation/role/enrollment changes,
+restart or unreadable authority stops terminal I/O within its authorization lease of at most five seconds. Browser
+driver input-idle expiry follows `PI_SANDBOX_IDLE_MINUTES`, zero disabling it; shell prompt `TMOUT` remains separate.
+Close and failures detach, leaving the shell/workspace. The existing separately confirmed End action owns stopping it.
+
+The per-host workbench holds at most four original-session-bound drive/watch panes. Each additional attachment
+still requires its own fresh authorization. Layout moves preserve attachments; closing one pane detaches only it.
+Public-ID-only tab rendezvous conveys no proof, session association or run facts. A different console sign-in cannot
+be adopted into an established workspace. Optional run context is a closed six-fact projection from the matching
+run record, shown after authorization; prepared shells without that record retain generic context.
+
+The driver may explicitly permit at most three read-only watches, including pending reservations. This disclosure
+is off by default: echoed tokens and other sensitive output can be visible to watchers. Each watcher has their own
+fresh same-token authorization and a grant bound to the exact driver owner and consent epoch. The driver's persistent
+named roster remains visible for inactive panes. Before a new watch receives output, that live driver must acknowledge
+its rendered roster revision; this orders rendering, not physical attention. Stale or unavailable metadata cannot
+be treated as an empty roster. Re-enabling consent cannot revive an earlier grant or removed attachment.
+
+Watch runtime attachments use `stdin:false`, expose a readable-only response and make no PTY resize call. Client
+input, resize, activity and automatic renderer replies never reach the runtime. Driver geometry is relayed through
+owner-fenced revisions across gateway processes. Slow watchers are dropped individually. Watch authority is bounded
+by both original console leases, the driver's live authorization and ownership, consent epoch and reservation.
+It has no additional input-idle timer. Off, exact-watch Remove, driver loss and either party's authority loss stop
+affected output within five seconds. Failed control writes do not claim success and fail closed. Watches never
+become drivers; native-only shells cannot be watched through this route.
+
+The maintained terminal renderer, layout library and assets are served by the gateway, under its own CSP. Only styles
+those two libraries generate receive its narrow inline-style allowance; scripts remain self-hosted without inline/eval/CDN authority.
+A launch link sent to someone else cannot be armed from the sender's tab: stepping up needs a receipt only the browser that
+bound the launch holds. A launch that did not start from a console page waits for a click. Terminal output grants no clipboard-write, title, link-navigation, HTML or file-transfer capability. Terminal input
+and output are not recorded or sent to console panels, history, logs or audit. Lifecycle audit distinguishes an
+opening intent, a successful attachment and its ending; interrupted processes can leave explicitly recovered,
+unproven endings rather than a false claim that a sandbox stopped. Phones retain the native-command route; the
+width policy is a supported layout, not cryptographic device identification.
+Watch lifecycle records identify both safe operator actors and the reason, never bytes. Consent/removal records
+distinguish requested changes from applied receipts; audit failure cannot enable sharing.
+
+These limits do not narrow the runtime socket's permissions. A compromised Docker gateway still has root-equivalent
+host reach, and rootless Podman still grants the runtime account's reach. Shared Valkey control remains trusted.
+A complete browser compromise or stolen operator credential can defeat step-up, and revocation is bounded rather
+than instantaneous. The bootstrap verifier briefly traverses a URL fragment before removal; it cannot attach by
+itself, but browser history/extensions may observe it during that interval. Enrollment explicitly accepts these
+residuals. The native opener, job isolation/credentials, paid admission and person-confirmed answer boundary remain.
 
 ## What is NOT defended (v1)
 
@@ -1156,7 +1225,10 @@ Stated openly rather than discovered later:
   so once staged they load for every job and `"packages": false` on a trigger is how one flow declines
   them; there is deliberately no env flag deciding it fleet-wide — and runner-side validation: a
   package that did not mount is refused before any spend, and a package skill that takes the name of a repo
-  or overlay skill loses — the repo's stays in force, and the attempt is logged. Two facts to hold on to.
+  or overlay skill loses — the repo's stays in force, and the attempt is logged. Since issue #796 a person can also try
+  one exact version on one job, or adopt it fleet-wide, from the console's [Updates](docs/console.md#updates) page: both
+  go through the same staging with `--ignore-scripts`, refuse a dependency tree holding anything but registry tarballs with a hash (npm runs a git dependency's build script whatever that flag says), neither is open to an agent, and a tried version is new third-party
+  code in a job that holds its trigger's credentials, which is why that is a person's call. Two facts to hold on to.
   Staging runs
   `npm install --ignore-scripts`: **without that flag a package's — and every transitive dependency's —
   lifecycle scripts would run AS YOU, ON YOUR HOST**, at stage time, which is a host compromise and not a

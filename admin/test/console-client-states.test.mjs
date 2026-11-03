@@ -323,6 +323,39 @@ test("where a swap replaced the button that opened the slot, closing it gives th
   assert.equal(panel.getAttribute("tabindex"), "-1");
 }));
 
+test("a press holds its panel's update until the release, with no note that would move what is being pressed", () => trapGlobalFetch(async () => {
+  // Measured: the Sandboxes page's first live update landed between a press and its release, so the browser sent no click
+  // and Open in browser silently did nothing. A panel redrawn on every tick could lose a person's click the same way.
+  const w = boot(gridPage());
+  const panel = w.document.getElementById("p-waiting");
+  const button = formOf(w, "cancel-queued").querySelector("button[type=submit]");
+  const before = panel.innerHTML;
+  button.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+  w.streams[0].emit("panel", { id: "p-waiting", html: "<h2>p-waiting</h2><p>NEW</p>" });
+  assert.equal(panel.innerHTML, before, "the pressed element is still there for the release");
+  assert.ok(panel.contains(button));
+  assert.equal(panel.querySelector("[data-held-note]"), null);
+  w.streams[0].emit("panel", { id: "p-waiting", html: "<h2>p-waiting</h2><p>NEWER</p>" });
+  button.dispatchEvent(new Event("pointerup", { bubbles: true }));
+  assert.equal(panel.innerHTML, before, "the click comes after the release, so the swap still waits this turn");
+  w.tick(0);
+  assert.equal(panel.innerHTML, "<h2>p-waiting</h2><p>NEWER</p>", "then the newest update lands");
+
+  // A press somewhere else holds nothing, and a cancelled press lets go too.
+  const other = boot(gridPage());
+  const otherPanel = other.document.getElementById("p-waiting");
+  other.document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+  other.streams[0].emit("panel", { id: "p-waiting", html: "<h2>p-waiting</h2><p>SWAPPED</p>" });
+  assert.equal(otherPanel.innerHTML, "<h2>p-waiting</h2><p>SWAPPED</p>", "an unrelated press holds no panel");
+  const dropped = boot(gridPage());
+  const droppedPanel = dropped.document.getElementById("p-waiting");
+  formOf(dropped, "cancel-queued").querySelector("button[type=submit]").dispatchEvent(new Event("pointerdown", { bubbles: true }));
+  dropped.streams[0].emit("panel", { id: "p-waiting", html: "<h2>p-waiting</h2><p>AFTER</p>" });
+  dropped.document.body.dispatchEvent(new Event("pointercancel", { bubbles: true }));
+  dropped.tick(0);
+  assert.equal(droppedPanel.innerHTML, "<h2>p-waiting</h2><p>AFTER</p>");
+}));
+
 test("a focused button never holds its panel: after Cancel gives the focus back to the button that opened the slot, the panel's next update lands", () => trapGlobalFetch(async () => {
   const g = boot(gridPage());
   const gslot = slotOf(g);

@@ -104,6 +104,7 @@ import { loginCodePage, loginPage } from "./shell.mjs";
 import { CONSOLE_CSS } from "./style.mjs";
 import { themeOf } from "./theme.mjs";
 import { TRANSCRIPT_FORMATS } from "./transcript.mjs";
+import { gatewayApi, gatewayLanding } from "./gateway.mjs";
 
 /** The largest request body a write may send. A pause-windows file is a few hundred bytes; 64 KiB is generous. */
 export const BODY_LIMIT = 64 * 1024;
@@ -312,7 +313,10 @@ function startSession(ctx, entry, file, action, extra = {}) {
     deps.tickets?.endSession?.(presented);
     res.once("finish", () => deps.hub?.endSession(presented, "elsewhere"));
   }
-  const cookie = deps.cookies.sessionCookie(id, { maxAgeSec: Math.floor(deps.config.maxMs / 1000) });
+  // The write guard already judged this request against the protected canonical origin. Reuse that exact
+  // declaration, never a forwarding header or a second file read that could change while the body arrived.
+  const secure = typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://");
+  const cookie = deps.cookies.sessionCookie(id, { maxAgeSec: Math.floor(deps.config.maxMs / 1000), secure });
   return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role, ...extra }, { "set-cookie": cookie });
 }
 
@@ -645,6 +649,9 @@ export const ROUTES = Object.freeze([
   // `auth: "none"` (issue #737): a sign-out judges no session, it ends the one the cookie names (`postLogout`), so an
   // unreadable tokens file cannot keep a browser signed in that asked to sign out.
   { method: "POST", path: "/logout", auth: "none", write: true, readOnlyExempt: true, handler: postLogout },
+  // Public generic shells recover the Strict cookie with a same-origin request, without replacing the sign-in.
+  ...["launch", "authorize", "return", "select"].map((mode) => ({ method: "GET", path: `/sandbox/gateway/${mode}`, auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, gatewayLanding({ mode, theme: themeOf(ctx.req.headers.cookie), gesture: ctx.req.headers["sec-fetch-site"] !== "same-origin" })) })),
+  ...["launch", "context", "authorize"].map((method) => ({ method: "POST", path: `/api/sandbox-gateway/${method}`, auth: "operator", write: true, handler: (ctx) => { ctx.gatewayTheme = themeOf(ctx.req.headers.cookie); return gatewayApi(ctx, method); } })),
   ...pageRoutes(realPages.PAGES),
   { method: "GET", path: "/api/whoami", auth: "viewer", write: false, handler: (ctx) => sendJson(ctx.res, 200, { name: ctx.session.name, role: ctx.session.role, readOnly: Boolean(ctx.deps.config.readOnly) }) },
   { method: "GET", path: "/static/console.js", auth: "none", write: false, anyHost: true, handler: (ctx) => {
@@ -817,8 +824,9 @@ async function dispatch(req, res, deps) {
   const ctx = { req, res, deps, route, pathname, session: null, body: null, record, searchParams, json: (status, body, headers) => sendJson(res, status, body, headers), actor: () => actorOf(ctx) };
 
   if (route.write || route.readJson) {
+    ctx.consoleOrigin = deps.consoleOrigin?.() ?? null;
     const checks = [
-      ["origin", originRefusal(req.headers)],
+      ["origin", originRefusal(req.headers, { expectedOrigin: ctx.consoleOrigin })],
       ["content-type", contentTypeRefusal(req.headers)],
       ["read-only", !route.write || route.readOnlyExempt ? null : readOnlyRefusal(deps.config)],
     ];
@@ -900,7 +908,7 @@ async function dispatch(req, res, deps) {
  *     `endedOf(id)` (why a refused cookie's session ended), and the flash, `setFlash(id,
  *     change)` (the action table's) and `takeFlash(id)` (a page GET's); `verdict(id, file)` is the hub's, read through
  *     the CLI; `streamAcquire(id)` and `streamRelease(id)` the streams'.
- *   - `cookies`: `sessionCookie(id, {maxAgeSec})`, `clearSessionCookie()`, `readSessionCookie(header)` (the one session a
+ *   - `cookies`: `sessionCookie(id, {maxAgeSec, secure})`, `clearSessionCookie()`, `readSessionCookie(header)` (the one session a
  *     request runs as), `readSessionCookies(header)` (every one a sign-out ends), `sessionDigest(id)`.
  *   - `consumeLoginCode(code)` -> `{name}` | `{refusal}` (the CLI binds the codes directory, fs and clock).
  *   - `tickets`: `issue({...})` -> `{ticket}`, `redeem({sessionId, ticket, action})` -> `{entry}` | `{refusal}`.
@@ -940,10 +948,12 @@ export function createConsoleServer({
   stateOf = defaultStateOf,
   errorPage = realErrorPage,
   limits: limitsOverride = {},
+  gateway = null,
+  consoleOrigin = null,
 }) {
   const limits = { ...SERVER_LIMITS, streamsTotal: STREAMS_TOTAL_MAX, streamsOperatorReserve: STREAMS_OPERATOR_RESERVE, ...limitsOverride };
   const refusalRows = makeLoginLimiter({ now, perMinute: REFUSAL_ROWS_PER_MINUTE, burst: 2 * REFUSAL_ROWS_PER_MINUTE });
-  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 } };
+  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
   const server = createServer({ headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval }, (req, res) => {
@@ -955,7 +965,7 @@ export function createConsoleServer({
       sendFailure({ req, res, deps }, 500, CONSOLE_FAILED, { page: { kind: "failed" } });
     });
   });
-  server.once("close", () => { actionDeps?.setup?.close?.(); tickets?.close?.(); });
+  server.once("close", () => { actionDeps?.setup?.close?.(); tickets?.close?.(); gateway?.close?.(); });
   server.maxConnections = limits.maxConnections;
   return server;
 }

@@ -118,6 +118,9 @@
     "./mcp-config": "./src/mcp-config.mjs",
     "./triggers-file": "./src/triggers-file.mjs",
     "./packages": "./src/packages.mjs",
+    "./updates": "./src/updates.mjs",
+    "./package-canary-record": "./src/package-canary-record.mjs",
+    "./updates-subscription-adapters": "./src/updates-subscription-adapters.mjs",
     "./pause-windows": "./src/pause-windows.mjs",
     "./scoped-limits": "./src/scoped-limits.mjs",
     "./projects": "./src/projects.mjs",
@@ -156,6 +159,7 @@
     "./sandbox-policy": "./src/sandbox-policy.mjs",
     "./openshell-cli": "./src/openshell-cli.mjs",
     "./sandbox-store": "./src/sandbox-store.mjs",
+    "./sandbox-gateway-protocol": "./src/sandbox-gateway-protocol.mjs",
     "./opener-protocol": "./src/opener-protocol.mjs",
     "./sandbox-hosts": "./src/sandbox-hosts.mjs",
     "./sandbox-prepare": "./src/sandbox-prepare.mjs",
@@ -195,8 +199,8 @@
     "start": "node src/cli.mjs worker"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
     "@octokit/auth-app": "8.2.0",
     "@octokit/rest": "22.0.1",
     "bullmq": "5.80.4",

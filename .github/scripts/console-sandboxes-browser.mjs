@@ -14,7 +14,7 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
   const work = mkdtempSync(join(tmpdir(), "pd-sandbox-browser-")), children = new Set();
   let fixture, extraFixture, browser, tab, keeperAbort, keeperReader, stage = "startup";
   try {
-    fixture = await startSandboxBrowserFixture(work);
+    fixture = await startSandboxBrowserFixture(work, { browser: true });
     mkdirSync(join(work, "browser"));
     browser = await openChrome({ chrome, work: join(work, "browser"), children, env: { HOME: process.env.HOME }, extraArgs: chromeLaunchArgs({ sandbox }), resolverRules: "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", captureStderr: true });
     tab = await browser.openTarget(); await tab.send("Page.enable"); await tab.send("Runtime.enable"); await tab.send("Network.enable");
@@ -66,6 +66,7 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
       // An explicit page clip also captures correctly after a confirm has scrolled to its action card.
       const r = await tab.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width: box.width, height: box.height, scale: 1 } }, 60_000);
       writeFileSync(join(shots, `${name}.png`), Buffer.from(r.data, "base64"));
+      writeFileSync(join(shots, `${name}.probe.json`), JSON.stringify(await evaluate("({width:innerWidth,height:innerHeight,canvas:getComputedStyle(document.body).getPropertyValue('--canvas').trim(),fonts:document.fonts.status,font:getComputedStyle(document.body).fontFamily,sheets:[...document.styleSheets].map(s=>({href:s.href,rules:s.cssRules.length})),csp:window.__sandboxCsp||[],browserLinks:[...document.querySelectorAll('.sandbox-browser')].map(a=>({href:a.href,visible:a.getClientRects().length>0})),nativeLinks:[...document.querySelectorAll('a[href^=\"pi-dispatch-open:\"]')].map(a=>({href:a.href,visible:a.getClientRects().length>0}))})"), null, 2));
     };
     await login("operator");
     const path = "/runs/sandboxes?id=gh-9575&host=mini1&repo=acme/web&index=0&ref=HEAD";
@@ -82,19 +83,43 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
       await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
       await navigate(path);
       await until("document.querySelector('[data-action=sandbox-prepare]')");
-      const m = await evaluate(`(()=>{const b=getComputedStyle(document.body);const links=[...document.querySelectorAll('a[href^="pi-dispatch-open:"]')];return {width:document.documentElement.scrollWidth,canvas:b.getPropertyValue('--canvas').trim(),fontReady:document.fonts.status,font:b.fontFamily,cardRadius:getComputedStyle(document.querySelector('.card')).borderRadius,links:links.map(a=>({href:a.href,visible:a.getClientRects().length>0})),csp:window.__sandboxCsp};})()`);
+      const m = await evaluate(`(()=>{const b=getComputedStyle(document.body);const links=[...document.querySelectorAll('a[href^="pi-dispatch-open:"]')];return {width:document.documentElement.scrollWidth,canvas:b.getPropertyValue('--canvas').trim(),fontReady:document.fonts.status,font:b.fontFamily,cardRadius:getComputedStyle(document.querySelector('.card')).borderRadius,links:links.map(a=>({href:a.href,visible:a.getClientRects().length>0})),browserLinks:[...document.querySelectorAll('.sandbox-browser')].map(a=>({href:a.href,visible:a.getClientRects().length>0,target:a.target,rel:a.rel})),csp:window.__sandboxCsp};})()`);
       assert.ok(m.width <= width + 1, `Sandboxes ${theme} ${width} overflowed to ${m.width}`);
       assert.equal(m.canvas, theme === "light" ? "#edeeec" : "#000000"); assert.equal(m.fontReady, "loaded"); assert.equal(m.cardRadius, width <= 760 ? "22px" : "26px"); assert.deepEqual(m.csp, []);
       const factWidths = await evaluate("[...document.querySelectorAll('.fact dd')].filter(e=>e.textContent.trim()).map(e=>e.getBoundingClientRect().width)");
       assert.ok(factWidths.every((w) => w >= 80), `Sandboxes ${width}: readable fact values, minimum ${Math.min(...factWidths)}px`);
       assert.ok(m.links.length >= 3); for (const link of m.links) { parseSandboxOpenUrl(link.href); assert.equal(link.visible, width > 760); }
+      const browserExplanation = await evaluate("document.querySelector('#p-sb-browser').innerText");
+      assert.ok(browserExplanation.includes("760 pixels") && browserExplanation.includes("copy the command"));
+      assert.equal(browserExplanation.includes("Choose Open in browser beside"), width > 760, "the phone explains its copy fallback instead of directing people to a hidden control");
+      assert.equal(m.browserLinks.length, 1, "only the live shell receives a browser CTA; kept/prepared workspaces keep their native route");
+      assert.equal(m.browserLinks[0].visible, width > 760);
+      assert.equal(new URL(m.browserLinks[0].href).pathname, "/sandbox/gateway/launch");
+      assert.equal(m.browserLinks[0].target, "_blank"); assert.ok(m.browserLinks[0].rel.includes("noopener"));
       if (width <= 760) {
+        await evaluate("document.querySelector('.sandbox-browser').focus()");
+        assert.equal(await evaluate("document.activeElement?.matches('.sandbox-browser')"), false, "phone browser CTA is unfocusable");
         await evaluate("document.querySelector('a[href^=\"pi-dispatch-open:\"]').focus()");
         assert.equal(await evaluate("document.activeElement?.matches('a[href^=\"pi-dispatch-open:\"]')"), false, "phone opener is unfocusable");
       }
       measurements.push({ theme, width, ...m });
       if ([375, 1024, 1440].includes(width)) await shot(`sandboxes-${theme}-${width}`);
     }
+    for (const theme of ["light", "dark"]) for (const state of ["off", "unavailable"]) {
+      stage = `browser fallback ${state} ${theme}`;
+      await tab.send("Emulation.setDeviceMetricsOverride", { width: 1024, height: 1000, deviceScaleFactor: 1, mobile: false });
+      await tab.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }] });
+      fixture.browserView.enabledHosts = [];
+      if (state === "unavailable") fixture.browserView.problem = "Browser-terminal information could not be read. Use the native terminal route.";
+      else delete fixture.browserView.problem;
+      await navigate(path);
+      assert.equal(await evaluate("document.querySelectorAll('.sandbox-browser').length"), 0);
+      assert.ok(await evaluate("document.querySelectorAll('a[href^=\"pi-dispatch-open:\"]').length>=3 && document.querySelectorAll('[data-sandbox-command]').length>=3"), "gateway failure never removes native openers or commands");
+      assert.ok(await evaluate(`document.querySelector('#p-sb-browser').innerText.includes(${JSON.stringify(state === "off" ? "No host is enrolled" : "could not be read")})`));
+      assert.equal(fixture.effects.queued.length, 0); assert.equal(fixture.effects.ended.length, 0);
+      await shot(`sandboxes-browser-${state}-${theme}-1024`);
+    }
+    fixture.browserView.enabledHosts = ["mini1"]; delete fixture.browserView.problem;
     const exceptional = ["long-names", "failed", "pending", "preparing", "ready", "refused", "unknown"];
     const originalId = fixture.inventory.hosts[0].rows[0].id;
     const longId = "gh-" + "a".repeat(190), requestId = "sb-" + "e".repeat(32);
@@ -262,8 +287,8 @@ export async function checkSandboxBrowser({ chrome, shots = null, sandbox = proc
     await tab.send("Emulation.setScriptExecutionDisabled", { value: false });
     stage = "read-only";
     const writableFixture = fixture;
-    mkdirSync(join(work, "readonly")); extraFixture = await startSandboxBrowserFixture(join(work, "readonly"), { readOnly: true }); fixture = extraFixture;
-    await login("operator"); await navigate(path); assert.equal(await evaluate("document.querySelectorAll('[data-action]').length"), 0); await shot("sandboxes-readonly");
+    mkdirSync(join(work, "readonly")); extraFixture = await startSandboxBrowserFixture(join(work, "readonly"), { readOnly: true, browser: true }); fixture = extraFixture;
+    await login("operator"); await navigate(path); assert.equal(await evaluate("document.querySelectorAll('[data-action]').length"), 0); assert.equal(await evaluate("document.querySelectorAll('.sandbox-browser').length"), 0); assert.ok(await evaluate("document.querySelector('#p-sb-browser').innerText.includes('1 host is enrolled')")); await shot("sandboxes-readonly");
     await extraFixture.close(); extraFixture = null; fixture = writableFixture;
     stage = "viewer";
     await login("viewer"); await navigate("/runs"); assert.equal(await evaluate("!!document.querySelector('a[href=\"/runs/sandboxes\"]')"), false);

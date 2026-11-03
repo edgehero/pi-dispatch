@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { test } from "node:test";
-import { CONTAINER_PACKAGES_ROOT, containerPackagePaths, mergeHostPackages, normalizeDiscoveredPackage, parsePackagesFile, readStagedSkills, readStageManifest, stagedDirName } from "../src/packages.mjs";
+import { CONTAINER_PACKAGES_ROOT, PACKAGES_SUBDIR, STAGE_MANIFEST, containerPackagePaths, mergeHostPackages, normalizeDiscoveredPackage, parsePackagesFile, readStagedSkills, readStageManifest, stagedDirName } from "../src/packages.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // parsePackagesFile is pure over the file TEXT -- no fs (mirrors triggers.test.mjs).
 const PATH = "/pi-packages.json";
@@ -290,10 +293,9 @@ test("readStagedSkills follows pi manifest entries: a dir of skills, and a SKILL
 	assert.deepEqual(got.skills.map((s) => s.name).sort(), ["one", "wf"]);
 });
 
-test("a pi manifest WITHOUT a skills key contributes NO skills and gets NO convention fallback", () => {
-	// The pin's exact behaviour (collectPackageResources short-circuits on readPiManifest): the
-	// convention dir is only consulted when there is no manifest AT ALL. An enumerator that fell back
-	// anyway would print a ✓ for a skill pi never loads -- the wrong direction for an advisory line.
+test("a pi manifest listing other resources contributes NO skills and gets NO convention fallback", () => {
+	// The pin's exact behaviour (collectPackageResources stops at a manifest that lists a resource). An enumerator
+	// that fell back anyway would print a ✓ for a skill pi never loads -- the wrong direction for an advisory line.
 	const got = readStagedSkills(stagedFs({
 		[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
 		[`${WF_ROOT}/package.json`]: JSON.stringify({ name: "@a/wf", version: "1.0.0", pi: { extensions: ["ext/index.js"] } }),
@@ -301,6 +303,48 @@ test("a pi manifest WITHOUT a skills key contributes NO skills and gets NO conve
 	}));
 	assert.deepEqual(got.skills, []);
 	assert.deepEqual(got.unenumerable, []);
+});
+
+// Every shape where pi's reading could differ from a simpler one, with the skills pi must load. pi 1.5.0 moved one of these
+// (a `pi` object holding only metadata now falls through to skills/), which is what a copy held by hand would have missed.
+const MANIFEST_SHAPES = [
+	["no pi key", {}, ["convention"]],
+	["an empty pi object", { pi: {} }, ["convention"]],
+	["metadata only", { pi: { changelogPath: "HISTORY.md" } }, ["convention"]],
+	["a non-array skills field, which pi drops", { pi: { skills: "listed" } }, ["convention"]],
+	["a mixed skills list, which pi drops whole", { pi: { skills: ["listed", 1] } }, ["convention"]],
+	["a pi key that is an array", { pi: ["skills"] }, ["convention"]],
+	["another resource listed", { pi: { extensions: [] } }, []],
+	["skills listed", { pi: { skills: ["listed"] } }, ["listed-skill"]],
+	["an empty skills list", { pi: { skills: [] } }, []],
+	["a dropped skills field beside a listed resource", { pi: { skills: "listed", prompts: [] } }, []],
+];
+
+for (const [title, fields, expected] of MANIFEST_SHAPES) {
+	test(`readStagedSkills agrees with pi's own package manager: ${title}`, async () => {
+		const { DefaultPackageManager, SettingsManager } = await import("@earendil-works/pi-coding-agent");
+		const globalPiDir = tempDir("packages-pi-rule-");
+		const root = join(globalPiDir, PACKAGES_SUBDIR, "pkg");
+		for (const dir of ["skills/convention", "listed/listed-skill"]) mkdirSync(join(root, dir), { recursive: true });
+		writeFileSync(join(root, "skills", "convention", "SKILL.md"), "---\nname: convention\ndescription: c\n---\n");
+		writeFileSync(join(root, "listed", "listed-skill", "SKILL.md"), "---\nname: listed-skill\ndescription: l\n---\n");
+		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0", ...fields }));
+		writeFileSync(join(globalPiDir, PACKAGES_SUBDIR, STAGE_MANIFEST), JSON.stringify({ stagedAt: "2026-11-02T00:00:00.000Z", packages: [{ name: "pkg", version: "1.0.0", dir: "pkg" }] }));
+		const manager = new DefaultPackageManager({ cwd: root, agentDir: join(globalPiDir, "agent"), settingsManager: SettingsManager.inMemory() });
+		const resolved = await manager.resolveExtensionSources([root], { temporary: true });
+		const piLoads = resolved.skills.filter((skill) => skill.enabled).map((skill) => basename(dirname(skill.path))).sort();
+		assert.deepEqual(piLoads, expected, "the shape no longer means what this table says at the pinned pi");
+		assert.deepEqual(readStagedSkills({ globalPiDir }).skills.map((skill) => skill.name).sort(), piLoads);
+	});
+}
+
+test("a package.json with a leading BOM is read, as pi reads it", () => {
+	const got = readStagedSkills(stagedFs({
+		[`${OVERLAY}/packages/packages.json`]: WF_MANIFEST,
+		[`${WF_ROOT}/package.json`]: `\uFEFF${JSON.stringify({ name: "@a/wf", version: "1.0.0" })}`,
+		[`${WF_ROOT}/skills/review/SKILL.md`]: "---\ndescription: r\n---\n",
+	}));
+	assert.deepEqual(got.skills.map((s) => s.name), ["review"]);
 });
 
 test("a glob or override pattern makes the package unenumerable, reported rather than guessed", () => {

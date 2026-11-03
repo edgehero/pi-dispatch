@@ -62,6 +62,26 @@ test("Fire now previews without rate writes, executes the worker's entire cron t
   assert.ok(f.queues.every((q) => q === "pi-jobs@host1"));
 });
 
+test("a canary is the same template with one more field, under an identity of its own (issue #796)", async () => {
+  const f = fixture();
+  const { plan } = await planTriggerFire(f.options);
+  const canary = { name: "pi-lint", version: "1.4.3" };
+  const fired = await enqueueTriggerFire(plan, f.options);
+  assert.equal(fired.ok, true);
+  const res = await enqueueTriggerFire(plan, { ...f.options, packageCanary: canary });
+  assert.equal(res.ok, true, "a fire in the same minute does not swallow it");
+  assert.notEqual(res.jobId, fired.jobId);
+  assert.match(res.jobId, /^manual:daily:\d+$/, "every reader that attributes a run to its trigger still does");
+  const { enqueueNonce, packageCanary, dataVersion, ...data } = f.adds[1].data;
+  assert.deepEqual(packageCanary, canary);
+  assert.equal(dataVersion, 2, "a worker from before canaries waits for an upgrade instead of paying for a plain run");
+  assert.deepEqual(data, plan.schedule.data, "nothing else about the job moves");
+  assert.equal(f.adds[0].data.packageCanary, undefined, "the plain fire carries none");
+  const again = await enqueueTriggerFire(plan, { ...f.options, packageCanary: canary });
+  assert.equal(again.deduplicated, true, "a second canary in one minute is one canary");
+  assert.equal(f.adds.length, 2);
+});
+
 test("Fire now refuses non-cron, command, portfolio, absent index, unserved and undeclared schedules", async () => {
   for (const [change, expected] of [
     [(f) => { f.raw.on = { type: "label", any: ["fix"] }; f.raw.run = { kind: "github", flow: "fix" }; }, /Only a cron/],

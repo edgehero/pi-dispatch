@@ -16,7 +16,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
  */
 
 /** A ledger row with the ten numerics, zero unless given. */
-const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, ...fields });
+const row = (provider, model, fields = {}) => ({ provider, model, calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 0, cost: 0, unpriced: 0, providerBilled: 0, ...fields });
 
 /** A well-formed ledger: `calls` settled calls of `each` tokens on one pair, plus `unresolved` calls in flight. */
 function ledger({ state = "running", metered = true, calls = 1, each = 100, provider = "fake", model = "m1", unresolved = 0, spentMicros = 0, inflightMicros = 0, costRefused = 0, modelRefused = 0, cost = 0.001, floor = {} } = {}) {

@@ -1,7 +1,7 @@
 The Zero touch tab as a viewer sees it. The same numbers as the operator's page, so a viewer can follow a project towards zero touch; nothing on it acts, and nothing on it quotes a run.
 
 **How a person uses it.**
-- **The numbers.** Touch rate, the zero-touch streak, the time runs waited for a person and the answers sent from a draft, as on the operator's page. The waiting run is named by its id. The draft tile says it arrives with #772.
+- **The numbers.** Touch rate, the zero-touch streak, the time runs waited for a person and the answers sent from a draft, as on the operator's page. The waiting run is named by its id. The draft tile shows the same six answered source runs, including edited answers, still counted as human touches.
 - **By project.** The same rows and meters, opening to repositories. There is no *Open as runs* link: it leads to the Runs tab's actions.
 - **What needed a person.** The same bars and the six causes with their counts.
 - **Fixes that worked.** What changed and what it did, before and after. Who made the change is left out (that is the audit log's, which a viewer never sees), and so is the text of an instruction: "Trigger 3's instructions gained a sentence".

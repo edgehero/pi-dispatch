@@ -82,6 +82,8 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// bundle-env.json. A trigger setting it would make a runner refuse on a file nobody wrote, or read one it should not.
 	"PI_BUNDLE_ENV",
 	"PI_OFFLINE",
+	// Issue #796: names a canary's candidate. A trigger setting it would make a run report on a path nobody installed.
+	"PI_PACKAGE_CANARY",
 	"PI_SUBSCRIPTION_AUTH",
 	"PLAYWRIGHT_BROWSERS_PATH",
 	"PLAYWRIGHT_MCP_BROWSER",

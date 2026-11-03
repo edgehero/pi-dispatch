@@ -940,6 +940,34 @@ test("a manifest entry naming a DIRECTORY is skipped and logged as manifest-dir;
 	assert.deepEqual(skipped, [{ path: join(root, "lib"), kind: "manifest-dir" }]);
 });
 
+test("the runner tells a candidate that loaded from one that did not, through pi's real loader (issue #796)", { skip }, async () => {
+	const { canaryLoadOf } = await import("../src/package-canary.mjs");
+	const candidate = (name, pi, files) => {
+		const root = tempDir(`pi-canary-${name}-`);
+		writeFileSync(join(root, "package.json"), `${JSON.stringify({ name, version: "1.0.0", pi })}\n`);
+		for (const [file, text] of Object.entries(files)) {
+			mkdirSync(dirname(join(root, file)), { recursive: true });
+			writeFileSync(join(root, file), text);
+		}
+		return root;
+	};
+	const loadOf = async (root, others = []) => {
+		const { loader } = await load({ packagePaths: [...others, root], log: () => {} });
+		return canaryLoadOf(root, loader);
+	};
+	const good = candidate("good", { extensions: ["index.js"] }, { "index.js": commandExtension("canary-good") });
+	assert.equal(await loadOf(good), "loaded");
+	assert.equal(await loadOf(candidate("throws", { extensions: ["index.js"] }, { "index.js": 'throw new Error("this candidate does not load");\n' })), "failed", "pi only records this, and the job would carry on");
+	assert.equal(await loadOf(candidate("empty", { extensions: [] }, {})), "failed", "contributing nothing is not loading");
+	assert.equal(await loadOf(candidate("skills", { skills: ["skills"] }, { "skills/tidy/SKILL.md": "---\nname: tidy\ndescription: d\n---\nbody\n" })), "loaded", "a package may hold only skills");
+	assert.equal(await loadOf(candidate("empty2", { extensions: [] }, {}), [good]), "failed", "another package's load says nothing about this one");
+	assert.equal(canaryLoadOf(good, { getExtensions() { throw new Error("no"); } }), "failed", "a loader that cannot answer has not shown it loaded");
+	assert.equal(await loadOf(candidate("half", { extensions: ["good.js", "bad.js"] }, { "good.js": commandExtension("canary-half"), "bad.js": 'throw new Error("no");\n' })), "failed", "one entry failing is a candidate that did not load whole, though another did");
+	assert.equal(await loadOf(candidate("prompts", { prompts: ["prompts"] }, { "prompts/tidy.md": "---\ndescription: d\n---\nbody\n" })), "loaded", "a package may hold only prompts");
+	const piTheme = JSON.parse(readFileSync(new URL("dist/modes/interactive/theme/dark.json", new URL("../", import.meta.resolve("@earendil-works/pi-coding-agent").replace(/dist\/index\.js$/, "dist/"))), "utf8"));
+	assert.equal(await loadOf(candidate("themes", { themes: ["themes"] }, { "themes/plain.json": `${JSON.stringify({ ...piTheme, name: "plain-canary" })}\n` })), "loaded", "or only themes");
+});
+
 test("a layout that loaded before issue #544 and is unused now is said once, by part (issue #544)", { skip }, async () => {
 	const logged = [];
 	const globalPiDir = looseOverlay();

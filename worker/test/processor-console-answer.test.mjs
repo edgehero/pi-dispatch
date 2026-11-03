@@ -7,6 +7,7 @@ import { resolveSettings } from "../src/runtime-settings.mjs";
 import { enqueueForgeJob } from "../src/queue.mjs";
 import { ANSWER_TEXT_MAX_BYTES, answerTrailComment, boundAnswerText, consoleAnswerBy, scrubAnswerText } from "../src/console-answer.mjs";
 import { estimateReserve } from "../src/reserve-estimate.mjs";
+import { computeZeroTouch } from "../src/zero-touch.mjs";
 
 // Issue #642: an answer typed into the operator console. The worker posts ONE trail comment for it, after the
 // `not-parked` gate and before any spend; the queue carries who answered and nothing else; and the console's reserve
@@ -262,6 +263,41 @@ test("a refused reply or a legacy park without exact source cannot invent an ans
 	const unknown = await runJob(answer("private"), d);
 	assert.equal(writes.length, 0);
 	assert.equal(unknown.touchLineageSkipped, "source-unavailable", "a proven resume with no staged parent names its accounting gap");
+});
+
+test("the real answer pickup records edited and as-drafted confirmations once per source, never failed resumes", async () => {
+	const nowMs = NOW.getTime(), parkedAt = nowMs - 3600_000, draftDigest = "d".repeat(64);
+	const writes = [];
+	const { deps: d } = deps({
+		readParkedInfo: () => ({ runId: "source-park", at: parkedAt }),
+		prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j", session: { parkedSource: { runId: "source-park", at: parkedAt } } }),
+		answerDraftStore: { readMeta: async () => ({ status: "sent", draftRunId: "draft-job", draftDigest }), privateInput: async () => ({ source: { kind: "github", repo: "org/repo", target: { type: "issue", number: 7 } } }) },
+		answerDraftRuntime: { checkSource: async () => true },
+		recordTouch: async (fact) => writes.push(fact), runContainer: async () => ({ code: 0, session: { resumed: true, reason: "resumed" } }),
+	});
+	const source = { jobId: "source-park", kind: "github", target: "org/repo#7", touchTrackingVersion: 1, endedAt: new Date(parkedAt).toISOString() };
+	const recount = () => computeZeroTouch({ records: [source], events: writes, nowMs: nowMs + 1, coverage: { fromMs: nowMs - 30 * 86400_000 } });
+	assert.equal(recount().totals.draftAnswers, 0, "a retained offered/sent draft by itself cannot prove an answered workload");
+	for (const body of ["The cited draft answer.", "The person's edited answer."]) {
+		const job = answer(body);
+		job.console = { by: "alice", draftRunId: "draft-job", draftDigest, draftSourceRunId: "source-park" };
+		assert.equal((await runJob(job, d)).outcome, "completed");
+	}
+	assert.equal(writes.length, 2);
+	assert.ok(writes.every((fact) => fact.runId === source.jobId && fact.cause === "question-answer" && fact.answerSource === "draft" && fact.draftRunId === "draft-job"));
+	for (const body of ["The cited draft answer.", "The person's edited answer."]) assert.ok(!JSON.stringify(writes).includes(body), "the private answer never becomes accounting data");
+	assert.deepEqual([recount().totals.draftAnswers, recount().totals.touched], [1, 1], "duplicate delivery/fallback evidence is one quicker human touch");
+	for (const resumed of [false, undefined]) {
+		writes.length = 0;
+		d.runContainer = async () => ({ code: 0, session: { resumed } });
+		const job = answer("An unresumed draft"); job.console = { by: "alice", draftRunId: "draft-job", draftDigest, draftSourceRunId: "source-park" };
+		await runJob(job, d);
+		assert.deepEqual([writes.length, recount().totals.draftAnswers, recount().totals.touched], [0, 0, 0]);
+	}
+	writes.length = 0; d.isParked = () => false;
+	const refused = answer("A refused draft"); refused.console = { by: "alice", draftRunId: "draft-job", draftDigest, draftSourceRunId: "source-park" };
+	assert.equal((await runJob(refused, d)).reason, "not-parked");
+	assert.equal(recount().totals.draftAnswers, 0);
 });
 
 test("park capture uses the full job redactor and refuses private text when that redactor is unavailable", async () => {

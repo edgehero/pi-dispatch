@@ -1,6 +1,7 @@
 /** Run cards and the browser-owned transcript slots (#747), scoped to the run page by page-css.mjs. */
 import { QCARD_CSS } from "./parked-css.mjs";
-export const RUN_CSS = `${QCARD_CSS}
+import { WORKSPACE_CSS } from "./workspace-css.mjs";
+export const RUN_CSS = `${QCARD_CSS}${WORKSPACE_CSS}
 /* Keep fact values readable inside a narrow desktop card as well as on a phone. */
 .facts, .facts--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 .facts--1 { grid-template-columns: minmax(0, 1fr); }

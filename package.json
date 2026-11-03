@@ -12,19 +12,22 @@
     "image/runner",
     "worker",
     "receiver",
-    "admin"
+    "admin",
+    "gateway"
   ],
   "scripts": {
-    "test": "node --test \"image/runner/test/*.test.mjs\" \"worker/test/*.test.mjs\" \"receiver/test/*.test.mjs\" \"admin/test/*.test.mjs\""
+    "test": "node --test \"image/runner/test/*.test.mjs\" \"worker/test/*.test.mjs\" \"receiver/test/*.test.mjs\" \"admin/test/*.test.mjs\" \"gateway/test/*.test.mjs\""
   },
   "overrides": {
-    "@earendil-works/pi-agent-core": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-codemode": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-mcp": "1.4.0",
-    "@earendil-works/pi-telemetry": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0"
+    "@earendil-works/pi-agent-core": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-codemode": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-mcp": "1.5.0",
+    "@earendil-works/pi-telemetry": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "dockview-core": "8.8.3",
+    "@earendil-works/pi-schema": "1.5.0"
   },
   "devDependencies": {
     "primary-anthropic-sdk": "npm:@anthropic-ai/sdk@0.124.0"

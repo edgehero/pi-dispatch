@@ -9,11 +9,11 @@ from paths import COMPONENTS as ROOT
 GROUPS = {
     "Start here": ["ConceptMap", "Glossary", "SampleStory", "JourneyAnswer", "JourneyFailure", "JourneySetup"],
     "Overview": ["OverviewScreen", "OverviewAllClear", "SetupScreen"],
-    "Runs": ["SandboxesScreen", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
+    "Runs": ["SandboxesScreen", "SandboxTerminal", "SandboxGatewaySignIn", "SandboxGatewayStates", "SandboxWorkbench", "RunWorkspace", "RunWorkspaceStates", "SandboxTerminalRun", "SandboxWatch", "RunsScreen", "RunLive", "RunEnded", "RunRefused", "RunParked", "RunRecovered", "RunSandboxed", "RunChatStates", "RunViewer", "ForkRun", "ZeroTouchScreen", "ZeroTouchViewer", "ParkedAnswerer", "ParkedDraftViewer"],
     "Fleet": ["FleetScreen", "FleetPartPaused", "HostDetail", "VenueDetail", "FleetViewer"],
     "Spend": ["ModelsScreen", "SpendScreen", "SpendBudgetSplit", "SpendCapacity", "SpendBreakdown", "TopologyScreen"],
     "Triggers": ["TriggersScreen", "TriggerDetail", "TriggerEditor", "TriggersViewer", "WatchScreen", "WatchBoard"],
-    "Configuration": ["ConfigScreen", "SecretsScreen", "ConnectionsScreen", "ProjectDetail"],
+    "Configuration": ["ConfigScreen", "SecretsScreen", "ConnectionsScreen", "ProjectDetail", "UpdatesScreen"],
     "Access and audit": ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"],
     "Phone": ["OverviewPhone", "RunsPhone", "ParkedPhone", "SpendPhone", "RunLivePhone", "FleetPhone", "TriggersPhone",
               "ParkedDraftPhone", "ZeroTouchPhone"],
@@ -43,13 +43,21 @@ STATUS = {
     "TriggerDetail": (BUILT, "Built by #767 (#750)."), "TriggerEditor": (BUILT, "Built by #767 (#750)."), "ConfigScreen": (BUILT, "Built by #767 (#750)."),
     **{n: (BUILT, "Built by #751, Secrets, Connections and project detail.") for n in ["SecretsScreen", "ConnectionsScreen", "ProjectDetail"]},
     "ConnectionsScreen": (BUILT, "Built by #751; provider API key management added by PR #784 (#774); hook run display added by #775."),
+    "UpdatesScreen": (BUILT, "Built by #796 (PR #790). Prepared by pi-dispatch, adopted by a person: nothing a job runs updates by itself."),
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
     "ApprovalRequest": (BUILT, "Built by #649: budget raises are worker-enforced; external gates are advisory. Model text stays in the transcript."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),
     "ModelsScreen": (BUILT, "#780. Scoped roles, fallbacks, cooldowns and retained canaries (#773)."),
     "WatchScreen": (BUILT, "Built by #735: compact retained source, rule and finding view."), "WatchBoard": (BUILT, "Built by #743: retained trace, classifier totals and operator-adopted inert board; live projections remain future work."),
     "DispatchersScreen": (PROPOSED, "#776, specs only. Resident model containers and forge starts are rejected; long LLM runs are deferred."),
     "DispatcherScreen": (PROPOSED, "#776, specs only. Fresh decision containers and local read-only starts; adopting proposals always needs a person."),
-    "SandboxesScreen": (BUILT, "Built by #771. The browser terminal remains proposed under #754."),
+    "SandboxesScreen": (BUILT, "Built by #771. Separate gateway attachment added by #754, off by default."),
+    "SandboxWorkbench": (BUILT, "Built by #754, #792 and #793. Maintained-library tabs, splits and read-only watches."),
+    "SandboxTerminal": (BUILT, "Built by #754, on its own gateway hostname. Attaches to an existing shell only."),
+    **{n: (BUILT, "Built by #793 in PR #790. Run workspace states and confirmed next steps; no browser container start.") for n in ["RunWorkspace", "RunWorkspaceStates"]},
+    "SandboxTerminalRun": (BUILT, "Built by #793 and #792, per-pane run context and consent in the workbench."),
+    "SandboxWatch": (BUILT, "Built by #792, one driver and at most three consented read-only watchers."),
+    "SandboxGatewaySignIn": (BUILT, "Built by #754. Same-session fresh operator sign-in, one attachment, 60 seconds."),
+    "SandboxGatewayStates": (BUILT, "Built by #754. Refusals, session and connection loss, and native fallback."),
     "ZeroTouchScreen": (BUILT, "Built by #777, fleet-wide touch accounting and cause-linked fixes."), "ZeroTouchViewer": (BUILT, "Built by #777, as a viewer sees it."),
     "ZeroTouchPhone": (BUILT, "Built by #777, on a phone."),
     "ParkedDraftViewer": (BUILT, "Built by PR #779 (#772). Viewers see wait, draft existence and the sender only."), "ParkedDraftPhone": (BUILT, "Built by PR #779 (#772). On a phone, the full rules remain one tap away."),
@@ -81,8 +89,11 @@ def ribbon(name):
 
 def put_ribbon(name, text):
     text = RIBBON_CSS_RE.sub("", RIBBON_RE.sub("", text))
-    if name not in STATUS or '<a class="skip"' not in text:
+    if name not in STATUS:
         return text
+    # A status is a claim about this repository. Failing here beats a card that quietly stops making it.
+    if '<a class="skip"' not in text:
+        raise SystemExit(f"{name}: has a status but no skip link for its ribbon to sit before")
     text = text.replace("</head>", RIBBON_CSS + "</head>", 1)
     return text.replace('<a class="skip"', ribbon(name) + '<a class="skip"', 1)
 found = sorted(d.name for d in ROOT.iterdir() if d.is_dir() and d.name != "Cover")

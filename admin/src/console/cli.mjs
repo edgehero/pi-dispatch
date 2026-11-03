@@ -34,6 +34,8 @@ import { acquireConsoleLock } from "./lock.mjs";
 import { keptTokenLinkRefusal } from "./login-codes.mjs";
 import { makeAnswererService } from "../answerer-data.mjs";
 import { readAgentWritesToday } from "../agent-write-count.mjs";
+import { readSandboxGateways } from "../sandbox-gateways.mjs";
+import { makeGatewayBroker } from "./gateway-broker.mjs";
 
 export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
 
@@ -56,7 +58,9 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
+  const [updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
+    import("../updates-view.mjs"),
+    import("@edgehero/pi-dispatch/updates"),
     import("@edgehero/pi-dispatch/console-tokens"),
     import("@edgehero/pi-dispatch/console-audit"),
     import("./sessions.mjs"),
@@ -92,7 +96,7 @@ export async function loadModules() {
     import("../setup-host-client.mjs"),
     import("./actions.mjs"),
   ]);
-  return { tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
+  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -477,6 +481,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
   let hub = null;
   let setup = null;
   let setupBroker = null;
+  let gateway = null;
   try {
     // Every Valkey client of this process (the audit copy's, the fleet reader's) takes its password and its facts
     // about the deployment's Valkey from THIS deployment's `.env`, through the panel's one reader, as the pi extension
@@ -525,6 +530,10 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: () => log("console: Zero touch accounting needs repair") });
     const sandboxes = m.sandboxData?.makeSandboxService({ paths: side.paths, env: { ...side.env, ...(config.sandboxHostsFile ? { PI_SANDBOX_HOSTS_FILE: config.sandboxHostsFile } : {}) }, deploymentDir: config.dir, fleet, fs, now });
+    const gatewayRegistry = () => config.sandboxGatewaysFile ? readSandboxGateways(config.sandboxGatewaysFile, { fs, uid, platform: io.platform ?? process.platform }) : { disabled: true };
+    const gatewayEnrollment = gatewayRegistry();
+    if (gatewayEnrollment.refusal) io.err(`pi-dispatch-console: ${gatewayEnrollment.refusal}`);
+    if (redis) gateway = makeGatewayBroker({ redis, sessions, readTokens, findToken: m.tokens.findToken, readRegistry: gatewayRegistry, audit, readOnly: () => config.readOnly, now, ...(random ? { random } : {}), readSessions: () => fleet.sandboxSessions(), readRun: (id) => fleet.runById(id) });
     const answerer = makeAnswererService({ paths: side.paths, env: side.env, fs, now });
     const pricing = pricingOf(m.pricing);
     const modelsView = m.modelsView ? (snapshot = null) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, fleet, fs, redis }) : null;
@@ -560,9 +569,27 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       }),
     }) ?? null;
     const triggerHistory = cachedFor(() => m.readModel.scanRunRecords({ logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
+    // The fleet's records and not this host's: a canary runs on whichever host took the job, and Adopt's gate reads its record.
+    const updatesHistory = cachedFor(() => m.readModel.scanFleetRunRecords({ redis, logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
+    // The page's and the actions' one read, so an Adopt's gate reads what the page drew.
+    const readUpdatesFacts = async () => {
+      const history = await updatesHistory().catch(() => ({ records: [], partial: true }));
+      return await m.updatesView.readDeploymentUpdates({
+        redis, now: now(), pinned: m.pricing.piAiVersion?.() ?? null, paths: side.paths, fs,
+        records: history.records, recordsPartial: history.partial,
+        audit: await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => read?.rows ?? []).catch(() => []),
+      });
+    };
     const pageDeps = {
       fleet,
       sandboxes,
+      gatewayView: async () => {
+        if (gateway) return gateway.view();
+        const read = gatewayRegistry();
+        if (!read.config) return { enabledHosts: [], sessions: [], ...(read.refusal ? { problem: read.refusal } : {}) };
+        const shells = await fleet.sandboxSessions();
+        return { enabledHosts: Object.keys(read.config.hosts), sessions: shells?.sessions ?? [], partial: Boolean(shells?.unreachable || shells?.more || shells?.unreadable) };
+      },
       answerer,
       modelsView,
       setup: async ({ role, snapshot } = {}) => {
@@ -581,6 +608,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
       secretsView: (snapshot) => m.secretsView.secretsView({ snapshot, env: side.env, fs }),
+      updates: () => readUpdatesFacts(),
       connections: (snapshot) => m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid }),
       projectView: (id, snapshot) => m.projectView.readProjectView({ id, snapshot, paths: side.paths, env: side.env, deploymentDir: config.dir, pricing, fleet, fs, now: now(), platform: io.platform ?? process.platform, uid }),
       triggerCheck: (input) => m.triggerCheck.checkTriggerEvent({ input, triggersPath: side.paths.triggersPath, fs }),
@@ -649,6 +677,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       log,
     });
     actionDeps = {
+      updates: { read: readUpdatesFacts, setDesired: (row) => m.updates.setDesired(redis, row) },
     modelRoles,
     watch: fleet.watch,
     zeroTouch,
@@ -695,6 +724,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       pageDeps,
       hub,
       stateOf: m.live.stateOf,
+      gateway,
+      consoleOrigin: () => { const read = gatewayRegistry(); return read.refusal ? false : read.config?.consoleOrigin ?? null; },
     });
     const bound = await listenOn(server, config.listen, { fs, uid });
     if (bound.refusal) throw new Refusal(bound.refusal);
@@ -724,6 +755,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     // The streams first, so closing the server is not held open by them; then the listener, the reader, the copy.
     setup?.close();
     setupBroker?.close();
+    await gateway?.close();
     hub?.close();
     if (server?.listening) {
       await new Promise((resolve) => {

@@ -359,6 +359,8 @@ settings overlay is the sharper half: it is read per job and written by whicheve
 cap set on one host silently becomes the cap everywhere. Set both variables per host, or decide to share
 them on purpose.
 
+**A shared overlay is safe to stage on, and adopting there happens once.** If your hosts share one `PI_GLOBAL_PI_DIR` on a network mount, a lock serialises staging across them, each stage works in a uniquely named folder, and a tree a running job may have mounted is kept for a week after it leaves the manifest. The first host to apply a person's [Adopt](console.md#updates) does the work and the others find it done.
+
 ### 5. A folder on two machines is not the same folder
 
 `/srv/site` on mini1 and `/srv/site` on mini2 are usually two different checkouts. Nothing here treats

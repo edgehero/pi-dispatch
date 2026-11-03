@@ -5,7 +5,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
   - *Touch rate*: runs that needed a person out of runs that ended, over the window (7, 30 or 90 days), with a sparkline of the rolling rate each week, a dashed goal line, and the change against the window before in words.
   - *Zero-touch streak*: the project that has gone longest without a touch, and the others.
   - *Waiting for a person*: the hours runs waited on a person, the median wait for an answer, and what waits now.
-  - *Answered from a draft*: an explicit coming-next state for #772. A draft the person sends will be a touch; #770 does not draft or send answers.
+  - *Answered from a draft*: six distinct source runs answered from person-confirmed drafts in the covered interval, edited or as drafted. They still count as touches. Offered, unsent and refused drafts and internal helper jobs add none; partial coverage is named.
 - **By project.** One row per project:
   - the rate as a meter, with the goal tick at 5% and a word beside it (*Under goal*, *Above goal*, *High* from 30%), so colour never carries it alone;
   - the change against the 30 days before, as an arrow and words ("down 8 points, from 24%");
@@ -17,7 +17,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
 - **What needed a person** (side). One stacked bar per project on one scale that contains the complete stack, each with its counts in words under it. Under the bars, the six causes with what the record says for each and their counts (17, 5, 7, 5, 3 and 1, which make 38), and one line: merging is never a touch, with a link to how touches are counted.
 - **Questions it keeps asking** (operator only). Questions with the same meaning, grouped by a decision model, per repository. A person names each group (an unnamed one says how many similar questions it holds and offers *Name this group*), and the page shows the name, the count and links to the runs, never the questions. Each group offers the fix that removes it:
   - *Add to instructions*: shown open, a preview with the diff of `triggers.json` and *Add to trigger 3*. The undo is to remove the sentence.
-  - Standing answers and drafting arrive with #772; #770 offers no inactive draft or standing-answer control. Product-decision sample wording is illustrative.
+  - Standing answers and drafting are managed in Parked, not through controls on this page. Product-decision sample wording is illustrative.
   - A fixed group stays listed, with when it was fixed and *none since*.
 - **Fixes that worked** (side). Each change a person made against a cause, with before and after bars over equal spans: the pnpm sentence on trigger 3 (package manager questions 5 to 0), and the vault reference fix (`secret-unresolved` refusals 4 to 0).
   Green means an established reduction. More occurrences use the failure colour and say so; unchanged, partial, unexposed and reverted observations never claim effectiveness.
@@ -35,7 +35,7 @@ A second tab on Runs that counts how often a run needed a person, per project an
   - approvals decided (with ApprovalRequest);
   - linking a configuration change to the refusal it answered;
   - question groups from a decision model over the question text, named by a person;
-  - standing answers and sent drafts remain #772;
+  - confirmed draft-answer provenance from #772, counted once per source run; standing-answer text remains on the Parked rules page;
   - the fixes log, each change with the cause it targets and counts before and after.
 - The rate is an on-demand read over retained records and fleet-wide touch facts. Grouping starts a capped job; naming a group and appending an instruction are operator-only writes through preview and Confirm. Private question context never enters this page.
 
@@ -58,4 +58,4 @@ A second tab on Runs that counts how often a run needed a person, per project an
 - the question groups and their wording, the trigger 3 instructions line (from `triggers.example.json`) and the sentence added to it;
 - the two fixes.
 
-Projects, repositories, trigger 3 and `gh-2f6a` follow the fixture.
+Projects, repositories, trigger 3 and `gh-2f6a` follow the fixture. Six of the 17 question answers came from drafts; every value is sample data.

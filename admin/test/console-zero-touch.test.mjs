@@ -2,11 +2,49 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { zeroTouchView } from "../src/zero-touch-view.mjs";
 import { loadPageData, parsePageQuery, pageQueryString, renderPage, panelIds } from "../src/console/pages.mjs";
-import { ZERO_TOUCH_CAUSES, ZERO_TOUCH_WORDS } from "../src/console/panels/zero-touch.mjs";
+import { ZERO_TOUCH_CAUSES, ZERO_TOUCH_WORDS, zeroTouchHandled } from "../src/console/panels/zero-touch.mjs";
 import { zeroTouchFixture, ZERO_TOUCH_DRAW } from "./helpers/zero-touch-goldens.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
 import { computeZeroTouch } from "@edgehero/pi-dispatch/zero-touch";
 const NOW = 1800000000000;
+
+test("desktop and phone render the same actual draft-answer recount for every reading role and selected interval", async () => {
+  const day = 86400000, scope = "a".repeat(64), other = "b".repeat(64);
+  const records = [["as-drafted", 1, "api", scope], ["edited", 12, "api", scope], ["other-repo", 1, "api", other], ["other-project", 1, "web", other], ["offered", 1, "api", scope], ["helper", 1, "api", scope]].map(([jobId, days, project, touchScopeId]) => ({ jobId, project, touchScopeId, kind: "github", target: `acme/${project}#1`, touchTrackingVersion: 1, endedAt: new Date(NOW - days * day).toISOString(), ...(jobId === "helper" ? { purpose: "answer-draft" } : {}) }));
+  const events = ["as-drafted", "as-drafted", "edited", "other-repo", "other-project", "helper"].map(runId => ({ runId, cause: "question-answer", answerSource: "draft", draftRunId: "private-helper", at: NOW - day }));
+  for (const [selection, expected] of [[{}, 4], [{ project: "api" }, 3], [{ project: "api", scopeId: scope }, 2], [{ project: "api", scopeId: scope, windowDays: 7 }, 1]]) {
+    const report = computeZeroTouch({ records, events, nowMs: NOW, coverage: { fromMs: NOW - 90 * day }, ...selection });
+    assert.equal(report.totals.draftAnswers, expected);
+    for (const role of ["operator", "viewer", "agent"]) {
+      const page = String((await renderPage("zero-touch", { session: { name: "reader", role }, data: { now: NOW, zeroTouch: report }, query: { days: selection.windowDays ?? 30, project: selection.project ?? null, scope: selection.scopeId ?? null } })).html);
+      const tile = page.match(/<section id="p-zt-handled" data-panel>([^]*?)<\/section>/)?.[1];
+      const phone = page.match(/<ul class="ztp-now">([^]*?)<\/ul>/)?.[1];
+      assert.match(tile, new RegExp(`<b>${expected}</b><span>runs answered in the covered interval</span>`), `${role}: selected desktop count`);
+      assert.match(phone, new RegExp(`Answered from a draft</span><b>${expected} ${expected === 1 ? "run" : "runs"}</b>`), `${role}: selected phone count`);
+      for (const markup of [tile, phone]) {
+        assert.ok(markup.includes(ZERO_TOUCH_WORDS.drafts));
+        assert.doesNotMatch(markup, /Coming next|Available with|#772|private-helper|as-drafted|other-project/);
+      }
+    }
+  }
+});
+
+test("draft counts distinguish covered zero, partial retained counts and unavailable history", async () => {
+  for (const count of [0, 1, 6]) {
+    const raw = zeroTouchFixture(NOW); raw.totals.draftAnswers = count;
+    const view = { role: "viewer", data: { zeroTouch: raw }, query: { days: 30 }, now: NOW };
+    assert.match(String(zeroTouchHandled(view)), new RegExp(`<b>${count}</b>`));
+    raw.coverage.partial = true;
+    assert.ok(String(zeroTouchHandled(view)).includes(ZERO_TOUCH_WORDS.draftsPartial));
+    const page = String((await renderPage("zero-touch", { session: { name: "reader", role: "viewer" }, data: { now: NOW, zeroTouch: raw }, query: { days: 30 } })).html);
+    assert.ok(page.match(/<ul class="ztp-now">([^]*?)<\/ul>/)?.[1].includes(ZERO_TOUCH_WORDS.draftsPartial), "the phone cannot silently present the retained suffix as a whole-window count");
+  }
+  for (const raw of [null, { state: "unavailable", totals: { draftAnswers: 0 } }, { ...zeroTouchFixture(NOW), coverage: { partial: true, fromMs: NOW, reasons: ["touch-index-lost"] } }]) {
+    const tile = String(zeroTouchHandled({ role: "operator", data: { zeroTouch: raw }, query: { days: 30 }, now: NOW }));
+    assert.ok(tile.includes(ZERO_TOUCH_WORDS.unavailable));
+    assert.doesNotMatch(tile, /class="kpi"|<b>0<\/b>/, "lost evidence is not a known zero");
+  }
+});
 
 test("Zero touch query refuses unknown, duplicate and malformed input before a reader is called", () => {
   for (const query of ["days=8", "days=7&days=30", "scope=../../secret", "project=<script>", "question=SECRET_QUESTION"]) {
@@ -53,7 +91,11 @@ test("desktop and phone show incomplete waiting history without suppressing the 
   assert.match(rendered, /1 of 1 runs needed a person/);
   assert.match(rendered, /class="zt-phone-summary"[^]*Waiting history is incomplete/);
   assert.match(rendered, /Waiting for a person[^]*Pending count not known/);
-  assert.doesNotMatch(rendered, /0 waiting now|0 runs<\/b>|Not knownh/);
+  const phoneWait = rendered.match(/Waiting now<\/span>([^]*?)<\/li>/)?.[1];
+  const waitPanel = rendered.match(/<section id="p-zt-wait" data-panel>([^]*?)<\/section>/)?.[1];
+  assert.ok(phoneWait && waitPanel);
+  // A covered zero draft-answer count is valid beside an unknown old wait. Judge the waiting claims themselves.
+  assert.doesNotMatch(phoneWait + waitPanel, /0 waiting now|0 runs<\/b>|Not knownh/);
   assert.doesNotMatch(rendered, /zero touch, 30\+ days/);
 });
 

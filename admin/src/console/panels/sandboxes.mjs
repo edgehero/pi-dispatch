@@ -1,14 +1,14 @@
 /** SandboxesScreen: private operator facts and confirmed control requests, never a browser shell (#771). */
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { sandboxLinks } from "../sandbox-links.mjs";
+import { sandboxLinks, sandboxBrowserLink, sandboxDriverLine } from "../sandbox-links.mjs";
 import { timeHtml, ageText } from "./common.mjs";
 
 export const SANDBOX_WORDS = Object.freeze({
   unavailable: "Sandbox information could not be read. Reload to try again; an unread host is not an empty host.",
   empty: "No kept workspace was published. A worker publishes its retained workspaces while it is running.",
   noShells: "No live sandbox shell was registered. A shell whose terminal stopped answering disappears when its short lease expires. An expired registration is not proof the container stopped; inspect its host if the terminal ended unexpectedly.",
-  browser: "A terminal in this browser needs a decision in #754. This console opens no shell and starts no container.",
+  browser: "A separate gateway can attach to an already-open sandbox. It is off by default and enabled by hand per host. Open in Terminal and copy-command support remain available.",
   noScript: "Preparing, pinning, ending a shell and saving terminal targets require JavaScript for Preview and Confirm. Commands remain selectable and the settings form works without JavaScript.",
 });
 const report = (v) => v.data?.sandboxes;
@@ -37,7 +37,7 @@ function state(v) {
 }
 
 export function sandboxFromRun(v) {
-  if (!allowed(v)) return null;
+  if (!allowed(v) || v.query?.gatewaySelect) return null;
   const all = rows(v);
   const id = v.query?.id;
   const picked = all.find((r) => rowId(r) === id && (!v.query?.host || r.host === v.query.host));
@@ -51,7 +51,7 @@ export function sandboxFromRun(v) {
 }
 
 export function sandboxNew(v) {
-  if (!allowed(v)) return null;
+  if (!allowed(v) || v.query?.gatewaySelect) return null;
   const s = selected(v), data = report(v), options = data?.options ?? [];
   const repositories = [...new Set(options.map((o) => o.repo).filter(Boolean))];
   const triggers = options;
@@ -64,27 +64,32 @@ export function sandboxNew(v) {
     ui.field({ label: "Keep it", id: "sb-pin", control: ui.select({ id: "sb-pin", name: "pin", value: s.pin ? "1" : "0", options: [{ value: "0", label: "Host's retention window" }, { value: "1", label: "Host's pin window" }] }) }),
   ];
   const plan = data?.plan;
-  const form = html`<form method="get" action="/runs/sandboxes" data-live-hold><div class="sx-form">${fields}</div><div class="sx-form-end">${ui.btn({ type: "submit", label: "Review settings" })}</div></form>`;
+  const source = data?.fromRun ? html`<p class="sx-p">Preparing from <a class="link" href="${`/run?${new URLSearchParams({ id: data.fromRun })}`}">${data.fromRun}</a>. The ref starts at HEAD because the record holds no created pull request. ${data.sourceRun?.historicalIndex !== null && data.sourceRun?.historicalIndex !== undefined ? `Its historical trigger row was ${data.sourceRun.historicalIndex + 1}; that does not prove the current row's identity.` : "Its original trigger identity is unavailable."} Choose the current trigger explicitly.${String(data.sourceRun?.backend).startsWith("openshell") ? " Its original OpenShell venue cannot prepare a sandbox; deliberately choose a compatible local or podman trigger." : ""}</p>` : null;
+  const form = html`${source}<form method="get" action="/runs/sandboxes" data-live-hold>${data?.fromRun ? html`<input type="hidden" name="fromRun" value="${data.fromRun}">` : null}<div class="sx-form">${fields}</div><div class="sx-form-end">${ui.btn({ type: "submit", label: "Review settings" })}</div></form>`;
   const preparation = plan ? html`<h3 class="sx-h3">Given by the trigger, not chosen here</h3>${facts(plan)}<p class="sx-p">${plan.pin ? `Pinned for ${plan.pinDays} days` : `Kept for ${plan.retentionHours} hours`}, on ${plan.host}. The worker clones on that host with a credential for this repository, then drops it. No container starts, no model runs, no dollars are spent and no run slot is taken.</p>${acts(v) ? ui.actForm({ action: "sandbox-prepare", hidden: [["repo", s.repo], ["index", s.index, "int"], ["ref", s.ref], ["host", s.host], ["pin", Boolean(s.pin), "json"]], label: "Preview preparation", kind: ["primary"], icon: "plus" }) : html`<p class="card__sub">This console is read-only. Prepare from the host's terminal.</p>`}${ui.cmd(["pi-dispatch", "sandbox", "--new", s.repo, "--ref", s.ref, "--as", String(s.index), ...(s.pin ? ["--pin"] : [])])}<p class="card__sub">The CLI’s --as takes a zero-based file index: trigger row ${s.index + 1} is index ${s.index}.</p>` : html`<p class="sx-p" role="status">${data?.refusal ?? "Choose a repository, its trigger, a ref and a host, then review their settings."}</p>`;
   return card("Without a run", html`${form}${preparation}<noscript><p class="card__sub">${SANDBOX_WORDS.noScript}</p></noscript>`, "a fresh clone with a trigger's image and a job's isolation");
 }
 
 export function sandboxOpen(v) {
   if (!allowed(v)) return null;
-  const data = report(v), sessions = data?.sessions ?? [];
+  const data = report(v), sessions = (data?.sessions ?? []).filter((s) => !v.query?.gatewaySelect || s.host === v.query.host);
   const incomplete = !data || data.sessionsUnavailable || data.sessionsMore > 0 || data.sessionsUnreadable > 0;
-  const notices = (data?.notices ?? []).map((n) => html`<p class="sx-p" role="status">${ui.icon("attention", { size: "sm" })} ${n.host}, ${n.id}: ${{ "network-kept": "The sandbox network was kept because cleanup could not be confirmed. Inspect this host’s runtime and network before removing either.", "network-cleanup-failed": "Sandbox network cleanup failed. Inspect this host’s runtime and egress network before retrying cleanup.", "runtime-unreadable": "The runtime could not be read. An expired shell registration does not prove the container stopped. Inspect this host before reopening or cleaning it." }[n.reason] ?? "Sandbox cleanup needs inspection on this host."} <a class="link" href="${`/fleet/host?${new URLSearchParams({ name: n.host })}`}">Inspect host</a>.</p>`);
-  return card("Open now", html`${notices}${data?.noticesUnavailable ? html`<p role="status">Some sandbox cleanup notices could not be read. Inspect the host if a terminal ended unexpectedly.</p>` : null}${data?.sessionsMore > 0 || data?.sessionsUnreadable > 0 ? html`<p role="status">The registered shell list is incomplete: at least ${data.sessionsMore ?? 0} more and ${data.sessionsUnreadable ?? 0} unreadable registrations.</p>` : null}${data?.sessionsUnavailable ? html`<p role="status">Open shells could not be read. Reload to try again.</p>` : sessions.length ? html`<ul class="sx-opens">${sessions.map((s) => html`<li class="sx-open"><span class="dot tone-running"></span><div class="sx-open__b"><p class="sx-open__t"><span class="code">${s.id}</span>${ui.vtag(s.venue)}</p><p class="sx-open__s">${s.host}, opened by ${s.by ?? "the terminal operator"}. Open since ${stamp(s.since)}.</p><div class="sx-open__a">${links(v, s, "attach", true)}${acts(v) ? ui.actForm({ action: "sandbox-end", hidden: [["host", s.host], ["id", s.id], ["nonce", s.nonce], ["containerId", s.containerId]], label: "Preview End", kind: ["sm", "danger"], icon: "cancel" }) : null}</div></div></li>`)}</ul>` : html`<p>${data?.sessionsMore > 0 || data?.sessionsUnreadable > 0 ? "No readable shell is in this bounded view. The incomplete registrations above prevent an exact empty count." : SANDBOX_WORDS.noShells}</p>`}<p class="sx-small">${ui.icon("info", { size: "sm" })}<span>One shell per workspace at a time. End asks the terminal that opened it to close the shell and keeps the workspace. What you type is not recorded.</span></p>`, null, ui.badge(incomplete ? "attention" : "running", `${sessions.length} ${incomplete ? "shown" : "open"}`));
+  const notices = (data?.notices ?? []).filter((n) => !v.query?.gatewaySelect || n.host === v.query.host).map((n) => html`<p class="sx-p" role="status">${ui.icon("attention", { size: "sm" })} ${n.host}, ${n.id}: ${{ "network-kept": "The sandbox network was kept because cleanup could not be confirmed. Inspect this host’s runtime and network before removing either.", "network-cleanup-failed": "Sandbox network cleanup failed. Inspect this host’s runtime and egress network before retrying cleanup.", "runtime-unreadable": "The runtime could not be read. An expired shell registration does not prove the container stopped. Inspect this host before reopening or cleaning it." }[n.reason] ?? "Sandbox cleanup needs inspection on this host."} <a class="link" href="${`/fleet/host?${new URLSearchParams({ name: n.host })}`}">Inspect host</a>.</p>`);
+  if (v.query?.gatewaySelect && !v.data?.browserGateways?.enabledHosts?.includes(v.query.host)) return card("Open now", html`<p role="status">The browser gateway is not enabled for ${v.query.host}, so there is no shell to choose here. <a class="link" href="/runs/sandboxes">Return to Sandboxes</a>.</p>`);
+  return card("Open now", html`${v.query?.gatewaySelect ? html`<p class="sx-p">Choose an already-open shell on ${v.query.host}. Each browser opening needs your current operator token. <a class="link" href="/runs/sandboxes">Return to Sandboxes</a>.</p>` : null}${notices}${data?.noticesUnavailable ? html`<p role="status">Some sandbox cleanup notices could not be read. Inspect the host if a terminal ended unexpectedly.</p>` : null}${data?.sessionsMore > 0 || data?.sessionsUnreadable > 0 ? html`<p role="status">The registered shell list is incomplete: at least ${data.sessionsMore ?? 0} more and ${data.sessionsUnreadable ?? 0} unreadable registrations.</p>` : null}${data?.sessionsUnavailable ? html`<p role="status">Open shells could not be read. Reload to try again.</p>` : sessions.length ? html`<ul class="sx-opens">${sessions.map((s) => html`<li class="sx-open"><span class="dot tone-running"></span><div class="sx-open__b"><p class="sx-open__t"><span class="code">${s.id}</span>${ui.vtag(s.venue)}</p><p class="sx-open__s">${s.host}, opened by ${s.by ?? "the terminal operator"}. Open since ${stamp(s.since)}.</p>${sandboxDriverLine(v, s)}<div class="sx-open__a">${links(v, s, "attach", true)}${sandboxBrowserLink(v, s)}${acts(v) && !v.query?.gatewaySelect ? ui.actForm({ action: "sandbox-end", hidden: [["host", s.host], ["id", s.id], ["nonce", s.nonce], ["containerId", s.containerId]], label: "Preview End", kind: ["sm", "danger"], icon: "cancel" }) : null}</div></div></li>`)}</ul>` : html`<p>${data?.sessionsMore > 0 || data?.sessionsUnreadable > 0 ? "No readable shell is in this bounded view. The incomplete registrations above prevent an exact empty count." : SANDBOX_WORDS.noShells}</p>`}<p class="sx-small">${ui.icon("info", { size: "sm" })}<span>One shell per workspace at a time. End asks the terminal that opened it to close the shell and keeps the workspace. What you type is not recorded.</span></p>`, null, ui.badge(incomplete ? "attention" : "running", `${sessions.length} ${incomplete ? "shown" : "open"}`));
 }
 
 export function sandboxKept(v) {
-  if (!allowed(v)) return null;
+  if (!allowed(v) || v.query?.gatewaySelect) return null;
   const data = report(v), all = rows(v);
   return card("Kept workspaces", html`${data?.more > 0 ? html`<p role="status">At least ${data.more} more hosts have inventory beyond this bounded view. Inspect the fleet before treating this list as complete.</p>` : null}${!data ? html`<p role="status">${SANDBOX_WORDS.unavailable}</p>` : html`${(data.hosts ?? []).filter((h) => h.stale || h.unreadable).map((h) => html`<p class="sx-p" role="status">${h.name}: ${h.unreadable ? "publication unreadable" : "publication stale; inspect this host before opening"}. Its list is incomplete.</p>`)}${all.length ? html`<ul class="sx-kepts">${all.map((r) => html`<li class="sx-kept${canOpen(r) ? "" : " sx-kept--no"}"><p class="sx-kept__t"><a class="code" href="${`/runs/sandboxes?${new URLSearchParams({ id: rowId(r), host: r.host })}`}">${rowId(r)}</a>${r.project ? ui.ptag(r.project) : null}${r.prepared ? ui.chip("Without a run") : null}</p><p class="sx-kept__s">${r.host} ${ui.vtag(r.v ?? r.backend)}. ${retention(r, v.now)}${!canOpen(r) ? ". This venue has no sandbox shell." : null}</p>${canOpen(r) ? html`<div class="sx-kept__actions">${links(v, r, "open", true)}${pinForm(v, r)}</div>` : null}</li>`)}</ul>` : html`<p>${SANDBOX_WORDS.empty}</p>`}${(data.hosts ?? []).filter((h) => h.more > 0).map((h) => html`<p class="sx-p">${h.name} has at least ${h.more} more retained workspaces. Inspect its full list with pi-dispatch sandbox --list.</p>`)}`}`, "what each host still keeps");
 }
 
 export function sandboxBrowser(v) {
-  if (!allowed(v)) return null;
-  return card("In this browser", html`<p class="sx-p">${SANDBOX_WORDS.browser}</p>${ui.outLink({ href: "https://github.com/edgehero/pi-dispatch/issues/754", label: "Read the browser terminal proposal" })}`, "proposed", ui.chip("Needs a decision", { status: "attention", icon: "attention" }));
+  if (!allowed(v) || v.query?.gatewaySelect) return null;
+  const gateway = v.data?.browserGateways;
+  const count = gateway?.enabledHosts?.length ?? 0;
+  return card("In this browser", html`<p class="sx-p">${SANDBOX_WORDS.browser}</p>${gateway?.problem ? html`<p class="sx-p" role="status">${gateway.problem}</p>` : html`<p class="sx-p">${count ? `${count} ${count === 1 ? "host is" : "hosts are"} enrolled.` : "No host is enrolled in this console. Ask the host operator to configure the optional gateway."}${count ? html`<span class="sandbox-opener"> Choose Open in browser beside a registered shell in Open now.</span>` : null}</p>`}<p class="sx-p">Each opening needs your current operator token again. Only one browser window attaches at a time. Closing it keeps the original sandbox; what you type is not recorded.</p><p class="sx-p">First open a kept or prepared workspace in your own terminal. The browser never starts a container.</p><p class="sx-p">Browser terminals require a window wider than 760 pixels. On a phone, copy the command for your own terminal.</p>${v.readOnly ? html`<p class="sx-p">This console is read-only, so browser attachment is unavailable.</p>` : null}`, "optional, separate gateway", ui.chip(count ? "Enabled per host" : "Off by default", { status: count ? "ok" : "idle", icon: "shield" }));
 }
+
 export const SANDBOX_PANELS = Object.freeze([["p-sb-run", sandboxFromRun], ["p-sb-new", sandboxNew], ["p-sb-open", sandboxOpen], ["p-sb-kept", sandboxKept], ["p-sb-browser", sandboxBrowser]]);

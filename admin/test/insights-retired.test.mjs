@@ -18,8 +18,8 @@ const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 // The export's names, and the graph dir it wrote into: `graphDir` (resolvePaths' key) also covers `defaultGraphDir`,
 // the worker's export the admin resolved it with, but both are listed so a hit names the one left behind.
 const RETIRED = Object.freeze(["insights.html", "PI_GRAPH_DIR", "buildInsightsHtml", "insightsCommand", "INSIGHTS_JS", "graphDir", "defaultGraphDir", "secureGraphRoot"]);
-const TREES = ["admin/src", "admin/skills", "worker/src", "receiver/src", "image", "deploy", "worker/deploy", "docs", "launch", "specs", ".github"];
-const FILES = ["README.md", "admin/README.md", "worker/README.md", "receiver/README.md", ".env.example", "worker/.env.example", "AGENTS.md"];
+const TREES = ["admin/src", "admin/skills", "worker/src", "receiver/src", "gateway/src", "image", "deploy", "worker/deploy", "docs", "launch", "specs", ".github"];
+const FILES = ["README.md", "admin/README.md", "worker/README.md", "receiver/README.md", "gateway/README.md", ".env.example", "worker/.env.example", "AGENTS.md"];
 const SKIP_DIRS = new Set(["node_modules", "dist", "test", "fixtures", ".git"]);
 const TEXT = /\.(?:mjs|js|cjs|ts|mts|md|json|ya?ml|sh|service|socket|timer|container|env|example|tape|txt|toml|conf)$|(?:^|\/)(?:Dockerfile|Containerfile)[^/]*$/;
 const REVISION_ROW = /^\| \d{4}-\d{2}-\d{2} \|/;
@@ -41,6 +41,7 @@ test("no source, example file or doc names the retired insights export (revision
   for (const f of FILES) if (existsSync(join(ROOT, f))) files.push(join(ROOT, f));
   assert.ok(files.length > 200, `the scan reached the trees (${files.length} files)`);
   assert.ok(files.some((f) => f.endsWith("specs/requirements.md")) && files.some((f) => f.endsWith("admin/src/index.ts")), "including the specs and the panel");
+  assert.ok(files.some((f) => f.endsWith("gateway/src/cli.mjs")) && files.some((f) => f.endsWith("gateway/README.md")), "including the gateway executable and its published instructions");
   const hits = [];
   let rowsSeen = 0;
   for (const f of files) {

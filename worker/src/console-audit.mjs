@@ -161,6 +161,12 @@ function auditString(value, field) {
 	return points.length > CONSOLE_AUDIT_FIELD_MAX ? points.slice(0, CONSOLE_AUDIT_FIELD_MAX).join("") : text;
 }
 
+/** Watch rows name the other participant without admitting an arbitrary peer object into the journal. */
+export function consoleAuditDriver(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "name,role,session" || !/^[a-z0-9][a-z0-9._-]{0,31}$/.test(value.name ?? "") || value.role !== "operator" || !/^[a-f0-9]{12}$/.test(value.session ?? "")) return null;
+	return { name: value.name, role: value.role, session: value.session };
+}
+const WATCH_AUDIT_KINDS = new Set(["sandbox-watch-opening", "sandbox-watch-start", "sandbox-watch-end"]);
 /** The row as stored, from a caller's input, or a throw naming the field that is wrong (the caller refuses its write). */
 function auditRowBody(input) {
 	if (input === null || typeof input !== "object") throw new Error("console audit row must be an object");
@@ -182,9 +188,11 @@ function auditRowBody(input) {
 	if (!absent("reserve") && !(Number.isSafeInteger(input.reserve) && input.reserve >= 0)) throw new Error("console audit row: reserve must be a non-negative whole number of micro-dollars");
 	if (!absent("count") && !(Number.isSafeInteger(input.count) && input.count >= 1)) throw new Error("console audit row: count must be a positive whole number");
 	const number = (field) => (absent(field) ? {} : { [field]: input[field] });
+	const driver = consoleAuditDriver(input.driver);
+	if (WATCH_AUDIT_KINDS.has(input.kind) ? !driver : !absent("driver")) throw new Error("console audit row: driver is required only on watch attachment rows");
 	// In reading order: who, did what (and which write), to what, how it went, why, what it holds and how many, then the
 	// digests and the ticket that tie it to a change.
-	return { ...body, ...(absent("kind") ? {} : { kind: input.kind }), ...optional("target"), outcome, ...optional("reason"), ...number("reserve"), ...number("count"), ...optional("beforeDigest"), ...optional("afterDigest"), ...optional("ticket") };
+	return { ...body, ...(absent("kind") ? {} : { kind: input.kind }), ...optional("target"), outcome, ...optional("reason"), ...number("reserve"), ...number("count"), ...optional("beforeDigest"), ...optional("afterDigest"), ...optional("ticket"), ...(driver ? { driver } : {}) };
 }
 
 /**
@@ -396,6 +404,7 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs, withLast = false }) {
 				if (!known && !(shapedWord(row.action, CONSOLE_AUDIT_ACTION_RE) && shapedWord(row.outcome, CONSOLE_AUDIT_OUTCOME_RE))) {
 					return broken("the row's action or outcome is not of the shape the console writes");
 				}
+				if (WATCH_AUDIT_KINDS.has(row.kind) ? !consoleAuditDriver(row.driver) : row.driver !== undefined) return broken("the row's watch driver is not one the console writes");
 				if (!optionalFieldsWellFormed(row)) return broken("the row's kind, reserve or count is not one the console writes");
 				if (prior === null) {
 					if (row.prev === null) {

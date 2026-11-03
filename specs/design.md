@@ -4256,6 +4256,16 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY
 
+- **Compatibility correction, IMPLEMENTED (2026-11-02, #754)**: The published pi 1.5.0
+  extension view re-exports compat through a distinct namespace. Retain exact namespace identity at the 1.4.0
+  production pin, and additionally admit a facade only when all five callable exports are identical to the
+  resolved compat candidate: registerApiProvider, getApiProvider, getApiProviders, resetApiProviders and
+  createAssistantMessageEventStream. Names or matching shape alone never establish a shared registry. Missing,
+  noncallable or separately closed functions refuse the facade. Pricing/version/provider discovery remains
+  relative to the proven candidate. Test actual calls, reset/re-arm, cap braking, wrong-copy counterexamples and
+  both exact published artifacts. This explicitly approved narrow fix stays in #790 despite the normal pi-bump
+  branch routing; production pins, policy ceilings, accounting and refusal-before-paid-call stay unchanged.
+
 - **Decision**: Meter token usage **process-wide**, at pi-ai's **module-level api-provider registry** — not
   on an `AgentSession`'s event bus. The runner wraps every registered api id with a `{ streamSimple }` that
   dispatches exactly as compat would and then *observes* the returned stream (`stream.result()` is a
@@ -6100,7 +6110,7 @@ free local model, or using a few successful live probes as proof of every routin
     the operator's config is already broken.
   - *A package with no `pi` key but a convention dir IS a pi package.* The issue proposed requiring the
     `pi` key. At the 0.80.7 pin `collectPackageResources` falls through to `extensions/ skills/ prompts/
-    themes/` when the manifest is absent (still so at the 0.99.1 pin, issue #509), so requiring the key would have silently dropped a legitimate
+    themes/` when the manifest is absent (still so at the 0.99.1 pin, issue #509, and since 1.5.0, issue #796, also when the `pi` object lists no resource), so requiring the key would have silently dropped a legitimate
     class. The stager already had the right predicate; discovery reuses it rather than restating it.
   - *On by default inside `--with-packages`, rather than an opt-in flag for one release.* A flagless
     `import-pi` still stages no packages, before and after, so the only run whose behaviour moves is one
@@ -12152,6 +12162,15 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **AMENDED AND IMPLEMENTED 2026-11-02 (#792, #793)**: Workspace reuses existing native links,
+  copy, exact-incarnation End and preparation/fork/instruction confirmation flows. The separate full-viewport
+  gateway workbench integrates RunWorkspace, RunWorkspaceStates, SandboxTerminalRun and SandboxWatch semantics.
+  Context follows each pane; canonical return uses the generic Strict-cookie bridge. Missing/prepared records
+  keep generic context. Original trigger/created-PR identity is never guessed. Generators precede rebuilt cards;
+  complete implementation precedes Built status. Final captures verify loaded tokens/styles/fonts and complete
+  sections; inaccessible remote artifacts are disclosed, with published-source comparison identified accurately.
+  Console CSP, process separation and runtime authority remain unchanged.
+
 **AMENDED 2026-11-01 (#775, hooks)**: Connections reads `INT-HOOK-RUNS-KEY` only in its page-specific reader,
 with Setup's shared metadata call opting out. Its Notifications table shows the last run and retained-detail counts
 per host, visible tinted error words, explicit absence and unknown, and no delivery-success claim. Host identities use the table id treatment with enough column space; header words remain whole. Unusually long identities scroll in a named keyboard-focusable region inside the card. Both human roles
@@ -12182,7 +12201,14 @@ unreadable evidence remains unknown, and all bounds are named rather than hiding
 
 - **Sandbox paths (#771)**: Operators may see explicitly configured deployment and executable paths in Fleet sandbox mapping editors/exports and constructed terminal command boxes. This exception exists so the person can inspect exactly what Enter will run. It does not admit paths to viewer output, unrelated page regions, telemetry or audit rows.
 
-- **Extension (#771)**: `outLink`'s HTTP(S)-only rule has one checked exception: the canonical opener URL from `opener-protocol.mjs`. Generic custom schemes remain refused. The Sandboxes tab and all sandbox commands, links, preparation results and live-shell observations are operator-only across pages, panels, APIs and streams. The console only reads publications and submits confirmed requests; it never invokes a runtime or starts a shell. Shared commands serve Run, Host, Trigger and Sandboxes pages. The visual system remains generator-first, with a SandboxesScreen ledger and Built status. The browser-terminal rejection and WebSocket rejection remain in force.
+- **Extension (#771)**: `outLink`'s HTTP(S)-only rule has one checked exception: the canonical opener URL from `opener-protocol.mjs`. Generic custom schemes remain refused. The Sandboxes tab and all sandbox commands, links, preparation results and live-shell observations are operator-only across pages, panels, APIs and streams. The console only reads publications and submits confirmed requests; it never invokes a runtime or starts a shell. Shared commands serve Run, Host, Trigger and Sandboxes pages. The visual system remains generator-first, with a SandboxesScreen ledger and Built status. Its WebSocket rejection remains in force; the separate-origin gateway exception is recorded below.
+
+- **Adopted gateway exception (#754, decision before implementation)**: `OQ-050` admits the separate process in
+  `DES-SANDBOX-GATEWAY-ATTACH-ONLY`. The console may own a person-only launch intent, same-token step-up and bounded
+  authorization broker, and navigate to the configured gateway in a new tab. It gains no runtime connection, pty or
+  WebSocket; its CSP stays byte-identical. Gateway input/output is never a console page/panel/event/state surface.
+  The native opener, copy command and sandbox preparation remain available under their existing contracts. This
+  amendment records authority and required checks, not a claim that the gateway has shipped.
 
 - **Extension (#770)**: Issue #770 adds the three Zero touch cards as the second Runs tab, including operator-only projected groups and ordinary preview/Confirm actions. Grouping is explicitly paid work, never a GET side effect; the private corpus is not a console read surface. `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` and `INT-ZERO-TOUCH-FIXES` define the data and interactions.
 
@@ -12558,14 +12584,15 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   judging liveness by the lock's pid (an alive pid is not an answering listener, and a recycled pid is not the
   console); and probing a configured non-loopback address (a read-only command would send a request across a
   network).
-- **The cookie's attributes**: `Secure` and the `__Host-` prefix are set only if Chrome, Firefox and Safari keep such
-  a cookie on `http://127.0.0.1` and `http://localhost`, where the console is served without TLS; a browser that
-  drops it would make login silently fail. Measured on 2026-10-14 with a server setting three cookies over plain
+- **The cookie's attributes**: the HTTP-loopback route omits `Secure` and the `__Host-` prefix, because a browser that
+  drops such cookies would make login silently fail. Measured on 2026-10-14 with a server setting three cookies over plain
   http: Chrome 155 (headless, macOS 15.7) sent back all three on both hosts, but WebKit (a `WKWebView`, the engine of
   Safari 18.6) sent back only the plain one and dropped both the `Secure` cookie and the `__Host-` one. So the
-  cookie is the plain name `pdc_session`, `HttpOnly; SameSite=Strict; Path=/`, without `Secure`: with it, a Safari
-  operator could never log in. Firefox is unmeasured. Nothing is lost on the wire, where the cookie never leaves the
-  loopback hop or the tunnel.
+  HTTP-loopback cookie is the plain name `pdc_session`, `HttpOnly; SameSite=Strict; Path=/`, without `Secure`: with it,
+  a Safari operator could never log in. Firefox is unmeasured. The protected canonical HTTPS console origin introduced
+  for the optional gateway adds `Secure`; that decision comes from the exact enrollment already judged by the write
+  guard, never `Forwarded`/`X-Forwarded-*` or a second file read during login. Name, host-only scope and `Path=/` stay
+  the same, so the existing expiry clears either cookie. The console still terminates no TLS itself.
 - **The screens** (issue #641, `REQ-OPERATOR-CONSOLE-SCREENS`): eight read pages, each an exact path with a bounded
   query string, so the route table stays a table of exact paths and the #640 tests that iterate it cover every page
   without a hand list. `/` is the overview (since #737 PR 3b with the timeline's `rows`, `zoom` and `project`),
@@ -14946,8 +14973,9 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     token is 256 random bits, which no guessing reaches, so sha256 is enough; a KDF would only add a per-login cost
     that a local attacker could use to slow the operator's logins further. The code says so beside the hash, so it
     is not later "fixed".
-  - **A cookie with `Secure` or the `__Host-` prefix.** WebKit drops both on plain-http loopback (measured, see the
-    cookie's attributes above), so either would lock Safari operators out.
+  - **A cookie with `Secure` or the `__Host-` prefix on plain-http loopback.** WebKit drops both there (measured, see
+    the cookie's attributes above), so either would lock Safari operators out. Protected HTTPS enrollment instead
+    requires `Secure`, while retaining the existing name and host-only scope.
   - **The token in a URL** (`?token=`, or a token login link). A query string reaches the server's request log, the
     browser's history and a `Referer`. The one-time link instead carries a code in the **fragment**, which the browser
     never sends to the server; a same-origin script POSTs it, it is single use, lives 60 seconds, and is never the
@@ -14969,14 +14997,14 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     needs upgrade handling on the trusted process, a second framing to parse, and an origin check of its own (a
     WebSocket handshake is not held by the same-origin policy), all for a channel the console would never read
     from.
-  - **A terminal in the browser** (issue #642), to reopen a sandbox from the page. Reopening is an interactive
+  - **A terminal in the console process** (issue #642), to reopen a sandbox from the page. Reopening is an interactive
     `docker run -it` with the operator's terminal inherited; carrying it to a browser means a pty and a duplex
     channel in the process that holds operator power, an interactive root-adjacent shell one stolen session away
     from anyone, and the WebSocket handling rejected above. The page shows the one command instead, and the operator
-    runs it where they already have a shell. **Asked again 2026-10-27 as `OQ-050` (issue #754)**, with a separate
-    gateway process as the proposal, and still rejected while that row is open. The command itself is proposed to
-    reach the operator's own terminal through an opener on their computer (`DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`,
-    issue #753), which adds no shell, pty or WebSocket to the console.
+    runs it where they already have a shell. **Narrowly superseded 2026-11-02 by `OQ-050` (issue #754)**: the
+    approved separate gateway may attach to an existing sandbox in its own process, hostname and tab, under
+    `DES-SANDBOX-GATEWAY-ATTACH-ONLY`. A terminal, pty, runtime socket or WebSocket in the console itself stays
+    rejected. The native opener (`DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`, issue #753) remains supported.
   - **Committing configuration to git** (issue #642). A config edit lands in the files the TUI writes (the triggers
     file, the overlay, the money files) and nothing else. Committing would give the console process a git identity
     and a repository to write, turn a confirmed file write into a second, separately failing step, and take a
@@ -15782,6 +15810,34 @@ is introduced. The design generator owns the published card before the console u
   admin/src/index.ts (the `chat` subcommand, `chatIo`, `openDashboard`'s `initialTail`), admin/src/read-model.mjs
   (`PANEL_SERVICE_KEYS`, `PANEL_PATH_KEYS`).
 
+## DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED
+
+- **Status**: issue #796, part 2 (2026-11-02). New. Requirement `REQ-PACKAGE-UPDATES`, contract `INT-UPDATES-KEYS`.
+- **Decision**: pi-dispatch prepares an update and a person applies it. A daily look (off until enabled), a paid canary of one exact version
+  for one job, and a person's Adopt with Undo. A job never updates anything: it stays offline (`PI_OFFLINE=1`).
+- **Reversed, with the reasons they stood:**
+  - *"restage for me"* (`docs/global-pi-overlay.md`) refused an automated restage because `import-pi --with-packages` discovers, so it would import whatever is on
+    the machine. That reason stands against running `import-pi` from a button, and Adopt does not: it stages one named exact version, and it never reads the account's pi setup.
+  - *"not as a `/job` input"* (`INT-SDK-SESSION-OPTIONS`) kept staged packages out of `/job` because `/job` is per-job. A canary's candidate is exactly that, so one candidate for
+    one job lives there. Every other package stays on the overlay's `:ro` mount.
+- **Rejected:**
+  - *Adopt runs `import-pi`.* It reads the account's paths and working directory, rewrites models, MCP and extensions, and reinstalls every package; the service account usually
+    differs from the operator's. Hence the single-package stager (`worker/src/package-stage.mjs`), which `import-pi` now calls too.
+  - *Swap a package's directory in place.* `rename` cannot replace a non-empty directory, and a running job's bind mount would change under it. Each stage gets its own directory,
+    the manifest (temp and rename) is the commit point, and an old tree is removed only after a delay longer than any job. `start.mjs` reading the manifest at each job start then stays correct.
+  - *Copy Adopt requests to each host, like sandbox preparation.* Those expire after 30 minutes, and a queued Adopt then Undo could replay stale. A desired generation per package, with each host
+    reconciling to the newest, has neither problem, and offline hosts stay visible as pending and then overdue.
+  - *Undo writes the old pin.* A written pin overrides discovery permanently (`packages.mjs`), so Undo would quietly change what the file meant. It restores the file's prior state.
+  - *Load the candidate beside the staged copy.* `run-container.mjs` would load both, and which wins is pi's business. It replaces its manifest `dir`, so a `run.packages: false` trigger is refused for free.
+  - *Install the candidate in the overlay.* Every job mounts the overlay whole, so a concurrent job would see it.
+  - *Trust `--ignore-scripts`.* npm runs a git dependency's `prepare` to build it whatever that flag says, as the service account and outside any container, and a tarball URL has npm fetch wherever the package said. So a service resolves first with `--package-lock-only`, which fetches metadata and runs nothing, refuses a tree holding anything but registry tarballs with a hash, and then installs exactly that tree with `npm ci`. An independent review proved this with real npm against a local registry. `import-pi` keeps its plain install, since a person at a keyboard ran it: `docs/global-pi-overlay.md` says what that means.
+  - *Trust a clean exit as the canary's proof.* A failed load only logs and the job continues, so the runner reports the load, a validated run-record field says so, and a missing report reads as failed.
+    An image too old to report is refused for free, by a new image capability.
+  - *Read a canary's result from this host's run records.* A canary runs on whichever host took the job, and without a shared `PI_LOGS_DIR` its record is on that host's disk and in the run mirror. This host's files alone would read a finished canary as never tried, and Adopt would refuse it, so `scanFleetRunRecords` merges the two. It is bounded like the fleet's own window and says `partial` when a side could not be read or the bound cut the window, because a missing record must fail toward another canary, never toward an Adopt.
+  - *Read every changelog daily.* That downloads third-party tarballs on every host every day. The page links to the version, and shows a bounded, escaped excerpt only once a canary has installed that candidate.
+- **Costs accepted**: transitive dependencies float, so the canaried and adopted trees can differ, and the page says so. On a shared home every host sees one overlay, so a lock serialises staging and a peer's work is never deleted.
+- **Traces to**: `REQ-PACKAGE-UPDATES`, `CONST-PI-VERSION-PINNED`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
+
 ## DES-DOCTOR-RESULTS-PUBLISHED
 
 - **Proposal detail exception (#773)**: explicitly typed model proposal checks may publish their bounded redacted labels even when successful, with allowlisted machine facts for Models and `dispatch_models`. This exception does not retain generic successful labels or trust a text prefix as authority. Existing detailed/check bounds, redaction, TTL, observation age and display-only behavior apply; old records lacking proposal evidence never establish that no proposals exist.
@@ -16075,6 +16131,149 @@ is introduced. The design generator owns the published card before the console u
   admin/test/read-model-waiting.test.mjs, admin/test/read-model-waiting.valkey.test.mjs,
   admin/test/cancel-queued.test.mjs.
 
+## DES-SANDBOX-GATEWAY-ATTACH-ONLY
+
+- **Independent-review correction (2026-11-02)**: A merely host-only Set-Cookie response does not prove the
+  incoming nonce was host-only: a sibling may preseed a Domain cookie with the same name before first bootstrap.
+  HTTPS therefore uses only the browser-enforced __Host-pdg_browser name and never adopts the legacy unprefixed
+  cookie. The explicit local HTTP compatibility case is separate. Real TLS sibling Set-Cookie counterexamples
+  supplement server tests. Pre-attach deadlines are checked synchronously after awaits as well as by timers;
+  an expired callback cannot attach during a delayed timer turn. Queued driver controls have a finite source-owned
+  pending bound across rate windows and cannot apply effects after end.
+
+- **IMPLEMENTED (2026-11-02, #792, #793)**: The earlier one-browser limit becomes
+  one writing driver plus three consented watches. This intentionally discloses potentially sensitive echoed
+  terminal content to other operators. Consent starts off per driver, changes epoch on re-enable and cannot
+  survive replacement. A watch is its own session-bound attachment, never part of another operator's workbench
+  or a route to driver authority. Its runtime path has no stdin/writable channel and no PTY resize; frontend
+  disabling is supplementary. Every output path is bounded by watch AUTH, driver AUTH (not its longer window
+  lease), exact owner/epoch and reservation. Local off/removal stops local watches immediately. Control failure
+  ceases driver renewal/detaches as needed for the five-second bound, with no optimistic success. The persistent
+  roster renders before acknowledging its bounded revision under the same live owner/epoch; that orders rendering,
+  not human attention. Missing acknowledgements time out. Shared owner-fenced roster/geometry revisions support
+  two processes without room-metadata routing affinity: poll at most once per second and apply observed geometry before later
+  output. Each watch forwards its own read-only stream once, no history/fanout duplication; slow watches drop alone.
+  Opening/open-receipt compensation and safe two-actor watch audit remain mandatory. These clauses supersede
+  older exclusive-connection and universal input-idle wording below.
+
+- **Workbench**: xterm 6.0.0/FitAddon 0.11.0 and community Dockview 8.8.3 (core also exact-pinned) own rendering and
+  layout. Up to four held drive/watch panes share one original session digest, at most two incoming admissions.
+  Layout never owns transport: move preserves DOM/socket; explicit close disposes exactly its target. A public-ID
+  only BroadcastChannel plus lifetime owner Web Lock transfers helper launches, without proof/cookie/run/session
+  facts. First provisional admission has one 15-second budget through ready, with abort/owner epochs fencing every
+  await; failed transfer never redeems or reconnects automatically. Session binding is immutable after first ready.
+  Duplicate focus requires matching mode, local READY target and winner, plus driver/epoch for watches. Hidden
+  drivers retain automatic terminal replies but no human focus/activity; watches forward neither. Useful driver
+  geometry is 40 by 10 cells: collapse rail then splits to tabs, preserve last geometry while too short, never
+  reconnect or automatically restore old splits. At widths at/below 760 detach and retain the native route.
+  Application keyboard controls use community layout APIs. Protocol minimum dimensions remain unchanged.
+
+- **Status**: **IMPLEMENTED** (2026-11-02, issue #754). The maintainer approved adoption and the independently
+  reviewed plan before the prerequisite spec-only decision commit. Runtime/browser measurements below establish
+  the implemented route; final-commit CI and rendered-reference review remain separate acceptance gates.
+- **Decision**: An optional sandbox gateway runs on the host that owns a sandbox, in its own process and tab. It
+  attaches only to the already running TTY of a tracked `pi-sandbox-*` container on `local` or `podman`. It cannot
+  create, start, restart, exec into or stop a container, choose an image, or select an untracked runtime object.
+  Docker/Podman own that existing TTY; the gateway needs no host pty. The native opener and command-copy route stay.
+- **Enrollment and origins**: enablement and the exact host/runtime/origin mapping are hand-owned configuration,
+  off by default, unreachable from model tools and ordinary console edits. Gateway and console use distinct canonical
+  hostnames, not merely different ports: the current host-only `pdc_session` cookie crosses ports. Public navigation
+  requires HTTPS through the operator's proxy; explicit loopback-only development is the named exception. Runtime
+  selection comes from the reviewed local socket configuration, never ambient Docker context or browser fields.
+  The gateway has no console-token file, provider/forge credential, worker job authority or private transcript reader.
+- **Console boundary**: all cross-origin transitions are top-level navigations. The console retains its exact CSP,
+  existing request guards, session/person checks and role-separated reads. It gains bounded launch/step-up/broker
+  operations, never a terminal renderer, pty, runtime socket or WebSocket. No CORS or cross-origin form exception is
+  added. The gateway serves its own exact-pinned maintained terminal library, assets and strictly guarded WebSocket.
+  A protected enrolled console origin supplies the exact scheme/host/port expected by login and every write;
+  absent enrollment retains the existing `http://<Host>` rule. Host must match that canonical origin and no
+  forwarded header is trusted. This lets a public HTTPS console work without a request-chosen scheme exception.
+- **Fresh authority, in two distinct browser contexts**:
+  - A new same-origin console launch tab makes a guarded operator POST. The console owns the original live session,
+    exact immutable target and a bounded random public intent ID. A random tab proof stays in that tab's console
+    `sessionStorage`; only its digest is retained server-side. A separate random one-use handoff verifier is prepared.
+  - Navigation carries the handoff verifier in the gateway fragment, never a request URL. The gateway removes the
+    fragment immediately, establishes its own HttpOnly browser-binding cookie and submits a same-origin JSON POST.
+    Consuming the verifier and binding that cookie's digest is atomic and immutable. A public intent ID alone cannot
+    prebind a different browser, and the handoff verifier cannot attach a shell or satisfy console step-up.
+  - Returning to the console loads a generic landing shell, then uses a same-origin request so the console's Strict
+    cookie is available. The original session and original tab proof must match, and the person re-enters the same
+    current operator token. A fresh sign-in with a different token/session is not equivalent. Read-only, role,
+    generation, enrollment and exact sandbox identity are judged again before granting anything.
+  - The single-use attachment grant lasts at most 60 seconds and stays server-side. It binds the console session,
+    gateway browser-cookie digest, gateway origin, owning host, sandbox ID, venue, full container ID and session nonce.
+    A return navigation carries only the public request ID. The gateway's own same-origin POST atomically consumes
+    the grant and acquires the exclusive browser-attachment lease. It receives no raw console session ID or token.
+- **Liveness and boundaries**: the console rejudges session/token-file authority at least every two seconds without
+  extending session idle time, and authorizes I/O for no more than five seconds ahead. Revocation, role/generation
+  change, read-only, changed enrollment, console restart or unreadable control authority stops input/output and
+  detaches within that lease. One browser lease covers each immutable sandbox incarnation across tabs/processes;
+  stale cleanup cannot release a newer owner. There is no automatic reconnect or input replay.
+  The broker samples Redis time before each current registration/session/token/enrollment judgment and immediately
+  captures its primitive `observedAt` for that operation. `authorizeIntent` uses Redis `SET ... PXAT` and
+  `renewAuthorization` uses `PEXPIREAT` at `observedAt + authMs`, capped by the exported `GATEWAY_AUTH_MS`. The Lua
+  command refuses future or already-expired observations and renewal requires the existing owner key. A successful
+  write arriving after an RPC timeout cannot buy five fresh seconds; an overlapping observation cannot replace the
+  original operation's instant. Gateway receipt deadlines additionally subtract control latency using monotonic
+  request-start time, so a delayed remaining-TTL response cannot revive expired I/O.
+  `PI_SANDBOX_IDLE_MINUTES` additionally bounds browser time without input, with zero retaining its disabled meaning.
+  This is stronger than bash's prompt-only `TMOUT`; output and heartbeat do not count as input. Closing a browser
+  terminal only detaches. The existing monitor, retained workspace and separately confirmed End action own lifecycle.
+- **Threat model and counterexamples**:
+  - **A hostile page or sibling origin**: exact Host/Origin guards cover both JSON and WebSocket admission; no
+    CORS, framing, arbitrary return URL or same-site exception. Neither gateway nor console is frameable.
+  - **Another browser/tab or guessed intent**: public IDs authorize nothing; independent tab and handoff proofs,
+    immutable cookie binding and same-session same-token step-up prevent prebinding and session mixup. Test an
+    attacker opening the public ID before the real browser, copied IDs, racing handoffs and stolen/replayed grants.
+  - **A stolen session or revoked operator**: an existing cookie cannot satisfy fresh token step-up. The live
+    authorization lease bounds revocation; it never relies on a cached role or background traffic to stay alive.
+    The first lease is what the attach left of its authority, so a slow runtime can leave less than one poll: such a lease
+    is renewed at once rather than a poll later. Waiting ended a healthy terminal as "could not confirm its authority" just
+    after it said Connected. It only asks sooner: the lease grows by the store's answer alone, so a real lapse ends at the
+    same deadline and a revocation is seen earlier.
+  - **A swapped container or competing connection**: compare the tracked nonce and full ID against live runtime
+    evidence immediately before attaching; a name prefix alone is insufficient. Atomic ownership prevents two
+    browser connections and stale release. Missing or unreadable evidence refuses, never falls back to a name.
+  - **Hostile terminal bytes**: the maintained renderer receives terminal data, never HTML. Disable terminal-driven
+    clipboard writes, output hyperlink navigation, title injection, file transfer and external resources. Audit and
+    logs receive fixed events/IDs only, never keystrokes, output, tokens, verifier, proof or cookie values.
+  - **Resource exhaustion**: bound pending intents, attempts, attachment count, protocol/body/frame/input/output
+    sizes and rates, resize geometry, memory and backpressure. A stalled consumer or unavailable broker detaches;
+    it cannot buy unbounded buffering or another valid connection.
+- **UI and accessibility**: browser attachment is an additional operator-only route on writable consoles at widths
+  above 760 px. This is a supported-layout policy, not a secure device identity; phone/direct/shrunk views refuse
+  and retain the native command. The gateway supports keyboard focus, readable status/labels, the maintained
+  terminal's accessibility mode, both themes and full exceptional-state guidance. No JavaScript leaves a truthful
+  fallback and never consumes authority. It does not expose terminal bytes to console live panels.
+- **Measured evidence**: `.github/scripts/sandbox-gateway-runtime-smoke.mjs` verifies detach, abrupt loss,
+  `StdinOnce`, native simultaneous PTY attachment, Ctrl-D/exit, idle and external End on live Docker and rootless
+  Podman. `.github/scripts/sandbox-gateway-browser.mjs --tls` proves the distinct-site round trip with actual Secure
+  Strict cookies, COOP and both CSPs. Its test-only TLS fronts preserve the application Host/Origin guards, trust
+  only a freshly generated certificate's SPKI and reject an unrelated certificate; system trust is untouched.
+  The exact-pinned renderer and fit addon are the gateway manifest's development dependencies, bundled locally by
+  `buildGatewayAssets`, never console dependencies. The released xterm artifact generates inline styles, so only
+  gateway `style-src` has that narrow allowance; scripts still require self and no eval/CDN. The browser oracle
+  executes shell editing/control/resize/Unicode, alternate-screen restoration, hostile output, themes/widths,
+  roles/no-script/phone and live revocation. Final styled published-source reference comparisons and screenshot
+  inspection remain mandatory after the last relevant change; the remote artifact was inaccessible, so no direct
+  remote comparison is claimed. Unit tests alone cannot establish runtime detach or visual agreement.
+- **Accepted residuals**: the runtime socket retains root or rootless-account authority if the gateway is
+  compromised; a second listener and terminal parser add attack surface. The bootstrap fragment has a brief secret
+  lifetime in browser history/extensions before removal. A fully compromised browser/operator credential or shared
+  trusted control store defeats these proofs. Revocation is bounded, not instantaneous. None is described as removed
+  by separate origins or narrower application methods.
+- **Rejected**: gateway startup/exec of a sandbox, arbitrary runtime API proxying, terminal in the console, a
+  same-host/different-port cookie boundary, a bearer grant redeemable without the bound browser, ordinary login
+  recency instead of same-token step-up, public-ID prebinding, automatic reconnect, recording terminal bytes, and
+  replacing or removing the native terminal opener.
+- **UNCHANGED, checked**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-TOKEN-SCOPED-PER-JOB`,
+  `CONST-ISSUE-TEXT-IS-DATA`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`,
+  `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-PI-VERSION-PINNED`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
+  `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL`'s native authority, paid queues, session/recovery/outbox contracts,
+  zero-touch causes and `OQ-051`. Attaching adds no container shape, harness credentials, paid work or agent input.
+- **Traces to**: `REQ-SANDBOX-BROWSER-GATEWAY`, `INT-SANDBOX-GATEWAY-CONTRACT`, `DES-OPERATOR-CONSOLE`,
+  `INT-SANDBOX-SESSIONS-CONTRACT`, `INT-CONSOLE-AUDIT-LOG`, `OQ-050`.
+
 ## DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL
 
 - **As built (#771)**: The per-user opener imports a versioned Fleet mapping into a protected local file. The scheme handler validates before opening a terminal helper. That helper shows the full argv and waits for Enter, then spawns the constructed argv; it does not evaluate shell input. SSH uses absolute Node/CLI paths and explicit deployment loading. A separate `pi-sandbox-prepare@<host>` BullMQ control worker reuses lock/retry machinery but never enters paid `pi-jobs` processing, run history or budget/slot ledgers. Prepared IDs reconcile against immutable request/manifest fingerprints. The session monitor binds lease and End to a nonce and immutable runtime container ID, survives detach and owns eventual guarded network cleanup. Existing host telemetry supplies one cached inventory projection, additionally published with a bounded lifetime for offline-host evidence. No new zero-touch cause is introduced.
@@ -16099,7 +16298,7 @@ is introduced. The design generator owns the published card before the console u
     - The remote command must carry the deployment's sandbox settings. `pi-dispatch sandbox` reads them from its own
       environment for ordinary invocations, with the explicit trusted deployment-aware path added in #771 (`OQ-038`), and a non-interactive SSH command usually has
       neither the settings nor the CLI on its `PATH`.
-    - How the remote command loads them is the build's to decide and measure, on a podman run as well as a local one.
+    - The opener uses absolute Node/CLI paths and the explicit trusted `--deployment` loader implemented and measured by #771, on local and Podman runs.
   - **A prepared sandbox is a kept workspace with no run.**
     - The worker clones on the host, with its git hardening, as it clones for a job. It then drops the credential and
       keeps the directory beside retained runs under an `sb-` id, with a manifest naming the image of the trigger it
@@ -16120,11 +16319,11 @@ is introduced. The design generator owns the published card before the console u
     manifests today.
 - **Why**: What was missing is the copying and the hunt for the right host. Neither needs a shell in the browser, and
   both are solved where the operator already has a terminal. The console gains reads of published keys, two small
-  writes, and one new kind of link. Each of those is named here as an amendment, so the rejection of a terminal in
-  the browser in `DES-OPERATOR-CONSOLE` stands untouched.
+  writes, and one new kind of link. The native path remains supported alongside the separately adopted gateway
+  (`DES-SANDBOX-GATEWAY-ATTACH-ONLY`); no gateway permission changes what a native opener link can request.
 - **Rejected**:
-  - *A terminal in the browser.* `DES-OPERATOR-CONSOLE` rejected it (issue #642). The question is asked again, with a
-    separate gateway process as the proposal, as `OQ-050` (issue #754). It stays rejected until that row closes.
+  - *A terminal in the console process.* `DES-OPERATOR-CONSOLE` still rejects it (issue #642). `OQ-050` (issue #754)
+    separately adopts `DES-SANDBOX-GATEWAY-ATTACH-ONLY`, an additional route that does not replace this native opener.
   - *The console runs `pi-dispatch sandbox` or docker itself.* An interactive shell started by the process that holds
     operator power is the thing #642 rejected, wherever the terminal ends up. And the console still has no terminal to
     give it to.
@@ -16631,8 +16830,8 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   LOWEST version its content needs, which is nothing at all while that is 1, so a store of today's content stays byte
   for byte what it was, and an older reader is turned away only by content it would misread. The store's own
   `*_VERSION` constant is the highest version this build reads and equals its table's largest value (or 1); a test
-  holds every store to that (`versionTableProblems`). Today every table is empty and every version is 1, so this
-  change writes nothing new into any of these stores (run records gain `v`, below) and only teaches every reader and
+  holds every store to that (`versionTableProblems`). At #761 every table was empty and every version was 1, so that
+  change wrote nothing new into any of these stores (since #796 queued job data is at 2, for `packageCanary` alone: an older worker would otherwise run a plain paid job in a canary's place, and a job with no canary still carries no stamp) (run records gain `v`, below) and only teaches every reader and
   writer what a newer one means. The stores: the settings overlay (`SETTINGS_VERSION`, `SETTINGS_KEY_VERSIONS`, and
   `SETTINGS_VALUE_VERSIONS` for a value a later release allows where this one refuses), the pause windows file
   (`PAUSE_WINDOWS_VERSION`, `PAUSE_WINDOW_FIELD_VERSIONS`), the triggers file (`TRIGGERS_FILE_VERSION`,
@@ -16870,6 +17069,8 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-02 (#754, #792; independent implementation review) | DES-SANDBOX-GATEWAY-ATTACH-ONLY records the sibling-cookie fixation counterexample, HTTPS prefix-only binding, synchronous pre-attach deadline checks and bounded pending control queue. DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY also records the explicitly approved five-callable-identity facade correction verified against exact pi 1.4.0 and 1.5.0 artifacts. Production pi pins, policy/brake behavior, console CSP/cookies, native lifecycle and paid admission UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, #793; approved extension) | DES-SANDBOX-GATEWAY-ATTACH-ONLY and DES-OPERATOR-CONSOLE amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-03 (#761, tolerant readers) | **`DES-STORE-VERSION-WHEN-NEEDED` AMENDED**: a new bullet, "The tolerant readers: newer means wait, never destroy", the reading side of the same rule for four stores whose readers were closed, their writers still closed: the console audit log links an unlisted but shaped action or outcome and counts it on an intact chain, every surface saying the word is one this console does not know and none that a newer console wrote the row (the check knows only the shape and the link), with no row version (one an older verifier refused would bring back the false "chain is broken"); the tokens file keeps an entry of a shaped role it does not know, which signs in nowhere, and carries extra fields and keys, while a field of an entry or a key of the file that would narrow who may sign in must raise `version`; the boot sweep's keep-list takes a checkpoint pointer of any version, because its "no" deletes; and a newer workspace checkpoint manifest defers the recovery (`newer-release`), leaves the salvage's folder, is aged by the fork sweep by its own `at`, and waits at most the host-lost sweep's seven days; the pointer and manifest tables read exactly their newest version and the one before, the version written among them (pinned by a test), so readers ship a release before writers (a release may read v + 1 while it still writes v), newer being a `v` above the newest read. **`DES-RUN-CHECKPOINT-PAIRED` AMENDED**: the salvage reads the manifest before the snapshot whose end removes the folder, and a newer one stops it there (`checkpoint-newer`, nothing taken or removed, the folder held by the any-version keep-list until the pointer's TTL); the salvage's skips listed by what they leave, `sandbox-alive` and `checkpoint-newer` the two that find the folder and leave it. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: the mirror's count cap is the deployment's `PI_RUN_MIRROR_MAX_RUNS` as the reader is told it (a fixed 5,000 before), and every writer trims the shared index to its own cap as well as its own retention, so the lowest cap wins. UNCHANGED, checked: `DES-RUN-HISTORY-FLAT-FILES-NO-DB` (still one flat file per job and no database; only the mirror's member cap became a setting), `DES-OPERATOR-CONSOLE` (one audit chain, and the tokens file as the one source of sign-ins, as written; what a newer row or role does is in the contracts and `REQ-CONSOLE-SECURITY`) and `DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST` (routing, the recovery cap, the host-lost deadline and its extension are as written, and they bound the new wait). `constitution.md` UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS` (the recovery's `newer-release` deferral comes before the mint and every reserve) and `CONST-RETRY-INFRA-ONLY` (a newer checkpoint is neither a determinate refusal nor an infrastructure failure: the job goes back to the delayed set without spending its attempt). **Code evidence**: worker/src/console-audit.mjs -> verifyConsoleAudit; worker/src/console-tokens.mjs -> parseTokensFile; worker/src/run-checkpoint.mjs -> pointerKeepEntry, CHECKPOINT_POINTER_SHAPES; worker/src/workspace-checkpoint.mjs -> CHECKPOINT_MANIFEST_READS, readManifest; worker/src/recovery-queue.mjs -> makeSalvager, pointedJobDirs; worker/src/fork-store.mjs -> sweepAge; worker/src/run-mirror.mjs -> RUNS_INDEX_MAX; worker/src/capacity-records.mjs -> readMirrorWindow; worker/src/start.mjs -> startWorker (the mirror writer's `indexMax`). |
 | 2026-11-02 (#761, store versions) | **NEW `DES-STORE-VERSION-WHEN-NEEDED`**: one shared rule for a store that outlives a release and had no version: an optional `version`, absent meaning 1, written only when a field in the store's frozen field table, or a value in its value table, needs more (value tables for the settings overlay, the pause windows file, the triggers file's entries, `run` keys and top-level blocks, and job data; `valueNeededVersion`, a throwing rule counting as 1; every table empty today, so nothing new is written); a field or value above the declared version refused as an ordinary config error; every exported closed list whose new member an older build refuses pinned so that a new member needs a value rule in every store that carries it (`WAIT_CONDITION_KEYS`, `FORGE_KINDS` as pause scopes, `DAYS`, `RUN_KINDS`, `ON_TYPES`, `PR_ACTIONS`, `ISSUE_ACTIONS`, `REVIEW_STATES`, `EXCLUDABLE_TOOL_NAMES`, `MCP_EXCLUDABLE_TOOL_NAMES`, `BACKEND_NAMES`, `FORGE_MCP_KINDS`, `ANSWER_CATEGORIES`, `WATCH_SEVERITIES`, `FORK_THINKING_LEVELS` and `BUNDLE_FORMATS`), a list written inline a residual; a top-level `version` that earlier releases ignored is now read, so one written by hand is removed; a repeated `version` is broken, never newer, wherever the store refuses a repeated key, and no reader of the triggers file reads it as newer; what each writer carries that it does not know (an overlay key only by a panel or console of this release or later); a newer job or file, or a `dataVersion` that is not an integer of 1 or more, defers the job (`newer-release`) before any spend, without an attempt: the overlay at the processor's head, before every runtime and refusal, for a file newer at that read, and again at the pickup's read; the pause windows file at the pause gate, which a job meets early in the pickup (a job ended earlier spends nothing); the answer-draft and question-grouping runtimes before any write; and a model failover retry with no model attempt key whose previous record a newer release wrote, at the selection, instead of a `model-failover-no-candidate` refusal; a park after a paid run is the one exception to deferring; every writer but the one-shot disarm refuses to write over a newer file; a newer sandbox manifest refuses an open and a pin while the sweep ignores the version; run records' unconditional `v` and stable core, read by the core wherever the worker judges a settled attempt, and one rule for a job's own attempt's record (`recordOfThisJob`: the same id, that attempt, and not older than the job by its `startedAt`, or its `endedAt` when it has none), used by the failed listener's own-record check (which reads this host's file and the run mirror, each side held to the rule before the higher attempt is kept) and the failover wait (a stale newer record under a reused id makes no retry wait), while the lost-lock settle check shares its id and attempt checks and judges a settling record's age by its start alone, as before; on a lost lock, this attempt's newer `failed` record takes the terminal failure path without its comment (the line `job_lost_lock_after_completion`, the approval claim closed, an answer draft refused, the inbox and held replies closed unless the job is recovery-armed, one page whose argv carries `infra`; no comment, recovery request or record); the release rule that a stamp protects only against readers at issue #761's release or later, and that a release raising the triggers file's version keeps accepting `on.disarmed` as `{ at, jobId? }`; the residuals (a worker without the triggers watcher, output collected after a paid run on a file that turned newer, scope forms and the scoped-limits file, the disarm's and the triggers writer's JSON re-encoding (numbers beyond 2^53, `1e400`, `-0`, keys named by an integer), a settings file that turns newer between the head's and the pickup's reads, a newer `failed` record's comment not posted or its page not owed, and a recovery-armed run's inbox and held replies left to expire when that record was an ordinary failure the newer host did not settle, the prior-record uses that do not apply the rule yet (`retryNeverStarted`, `earlierFrom`, the touches, and a recovery's superseded check, which does not judge age), a failover retry that waits while the newer record stays or that the skipped selection would refuse (an invalid fallback list, `local-folder-holds-subscription-auth`, the subscription check after the selection), the closed lists written inline, the in-place fallback and Windows, no fsync). Rejected: stamping the current version on every write, a required version, comparing release numbers, carrying unknown keys without a version, refusing newer work. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` AMENDED**: a write carries the keys this build does not know (a panel or console from before this release still drops them), a newer file defers the job at the processor's head instead of refusing it (and at the pickup's read for one that turned newer since), a hand-written `version` is now judged, and the admin's write re-checks against its own read by default. **`DES-ONE-SHOT-DISARM-IN-THE-FILE` AMENDED**: a newer triggers file defers the one-shot, the one answer of its check that does not fail open (a repeated `version` is broken there, never newer), and the disarm still writes its one key into a newer file with every other key and `version` kept (each value re-encoded, as by every write of the file), so a one-shot whose file turned newer during its run is not fired again, and a release that raises the file's version keeps accepting `on.disarmed` as `{ at, jobId? }`. **`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST` AMENDED**, for every release, a new bullet: a returned `recovery-failed` or `recovery-enqueued` failure that then lost its lock is found by reading this host's file and the run mirror, each side held to `recordOfThisJob` before the higher attempt is kept (before: this host's file whenever one existed), so a record older than the job (a reused id) goes to the stall recovery or the failure path instead of suppressing it, while a #645 record with `startedAt: null` still counts by its `endedAt`; the rest of the entry UNCHANGED, checked. UNCHANGED, checked: `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` (the lost-lock settle check's answers are those of before this release: the same id, `attempt` equal to `attemptsMade`, an outcome other than `failed`, and a `startedAt` no earlier than the job's creation less `RECORD_CLOCK_SKEW_MS`, now through the id and attempt checks it shares with `recordOfThisJob`; the one exception to the entry's failed-listener comment, a newer release's `failed` record of this attempt settled without it, is recorded under `DES-STORE-VERSION-WHEN-NEEDED`, as #645's exception is under its own entry), `DES-RUN-HISTORY-FLAT-FILES-NO-DB` (still one flat file per job and no database; the write now goes through a temporary file and a rename, `INT-RUN-HISTORY-FILE-CONTRACT`), `DES-TRIGGERS-UNIFIED-FILE` (one file and one shared parser, which now also judges the version), `DES-WAITING-REASONS` (one more reason, written through the same `deferTo`) and `DES-DOCTOR-RESULTS-PUBLISHED` (two more named ids in the `NAMED_CHECK_IDS` it cites). `constitution.md` UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS` (every `newer-release` deferral comes before the token mint, the clone and the budget reservation) and `CONST-RETRY-INFRA-ONLY` (a newer store is neither a determinate refusal nor an infrastructure failure: the job is moved to the delayed set without spending an attempt, and the park after a paid run returns a policy result, never a retry; the lost-lock gate still takes only a record started no earlier than the job less 5 minutes). |
 | 2026-11-02 (#776) | Four NEW PROPOSED entries, spec only: `DES-DISPATCHER-ADMISSION` bounds new producers, caps, semantic duplicates and crash reconciliation; `DES-DISPATCHER-DECISION-ENGINE` selects deterministic collection and fresh per-event classifier containers; `DES-DISPATCHER-LLM-ENGINE` keeps correlation in fresh read-only jobs of at most thirty minutes; `DES-DISPATCHER-TRIGGER-PROPOSALS` keeps bounded private proposals and validated adoption with a person. `DES-WATCH-DETERMINISTIC-PRODUCER`, `DES-DECISION-MODEL-BEFORE-THE-JOB` and `OQ-053` UNCHANGED, checked: their resident-agent rejections stand; the alternative explicitly offered by #776 is selected, and contrary card claims are marked through generators. `DES-JOB-OUTBOX-CHAINING`, `DES-DOLLAR-RESERVE-AND-SETTLE` and `DES-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: generic chains, existing holds and #766 delegation are not widened. To be AMENDED by later builds: `DES-AI-TRIGGER-FLOW-GATE` for the new producer and current-list revalidation, and `DES-OPERATOR-CONSOLE` for the new screens and audited person actions. No runtime code or executable interface is added. |
@@ -17285,3 +17486,16 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-01 (#775, receiver and hook integration) | `DES-OPERATOR-CONSOLE` reviewed with receiver and hook publications together: preserve native receiver disclosures, complete identities, hook history and explicit unknown states without adding a live page or authority. `DES-ADMIN-VIA-PI-EXTENSION`, shared visual tokens/styles, pending-notification-store rejection, endpoint enforcement and all runtime decisions UNCHANGED, checked. |
 | 2026-11-01 (#775, endpoint occupancy) | `DES-OPERATOR-CONSOLE` AMENDED: versioned host observations display the shared in-process endpoint map and last-good file, through bounded page-only reads and existing Pulse slot marks. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS`, `DES-ADMIN-VIA-PI-EXTENSION`, admission, release, CSP, shared tokens and stylesheet are UNCHANGED, checked. |
 | 2026-11-01 (#775, three publication channels) | `DES-OPERATOR-CONSOLE` reviewed with all three bounded publication channels together, preserving receiver disclosures and identities, hook history and endpoint fleet/host scopes with explicit unknown states. `DES-ADMIN-VIA-PI-EXTENSION`, shared tokens/styles, pending-notification-store rejection, fleet lease enforcement and all runtime decisions UNCHANGED, checked. |
+| 2026-11-02 (#753, #754, decision before implementation) | NEW `DES-SANDBOX-GATEWAY-ATTACH-ONLY`, ADOPTED with written pre-build threat model and counterexamples. `DES-OPERATOR-CONSOLE` and `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL` narrowly AMENDED for a separate-origin gateway; native opener remains supported. Records corrected public-intent/tab-proof/one-use-handoff/cookie-bound grant protocol, same-token step-up, existing-TTY attach only, exclusive ownership, bounded live authorization, idle/detach, maintained renderer/CSP and runtime/browser evidence required before Built. Console CSP/pty/WebSocket/runtime exclusion, `DES-SANDBOX-IS-A-FRESH-CONTAINER`, paid job/session/recovery/outbox decisions, zero-touch causes and all named constitutional constraints UNCHANGED, checked. No gateway code or fresh acceptance is claimed. |
+| 2026-11-02 (#753, retained draft-answer count) | `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` implemented view now renders its retained confirmed-draft count on desktop and phone, including edited answers and explicit partial/unavailable states; published-source generator/cards and ledgers reconcile to shipped #772. `DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL` future loader prose reconciled to #771. Shared visual tokens/styles, human-touch semantics, privacy/roles, native opener/preparation, gateway decision/threat model and all paid/container contracts UNCHANGED, checked. |
+| 2026-11-02 (#754, canonical HTTPS origin review) | Gateway enrollment also supplies the exact canonical console origin to login/write guards, so public HTTPS enrollment cannot silently become unusable behind a TLS proxy. Host must match, same-origin fetch-site remains required, and no forwarded/request-selected origin is trusted. Absent enrollment retains the existing HTTP-Host rule. Console CSP, cookie shape, role/person/read-only/JSON guards and all unrelated contracts UNCHANGED, checked. |
+| 2026-11-02 (#754, HTTPS session-cookie review) | `DES-OPERATOR-CONSOLE` narrows its measured WebKit plain-cookie exception to HTTP-loopback and adds Secure under protected canonical HTTPS enrollment. Reusing the exact origin already judged for this request avoids a second configuration read during login and trusts no forwarding header. Cookie name/host/path and expiry identity, console CSP/process boundary, loopback behavior, gateway authority and native/paid/container decisions UNCHANGED, checked. |
+| 2026-11-02 (#754, measured implementation) | `DES-SANDBOX-GATEWAY-ATTACH-ONLY` is IMPLEMENTED with source evidence for live Docker/rootless-Podman PTY/detach/lifecycle measurements and genuine-HTTPS distinct-site browser controls, Secure cookies, themes/widths/roles/no-script and hostile-output refusals. The renderer-only gateway style allowance follows the exact released artifact; final published-source screenshot comparisons remain required, with no claim of direct inaccessible remote-artifact comparison. Console CSP/process separation, native opener, accepted runtime/browser/Valkey residuals, zero-touch and all paid/container decisions UNCHANGED, checked. |
+| 2026-11-02 (#754, delayed-authorization correction) | `DES-SANDBOX-GATEWAY-ATTACH-ONLY` records operation-local primitive Redis observations before current identity/registration judgment, explicit observedAt protocol arguments and absolute PXAT/PEXPIREAT authority expiry. A timed-out command executing late cannot turn an old judgment into five fresh seconds, and concurrent time reads cannot shift another operation forward. Future/expired observations refuse and missing owner authority stays absent. Gateway monotonic receipt deadlines, grant/window ownership, console idle/CSP and all native/paid/container decisions UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, #793, implemented) | DES-SANDBOX-GATEWAY-ATTACH-ONLY, DES-OPERATOR-CONSOLE and DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY: pending markers become IMPLEMENTED. Two corrections found while verifying: a focus request now survives until it lands, because Dockview raises a pane's visibility event before it unhides the overlay that holds it and a hidden element refuses focus without an error; and watch admission polls at the contract's once a second, where it had polled every 50 ms. Measured: a CDP-frozen driver stays hidden after thawing, which correctly withholds its roster acknowledgement, so no watcher is admitted to a tab nobody can see. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
+| 2026-11-02 (#754, #792, security review) | DES-SANDBOX-GATEWAY-ATTACH-ONLY: nine findings from an independent review are fixed, recorded in INT-SANDBOX-GATEWAY-CONTRACT. Rejected: accepting the launch-link hand-over as an insider-only risk, because the review showed a shell landing in another browser under the operator's name, and a receipt closes it at small cost. Also rejected for the launch gesture: a click on every launch, which would add a step to every ordinary button; only a launch not arriving same-origin waits. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener, preparation admission, retention policy, the run-record schema, console CSP and OQ-051: UNCHANGED, checked. |
+| 2026-11-02 (#754, lost clicks) | DES-OPERATOR-CONSOLE: a live panel update waits while a press is held inside that panel, and lands after the release. A press and its release must land on the same element for the browser to send a click, so a swap between them silently lost the click. Measured in the gateway's browser flow on Linux CI, on the Sandboxes page's first update, and any panel redrawn on a tick could do the same to a person. It waits without the held note, because inserting one would move what is being pressed. The console's CSP, routes, roles and SSE framing: UNCHANGED, checked. |
+| 2026-11-02 (#796, pi 1.5.0) | The design of staged-package discovery records pi's changed fallthrough: since 1.5.0 a `pi` object listing no resource falls through to the convention folders. `readStagedSkills` follows it and is now held to pi's own `DefaultPackageManager`, shape by shape, because it had only agreed by hand; that also fixed two older differences (a mixed `skills` list, a leading BOM). `legacyOverlayLayout` deliberately keeps the older reading, since it names what loaded before #544, not what loads now. `DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` UNCHANGED, checked: the compat half still arms pi's own registry, proven by function identity through the 1.5.0 view. Tool argument conversion is met by a raw-argument check in `prepareArguments` for every tool the runner defines; a recheck in `execute` was rejected because it only sees the converted copy, and MCP tools were left as pi converts them because their schemas belong to their servers. |
+| 2026-11-02 (#796) | New `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`. It reverses "restage for me" and "not as a `/job` input", the latter for one canary job only, each with the reason it stood and why that reason does not reach this. `DES-DOCTOR-RESULTS-PUBLISHED` UNCHANGED, checked: the look publishes beside doctor, not through it, and nothing reads either to decide anything. |
+| 2026-11-03 (#796, a canary on another host) | `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`: records the rejected alternative of reading a canary's result from this host's run records alone, and `scanFleetRunRecords` in its place. Found while checking the pull request's own claims, not by a test: every fixture had handed the page its records. The run mirror and `INT-UPDATES-KEYS` UNCHANGED, checked: the mirror already carried the record whole. |
+| 2026-11-03 (#754, a slow attach) | `DES-SANDBOX-GATEWAY-ATTACH-ONLY`: a first lease shorter than a poll is renewed at once. Found by the rootless Podman lane: a slow attach could leave under a second of authority, and the session's first renewal came one second later, so a healthy terminal said Connected and then ended as "could not confirm its authority". Reproduced through the real server with a real clock, on the old code and not the new. `INT-SANDBOX-GATEWAY-CONTRACT`, the five-second bound and every revocation path UNCHANGED, checked: this asks sooner and never extends a lease without the store's answer. |

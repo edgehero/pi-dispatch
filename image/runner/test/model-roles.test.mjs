@@ -180,3 +180,9 @@ test("the pinned CLI keeps leading @ task text literal instead of reading an att
 	assert.deepEqual(parsed.fileArgs, []);
 	assert.deepEqual(parsed.diagnostics, []);
 });
+
+test("a single object for tasks or chain is refused, not wrapped into an array and run (#796)", () => {
+	const { tool } = toolFor({ runChild: () => assert.fail("nothing runs") });
+	for (const args of [{ tasks: { agent: "a", task: "t" } }, { chain: { agent: "a", task: "t" } }, { tasks: [{ agent: null, task: "t" }] }, { agent: null, task: "t" }]) assert.throws(() => tool.prepareArguments(args), Error, JSON.stringify(args));
+	assert.deepEqual(tool.prepareArguments({ tasks: [{ agent: "a", task: "t" }] }), { tasks: [{ agent: "a", task: "t" }] });
+});

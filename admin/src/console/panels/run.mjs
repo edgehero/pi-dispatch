@@ -1,5 +1,5 @@
 import { answererRun, standingAnswerEditor, offeredAnswerDraft } from "./answerer.mjs";
-import { sandboxLinks } from "../sandbox-links.mjs";
+import { sandboxLinks, sandboxBrowserLink, sandboxCopy, sandboxNativeLink, sandboxDriverLine } from "../sandbox-links.mjs";
 import { modelRolesTelemetryOf } from "@edgehero/pi-dispatch/run-history";
 import { modelChoiceSentence, providerFailureSentence } from "../../model-words.mjs";
 /**
@@ -205,7 +205,7 @@ export function runOutcome(view) {
   const recoveryId = view.data?.chat?.activeJobId ?? view.data?.chat?.queuedJobId;
   const recoveryActions = recovering ? html`${typeof recoveryId === "string" && RUN_ID_RE.test(recoveryId) ? ui.btn({ href: `/run?id=${encodeURIComponent(recoveryId)}`, label: "Open recovery run", kind: "primary", icon: "running" }) : null}${view.data?.siblings?.map((s) => ui.btn({ href: `/run?id=${encodeURIComponent(s.jobId)}`, label: "Open sibling replica", kind: "sm", icon: "runs" }))}` : null;
   const fixLink = r.outcome === "policy" && !["awaiting-input", "awaiting-approval"].includes(token) && /^[a-f0-9]{64}$/.test(r.touchScopeId ?? "") ? ui.btn({ href: `/config?becauseRun=${encodeURIComponent(r.jobId)}`, label: "Fix configuration", kind: "sm", icon: "config" }) : null;
-  const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${rerunLine(r, view)}${fixLink}`;
+  const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
   return ui.banner({ block: true, status: recovering ? "running" : w.status, title: `${word}${refusedBeforeStart(r) ? "" : duration}`, body: html`<p>${reason}</p>${next}${(view.data?.children?.length ?? 0) > 0 || r.chainRefused > 0 ? html`<p>It queued ${view.data?.children?.length ?? 0} runs from /outbox${r.chainRefused > 0 ? `, and ${r.chainRefused} more requests were refused: a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT}` : ""}. ${view.data?.children?.map((child) => runLink(child.jobId))}</p>` : null}${refusedBeforeStart(r) ? html`<p>Nothing was spent.</p>` : href ? html`<p>Merges are never automatic: a person merges the pull request on the forge.</p>` : null}`, actions });
 }
 
@@ -555,21 +555,6 @@ function chatDrawsSteer(view) {
 }
 
 /**
- * The run detail's operator actions (issue #642): the command that reopens the run's retained workspace on the host
- * (`pi-dispatch sandbox <jobId>`, shown to copy and never run: a browser terminal was rejected, DES-OPERATOR-CONSOLE),
- * and the re-run form, whose preview shows the reserve the worker will hold. A job id outside the run-id charset gets
- * neither: it could not be typed back as one argument.
- *
- * ONLY WHAT CAN WORK (issue #710, REQ-OPERATOR-CONSOLE-ACTIONS): each is replaced by one line saying why it cannot,
- * where that is known for certain before the click. The sandbox (`sandboxLine`) and the re-run (`rerunLine`) each say
- * how they know.
- */
-function runActions(r, view) {
-  if (view.role !== "operator" || typeof r.jobId !== "string" || !RUN_ID_RE.test(r.jobId)) return null;
-  return html`<h3>Actions</h3>${sandboxLine(r, view)}${rerunLine(r, view)}${forkLine(r, view)}`;
-}
-
-/**
  * What the run page says of a sandbox whose manifest this host read and refused (`sandboxRetentionOf`'s `why`), when
  * the pane's own words (`reason`) would not read as a sentence after "Its workspace is".
  */
@@ -590,29 +575,64 @@ const SANDBOX_KEPT_TEXT = Object.freeze({
  */
 const SANDBOX_CERTAIN = new Set(["retention-off", "swept", "id-mismatch", "manifest-newer", "no-image", "workspace-gone", "venue", "no-venue", "no-launcher"]);
 
-/**
- * The sandbox line. Hidden, with the reason, for a venue that has no sandbox shell (`sandboxShellRefusal`, held to the
- * worker's SANDBOX_LAUNCHERS; a record with no `backend` is a `local` run from before attribution), for a run refused
- * before it started (no workspace was ever made), and for a workspace this host's manifest says cannot be reopened (the
- * panel's verdict, `sandboxRetentionOf`, read through the fleet reader for a run of THIS host and cached 15 s:
- * `data.sandboxCheck`) and only where that verdict is certain (`SANDBOX_CERTAIN`). Past its window, the command carries
- * `--pin`, which the CLI needs then. A venue-policy verdict, a check that could not be read, a run of another host, or a
- * page with no check keeps the command, as before: the CLI checks again.
- */
-function sandboxLine(r, view) {
-  const venue = typeof r.backend === "string" && r.backend !== "" ? r.backend : UNATTRIBUTED_BACKEND;
-  const refused = sandboxShellRefusal(venue);
-  if (refused !== null) return html`<p class="note">Its workspace is ${refused}.</p>`;
-  if (refusedBeforeStart(r)) return html`<p class="note">No workspace to reopen: the run was refused before it started, so none was made.</p>`;
-  const check = view.data?.sandboxCheck ?? null;
-  if (check?.retained === false && typeof check.why === "string") {
-    if (check.why === "past-window") return html`<p>Its workspace is past its retention window; the command pins it first.</p>${ui.cmd(["pi-dispatch", "sandbox", r.jobId, "--pin"], { host: `Run it on ${r.host ?? "its host"}.` })}`;
-    if (SANDBOX_CERTAIN.has(check.why)) {
-      if (Object.hasOwn(SANDBOX_KEPT_TEXT, check.why)) return html`<p class="note">${SANDBOX_KEPT_TEXT[check.why]}</p>`;
-      if (typeof check.reason === "string") return html`<p class="note">Its workspace is ${check.reason}.</p>`;
-    }
+/** Codes the fork reader returns, in words a person can act on. Anything else it says is already a sentence. */
+const FORK_REFUSAL_WORDS = Object.freeze({
+  "fork-source-store-unset": "this host keeps no saved sessions (PI_SESSIONS_DIR is not set)",
+  "fork-source-unavailable": "no saved session is available for this run",
+});
+const forkRefusalWords = (refusal) => FORK_REFUSAL_WORDS[refusal] ?? refusal;
+
+/** One decision for the row and its action. Tracking loss is unknown, never evidence that a shell or workspace ended. */
+export function runWorkspaceState(view) {
+  const r = recordOf(view), data = view.data ?? {};
+  const id = r?.jobId ?? view.query?.id;
+  const active = data.chat?.jobState === "active" || data.chat?.state === "active" || runningWithoutRecord(view) || r?.reason === "recovery-enqueued" && Boolean(data.chat?.activeJobId || data.chat?.queuedJobId);
+  if (active) return { kind: "running", id, title: "Opens when it ends.", text: "To change it now, steer it. The running job's container is never a browser terminal." };
+  if (!r) return { kind: "unknown", id, title: "Workspace unknown.", text: "This run's record is unavailable; no workspace or shell is inferred." };
+  if (refusedBeforeStart(r) || r.reason === "container-never-started") return { kind: "nothing", id, title: "Nothing to open.", text: r.reason === "container-never-started" ? "Its container never started." : "The run was refused before it started." };
+  const published = data.workspace ?? {};
+  const check = data.sandboxCheck;
+  const shell = published.shell ?? data.browserGateways?.sessions?.find((s) => s.host === r.host && s.id === r.jobId) ?? null;
+  const certain = check?.retained === true || check?.retained === false && SANDBOX_CERTAIN.has(check.why) || check?.why === "past-window" ? check : null;
+  const evidence = certain ?? published;
+  const until = Number.isSafeInteger(evidence.until) ? evidence.until : msOf(evidence.until);
+  const venue = r.backend ?? UNATTRIBUTED_BACKEND;
+  const noVenue = sandboxShellRefusal(venue);
+  if (!shell && (noVenue || evidence.retained === false || Number.isFinite(until) && until <= view.now)) return { kind: "prepare", id, host: r.host, title: noVenue ? "Cannot reopen." : evidence.why === "retention-off" ? "Not kept." : "Workspace gone.", text: noVenue ? `Its ${venue} venue cannot reopen a sandbox.` : evidence.why === "retention-off" ? "Workspace retention is off on its host." : "It was swept, or is past its opening window.", until };
+  const purpose = ["awaiting-input", "awaiting-approval"].includes(recordReason(r)) ? { title: "Look before you answer.", text: "Your answer starts a new job, so put what you find in it; shell edits do not reach it." } : outcomeWord(r.outcome, recordReason(r)).word === "failed" ? { title: "Reproduce it.", text: "The kept sandbox uses the run's recorded limits." } : { title: "Try it before you merge.", text: "The native terminal checks the workspace again before opening." };
+  return { kind: shell ? "open" : evidence.retained === true ? "kept" : "unknown", id, host: r.host, shell, until, ...purpose, ...(shell || evidence.retained === true ? {} : { text: "The workspace's current retention could not be verified. The native command checks again; missing tracking does not prove it was swept." }) };
+}
+
+export function runWorkspace(view) {
+  if (view.role !== "operator") return html``;
+  const state = runWorkspaceState(view), r = recordOf(view);
+  let actions = null, more = null;
+  if (state.kind === "running") actions = !view.readOnly ? ui.btn({ href: "#p-chat", label: "Steer this run", kind: "sm", icon: "steer" }) : null;
+  else if (state.kind === "prepare") actions = !view.readOnly ? ui.btn({ href: `/runs/sandboxes?${new URLSearchParams({ fromRun: state.id })}`, label: "Prepare from this run", kind: "sm", icon: "plus" }) : null;
+  else if (r && ["open", "kept", "unknown"].includes(state.kind) && RUN_ID_RE.test(state.id ?? "")) {
+    const verb = state.shell ? "attach" : "open";
+    if (!view.readOnly) actions = html`${state.shell ? sandboxBrowserLink(view, state.shell) : null}${typeof state.host === "string" ? sandboxNativeLink({ id: state.id, host: state.host, verb }) : null}`;
+    const copy = typeof state.host === "string" ? sandboxCopy({ id: state.id, host: state.host, verb, config: view.data?.sandboxHosts }) : html`<aside data-sandbox-command>${ui.cmd(["pi-dispatch", "sandbox", state.id], { host: "Run on the host that kept this workspace; its historical host was not recorded." })}</aside>`;
+    more = html`<details class="ws-more"><summary>${view.readOnly || !state.shell ? "Copy the command" : "Copy the command, or end the shell"}</summary><div class="ws-more__b">${copy}${!view.readOnly && state.shell ? ui.actForm({ action: "sandbox-end", hidden: [["host", state.shell.host], ["id", state.shell.id], ["nonce", state.shell.nonce], ["containerId", state.shell.containerId]], label: "Preview End", kind: ["sm", "danger"], icon: "cancel" }) : null}</div></details>`;
   }
-  return html`<p>Open its retained workspace on the host.</p>${view.role === "operator" && r.host ? sandboxLinks({ id: r.jobId, host: r.host, config: view.data?.sandboxHosts }) : ui.cmd(["pi-dispatch", "sandbox", r.jobId], { host: `Run it on ${r.host ?? "its host"}.` })}<a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ id: r.jobId, ...(r.host ? { host: r.host } : {}) })}`}">Open Sandboxes</a>`;
+  // Who is in it comes first, and what opening it would do depends on who is reading: a watcher never joins, they only see.
+  const driver = state.shell ? view.data?.browserGateways?.drivers?.find((s) => s.host === state.shell.host && s.id === state.shell.id && s.containerId === state.shell.containerId && s.nonce === state.shell.nonce) : null;
+  const since = Number.isFinite(state.shell?.since) ? html`, since ${timeHtml(state.shell.since)}` : null;
+  const opener = html`<b>${state.shell?.by ?? "The native terminal operator"}</b> opened the shell${since}.`;
+  const shared = driver?.watching && driver.by !== view.name;
+  const line = !state.shell ? html`<b>${state.title}</b> ${state.text}`
+    : shared ? html`<b>${driver.by} is driving</b>, and lets operators watch. You see new output and cannot type.`
+    : html`${opener}${view.readOnly ? null : " Opening it joins that shell."}`;
+  // Watching and joining are different promises: Open in Terminal still shares the driver's prompt, so say so here.
+  const below = !state.shell ? null
+    : shared ? html`<p class="sx-open__s">${opener}${view.readOnly ? null : " A native terminal joins that shell and its prompt."}${driver.watchers?.length ? ` Watching now: ${driver.watchers.map((w) => w.name).join(", ")}.` : null}</p>`
+    : sandboxDriverLine(view, state.shell);
+  const points = view.data?.forkPoints;
+  const canFork = points?.ok && points.entries?.some((entry) => entry.positions?.length);
+  const found = r && !view.readOnly && !["nothing", "running"].includes(state.kind) ? html`<p class="ws-found"><b>Found something?</b><a class="link" href="/triggers">Add it to a trigger’s instructions</a>${canFork ? html`<a class="link" href="#run-fork">Fork it with a message</a>` : html`<span>Fork unavailable: ${(r.forkSource?.saved === false ? forkRefusalWords(forkArchiveFact(r.forkSource).reason) : forkRefusalWords(points?.refusal)) ?? "no exact retained point is available"}.</span>`}</p>` : null;
+  // A gone workspace has no "kept until", and "not verified" would contradict the row beneath it.
+  const sub = !state.host ? null : state.kind === "prepare" ? html`on ${state.host}` : state.until && Number.isFinite(state.until) ? html`kept on ${state.host} until ${timeHtml(state.until)}` : html`on ${state.host}, retention not verified`;
+  return ui.card({ title: "Workspace", sub, body: html`<div class="ws-row"><p class="ws-row__t"><span class="dot ${state.kind === "open" ? "tone-running" : "tone-idle"}"></span><span>${line}</span></p><div class="ws-row__a">${actions}</div></div>${below}${view.data?.workspace?.sessionsUnknown || view.data?.browserGateways?.partial ? html`<p class="note" role="status">Some shell or browser status could not be read; an absent watcher is not inferred.</p>` : null}${more}${found}` });
 }
 
 /**
@@ -869,7 +889,7 @@ export function runActionsPanel(view) {
   if (!r || view.role !== "operator" || !RUN_ID_RE.test(r.jobId ?? "")) return html``;
   const continuing = r.reason === "recovery-enqueued" && [view.data?.chat?.activeJobId, view.data?.chat?.queuedJobId].some((id) => typeof id === "string" && id !== r.jobId);
   if (continuing) return html``;
-  return titled("Actions", html`${rerunLine(r, view)}${forkLine(r, view)}${String(r.jobId).startsWith("repeat:") ? html`<p>A cron run is fired again by hand from its trigger as the triggers file says now.</p>` : null}${sandboxLine(r, view)}`);
+  return titled("Actions", html`${rerunLine(r, view)}${forkLine(r, view)}${String(r.jobId).startsWith("repeat:") ? html`<p>A cron run is fired again by hand from its trigger as the triggers file says now.</p>` : null}`);
 }
 
 export function runSandbox(view) {
@@ -964,10 +984,10 @@ export function runViewer(view) {
 function forkLine(r, view) {
   if (!canAct(view)) return null;
   const points = view.data?.forkPoints;
-  if (!points?.ok) return html`<p>Fork unavailable: ${r.forkSource?.saved === false ? forkArchiveFact(r.forkSource).reason : points?.refusal ?? "fork-source-unavailable"}.</p>`;
+  if (!points?.ok) return html`<p>Fork unavailable: ${(r.forkSource?.saved === false ? forkRefusalWords(forkArchiveFact(r.forkSource).reason) : forkRefusalWords(points?.refusal)) ?? forkRefusalWords("fork-source-unavailable")}.</p>`;
   const entries = points.entries.filter((e) => e.positions?.length);
   if (!entries.length) return html`<p>Fork unavailable: no exact workspace point is retained.</p>`;
-  return html`<form class="act" data-action="run-fork" autocomplete="off"><input type="hidden" name="jobId" value="${r.jobId}">
+  return html`<form class="act" id="run-fork" data-action="run-fork" autocomplete="off"><input type="hidden" name="jobId" value="${r.jobId}">
     <p><b>Fork this run.</b> Continue from a retained point on a separate branch and pull request.</p>
     ${ui.field({ label: "Fork point", id: "fork-point", control: ui.select({ id: "fork-point", name: "point", options: entries.flatMap((e) => e.positions.map((position) => ({ value: `${e.id}:${position}`, label: `${position} ${e.id} (${e.role ?? e.type})` }))) }) })}
     ${ui.field({ label: "Provider (optional)", id: "fork-provider", control: ui.input({ id: "fork-provider", name: "provider" }) })}

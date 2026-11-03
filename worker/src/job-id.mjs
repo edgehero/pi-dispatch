@@ -43,6 +43,15 @@ export function manualTriggerJobId({ triggerId, now }) {
 }
 
 /**
+ * A canary's jobId (issue #796): the same shape, so every reader that attributes a run to its trigger still does, one millisecond past the minute, so a hand fire in the same minute
+ * cannot swallow it, nor it the fire. They are different jobs running different code.
+ */
+export function manualCanaryJobId({ triggerId, now }) {
+	const base = manualTriggerJobId({ triggerId, now });
+	return base.replace(/\d+$/, (minute) => String(Number(minute) + 1));
+}
+
+/**
  * The retry-idempotent jobId for a chained (outbox-requested) child job: `parent id + content-hash of
  * (flow, task)`, with NO time component. BullMQ's dedup is `EXISTS jobId`, so a retried parent
  * re-collects its outbox and re-enqueues IDENTICAL child ids -- the duplicate follow-up is rejected,

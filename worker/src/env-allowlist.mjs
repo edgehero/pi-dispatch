@@ -376,7 +376,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [] }) {
+export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [] }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -416,6 +416,8 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 		// never PI_PACKAGES=. The delimiter is ":" because these are CONTAINER (POSIX) paths -- never the
 		// host's path.delimiter, which is ";" on Windows.
 		PI_PACKAGES: packagePaths.length > 0 ? packagePaths.join(":") : undefined,
+		// Issue #796: which of those paths is a canary's candidate, so the runner can say whether it loaded. Only on a canary job.
+		PI_PACKAGE_CANARY: packageCanaryPath,
 		// The transcript file inside the /session mount (REQ-RESUMABLE-SESSION). Emitted ONLY when this job
 		// actually has one -- absent means the runner builds pi's ephemeral in-memory session. Since issue #643
 		// every prepared job has one (a resume job's staged transcript, or every other job's empty live file,

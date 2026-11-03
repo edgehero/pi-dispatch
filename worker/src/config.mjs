@@ -594,6 +594,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		sweepIntervalHours: nonNegativeInt(env, "PI_SWEEP_INTERVAL_HOURS", SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS),
 		// Issue #712: how often the worker runs `pi-dispatch doctor --publish` as a child (the first run shortly after boot).
 		// 0 = never, and start.mjs then constructs nothing; capped for the sweep's reason (setInterval's clamp).
+		updatesLook: env.PI_UPDATES_LOOK === "1",
 		doctorIntervalHours: nonNegativeInt(env, "PI_DOCTOR_INTERVAL_HOURS", DOCTOR_INTERVAL_HOURS, DOCTOR_INTERVAL_MAX_HOURS),
 		// REQ-RESUMABLE-SESSION. NO DEFAULT AT ALL, deliberately unlike every sibling above: unset means the
 		// feature is unavailable, and a trigger that armed run.resume then refuses PRE-SPEND rather than

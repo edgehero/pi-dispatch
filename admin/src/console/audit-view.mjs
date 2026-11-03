@@ -50,7 +50,7 @@
  * NEVER AN ECHO. A query parameter is checked against a closed list or a charset before anything reads it, and a
  * refusal names the parameter, never the value (`pages.mjs`'s rule).
  */
-import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_CURSOR_RE, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX } from "@edgehero/pi-dispatch/console-audit";
+import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_CURSOR_RE, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, consoleAuditDriver } from "@edgehero/pi-dispatch/console-audit";
 
 /** The most rows one view examines while it searches (the AuditScreen card: "search over 2,000 rows"). */
 export const AUDIT_EXAMINE_MAX = 2000;
@@ -189,6 +189,11 @@ export function isAuditRow(entry) {
   return entry !== null && typeof entry === "object" && !Array.isArray(entry) && entry.broken !== true && Number.isSafeInteger(entry.seq) && entry.seq >= 1;
 }
 
+/** Only the shared strict watcher schema grants this optional metadata its meaning. */
+export function auditDriver(entry) {
+  return ["sandbox-watch-opening", "sandbox-watch-start", "sandbox-watch-end"].includes(entry?.kind) ? consoleAuditDriver(entry.driver) : null;
+}
+
 /** A place as `[month, line]`, or null for anything that is not one. */
 function placeOf(pos) {
   const m = typeof pos === "string" ? PLACE_RE.exec(pos) : null;
@@ -295,14 +300,14 @@ function indexEnd(chain) {
 /** Whether a row matches the filters (a damaged entry is shown whatever they say, by the caller; see the header). */
 function matches(entry, q) {
   if (!isAuditRow(entry)) return false;
-  if (q.who && entry.actor?.name !== q.who) return false;
+  if (q.who && entry.actor?.name !== q.who && auditDriver(entry)?.name !== q.who) return false;
   if (q.role && entry.actor?.role !== q.role) return false;
   if (q.action && entry.action !== q.action) return false;
   if (q.outcome && entry.outcome !== q.outcome) return false;
   if (q.q) {
     const needle = q.q.toLowerCase();
     const has = (v) => typeof v === "string" && v.toLowerCase().includes(needle);
-    if (!has(entry.target) && !has(entry.reason)) return false;
+    if (!has(entry.target) && !has(entry.reason) && !has(auditDriver(entry)?.name)) return false;
   }
   return true;
 }
@@ -401,6 +406,8 @@ export async function readAuditView({ read, verify = null, query = {}, perPage =
         if (isAuditRow(entry)) {
           if (from === null && s.newest === null) s.newest = entry.seq;
           if (typeof entry.actor?.name === "string" && AUDIT_WHO_RE.test(entry.actor.name)) names.add(entry.actor.name);
+          const driver = auditDriver(entry);
+          if (driver) names.add(driver.name);
         }
         if (seq !== null) {
           if (isAuditRow(entry) && entry.seq < bottom) {

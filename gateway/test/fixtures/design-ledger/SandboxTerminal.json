@@ -1,0 +1,90 @@
+{
+  "card": "SandboxTerminal",
+  "issue": 754,
+  "panels": [
+    "p-gateway-terminal"
+  ],
+  "elements": [
+    {
+      "el": "p-gateway-terminal",
+      "kind": "panel",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "Read the sandbox id, host and signed-in operator before typing. Connected means this browser has the one active gateway attachment to that exact container.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "Type and read new output in the terminal; earlier screen contents are not replayed and no Enter is injected to redraw them. Ordinary Escape, Ctrl+C, arrow keys, Unicode and shell completion work. “Tab moves focus” starts on; turn it off for completion, or use Ctrl+Shift+M to switch it back.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "Disconnect closes the browser attachment and clears its terminal buffer. It leaves the original shell running; Ctrl+D can end that shell normally.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "Return to console goes through its generic return page so a cross-site navigation does not discard the original Strict-cookie session.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "On a phone, no terminal opens. Copy the command from Sandboxes instead. Shrinking a connected window into that layout disconnects it.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "A one-use authorization for the current operator session, browser launch and exact live container, after fresh sign-in with the same token.",
+      "kind": "provides",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "The host, sandbox id, operator and configured idle timeout only after authorization. Terminal input and output never enter a run record or audit payload.",
+      "kind": "provides",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "Existing-container output and bounded input/resize messages. There is no container creation, exec, command choice, image choice, terminal history or automatic reconnect.",
+      "kind": "provides",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "Use a current browser with Web Locks. Without secure launch coordination, the gateway refuses before cookie binding and keeps the native terminal fallback.",
+      "kind": "readme",
+      "source": "gateway/src/bootstrap.mjs#startGatewayPage",
+      "verification": [
+        "gateway/test/frontend.test.mjs"
+      ]
+    }
+  ],
+  "fixture": "The pictured account, host, id and terminal text are illustrative. Behavior is tested against the actual gateway/controller and console broker."
+}

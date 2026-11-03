@@ -29,7 +29,10 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
     const until = async expression => {
       const end = Date.now() + 10_000;
       while (Date.now() < end) {
-        try { if (await evaluate(`Boolean(${expression})`)) return; } catch (error) { if (!/context|navigat/.test(error.message)) throw error; }
+        // The console reloads after a confirm. A poll landing while the new document is still being parsed finds no
+        // `#confirm-slot` yet, and throws: that is "not yet", and only a finished document can say an element is missing.
+        // Judged inside the page, in one turn, because a second read could find the document finished by then.
+        try { if (await evaluate(`(() => { try { return Boolean(${expression}); } catch (error) { if (document.readyState === "complete") throw error; return false; } })()`)) return; } catch (error) { if (!/context|navigat/.test(error.message)) throw error; }
         await new Promise(resolve => setTimeout(resolve, 25));
       }
       throw new Error(`Timed out: ${expression}; ${await evaluate("document.querySelector('#confirm-slot')?.innerText ?? location.pathname")}`);

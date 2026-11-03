@@ -2,6 +2,8 @@ import { SETUP_DRAW } from "./setup-goldens.mjs";
 import { MODELS_DRAW } from "./models-goldens.mjs";
 import { ANSWERER_DRAW, AGENT_OVERVIEW_DRAW } from "./answerer-goldens.mjs";
 import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
+import { UPDATES_CANARY_RECORD, UPDATES_DRAW, updatesFacts } from "./updates-goldens.mjs";
+import { WORKSPACE_DRAW } from "./workspace-goldens.mjs";
 import { ZERO_TOUCH_DRAW } from "./zero-touch-goldens.mjs";
 import { CONFIGURATION_DRAW } from "./configuration-goldens.mjs";
 import { TRIGGER_LIST_DRAW } from "./trigger-list-goldens.mjs";
@@ -165,7 +167,7 @@ function counter() {
  * held job's cancel canned here): each key it names replaces that function, the real one or the canned one (a queued
  * job's plan and its removal's answer, a re-run's plan and its enqueue).
  */
-function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {} } = {}) {
+function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {}, updates = null } = {}) {
   let t = NOW;
   const now = () => t;
   const dir = tempDir("panel-goldens-");
@@ -195,7 +197,7 @@ function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {} } = {}) {
     sessions: { setFlash: () => true },
     writePauseWindows: RM.writePauseWindows,
     hub: null,
-    actionDeps: { rm, plans: WP, paths, fleet, env: { PI_MAX_COST_USD: "2" }, readJobsData: async ({ jobs }) => new Map(jobs.filter((j) => JOB_DATA.has(j.jobId)).map((j) => [j.jobId, JOB_DATA.get(j.jobId)])), urlShown: (u) => u, host: "mini1" },
+    actionDeps: { ...(updates ? { updates } : {}), rm, plans: WP, paths, fleet, env: { PI_MAX_COST_USD: "2" }, readJobsData: async ({ jobs }) => new Map(jobs.filter((j) => JOB_DATA.has(j.jobId)).map((j) => [j.jobId, JOB_DATA.get(j.jobId)])), urlShown: (u) => u, host: "mini1" },
   };
   const ctxOf = (name, step, body) => ({
     deps,
@@ -822,6 +824,18 @@ const DRAW = {
   ...ANSWERER_DRAW,
   ...AGENT_OVERVIEW_DRAW,
   ...SANDBOX_DRAW,
+  ...UPDATES_DRAW,
+  "updates-confirm-canary.operator": async () => {
+    const plan = { index: 2, schedulerId: "nightly", queue: "pi-jobs", fileDigest: "a".repeat(64), schedule: { data: {} }, reserve: { slots: 1, dollarsMicros: 2_000_000, capMicros: 2_000_000, zeroRated: false }, title: "Fire cron trigger now", summary: [] };
+    const answer = await actionWorld({ updates: { read: async () => updatesFacts({}), setDesired: async () => 1 }, rm: { planTriggerFire: async () => ({ plan }) } }).preview("package-canary", { index: 2, name: "pi-lint", version: "1.4.3" });
+    return openSlotAfter(await UPDATES_DRAW["updates-newer-available.operator"](), "p-up-jobs", { inner: answerHtml(answer, 200, "package-canary") });
+  },
+  "updates-confirm-adopt.operator": async () => {
+    const facts = { records: [UPDATES_CANARY_RECORD] };
+    const answer = await actionWorld({ updates: { read: async () => updatesFacts(facts), setDesired: async () => 1 } }).preview("package-adopt", { name: "pi-lint", version: "1.4.3" });
+    return openSlotAfter(await UPDATES_DRAW["updates-canary-completed.operator"](), "p-up-jobs", { inner: answerHtml(answer, 200, "package-adopt") });
+  },
+  ...WORKSPACE_DRAW,
   ...MODELS_DRAW,
   ...ZERO_TOUCH_DRAW,
   ...CONFIGURATION_DRAW,

@@ -1,0 +1,52 @@
+{
+  "name": "@edgehero/pi-dispatch-sandbox-gateway",
+  "version": "4.3.1",
+  "type": "module",
+  "description": "An optional, separately hosted browser attachment for an existing pi-dispatch sandbox.",
+  "license": "MIT",
+  "bin": {
+    "pi-dispatch-sandbox-gateway": "dist/cli.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "prepublishOnly": "node build.mjs"
+  },
+  "dependencies": {
+    "docker-modem": "5.0.7",
+    "dockerode": "5.0.1",
+    "ws": "8.22.1",
+    "ioredis": "5.11.1"
+  },
+  "devDependencies": {
+    "@edgehero/pi-dispatch": "*",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "esbuild": "0.28.1",
+    "dockview": "8.8.3"
+  },
+  "author": "Rob Boerman",
+  "homepage": "https://github.com/edgehero/pi-dispatch/tree/main/gateway",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edgehero/pi-dispatch.git",
+    "directory": "gateway"
+  },
+  "bugs": {
+    "url": "https://github.com/edgehero/pi-dispatch/issues"
+  },
+  "keywords": [
+    "pi-dispatch",
+    "sandbox",
+    "terminal",
+    "docker",
+    "podman",
+    "self-hosted"
+  ]
+}

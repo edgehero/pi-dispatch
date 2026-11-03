@@ -31,7 +31,7 @@ const script = stepScript(readFileSync(join(repo, ".github/workflows/pi-upgrade-
 // GitHub's own invocation of a `run:` step on Linux.
 const runIn = (cwd) => spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], { cwd, encoding: "utf8" });
 
-const SCOPE = ["worker/src/x.mjs", "image/runner/x.mjs", "receiver/src/x.mjs", ".github/scripts/x.mjs", ".github/workflows/pi-bump.yml"];
+const SCOPE = ["worker/src/x.mjs", "image/runner/x.mjs", "receiver/src/x.mjs", "gateway/src/x.mjs", ".github/scripts/x.mjs", ".github/workflows/pi-bump.yml"];
 const PLANTED = [
 	"octokit.pulls.merge({ pull_number })",
 	"gh pr merge 12 --rebase",
@@ -55,7 +55,7 @@ const PLANTED = [
 // Reading a pull request's reviews is the receiver's job (the poller's review feed, issue #66), so this one is refused
 // only where the pi bump runs.
 const BUMP_ONLY = ["gh api repos/o/r/pulls/12/reviews -f event=COMMENT"];
-const BUMP_SCOPE = SCOPE.slice(3);
+const BUMP_SCOPE = SCOPE.filter((path) => path.startsWith(".github/"));
 
 function cleanTree() {
 	const dir = tempDir("merge-grep-");

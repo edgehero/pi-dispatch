@@ -3,7 +3,7 @@ import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { zeroTouchView } from "../../zero-touch-view.mjs";
 
-export const ZERO_TOUCH_WORDS = Object.freeze({ unavailable: "Zero touch could not be read. Reload to try again; missing history is never counted as zero touches.", empty: "No workload runs ended in the covered interval.", drafts: "Answer-rule drafts arrive with #772. A draft sent by a person will still count as a touch.", viewer: "Questions it keeps asking are for operators. Rates, causes, streaks and fixes are shown here.", noGroups: "No question groups yet. Group retained questions with a capped decision job; name each group yourself.", noFixes: "No cause-linked fixes recorded yet. Start a change from a refusal or a question group to measure it here." });
+export const ZERO_TOUCH_WORDS = Object.freeze({ unavailable: "Zero touch could not be read. Reload to try again; missing history is never counted as zero touches.", empty: "No workload runs ended in the covered interval.", drafts: "Sent by a person, edited or as drafted. Each run still counts as a touch.", draftsPartial: "Partial history; this counts retained runs only.", viewer: "Questions it keeps asking are for operators. Rates, causes, streaks and fixes are shown here.", noGroups: "No question groups yet. Group retained questions with a capped decision job; name each group yourself.", noFixes: "No cause-linked fixes recorded yet. Start a change from a refusal or a question group to measure it here." });
 export const ZERO_TOUCH_CAUSES = Object.freeze([
   { cause: "question-answer", label: "Questions", short: "Questions", icon: "parked", tone: "parked", detail: "A person answered a parked question and the source session resumed." },
   { cause: "approval-decision", label: "Approvals", short: "Approvals", icon: "shield", tone: "attention", detail: "A person approved or declined a request. System expiry is excluded." },
@@ -69,7 +69,7 @@ function longest(m) { return [...m.projects].filter((p) => p.streakDays !== null
 function waitingHistory(m) { return m.totals.waitingPartial ? html`<p class="zt-note" role="status">Waiting history is incomplete. An older park predates retained answer history; its current state and wait time are not known.</p>` : null; }
 function compact(m) {
   const best = longest(m);
-  return html`<ul class="ztp-now"><li><span>${ui.icon("flag", { size: "sm" })}Longest streak</span><b>${best ? `${best.name}, ${amount(best.streakDays)} ${best.streakDays === 1 ? "day" : "days"}` : "Not enough history"}</b></li><li><span>${ui.icon("clock", { size: "sm" })}Waited on a person</span><b>${m.totals.waitingPartial ? "Not known" : `${amount(m.totals.waitingHours)}h, median ${span(m.totals.medianWaitMs)}`}</b></li><li><span>${ui.icon("edit", { size: "sm" })}Answered from a draft</span><b>Available with #772</b></li><li><span>${ui.icon("parked", { size: "sm" })}Waiting now</span><b>${m.totals.waitingPartial ? "Not known" : `${m.totals.pending} ${m.totals.pending === 1 ? "run" : "runs"}`}</b>${m.waitingRuns.slice(0, 3).map((r) => html`<span>${link(r.runId)}, ${span(m.nowMs - r.parkedAt)}</span>`)}</li></ul>${waitingHistory(m)}`;
+  return html`<ul class="ztp-now"><li><span>${ui.icon("flag", { size: "sm" })}Longest streak</span><b>${best ? `${best.name}, ${amount(best.streakDays)} ${best.streakDays === 1 ? "day" : "days"}` : "Not enough history"}</b></li><li><span>${ui.icon("clock", { size: "sm" })}Waited on a person</span><b>${m.totals.waitingPartial ? "Not known" : `${amount(m.totals.waitingHours)}h, median ${span(m.totals.medianWaitMs)}`}</b></li><li><span>${ui.icon("edit", { size: "sm" })}Answered from a draft</span><b>${m.totals.draftAnswers} ${m.totals.draftAnswers === 1 ? "run" : "runs"}</b><span>${ZERO_TOUCH_WORDS.drafts}${m.coverage.partial ? html` ${ZERO_TOUCH_WORDS.draftsPartial}` : null}</span></li><li><span>${ui.icon("parked", { size: "sm" })}Waiting now</span><b>${m.totals.waitingPartial ? "Not known" : `${m.totals.pending} ${m.totals.pending === 1 ? "run" : "runs"}`}</b>${m.waitingRuns.slice(0, 3).map((r) => html`<span>${link(r.runId)}, ${span(m.nowMs - r.parkedAt)}</span>`)}</li></ul>${waitingHistory(m)}`;
 }
 export function zeroTouchRate(view) {
   const m = model(view);
@@ -84,7 +84,10 @@ export function zeroTouchWait(view) {
   if (m.state !== "ready") return ui.card({ title: "Waiting for a person", body: fail(m) });
   return ui.card({ title: "Waiting for a person", body: html`${fail(m)}${ui.kpi(m.totals.waitingPartial ? "Not known" : `${amount(m.totals.waitingHours)}h`, `runs waited on a person in ${m.windowDays} days`)}<p class="zt-kps">Median wait for an answer <b>${span(m.totals.medianWaitMs)}</b></p>${waitingHistory(m)}<p class="zt-kp">${ui.chip(m.totals.waitingPartial ? "Pending count not known" : `${m.totals.pending} waiting now`, { status: "parked", icon: "parked" })}${m.waitingRuns.slice(0, 3).map((r) => html`<span>${link(r.runId)}, ${span(m.nowMs - r.parkedAt)}</span>`)}</p>` });
 }
-export function zeroTouchHandled(view) { return ui.card({ title: "Answered from a draft", body: html`${ui.kpi("Coming next", "Answer rules, #772")}<p class="zt-kps">${ZERO_TOUCH_WORDS.drafts}</p>` }); }
+export function zeroTouchHandled(view) {
+  const m = model(view);
+  return ui.card({ title: "Answered from a draft", body: m.state !== "ready" ? fail(m) : html`${ui.kpi(m.totals.draftAnswers, "runs answered in the covered interval")}<p class="zt-kps">${ZERO_TOUCH_WORDS.drafts}</p>${m.coverage.partial ? html`<p class="zt-kps" role="status">${ZERO_TOUCH_WORDS.draftsPartial}</p>` : null}` });
+}
 function meter(row) {
   if (row.rate === null) return html`<span class="zt-m">Not enough history</span>`;
   const tone = row.rate < 5 ? "ok" : row.rate < 30 ? "attention" : "failed";

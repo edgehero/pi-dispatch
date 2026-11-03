@@ -262,6 +262,8 @@ is doing the work here. The container's network is **not** cut off (egress is op
 [`SECURITY.md`](../SECURITY.md) says so plainly); offline mode is the thing that closes the job-time
 install, and the worker sets it on every job while the runner re-asserts it before the loader is built.
 
+**A stage never touches what jobs are loading.** Each one lands in a folder of its own (`packages/<name>--<version>--<id>`) and the manifest, written whole, is what commits it. A job started at any moment reads the old set or the new one, a stage that fails leaves the old set exactly as it was, and a tree that left the manifest stays a week for any job that has it mounted. To try or adopt one version from the console rather than here, see [Updates](console.md#updates).
+
 **What you installed in pi is staged too.** If you ran `pi install npm:@acme/pi-house-skills`, you do not
 declare it a second time: `--with-packages` reads pi's own settings, finds it, and stages it **at the exact
 version your host has on disk**. `pi-packages.json` is the override-and-addition layer — an explicit entry
@@ -359,13 +361,17 @@ failures, because running a narrower set on a deployment than on your laptop is 
 None of them offers to fix itself. Now that `--with-packages` discovers, "restage for me" would stop meaning
 *restore what you declared* and start meaning *import whatever is on your laptop*, which is not a decision
 to make behind a `y/N` prompt. For the same reason `doctor --fix`'s existing restage offer runs
-`import-pi --with-packages --no-host-packages`: the one automated path stays a repair.
+`import-pi --with-packages --no-host-packages`: the one automated path stays a repair. The console's Adopt
+is not that prompt: a person names one exact version of one package on a preview, it never reads your pi setup, and
+it can be undone ([Updates](console.md#updates)).
 
 **`--ignore-scripts` is on, and it cuts both ways.** Staging never runs a package's lifecycle scripts —
 without that flag, the `install`/`postinstall` of the package **and of every transitive dependency** would
 run **as you, on your host**, at stage time. The honest cost: a package that needs a build step, or an
 optional dependency, is staged **INCOMPLETE** and may fail at run time. `import-pi` prints a `WARN` line
 naming any package that declares one, so you learn it at stage time instead of mid-job.
+
+**One thing `--ignore-scripts` does not stop.** npm runs a **git dependency's** `prepare` script to build it, whatever that flag says, and a dependency given as a tarball URL has npm fetch that URL. `import-pi` is something you run at your own keyboard, so it installs as npm does: read what you stage. The console's [canary and Adopt](console.md#updates) run as a service, so they resolve the tree first without running anything, and refuse a package whose tree holds anything but registry tarballs with a hash.
 
 Two more things worth knowing before you arm one:
 

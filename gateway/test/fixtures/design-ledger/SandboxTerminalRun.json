@@ -1,0 +1,85 @@
+{
+  "card": "SandboxTerminalRun",
+  "issue": 793,
+  "panels": [
+    "p-gateway-run",
+    "p-gateway-terminal"
+  ],
+  "elements": [
+    {
+      "el": "p-gateway-run",
+      "kind": "panel",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "p-gateway-terminal",
+      "kind": "panel",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "**The title** names the sandbox and its host; the line under it says the run's outcome, project, target, flow and when it ended.",
+      "kind": "readme",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs"
+      ]
+    },
+    {
+      "el": "**The terminal** uses the shared workbench: tabs and splits preserve the same attachment, driver idle logout, Disconnect, nothing recorded and only new output.",
+      "kind": "readme",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs"
+      ]
+    },
+    {
+      "el": "**Back to gh-9575** in the header replaces the generic return, and the line under the terminal says where a finding goes: the run's page, where the next run sees it.",
+      "kind": "readme",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs"
+      ]
+    },
+    {
+      "el": "**Let operators watch** (observer mode, #792), off by default. On, other operators can watch from the run page or Sandboxes. A line under the toolbar names each watcher with **Remove**, and says they see what is typed. Turning it off ends every watch at once.",
+      "kind": "readme",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs"
+      ]
+    },
+    {
+      "el": "On a phone, no terminal opens. The console provides the native command; a generic arrival exposes no private run context.",
+      "kind": "readme",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs"
+      ]
+    },
+    {
+      "el": "**Know what you type into.** A prompt says only `gh-9575`; the run's target and outcome say whether this is the change about to be merged or a run that failed. The way back goes to the run, because the next useful step after a look is there.",
+      "kind": "readme",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs"
+      ]
+    },
+    {
+      "el": "**Watching is the driver's choice, and always on their screen.** A watcher sees everything the shell prints, including what is typed, such as a pasted token. So it is off until the person typing turns it on, and they see who watches.",
+      "kind": "readme",
+      "source": "gateway/src/workbench.mjs#mountWorkbench",
+      "verification": [
+        "gateway/test/workbench.test.mjs"
+      ]
+    }
+  ],
+  "fixture": "The pictured accounts, hosts, ids and output are illustrative. Actual authority, lifecycle, output isolation and browser behavior are checked independently."
+}

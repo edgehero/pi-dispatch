@@ -247,7 +247,10 @@ install --console` ([above](#keep-it-running-as-a-service)).
 
 ## Sessions
 
-Signing in sets one cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`). The theme button sets a second one,
+Signing in sets one host-only cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`, `Path=/`). A protected HTTPS console
+origin in [gateway enrollment](sandbox-gateway.md) adds `Secure`; HTTP-loopback keeps its existing browser
+compatibility. Proxy headers alone cannot change this setting. Sign-out expires the same cookie in either case.
+The theme button sets a second one,
 `pd_theme`, which holds only your theme choice and is no part of a session ([Look and theme](#look-and-theme)). A
 session ends:
 
@@ -534,7 +537,7 @@ row, as they always could one with a word this console knows ([`SECURITY.md`](..
 that is not a word of that shape is still damage. A console from before this release calls such a row damaged; upgrade
 it.
 
-The filters are a search over targets and reasons (at most 64 characters) and three lists: who, the action and the
+The filters are a search over targets, reasons and a watch's driver name (at most 64 characters) and three lists: who, the action and the
 outcome; the search matches in any case. A filtered view is a plain link. It searches 500 rows at a time and stops
 after 2,000, saying once how many rows matched among how many it searched ("20 rows match among the 2,000 rows
 searched", "from here" on an Older page); its Older link searches on from there, so a search never claims "no match"
@@ -543,6 +546,10 @@ match: the chain does not vouch for what it says, and a filtered view that hid i
 outside its list or its characters is refused by the parameter's name, never repeated back. The action and outcome
 lists are this console's own, so a row with an action or outcome they do not hold is found unfiltered, and under
 who, role and the search.
+
+Watch opening and ending rows name the watcher as actor and the browser driver separately. The **Who** filter
+matches either person on these rows. Ordinary audit rows retain their existing fields and meaning. Terminal input,
+output, tokens, proofs and cookies never enter an audit row.
 
 `/audit?seq=<n>` opens the page that holds row n, at the row (`/audit?seq=41#seq-41`), however many rows were written
 since: the banner after a write links its row this way. The page finds the row by its number, from where the last check
@@ -633,6 +640,7 @@ readers ([Live updates](#live-updates)).
 | `/fleet/host?name=build3` | One host's heartbeat, running and waiting jobs, orphan cleanup guidance, retained workspaces, slots and budgets, seven-day capacity, registry and doctor. The host facts update live; capacity is read when the page opens. |
 | `/fleet/venue?name=podman` | One venue's capabilities, all fourteen isolation declarations and asserters, every published applicable floor, host observations, credential custody and four-venue comparison. Read once, with no runtime probes. |
 | `/config` | The triggers, the settings overlay, the pause windows, the scoped limits, the projects, the envelope and allocation, the MCP servers, the staged packages, the secret profiles (their names only, never where a secret comes from or its value; those `PI_SECRET_PROFILES` declares are listed beside the overlay's, and a name in both is marked ambiguous; a "Secret profiles in use" table gives each profile's source, where its resolver stands against `PI_SECRET_RESOLVER_ROOTS`, the triggers and projects that use it, the last resolve a run recorded and the live hosts that advertise it, still with no path: [`secrets.md`](secrets.md#from-the-panel)), and the secret bundles: each project bundle in `triggers.json` with its project, its profile and whether this deployment declares it, fork reviews, its endpoint names and hosts, the triggers that opt out and the variable names the newest run received, plus the bundle resolvers by name and format ([`secrets.md`](secrets.md#from-the-panel)). Never a bundle's reference or a value. |
+| `/config/updates` | Which pi and which extensions jobs run, what is newer, a canary and Adopt ([Updates](#updates)). |
 | `/models` | Scoped model roles and ordered fallbacks, actionable policy banners, observed cooldowns and model windows, published proposals and retained canary comparisons. Not live; Reload reads again. Operators review role-map changes through preview, diff and confirm. No page action starts a run. |
 | `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. How far its hash chain is verified, which rows it does not vouch for, filters and a search ([The audit log](#the-audit-log)). A line that is not a valid row is shown as damaged in its place, never skipped. |
 
@@ -1080,7 +1088,7 @@ once jobs run. A temporary outage never turns an established deployment into a n
 Bootstrap from the deployment folder with the durable installed CLI:
 
 ```bash
-npm install --save-exact @edgehero/pi-dispatch@4.3.1 @edgehero/pi-dispatch-admin@4.3.1 @earendil-works/pi-coding-agent@1.4.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+npm install --save-exact @edgehero/pi-dispatch@4.3.1 @edgehero/pi-dispatch-admin@4.3.1 @earendil-works/pi-coding-agent@1.5.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
 
@@ -1720,6 +1728,26 @@ The running and parked modes show `pi-dispatch chat <job id>` too, which opens t
 state only, never a form or a command, and a read-only console draws no form for anyone. When the queue cannot be
 read the panel says so rather than guess.
 
+### Updates
+
+**Updates** (`/config/updates`, linked from Configuration) says which pi and which extensions your jobs run, what is newer, and what you can do about it. pi-dispatch pins every version a job runs, so nothing here updates by itself. Viewers see versions and results; the buttons are an operator's, and no agent can press them, whatever grant it holds.
+
+**The look is off until you turn it on.** Set `PI_UPDATES_LOOK=1` on a worker host, and it looks a minute after it starts and then once a day: the newest pi and the newest version of each staged extension from the npm registry, and this project's public checks on its bump pull request. It runs on the host and never in a job, changes nothing and spends nothing. It does send your staged package names to the registry, so set `PI_UPDATES_REGISTRY` to a private mirror if those names are private, and `PI_UPDATES_PROXY` to send its requests through a proxy with no direct fallback. A read that fails says **unknown**, never that all is well, and a look older than two days says so.
+
+**pi** arrives in a pi-dispatch release, so its row only tells you where it stands and links to the bump pull request. **pi on each host** is the pi where `/dispatch` runs. That one is yours to update, for example with `pi update --all`, and the page says when it is newer or older than pi-dispatch is tested with.
+
+**Run a canary** tries one exact version of one extension on one paid job. Pick a cron trigger that loads staged packages; the preview shows the reserve. The version replaces the staged copy for that job only, installed under that job's own folder, so a job running beside it never sees it, and it is deleted from a kept workspace. What it does to the trigger's own folder or repository stays done, as with any job of that trigger, and a failed canary cannot be retried: start another from this page. It is refused for free, before anything is spent, if the trigger sets `run.packages: false` or resumes its transcript (its next run would continue the candidate's work), the package is a reviewed subscription adapter, it is not staged on that host, the version does not exist, or the image is too old to report the result.
+
+The result reads **completed, read the run** or **failed**, and never "passed". Completed means the job finished and the runner saw the extension load. It does not prove the extension is good, so read the run. A candidate that did not load, or a run that did not say, reads as failed: a failed load only logs, and the job carries on without it.
+
+A canary or an Adopt of a package whose dependency tree holds anything but registry tarballs with a hash, such as a git dependency, is refused before anything is installed: npm would run a git dependency's build script on the host, whatever `--ignore-scripts` says.
+
+**Adopt** needs a canary of that exact version that completed, on a run still retained. The page finds it on any host: it reads the last 30 days of this host's run records and of the run mirror (`PI_WORKER_NAME` on each host), up to the newest 1,000 mirrored runs. If some of those could not be read it says so, because a canary may then read as not tried. Each host stages the version in a folder of its own and pins it in its `pi-packages.json`, so a later `import-pi` does not put it back. Jobs that start afterwards load it, and running jobs keep what they have. A host that is offline adopts when it returns: the page shows it as pending, and as overdue after a day. A host that cannot adopt says why, for example a read-only overlay, and the row reads as partial until you fix that or undo.
+
+A host never moves to an older version for an Adopt, so one you have since moved past with `import-pi` stays where you put it. **Undo** puts each host back as it was, including its `pi-packages.json`. The old version's folder is kept for a week, so going back is instant; after that it is staged again. A host that never took the adoption changes nothing.
+
+Two limits, so that you can judge them. A package has no lockfile, so its dependencies are resolved again on each host and a tree can differ from the one the canary ran; each tree's digest is recorded and the page says when they differ, which does not make them the same. And Adopt is one host's overlay at a time unless your hosts share one, in which case a lock serialises them.
+
 ### Opening a sandbox
 
 The **Sandboxes** tab under Runs (`/runs/sandboxes`) is for operators only. It shows kept workspaces from every host,
@@ -1749,12 +1777,28 @@ pi-dispatch opener install --config sandbox-hosts.json
 Re-running this command explicitly replaces the opener's approved hosts. A link cannot enroll or change a host. The
 console never sends its own host configuration to the local handler automatically.
 
-A run page and the Fleet host page offer the same Open/Copy handoff. Only `local` and `podman` support reopening;
-`openshell` and `openshell-bind` say that their venue has no sandbox shell. A run refused before it started has no
-workspace. For the console's own host, its run page still reads the retained manifest at most every 15 seconds,
-hiding an impossible command and adding `--pin` when the workspace is past its window. For other hosts, the terminal
-CLI makes the final decision. The Sandboxes tab uses each host's published deadline, pin window and capabilities,
-and says when a publication is stale, missing, unreadable or truncated.
+A run page has one operator-only **Workspace** row above its facts. A completed run says **Try it before you merge**,
+a failed run with a kept workspace says **Reproduce it**, and a parked run says **Look before you answer**. A shell
+edit does not reach the job that an answer starts, so put the finding in the answer. A running or recovering run
+says **Opens when it ends** and links to steering; a refused run or a container that never started has nothing to open.
+The completed outcome banner's **Try it in its workspace** scrolls to this row; it starts nothing.
+
+The row names the host and known kept deadline, and who opened an existing shell. Its native opener remains available;
+**Copy the command, or end the shell** folds the command and confirmed End control beneath it. A native opener's
+reported account is separate from the authenticated browser driver and watchers. Viewers get no Workspace facts or
+controls. On a read-only console the row retains selectable commands only.
+
+Only `local` and `podman` support reopening. A known missing, expired or unsupported workspace offers **Prepare from
+this run**. This opens the ordinary preparation form with a validated repository and `HEAD`: records currently hold
+no created pull request to prefill. A historical trigger row is a suggestion, never proof of the current rule. Choose
+the current trigger explicitly. An OpenShell trigger remains incompatible until you deliberately select a compatible
+local or podman trigger; the console never changes its venue or silently chooses another rule. The owning worker still
+validates the final preview and request. Local retained manifests and fresh host publications supply evidence; stale,
+unreadable or truncated publications and missing rows remain unknown, rather than being called swept.
+
+**Found something?** leads to the current trigger chooser and its existing instruction editor, preview and Confirm.
+Its fork link focuses the existing exact-point fork/message form when a retained source is available, and otherwise
+says why a fork cannot be offered. Shell text is never copied into either action automatically.
 
 To prepare a fresh workspace, enter its repository, choose a forge trigger and an eligible host, and choose a ref:
 `HEAD` means the remote default branch; branches, tags, full commit SHAs and `pr:42` are accepted. **Review settings**
@@ -1771,8 +1815,39 @@ container and shell nonce; the terminal process closes it and acknowledges. The 
 acknowledgement is explicitly ambiguous and asks you to refresh before retrying. The short shell registration expires
 if its terminal stops answering; expiry alone does not prove the container stopped. Runtime-read failures and kept-network/cleanup failures appear as actionable host inspection notices, with an explicit warning if those notices could not be read. The console neither asks Docker for its list nor observes what is typed.
 
-The browser-terminal panel is an off/proposed note linking [#754](https://github.com/edgehero/pi-dispatch/issues/754).
-The console obtains no pty or WebSocket and never starts a shell or container itself.
+**Open in browser** is an additional route for an already running, registered shell when its host's separate gateway
+is enrolled. It opens a new tab and asks for this sign-in's same operator token again on the console origin. The
+single-use attachment grant lasts 60 seconds and is bound to the original tab, operator session, gateway browser
+cookie and exact sandbox incarnation. Viewers, agents and read-only consoles cannot authorize it; windows 760 pixels
+wide or narrower retain the native command. Closing the browser detaches and keeps the sandbox. **End this shell**
+remains a separate confirmed action.
+
+The gateway workbench holds up to four distinct drive or watch panes on one enrolled host, under one original sign-in.
+Tabs, splits and keyboard layout controls preserve each attachment. Adding a terminal opens a host-bound chooser in
+a helper tab; choosing its shell still requires fresh same-token verification. The chooser carries only a checked
+host, has no preparation, pin or End controls, and returns the authorized opening to the existing workbench.
+
+A browser driver can enable **Let operators watch**, off by default. Other operators then get **Watch** on the run
+page and in Sandboxes. They verify with their own original sign-in and token. At most three pending or active watches
+may join one driver, and each is read only at the driver's size. The driver sees a persistent named roster, including
+watchers of hidden panes, and may remove a current watch or turn watching off. A native-only shell cannot be watched.
+Watcher input and resize never reach the runtime; Stop watching does not disconnect the driver. Losing the driver's
+authority or consent ends its watches within the five-second lease. Each watcher also keeps their own independently
+checked console session; watching does not extend anybody's console idle time.
+
+An operator name may belong to several sign-ins. When the name matches the driver, both browser actions remain
+available: **Open in browser** can focus the existing drive pane, while **Watch** uses a separate sign-in. The exact
+sign-in already driving cannot watch itself and is directed to its existing workspace.
+
+After authorization the active pane can show six record facts: run id, normalized outcome, project, target, flow and
+end time. The target is text, and **Back to `<run id>`** goes through the console's Strict-cookie bridge. Prepared or
+unavailable records use the generic return; no transcript, question or issue text crosses in this context.
+
+Gateway enrollment is hand-owned, off by default, and separate from the native opener's host import. It requires a
+different hostname, rather than another port on the console hostname, and HTTPS for public origins. The console
+obtains no pty, runtime socket or WebSocket and retains its CSP; the gateway serves its own terminal library and
+attaches to the existing TTY. It never starts a shell/container. See [Sandbox browser gateway](sandbox-gateway.md)
+for installation, configuration, revocation/idle behavior and the accepted runtime-socket and bootstrap-fragment risks.
 
 ## Live updates
 
@@ -1994,6 +2069,12 @@ through the same code, so the two never disagree about what is waiting.
 | `PI_CONSOLE_MAX_HOURS` | 12 | Absolute limit of a session, 1 to 168. |
 | `PI_CONSOLE_MAX_STREAMS` | 4 | Live pages one token may hold open across its sign-ins, 1 to 32. The whole console holds at most 32, 8 of them kept for operators. |
 | `PI_CONSOLE_AUDIT_RETENTION_DAYS` | `PI_LOG_RETENTION_DAYS`'s value | Days the audit log's month files are kept; `0` keeps them forever, and the newest is never removed. Read by the worker, which prunes them, not by the console; a value that is not a whole number of days (0 or more) stops the worker from starting. |
+
+`PI_SANDBOX_GATEWAYS_FILE` selects the protected hand-owned gateway enrollment file (default
+`<deployment>/sandbox-gateways.json`); an absent file disables browser attachment. This file is not the native opener's
+`PI_SANDBOX_HOSTS_FILE`. Its canonical console origin is also the exact Origin required for login and writes,
+with matching Host and the existing same-origin fetch-site policy. No forwarded header establishes that authority.
+Without enrollment, the existing `http://<Host>` rule remains. See the [gateway reference](sandbox-gateway.md).
 
 The console also reads, from the same deployment, `VALKEY_URL` (the queues, hosts and run mirror), `PI_LOGS_DIR`
 (this host's run records and the audit log), `PI_PAUSE_WINDOWS_FILE`, the files the configuration page shows and

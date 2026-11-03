@@ -14,7 +14,7 @@ import { PINNED, judgedEndpoint, valkeyClientContext, valkeyContextFromResolutio
 // with VALKEY_URL=localhost used to carry a job's task text to that account's Valkey (measured on Fedora 44).
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const TREES = ["worker/src", "receiver/src", "admin/src", "image/runner"];
+const TREES = ["worker/src", "receiver/src", "admin/src", "image/runner", "gateway/src"];
 const SKIP_DIRS = new Set(["test", "node_modules", "dist"]);
 const EXTS = new Set([".mjs", ".js", ".cjs", ".ts", ".mts"]);
 
@@ -58,16 +58,21 @@ const RULES = [
 	{ what: "a BullMQ Worker", re: /new\s+Worker\s*\(/, allowed: ["worker/src/index.mjs"] },
 ];
 
+function violations(files) {
+	return RULES.flatMap((rule) => files.filter((file) => rule.re.test(file.code) && !rule.allowed.includes(file.path)).map((file) => `${file.path}: ${rule.what}`));
+}
+
 test("no file constructs a Valkey client except through connection.mjs' judged connection (the bolt, #464)", () => {
 	const files = sources();
-	assert.ok(files.some((f) => f.path.startsWith("receiver/src/")) && files.some((f) => f.path.startsWith("admin/src/")), "the scan reaches the receiver and the admin");
-	const offenders = [];
-	for (const rule of RULES) {
-		for (const f of files) {
-			if (rule.re.test(f.code) && !rule.allowed.includes(f.path)) offenders.push(`${f.path}: ${rule.what}`);
-		}
+	assert.ok(files.some((f) => f.path.startsWith("receiver/src/")) && files.some((f) => f.path.startsWith("admin/src/")) && files.some((f) => f.path === "gateway/src/cli.mjs"), "the scan reaches the receiver, admin and gateway executable");
+	assert.deepEqual(violations(files), [], "open Valkey only through parseConnection/makeRedisClient (worker/src/connection.mjs) and makeQueue; receiver, admin and gateway import the shared connection");
+	const gateway = files.find((file) => file.path === "gateway/src/cli.mjs");
+	// Exercise the same scan against planted source at the new executable's actual path. A
+	// patterns-only assertion could pass while its directory was absent from the census.
+	for (const code of ['import Redis from "ioredis";', 'const driver = await import("ioredis/built/Redis.js");', "const client = new Redis(url);", 'import { Queue } from "bullmq";']) {
+		const planted = files.map((file) => file === gateway ? { ...file, code: `${file.code}\n${code}` } : file);
+		assert.ok(violations(planted).some((hit) => hit.startsWith("gateway/src/cli.mjs:")), `${code}: the gateway cannot bypass judged connection construction`);
 	}
-	assert.deepEqual(offenders, [], "open Valkey only through parseConnection/makeRedisClient (worker/src/connection.mjs) and makeQueue; the receiver and the admin import them from @edgehero/pi-dispatch/connection");
 	// The two allowed BullMQ constructions assert the connection is judged right before they build on it.
 	const at = (path) => files.find((f) => f.path === path).code;
 	assert.match(at("worker/src/queue.mjs"), /assertJudgedConnection\(connection\);\s*const queue = new Queue\(/);
@@ -84,11 +89,11 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	// And connection.mjs' own client is built from parseConnection's options, never from a bare URL.
 	assert.match(at("worker/src/connection.mjs"), /return new Redis\(\{ \.\.\.parseConnection\(url,/);
 	assert.equal((at("worker/src/connection.mjs").match(/new Redis\(/g) ?? []).length, 1);
-	// Non-vacuity: the sites that DO connect are there to be found, in all three packages.
+	// Non-vacuity: the sites that DO connect are there to be found, including the optional gateway.
 	// (admin/src/dashboard.ts was on this list until issue #641 moved the panel's reader, and its clients, into
 	// read-model.mjs's `createFleetReader`.)
 	const users = files.filter((f) => /\b(parseConnection|makeRedisClient)\b/.test(f.code)).map((f) => f.path);
-	for (const expected of ["worker/src/start.mjs", "worker/src/cli.mjs", "worker/src/cancel-cli.mjs", "worker/src/doctor.mjs", "worker/src/service.mjs", "receiver/src/start.mjs", "receiver/src/route.mjs", "receiver/src/poller.mjs", "admin/src/read-model.mjs"]) {
+	for (const expected of ["worker/src/start.mjs", "worker/src/cli.mjs", "worker/src/cancel-cli.mjs", "worker/src/doctor.mjs", "worker/src/service.mjs", "receiver/src/start.mjs", "receiver/src/route.mjs", "receiver/src/poller.mjs", "admin/src/read-model.mjs", "gateway/src/cli.mjs"]) {
 		assert.ok(users.includes(expected), `${expected} opens its Valkey clients through connection.mjs`);
 	}
 	for (const rule of RULES) assert.equal(rule.re.test(""), false);

@@ -10,7 +10,7 @@ successful intervention; later interventions remain in its history. Jobs removed
 counted separately. Stops whose project or folder was never recorded remain explicitly unattributed in scoped views.
 
 The denominator is distinct workload runs whose records ended in the covered interval. Internal grouping jobs keep
-normal history and spend but are excluded from workload rates, so analysing a rate cannot improve it. The Open as
+normal history and spend but, like internal answer-draft jobs, are excluded from workload rates, so analysing a rate cannot improve it. The Open as
 runs links list the touched source runs, with the same window and scope.
 
 ## What the numbers can prove
@@ -105,5 +105,9 @@ edit because its metric is pending. Conflicting later edits leave uncertain evid
 Viewers receive rates, counts, causes, streaks and safe fix descriptions. Operators additionally receive question
 groups and confirmed actions. A read-only console keeps the reads and suppresses writes. Native disclosures and
 window navigation work without JavaScript; writes remain disabled with an explanation. The page uses the console's
-normal CSP and theme controls. Standing answers, draft answers and sandbox management belong to the following
-features (#772 and #771), and are not active controls on this page.
+normal CSP and theme controls. **Answered from a draft** shows distinct workload runs actually answered from a
+person-confirmed draft, edited or as drafted, within the same covered interval and project/repository selection.
+Each remains a human touch. Duplicate deliveries and record/index copies count once; offered, unsent, refused
+answers and internal draft jobs add none. Partial history labels the retained count; unavailable evidence is not zero.
+Answer rules, standing answers and sending are managed on Parked. Sandbox management stays on its own Runs tab;
+this count exposes no draft text or answer controls.

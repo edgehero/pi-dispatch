@@ -195,6 +195,47 @@ async function argvFor(job, packagePaths = STAGED, factory = {}) {
 	return rec.args;
 }
 
+test("a canary's candidate replaces the staged copy for this job, and a job beside it sees the staged set (issue #796)", { skip }, async () => {
+	const rec = {};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, packagePaths: STAGED, spawnFn: fakeSpawn(rec) });
+	const prepared = { ...PREPARED, packageCanary: { replaces: "pi-lint", tree: "pi-lint--2.0.0--abcd1234" } };
+	await runContainer({ job: JOB, prepared, name: "j1", signal: new AbortController().signal });
+	assert.ok(rec.args.includes("PI_PACKAGES=/opt/pi-global/packages/pi-playwright:/job/canary/pi-lint--2.0.0--abcd1234"), "in its place, and the staged copy is gone");
+	assert.ok(rec.args.includes("PI_PACKAGE_CANARY=/job/canary/pi-lint--2.0.0--abcd1234"));
+	// The same factory, the same overlay, and no candidate: this is the concurrent job.
+	const beside = await argvFor(JOB);
+	assert.ok(beside.includes(PI_PACKAGES_ARG));
+	assert.ok(!beside.some((a) => String(a).startsWith("PI_PACKAGE_CANARY")), "a job that is not a canary names none");
+});
+
+test("a canary's candidate is at this layout's own /job, so that it means the same on every venue (issue #796)", { skip }, async () => {
+	const { layoutFor } = await import("../src/job-layout.mjs");
+	const rec = {};
+	const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, packagePaths: STAGED, spawnFn: fakeSpawn(rec), layout: "sandbox" });
+	await runContainer({ job: JOB, prepared: { ...PREPARED, packageCanary: { replaces: "pi-lint", tree: "pi-lint--2.0.0--abcd1234" } }, name: "j1", signal: new AbortController().signal });
+	const job = layoutFor("sandbox").job;
+	assert.notEqual(job, "/job", "this layout is the one that differs");
+	assert.ok(rec.args.includes(`PI_PACKAGE_CANARY=${job}/canary/pi-lint--2.0.0--abcd1234`), rec.args.filter((a) => String(a).startsWith("PI_PACKAGE")).join(" "));
+});
+
+test("what the runner said of a canary reaches the result from a verified line, and an unverified one says nothing (issue #796)", { skip }, async () => {
+	const verified = { turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null, exitLineCode: 0, canaryLoad: "loaded", exitAuth: "verified" };
+	const run = async (sink) => await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawnStdin({}, 0), mintExitKey: () => MINTED, openJobLog: () => ({ write() {}, close: async () => sink }) })({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal, exitAuth: true });
+	assert.equal((await run(verified)).canaryLoad, "loaded");
+	for (const closed of [{ ...verified, exitAuth: "unverified" }, { ...verified, exitAuth: undefined }, { ...verified, canaryLoad: null }]) {
+		assert.equal(Object.hasOwn(await run(closed), "canaryLoad"), false, "a job's own printout claiming it is not the runner's word");
+	}
+	// And off the real sink, so that a word the runner did print is not lost between the line and the result.
+	const { makeLogSink } = await import("../src/run-history.mjs");
+	const fs = { mkdirSync() {}, createWriteStream: () => null };
+	const line = (fields) => `\n${JSON.stringify({ event: "exit", jobId: "j1", code: 0, ...fields })}\n`;
+	for (const [chunk, want] of [[line({ canaryLoad: "loaded" }), "loaded"], [line({ canaryLoad: "failed" }), "failed"], [line({ canaryLoad: "passed" }), undefined], [line({}), undefined]]) {
+		const runContainer = mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, onOutput: () => {}, openJobLog: makeLogSink({ logsDir: "/logs", enabled: false, fs }), spawnFn: fakeSpawnWithData({}, { chunks: [Buffer.from(chunk)] }) });
+		const result = await runContainer({ job: JOB, prepared: PREPARED, name: "j1", signal: new AbortController().signal });
+		assert.equal(result.canaryLoad, want, chunk);
+	}
+});
+
 test("packages: true passes the boot-staged set through to the container env", { skip }, async () => {
 	const args = await argvFor({ ...JOB, packages: true });
 	assert.ok(args.includes(PI_PACKAGES_ARG), "an explicitly opted-in job must carry the \":\"-joined staged container paths");

@@ -8,6 +8,7 @@ import { planSandboxPreparation } from "@edgehero/pi-dispatch/sandbox-prepare";
 import { readSandboxHosts, planSandboxHost, writeSandboxHost } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
+import { repoOfTarget } from "./costs.mjs";
 export const SANDBOX_READ_DEPS = Object.freeze({ makeSandboxPrepareQueueFn: makeSandboxPrepareQueue, enqueueSandboxPreparationFn: enqueueSandboxPreparation, readSandboxPreparationFn: readSandboxPreparation });
 const sha = (x) => createHash("sha256").update(typeof x === "string" ? x : JSON.stringify(x)).digest("hex");
 const refusalOf = (out) => out?.refusal ?? out?.message ?? out?.refused ?? "The sandbox request was refused.";
@@ -51,13 +52,40 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
   }
   return {
     hosts,
+    async workspace(record) {
+      if (!record || typeof record.jobId !== "string" || typeof record.host !== "string") return { unknown: true };
+      const [inventoryRead, sessionsRead] = await Promise.allSettled([fleet.sandboxInventory(), fleet.sandboxSessions()]);
+      const kept = inventoryRead.status === "fulfilled" ? inventoryRead.value : null;
+      const open = sessionsRead.status === "fulfilled" ? sessionsRead.value : null;
+      const shell = open?.sessions?.find((s) => s.host === record.host && s.id === record.jobId) ?? null;
+      const observed = { shell, sessionsUnknown: !open || Boolean(open.unreachable || open.more || open.unreadable) };
+      const host = kept?.hosts?.find((h) => h.name === record.host);
+      if (kept?.unreachable || !host || host.stale || host.unreadable || !Array.isArray(host.rows)) return { ...observed, unknown: true };
+      const row = host.rows.find((r) => (r.id ?? r.jobId) === record.jobId);
+      if (row) return { ...observed, retained: row.canOpen !== false, until: Number.isSafeInteger(row.until) ? row.until : null, backend: row.v ?? row.backend ?? null, pin: row.pin === true, ...(row.canOpen === false ? { why: "venue" } : {}) };
+      // A bounded publication's missing row is never evidence that this workspace was swept.
+      if (host.more !== 0 || kept.more > 0) return { ...observed, unknown: true };
+      if (host.settings?.sandboxRetentionHours === 0) return { ...observed, retained: false, why: "retention-off" };
+      return { ...observed, unknown: true, notPublished: true };
+    },
     async read(query = {}) {
       const inv = await inventory();
+      if (query.gatewaySelect) return { ...inv, selected: { host: query.host }, options: [], eligibleHosts: [], selectionHost: query.host };
       let cfg;
       try { cfg = configuration(); } catch { return { ...inv, options: [], selected: query, refusal: "The triggers, projects or scoped limits could not be read. Fix the deployment configuration before preparing a sandbox." }; }
       const options = optionsOf(cfg);
-      const selected = { repo: query.repo ?? null, index: query.index, ref: query.ref ?? "HEAD", host: query.host ?? inv.hosts.find((h) => !h.stale && !h.unreadable && h.settings)?.name ?? null, pin: query.pin === true };
-      if (selected.index === null || selected.index === undefined) selected.index = options[0]?.index ?? null;
+      let sourceRun = null;
+      if (query.fromRun) {
+        try {
+          const got = await fleet.runById(query.fromRun), r = got?.record;
+          if (r?.jobId === query.fromRun && ["github", "gitlab", "forgejo", "azure"].includes(r.kind)) {
+            const repo = repoOfTarget(r.target);
+            sourceRun = { id: r.jobId, repo: typeof repo === "string" && /^[A-Za-z0-9._/-]{1,200}$/.test(repo) && !repo.split("/").some((part) => !part || part === "." || part === "..") ? repo : null, historicalIndex: Number.isSafeInteger(r.triggerIndex) && r.triggerIndex >= 0 ? r.triggerIndex : null, backend: r.backend ?? null, host: inv.hosts.some((h) => h.name === r.host && !h.stale && !h.unreadable) ? r.host : null };
+          }
+        } catch { /* The form remains a deliberate manual choice when history is unavailable. */ }
+      }
+      const selected = { repo: query.repo ?? sourceRun?.repo ?? null, index: query.index, ref: query.ref ?? "HEAD", host: query.host ?? (query.fromRun ? sourceRun?.host ?? null : inv.hosts.find((h) => !h.stale && !h.unreadable && h.settings)?.name ?? null), pin: query.pin === true };
+      if (selected.index === null || selected.index === undefined) selected.index = query.fromRun ? null : options[0]?.index ?? null;
       const rawTrigger = cfg.triggers[selected.index]?.run;
       const eligibleHosts = inv.hosts.filter((h) => {
         const backend = rawTrigger?.backend ?? h.settings?.defaultBackend;
@@ -65,7 +93,7 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       }).map((h) => h.name);
       const judged = selected.repo && selected.host && selected.index !== null ? preparation(selected, inv, cfg) : {};
       const request = query.request && query.host ? await fleet.sandboxPreparationStatus(query.host, query.request) : null;
-      return { ...inv, options, eligibleHosts, selected, ...judged, request };
+      return { ...inv, options, eligibleHosts, selected, ...judged, request, ...(query.fromRun ? { fromRun: query.fromRun, sourceRun } : {}) };
     },
     async preview(name, params) {
       if (name === "sandbox-host-set") {

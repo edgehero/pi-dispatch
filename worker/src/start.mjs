@@ -77,6 +77,12 @@ import { makeSandboxInventory } from "./sandbox-inventory.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
 import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
 import { makeDoctorSpawner } from "./doctor-spawner.mjs";
+import { hostHasPending, publishCanaryFacts, UPDATES_LOOK_EVERY_HOURS } from "./updates.mjs";
+import { makePackageCanaryRuntime } from "./package-canary.mjs";
+
+/** How often a host asks whether a person wants something of it, and how long applying it may take: several npm installs on a slow link. */
+const UPDATES_RECONCILE_EVERY_MS = 2 * 60 * 1000;
+const UPDATES_RECONCILE_TIMEOUT_MS = 15 * 60 * 1000;
 import { fileURLToPath } from "node:url";
 import { listSandboxes, sandboxDeadline, makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
@@ -800,6 +806,7 @@ export async function startWorker(
 		makeQuestionGroupRuntime: makeQuestionGroupRuntimeFn = makeQuestionGroupRuntime,
 		// Issue #712: the worker's own doctor runs, a seam so a wiring test sees the interval and never spawns a doctor.
 		makeDoctorSpawner: makeDoctorSpawnerFn = makeDoctorSpawner,
+		makeUpdatesRunner: makeUpdatesRunnerFn = makeDoctorSpawner,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		// Issue #643: the preparer factory, a seam so a test can see what the wiring hands it (`stageLive`).
 		makePrepareWorkspace: makePrepareWorkspaceFn = makePrepareWorkspace,
@@ -3171,6 +3178,7 @@ export async function startWorker(
 			// is how a fact ends up dispatched on one path and hardcoded on another.
 			neverStartedExits: backends.neverStartedExits,
 			checkSandboxWorkspace: (job) => checkSandboxWorkspace(job, { sandboxDir: config.sandboxDir }),
+			packageCanary: makePackageCanaryRuntime({ globalPiDir: config.globalPiDir, env, host: config.workerName, log, publishFacts: (facts) => publishCanaryFacts(redis, facts) }),
 			prepareWorkspace: makePrepareWorkspaceFn({
 				jobsDir: config.jobsDir,
 				// Issue #643: with PI_LIVE_TRANSCRIPTS=0 no live file is staged either, so a job without a resume transcript
@@ -3637,6 +3645,23 @@ export async function startWorker(
 			doctorRuns.start();
 			extraClosers.push(doctorRuns);
 		}
+
+		// Issue #796 (`DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`): the look, off until PI_UPDATES_LOOK=1, and each host applying what a person asked for. Children for
+		// doctor's reason: neither belongs on the loop that renews paid job locks. The reconcile starts nothing until a person asked for something, and reaches a
+		// registry only then, which is why it needs no switch of its own: until then it is one free Valkey read every two minutes.
+		const cliPath = fileURLToPath(new URL("./cli.mjs", import.meta.url));
+		if (config.updatesLook) {
+			const look = makeUpdatesRunnerFn({ cliPath, intervalMs: UPDATES_LOOK_EVERY_HOURS * 3600000, log, args: ["updates", "look"], events: { overlapped: "updates_look_overlapped", spawnFailed: "updates_look_failed", finished: "updates_look_finished" } });
+			look.start();
+			extraClosers.push(look);
+		}
+		const reconcile = makeUpdatesRunnerFn({
+			cliPath, intervalMs: UPDATES_RECONCILE_EVERY_MS, bootDelayMs: UPDATES_RECONCILE_EVERY_MS, timeoutMs: UPDATES_RECONCILE_TIMEOUT_MS, log, args: ["updates", "reconcile"],
+			events: { overlapped: "updates_reconcile_overlapped", spawnFailed: "updates_reconcile_failed", finished: "updates_reconcile_finished" },
+			shouldRun: () => hostHasPending(redis, config.workerName),
+		});
+		reconcile.start();
+		extraClosers.push(reconcile);
 
 		log("worker_started", {
 			queue: "pi-jobs",

@@ -12,12 +12,12 @@ import { tempDir } from "./helpers/temp-dir.mjs";
  * runs, but after those hooks, so the helper's hook never saw its directory: `output-cap.test.mjs` left one per run
  * under a TMPDIR of its own. The helper now also removes its directories on the process `exit` event.
  *
- * Proved in a child `node --test` run per workspace copy of the helper (each workspace carries its own, and all four
- * had the same hook). The fixture reports the order its own root hook and its late test ran in, so the test also
+ * Proved in a child `node --test` run per workspace helper, including the gateway's re-export. The fixture reports
+ * the order its own root hook and its late test ran in, so the test also
  * shows the hazard is real on this Node: if the hook ever ran after the late test, the fixture would prove nothing.
  */
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const HELPERS = ["worker", "receiver", "admin", "image/runner"].map((ws) => join(root, ws, "test", "helpers", "temp-dir.mjs"));
+const HELPERS = ["worker", "receiver", "admin", "image/runner", "gateway"].map((ws) => join(root, ws, "test", "helpers", "temp-dir.mjs"));
 
 function runChild(helper) {
 	const work = tempDir("pi-dispatch-tla-");

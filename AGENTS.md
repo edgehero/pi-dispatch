@@ -28,6 +28,7 @@ Two consequences worth internalising before you design anything:
 | `worker/` | the queue consumer, the CLI (`pi-dispatch`), the forge hosts, doctor, service installer |
 | `receiver/` | the always-on trigger edge (`pi-dispatch-receiver`): webhook routes and the poller |
 | `admin/` | the operator console, a pi extension (`/dispatch`), TypeScript, bundled to `dist/` |
+| `gateway/` | optional sandbox browser attachment, a separately hosted process with local terminal assets |
 | `image/` | the job image and the in-container runner that implements the exit-code protocol |
 | `deploy/` | service units, wrappers and the compose file; `worker/deploy/` is the published mirror |
 | `specs/` | constitution, requirements, design, interfaces, open questions. The source of truth |
@@ -53,7 +54,7 @@ Two consequences worth internalising before you design anything:
   not a version, and this rule is in the constitution because ignoring it once nearly shipped a runner that
   imported an export the pinned release did not have. Docs are a hint; source at the pin is evidence.
 - **`CONST-MERGE-NEVER-AUTOMATIC`.** Nothing in this project merges anything, ever. CI greps
-  `worker/src`, `receiver/src`, `image/runner`, `.github/workflows/pi-bump.yml` and `.github/scripts` for
+  `worker/src`, `receiver/src`, `image/runner`, `gateway/src`, `.github/workflows/pi-bump.yml` and `.github/scripts` for
   `pulls.merge`, `gh pr merge`, any spelling of auto merge, a self-approval and friends, so even a comment
   mentioning one fails the build.
 - **`CONST-BUDGET-BEFORE-TOKENS`.** Free, determinate refusals go before anything that spends: before the

@@ -135,3 +135,13 @@ test("repository reader rejects traversal, host files and links, and binds admit
 	assert.deepEqual(reader.list().paths, ["README.md"]);
 	const cfg = input(); cfg.source.apiUrl = "https://evil.invalid"; assert.throws(() => validateAnswerInput(cfg));
 });
+
+test("pi 1.5.0's conversions are refused on the raw arguments with the retryable word, before anything spends (#796)", () => {
+	const f = fixture();
+	const tool = (name) => f.draft.tools.find((t) => t.name === name);
+	for (const [name, args] of [["submit_answer_draft", { draft: null, sources: ["s1"] }], ["submit_answer_draft", { draft: "d", sources: "s1" }], ["submit_answer_draft", { draft: "d", sources: [7] }], ["read_reply", { issue: 2.5, commentId: "1" }], ["list_replies", { issue: "2" }], ["read_repository", { path: null }]]) {
+		assert.throws(() => tool(name).prepareArguments(args), /answer-draft-refused/, `${name} ${JSON.stringify(args)}`);
+	}
+	assert.deepEqual(tool("submit_answer_draft").prepareArguments({ draft: "d", sources: ["s1"] }), { draft: "d", sources: ["s1"] });
+	for (const t of f.draft.tools) assert.equal(typeof t.prepareArguments, "function", `${t.name} goes through the rule`);
+});

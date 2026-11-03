@@ -1,0 +1,128 @@
+{
+  "card": "SandboxWatch",
+  "issue": 792,
+  "panels": [
+    "p-gateway-run",
+    "p-gateway-watch"
+  ],
+  "elements": [
+    {
+      "el": "p-gateway-run",
+      "kind": "panel",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "p-gateway-watch",
+      "kind": "panel",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/frontend.test.mjs"
+      ]
+    },
+    {
+      "el": "On the run page or in Sandboxes, an operator sees *lee is driving, and lets operators watch* and **Watch**. It asks for their own token again, as opening does, and opens this tab.",
+      "kind": "readme",
+      "source": "gateway/src/server.mjs#createGatewayServer",
+      "verification": [
+        "gateway/test/server.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "**The title** says whose shell and which run: Watching gh-9575, with the run's line under it.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "**The terminal** shows the same new output as the driver's, at the driver's size (120 × 36 here), with an internal scroll viewport when it does not fit. The toolbar says *Read only: you cannot type*. There is no Tab-focus switch and no Disconnect; **Stop watching** closes the tab's watch.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "Watching ends when the driver disconnects, turns watching off or removes the watcher, when the shell ends, or when the watcher's own session ends.",
+      "kind": "readme",
+      "source": "gateway/src/server.mjs#createGatewayServer",
+      "verification": [
+        "gateway/test/server.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "On a phone, no terminal opens.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "A `watch` grant: one use, 60 seconds, after the watcher's fresh sign-in with their own token, for that exact sandbox, only while its driver allows watching.",
+      "kind": "readme",
+      "source": "gateway/src/server.mjs#createGatewayServer",
+      "verification": [
+        "gateway/test/server.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "The driver's terminal size as it changes, and new output. No history, input or resize from a watcher.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "**Read only by construction.** The watcher's attach has no input stream, and the gateway drops any input or resize a watcher sends before it reaches the runtime. The tab's read-only look is not what stops typing.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "**The driver decides.** A watcher sees what is typed, a pasted token included, so watching is off by default, turned on by the person typing, and every watcher is listed on their screen with Remove.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "**Audited, not recorded.** Each watch's start and end are audited with who watched whom. What is shown is not kept, as for the driver.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    },
+    {
+      "el": "**One driver.** A watcher never types. Two people typing into one prompt is what a native terminal joining a shell already allows; the browser does not add a second way.",
+      "kind": "readme",
+      "source": "gateway/src/browser.mjs#mountGateway",
+      "verification": [
+        "gateway/test/workbench.test.mjs",
+        "gateway/test/session.test.mjs"
+      ]
+    }
+  ],
+  "fixture": "The pictured accounts, hosts, ids and output are illustrative. Actual authority, lifecycle, output isolation and browser behavior are checked independently."
+}

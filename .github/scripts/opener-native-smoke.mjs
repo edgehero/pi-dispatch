@@ -103,7 +103,7 @@ try {
 		const script = `$ErrorActionPreference='Stop'; Register-WmiEvent -Query "SELECT * FROM Win32_ProcessStopTrace WHERE ProcessName='node.exe'" -SourceIdentifier NativeNodeExit | Out-Null; [IO.File]::WriteAllText(${literal(exitReady)},'ready'); while ($true) { $e=Wait-Event -SourceIdentifier NativeNodeExit; $p=$e.SourceEventArgs.NewEvent; [IO.File]::AppendAllText(${literal(exitEvents)},(@{pid=[int]$p.ProcessID;parent=[int]$p.ParentProcessID;status=[uint32]$p.ExitStatus}|ConvertTo-Json -Compress)+[Environment]::NewLine); Remove-Event -EventIdentifier $e.EventIdentifier }`;
 		exitWatcher = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env, windowsHide: true, stdio: "ignore" });
 		exitWatcher.once("error", () => {});
-		try { await until(() => fs.existsSync(exitReady), "native process-exit observer readiness", 5_000); }
+		try { await until(() => fs.existsSync(exitReady), "native process-exit observer readiness"); }
 		catch { console.error("Native diagnostic process-exit observer was unavailable; the actual opener assertions still run."); exitWatcher.kill(); }
 	}
 	if (process.platform === "win32") {

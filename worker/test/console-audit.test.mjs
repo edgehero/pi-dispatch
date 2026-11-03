@@ -30,6 +30,30 @@ test("the vocabularies are frozen and match the contract", () => {
 	assert.deepEqual([...CONSOLE_AUDIT_OUTCOMES], ["ok", "refused", "failed"]);
 });
 
+test("watch audit rows preserve a strict second operator while ordinary rows retain their original shape", async () => {
+	const f = setup(), driver = { name: "ops", role: "operator", session: "b".repeat(12) };
+	const original = f.audit.append(row());
+	assert.equal(Object.hasOwn(original, "driver"), false);
+	const watch = f.audit.append(row({ action: "write", kind: "sandbox-watch-start", target: "host/container", driver, question: "PRIVATE" }));
+	assert.deepEqual(watch.driver, driver); assert.equal(Object.hasOwn(watch, "question"), false);
+	assert.equal(verifyConsoleAudit({ logsDir: f.logsDir }).ok, true);
+	const reads = readConsoleAudit({ logsDir: f.logsDir }); assert.deepEqual(reads.rows[0].driver, driver);
+	const mirrored = []; await mirrorRow({ lpush: async (_key, text) => mirrored.push(JSON.parse(text)), ltrim: async () => {} }, watch);
+	assert.deepEqual(mirrored[0].driver, driver);
+	for (const invalid of [null, { ...driver, question: "PRIVATE" }, { ...driver, role: "viewer" }, { ...driver, session: "raw-console-session" }, { ...driver, name: "<img>" }]) assert.throws(() => f.audit.append(row({ action: "write", kind: "sandbox-watch-end", driver: invalid })), /driver/);
+	assert.throws(() => f.audit.append(row({ driver })), /driver/);
+	assert.equal(f.lines("2026-10").length, 2, "invalid peers produce no partial audit write");
+});
+
+test("verification refuses a fabricated peer even on the last row, where no later digest could vouch for it", () => {
+	const f = setup(), driver = { name: "ops", role: "operator", session: "b".repeat(12) };
+	f.audit.append(row({ action: "write", kind: "sandbox-watch-start", driver }));
+	const value = JSON.parse(f.lines("2026-10")[0]); value.driver.token = "PRIVATE";
+	fs.writeFileSync(join(f.dir, "2026-10.jsonl"), JSON.stringify(value) + "\n");
+	const verdict = verifyConsoleAudit({ logsDir: f.logsDir });
+	assert.equal(verdict.ok, false); assert.match(verdict.broken.reason, /watch driver/);
+});
+
 test("every action and outcome the console writes has the shape an older verifier links (issue #761)", () => {
 	// The shape is the promise a verifier of an older release relies on: a value a later release adds outside it would
 	// make that verifier call an intact chain broken, so a list member outside it fails here, in the build that adds it.

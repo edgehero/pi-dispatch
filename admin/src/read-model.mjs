@@ -2665,6 +2665,25 @@ export function scanRunRecords({ logsDir, sinceMs, nowMs = Date.now(), fs = node
 }
 
 /**
+ * A window of the FLEET's run records: this host's files (`scanRunRecords`) merged with the run mirror, the only place
+ * another host's record can be read unless `PI_LOGS_DIR` is shared. For a question about a job that may have run
+ * anywhere the scan alone is a wrong answer rather than a partial one: a package canary that ran on another host would
+ * read as never tried, and Adopt would refuse a version a person watched finish (issue #796).
+ *
+ * Read-only and bounded like the fleet's own window. `{ records, partial }`, and it never rejects: a side that cannot
+ * be read, or a mirror with more in the window than the bound, says `partial`, so a caller can say a run may be missing
+ * rather than present what it has as the whole. A missing record fails toward another canary, never toward an Adopt.
+ */
+export async function scanFleetRunRecords({ redis = null, logsDir, sinceMs, nowMs = Date.now(), fs = nodeFs, limit = WIDE_RUNS, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
+  const local = scanRunRecords({ logsDir, sinceMs, nowMs, fs });
+  const { runs, degraded } = await readMirroredRuns(redis, { limit, sinceMs, prune: false, now: () => nowMs, timeoutMs });
+  return {
+    records: mergeRuns(Array.isArray(local) ? local : [], runs.map(shownRecord), { limit: Infinity }),
+    partial: !Array.isArray(local) || degraded === "truncated" || degraded.startsWith("unreachable"),
+  };
+}
+
+/**
  * The size suggestions of the given projects (issue #596, phase 3, DES-SIZE-SUGGESTIONS), for the PROJECTS view, the
  * `dispatch_limit_edit` preview and the insights page: per project id, the worker's own `suggestSize` over this host's
  * run records, with the exact call that applies it (`suggestionCall`) and its evidence in words. The records are read

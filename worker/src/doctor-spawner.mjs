@@ -82,6 +82,10 @@ export function makeDoctorSpawner({
 	platform = process.platform,
 	// Signals a whole process group (`process.kill(-pid, sig)`), a seam so a test sees the group kill without a process.
 	killGroup = (pid, sig) => process.kill(-pid, sig),
+	// Issue #796: the same idiom for another child of the CLI. Its arguments and its log events, and a free check that says whether to start one at all.
+	args = null,
+	events = { overlapped: "doctor_overlapped", spawnFailed: "doctor_spawn_failed", finished: "doctor_published" },
+	shouldRun = null,
 }) {
 	// The interval in whole hours, handed to the child so its record carries the cadence it really runs at.
 	const everyHours = Math.round(intervalMs / 3_600_000);
@@ -106,21 +110,27 @@ export function makeDoctorSpawner({
 	// The run in flight, `{ child, done }`, or null.
 	let running = null;
 
-	function runOnce() {
-		if (closed) return Promise.resolve();
+	async function runOnce() {
+		if (closed) return;
+		// A free answer first, where the caller has one: asked before the overlap check would log an overlap for a tick with nothing to do.
+		if (shouldRun && !running) {
+			let wanted = false;
+			try { wanted = await shouldRun(); } catch { /* could not ask: next tick */ }
+			if (!wanted || closed) return;
+		}
 		// No overlap, for the sweep's reason: a short interval against a slow host must not stack doctors that each spawn
 		// the same runtime commands and race to publish. Said once per skipped tick, never queued.
 		if (running) {
-			log("doctor_overlapped", {});
-			return Promise.resolve();
+			log(events.overlapped, {});
+			return;
 		}
 		const startedAt = now();
 		let child;
 		try {
-			child = spawnFn(execPath, [cliPath, "doctor", "--publish", `--by-worker=${everyHours}`], { cwd, env, stdio: ["ignore", "ignore", "pipe"], ...(grouped ? { detached: true } : {}) });
+			child = spawnFn(execPath, [cliPath, ...(args ?? ["doctor", "--publish", `--by-worker=${everyHours}`])], { cwd, env, stdio: ["ignore", "ignore", "pipe"], ...(grouped ? { detached: true } : {}) });
 		} catch (err) {
-			log("doctor_spawn_failed", { reason: err?.code ?? "spawn threw" });
-			return Promise.resolve();
+			log(events.spawnFailed, { reason: err?.code ?? "spawn threw" });
+			return;
 		}
 		let stderr = "";
 		let timedOut = false;
@@ -147,13 +157,13 @@ export function makeDoctorSpawner({
 				if (!closed) log(fields.event, fields.data);
 				resolve();
 			};
-			child.on?.("error", (err) => settle({ event: "doctor_spawn_failed", data: { reason: err?.code ?? "spawn failed" } }));
+			child.on?.("error", (err) => settle({ event: events.spawnFailed, data: { reason: err?.code ?? "spawn failed" } }));
 			child.on?.("close", (code, signal) => {
 				const ms = now() - startedAt;
-				if (timedOut) return settle({ event: "doctor_spawn_failed", data: { reason: "timeout", ms } });
+				if (timedOut) return settle({ event: events.spawnFailed, data: { reason: "timeout", ms } });
 				// `code` is doctor's own verdict (0 ready, 1 a check failed) and is reported as it is; whether the run reached
 				// Valkey is the one stderr line doctor writes when it did not. No label, no path: names and integers only.
-				settle({ event: "doctor_published", data: { code: code ?? null, signal: signal ?? null, ms, published: !stderr.includes(DOCTOR_PUBLISH_SKIPPED_PREFIX) } });
+				settle({ event: events.finished, data: { code: code ?? null, signal: signal ?? null, ms, published: !stderr.includes(DOCTOR_PUBLISH_SKIPPED_PREFIX) } });
 			});
 		});
 		running = { child, done };

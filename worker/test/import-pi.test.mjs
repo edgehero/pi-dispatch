@@ -218,6 +218,8 @@ function npmStub(materialize = goodPackage) {
 }
 
 const readManifest = (to) => JSON.parse(readFileSync(join(to, "packages", "packages.json"), "utf8"));
+/** Where a stage put a package: its own directory, named for the package and its version, and unique per stage (issue #796). */
+const stagedTree = (to, name) => join(to, "packages", readManifest(to).packages.find((p) => p.name === name).dir);
 
 test("--with-packages stages a pinned package into packages/<dir> and writes the stage manifest", async () => {
 	const from = hostAgent();
@@ -229,15 +231,17 @@ test("--with-packages stages a pinned package into packages/<dir> and writes the
 	const code = await run(from, to, ["--with-packages", "--packages-file", file], out, { exec });
 
 	assert.equal(code, 0);
-	assert.ok(existsSync(join(to, "packages", PKG_DIR, "package.json")), "a scoped name stages as scope__name");
-	assert.ok(existsSync(join(to, "packages", PKG_DIR, "node_modules", "left-pad")), "the staged dir is SELF-CONTAINED");
-	assert.ok(existsSync(join(to, "packages", "widgets", "package.json")), "an explicit dir wins over the derived one");
-	assert.equal(existsSync(join(to, "packages", ".staging-0")), false, "the staging dir is cleaned up");
-
 	const manifest = readManifest(to);
-	assert.deepEqual(manifest.packages, [
-		{ name: PKG, version: "0.1.0", dir: PKG_DIR, from: "pi-packages" },
-		{ name: "pi-widgets", version: "1.4.2", dir: "widgets", from: "pi-packages" },
+	const [first, second] = manifest.packages;
+	assert.match(first.dir, new RegExp(`^${PKG_DIR}--0\\.1\\.0--[0-9a-f]{8}$`), "a scoped name stages as scope__name, under its own stage");
+	assert.ok(existsSync(join(to, "packages", first.dir, "package.json")));
+	assert.ok(existsSync(join(to, "packages", first.dir, "node_modules", "left-pad")), "the staged dir is SELF-CONTAINED");
+	assert.match(second.dir, /^widgets--1\.4\.2--[0-9a-f]{8}$/, "an explicit dir wins over the derived one");
+	assert.ok(existsSync(join(to, "packages", second.dir, "package.json")));
+	assert.deepEqual(readdirSync(join(to, "packages")).filter((name) => name.startsWith(".staging")), [], "the staging dirs are cleaned up");
+	assert.deepEqual(manifest.packages.map(({ name, version, from }) => ({ name, version, from })), [
+		{ name: PKG, version: "0.1.0", from: "pi-packages" },
+		{ name: "pi-widgets", version: "1.4.2", from: "pi-packages" },
 	]);
 	assert.match(manifest.stagedAt, /^\d{4}-\d{2}-\d{2}T/);
 	assert.match(text(), /packages\/.*2 packages -- third-party code, VET THESE/);
@@ -327,9 +331,9 @@ test("the staged tree still lands under options.cwd, so the assertions and the r
 	const code = await run(hostAgent(), to, ["--with-packages", "--packages-file", file], () => {}, { exec, platform: "win32" });
 
 	assert.equal(code, 0);
-	assert.match(calls[0].options.cwd, /\.staging-0$/, "the cwd IS the private staging dir npm must install into");
-	assert.ok(existsSync(join(to, "packages", PKG_DIR, "package.json")), "the package was renamed out of <cwd>/node_modules/<name>");
-	assert.ok(existsSync(join(to, "packages", PKG_DIR, "node_modules", "left-pad")), "and its nested dependency came with it");
+	assert.match(calls[0].options.cwd, /[/\\]packages[/\\]\.staging-[0-9a-f]{12}$/, "the cwd IS the private staging dir npm must install into, unique so that a peer's cannot be deleted");
+	assert.ok(existsSync(join(stagedTree(to, PKG), "package.json")), "the package was renamed out of <cwd>/node_modules/<name>");
+	assert.ok(existsSync(join(stagedTree(to, PKG), "node_modules", "left-pad")), "and its nested dependency came with it");
 });
 
 test("--with-packages refuses the admin package outright and stages NOTHING", async () => {
@@ -414,7 +418,7 @@ test("a package with no pi manifest but a convention dir (skills/) is staged", a
 	const code = await run(hostAgent(), to, ["--with-packages", "--packages-file", file], () => {}, { exec });
 
 	assert.equal(code, 0);
-	assert.ok(existsSync(join(to, "packages", "pi-widgets", "skills", "tidy", "SKILL.md")));
+	assert.ok(existsSync(join(stagedTree(to, "pi-widgets"), "skills", "tidy", "SKILL.md")));
 });
 
 test('--with-packages refuses a pi manifest entry containing ".."', async () => {
@@ -439,7 +443,7 @@ test("a package declaring a postinstall script is staged WITH a warn row (--igno
 	const code = await run(hostAgent(), to, ["--with-packages", "--packages-file", file], out, { exec });
 
 	assert.equal(code, 0, "a warning is not a refusal");
-	assert.ok(existsSync(join(to, "packages", PKG_DIR, "package.json")), "it is still staged");
+	assert.ok(existsSync(join(stagedTree(to, PKG), "package.json")), "it is still staged");
 	assert.match(text(), /WARN:.*scripts\.postinstall, optionalDependencies.*INCOMPLETE/);
 	assert.deepEqual(readManifest(to).packages.length, 1);
 });
@@ -474,6 +478,34 @@ test("without --with-packages nothing is staged and the rest of the import is un
 	assert.equal(/packages\//.test(text()), false, "and the table gains no packages row");
 });
 
+test("a re-stage that fails leaves exactly what jobs are loading (issue #796)", async () => {
+	const to = overlayDir();
+	const file = packagesFile([{ name: PKG, version: "0.1.0" }]);
+	assert.equal(await run(hostAgent(), to, ["--with-packages", "--packages-file", file], () => {}, { exec: npmStub().exec }), 0);
+	const before = readManifest(to);
+	const loaded = join(to, "packages", before.packages[0].dir);
+	const twoFile = packagesFile([{ name: PKG, version: "0.1.0" }, { name: "pi-widgets", version: "1.4.2" }]);
+	const bad = npmStub((dir, name, version) => { if (name === "pi-widgets") writeJson(join(dir, "package.json"), { name, version }); else goodPackage(dir, name, version); });
+	const { out, text } = capture();
+	assert.equal(await run(hostAgent(), to, ["--with-packages", "--packages-file", twoFile], out, { exec: bad.exec }), 1);
+	assert.match(text(), /Nothing was staged/);
+	assert.deepEqual(readManifest(to), before, "the manifest still names the old set");
+	assert.ok(existsSync(join(loaded, "package.json")), "a tree a running job has mounted is never deleted first");
+	assert.deepEqual(readdirSync(join(to, "packages")).sort(), [".retired.json", before.packages[0].dir, "packages.json"].sort(), "nothing of the failed stage is left");
+});
+
+test("a successful re-stage keeps the tree it replaced, for the job that has it mounted (issue #796)", async () => {
+	const to = overlayDir();
+	const file = packagesFile([{ name: PKG, version: "0.1.0" }]);
+	assert.equal(await run(hostAgent(), to, ["--with-packages", "--packages-file", file], () => {}, { exec: npmStub().exec }), 0);
+	const first = readManifest(to).packages[0].dir;
+	assert.equal(await run(hostAgent(), to, ["--with-packages", "--packages-file", file], () => {}, { exec: npmStub().exec }), 0);
+	const second = readManifest(to).packages[0].dir;
+	assert.notEqual(first, second);
+	assert.ok(existsSync(join(to, "packages", first, "package.json")));
+	assert.ok(existsSync(join(to, "packages", second, "package.json")));
+});
+
 test("re-running without the flag keeps an existing packages/ and reports it dormant", async () => {
 	const from = hostAgent();
 	const to = overlayDir();
@@ -485,7 +517,7 @@ test("re-running without the flag keeps an existing packages/ and reports it dor
 
 	assert.equal(code, 0);
 	assert.match(text(), /packages\/\s+kept -- re-run with --with-packages to refresh/);
-	assert.ok(existsSync(join(to, "packages", PKG_DIR, "package.json")), "the staged packages survive a plain re-run");
+	assert.ok(existsSync(join(stagedTree(to, PKG), "package.json")), "the staged packages survive a plain re-run");
 	assert.deepEqual(readManifest(to).packages.length, 1, "and so does the stage manifest");
 });
 
@@ -523,7 +555,8 @@ test("--with-packages stages what pi has installed, at the host's EXACT version,
 	// rests on it too.
 	assertArgvHasNoPath(calls[0].args, calls[0].options.cwd);
 
-	assert.deepEqual(readManifest(to).packages, [{ name: HOST_PKG, version: "1.4.2", dir: "acme__pi-house-skills", from: "host" }]);
+	assert.deepEqual(readManifest(to).packages.map(({ name, version, from }) => ({ name, version, from })), [{ name: HOST_PKG, version: "1.4.2", from: "host" }]);
+	assert.match(readManifest(to).packages[0].dir, /^acme__pi-house-skills--1\.4\.2--[0-9a-f]{8}$/);
 	assert.match(text(), /^\s+- @acme\/pi-house-skills@1\.4\.2 \(from your pi setup\)$/m, "provenance rides on the name row, so the vetting list says where each came from");
 	assert.match(text(), /re-run with --no-host-packages/, "and the run whose meaning changed names how to get the old one back");
 });
