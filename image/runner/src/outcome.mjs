@@ -384,15 +384,17 @@ export async function loadRetryPredicate({ module = null, candidates = [], load 
 }
 
 /**
- * The most a `message` may add to an exit line, counted AS SERIALIZED (issue #437 review). The worker
+ * The most a `message` may add to an exit line, counted as JSON.stringify spells it (issue #437 review). The worker
  * recovers the exit line from the last 8 KiB of container stdout (worker/src/run-history.mjs,
  * TAIL_CAP_BYTES, which counts string characters), and a provider's error body is unbounded: a 15 KB
  * HTML 403 put in whole pushes the line's head, where `code` and `reason` sit, out of that tail, and the
  * record loses the label. The budget is spent on the JSON-escaped form, not on the raw string, because
- * escaping is what the tail sees: a quote or a newline costs two characters and a control byte six, so a
- * raw-length cap of 2000 let a body of control bytes serialize to 12000 and lose the label anyway.
- * 1700 escaped characters plus the worst-case ledger, context, session and resources keeps the whole line
- * under 6 KiB, a 2 KiB margin inside the tail; worker/test/run-history.test.mjs measures exactly that line.
+ * a quote or a newline costs two characters and a control byte six, so a raw-length cap of 2000 let a body of
+ * control bytes serialize to 12000 and lose the label anyway. It is NOT what the line finally spends on it: since
+ * issue #800 the line is written in ASCII, so a non-ASCII character counted as one here is six there. The writer holds
+ * that itself (exit-line.mjs: `EXIT_MESSAGE_MAX_BYTES` as written, then `EXIT_LINE_MAX_BYTES` for the whole line).
+ * 1700 escaped characters plus the worst-case ledger, context, session and resources keeps a line whose message is
+ * ASCII under 6 KiB, a 2 KiB margin inside the tail; worker/test/run-history.test.mjs measures exactly that line.
  * It was 2000 until issue #596's `swapPeak` took the worst-case line past 6 KiB, then 1900 until the test was
  * found measuring the line unsigned and with a shorter reason than the longest: signed, at the longest runner
  * policy reason, 1900 left 9 characters, then 1800 until issue #796's `providerBilled` took 26 more characters on

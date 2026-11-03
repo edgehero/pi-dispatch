@@ -52,7 +52,7 @@ export const LOADED_MAX_EXT_TOOLS = 24;
 export const LOADED_MAX_COUNT = 999;
 export const LOADED_MAX_PROBLEM_COUNT = 99;
 export const LOADED_MAX_TOOL_COUNT = 9999;
-export const LOADED_OVERLAY_NAME_RE = /^[A-Za-z0-9._-]{1,48}$/;
+export const LOADED_OVERLAY_NAME_RE = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,48}$/;
 export const LOADED_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,47}$/;
 export const LOADED_JOB_TOOLS = Object.freeze(["report_progress", "await_human_input", "request_approval", "subagent", "codemode", "tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "query_logs", "decide", "board_write", "read_question", "list_repository", "read_repository", "read_standing_answer", "read_reply", "list_replies", "submit_answer_draft"]);
 

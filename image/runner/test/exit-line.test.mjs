@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { createExitWriter, drainStdin, EXIT_LINE_MAX_BYTES, EXIT_TAIL_BYTES, EXIT_TERMINATED, exitLineJson, exitLineMac, exitLineMaxBytes, readExitKey, signExitLine, SUPERVISOR_LINE_BYTES, writeAllSync } from "../src/exit-line.mjs";
+import { createExitWriter, drainStdin, EXIT_LINE_MAX_BYTES, EXIT_MESSAGE_MAX_BYTES, EXIT_TAIL_BYTES, EXIT_TERMINATED, exitLineJson, exitLineMac, exitLineMaxBytes, readExitKey, signExitLine, SUPERVISOR_LINE_BYTES, writeAllSync } from "../src/exit-line.mjs";
 import { buildLoaded, fitLoaded } from "../src/loaded.mjs";
 import { capExitMessage } from "../src/outcome.mjs";
 import { maximalLoaded } from "./helpers/maximal-loaded.mjs";
@@ -181,12 +181,12 @@ test("image entrypoint runs the runner under the exec-only node the Dockerfile i
 });
 
 /** Run the harness: key on stdin, wait for its tool child to forge, then stop it the way `docker stop` does. */
-function runHarness({ key, bigMessage = 0 }) {
+function runHarness({ key, bigField = 0 }) {
 	return new Promise((resolve, reject) => {
 		const env = { ...process.env };
 		delete env.PI_EXIT_AUTH;
 		if (key) env.PI_EXIT_AUTH = "stdin";
-		if (bigMessage > 0) env.HARNESS_BIG_MESSAGE = String(bigMessage);
+		if (bigField > 0) env.HARNESS_BIG_FIELD = String(bigField);
 		const child = spawn(process.execPath, [new URL("./fixtures/exit-harness.mjs", import.meta.url).pathname], { stdio: ["pipe", "pipe", "pipe"], env });
 		child.stdin.end(key ? `${key}\n` : "");
 		let out = "";
@@ -255,11 +255,11 @@ test("writeAllSync writes every byte through short writes and a full pipe's EAGA
 
 test("a large exit line written on SIGTERM and exited on at once arrives whole and verified (PR #555's review)", async () => {
 	const size = 1024 * 1024;
-	const { out, code } = await runHarness({ key: KEY, bigMessage: size });
+	const { out, code } = await runHarness({ key: KEY, bigField: size });
 	assert.equal(code, 143);
 	const verified = authenticExitLines(out, KEY);
 	assert.notEqual(verified, "", "the signed line arrived whole: a truncated tail would fail its MAC");
-	assert.equal(JSON.parse(verified).message.length, size);
+	assert.equal(JSON.parse(verified).padding.length, size);
 });
 
 test("run-job.mjs writes the exit line synchronously to fd 1", () => {
@@ -557,7 +557,7 @@ test("which form is chosen at each boundary: full, compact, minimal, then the me
 	const message = "m".repeat(400);
 	const fields = { code: 2, reason: "error", message, tokens: { total: 7 } };
 	const [, compactForm, minimalForm] = fitLoaded(NOTED_LOADED);
-	const size = (form, messageText = message) => bytesOf(`\n${signExitLine(JSON.stringify({ event: "exit", jobId: "j", ...(form ? { loaded: form } : {}), ...fields, message: messageText }), KEY)}\n`);
+	const size = (form, messageText = message) => bytesOf(`\n${signExitLine(JSON.stringify({ event: "exit", jobId: "j", ...(form ? { loaded: form } : { loadedCut: true }), ...fields, message: messageText }), KEY)}\n`);
 	const sizes = { full: size(NOTED_LOADED), compact: size(compactForm), minimal: size(minimalForm), minimalBare: size(minimalForm, ""), none: size(null), noneBare: size(null, "") };
 	assert.ok(sizes.full > sizes.compact && sizes.compact > sizes.minimal && sizes.minimal > sizes.minimalBare, JSON.stringify(sizes));
 	const at = (maxBytes) => bodyOf(linedWith(fields, { maxBytes }));
@@ -579,9 +579,11 @@ test("which form is chosen at each boundary: full, compact, minimal, then the me
 
 	const dropped = at(sizes.minimalBare - 1);
 	assert.equal(Object.hasOwn(dropped, "loaded"), false, "no room for even its smallest form: the field goes");
+	assert.equal(dropped.loadedCut, true, "and says so, so it never reads like an older image's silence");
 	assert.ok(dropped.message.length > 0, "and the message gets what that freed");
-	assert.deepEqual(at(sizes.noneBare), { event: "exit", jobId: "j", code: 2, reason: "error", message: "", tokens: { total: 7 } });
-	assert.deepEqual(at(sizes.noneBare - 1), { event: "exit", jobId: "j", code: 2, reason: "error", tokens: { total: 7 }, lineCut: true }, "the last resort, which still verifies");
+	assert.deepEqual(at(sizes.noneBare), { event: "exit", jobId: "j", code: 2, reason: "error", message: "", tokens: { total: 7 }, loadedCut: true });
+	// The last resort drops what is not the settlement's, and this line holds nothing else to drop, so it is no smaller than the bare line above.
+	assert.deepEqual(at(sizes.noneBare - 1), { event: "exit", code: 2, lineCut: true, loadedCut: true }, "the smallest line, which still verifies");
 	for (const maxBytes of [sizes.full, sizes.full - 1, sizes.compact - 1, sizes.minimal - 1, sizes.minimalBare, sizes.minimalBare - 1, sizes.noneBare]) {
 		assert.ok(bytesOf(linedWith(fields, { maxBytes })) <= maxBytes, `the line is held to ${maxBytes}`);
 	}
@@ -636,5 +638,54 @@ test("a noted `loaded` that cannot be fitted costs the field and never the line:
 	const line = linedWith({ code: 0, reason: "stop", tokens: { total: 7 } }, { loaded: { v: 1, at: "ready", tiers: { package: null } } });
 	const body = bodyOf(line);
 	assert.equal(Object.hasOwn(body, "loaded"), false);
+	assert.equal(body.loadedCut, true, "a note that did not make it is said");
 	assert.equal(body.tokens.total, 7);
+});
+
+test("`loadedCut` is said only of a noted `loaded`: a line with nothing noted stays what an older worker has always read", () => {
+	assert.equal(Object.hasOwn(bodyOf(linedWith({ code: 0, reason: "stop" }, { note: false })), "loadedCut"), false);
+	assert.equal(Object.hasOwn(bodyOf(linedWith({ code: 0, reason: "stop", message: "m".repeat(400) }, { note: false, maxBytes: 200 })), "loadedCut"), false, "however far the line was cut");
+	assert.equal(Object.hasOwn(bodyOf(linedWith({ code: 0, reason: "stop" })), "loadedCut"), false, "nor when the field made it");
+});
+
+test("a field the last resort keeps is not bounded either, so past it the line is event, code and lineCut, and still verifies", async () => {
+	for (const fields of [{ code: 2, reason: "r".repeat(20_000) }, { code: 2, reason: "error", tokens: { total: 7, pad: "x".repeat(20_000) } }, { code: 2, reason: "error", why: "w".repeat(20_000) }]) {
+		const line = writeOne(fields);
+		assert.ok(Buffer.byteLength(line) <= EXIT_LINE_MAX_BYTES, `the line is ${Buffer.byteLength(line)} bytes`);
+		assert.deepEqual(JSON.parse(authenticExitLines(line, KEY)), { event: "exit", code: 2, lineCut: true });
+		const read = await throughSink(line);
+		assert.equal(read.exitAuth, "verified");
+		assert.equal(read.exitLineCode, 2);
+		assert.equal(read.tokens, null, "no tokens to trust, so the dollars settle at the floor: it fails closed");
+	}
+	assert.deepEqual(bodyOf(linedWith({ code: 2, reason: "r".repeat(20_000) }, { maxBytes: EXIT_LINE_MAX_BYTES })), { event: "exit", code: 2, lineCut: true, loadedCut: true }, "a noted `loaded` is still said");
+	assert.deepEqual(bodyOf(linedWith({ code: 1, reason: "error", tokens: { total: 7 }, usage: { models: "u".repeat(20_000) } }, { maxBytes: EXIT_LINE_MAX_BYTES })), { event: "exit", jobId: "j", code: 1, reason: "error", tokens: { total: 7 }, lineCut: true, loadedCut: true }, "and on the last resort too");
+	assert.deepEqual(bodyOf(linedWith({ reason: "r".repeat(20_000) }, { note: false, maxBytes: EXIT_LINE_MAX_BYTES })), { event: "exit", lineCut: true }, "a line that named no code names none");
+	const longId = "i".repeat(9000);
+	const out = [];
+	createExitWriter({ key: KEY, jobId: longId, write: (s) => out.push(s), exit: () => {} }).writeExit({ code: 2, reason: "error" });
+	assert.deepEqual(bodyOf(out[0]), { event: "exit", code: 2, lineCut: true }, "the smallest line names no job id, so even an id past the whole tail cannot cost it");
+	assert.ok(Buffer.byteLength(out[0]) < 200);
+});
+
+test("a long non-ASCII error is held to 2 KiB as written before any form is chosen, so it cannot cost the record of what loaded", async () => {
+	assert.equal(EXIT_MESSAGE_MAX_BYTES, 2048);
+	const capped = capExitMessage({ code: 2, reason: "provider-auth-refused", message: "中".repeat(1700) });
+	assert.equal(capped.message.length, 1700, "the premise: capExitMessage counts each as one, and the line spells each in six");
+	const out = [];
+	const writer = createExitWriter({ key: KEY, jobId: JOB_ID, write: (s) => out.push(s), exit: () => {} });
+	writer.note({ loaded: NOTED_LOADED });
+	writer.writeExit(capped);
+	const body = bodyOf(out[0]);
+	assert.equal(body.loaded.cut.form, "full");
+	assert.match(body.message, /^中+\.\.\. \[truncated \d+ chars\]$/);
+	assert.ok(exitLineJson(body.message).length - 2 <= EXIT_MESSAGE_MAX_BYTES, "held as written");
+	assert.equal((await throughSink(out[0])).exitAuth, "verified");
+	const worst = [];
+	const worstWriter = createExitWriter({ key: KEY, jobId: JOB_ID, write: (s) => worst.push(s), exit: () => {}, resources: () => LONGEST_RESOURCES });
+	worstWriter.note({ loaded: maximalLoaded() });
+	worstWriter.writeExit({ ...capped, turns: 4 });
+	assert.equal(bodyOf(worst[0]).loaded.cut.form, "full", "every list at its cap too");
+	const ascii = "m".repeat(1700);
+	assert.equal(bodyOf(linedWith(capExitMessage({ code: 2, reason: "error", message: ascii }))).message, ascii, "what capExitMessage passes in ASCII is untouched");
 });

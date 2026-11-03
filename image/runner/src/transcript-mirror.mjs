@@ -10,7 +10,7 @@ import { writeAllSync } from "./exit-line.mjs";
  * feeds it into the same live-transcript path a bind-mounted file takes (worker/src/stderr-transcript.mjs).
  *
  * WHY STDERR AND NOT STDOUT. stdout already carries the runner's log and the signed exit line, which the worker reads
- * from a bounded 64 KiB TAIL (run-history.mjs): a transcript burst on stdout would push the exit line's neighbours out
+ * from a bounded 8 KiB TAIL (run-history.mjs): a transcript burst on stdout would push the exit line's neighbours out
  * of that tail, and a record stream on the same pipe as the exit line is one more thing a reader of either must get
  * right. stderr carries nothing the worker parses, so the records are the only structure on it. OpenShell's
  * `sandbox exec --no-tty` keeps the two streams apart (measured, 0.1.4), forwarding each in reads of up to 4 KiB that are

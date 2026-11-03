@@ -318,6 +318,57 @@ test("the job's own tool is named as the job's, on a real session, and a package
 	}
 });
 
+test("a hostile overlay file name never reaches the line: the operator's folder is held to the same shape as a repository's", { skip }, async () => {
+	const server = await chatServer();
+	try {
+		const root = jobTree({ base: server.base });
+		put(root, '/opt/pi-global/extensions/evil name "quoted".js', extension(["hostile_overlay_tool"]));
+		put(root, "/opt/pi-global/extensions/fine.js", extension(["fine_tool"]));
+		const { exit, stdout, stderr, code } = await runRealJob(root);
+		assert.equal(code, 0, `${JSON.stringify(exit)}\n${stderr}`);
+		const line = rawExitLine(stdout);
+		assert.doesNotMatch(line, /evil|quoted|hostile_overlay_tool/, line);
+		assert.deepEqual(exit.loaded.overlay.loaded, ["fine.js"]);
+		assert.equal(exit.loaded.tiers.overlay[LOADED_ROW.indexOf("extensions")], 2, "it loaded, and it counts");
+		assert.ok(exit.loaded.cut.names >= 2, `its name and its tool are counted as cut: ${JSON.stringify(exit.loaded.cut)}`);
+	} finally {
+		await server.close();
+	}
+});
+
+test("PI_GLOBAL_ALLOW_EXTENSIONS=0: no overlay extension loads, and the line says none did", { skip }, async () => {
+	const server = await chatServer();
+	try {
+		const root = jobTree({ base: server.base });
+		put(root, "/opt/pi-global/extensions/git-guard.js", extension(["guard_check"]));
+		const { exit, stderr, code } = await runRealJob(root, { PI_GLOBAL_ALLOW_EXTENSIONS: "0" }, { key: KEY });
+		assert.equal(code, 0, `${JSON.stringify(exit)}\n${stderr}`);
+		assert.deepEqual(exit.loaded.overlay, { loaded: [], failed: [] });
+		assert.deepEqual(exit.loaded.tiers.overlay, [0, 0, 0, 0, 0, 0, 0, 0]);
+		assert.deepEqual(exit.loaded.extTools, { p: [], o: [] });
+	} finally {
+		await server.close();
+	}
+});
+
+test("a manifest that climbs out of the overlay reads as where it landed, with no `..` and no folder's name for it", { skip }, async () => {
+	const server = await chatServer();
+	try {
+		const root = jobTree({ base: server.base });
+		put(root, "/opt/pi-global/extensions/climb/package.json", JSON.stringify({ name: "climb", pi: { extensions: ["../../../../workspace/climbed.js"] } }));
+		put(root, "/workspace/climbed.js", extension(["climbed_tool"]));
+		const { exit, stdout, stderr, code } = await runRealJob(root);
+		assert.equal(code, 0, `${JSON.stringify(exit)}\n${stderr}`);
+		const line = rawExitLine(stdout);
+		assert.doesNotMatch(line, /\.\.|climb/, line);
+		assert.deepEqual(exit.loaded.overlay.loaded, []);
+		assert.equal(exit.loaded.tiers.repository[LOADED_ROW.indexOf("extensions")], 1, "pi normalises what it hands back at the pin, so it reads as the workspace's");
+		assert.equal(exit.loaded.tiers.other[LOADED_ROW.indexOf("extensions")], 0);
+	} finally {
+		await server.close();
+	}
+});
+
 test("a server that connects counts its tools beside a disabled one, and neither name reaches the line", { skip }, async () => {
 	const server = await chatServer();
 	try {

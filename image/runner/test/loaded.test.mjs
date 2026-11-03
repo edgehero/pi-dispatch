@@ -13,6 +13,7 @@ import {
 	LOADED_MAX_PACKAGES,
 	LOADED_MAX_SERVERS,
 	LOADED_MCP_STATES,
+	LOADED_OVERLAY_NAME_RE,
 	LOADED_ROW,
 	LOADED_STAGES,
 	LOADED_TIERS,
@@ -164,6 +165,29 @@ test("`own` is pi's own active tools: a removed tool leaves it, an inactive one 
 	assert.deepEqual(session({ tools: [tool("custom", "builtin:custom")], active: ["custom"], ownNames }).tools.own, [], "only the names of pi's own set");
 });
 
+test("a path that climbs is no tier's and names no overlay extension, though pi normalises what it hands back at the pin", () => {
+	const climbing = `${OVERLAY_EXT}/HOSTILE-seg/../../../../workspace/evil.js`;
+	assert.equal(tierOf(climbing, ROOTS), "other");
+	assert.equal(tierOf(`${LINT}/../fmt/ext.js`, ROOTS), "other", "under a package's root, too");
+	assert.equal(tierOf(`${LINT}/..evil/ext.js`, ROOTS), "package", "a name that only starts with dots is not a climb");
+	const loaded = session({ extensions: [climbing, `${OVERLAY_EXT}/./dot.js`, `${OVERLAY_EXT}/kept.js`], tools: [tool("hostile_tool", climbing), tool("kept_tool", `${OVERLAY_EXT}/kept.js`)] });
+	assert.deepEqual(loaded.overlay.loaded, ["kept.js"], "not `HOSTILE-seg`, not `..`, not `.`");
+	assert.equal(loaded.tiers.other[slot.extensions], 1);
+	assert.equal(loaded.tiers.other[slot.tools], 1);
+	assert.deepEqual(loaded.extTools.o, [[0, "kept_tool"]]);
+	assert.doesNotMatch(JSON.stringify(loaded), /HOSTILE|hostile_tool|\.\./);
+});
+
+test("`.` and `..` are no overlay name, wherever one is read from", () => {
+	for (const name of [".", ".."]) assert.equal(LOADED_OVERLAY_NAME_RE.test(name), false, name);
+	for (const name of ["...", ".hidden", "..double", "a.js", "a..b"]) assert.equal(LOADED_OVERLAY_NAME_RE.test(name), true, name);
+	const { tee } = teed([FAILED_LINE([{ entry: "../outside.js", root: "/opt/pi-global/extensions", kind: "load" }, { entry: "./inside.js", root: "/opt/pi-global/extensions", kind: "load" }])]);
+	const loaded = session({ failures: tee.failures() });
+	assert.deepEqual(loaded.overlay.failed, [], "a failure's first segment, too");
+	assert.equal(loaded.cut.names, 2, "counted, never dropped silently");
+	assert.equal(loaded.tiers.overlay[slot.failed], 2, "and each still counts as a failure");
+});
+
 test("`job` is the job's own active tools, by name and by source: another extension's tool of that name is not the job's", () => {
 	const tools = [tool("report_progress", "<inline:job-report-progress>"), tool("await_human_input", "<inline:job-await-input>"), tool("codemode", "<inline:job-codemode>"), tool("mcp__a__b", "<inline:job-mcp>"), tool("query_logs", `${LINT}/ext.js`)];
 	const loaded = session({ tools, active: ["report_progress", "codemode", "mcp__a__b", "query_logs"] });
@@ -253,9 +277,11 @@ test("hostile repository skill and extension names never reach the line: asserte
 			active: [hostile],
 			ownNames: [],
 		});
-		assert.equal(loaded.flow, "repository", "the flow's tier, a closed word");
-		assert.equal(loaded.tiers.repository[slot.skills], 1, "it was counted");
-		assert.equal(loaded.packages[0][slot.shadowed], 1);
+		// A path that climbs is no tier's, whichever root it starts under.
+		const climbs = hostile.split("/").includes("..");
+		assert.equal(loaded.flow, climbs ? "other" : "repository", "the flow's tier, a closed word");
+		assert.equal(loaded.tiers[climbs ? "other" : "repository"][slot.skills], 1, "it was counted");
+		assert.equal(loaded.packages[0][slot.shadowed], climbs ? 0 : 1);
 		for (const form of fitLoaded(loaded)) {
 			const bytes = JSON.stringify(form);
 			assert.doesNotMatch(bytes, /evil|ignore all|\\u0430|а|passwd|control|\\n|\\u0001/, `${hostile} reached the ${form.cut.form} form: ${bytes}`);

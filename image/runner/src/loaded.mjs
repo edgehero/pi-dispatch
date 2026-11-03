@@ -8,17 +8,20 @@ import { owningRoot } from "./packages.mjs";
  * words, and only such names as the deployment staged or configured.
  *
  * THE HOSTILE-NAME RULE, the reason for the file's shape. A repository picks its skill and extension names, its paths
- * and the text its extensions throw, and the run record holds no string a repository chose. So a repository's part is
- * counts and nothing else: every name on the line is either one of the closed words below, an overlay extension's first
- * path segment, or a tool attributed to a staged package or an overlay extension, and each of those two passes a shape
- * check here. Package and server names are not on the line at all: rows are positional, aligned with PI_PACKAGES and
- * PI_MCP_SERVERS, and the worker joins them with what it staged. REJECTED: filtering a list of names at the worker,
- * which would put repository strings on a line a tool can read off the pipe, and trust a filter to take them back out.
+ * and the text its extensions throw, and the run record holds no string a repository chose. So through ordinary API use a
+ * repository's part is counts and nothing else: every name on the line is either one of the closed words below, an overlay
+ * extension's first path segment, or a tool attributed to a staged package or an overlay extension, and each of those two
+ * passes a shape check here. Package and server names are not on the line at all: rows are positional, aligned with
+ * PI_PACKAGES and PI_MCP_SERVERS, and the worker joins them with what it staged. REJECTED: filtering a list of names at the
+ * worker, which would put repository strings on a line a tool can read off the pipe, and trust a filter to take them back out.
  *
- * Residual, not closed here: a repository extension shares this process, so it could mutate a loaded extension's source
- * and make a name of the right shape read as a package's. The worker checks each name against what it knows (the
- * signature vouches for the runner, not for what an extension in its process did), and a tool name can only narrow what
- * a later chip excludes.
+ * WHAT THE CHECKS HERE ARE NOT (the OQ-003 residual). A repository extension shares this process, so it can put ANY string
+ * on the line: patching `RegExp.prototype.test`, `Array.prototype.map` or `JSON.stringify` is enough, with a source path
+ * mutated to read as a package's, and the runner signs what comes out. So the shape checks here cover ordinary API use and
+ * no more, and the signature vouches for the runner's channel and not for what is on it. The worker's rebuild is the
+ * boundary (worker/src/loaded-record.mjs `rebuildLoaded`): it checks every string it keeps against the same closed patterns,
+ * in its own process. What survives that is a token of a closed shape, and for a tool name the worker has no list to check
+ * against, so such a token can only narrow what a later chip excludes.
  *
  * Everything here is pure and handed its inputs, so it tests without pi or a container. packages.mjs is the one import,
  * for its segment-safe containment, and it reads no pi.
@@ -44,7 +47,8 @@ export const LOADED_MAX_COUNT = 999;
 export const LOADED_MAX_PROBLEM_COUNT = 99;
 export const LOADED_MAX_TOOL_COUNT = 9999;
 const FIRST_PROBLEM_SLOT = SLOT.failed;
-export const LOADED_OVERLAY_NAME_RE = /^[A-Za-z0-9._-]{1,48}$/;
+/** A first path segment: never `.` or `..`, which are a path's parts and name no extension, though the charset holds them. */
+export const LOADED_OVERLAY_NAME_RE = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,48}$/;
 export const LOADED_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,47}$/;
 /**
  * The tools the job's own factories can register, by name: the only tools `tools.job` may name, so `active` adds up for a
@@ -89,6 +93,9 @@ const INLINE_PATH_PREFIX = "<inline:";
  */
 export function tierOf(path, { packages = [], jobPi, triggerSkills, overlay, workspace } = {}) {
 	if (typeof path !== "string" || path === "" || path.startsWith(INLINE_PATH_PREFIX)) return null;
+	// Containment is by prefix, so a path that climbs reads as the root it climbs out of. pi normalises what it hands back at
+	// the pin and nothing pins that, so a segment that climbs is no tier's.
+	if (path.split("/").includes("..")) return "other";
 	const ordered = [...packages.map((root) => [root, "package"]), [jobPi, "repository"], [triggerSkills, "trigger"], [overlay, "overlay"], [workspace, "repository"]];
 	const owner = owningRoot(path, ordered.map(([root]) => root));
 	return owner === null ? "other" : ordered.find(([root]) => root === owner)[1];
@@ -97,9 +104,11 @@ export function tierOf(path, { packages = [], jobPi, triggerSkills, overlay, wor
 /** The folder under the overlay its extensions load from, as the loader's own constant builds it. */
 const overlayExtensionsOf = (roots) => `${roots.overlay}/extensions`;
 
-/** A path's first segment under `dir`, or null when `dir` does not hold it. The name an operator's overlay knows it by. */
+/** A path's first segment under `dir`, or null when `dir` does not hold it, or when the rest of it climbs or is a path's own part. The name an operator's overlay knows it by. */
 function firstSegmentUnder(path, dir) {
-	return typeof path === "string" && path.startsWith(`${dir}/`) ? path.slice(dir.length + 1).split("/")[0] : null;
+	if (typeof path !== "string" || !path.startsWith(`${dir}/`)) return null;
+	const segments = path.slice(dir.length + 1).split("/");
+	return segments.includes("..") || segments.includes(".") ? null : segments[0];
 }
 
 /**

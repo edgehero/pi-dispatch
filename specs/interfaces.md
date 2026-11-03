@@ -804,10 +804,12 @@ refactor apart.
     worker's sink decodes each stdout chunk alone, so a multi-byte character a pipe hands over in two chunks became
     U+FFFD and failed the MAC. The bytes signed, the bytes written and the text the worker verifies are one string, and
     `JSON.parse` reads back the same value, so an older worker needs no change.
-  - **A cut, not a loss.** A line past its limit has `message` cut to the room left, on whole code points and with the same marker.
+  - **A cut, not a loss.** `message` is first held to `EXIT_MESSAGE_MAX_BYTES`, 2,048 bytes as written, before any form of `loaded` is chosen: 1,700 CJK characters pass `capExitMessage`
+    and escape to six bytes each, which would otherwise cost the record of what the job loaded. A line past its limit then has `message` cut to the room left, on whole code points and with the same marker.
     A room too small for the marker leaves it empty. A line that still does not fit keeps only `code`, `reason`,
     `why`, `by` and `tokens`, with `lineCut: true`: no reader needs that key, and it says in the job's log that this happened. It takes
-    a field nothing bounds to get there; nothing a run produces today does.
+    a field nothing bounds to get there; nothing a run produces today does. If even that does not fit (those fields are not bounded either: a 20,000-character `reason` is a line of 20,458 bytes),
+    the line is `event`, `code` and `lineCut` alone, with no job id. It verifies, and with no tokens it settles at the floor, which fails closed.
   - **Raising the tail is rejected.** It does nothing for an older worker reading a newer image, which is what a host
     mid-upgrade runs. `TAIL_CAP_BYTES` is UNCHANGED, checked, and so are the 1700 cap and its 6 KiB test.
 
@@ -938,17 +940,20 @@ refactor apart.
   | `extTools` | The names of the tools a staged package or an overlay extension brought, for a later switch that excludes one: `p` rows of `[PI_PACKAGES position, ...names]`, `o` rows of `[overlay.loaded position, ...names]`, sorted, each name matching `^[A-Za-z][A-Za-z0-9_-]{0,47}$`. Read before the first prompt, so nothing the agent writes can reach it |
   | `cut` | `form`, one of `full`, `compact`, `minimal`, and how many `packages` rows, `servers`, `names` and `counts` a cap took. Nothing is dropped silently |
 
-  **The hostile-name rule: no string a repository chose reaches this field.** A repository's skills, extensions and
+  **The hostile-name rule: through ordinary API use, no string a repository chose reaches this field.** A repository's skills, extensions and
   tools are counts. Failures and drops are read by teeing the loader's own log (`createLoadTee`), so record and log cannot
   disagree, and of each entry only its root and kind survive the tee, plus the first path segment for an overlay
   entry alone; those log lines can name repository paths, and that stops there. One extension is one failure however
   many entries name it. `kind: "conflict"` counts as failed, as it does on the log line: pi loaded the extension, but a
   tool or flag it registered is shared with another, so one of them is not what it was written to be. A held-back
-  overlay (`overlay_extensions_withheld`) counts one failure on `overlay`. Every other string on the line is from a closed set, or passes a shape: an overlay
-  name at most 48 characters of `[A-Za-z0-9._-]`, a tool name as above. A name failing its shape is dropped and counted in
-  `cut.names`. **Residual, stated:** a repository extension shares this process, so it could mutate a loaded extension's
-  source and make a name of the right shape read as a package's. The signature vouches for the runner and not for what
-  an extension did in its process, so the worker checks each name against what it knows. A name can only narrow what a later
+  overlay (`overlay_extensions_withheld`) counts one failure on `overlay`. Every other string the runner puts there comes from a closed set, or passes a shape in the runner: an overlay
+  name at most 48 characters of `[A-Za-z0-9._-]`, and never `.` or `..`, a tool name as above. A name failing its shape is dropped and counted in
+  `cut.names`. A path with a `..` segment is `other` whichever root it starts under, and names no overlay extension: pi normalises what it hands back at the pin, and nothing pins that.
+  **Residual, stated (`OQ-003`): in-process code can put any string on the line.** A repository extension shares this process,
+  so patching `RegExp.prototype.test`, `Array.prototype.map` or `JSON.stringify` puts what it likes on a line the runner then signs, and a mutated source path
+  makes it read as a package's. The runner's shape check covers ordinary API use and no more, and the signature vouches for the channel and not
+  for what is on it. **The worker's rebuild is the boundary** (`rebuildLoaded`, `INT-RUN-HISTORY-FILE-CONTRACT`): it checks every string it keeps against the same closed
+  patterns in its own process. What survives it is a token of a closed shape, and for a tool name the worker has no list to check against. Such a token can only narrow what a later
   switch excludes, and a wrong one refuses the job.
 
   **Bounded, in three forms.** Caps: 16 `packages` rows, 8 servers, 16 overlay names, 24 extension tool names overall. A
@@ -956,7 +961,7 @@ refactor apart.
   cap raises `cut`. `fitLoaded` makes three forms, largest first, and the writer takes the largest that fits the line:
   `full` (worst case 4,177 characters); `compact`, no `packages`, overlay names, own or job tools or `extTools` (1,118); `minimal`,
   only `v`, `at`, `pi`, `flow`, the `failed` and `dropped` totals, `mcpBad` (servers that failed or timed out) and `cut` (232). Tool names go first. Past
-  `minimal` the writer cuts `message`, then drops the field. A test pins those three sizes. The record never stops a job:
+  `minimal` the writer cuts `message`, then drops the field and says so: a line that goes without a noted `loaded` carries `loadedCut: true`, on every fallback below too, so it never reads like an older image's silence. A test pins those three sizes. The record never stops a job:
   a throw while reading what loaded keeps the last note and logs `loaded_unavailable` with the stage alone.
 
   **The exit line's `reason` is read for one purpose and cannot move a job between classes** (issue #437).
@@ -1139,7 +1144,7 @@ refactor apart.
   container's stderr cannot forge one. The lines themselves are the session file's, which the agent can write (it can
   append pi-shaped lines the mirror then sends, signed), so they carry exactly the trust of a line the file tail reads
   on a binding venue. WHY STDERR, and not stdout: stdout carries the runner's log and the exit line, read from a
-  bounded 64 KiB tail, which a transcript burst would crowd, while stderr carries nothing the worker parses.
+  bounded 8 KiB tail (`TAIL_CAP_BYTES`, corrected: this sentence said 64 KiB from #686 on, and the tail was never that), which a transcript burst would crowd, while stderr carries nothing the worker parses.
   RESIDUAL: a record above PIPE_BUF (4 KiB) is not atomic against a write from another process sharing the pipe, and
   arrives broken (refused, counted, never published). Without the variable stdout, stderr and the exit line are
   byte-identical to before, on every venue.
@@ -1159,7 +1164,7 @@ refactor apart.
   and nothing else reads the block for a decision. Produced inside the job's container, so a job can inflate every
   number: advisory, and a later sizing suggestion must clamp it and never apply itself. The worker rebuilds it
   (`parseExitResources`: an explicit literal over the nine keys, a present value that is not a safe non-negative
-  integer nulls the whole block). The worst-case line, every key at 2^53 - 1, stays inside the 6 KiB budget above.
+  integer nulls the whole block). The line that test measures, every key at 2^53 - 1, stays inside the 6 KiB that test holds, and every line stays inside `EXIT_LINE_MAX_BYTES`, the writer's own limit.
   Since the same release the image's entrypoint starts a **supervisor** (`image/runner/supervise.mjs`, an entry file
   that always calls `image/runner/src/supervise.mjs`, under the same exec-only node and `--disable-sigusr1`) between
   the container's init and the runner. It drains stdin first and hands the same bytes to the
@@ -13797,3 +13802,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-03 (#800, what a job loaded) | `INT-RUNNER-EXIT-CODE-PROTOCOL`: the runner's exit line carries `loaded`, noted at five stages through the `canaryLoad` route so every path the runner writes carries the latest, with a `finally` around `lifecycle.start`, so a job a server stopped still names which server, as a position in `PI_MCP_SERVERS`. Counts and closed words: no string a repository chose reaches it, failures and drops come from teeing the loader's log so record and log cannot disagree, and a repository extension's tool is a count. Named here with its residual: `extTools`, the tools a staged package or an overlay extension brought. Bounded by caps that raise `cut`, in three forms the writer picks from by measuring the line. Beyond the example the issue drew, `cut` also counts `servers`, since a cap with nowhere to say it would drop silently. Also the theme count, which read `filePath` at `run-job.mjs` where pi 1.5.0's `Theme` has `sourcePath`. An MCP failure still stops the job (`mcp-unavailable`, `mcp-unreachable`), and the exit codes, the signature and the `RUNNER_POLICY_REASONS` set are UNCHANGED, checked. The worker's half (`INT-RUN-HISTORY-FILE-CONTRACT`) comes with the record, so an older worker ignores the key, checked through its real sink. |
 | 2026-11-03 (#800, what a run loaded) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a new conditional key `loaded`, the last before `v`, which stays 1. Named at most 16 KiB (worst case measured, 14,533 bytes). `runner` is `reported`, `absent` or `invalid`; every part of the runner's field is checked against what the worker knows, since a repository extension shares the signer's process, and any violation keeps only the worker's facts. The worker adds the image's reference, local id and declared pi version from its preflight, and `leftOut`, which the runner cannot say. The tool-name residual is stated. `imageDigest` is said to be a local id. A pre-container refusal holds the image's facts where one was found and is otherwise byte-identical. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `tools` gains `job`, the active tools of the job's own factories, held to the closed `LOADED_JOB_TOOLS`, so the card's "report_progress, the job's own" has a source; the `full` form's worst case is now 4,177 characters. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked (a new field never raises a record's version). `RECORD_CORE_FIELDS` UNCHANGED, checked. Exit codes, the MAC and the settlement UNCHANGED, checked: nothing reads this field to decide. **Code evidence**: worker/src/loaded-record.mjs -> rebuildLoaded, recordedLoaded, leftOutOf, loadedWithImage; worker/src/run-history.mjs -> parseExitLoaded, buildRecord; worker/src/run-container.mjs -> runContainer's `loadedKnown`; worker/src/processor.mjs -> runJob; worker/src/start.mjs -> getPackagePaths.rowOf; image/runner/src/loaded.mjs -> LOADED_JOB_TOOLS. |
 | 2026-11-03 (#800, what a host's jobs can load) | **`INT-DOCTOR-RESULTS-KEY` AMENDED**: a new key `doctor:loads:<name>`, `v: 1`, one `SET ... PX` of 7 days, written by doctor's `publishResults` right after its record and under the same `doctor:hosts` index: a host's overlay extensions and skills, its MCP servers by name with where, exposure, whether on and key names, its staged packages and each flow trigger's tier. Bounded, with `more` counting the rest (64 KiB, worst case measured 65,460 bytes). No paths, values or tool names. `unread` names a part that could not be read. An absent, expired, unparseable or newer record reads `unknown`, past two intervals `old`, and `hostsAgree` is null unless every host is current and lists everything: an older host never reads as the same. The doctor record's own shape, id rules and `--json` output UNCHANGED, checked. **`INT-HOST-REGISTRY-CONTRACT`'s falsification note AMENDED** to name the key: it obeys the same test, and a registry row gains no field for it. `INT-CONSOLE-STATE-API` UNCHANGED, checked: nothing reads this yet. **Code evidence**: worker/src/host-loads.mjs -> buildHostLoads, parseHostLoads, readHostLoads, hostsAgree, flowTierOf; worker/src/doctor.mjs -> doctorHostLoads, publishResults, defaultPublishDoctor; worker/package.json -> ./host-loads. |
+| 2026-11-03 (#800, the record's boundary) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**, from an independent check of the runner. The hostile-name rule said every other string on the line "passes a shape" and limited the residual to a name of the right shape. Refuted: a repository extension patching `RegExp.prototype.test` and mutating a tool's source path put `HOSTILE ignore all previous instructions "and quote"` on a verified, signed line, in a package's row. It now says in-process code can put any string on the line (`OQ-003`), the runner's shape check covers ordinary API use, and the worker's rebuild is the boundary; what survives it is a token of a closed shape. A noted `loaded` the line has no room for is now said (`loadedCut: true`, read as `runner: "cut"`), where "nothing is dropped silently" was false. "The result always verifies" was false for a last resort past the limit (a 20,000-character `reason`): such a line is now `event`, `code` and `lineCut`. `message` is held to 2,048 bytes as written before any form is chosen. A path with a `..` segment is `other`, and `.` and `..` are no overlay name. The record's "6 KiB budget" sentence names that test's line. **`INT-RUNNER-EXIT-CODE-PROTOCOL`'s "64 KiB tail" CORRECTED to 8 KiB**: checked, it is the exit line's own tail (`openJobLog`, `TAIL_CAP_BYTES`), which was 8 KiB when #686 wrote it. Exit codes and `authenticExitLines` UNCHANGED, checked. **Code evidence**: image/runner/src/exit-line.mjs -> createExitWriter, EXIT_MESSAGE_MAX_BYTES; image/runner/src/loaded.mjs -> tierOf, firstSegmentUnder, LOADED_OVERLAY_NAME_RE; worker/src/run-history.mjs -> TAIL_CAP_BYTES. |

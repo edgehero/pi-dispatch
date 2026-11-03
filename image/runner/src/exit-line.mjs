@@ -71,6 +71,13 @@ export const EXIT_TAIL_BYTES = 8 * 1024;
  */
 export const EXIT_LINE_MAX_BYTES = 7680;
 /**
+ * The most `message` may take of the line as written (issue #800), held before any form of `loaded` is chosen. A provider's
+ * error is the one field here whose size says nothing about the run: 1,700 CJK characters pass capExitMessage, which
+ * counts as JSON.stringify spells them, and escape to six bytes each here, so one such error took the whole record of what
+ * the job loaded down to its smallest form, for a sentence whose head says what it is.
+ */
+export const EXIT_MESSAGE_MAX_BYTES = 2048;
+/**
  * The supervisor's longest line with its job id taken out: `oom-killed` beside `SIGKILL`, every `resources` key at the
  * largest safe integer, signed, with both newlines. Pinned against the real writer in exit-line.test.mjs.
  */
@@ -227,10 +234,11 @@ function lastResortFields(fields) {
  * The line to write, measured in bytes on the whole write, signature and newlines included, because that is what has to
  * stay inside the tail. In the order the room runs out: the largest form of `loaded` that fits; then the smallest form
  * and `message` cut to the room left, because the head of a provider's error says what it is and nothing else says
- * what the job loaded; then no `loaded` and the message given what that frees; then the last resort. `forms` is `[null]`
- * for a line with nothing noted.
+ * what the job loaded; then no `loaded` and the message given what that frees; then the last resort; then, because the
+ * last resort keeps `reason` and `tokens` as they came and nothing bounds those, the smallest line there is. `forms` is
+ * `[null]` for a line with nothing noted.
  */
-function fitExitLine({ compose, forms, message, maxBytes, lastResort }) {
+function fitExitLine({ compose, forms, message, maxBytes, lastResort, smallest }) {
 	const size = (line) => Buffer.byteLength(line, "utf8");
 	for (const form of forms) {
 		const line = compose(form);
@@ -243,7 +251,8 @@ function fitExitLine({ compose, forms, message, maxBytes, lastResort }) {
 		const room = maxBytes - size(compose(form, { message: "" }));
 		if (room >= 0) return compose(form, { message: cutExitMessage(message, room) });
 	}
-	return lastResort();
+	const resort = lastResort();
+	return size(resort) <= maxBytes ? resort : smallest();
 }
 
 /**
@@ -257,10 +266,13 @@ function fitExitLine({ compose, forms, message, maxBytes, lastResort }) {
  * exit code and the last line still agree. Before this the runner had no handler, so a `docker stop` killed it
  * mid-run and no genuine line followed whatever a tool had written.
  *
- * The line it writes always fits `maxBytes` (exitLineMaxBytes): a noted `loaded` falls to a smaller form, a `message` too
- * long for the room left is cut, and, past that, only what the settlement reads is kept, marked `lineCut`, because such
- * a line still verifies and an oversized one reads as no line at all. `maxBytes` is a seam for the harness that proves a
- * write past a pipe's buffer survives.
+ * The line it writes fits `maxBytes` (exitLineMaxBytes): a noted `loaded` falls to a smaller form, a `message` too long
+ * for the room left is cut, and, past that, only what the settlement reads is kept, marked `lineCut`, because such a line
+ * still verifies and an oversized one reads as no line at all. If even that is over (a `reason` or `tokens` nothing bounded),
+ * the line is `{ event, code, lineCut }`, under any limit a real job id leaves: it names no job id, and with no tokens it
+ * settles at the floor, which fails closed. A noted `loaded` that did not make it is said with `loadedCut: true` on the line
+ * that went without it, on every one of these, so it never reads like an older image's silence. `maxBytes` is a seam for
+ * the harness that proves a write past a pipe's buffer survives.
  */
 export function createExitWriter({ key = null, jobId, write, exit, resources = () => null, maxBytes = exitLineMaxBytes(jobId) }) {
 	let written = false;
@@ -291,8 +303,13 @@ export function createExitWriter({ key = null, jobId, write, exit, resources = (
 		// `loaded` (issue #800) is noted whole and fitted here, the one place that knows how much room this line leaves it.
 		const { loaded, ...notes } = noted;
 		const forms = loaded === undefined ? [null] : loadedForms(loaded);
-		const compose = (form, over = {}) => lineOf({ event: "exit", jobId, ...notes, ...(form === null ? {} : { loaded: form }), ...fields, ...over, ...usedField });
-		write(fitExitLine({ compose, forms, message: fields?.message, maxBytes, lastResort: () => lineOf({ event: "exit", jobId, ...lastResortFields(fields), lineCut: true }) }));
+		const cutOff = loaded === undefined ? {} : { loadedCut: true };
+		// Before any form is chosen, so an error's length cannot be what costs the record.
+		const said = typeof fields?.message === "string" ? { ...fields, message: cutExitMessage(fields.message, EXIT_MESSAGE_MAX_BYTES) } : fields;
+		const compose = (form, over = {}) => lineOf({ event: "exit", jobId, ...notes, ...(form === null ? cutOff : { loaded: form }), ...said, ...over, ...usedField });
+		const lastResort = () => lineOf({ event: "exit", jobId, ...lastResortFields(said), lineCut: true, ...cutOff });
+		const smallest = () => lineOf({ event: "exit", ...(Number.isSafeInteger(said?.code) ? { code: said.code } : {}), lineCut: true, ...cutOff });
+		write(fitExitLine({ compose, forms, message: said?.message, maxBytes, lastResort, smallest }));
 		return true;
 	}
 	function terminate(fields = {}) {
