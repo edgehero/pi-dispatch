@@ -1,0 +1,396 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
+import { recordedLoaded } from "../../worker/src/loaded-record.mjs";
+import { LOADED_STATES, LOADED_WORDS, hostLoadsRow, loadedFold, loadedOf, loadedProblems, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, projectLoadsOf, runningVerdict, sandboxFreshLine, sandboxRunLine, wordsText } from "../src/loaded-words.mjs";
+import { outcomeKey } from "../src/words.mjs";
+import { HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, SCRIPT, billingRecords, incompleteRecords, loadedField, loadedRecord, source, webRecords } from "./helpers/loaded-samples.mjs";
+
+// Issue #800, the words every surface reads for what a run loaded. The cards draw these lines (RunLoaded, LoadedStates,
+// ProjectLoads), so where a sentence here is the card's it is checked word for word, and where it is not the test says why.
+// What the pages do with them is console-loaded.test.mjs's.
+
+const lineOf = (v) => [v.lead, v.bold, v.rest, ...v.then.flatMap((part) => [part.bold, part.rest])].filter(Boolean).join(" ");
+
+test("each state of the LoadedStates card, in its words, tone and way to where it is fixed", () => {
+  const want = [
+    [S.everything(), "everything", "ok", "Everything trigger 3 asks for loaded.", null],
+    [S.leftOut(), "left-out", "ok", "Everything trigger 2 asks for loaded. Left out, as it asks: bash, and the staged packages.", null],
+    [S.leftOutOverlay(), "left-out", "ok", "Everything trigger 4 asks for loaded. Left out for this job: the overlay’s extensions.", null],
+    [S.mcpConnected(), "everything", "ok", "Everything trigger 7 asks for loaded.", null],
+    [S.dropped(), "everything", "ok", "Everything trigger 3 asks for loaded.", null],
+    [S.cut(), "everything", "ok", "Everything trigger 3 asks for loaded.", null],
+    [S.noFlow(), "no-flow", "attention", "Ran without its flow. acme/api has no fix skill at its base commit, and no skills folder, overlay or staged package ships one.", "Open trigger 3"],
+    [S.mcpFailed(), "mcp-failed", "refused", "linear could not be used. The run stopped before the agent started, after its extensions and skills had loaded.", "Open Connections"],
+    [S.mcpTimeout(), "mcp-stopped", "failed", "linear did not answer in time. The run stopped before the agent started.", "Open Connections"],
+    [S.notRecorded(), "not-recorded", "idle", "Not recorded: an older release wrote this run’s record.", null],
+    [S.refused(), "refused", "idle", "Nothing loaded: it was refused before its container started.", null],
+  ];
+  for (const [record, state, tone, words, fix] of want) {
+    const v = loadedVerdict(record, HOST_LOADS);
+    assert.equal(v.state, state, record.jobId);
+    assert.ok(LOADED_STATES.includes(v.state));
+    assert.equal(v.tone, tone, record.jobId);
+    assert.equal(lineOf(v), words, record.jobId);
+    assert.equal(v.fix?.label ?? null, fix, record.jobId);
+  }
+  assert.deepEqual(loadedVerdict(S.mcpConnected()).small, ["MCP: linear connected, with 12 tools."]);
+  assert.deepEqual(loadedVerdict(S.cut()).small, ["Cut to fit: this record keeps the counts and leaves out the tool names."]);
+  assert.deepEqual(loadedVerdict(S.mcpFailed()).small, ["Not retried: the next attempt would find it the same."]);
+});
+
+test("the extension that failed: a total is said only where it is known, because a conflicted extension counts on both sides", () => {
+  // pi 1.5.0 keeps a conflicted extension loaded and reports it too, so `extensions: 2, failed: 1` is either two extensions
+  // with one conflicted, or three with one thrown. The record keeps no kind, so "1 of 3" and "1 of 2" are both guesses.
+  const of = (repository) => loadedRecord({ target: "acme/api#120", loaded: loadedField({ sources: [source("overlay"), source("repository", repository), source("trigger"), source("other")], problems: { failed: repository.failed, dropped: 0, mcp: 0 } }) });
+  assert.equal(lineOf(loadedVerdict(S.extensionFailed())), "1 of acme/api’s extensions failed to load. The run went on.");
+  for (const extensions of [1, 2, 5]) {
+    const v = loadedVerdict(of({ extensions, failed: 1 }));
+    assert.equal(lineOf(v), "1 of acme/api’s extensions failed to load. The run went on.", "no total, and no 'without it'");
+  }
+  // Nothing loaded from that tier: nothing can be both, so the total is known, and the run went on without them.
+  assert.equal(lineOf(loadedVerdict(of({ extensions: 0, failed: 1 }))), "Acme/api’s extension failed to load. The run went on without it.");
+  assert.equal(lineOf(loadedVerdict(of({ extensions: 0, failed: 3 }))), "All 3 of acme/api’s extensions failed to load. The run went on without them.");
+  assert.equal(loadedVerdict(S.extensionFailed()).fix.kind, "repository");
+  assert.equal(outcomeBanner(S.extensionFailed()).fix.kind, "repository");
+});
+
+test("a failed overlay extension goes to its host, a package's to Updates, and several tiers are each named", () => {
+  const record = (sources, failed) => loadedRecord({ host: "mini2", loaded: loadedField({ sources: [...sources, source("trigger"), source("other")], problems: { failed, dropped: 0, mcp: 0 } }) });
+  const overlay = loadedVerdict(record([source("overlay", { names: ["ok.ts"], failedNames: ["broken.js"], extensions: 1, failed: 1 }), source("repository")], 1));
+  assert.equal(lineOf(overlay), "1 of mini2’s overlay extensions failed to load. The run went on. broken.js.");
+  assert.deepEqual(overlay.fix, { kind: "host", label: "Open mini2", icon: "fleet", href: "/fleet/host?name=mini2" });
+  const staged = loadedVerdict(record([source("package", { name: "pi-lint", version: "1.4.2", extensions: 1, failed: 1 }), source("overlay"), source("repository")], 1));
+  assert.equal(staged.fix.href, "/config/updates");
+  const both = loadedVerdict(record([source("overlay", { failedNames: ["broken.js"], failed: 1 }), source("repository", { failed: 2 })], 3));
+  assert.equal(lineOf(both), "3 of this run’s extensions failed to load. 1 from mini2’s overlay and 2 from acme/web. The run went on.");
+  // The minimal form keeps the total and not where.
+  const minimal = loadedVerdict(loadedRecord({ loaded: loadedField({ cut: { form: "minimal", packages: 0, servers: 0, names: 0, counts: 0 }, sources: [], mcp: null, tools: null, problems: { failed: 2, dropped: 0, mcp: null } }) }));
+  assert.equal(lineOf(minimal), "2 extensions failed to load. The run went on. This record was cut to fit, so it does not say which.");
+  assert.equal(minimal.fix, null);
+});
+
+test("a failed MCP server stops the run: never a completed run's note, and no line says the run went on", () => {
+  for (const record of [S.mcpFailed(), S.mcpTimeout()]) {
+    assert.equal(outcomeNote(record), null);
+    assert.deepEqual(loadedProblems(record), []);
+    assert.ok(!lineOf(loadedVerdict(record)).includes("went on"));
+    assert.equal(loadedVerdict(record).fix.href, "/config/connections");
+  }
+  // "Its last attempt" only when the queue says so: an infrastructure failure writes a record per attempt.
+  assert.deepEqual(loadedVerdict(S.mcpTimeout()).small, ["Retried, as any infrastructure failure."]);
+  assert.deepEqual(loadedVerdict(S.mcpTimeout(), null, { jobEnded: true }).small, ["Retried, as any infrastructure failure; this was its last attempt."]);
+  // A record cut to its minimal form still says, by its outcome, which of the two it was.
+  const minimal = (over) => loadedRecord({ ...over, loaded: loadedField({ at: "session", cut: { form: "minimal", packages: 0, servers: 0, names: 0, counts: 0 }, sources: [], mcp: null, tools: null, problems: { failed: 0, dropped: 0, mcp: 1 } }) });
+  assert.equal(loadedVerdict(minimal({ outcome: "failed", reason: "container-infra-exit", exitCode: 1 })).state, "mcp-stopped");
+  assert.equal(loadedVerdict(minimal({ outcome: "policy", reason: "mcp-unavailable", exitCode: 2 })).state, "mcp-failed");
+});
+
+test("what no card names keeps saying the truth: off, pending, a stage that loaded nothing, and each way a record is not read", () => {
+  const off = loadedVerdict(loadedRecord({ loaded: loadedField({ mcp: [{ name: "linear", state: "disabled", tools: 0 }] }) }));
+  assert.equal(off.state, "mcp-off");
+  assert.equal(lineOf(off), "linear is turned off on mini1. The run went on without it.");
+  assert.equal(loadedVerdict(loadedRecord({ outcome: "failed", exitCode: 1, reason: "container-infra-exit", loaded: loadedField({ at: "session", mcp: [{ name: "linear", state: "pending", tools: 0 }] }) })).state, "stopped");
+  assert.equal(lineOf(loadedVerdict(loadedRecord({ outcome: "failed", exitCode: 1, loaded: loadedField({ at: "loader", mcp: null, tools: null }) }))), LOADED_WORDS.stoppedLoader);
+  // Before anything loaded, "failed: 0" would be a claim, and "everything loaded" a false one.
+  const early = (at) => loadedRecord({ outcome: "failed", exitCode: 1, loaded: loadedField({ at, flow: null, sources: [], mcp: null, tools: null, problems: null }) });
+  assert.equal(loadedVerdict(early("start")).rest, LOADED_WORDS.stoppedStart);
+  assert.equal(loadedVerdict(early("none")).rest, LOADED_WORDS.noAgent);
+  assert.deepEqual(loadedRows(early("start")).map((row) => row.label), ["pi"]);
+  const absent = recordedLoaded({ v: 1, runner: "absent", image: "pi-job:4.3.1" });
+  assert.equal(loadedVerdict(loadedRecord({ exitCode: 137, outcome: "failed", loaded: absent })).rest, LOADED_WORDS.absent);
+  assert.equal(loadedVerdict(loadedRecord({ exitCode: 137, outcome: "policy", reason: "operator-cancel", loaded: absent })).rest, LOADED_WORDS.noExitLine);
+  // An image-only value on a refusal: the preflight named the image, and then nothing ran.
+  assert.equal(loadedVerdict(loadedRecord({ exitCode: null, outcome: "policy", reason: "over-budget", loaded: absent })).rest, LOADED_WORDS.refused);
+  assert.equal(loadedVerdict(loadedRecord({ exitCode: null, outcome: "policy", reason: "operator-cancel", loaded: undefined })).rest, LOADED_WORDS.cancelled);
+  assert.equal(loadedVerdict(loadedRecord({ loaded: recordedLoaded({ v: 1, runner: "cut" }) })).rest, LOADED_WORDS.noRoom);
+  assert.equal(loadedVerdict(loadedRecord({ loaded: recordedLoaded({ v: 1, runner: "invalid" }) })).rest, LOADED_WORDS.invalid);
+  // A failed run with no exit code, of this release, is no older release's. The sentence holds for both.
+  const { loaded: _gone, ...noExit } = loadedRecord({ outcome: "failed", exitCode: null, reason: "clone-failed" });
+  assert.equal(loadedVerdict(noExit).rest, LOADED_WORDS.notRecordedUnknown);
+  assert.equal(runningVerdict(2).rest, "Shown when it ends, from its record. Trigger 3 says what it asks for.");
+  assert.equal(runningVerdict(2).fix.label, "Open trigger 3");
+  assert.equal(runningVerdict(null).rest, LOADED_WORDS.running);
+  assert.equal(runningVerdict(null).fix, null);
+});
+
+test("outcomeNote: the word a list and a banner read, for a completed run alone", () => {
+  assert.equal(outcomeNote(S.noFlow()), "Completed, without its flow");
+  assert.equal(outcomeNote(S.extensionFailed()), "Completed, with a failed extension");
+  const failed = (n) => loadedRecord({ loaded: loadedField({ sources: [source("repository", { failed: n }), source("overlay"), source("trigger"), source("other")], problems: { failed: n, dropped: 0, mcp: 0 } }) });
+  assert.equal(outcomeNote(failed(2)), "Completed, with 2 failed extensions");
+  const both = (n) => loadedRecord({ loaded: loadedField({ flow: { tier: "none", package: null }, sources: [source("repository", { failed: n }), source("overlay"), source("trigger"), source("other")], problems: { failed: n, dropped: 0, mcp: 0 } }) });
+  assert.equal(outcomeNote(both(1)), "Completed, without its flow and with a failed extension");
+  assert.equal(outcomeNote(both(3)), "Completed, without its flow and with 3 failed extensions");
+  // Decided: `run.flow` used as a loose hint reads the same, because it is true and only reported.
+  assert.equal(outcomeNote(loadedRecord({ flow: "just-a-hint", loaded: loadedField({ flow: { tier: "none", package: null } }) })), "Completed, without its flow");
+  // Every other outcome word already says something: a parked run, a refusal, a failure.
+  for (const over of [{ reason: "awaiting-input" }, { reason: "awaiting-approval" }, { outcome: "failed", reason: "container-infra-exit" }, { outcome: "policy", reason: "cost-cap" }]) {
+    const record = loadedRecord({ ...over, loaded: loadedField({ flow: { tier: "none", package: null } }) });
+    assert.equal(outcomeNote(record), null, JSON.stringify(over));
+    assert.deepEqual(loadedProblems(record), []);
+    assert.notEqual(outcomeKey(record.outcome, record.reason), "completed");
+    assert.equal(loadedVerdict(record).state, "no-flow", "the card still says it");
+  }
+});
+
+test("a dropped extension gets no sentence and no warning: it is a line in the fold, on a run that reads as everything loaded", () => {
+  const record = S.dropped();
+  assert.deepEqual(loadedProblems(record), []);
+  assert.equal(outcomeNote(record), null);
+  assert.equal(loadedVerdict(record).state, "everything");
+  assert.deepEqual(loadedVerdict(record).small, []);
+  const row = loadedFold(record).find((entry) => entry.kind === "Extension dropped");
+  assert.equal(row.name, "1");
+  assert.match(wordsText(row.from), /recursion guard/);
+});
+
+test("an older record stays quiet: nothing in its row, its filter or its banner moves", () => {
+  const older = S.notRecorded();
+  assert.equal(loadedOf(older), null);
+  assert.deepEqual(loadedProblems(older), []);
+  assert.equal(outcomeNote(older), null);
+  assert.equal(outcomeBanner(older), null);
+  assert.deepEqual(loadedRows(older), []);
+  assert.deepEqual(loadedFold(older), []);
+  // A newer release's record is read by its core alone, whatever it holds.
+  const newer = { ...S.noFlow(), v: 2 };
+  assert.equal(loadedOf(newer), null);
+  assert.equal(outcomeNote(newer), null);
+});
+
+test("a hostile or malformed `loaded` never throws, keeps nothing of itself, and reads as could not be read", () => {
+  for (const [at, loaded] of HOSTILE_LOADED.entries()) {
+    const record = { ...S.everything(), loaded };
+    const got = loadedOf(record);
+    assert.equal(got?.runner, "invalid", `${at}: ${JSON.stringify(loaded).slice(0, 80)}`);
+    assert.deepEqual(loadedProblems(record), [], `${at}`);
+    assert.equal(outcomeNote(record), null, `${at}`);
+    assert.equal(loadedVerdict(record, HOST_LOADS).state, "invalid", `${at}`);
+    assert.deepEqual(loadedRows(record), [], `${at}`);
+    assert.deepEqual(loadedFold(record), [], `${at}`);
+    assert.ok(!JSON.stringify(got).includes("alert(1)"), `${at}: nothing of it is kept`);
+  }
+  // Nor does a value that throws on being read.
+  const trap = Object.defineProperty({}, "loaded", { get() { throw new Error("no"); } });
+  assert.equal(loadedOf(trap).runner, "invalid");
+  for (const value of [null, undefined, 7, "x", []]) {
+    assert.equal(loadedOf(value), null);
+    assert.equal(outcomeNote(value), null);
+    assert.deepEqual(loadedProblems(value), []);
+  }
+  assert.equal(loadedVerdict(null), null);
+  // A hostile hostLoads is not a host difference, and does not stop the line.
+  for (const hostLoads of [null, undefined, 7, "x", {}, { hosts: "no" }, { hosts: [null, 7, {}] }, { unreachable: true, hosts: [] }, { hosts: [{ name: "mini1", state: "current" }] }]) {
+    assert.equal(loadedVerdict(S.hostDiffers(), hostLoads).state, "everything", JSON.stringify(hostLoads));
+  }
+});
+
+test("an overlay file can load beside the job's switch being off: both are said, and neither is corrected", () => {
+  const record = loadedRecord({ host: "mini2", loaded: loadedField({ sources: [source("overlay", { names: ["from-manifest.ts"], extensions: 1 }), source("repository"), source("trigger"), source("other")], leftOut: { tools: [], packages: false, overlayExtensions: true, restricted: false } }) });
+  assert.doesNotThrow(() => loadedVerdict(record));
+  const v = loadedVerdict(record);
+  assert.equal(v.state, "left-out");
+  assert.match(lineOf(v), /Left out for this job: the overlay’s extensions\./);
+  const extensions = loadedRows(record).find((row) => row.label === "Extensions");
+  assert.equal(extensions.value, "from-manifest.ts");
+  assert.match(wordsText(extensions.more), /from-manifest\.ts from mini2’s overlay/);
+  assert.ok(loadedFold(record).some((row) => row.kind === "Overlay" && wordsText(row.name) === "from-manifest.ts"));
+  assert.ok(loadedFold(record).some((row) => row.kind === "Left out" && wordsText(row.from).includes("PI_GLOBAL_ALLOW_EXTENSIONS=0")));
+});
+
+test("the overlay switch is this job's, so its words are true of a host's setting and of a canary's replay alike", () => {
+  const off = { tools: [], packages: false, overlayExtensions: true, restricted: false };
+  for (const over of [{}, { packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" } }]) {
+    const record = loadedRecord({ ...over, host: "mini2", loaded: loadedField({ leftOut: off }) });
+    const said = [lineOf(loadedVerdict(record)), wordsText(loadedRows(record).find((row) => row.label === "Extensions").more)].join(" ");
+    assert.doesNotMatch(said, /host asks|mini2 leaves out/, "no line says the host asked: on a canary's replay it did not");
+    assert.match(said, /Left out for this job: the overlay’s extensions\./);
+    const from = wordsText(loadedFold(record).find((row) => row.kind === "Left out").from);
+    assert.match(from, /PI_GLOBAL_ALLOW_EXTENSIONS=0/, "the fold names the host's setting");
+    assert.match(from, /or for a canary’s replay/, "and never as the only cause");
+  }
+  // A restricted run's switch is closed too, and one thing gets one line.
+  const restricted = loadedRecord({ loaded: loadedField({ leftOut: { ...off, restricted: true } }) });
+  assert.equal(lineOf(loadedVerdict(restricted)), "Everything trigger 3 asks for loaded. Left out, as this kind of run asks: the overlay’s extensions.");
+  assert.equal(loadedFold(restricted).filter((row) => row.kind === "Left out").length, 1);
+});
+
+test("`cut` covers both ways a record has no room for what it loaded", () => {
+  const cut = loadedRecord({ loaded: recordedLoaded({ v: 1, runner: "cut" }) });
+  assert.equal(loadedVerdict(cut).rest, "Cut to fit: what this run loaded had no room, on its exit line or in its record.");
+  const project = projectLoadsOf([loadedRecord(), { ...cut, jobId: "gh-cut", host: "mini2" }]);
+  assert.equal(project.small[0], "1 did not load or were not recorded: 1 with no room for what they loaded.");
+});
+
+test("a host difference: a publication proves that host, silence is said as silence, and an image id never counts", () => {
+  const v = loadedVerdict(S.hostDiffers(), HOST_LOADS);
+  assert.equal(v.state, "host-differs");
+  assert.equal(lineOf(v), "Also loaded git-guard from build3’s overlay. mini1 does not have it; mini2 has published nothing.");
+  assert.equal(v.fix.href, "/fleet/host?name=build3");
+  assert.equal(v.outcome, null, "a difference is no problem of the run's");
+  // Only silence: nothing is proved, so nothing is claimed.
+  const silent = { hosts: HOST_LOADS.hosts.filter((row) => row.name !== "mini1") };
+  assert.equal(loadedVerdict(S.hostDiffers(), silent).state, "everything");
+  // Old and unreadable are not lacking.
+  const unsure = { hosts: [HOST_LOADS.hosts[0], { ...HOST_LOADS.hosts[1], state: "old" }, { name: "mini2", state: "unknown", why: "unreadable" }] };
+  assert.equal(loadedVerdict(S.hostDiffers(), unsure).state, "everything");
+  const said = { hosts: [HOST_LOADS.hosts[0], HOST_LOADS.hosts[1], { name: "mini2", state: "unknown", why: "unreadable" }, { ...HOST_LOADS.hosts[1], name: "mini3", state: "old" }] };
+  assert.equal(lineOf(loadedVerdict(S.hostDiffers(), said)), "Also loaded git-guard from build3’s overlay. mini1 does not have it; mini3’s publication is old; mini2’s publication could not be read.");
+  // A host whose list ran past its cap, or could not read that part, cannot prove a lack.
+  for (const row of [{ ...HOST_LOADS.hosts[1], more: { extensions: 1 } }, { ...HOST_LOADS.hosts[1], unread: ["extensions"] }]) {
+    assert.equal(loadedVerdict(S.hostDiffers(), { hosts: [row] }).state, "everything");
+  }
+  // A host that lists it with the switch off does not give it to a job.
+  const off = { ...HOST_LOADS.hosts[1], extensions: [{ name: "git-guard", kind: "dir" }], overlayExtensionsAllowed: false };
+  assert.equal(loadedVerdict(S.hostDiffers(), { hosts: [off] }).state, "host-differs");
+  // A staged package's version, and a canary's candidate, which differs on purpose.
+  const newer = loadedRecord({ host: "build3", loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.3", extensions: 1 }), source("overlay"), source("repository"), source("trigger"), source("other")] }) });
+  assert.equal(lineOf(loadedVerdict(newer, { hosts: [HOST_LOADS.hosts[1]] })), "Also loaded pi-lint 1.4.3 from build3’s staged packages. mini1 does not have it.");
+  assert.equal(loadedVerdict({ ...newer, packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" } }, { hosts: [HOST_LOADS.hosts[1]] }).state, "everything");
+  // The same names under another image id: two local builds of one tag.
+  const other = loadedRecord({ loaded: loadedField({ imageDigest: `sha256:${"b".repeat(64)}` }) });
+  assert.equal(loadedVerdict(other, HOST_LOADS).state, "everything");
+});
+
+test("the card's rows: one line per kind, in the card's words", () => {
+  const rows = Object.fromEntries(loadedRows(S.everything()).map((row) => [row.label, [wordsText(row.value), wordsText(row.more)]]));
+  assert.deepEqual(rows, {
+    pi: ["pi 1.5.0 in pi-job:4.3.1", "image sha256:7c1e0b4…, as mini1 ran it"],
+    Model: ["anthropic / claude-sonnet-5-5", "14 calls"],
+    Extensions: ["pi-lint 1.4.2, pi-test-runner 0.9.0", "staged on mini1"],
+    Skills: ["fix, the flow, from the repository", "and 3 more: 2 from the repository, 1 from pi-test-runner"],
+    MCP: ["none", "trigger 3 names no server"],
+    Tools: ["10 active", "read, bash, edit and write, 5 from the extensions, and report_progress, the job’s own; none removed"],
+  });
+  const fold = loadedFold(S.everything()).map((row) => [row.kind, wordsText(row.name), row.version]);
+  for (const want of [["Extension", "pi-lint", "1.4.2"], ["Extension", "pi-test-runner", "0.9.0"], ["Extension failed", "0", ""], ["Extension dropped", "0", ""], ["Repository extensions", "0", ""], ["Overlay", "none", ""], ["Skill", "fix (the flow)", ""], ["Skill", "2 more", ""], ["Skill", "1", ""], ["Skill replaced", "1", ""], ["Prompt template", "1", ""], ["Theme", "0", ""], ["Tools", "read, bash, edit, write", ""], ["Tools", "lint_file, lint_fix", ""], ["Tools", "run_tests, test_coverage, test_report", ""], ["Tools", "report_progress", ""]]) {
+    assert.ok(fold.some((row) => JSON.stringify(row) === JSON.stringify(want)), JSON.stringify(want));
+  }
+  assert.equal(wordsText(loadedFold(S.everything()).find((row) => row.kind === "Skill replaced").from), "one of pi-test-runner’s, by a skill of that name from the repository, the skills folder or the overlay; the name stays in the job’s log");
+  // Compact keeps counts and says so; minimal keeps what went wrong and says so; neither draws a name it does not hold.
+  const cut = Object.fromEntries(loadedRows(S.cut()).map((row) => [row.label, [wordsText(row.value), wordsText(row.more)]]));
+  assert.deepEqual(cut.Extensions, ["2 from staged packages", ""]);
+  assert.deepEqual(cut.Tools, ["10 active", "5 from the extensions; none removed"]);
+  const minimal = loadedRecord({ loaded: loadedField({ cut: { form: "minimal", packages: 0, servers: 0, names: 0, counts: 0 }, sources: [], mcp: null, tools: null }) });
+  assert.deepEqual(loadedVerdict(minimal).small, [LOADED_WORDS.cutMinimal]);
+  assert.deepEqual(loadedFold(minimal), []);
+  // A bound on a full form, said as what it left out.
+  const full = loadedRecord({ loaded: loadedField({ cut: { form: "full", packages: 2, servers: 1, names: 3, counts: 1 } }) });
+  assert.deepEqual(loadedVerdict(full).small, ["Cut to fit: this record leaves out 2 packages, 1 server, 3 names and the exact value of 1 count."]);
+});
+
+test("a sandbox's line: a shell has no overlay, so that goes first, then what the run had, or what a job would load, or unknown", () => {
+  assert.equal(wordsText(sandboxRunLine(S.everything(), "gh-9575")), "pi 1.5.0 in the image. No overlay is mounted, so pi started here loads only the workspace’s own .pi/. gh-9575 itself also loaded pi-lint 1.4.2 and pi-test-runner 0.9.0.");
+  assert.ok(sandboxRunLine(S.everything(), "gh-9575").some((part) => part?.run === "gh-9575"), "linked to it");
+  assert.equal(wordsText(sandboxRunLine(S.notRecorded(), "gh-c3f8", { pi: "1.5.0" })), "pi 1.5.0 in the image. No overlay is mounted, so pi started here loads only the workspace’s own .pi/. What gh-c3f8 itself loaded is not recorded.");
+  assert.equal(wordsText(sandboxRunLine(null, "gh-x")), "pi in the image. No overlay is mounted, so pi started here loads only the workspace’s own .pi/. What gh-x itself loaded is not recorded.");
+  assert.match(wordsText(sandboxRunLine(S.leftOut(), "gh-8251-r2")), /gh-8251-r2 itself loaded no staged package or overlay extension\.$/);
+  assert.match(wordsText(sandboxRunLine(S.cut(), "gh-a3ac")), /gh-a3ac’s record was cut to fit and keeps no names\.$/);
+
+  const fresh = (over = {}) => sandboxFreshLine({ hostLoads: HOST_LOADS, host: "mini1", triggerIndex: 2, ...over });
+  assert.equal(wordsText(fresh()), "pi 1.5.0 in the image. No overlay is mounted, so pi started here loads only the workspace’s own .pi/. A job of trigger 3 on this host would load pi-lint 1.4.2 and pi-test-runner 0.9.0, from its last doctor run at .");
+  assert.ok(fresh().some((part) => part?.time === HOST_LOADS.hosts[1].at), "with its time");
+  assert.match(wordsText(fresh({ withholdsPackages: true })), /would load no staged package or overlay extension, from/);
+  assert.equal(wordsText(fresh({ host: "mini2" })), "pi 1.5.0 in the image. No overlay is mounted, so pi started here loads only the workspace’s own .pi/. What a job of trigger 3 would load on this host is unknown: it has published no doctor run.");
+  assert.match(wordsText(fresh({ host: "nowhere" })), /^pi in the image\..*unknown: it has published no doctor run\.$/);
+  // A read that failed, a null read and an unreadable or partial publication are all unknown, never an empty list.
+  assert.match(wordsText(fresh({ hostLoads: null })), /unknown: it has published no doctor run/);
+  assert.match(wordsText(fresh({ hostLoads: { unreachable: true, hosts: [] } })), /unknown: the hosts’ doctor runs could not be read/);
+  assert.match(wordsText(fresh({ hostLoads: { hosts: [{ name: "mini1", state: "unknown", why: "unreadable" }] } })), /unknown: its last doctor run could not be read/);
+  // Every part a host can fail to read makes the answer unknown, never "no staged package": an empty list there is not none.
+  const unread = (...parts) => ({ hostLoads: { hosts: [{ ...HOST_LOADS.hosts[1], packages: [], extensions: [], unread: parts }] } });
+  for (const [part, words] of [["packages", "its staged packages"], ["extensions", "its overlay’s extensions"], ["skills", "its skills"], ["mcp", "its MCP servers"]]) {
+    const said = wordsText(fresh(unread(part)));
+    assert.match(said, new RegExp(`unknown: its last doctor run could not read ${words}\\.$`), part);
+    assert.doesNotMatch(said, /no staged package/, part);
+  }
+  assert.match(wordsText(fresh(unread("skills", "mcp"))), /could not read its skills and its MCP servers\.$/);
+  // A part this job would not load from anyway says nothing about it.
+  assert.match(wordsText(fresh({ ...unread("packages"), withholdsPackages: true })), /would load no staged package or overlay extension, from/);
+  const closed = { hostLoads: { hosts: [{ ...HOST_LOADS.hosts[1], overlayExtensionsAllowed: false, unread: ["extensions"] }] } };
+  assert.match(wordsText(fresh(closed)), /would load pi-lint 1\.4\.2 and pi-test-runner 0\.9\.0, from/);
+  assert.match(wordsText(fresh({ hostLoads: { hosts: [{ ...HOST_LOADS.hosts[1], more: { packages: 3 } }] } })), /pi-test-runner 0\.9\.0 and 3 more, from/);
+  assert.match(wordsText(fresh({ hostLoads: { hosts: [{ ...HOST_LOADS.hosts[1], state: "old" }] } })), /, which is old\.$/);
+  assert.equal(hostLoadsRow({ unreachable: true, hosts: [] }, "x").why, "unreachable");
+});
+
+test("the project's card: what differs, in the card's words", () => {
+  const l = projectLoadsOf(billingRecords());
+  assert.equal(l.state, "differs");
+  assert.equal(l.tone, "attention");
+  assert.equal(l.top, "Runs differ by host: build3 also loads git-guard from its overlay.");
+  assert.equal(l.sub, "24 runs this week");
+  assert.deepEqual(l.links.map((fix) => fix.label), ["Open build3"]);
+  const rows = Object.fromEntries(l.rows.map((row) => [row.label, [wordsText(row.value), wordsText(row.more)]]));
+  assert.deepEqual(rows, {
+    pi: ["pi 1.5.0 in pi-job:4.3.1", "all 21 recorded runs"],
+    Models: ["anthropic / claude-sonnet-5-5", "all 21 recorded runs"],
+    Extensions: ["pi-lint 1.4.2, pi-test-runner 0.9.0", "all 21 recorded runs, and git-guard in the 15 recorded on build3; 3 did not load or were not recorded"],
+    Flows: ["fix in 15, review in 6", "fix from acme/billing’s .pi/skills; review from the overlay"],
+    MCP: ["none", "no recorded run names a server"],
+    Missing: ["nothing", "every recorded run found its flow and loaded every extension"],
+    "Not read": ["3 of 24 runs", "gh-e9a0 was refused before its container started; gh-4a7e’s stop did not take, so it left no exit line; an older release wrote gh-c3f8’s record"],
+  });
+  assert.deepEqual(l.hosts.map((host) => [host.name, host.backend, host.runs, host.recorded, host.flows]), [["build3", "podman", 18, 15, ["fix"]], ["mini2", "local", 6, 6, ["review"]]]);
+  assert.equal(wordsText(l.hosts[0].extensions), "pi-lint 1.4.2, pi-test-runner 0.9.0, git-guard (overlay)");
+  assert.equal(l.foot, LOADED_WORDS.projectFoot);
+});
+
+test("the project's card: the same, none and incomplete, each its own words", () => {
+  const same = projectLoadsOf(webRecords());
+  assert.equal(same.state, "same");
+  assert.equal(same.tone, "ok");
+  assert.equal(same.top, "Runs load the same on each host: mini1 and mini2.");
+  assert.deepEqual(same.hosts, []);
+  assert.equal(wordsText(same.rows.find((row) => row.label === "Extensions").more), "every recorded run, but for trigger 2’s, which withhold them, and the canary gh-c0a7, which tried pi-lint 1.4.3");
+  assert.deepEqual(same.rows.map((row) => row.label), ["pi", "Extensions"]);
+
+  const none = projectLoadsOf([]);
+  assert.equal(none.state, "none");
+  assert.equal(none.top, "Nothing to read: no run of this project has a record this week.");
+  assert.deepEqual(none.small, ["Either none ran, or an older release wrote their records."]);
+  assert.deepEqual(none.rows, []);
+  assert.equal(projectLoadsOf([S.notRecorded()]).small[0], "Either none ran, or an older release wrote their records.");
+  // A run that was refused is not an older release's, so that sentence would be false here.
+  assert.equal(projectLoadsOf([S.notRecorded(), S.refused()]).small[0], "2 did not load or were not recorded: 1 from an older release, 1 refused.");
+
+  const incomplete = projectLoadsOf(incompleteRecords());
+  assert.equal(incomplete.state, "incomplete");
+  assert.equal(incomplete.top, "Read from 9 of its 24 runs this week, so runs may differ in ways this does not show.");
+  assert.deepEqual(incomplete.small, ["15 did not load or were not recorded: 12 from an older release, 2 refused, 1 cancelled with no exit line."]);
+  assert.equal(wordsText(incomplete.rows.find((row) => row.label === "Extensions").more), "the 9 recorded; unknown for the other 15");
+  assert.deepEqual(incomplete.rows.find((row) => row.label === "Missing") && [wordsText(incomplete.rows.find((row) => row.label === "Missing").value), wordsText(incomplete.rows.find((row) => row.label === "Missing").more)], ["nothing in the 9 recorded", "a run with no record cannot say"]);
+  assert.deepEqual(incomplete.links, [], "no difference and no sameness on what it cannot read");
+
+  const one = projectLoadsOf([loadedRecord(), loadedRecord({ jobId: "gh-2" })]);
+  assert.equal(one.state, "same");
+  assert.equal(one.top, "All its recorded runs ran on one host: mini1.");
+});
+
+test("a host reading unknown never counts as the same: a host with no readable record, a cut record, a bounded history", () => {
+  const onMini1 = (i) => loadedRecord({ jobId: `gh-a${i}` });
+  const onMini2 = (i) => loadedRecord({ jobId: `gh-b${i}`, host: "mini2" });
+  const { loaded: _gone, ...olderOnMini2 } = onMini2(9);
+  assert.equal(projectLoadsOf([onMini1(1), onMini2(1)]).state, "same");
+  // mini2 has run something and said nothing: read 3 of 4, and nothing to compare it with.
+  const unknownHost = projectLoadsOf([onMini1(1), onMini1(2), onMini1(3), olderOnMini2]);
+  assert.equal(unknownHost.state, "incomplete");
+  assert.equal(unknownHost.top, "Read from 3 of its 4 runs this week, so runs may differ in ways this does not show.");
+  // A record cut past its names cannot speak for its host.
+  const cutOnMini2 = { ...S.cut(), jobId: "gh-c1", host: "mini2" };
+  assert.equal(projectLoadsOf([onMini1(1), onMini1(2), cutOnMini2]).state, "incomplete");
+  assert.equal(projectLoadsOf([onMini1(1), onMini2(1)], { historyIncomplete: true }).state, "incomplete");
+  assert.equal(hostsAgree([{ state: "unknown" }, { state: "current", unread: [], more: {}, extensions: [], skills: [], mcp: [], packages: [], flows: [] }]), null, "the rule this leans on");
+  // A difference two hosts it can read do show stands, whatever a third says.
+  const differs = projectLoadsOf([...billingRecords(), { ...olderOnMini2, jobId: "gh-z", host: "mini3" }]);
+  assert.equal(differs.state, "differs");
+  // Nothing that is chosen reads as a host's difference: a trigger's withheld packages, a canary, a different flow.
+  const withheld = projectLoadsOf([onMini1(1), { ...S.leftOut(), host: "mini2" }]);
+  assert.notEqual(withheld.state, "differs");
+  const otherPi = projectLoadsOf([onMini1(1), loadedRecord({ jobId: "gh-p", host: "mini2", loaded: loadedField({ pi: "1.4.0", imagePi: "1.4.0", image: "pi-job:4.2.0" }) })]);
+  assert.equal(otherPi.state, "differs");
+  assert.match(otherPi.top, /mini2 runs pi 1\.4\.0 in pi-job:4\.2\.0/);
+  const otherDigest = projectLoadsOf([onMini1(1), loadedRecord({ jobId: "gh-d", host: "mini2", loaded: loadedField({ imageDigest: `sha256:${"b".repeat(64)}` }) })]);
+  assert.equal(otherDigest.state, "same", "the image id is not a difference");
+});
