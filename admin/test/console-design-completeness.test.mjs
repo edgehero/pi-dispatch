@@ -31,6 +31,8 @@ const OUTSIDE_LEDGERS = Object.freeze({
   RunLoaded: "#800, part 1, proposed: the run page's Loaded card. Its ledger arrives when the card is built.",
   LoadedStates: "#800, part 1, proposed: the Loaded card's top line run by run. Its ledger arrives when the card is built.",
   ProjectLoads: "#800, part 1, proposed: the project page's What its runs load. Its ledger arrives when the card is built.",
+  TriggerEnvironment: "#800, part 2, proposed: the trigger page's What its jobs get. Its ledger arrives when the card is built.",
+  TriggerEnvironmentChange: "#800, part 2, proposed: the preview and Confirm of that change. Its ledger arrives when the card is built.",
 });
 
 function assertDispositionOwner(card, disposition, preview) {
