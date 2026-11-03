@@ -12,6 +12,7 @@
 import * as nodeFs from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { logsDirPath } from "@edgehero/pi-dispatch/config";
+import { sandboxHostsPath } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { pointerPath, readPointer } from "../deployment-pointer.mjs";
 import { GATEWAY_HOSTS, hostnameOf } from "./guards.mjs";
@@ -35,7 +36,9 @@ export const CONSOLE_ENV_KEYS = Object.freeze([
 ]);
 
 // Path-valued keys a `.env` may write relative; resolved against the deployment folder, as panelEnv does.
-const PATH_KEYS = new Set(["PI_SANDBOX_GATEWAYS_FILE", "PI_SANDBOX_HOSTS_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_LOGS_DIR", "PI_PAUSE_WINDOWS_FILE"]);
+// PI_SANDBOX_HOSTS_FILE is not one: sandboxHostsPath trims it and resolves it against the same folder, and resolving it
+// here first would turn a quoted blank, which means unset, into the deployment folder itself.
+const PATH_KEYS = new Set(["PI_SANDBOX_GATEWAYS_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_LOGS_DIR", "PI_PAUSE_WINDOWS_FILE"]);
 
 export const DEFAULT_LISTEN = "127.0.0.1:4790";
 
@@ -138,7 +141,8 @@ export function consoleConfig({ env, dir, platform = process.platform, tokensFil
     valkeyUrl: env.VALKEY_URL || "redis://127.0.0.1:6379",
     // The panel's default (resolvePaths): the deployment folder's pause-windows.json, which `init` scaffolds.
     pauseWindowsPath: inDir(env.PI_PAUSE_WINDOWS_FILE || "pause-windows.json"),
-    sandboxHostsFile: inDir(env.PI_SANDBOX_HOSTS_FILE || "sandbox-hosts.json"),
+    // The worker's one rule for this file (issue #806): the sandbox service reads and writes the same path.
+    sandboxHostsFile: sandboxHostsPath(env, dir),
     sandboxGatewaysFile: inDir(env.PI_SANDBOX_GATEWAYS_FILE || "sandbox-gateways.json"),
   };
 }

@@ -2,10 +2,9 @@ import { makeSandboxPrepareQueue, enqueueSandboxPreparation, readSandboxPreparat
 /** Private operator reads and zero-spend control requests. The console never clones or invokes a runtime (#771). */
 import * as nodeFs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { join } from "node:path";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { planSandboxPreparation } from "@edgehero/pi-dispatch/sandbox-prepare";
-import { readSandboxHosts, planSandboxHost, writeSandboxHost } from "@edgehero/pi-dispatch/sandbox-hosts";
+import { readSandboxHosts, planSandboxHost, sandboxHostsPath, writeSandboxHost } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
 import { repoOfTarget } from "./costs.mjs";
@@ -13,7 +12,10 @@ export const SANDBOX_READ_DEPS = Object.freeze({ makeSandboxPrepareQueueFn: make
 const sha = (x) => createHash("sha256").update(typeof x === "string" ? x : JSON.stringify(x)).digest("hex");
 const refusalOf = (out) => out?.refusal ?? out?.message ?? out?.refused ?? "The sandbox request was refused.";
 
-export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs = nodeFs, now = Date.now, random = randomBytes, planFn = planSandboxPreparation, hostFile = paths?.sandboxHostsFile ?? env.PI_SANDBOX_HOSTS_FILE ?? join(deploymentDir, "sandbox-hosts.json") } = {}) {
+export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs = nodeFs, now = Date.now, random = randomBytes, planFn = planSandboxPreparation } = {}) {
+  // The file's one rule, shared with the console's config (issue #806): blank is the default, and a relative path sits
+  // in the deployment folder, never the current directory.
+  const hostFile = sandboxHostsPath(env, deploymentDir);
   const hosts = () => readSandboxHosts(hostFile, { fs });
   async function inventory() {
     const [kept, open] = await Promise.all([fleet.sandboxInventory(), fleet.sandboxSessions()]);

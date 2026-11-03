@@ -3,6 +3,7 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { sandboxHostsPath } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { CONSOLE_ENV_KEYS, consoleConfig, consoleEnv, DEFAULT_LISTEN, deploymentDirOf } from "../src/console/config.mjs";
 
 // The console's configuration (issue #640): every problem a refusal sentence, nothing clamped, nothing guessed.
@@ -101,4 +102,23 @@ test("consoleEnv takes the console keys from the deployment .env, resolves its r
 
 test("a blank PI_CONSOLE_LISTEN is the default, as doctor reads it", () => {
   for (const value of ["", "   ", "\t"]) assert.deepEqual(consoleConfig({ env: { PI_CONSOLE_LISTEN: value }, dir: DIR }).listen, { kind: "tcp", host: "127.0.0.1", port: 4790 }, JSON.stringify(value));
+});
+
+test("the sandbox hosts file is the worker's sandboxHostsPath: the deployment folder's sandbox-hosts.json unless set", () => {
+  for (const value of [undefined, "", "  ", "state/hosts.json", "/etc/pd/hosts.json"]) {
+    const env = value === undefined ? {} : { PI_SANDBOX_HOSTS_FILE: value };
+    assert.equal(consoleConfig({ env, dir: DIR }).sandboxHostsFile, sandboxHostsPath(env, DIR), JSON.stringify(value));
+  }
+  assert.equal(consoleConfig({ env: {}, dir: DIR }).sandboxHostsFile, "/srv/deploy/sandbox-hosts.json");
+});
+
+test("a quoted blank PI_SANDBOX_HOSTS_FILE in the deployment .env is unset, and a relative one sits in the deployment folder", { skip: process.platform === "win32" ? "posix modes" : false }, () => {
+  for (const [line, file] of [['"  "', "sandbox-hosts.json"], ["'\t'", "sandbox-hosts.json"], ["", "sandbox-hosts.json"], ["state/hosts.json", "state/hosts.json"]]) {
+    const dir = tempDir("console-env-");
+    writeFileSync(join(dir, ".env"), `PI_SANDBOX_HOSTS_FILE=${line}\n`);
+    chmodSync(join(dir, ".env"), 0o600);
+    const { env, notice } = consoleEnv({ env: {}, dir });
+    assert.equal(notice, undefined, String(notice));
+    assert.equal(consoleConfig({ env, dir }).sandboxHostsFile, join(dir, file), JSON.stringify(line));
+  }
 });

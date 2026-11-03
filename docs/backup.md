@@ -36,7 +36,7 @@ Both exist because getting them wrong is silent.
 | Workspace checkpoints | `<PI_SESSIONS_DIR>/.checkpoints` | `PI_CHECKPOINTS_DIR` | Crash recovery of [durable runs](durable-runs.md). As PII bearing as the transcripts: back it up only with them |
 | Fork sources | `<PI_SESSIONS_DIR>/.fork-sources` | follows `PI_SESSIONS_DIR` | Forking a finished run, for seven days. Transcripts too. A session key's own forks sit in its `forks/` folder |
 | GitHub App key | `./github-app-<slug>.pem` | `GITHUB_APP_PRIVATE_KEY_PATH` | Forge authentication |
-| Sandbox hosts | worker: `~/.config/pi-dispatch/sandbox-hosts.json`; console: `./sandbox-hosts.json` | `PI_SANDBOX_HOSTS_FILE` | The hosts approved for sandboxes. The worker and the console default to different paths, so set the variable |
+| Sandbox hosts | `./sandbox-hosts.json`, on the console host | `PI_SANDBOX_HOSTS_FILE` | The hosts approved for sandboxes: each one's terminal target, set on its Fleet host page |
 | Sandbox gateways | `./sandbox-gateways.json`, on the console host | `PI_SANDBOX_GATEWAYS_FILE` | The browser gateways enrolled for [sandbox attachment](sandbox-gateway.md). Absent turns attachment off |
 | Opener hosts | `~/.config/pi-dispatch/opener/hosts.json`, on each machine that opens sandboxes | `XDG_CONFIG_HOME` | The host configuration the native opener approved |
 | Deployment pointer | `~/.pi/agent/pi-dispatch-deployment.json` | `PI_DISPATCH_DEPLOYMENT_FILE` (`PI_CODING_AGENT_DIR` moves its folder) | Which deployment folder `/dispatch` and the console manage. `/dispatch setup` writes it again |
@@ -229,7 +229,7 @@ SET. Stopping first is what buys the group.
    cp -a ~/.pi-dispatch/settings.json   /backup/settings.json
    cp -a ~/.pi-dispatch/subscription-auth /backup/subscription-auth  # secret: keep the backup encrypted
    cp -a /path/to/deployment            /backup/deployment      # includes .env, the *.pem and console-tokens.json
-   cp -a ~/.config/pi-dispatch          /backup/config-pi-dispatch   # sandbox and opener hosts; on Podman valkey.env (secret)
+   cp -a ~/.config/pi-dispatch          /backup/config-pi-dispatch   # opener hosts; on Podman valkey.env (secret)
    cp -a "$PI_GLOBAL_PI_DIR"            /backup/global-pi       # the overlay and its staged packages
    cp -a ~/.pi/agent/pi-dispatch-deployment.json /backup/deployment-pointer.json
    cp -a "$PI_SESSIONS_DIR"             /backup/sessions        # ONLY if you accept holding transcripts
