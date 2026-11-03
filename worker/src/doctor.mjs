@@ -141,7 +141,7 @@ import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
 import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, publishRedactor, secretValuesIn } from "./doctor-results.mjs";
 import { olderStateFindings as olderStateFindingsReal, VALKEY_CONTAINER } from "./older-state.mjs";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
-import { buildHostLoads, flowTierOf, mcpRowsOf, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
+import { buildHostLoads, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
@@ -285,6 +285,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// interval the worker actually runs at, not this resolution's reading of it.
 		publishBy = null,
 		publishDoctor = defaultPublishDoctor,
+		hostLoadsOf = doctorHostLoads,
 		writeErr = (s) => process.stderr.write(s),
 		publishNow = Date.now,
 		openshellRun,
@@ -513,7 +514,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 	const record = doctorResultsRecord({ checks: [...checks, ...liveRendered], liveRendered, seams, env, at: publishNow(), by: publishBy });
 	if (json === true) output(`${JSON.stringify(record)}\n`);
 	if (publish === true) {
-		await publishResults({ seams, publishDoctor, writeErr, record, env });
+		await publishResults({ seams, publishDoctor, hostLoadsOf, writeErr, record, env });
 	}
 
 	// Issue #477: whether anything doctor judged came from the deployment's `.env`, which a hand-started worker never reads.
@@ -532,7 +533,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
  * Issue #712: publish one run's results (`INT-DOCTOR-RESULTS-KEY`). Never throws and never decides anything: a Valkey
  * this run may not talk to, or one that does not answer, is ONE line on stderr whose wording starts with
  * `DOCTOR_PUBLISH_SKIPPED_PREFIX` (the worker's spawner reads that prefix and nothing else), and no URL, path or value
- * is in it. The secrets the record must not carry are every secret-named value of the resolution (`env`, which holds
+ * is in it. A record that landed without its `doctor:loads` beside it (issue #800) is one line in other words, for the same
+ * reader: it was published, and saying it was not would be false.
+ * The secrets the record must not carry are every secret-named value of the resolution (`env`, which holds
  * this shell's whole environment with the service's `.env` values over it), plus the `.env` values the resolution did
  * not take (a provider key resolved later, a value this shell disagrees with), so a value the file holds is as absent
  * as one this shell exports.
@@ -551,10 +554,11 @@ export function doctorResultsRecord({ checks, liveRendered = [], seams, env, at,
 /**
  * Issue #800: what this host's jobs can load, for `doctor:loads:<name>` (`host-loads.mjs`), read when it is published and
  * through the readers a job's worker uses, so a run by `--no-publish` reads nothing more. A part that cannot be read is
- * named in `unread`, which a reader takes as unknown, and an empty list would read as none. Throws nothing a caller must
- * handle beyond its own `try`: the doctor record goes out either way.
+ * named in `unread`, which a reader takes as unknown, and an empty list would read as none. Only ABSENT_CODES are absence
+ * (`pathIsThere`): an overlay this uid cannot enter is not an overlay with nothing in it. A throw that gets past that is
+ * the caller's to say: the doctor record goes out either way.
  */
-export function doctorHostLoads({ seams, env, record, fs = { existsSync, readFileSync, readdirSync, statSync } }) {
+export function doctorHostLoads({ seams, env, record, fs = { readFileSync, readdirSync, statSync } }) {
 	const overlay = typeof env.PI_GLOBAL_PI_DIR === "string" ? env.PI_GLOBAL_PI_DIR : "";
 	const unread = [];
 	const read = (part, fn, fallback) => {
@@ -575,46 +579,65 @@ export function doctorHostLoads({ seams, env, record, fs = { existsSync, readFil
 	const mcp = read("mcp", () => mcpRowsOf(readOverlayMcp(overlay, { readFileSync: seams.readOverlayFile ?? ((p, enc) => readFileSync(p, enc)), ...(seams.lstatOverlayFile ? { lstatSync: seams.lstatOverlayFile } : {}) })?.servers, { redact }), []);
 	// A manifest that is there and does not read is not "nothing staged": the job's own reader degrades, this one says so.
 	const packages = read("packages", () => {
-		const manifest = overlay === "" ? { packages: [] } : readStageManifest({ globalPiDir: overlay, readFile: (p) => readFileSync(p, "utf8"), fileExists: (p) => fs.existsSync(p) });
-		return manifest === null ? (fs.existsSync(join(overlay, PACKAGES_SUBDIR, STAGE_MANIFEST)) ? null : []) : manifest.packages;
+		if (overlay === "" || !pathIsThere(join(overlay, PACKAGES_SUBDIR, STAGE_MANIFEST), fs)) return [];
+		return readStageManifest({ globalPiDir: overlay, readFile: (p) => fs.readFileSync(p, "utf8"), fileExists: () => true })?.packages ?? null;
 	}, []);
-	return buildHostLoads({ at: record.at, every: record.every, by: record.by, overlayExtensionsAllowed: env.PI_GLOBAL_ALLOW_EXTENSIONS !== "0", extensions, skills, mcp, packages, flows: seams.flowRows ?? [], unread });
+	// `none` says every tier was checked, and a tier in `unread` was not. Doctor's line stays as it is, since "visible here" is
+	// still true of it. What is published is what can be said: not that the flow is nowhere, only that it was not found.
+	const blind = unread.includes("skills") || unread.includes("packages");
+	const flows = (seams.flowRows ?? []).map((row) => (blind && row.tier === "none" && row.flow !== null ? { ...row, tier: "unknown" } : row));
+	return buildHostLoads({ at: record.at, every: record.every, by: record.by, overlayExtensionsAllowed: env.PI_GLOBAL_ALLOW_EXTENSIONS !== "0", extensions, skills, mcp, packages, flows, unread });
 }
 
-async function publishResults({ seams, publishDoctor, writeErr, record, env }) {
-	const say = (why) => {
+async function publishResults({ seams, publishDoctor, hostLoadsOf, writeErr, record, env }) {
+	const line = (text) => {
 		try {
-			writeErr(`${DOCTOR_PUBLISH_SKIPPED_PREFIX} (${why}); the console and the panel keep the last published results\n`);
+			writeErr(`${text}\n`);
 		} catch {
 			// A closed stderr cannot change the verdict either.
 		}
 	};
+	const say = (why) => line(`${DOCTOR_PUBLISH_SKIPPED_PREFIX} (${why}); the console and the panel keep the last published results`);
+	// Not that prefix, on purpose: the doctor record DID land, and the worker's spawner reads the prefix as "it did not". And not
+	// "readers say unknown", which is false: the last list stays for its seven days and reads as current until it is old.
+	const sayLoads = (why) => line(`doctor: results published, but not what this host's jobs can load (${why}); the console keeps the last list it had`);
 	const target = seams.publishTo;
 	if (!target) return say("doctor talked to no Valkey on this run");
 	if (target.refused) return say(target.refused);
 	let loads = null;
+	let loadsThrew = false;
 	try {
-		loads = doctorHostLoads({ seams, env, record });
+		loads = hostLoadsOf({ seams, env, record });
 	} catch {
-		// Nothing above is known to throw. The doctor record is the older promise and goes out on its own: readers read no
-		// `doctor:loads` as unknown, which is the truth of it.
+		// Each part's own read fails into `unread`, so this is the build of it failing. The doctor record is the older promise
+		// and goes out on its own.
+		loadsThrew = true;
 	}
 	try {
 		await publishDoctor(target.url, target.name, record, loads);
-	} catch {
-		say("Valkey did not take them");
+	} catch (error) {
+		return error?.doctorRecordLanded === true ? sayLoads("Valkey did not take them") : say("Valkey did not take them");
 	}
+	if (loadsThrew) sayLoads("this run could not read them");
 }
 
-/** The real write: doctor's own fail-fast client, bounded, always dropped (`withDoctorClient`). */
-export async function defaultPublishDoctor(url, name, record, loads = null) {
+/**
+ * The real write: doctor's own fail-fast client, bounded, always dropped (`withDoctorClient`). A fault on the second write says
+ * the first landed (`doctorRecordLanded`), since "nothing was published" would then be false of a record readers can see.
+ */
+export async function defaultPublishDoctor(url, name, record, loads = null, { makeClient } = {}) {
 	const { publishDoctorRecord } = await import("./doctor-results.mjs");
 	const { publishHostLoads } = await import("./host-loads.mjs");
 	await withDoctorClient(url, async (client) => {
 		await publishDoctorRecord(client, name, record);
+		if (loads === null) return;
 		// After the doctor record, whose write puts this host under the index both share.
-		if (loads !== null) await publishHostLoads(client, name, loads);
-	});
+		try {
+			await publishHostLoads(client, name, loads);
+		} catch (cause) {
+			throw Object.assign(new Error("the doctor record landed and the loads did not", { cause }), { doctorRecordLanded: true });
+		}
+	}, { makeClient });
 }
 
 /**

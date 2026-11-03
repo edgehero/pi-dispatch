@@ -356,7 +356,13 @@ export async function runJob(job, deps) {
 		return result && typeof result === "object" && (touches.length || touchLineageSkipped) ? { ...result, ...(touches.length ? { touches } : {}), ...(touchLineageSkipped ? { touchLineageSkipped } : {}) } : result;
 	} catch (error) {
 		if (canaryFacts.load !== null && error && typeof error === "object") error.canaryLoad = canaryFacts.load;
-		if (canaryFacts.loaded !== null && error && typeof error === "object") error.loaded = canaryFacts.loaded;
+		if (error && typeof error === "object") {
+			const ran = error.loaded ?? null;
+			// A throw that already holds what the container said (`InfraRetry`'s `loaded`) came out of the run's own wrapper before
+			// the processor could note it, so what is noted here is the image alone. The line stands, with the image added.
+			if (ran !== null && canaryFacts.loaded !== null) error.loaded = { ...ran, image: canaryFacts.loaded.image, imageDigest: canaryFacts.loaded.imageDigest, imagePi: canaryFacts.loaded.imagePi };
+			else if (ran === null && canaryFacts.loaded !== null) error.loaded = canaryFacts.loaded;
+		}
 		if (touches.length && error && typeof error === "object") error.touches = touches;
 		if (touchLineageSkipped && error && typeof error === "object") error.touchLineageSkipped = touchLineageSkipped;
 		throw error;
@@ -3059,7 +3065,7 @@ function isNeverStartedRetry(e) {
 }
 
 export class InfraRetry extends Error {
-	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved, dollars, resources } = {}) {
+	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved, dollars, resources, loaded } = {}) {
 		super(message, cause ? { cause } : undefined);
 		this.name = "InfraRetry";
 		this.piDispatchRetry = true;
@@ -3086,6 +3092,9 @@ export class InfraRetry extends Error {
 		this.dollars = dollars ?? null;
 		// Issue #596: what the container used, off its exit line, or null; set on a throw after a container ran.
 		this.resources = resources ?? null;
+		// Issue #800: what the run loaded, for a throw that REPLACES another (`runJob` sets it on the first), or that comes out
+		// of the run's wrapper before the processor noted it. Absent otherwise, so an error that holds none says so.
+		if (loaded !== undefined && loaded !== null) this.loaded = loaded;
 	}
 }
 

@@ -15,15 +15,19 @@ import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
  * field `runner: "invalid"`: half of a line that lied about something is not a fact. What the worker knows by itself stays
  * either way. REJECTED: dropping only the bad part, which would let a forged line choose what the record is silent about.
  *
- * WHAT SURVIVES IT, said plainly. A token of a closed shape. For an extension tool's name the worker holds nothing to
- * compare it with, so a repository extension in the same process can forge one. The shape is all it gets
- * (`LOADED_TOOL_NAME_RE`: no space, no markup, no path), and a chip made from such a name can only narrow
- * what a job has, while a wrong one refuses the job. One thing the shape would let through is refused anyway, a word that
- * is one of the job's secrets (`known.redact`); a secret transformed or cut across two names is not, as everywhere the
- * redactor stands (redact-secrets.mjs, NOT DEFENDED).
+ * WHAT SURVIVES IT, said plainly. Three things the line alone says, which the worker holds to a shape because it has nothing
+ * to compare them with, so a repository extension in the same process can forge each:
+ *   - an extension tool's name, `LOADED_TOOL_NAME_RE`: no space, no markup, no path, though `ignore-all-previous` passes. A
+ *     chip made from such a name can only narrow what a job has, while a wrong one refuses the job.
+ *   - `pi`, `PI_VERSION_RE`: three dotted numbers, at most 32 characters. Digits, then, and no word.
+ *   - every count, an integer up to `LOADED_COUNT_MAX`. It can be wrong, and a forger can spell digits in a run of them.
+ * A tool name or a `pi` holding one of the job's secrets or a known token's shape is refused anyway (`known.redact`); a secret
+ * transformed, or cut across two values, or spelled in counts, is not, as everywhere the redactor stands (redact-secrets.mjs,
+ * NOT DEFENDED). Every other string kept is a closed word, a folder listing's name, or the worker's own: a package's name and
+ * version off its stage manifest, a server's name off the trigger, the image and `leftOut`. A package's version keeps its
+ * pre-release tail because the line cannot choose it; it picks a row by position and the worker writes what is in that row.
  *
- * Never read to decide anything: a display, as `resources` is. No string a repository chose can pass: every name here is
- * joined from the worker's own lists, checked against a folder listing, or held to a closed list or a shape.
+ * Never read to decide anything: a display, as `resources` is.
  *
  * Imports no spawn, no Valkey and no triggers file parser, because `run-history.mjs`, which the admin loads inside pi,
  * imports this. `known.ownTools` is therefore handed in by the one caller that has `EXCLUDABLE_TOOL_NAMES`.
@@ -35,12 +39,27 @@ export const LOADED_RECORD_VERSION = 1;
 export const LOADED_LINE_VERSION = 1;
 /**
  * Whether the runner said: it said and it held up (`reported`), it never said (`absent`), it said and it did not hold up
- * (`invalid`), or it had something to say and its line had no room for any of it (`cut`). `cut` is not `absent`: the job got
- * as far as noting what it loaded, and a reader saying "an older release wrote this" would be wrong about the run.
+ * (`invalid`), or it had something to say and there was no room for it (`cut`): on its line, or on the record past
+ * `LOADED_RECORD_MAX_BYTES`. `cut` is not `absent`: the job got as far as noting what it loaded, and a reader saying "an older
+ * release wrote this" would be wrong about the run.
  */
 export const LOADED_RUNNER_WORDS = Object.freeze(["reported", "absent", "invalid", "cut"]);
 /** The most the field may take on a record, serialized. Measured against every cap in the tests. */
 export const LOADED_RECORD_MAX_BYTES = 16 * 1024;
+/**
+ * The largest count the field may hold, anywhere: past it the whole field is a violation. A package row, a server and `active`
+ * have tighter clamps below; this bounds what has none (`tiers`, which keep true totals, `cut`'s counts and the `problems`
+ * totals). A million of anything loaded is no job's, and it is what makes the worst case above a number rather than sixteen
+ * digits a slot. The runner clamps none of these: a job past it reads as `invalid`, the word for a line that cannot be believed.
+ */
+export const LOADED_COUNT_MAX = 999_999;
+/**
+ * `pi` on the line and `imagePi` from the image: `usage.piAi`'s rule (run-history.mjs). REJECTED: `EXACT_VERSION_RE`, whose
+ * `-...` and `+...` tails are free text, so a forged line read as `reported` with `pi: "1.5.0-ghs0123456789abcdef"`, a job's
+ * own token, and `1.5.0-ignore.all.previous-instr` beside it. A pi pin is an exact release (`CONST-PI-VERSION-PINNED`), and the
+ * runner holds to this too, so a genuine line never trips it.
+ */
+export const PI_VERSION_RE = /^\d+\.\d+\.\d+$/;
 
 // The runner's vocabulary and caps (image/runner/src/loaded.mjs, which the worker cannot import because it ships in the
 // job image), restated here and held to the source by worker/test/loaded-record.test.mjs.
@@ -81,8 +100,10 @@ const LEFT_OUT_TOOLS_MAX = 32;
 const OWN_TOOLS_MAX = 16;
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-const isCount = (value, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(value) && value >= 0 && value <= max;
-const isPiVersion = (value) => typeof value === "string" && value.length <= PI_VERSION_MAX && EXACT_VERSION_RE.test(value);
+const isCount = (value, max = LOADED_COUNT_MAX) => Number.isSafeInteger(value) && value >= 0 && value <= max;
+const isPiVersion = (value) => typeof value === "string" && value.length <= PI_VERSION_MAX && PI_VERSION_RE.test(value);
+/** Whether the job's own redactor would change this: it holds a value of the job's, or a known token's shape. */
+const holdsSecret = (text, redact) => typeof redact === "function" && redact(text) !== text;
 const isToolName = (value) => typeof value === "string" && LOADED_TOOL_NAME_RE.test(value);
 const isOverlayName = (value) => typeof value === "string" && LOADED_OVERLAY_NAME_RE.test(value);
 /** A package row's slot held to its clamp: a resource count, then a problem count. */
@@ -101,8 +122,9 @@ function knownPackage(value) {
 /**
  * What the worker itself left out of this job, in its own words, because the runner cannot tell: it reads no `run.packages`
  * and sees only what reached it, so `"packages": false` and nothing staged read the same from inside (env-allowlist.mjs).
- * `overlayExtensions` is the host's own switch (`PI_GLOBAL_ALLOW_EXTENSIONS=0`) and not the value handed to this job, which
- * is forced off for a restricted one: that is `restricted`, a different statement with a different fix.
+ * `overlayExtensions` is this job's overlay switch as the worker was built with it: the host's `PI_GLOBAL_ALLOW_EXTENSIONS=0`,
+ * or a canary replay, which runs every job with the overlay shut (canary-runtime.mjs). Not the value handed to a restricted
+ * job, which is forced off for it alone: that is `restricted`, a different statement with a different fix.
  * `tools` keeps what passes the shape. The loader validated the field, so a name failing here is a hand-built job's.
  */
 export function leftOutOf(job, { allowGlobalExtensions = true } = {}) {
@@ -206,7 +228,7 @@ function readExtTools(raw, packageCount, overlayCount, redact) {
 			const [index, ...names] = row;
 			if (!isCount(index) || index >= limit || out.has(index)) refuse("ext-tools-index");
 			if (!names.every(isToolName)) refuse("ext-tools-name");
-			if (typeof redact === "function" && names.some((name) => redact(name) !== name)) refuse("ext-tools-secret");
+			if (names.some((name) => holdsSecret(name, redact))) refuse("ext-tools-secret");
 			total += names.length;
 			out.set(index, names);
 		}
@@ -235,7 +257,7 @@ function readTools(raw, form, ownTools) {
 	return { active: raw.active, own: raw.own, job: raw.job };
 }
 
-const totalOf = (tiers, slot) => Math.min(Object.values(tiers).reduce((sum, row) => sum + row[slot], 0), Number.MAX_SAFE_INTEGER);
+const totalOf = (tiers, slot) => Object.values(tiers).reduce((sum, row) => sum + row[slot], 0);
 const badServers = (mcp) => (mcp === null ? null : mcp.filter((row) => row.state === "failed" || row.state === "timeout").length);
 
 /** The sources a tiers-only line can say: one unnamed package row of true totals, and the rest of the tiers. */
@@ -252,6 +274,8 @@ function readLine(raw, known) {
 	if (raw.v !== LOADED_LINE_VERSION) refuse("version");
 	if (!LOADED_STAGES.includes(raw.at)) refuse("stage");
 	if (raw.pi !== null && !isPiVersion(raw.pi)) refuse("pi");
+	// A numeric token passes the shape: digits are all it has, and the job's own value is still the one thing it may not be.
+	if (raw.pi !== null && holdsSecret(raw.pi, known?.redact)) refuse("pi-secret");
 	const cut = readCut(raw.cut);
 	const packages = (Array.isArray(known?.packages) ? known.packages : []).map(knownPackage);
 	const servers = Array.isArray(known?.servers) ? known.servers : [];
@@ -283,7 +307,11 @@ function readLine(raw, known) {
 	} else if (raw.mcp !== undefined || raw.tools !== undefined) {
 		refuse("stage-facts");
 	}
-	runner.problems = { failed: totalOf(tiers, FAILED_SLOT), dropped: totalOf(tiers, DROPPED_SLOT), mcp: badServers(runner.mcp) };
+	const failed = totalOf(tiers, FAILED_SLOT);
+	const dropped = totalOf(tiers, DROPPED_SLOT);
+	// Each tier held and their sum need not: a total past the bound is the same violation as a count past it.
+	if (!isCount(failed) || !isCount(dropped)) refuse("tiers-total");
+	runner.problems = { failed, dropped, mcp: badServers(runner.mcp) };
 	if (cut.form === "compact") {
 		runner.sources = tierSources(tiers);
 		return runner;
@@ -457,7 +485,7 @@ function recordedRunnerPart(value) {
  * The record's `loaded` (issue #800), REBUILT, never the source's object, the posture of every other field of the record:
  * or null on any violation, and then the record has no such key. What reaches this was made by `rebuildLoaded` and
  * `loadedWithImage`, so null here is a hand-built source and no ordinary run. Only `reported` carries a runner part, whatever
- * the source said. Never throws.
+ * the source said. Past `LOADED_RECORD_MAX_BYTES` it reads as `cut`, the worker's facts kept. Never throws.
  */
 export function recordedLoaded(value) {
 	if (!isObject(value) || value.v !== LOADED_RECORD_VERSION || !LOADED_RUNNER_WORDS.includes(value.runner)) return null;
@@ -473,5 +501,10 @@ export function recordedLoaded(value) {
 	}
 	const { at, cut, pi, flow, sources, mcp, tools, problems } = runnerPart;
 	const out = { v: LOADED_RECORD_VERSION, runner: value.runner, at, cut, image, imageDigest, imagePi, pi, flow, sources, mcp, tools, problems, leftOut };
-	return Buffer.byteLength(JSON.stringify(out), "utf8") <= LOADED_RECORD_MAX_BYTES ? out : null;
+	if (Buffer.byteLength(JSON.stringify(out), "utf8") <= LOADED_RECORD_MAX_BYTES) return out;
+	// No job's line gets here today (the tests measure the worst one); a cap that grows would. REJECTED: null, as this read
+	// until a check found it. The bound falls after the image's facts are added, so a line that had passed every check then
+	// left no key at all, and the run read like an older worker's. What is left always fits: the image's three facts and at
+	// most 32 left-out tools, a few KiB between them.
+	return { ...out, runner: "cut", at: null, cut: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null };
 }

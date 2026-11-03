@@ -18,10 +18,10 @@ const skip = mod ? false : `bullmq not installed (node ${process.version} < 22.1
 
 const USED = { memPeak: 2147483648, swapPeak: 0, oomKills: 0, memSomeUsec: 1, memFullUsec: 0, cpuUsec: 600000000, throttledUsec: 5, throttled: 1, pidsPeak: 40 };
 
-function harness(runContainer, { cancelReq = undefined } = {}) {
+function harness(runContainer, { cancelReq = undefined, redisOver = {}, depsOver = {} } = {}) {
 	const records = [];
 	const logs = [];
-	const redis = { incr: async () => 1, decr: async () => 0, expire: async () => {} };
+	const redis = { incr: async () => 1, decr: async () => 0, expire: async () => {}, ...redisOver };
 	if (cancelReq !== undefined) {
 		const keys = new Map([["cancel:req:local-r", cancelReq]]);
 		Object.assign(redis, { get: async (k) => keys.get(k) ?? null, set: async (k, v) => (keys.set(k, v), "OK"), del: async (k) => (keys.delete(k), 1) });
@@ -40,6 +40,7 @@ function harness(runContainer, { cancelReq = undefined } = {}) {
 			cleanup: async () => {},
 			comment: async () => {},
 			log: (event, fields) => logs.push({ event, ...fields }),
+			...depsOver,
 		},
 	});
 	return { processor, records, logs };
@@ -79,6 +80,24 @@ test("a cancel read only when a spent attempt fails ends as the cancel and keeps
 	assert.ok(logs.some((l) => l.event === "job_cancelled_instead_of_retry" && l.spent === true), "the conversion path, not the raced exit");
 	assert.deepEqual(records.at(-1).result.resources, USED);
 	assert.deepEqual(records.at(-1).result.progress, PROGRESS);
+});
+
+test("a verified line whose provider failure could not be recorded keeps what the job said, with the image: `absent` would be false (#800)", { skip }, async () => {
+	const IMAGE = { ok: true, image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0", capabilities: ["exitAuth"] };
+	const LOADED = { v: 1, runner: "reported", at: "ready", cut: null, image: null, imageDigest: null, imagePi: null, pi: "1.5.0", flow: null, sources: [], mcp: [], tools: { active: 3, own: ["read"], job: [] }, problems: { failed: 0, dropped: 0, mcp: 0 }, leftOut: null };
+	const ran = async () => ({ code: 1, aborted: false, exitAuth: "verified", exitLineCode: 1, turns: 1, providerFailure: { kind: "quota-exhausted" }, loaded: LOADED });
+	const blip = async () => {
+		throw new Error("valkey blip");
+	};
+	const { processor, records } = harness(ran, { redisOver: { set: blip, psetex: blip, pexpire: blip, eval: blip, hset: blip, mget: async () => [], get: async () => null, del: blip, sadd: blip, smembers: async () => [] }, depsOver: { imagePreflight: async () => IMAGE } });
+	await assert.rejects(() => processor(job(), "tok", new AbortController().signal), (error) => error.name === "InfraRetry" && error.message === "the provider failure could not be recorded");
+	const { buildRecord } = await import("../src/run-history.mjs");
+	const record = buildRecord(records.at(-1));
+	assert.equal(record.reason, "container-infra-exit");
+	assert.equal(record.loaded.runner, "reported");
+	assert.equal(record.loaded.at, "ready");
+	assert.deepEqual([record.loaded.pi, record.loaded.tools.active], ["1.5.0", 3]);
+	assert.deepEqual([record.loaded.image, record.loaded.imageDigest, record.loaded.imagePi], [IMAGE.image, IMAGE.imageDigest, "1.5.0"]);
 });
 
 test("a cancel read only when a spent attempt fails keeps what that attempt loaded through the same rebuild (#800)", { skip }, async () => {

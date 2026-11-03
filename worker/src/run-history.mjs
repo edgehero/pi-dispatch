@@ -1319,7 +1319,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// What the run loaded (issue #800, INT-RUN-HISTORY-FILE-CONTRACT): REBUILT (`recordedLoaded`), a display no decision
 		// reads. CONDITIONAL and the last key before `v`, so a refusal before the image was known, and every older record,
 		// is byte-identical to what it was. Names only from what the deployment staged and configured, and counts for what
-		// a repository holds: no string a repository chose.
+		// a repository holds. A repository extension can still forge what the line alone says, each held to a closed shape
+		// (loaded-record.mjs says which and what is left).
 		...(loaded !== null ? { loaded } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader

@@ -20,8 +20,8 @@ import { owningRoot } from "./packages.mjs";
  * mutated to read as a package's, and the runner signs what comes out. So the shape checks here cover ordinary API use and
  * no more, and the signature vouches for the runner's channel and not for what is on it. The worker's rebuild is the
  * boundary (worker/src/loaded-record.mjs `rebuildLoaded`): it checks every string it keeps against the same closed patterns,
- * in its own process. What survives that is a token of a closed shape, and for a tool name the worker has no list to check
- * against, so such a token can only narrow what a later chip excludes.
+ * in its own process. What survives that is a token of a closed shape (a tool's name, for which the worker has no list to
+ * check against, so it can only narrow what a later chip excludes; pi's version, three dotted numbers) and the counts.
  *
  * Everything here is pure and handed its inputs, so it tests without pi or a container. packages.mjs is the one import,
  * for its segment-safe containment, and it reads no pi.
@@ -37,7 +37,10 @@ export const LOADED_MCP_STATES = Object.freeze(["connected", "failed", "timeout"
 /** Each row's positions: a `packages` row and a `tiers` row alike, so one reader reads both. */
 export const LOADED_ROW = Object.freeze(["extensions", "skills", "prompts", "themes", "tools", "failed", "dropped", "shadowed"]);
 const SLOT = Object.freeze(Object.fromEntries(LOADED_ROW.map((name, index) => [name, index])));
-/** The caps, each of which raises `cut` rather than dropping silently. `tiers` is exempt: it keeps true totals. */
+/**
+ * The caps, each of which raises `cut` rather than dropping silently. `tiers` is exempt: it keeps true totals. The worker
+ * reads a total past 999,999 as `invalid` (`LOADED_COUNT_MAX`), and clamping one here would only hide that behind a false count.
+ */
 export const LOADED_MAX_PACKAGES = 16;
 export const LOADED_MAX_SERVERS = 8;
 export const LOADED_MAX_OVERLAY_NAMES = 16;
@@ -79,7 +82,13 @@ export const LOADED_JOB_TOOLS = Object.freeze([
 ]);
 /** pi's own version constant, read as a version only: pi falls back to this spelling when it cannot read its package. */
 const PI_VERSION_UNKNOWN = "0.0.0";
-const PI_VERSION_RE = /^[0-9A-Za-z.+-]{1,32}$/;
+/**
+ * Three dotted numbers, the worker's own rule (`PI_VERSION_RE`, worker/src/loaded-record.mjs, held equal by a test there).
+ * A pre-release reads as null here, which says only that the job's pi did not name itself; written out, it would turn this
+ * whole line `invalid` at the worker, because a `-...` tail is free text.
+ */
+export const PI_VERSION_RE = /^\d+\.\d+\.\d+$/;
+const PI_VERSION_MAX = 32;
 /** The prefix on a tool's source path when pi itself provides it (source-info.js BUILTIN_PATH_PREFIX, pinned). */
 const BUILTIN_TOOL_PREFIX = "builtin:";
 /** The prefix on the source path of a factory the job itself passed (`tierOf` reads these as no tier's). */
@@ -160,7 +169,7 @@ const emptyRow = () => LOADED_ROW.map(() => 0);
  */
 export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skills = [], prompts = [], themes = [], failures = [], drops = [], shadowed = [], tools = null, active = [], ownNames = [], mcp = null }) {
 	const cut = { form: "full", packages: 0, servers: 0, names: 0, counts: 0 };
-	const out = { v: LOADED_VERSION, at, pi: typeof pi === "string" && pi !== PI_VERSION_UNKNOWN && PI_VERSION_RE.test(pi) ? pi : null };
+	const out = { v: LOADED_VERSION, at, pi: typeof pi === "string" && pi !== PI_VERSION_UNKNOWN && pi.length <= PI_VERSION_MAX && PI_VERSION_RE.test(pi) ? pi : null };
 	if (roots === undefined) return { ...out, cut };
 
 	const packages = roots.packages ?? [];

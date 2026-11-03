@@ -2936,6 +2936,26 @@ test("a refusal after the image is known names the image and has no runner part,
 	await assert.rejects(() => runJob(ghJob, deps({ imagePreflight: async () => ({ unavailable: "pi-job:1" }) }).deps), (e) => e instanceof InfraRetry && !Object.hasOwn(e, "loaded"));
 });
 
+test("a throw out of the run's wrapper that holds a verified line keeps it, with the image's facts added: `runJob` does not put the image alone over it", async () => {
+	const { deps: d } = deps({ imagePreflight: async () => LOADED_IMAGE, runContainer: async () => { throw new InfraRetry("the provider failure could not be recorded", { reason: "container-infra-exit", exitCode: 1, loaded: reportedLoaded() }); } });
+	let thrown;
+	await assert.rejects(() => runJob(ghJob, d), (e) => ((thrown = e), e instanceof InfraRetry));
+	assert.equal(thrown.loaded.runner, "reported");
+	assert.equal(thrown.loaded.at, "session");
+	assert.deepEqual(thrown.loaded.mcp, [{ name: "linear", state: "timeout", tools: 0 }]);
+	assert.deepEqual([thrown.loaded.image, thrown.loaded.imageDigest, thrown.loaded.imagePi], [LOADED_IMAGE.image, LOADED_IMAGE.imageDigest, "1.5.0"]);
+	const noImage = deps({ imagePreflight: async () => ({ ok: true }), runContainer: async () => { throw new InfraRetry("x", { reason: "container-infra-exit", loaded: reportedLoaded() }); } });
+	await assert.rejects(() => runJob(ghJob, noImage.deps), (e) => e.loaded.runner === "reported" && e.loaded.image === null, "a preflight that named no image takes nothing from it");
+});
+
+test("an InfraRetry holds `loaded` only when it was given one, so no other throw claims to hold what a job loaded", () => {
+	assert.equal(Object.hasOwn(new InfraRetry("x", {}), "loaded"), false);
+	assert.equal(Object.hasOwn(new InfraRetry("x", { loaded: undefined }), "loaded"), false);
+	assert.equal(Object.hasOwn(new InfraRetry("x", { loaded: null }), "loaded"), false);
+	const held = reportedLoaded();
+	assert.equal(new InfraRetry("x", { loaded: held }).loaded, held);
+});
+
 test("a throw before the container started keeps the image alone, and never a line of an earlier attempt", async () => {
 	const { deps: d } = deps({ imagePreflight: async () => LOADED_IMAGE, runContainer: async () => { throw new InfraRetry("container-never-started", { reason: "container-never-started" }); } });
 	let thrown;

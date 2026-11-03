@@ -6,7 +6,9 @@ export const ROOTS = Object.freeze({ packages: [], jobPi: "/job/pi", triggerSkil
 /**
  * The largest `loaded` the runner can note, built through buildLoaded and then widened where its input cannot reach
  * cheaply: every row at its clamp, every list at its cap, every name at its longest, each tier total at the largest safe
- * integer (`tiers` keeps true totals, so nothing else bounds it) and each `cut` count at five digits.
+ * integer (`tiers` keeps true totals, so nothing here bounds it) and each `cut` count at five digits. That is the worst for
+ * this LINE's budget; the worker reads a count past 999,999 as `invalid` (`LOADED_COUNT_MAX`), so its own worst RECORD is built
+ * from this with those brought in (worker/test/loaded-record.test.mjs `maximal`).
  */
 export function maximalLoaded() {
 	const packages = Array.from({ length: LOADED_MAX_PACKAGES + 8 }, (_, i) => `/opt/pi-global/packages/p${i}`);
@@ -20,7 +22,7 @@ export function maximalLoaded() {
 	];
 	const loaded = buildLoaded({
 		at: "session",
-		pi: "9".repeat(32),
+		pi: `${"9".repeat(28)}.9.9`,
 		roots,
 		flow: "deep",
 		skills: [{ name: "deep", filePath: `${packages[LOADED_MAX_PACKAGES + 7]}/skills/deep/SKILL.md` }],

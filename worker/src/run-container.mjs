@@ -350,7 +350,8 @@ export function makeRunContainer({
 			overlayExtensions,
 			servers: Array.isArray(job.mcp) ? job.mcp : [],
 			ownTools: EXCLUDABLE_TOOL_NAMES,
-			// The closure's value, not the job's below: a host's switch and a restricted job's forced one are different statements.
+			// The closure's value, not the job's below: this worker's switch (the host's, or a canary replay's) and a restricted
+			// job's forced one are different statements.
 			leftOut: leftOutOf(job, { allowGlobalExtensions }),
 			// A word from a closed list, never line text: the line is what is not trusted here.
 			onViolation: (why) => log("loaded_invalid", { container: name, why }),

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DOCTOR_RESULTS_TTL_MS } from "../src/doctor-results.mjs";
-import { buildHostLoads, flowTierOf, HOST_LOADS_CAPS, HOST_LOADS_MAX_BYTES, HOST_LOADS_OLD_INTERVALS, hostLoadsKey, hostsAgree, LOADS_IGNORE_FILES, loadsFreshness, mcpRowsOf, parseHostLoads, publishHostLoads, readHostLoads, readOverlayExtensionRows, readOverlaySkillNames } from "../src/host-loads.mjs";
-import { parseOverlayMcp } from "../src/mcp-config.mjs";
+import { buildHostLoads, flowTierOf, HOST_LOADS_CAPS, HOST_LOADS_MAX_BYTES, HOST_LOADS_OLD_INTERVALS, hostLoadsKey, hostsAgree, LOADS_IGNORE_FILES, loadsFreshness, mcpRowsOf, parseHostLoads, pathIsThere, publishHostLoads, readHostLoads, readOverlayExtensionRows, readOverlaySkillNames } from "../src/host-loads.mjs";
+import { ABSENT_CODES, parseOverlayMcp } from "../src/mcp-config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #800, INT-DOCTOR-RESULTS-KEY's `doctor:loads:<name>`. Every clock here is injected: a record's age is the point.
@@ -150,7 +150,7 @@ test("each list has its cap, the rest counted in `more`, and the whole record it
 });
 
 test("the parser is an allowlist: an unknown key is not read, and a row that fails is dropped and counted", () => {
-	const parsed = parseHostLoads(JSON.stringify({ ...record(), secret: "SECRET", extensions: [{ name: "ok.ts", kind: "file", path: "/etc/x" }, { name: "/etc/x", kind: "file" }, "x"], mcp: [{ ...PARTS.mcp[0], url: "https://secret" }], packages: [{ name: "pi-a", version: "1.0.0", dir: "/x" }], skills: [7], flows: [{ ...PARTS.flows[0], folder: "/srv" }], unread: ["mcp", "made-up"], more: { extensions: 1, junk: 4, flows: "x" } }));
+	const parsed = parseHostLoads(JSON.stringify({ ...record(), secret: "SECRET", extensions: [{ name: "ok.ts", kind: "file", path: "/etc/x" }, { name: "/etc/x", kind: "file" }, "x"], mcp: [{ ...PARTS.mcp[0], url: "https://secret" }], packages: [{ name: "pi-a", version: "1.0.0", dir: "/x" }], skills: [7], flows: [{ ...PARTS.flows[0], folder: "/srv" }], unread: ["mcp"], more: { extensions: 1, junk: 4 } }));
 	assert.deepEqual(parsed.extensions, [{ name: "ok.ts", kind: "file" }]);
 	assert.deepEqual(parsed.mcp, PARTS.mcp);
 	assert.deepEqual(parsed.packages, [{ name: "pi-a", version: "1.0.0" }]);
@@ -161,6 +161,85 @@ test("the parser is an allowlist: an unknown key is not read, and a row that fai
 	assert.deepEqual(parsed.more, { extensions: 3, skills: 1 }, "what the host said was past its cap, and what this reader refused");
 	assert.doesNotMatch(JSON.stringify(parsed), /SECRET|\/etc\/x|https:\/\/secret|"\/x"|\/srv|junk/);
 	for (const notOne of ["{", "null", "[]", "7", JSON.stringify({ ...record(), v: 2 }), JSON.stringify({ ...record(), v: "1" }), JSON.stringify({ ...record(), v: 0 }), JSON.stringify({ ...record(), at: "x" }), JSON.stringify({ ...record(), at: -1 })]) assert.equal(parseHostLoads(notOne), null, notOne);
+});
+
+test("a record with no shape does not read: unknown, never an empty current host that agrees with a real one", async () => {
+	// What an independent check found, whole: this parsed as a host with nothing on it, off, and said "the same" of one.
+	const shapeless = '{"v":1,"at":1000}';
+	assert.equal(parseHostLoads(shapeless), null);
+	const real = { name: "real", state: "current", ...parseHostLoads(JSON.stringify(buildHostLoads({ at: 1000, overlayExtensionsAllowed: false }))) };
+	const read = await readHostLoads(fakeRedis({ [hostLoadsKey("bare")]: shapeless }), { now: () => 1000 });
+	assert.deepEqual(read.hosts, [{ name: "bare", state: "unknown", why: "unreadable" }]);
+	assert.equal(hostsAgree([real, ...read.hosts]), null, "never the same");
+
+	// One part at a time, so each list and the switch is a reason of its own.
+	const good = record({ more: undefined });
+	const without = (part) => {
+		const copy = { ...good };
+		delete copy[part];
+		return copy;
+	};
+	for (const part of ["extensions", "skills", "mcp", "packages", "flows"]) {
+		assert.equal(parseHostLoads(JSON.stringify(without(part))), null, `${part} missing`);
+		for (const wrong of [null, "x", 7, {}, true]) assert.equal(parseHostLoads(JSON.stringify({ ...good, [part]: wrong })), null, `${part} as ${JSON.stringify(wrong)}`);
+	}
+	assert.equal(parseHostLoads(JSON.stringify(without("overlayExtensionsAllowed"))), null, "the switch missing");
+	for (const wrong of [null, "true", 1, 0, []]) assert.equal(parseHostLoads(JSON.stringify({ ...good, overlayExtensionsAllowed: wrong })), null, `the switch as ${JSON.stringify(wrong)}`);
+	assert.equal(parseHostLoads(JSON.stringify({ ...good, overlayExtensionsAllowed: false })).overlayExtensionsAllowed, false, "a real off stays off");
+
+	// What would otherwise read as "nothing left out", "nothing unread" or "never old".
+	assert.equal(parseHostLoads(JSON.stringify(without("more"))), null, "no `more`: whether anything was left out is not known");
+	for (const more of [null, 7, "x", [], { flows: "x" }, { keys: -1 }, { mcp: 1.5 }]) assert.equal(parseHostLoads(JSON.stringify({ ...good, more })), null, `more ${JSON.stringify(more)}`);
+	for (const unread of [null, "mcp", 7, {}, ["made-up"], ["mcp", "made-up"]]) assert.equal(parseHostLoads(JSON.stringify({ ...good, unread })), null, `unread ${JSON.stringify(unread)}`);
+	assert.deepEqual(parseHostLoads(JSON.stringify(without("unread"))).unread, [], "absent is the builder's own way of saying none");
+	assert.equal(parseHostLoads(JSON.stringify(without("every"))), null, "no interval key at all");
+	for (const every of ["24", -1, 1.5, []]) assert.equal(parseHostLoads(JSON.stringify({ ...good, every })), null, `every ${JSON.stringify(every)}`);
+	assert.equal(parseHostLoads(JSON.stringify({ ...good, every: null })).every, null, "null is the builder's own unknown");
+	assert.equal(parseHostLoads(JSON.stringify(without("by"))), null);
+	assert.equal(parseHostLoads(JSON.stringify({ ...good, by: "x" })), null);
+	for (const notText of [null, undefined, 7, {}]) assert.equal(parseHostLoads(notText), null, String(notText));
+});
+
+test("a record past the bound does not read, however it got there: no builder writes one, and a reader does not parse it to find out", async () => {
+	const pad = (bytes) => {
+		const text = JSON.stringify({ ...record(), pad: "" });
+		return text.replace('"pad":""', `"pad":"${"x".repeat(bytes - Buffer.byteLength(text, "utf8"))}"`);
+	};
+	assert.equal(Buffer.byteLength(pad(HOST_LOADS_MAX_BYTES), "utf8"), HOST_LOADS_MAX_BYTES);
+	assert.ok(parseHostLoads(pad(HOST_LOADS_MAX_BYTES)) !== null, "at the bound it reads");
+	assert.equal(parseHostLoads(pad(HOST_LOADS_MAX_BYTES + 1)), null, "one byte past it does not");
+	assert.equal(parseHostLoads(pad(2 * 1024 * 1024)), null, "nor the two megabytes a check read as current");
+	// By bytes, not characters: another host's multi-byte text cannot get past the bound on its length.
+	const wide = JSON.stringify({ ...record(), pad: "é".repeat(HOST_LOADS_MAX_BYTES / 2) });
+	assert.ok(wide.length < HOST_LOADS_MAX_BYTES + 512 && Buffer.byteLength(wide, "utf8") > HOST_LOADS_MAX_BYTES);
+	assert.equal(parseHostLoads(wide), null);
+	const read = await readHostLoads(fakeRedis({ [hostLoadsKey("huge")]: pad(2 * 1024 * 1024) }), { now: () => NOW });
+	assert.deepEqual(read.hosts, [{ name: "huge", state: "unknown", why: "unreadable" }]);
+});
+
+test("where a server is and the names it references are held to their charsets, at the builder and again at the parser", () => {
+	const row = (over) => ({ name: "m", transport: "http", where: "ok.example", exposure: "codemode", enabled: true, keys: ["A_KEY"], ...over });
+	const rows = (over) => [buildHostLoads({ at: NOW, mcp: [row(over)] }), parseHostLoads(JSON.stringify({ ...buildHostLoads({ at: NOW }), mcp: [row(over)] }))];
+	for (const where of ["/etc/passwd", "bin/tool", "https://user:pass@host/x?y=1", "a b", "host?token=x", "user@host", "ok.example\n", "<b>", "x".repeat(256), "", 7, null]) {
+		for (const read of rows({ where })) {
+			assert.equal(read.mcp[0].where, null, JSON.stringify(where));
+			assert.ok(typeof where !== "string" || where === "" || !JSON.stringify(read).includes(where), JSON.stringify(where));
+		}
+	}
+	for (const where of ["mcp.linear.app", "mcp.linear.app:8443", "[::1]:8080", "my-server_2", "x".repeat(255)]) {
+		for (const read of rows({ where })) assert.equal(read.mcp[0].where, where);
+	}
+	for (const read of rows({ keys: ["GOOD_KEY", "_LEADING", "HOSTILE value", "$(x)", "lower", "9STARTS", "A".repeat(65), "X".repeat(64), 7] })) {
+		assert.deepEqual(read.mcp[0].keys, ["GOOD_KEY", "_LEADING", "X".repeat(64)], "a name, and no more than a name");
+		assert.equal(read.more.keys, 6, "and each one it did not keep is counted");
+		assert.doesNotMatch(JSON.stringify(read), /HOSTILE|\$\(x\)|lower|9STARTS/);
+	}
+	// A place that failed its charset can hide a difference: two hosts with different hostile values would both read null.
+	const place = (where, name) => ({ name, state: "current", ...parseHostLoads(JSON.stringify({ ...buildHostLoads({ at: NOW }), mcp: [row({ where })] })) });
+	assert.equal(hostsAgree([place("a b", "x"), place("c d", "y")]), null, "not the same: nobody can say");
+	assert.equal(hostsAgree([place(null, "x"), place(null, "y")]), null, "nor when a secret took it out of both");
+	assert.equal(hostsAgree([place("ok.example", "x"), place("ok.example", "y")]), true);
+	assert.equal(hostsAgree([place("ok.example", "x"), place("other.example", "y")]), false);
 });
 
 test("an older host never reads as the same: absent, unparseable, newer and expired all read unknown", async () => {
@@ -334,7 +413,72 @@ test("the overlay's extensions read by the rule a job discovers them by, held to
 	assert.deepEqual(readOverlayExtensionRows(tempDir("host-loads-empty-")), [], "no folder is no extensions");
 	assert.deepEqual(readOverlayExtensionRows(""), []);
 	assert.deepEqual(readOverlayExtensionRows(null), []);
-	assert.throws(() => readOverlayExtensionRows("/x", { fs: { existsSync: (path) => path.endsWith("extensions"), readFileSync: () => "", statSync: () => ({ isDirectory: () => false }), readdirSync: () => { throw new Error("EACCES"); } } }), /EACCES/, "a read that fails is not an empty folder");
+});
+
+/** The real `fs`, except that a path `denied` matches fails with `code`: what a folder at mode 000 answers, as any uid. */
+function fsDenying(denied, code = "EACCES") {
+	const check = (path) => {
+		if (denied.test(String(path))) throw Object.assign(new Error(`${code}: permission denied`), { code });
+	};
+	return {
+		statSync: (path, ...rest) => (check(path), statSync(path, ...rest)),
+		readFileSync: (path, ...rest) => (check(path), readFileSync(path, ...rest)),
+		readdirSync: (path, ...rest) => (check(path), readdirSync(path, ...rest)),
+	};
+}
+
+test("only absence is absent: anything else a read answers throws, so a folder it cannot enter never reads as none", () => {
+	for (const code of ABSENT_CODES) assert.equal(pathIsThere("/x", fsDenying(/x/, code)), false, code);
+	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const said = spec.match(/Only (`[A-Z]+`(?:, `[A-Z]+`)*(?: and `[A-Z]+`)) are absence \(`ABSENT_CODES`\)/);
+	assert.deepEqual(said?.[1].match(/[A-Z]+/g).sort(), [...ABSENT_CODES].sort(), "INT-DOCTOR-RESULTS-KEY names the set");
+	for (const code of ["EACCES", "EPERM", "EIO", "EMFILE", undefined]) assert.throws(() => pathIsThere("/x", fsDenying(/x/, code)), undefined, String(code));
+	assert.equal(pathIsThere(tempDir("host-loads-there-")), true);
+
+	const overlay = tempDir("host-loads-denied-");
+	const dir = join(overlay, "extensions");
+	mkdirSync(join(dir, "folder"), { recursive: true });
+	writeFileSync(join(dir, "folder", "index.ts"), "x");
+	mkdirSync(join(dir, "pack"), { recursive: true });
+	writeFileSync(join(dir, "pack", "package.json"), JSON.stringify({ pi: { extensions: ["./main.js"] } }));
+	writeFileSync(join(dir, "pack", "main.js"), "x");
+	writeFileSync(join(dir, "single.ts"), "x");
+	writeFileSync(join(dir, ".gitignore"), "# nothing\n");
+	symlinkSync(join(dir, "single.ts"), join(dir, "linked.ts"));
+	for (const name of ["deploy", "fix"]) {
+		mkdirSync(join(overlay, "skills", name), { recursive: true });
+		writeFileSync(join(overlay, "skills", name, "SKILL.md"), "x");
+	}
+	writeFileSync(join(overlay, "skills", "README.md"), "a file beside the folders is no skill, not a failed read");
+
+	assert.equal(readOverlayExtensionRows(overlay).length, 4, "the premise: all of it reads");
+	assert.deepEqual(readOverlaySkillNames(overlay), ["deploy", "fix"], "and a file's ENOTDIR is absence");
+	for (const [label, denied] of Object.entries({
+		"the overlay": new RegExp(`^${overlay}`),
+		"extensions/": /extensions$/,
+		"its manifest": /extensions\/package\.json$/,
+		"a folder of one extension": /extensions\/folder\//,
+		"a package's manifest": /pack\/package\.json$/,
+		"what a package's manifest names": /pack\/main\.js$/,
+		"an ignore file": /extensions\/\.gitignore$/,
+		"where a link points": /linked\.ts$/,
+	})) {
+		assert.throws(() => readOverlayExtensionRows(overlay, { fs: fsDenying(denied) }), /EACCES/, label);
+	}
+	for (const [label, denied] of Object.entries({ "the overlay": new RegExp(`^${overlay}`), "skills/": /skills$/, "a skill's own folder": /skills\/deploy\/SKILL\.md$/ })) {
+		assert.throws(() => readOverlaySkillNames(overlay, { fs: fsDenying(denied) }), /EACCES/, label);
+	}
+	// A manifest that does not parse is not one that cannot be read: the job takes it as declaring nothing, and so does this.
+	const garbled = tempDir("host-loads-garbled-");
+	mkdirSync(join(garbled, "extensions", "broken"), { recursive: true });
+	writeFileSync(join(garbled, "extensions", "broken", "package.json"), "{ not json");
+	writeFileSync(join(garbled, "extensions", "broken", "index.js"), "x");
+	assert.deepEqual(readOverlayExtensionRows(garbled), [{ name: "broken", kind: "dir" }]);
+	// A link to nowhere is absence too: discovery skips it, as it always did.
+	const dangling = tempDir("host-loads-dangling-");
+	mkdirSync(join(dangling, "extensions"), { recursive: true });
+	symlinkSync(join(dangling, "gone"), join(dangling, "extensions", "dangling.ts"));
+	assert.deepEqual(readOverlayExtensionRows(dangling), []);
 });
 
 test("the overlay's skills read by folder, as doctor's flow line reads them", () => {

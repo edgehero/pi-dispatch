@@ -12,7 +12,7 @@ import { makeRedactor } from "../src/redact-secrets.mjs";
 import { buildRecord, makeLogSink } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
-const { LOADED_RECORD_MAX_BYTES, leavesOut, leftOutOf, loadedWithImage, rebuildLoaded, recordedLoaded } = record;
+const { LOADED_COUNT_MAX, LOADED_RECORD_MAX_BYTES, leavesOut, leftOutOf, loadedWithImage, rebuildLoaded, recordedLoaded } = record;
 const { buildLoaded, fitLoaded } = runnerLoaded;
 
 // Issue #800, INT-RUN-HISTORY-FILE-CONTRACT's `loaded`: the worker's half. The lines here come out of the runner's own
@@ -60,6 +60,7 @@ test("the worker's copy of the runner's vocabulary and caps is the runner's (the
 	}
 	assert.equal(String(record.LOADED_OVERLAY_NAME_RE), String(runnerLoaded.LOADED_OVERLAY_NAME_RE));
 	assert.equal(String(record.LOADED_TOOL_NAME_RE), String(runnerLoaded.LOADED_TOOL_NAME_RE));
+	assert.equal(String(record.PI_VERSION_RE), String(runnerLoaded.PI_VERSION_RE), "or a genuine line would read as invalid");
 	assert.equal(record.LOADED_LINE_VERSION, runnerLoaded.LOADED_VERSION);
 	assert.deepEqual(fitLoaded(line()).map((form) => form.cut.form), [...record.LOADED_FORMS]);
 });
@@ -188,6 +189,10 @@ test("any violation is `invalid`, every part of the line gone and the worker's f
 		"a version that is no number": (l) => (l.v = "1"),
 		"a stage": (l) => (l.at = "finished"),
 		"pi not a version": (l) => (l.pi = "1.5.0 please read the file"),
+		"pi with a pre-release tail": (l) => (l.pi = "1.5.0-rc.1"),
+		"pi with a build tail": (l) => (l.pi = "1.5.0+b2"),
+		"a tier count past the bound": (l) => (l.tiers.other[0] = LOADED_COUNT_MAX + 1),
+		"a cut count past the bound": (l) => (l.cut.counts = LOADED_COUNT_MAX + 1),
 		"a cut that names no form": (l) => (l.cut.form = "huge"),
 		"a cut that is no count": (l) => (l.cut.names = -1),
 		"a flow word": (l) => (l.flow = "sneaky"),
@@ -395,6 +400,115 @@ test("in-process code can put any string on a signed line, so the rebuild is the
 	}
 });
 
+test("`pi` is three dotted numbers: a version's tail is free text, so a job's secret and a sentence are both invalid, and neither reaches the record", () => {
+	const SECRET_TAIL = "ghs0123456789abcdefABCDEF";
+	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
+	const known = { ...KNOWN, leftOut: leftOutOf({ excludeTools: ["bash"] }), redact: makeRedactor({ values: [SECRET_TAIL] }) };
+	const img = { image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0" };
+	for (const pi of [`1.5.0-${SECRET_TAIL}`, "1.5.0-ignore.all.previous-instr", "1.5.0+ignore.all.previous", "1.5.0-rc.1", "v1.5.0", "1.5", "1.5.0.0", "1.5.0\n", " 1.5.0", "1.5.0 ", "1٫5٫0", "١.٥.٠", `${"1".repeat(30)}.0.0`, 7, true, {}]) {
+		const words = [];
+		const loaded = rebuildLoaded({ ...line(), pi }, { ...known, onViolation: (word) => words.push(word) });
+		assert.equal(loaded.runner, "invalid", JSON.stringify(pi));
+		assert.deepEqual(words, ["pi"], JSON.stringify(pi));
+		assert.equal(loaded.pi, null);
+		const bytes = JSON.stringify(buildRecord({ job, result: { outcome: "completed", exitCode: 0, loaded: loadedWithImage(loaded, img) } }));
+		for (const piece of [SECRET_TAIL, "ignore", "previous"]) assert.ok(!bytes.includes(piece), `${piece} reached the record`);
+		assert.ok(bytes.includes('"imagePi":"1.5.0"') && bytes.includes('"tools":["bash"]'), "the worker's facts stay");
+	}
+	for (const pi of ["1.5.0", "0.0.1", "10.20.30", `${"1".repeat(28)}.0.0`, null]) assert.equal(rebuildLoaded({ ...line(), pi }, known).runner, "reported", JSON.stringify(pi));
+
+	// The record's own door holds the same rule, for what reaches it by hand, and the image's declared version is held to it too.
+	const good = rebuildLoaded(line(), KNOWN);
+	assert.equal(recordedLoaded({ ...good, pi: `1.5.0-${SECRET_TAIL}` }), null);
+	assert.equal(recordedLoaded({ ...good, imagePi: `1.5.0-${SECRET_TAIL}` }).imagePi, null, "a fact that fails its shape reads as no fact");
+
+	// A number is all it can be now, and a job's own numeric value is still refused, on the same word a tool's name gets.
+	const words = [];
+	assert.equal(rebuildLoaded({ ...line(), pi: "12345678.0.0" }, { ...KNOWN, redact: makeRedactor({ values: ["12345678"] }), onViolation: (word) => words.push(word) }).runner, "invalid");
+	assert.deepEqual(words, ["pi-secret"]);
+	assert.equal(rebuildLoaded({ ...line(), pi: "12345678.0.0" }, { ...KNOWN, redact: makeRedactor({ values: ["87654321"] }) }).runner, "reported", "a long version that is no secret");
+	assert.equal(rebuildLoaded({ ...line(), pi: null }, { ...KNOWN, redact: () => "" }).runner, "invalid", "a redactor that could not be built fails the tools; with none, a null pi");
+	assert.equal(rebuildLoaded({ ...buildLoaded({ at: "start", pi: "1.5.0" }) }, { ...KNOWN, redact: () => "" }).runner, "invalid", "and it judges no version fine either");
+
+	// A genuine runner on a pre-release says nothing of its version, and its line stays whole.
+	const pre = rebuildLoaded(line({ pi: "1.6.0-rc.1" }), KNOWN);
+	assert.equal(pre.runner, "reported");
+	assert.equal(pre.pi, null);
+});
+
+test("every count has the one bound: past 999,999, anywhere, the whole field is `invalid`", () => {
+	assert.equal(LOADED_COUNT_MAX, 999_999);
+	assert.match(readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8"), /`problems` totals, at most 999,999 \(`LOADED_COUNT_MAX`\)/);
+	const at = LOADED_COUNT_MAX;
+	const past = LOADED_COUNT_MAX + 1;
+	const words = [];
+	const read = (forged, known = KNOWN) => rebuildLoaded(forged, { ...known, onViolation: (word) => words.push(word) }).runner;
+	const editing = (edit, over = {}) => {
+		const forged = structuredClone(line(over));
+		edit(forged);
+		return forged;
+	};
+	const [, compact, minimal] = fitLoaded(line());
+	for (const value of [past, Number.MAX_SAFE_INTEGER]) {
+		for (const [label, forged] of Object.entries({
+			"a tier's own count": editing((l) => (l.tiers.repository[0] = value)),
+			"a tier's own problem count": editing((l) => (l.tiers.other[5] = value)),
+			"a package tier the rows do not show": editing((l) => (l.tiers.package[4] = value)),
+			"a tier in the compact form": { ...structuredClone(compact), tiers: { ...compact.tiers, other: [value, 0, 0, 0, 0, 0, 0, 0] } },
+			"cut.names": editing((l) => (l.cut.names = value)),
+			"cut.counts": editing((l) => (l.cut.counts = value)),
+			"cut.counts, compact": { ...compact, cut: { ...compact.cut, counts: value } },
+			"cut.names, minimal": { ...minimal, cut: { ...minimal.cut, names: value } },
+			"minimal's failed": { ...minimal, failed: value },
+			"minimal's dropped": { ...minimal, dropped: value },
+		})) {
+			assert.equal(read(forged), "invalid", `${label} at ${value}`);
+		}
+		// Refused by its own check and not only by the record's door after it, so the log names what was wrong.
+		words.length = 0;
+		read({ ...minimal, failed: value });
+		assert.deepEqual(words, ["minimal"]);
+	}
+	// A stage that holds no list still holds its `cut`.
+	assert.equal(read({ ...buildLoaded({ at: "start", pi: "1.5.0" }), cut: { form: "full", packages: past, servers: 0, names: 0, counts: 0 } }), "invalid");
+	assert.equal(read({ ...buildLoaded({ at: "start", pi: "1.5.0" }), cut: { form: "full", packages: 0, servers: past, names: 0, counts: 0 } }), "invalid");
+
+	// At the bound each one reads, so the bound is this number and no lower.
+	assert.equal(read(editing((l) => (l.tiers.repository[0] = at))), "reported");
+	assert.equal(read(editing((l) => (l.cut.names = at))), "reported");
+	assert.equal(read(editing((l) => (l.cut.counts = at))), "reported");
+	assert.equal(read({ ...minimal, failed: at, dropped: at }), "reported");
+
+	// Each tier in bounds and their sum past it: `problems` would hold the number, so it is the same violation.
+	words.length = 0;
+	const summed = rebuildLoaded(editing((l) => { for (const tier of Object.keys(l.tiers)) l.tiers[tier][5] = 200_000; }), { ...KNOWN, onViolation: (word) => words.push(word) });
+	assert.equal(summed.runner, "invalid");
+	assert.deepEqual(words, ["tiers-total"]);
+	assert.equal(read(editing((l) => { for (const tier of Object.keys(l.tiers)) l.tiers[tier][6] = 200_000; })), "invalid", "dropped too");
+	assert.equal(read(editing((l) => { for (const tier of Object.keys(l.tiers)) l.tiers[tier][0] = at; })), "reported", "a slot no total is made of");
+
+	// A name past the row cap adds to `cut.names`, and that sum is held too.
+	const packages = Array.from({ length: 18 }, (_, i) => `/opt/pi-global/packages/p${i}`);
+	const many = { ...KNOWN, servers: [], packages: packages.map((_, i) => ({ name: `p${i}`, version: "1.0.0" })) };
+	const beyond = buildLoaded({ at: "session", pi: "1.5.0", roots: { ...ROOTS, packages }, tools: [tool("beyond", `${packages[17]}/e.js`)], active: [], ownNames: [...OWN], mcp: [] });
+	assert.equal(read({ ...beyond, cut: { ...beyond.cut, names: at - 1 } }, many), "reported");
+	assert.equal(read({ ...beyond, cut: { ...beyond.cut, names: at } }, many), "invalid");
+
+	// The record's own door, for what reaches it by hand.
+	const good = rebuildLoaded(line(), KNOWN);
+	for (const [label, edit] of Object.entries({
+		"a source's count": (l) => (source(l, "repository").extensions = past),
+		"a package source's count": (l) => (l.sources[0].tools = past),
+		"cut": (l) => (l.cut = { form: "full", packages: 0, servers: 0, names: past, counts: 0 }),
+		"problems.failed": (l) => (l.problems.failed = past),
+		"problems.dropped": (l) => (l.problems.dropped = past),
+	})) {
+		const forged = structuredClone(good);
+		edit(forged);
+		assert.equal(recordedLoaded(forged), null, label);
+	}
+});
+
 test("a line with no room for the field reads as `cut`, not `absent`: the job got that far, and the worker's facts stay", () => {
 	assert.ok(record.LOADED_RUNNER_WORDS.includes("cut"));
 	const loaded = loadedWithImage(rebuildLoaded(record.LOADED_LINE_CUT, { ...KNOWN, leftOut: leftOutOf({ packages: false }) }), { image: "pi-job:4.3.1" });
@@ -424,24 +538,47 @@ test("a tool of a package past the row cap has no row to hold it, so it is count
 	assert.deepEqual(loaded.cut, { form: "full", packages: 2, servers: 0, names: 1, counts: 0 });
 });
 
-/** The longest of each thing, through the runner's own maximal line, with every list and name at its cap. */
+/**
+ * The longest record a line can get kept, by what the worker's checks allow rather than what a runner would write, each
+ * choice the one that costs the most bytes, so the pinned number is an upper bound and not one line's size:
+ *   - every tool name on an overlay row, one row per overlay name, since a row there repeats its name where a package's
+ *     `toolNames` has no row to add. An earlier measure had them on package rows, and understated the worst by 1,564 bytes.
+ *   - every overlay name loaded, not failed, since only a loaded one has a `namedTools` row;
+ *   - every count at the bound, and the two tier slots a total is made of at a fifth of it, six digits each that still sum
+ *     within it. `cut.packages` and `cut.servers` must agree with the worker's lists, so those lists are that long;
+ *   - `session`, the longest stage that holds tools; `connected`, the longest server state; `false`, longer than `true`.
+ */
 function maximal() {
 	const line = maximalLoaded();
-	const count = line.packages.length + 8;
 	const longName = (i) => `@${"s".repeat(100)}/${String(i).padStart(2, "0")}${"n".repeat(110)}`;
 	const longVersion = `1.2.3-${"r".repeat(122)}`;
 	const overlayNames = line.overlay.loaded;
-	const forged = { ...line, pi: `1.5.0-${"a".repeat(26)}`, cut: { form: "full", packages: 8, servers: 0, names: 99_999, counts: 99_999 } };
-	const known = {
-		packages: Array.from({ length: count }, (_, i) => ({ name: longName(i), version: longVersion })),
-		overlayExtensions: overlayNames,
-		servers: Array.from({ length: line.mcp.length }, (_, i) => `${String(i).padStart(2, "0")}${"x".repeat(30)}`),
-		ownTools: OWN,
-		leftOut: { tools: Array.from({ length: 32 }, (_, i) => `mcp__${String(i).padStart(2, "0")}${"y".repeat(39)}*`), packages: true, overlayExtensions: true, restricted: true },
+	const tierRow = record.LOADED_ROW.map((name) => (name === "failed" || name === "dropped" ? Math.floor(LOADED_COUNT_MAX / 5) : LOADED_COUNT_MAX));
+	const toolNames = Array.from({ length: record.LOADED_MAX_EXT_TOOLS }, (_, i) => `t${String(i).padStart(2, "0")}`.padEnd(48, "x"));
+	const onOverlay = overlayNames.map((_, index) => [index]);
+	toolNames.forEach((name, i) => onOverlay[i % onOverlay.length].push(name));
+	const piLongest = `${"9".repeat(28)}.9.9`;
+	const forged = {
+		...line,
+		pi: piLongest,
+		tiers: Object.fromEntries(Object.keys(line.tiers).map((tier) => [tier, [...tierRow]])),
+		extTools: { p: [], o: onOverlay },
+		cut: { form: "full", packages: LOADED_COUNT_MAX, servers: LOADED_COUNT_MAX, names: LOADED_COUNT_MAX, counts: LOADED_COUNT_MAX },
 	};
-	const img = { image: `ghcr.io/${"i".repeat(504)}`, imageDigest: `sha256:${"f".repeat(64)}`, piVersion: `1.5.0-${"a".repeat(26)}` };
+	const filler = { name: longName(99), version: longVersion };
+	const known = {
+		packages: Array.from({ length: record.LOADED_MAX_PACKAGES + LOADED_COUNT_MAX }, (_, i) => (i < record.LOADED_MAX_PACKAGES ? { name: longName(i), version: longVersion } : filler)),
+		overlayExtensions: overlayNames,
+		servers: Array.from({ length: record.LOADED_MAX_SERVERS + LOADED_COUNT_MAX }, (_, i) => `${String(i % 100).padStart(2, "0")}${"x".repeat(30)}`),
+		ownTools: OWN,
+		leftOut: { tools: Array.from({ length: 32 }, (_, i) => `mcp__${String(i).padStart(2, "0")}${"y".repeat(41)}*`), packages: false, overlayExtensions: false, restricted: false },
+	};
+	const img = { image: `ghcr.io/${"i".repeat(504)}`, imageDigest: `sha256:${"f".repeat(64)}`, piVersion: piLongest };
 	return { forged, known, img };
 }
+
+/** Measured off `maximal` below, and said in INT-RUN-HISTORY-FILE-CONTRACT. A new cap moves this and the spec together. */
+const WORST_RECORD_BYTES = 15_814;
 
 test("the record stays under 16 KiB at every cap, and the worst case is measured and pinned", () => {
 	const { forged, known, img } = maximal();
@@ -455,20 +592,87 @@ test("the record stays under 16 KiB at every cap, and the worst case is measured
 	assert.equal(kept.mcp.length, 8);
 	assert.equal(kept.leftOut.tools.length, 32);
 	assert.equal(kept.tools.job.length, record.LOADED_JOB_TOOLS.length);
+	assert.equal(source(kept, "overlay").namedTools.length, 16, "the costliest place for a tool's name");
 	assert.ok(bytes <= LOADED_RECORD_MAX_BYTES, `the worst record is ${bytes} bytes`);
-	assert.equal(bytes, 14_533);
+	assert.equal(bytes, WORST_RECORD_BYTES);
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
-	assert.ok(spec.includes("14,533 bytes"), "INT-RUN-HISTORY-FILE-CONTRACT says the measured worst case");
-	// And each smaller form, for a line that had to fall to one. The minimal form sums the tiers, so each is a fifth of the
-	// largest safe integer here: a sum past that is no count and reads as invalid, which no real job comes near.
-	const summable = { ...forged, tiers: Object.fromEntries(Object.entries(forged.tiers).map(([tier, row]) => [tier, row.map((value) => Math.floor(value / 5))])) };
-	for (const form of fitLoaded(summable).slice(1)) {
+	assert.ok(spec.includes(`${WORST_RECORD_BYTES.toLocaleString("en-US")} bytes`), "INT-RUN-HISTORY-FILE-CONTRACT says the measured worst case");
+	assert.equal(known.leftOut.tools[0].length, 49, "each left-out tool at the longest its shape takes");
+	// Each thing the choices above chose against is smaller, so a change in the shape that makes one of them the worst shows.
+	const sizeOf = (line_) => {
+		const shown = recordedLoaded(loadedWithImage(rebuildLoaded(line_, known), img));
+		assert.equal(shown.runner, "reported");
+		return Buffer.byteLength(JSON.stringify(shown), "utf8");
+	};
+	const [firstRow, ...otherRows] = forged.extTools.o;
+	assert.equal(firstRow.length, 3, "the first row has a tool to spare");
+	for (const [label, other] of Object.entries({
+		"every tool on a package": { ...forged, extTools: { p: [[0, ...forged.extTools.o.flatMap(([, ...names]) => names)]], o: [] } },
+		"one row's tool on a package": { ...forged, extTools: { p: [[0, firstRow[2]]], o: [firstRow.slice(0, 2), ...otherRows] } },
+		"an overlay name failed": { ...forged, overlay: { loaded: forged.overlay.loaded.slice(0, -1), failed: forged.overlay.loaded.slice(-1) }, extTools: { p: [], o: forged.extTools.o.slice(0, -1) } },
+		"the stage after": { ...forged, at: "ready" },
+		"a server that failed": { ...forged, mcp: [["failed", 9999], ...forged.mcp.slice(1)] },
+	})) {
+		assert.ok(sizeOf(other) < bytes, label);
+	}
+	// And each smaller form, for a line that had to fall to one.
+	for (const form of fitLoaded(forged).slice(1)) {
 		const loaded = recordedLoaded(loadedWithImage(rebuildLoaded(form, known), img));
 		assert.equal(loaded.runner, "reported", form.cut.form);
 		assert.ok(Buffer.byteLength(JSON.stringify(loaded), "utf8") < bytes);
 	}
-	// A hand-built source past the bound holds no key: its size is not something a reader should have to cope with.
-	assert.equal(recordedLoaded({ ...kept, sources: kept.sources.map((row) => (row.tier === "package" ? { ...row, toolNames: Array.from({ length: 24 }, (_, i) => `${"t".repeat(40)}${i}`) } : row)) }), null);
+});
+
+test("past the bound it reads as `cut` and keeps the worker's facts: a key that vanished would read like an older worker's run", () => {
+	const { forged, known, img } = maximal();
+	const kept = recordedLoaded(loadedWithImage(rebuildLoaded(forged, known), img));
+	// No line reaches this, so a source by hand, every package row holding every tool name the door lets a row hold.
+	const huge = { ...kept, sources: kept.sources.map((row) => (row.tier === "package" ? { ...row, toolNames: Array.from({ length: 24 }, (_, i) => `${"t".repeat(40)}${i}`) } : row)) };
+	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
+	const built = buildRecord({ job, result: { outcome: "completed", exitCode: 0, loaded: huge } });
+	assert.ok(Object.hasOwn(built, "loaded"), "the key stays");
+	assert.equal(built.loaded.runner, "cut");
+	assert.deepEqual([built.loaded.at, built.loaded.cut, built.loaded.pi, built.loaded.flow, built.loaded.mcp, built.loaded.tools, built.loaded.problems], [null, null, null, null, null, null, null], "no part of what did not fit");
+	assert.deepEqual(built.loaded.sources, []);
+	assert.deepEqual([built.loaded.image, built.loaded.imageDigest, built.loaded.imagePi], [img.image, img.imageDigest, img.piVersion]);
+	assert.deepEqual(built.loaded.leftOut, known.leftOut);
+	const bytes = Buffer.byteLength(JSON.stringify(built.loaded), "utf8");
+	assert.ok(bytes <= LOADED_RECORD_MAX_BYTES, "what is left fits, and it is the most the worker alone can say");
+	assert.equal(bytes, 2_522);
+	assert.deepEqual(recordedLoaded(built.loaded), built.loaded, "and it reads back as itself");
+	assert.deepEqual(Object.keys(built).slice(-2), ["loaded", "v"]);
+	// The bound itself, to the byte. A name costs its length, two quotes and a comma, less the one comma the first has none of.
+	const filled = (target) => {
+		let left = target - Buffer.byteLength(JSON.stringify(kept), "utf8") + 1;
+		const names = [];
+		while (left > 0) {
+			const take = Math.min(51, left);
+			names.push("t".repeat(take - 3));
+			left -= take;
+		}
+		const out = { ...kept, sources: kept.sources.map((row, i) => (i === 0 ? { ...row, toolNames: names } : row)) };
+		assert.equal(Buffer.byteLength(JSON.stringify(out), "utf8"), target);
+		return out;
+	};
+	assert.equal(recordedLoaded(filled(LOADED_RECORD_MAX_BYTES)).runner, "reported", "at the bound");
+	assert.equal(recordedLoaded(filled(LOADED_RECORD_MAX_BYTES + 1)).runner, "cut", "one byte past it");
+});
+
+test("the record's line and its table name every word `runner` has", () => {
+	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const [line_] = spec.match(/"loaded"\?: \{ "v": 1, "runner": [^\n]*/);
+	assert.deepEqual(line_.slice(line_.indexOf('"runner":')).match(/"([a-z]+)"(?= \||,)/g).map((word) => word.slice(1, -1)), [...record.LOADED_RUNNER_WORDS]);
+	const row = spec.split("\n").find((text) => text.startsWith("  | `runner` | "));
+	for (const word of record.LOADED_RUNNER_WORDS) assert.ok(row.includes(`\`${word}\``), word);
+});
+
+test("`overlayExtensions` is this job's overlay switch, and a canary replay is one way it is off", () => {
+	const canary = readFileSync(new URL("../src/canary-runtime.mjs", import.meta.url), "utf8");
+	assert.match(canary, /containerFactory\(\{[^}]*allowGlobalExtensions: false/, "a canary replay shuts the overlay, whatever the host says");
+	assert.deepEqual(leftOutOf({}, { allowGlobalExtensions: false }).overlayExtensions, true);
+	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const row = spec.split("\n").find((text) => text.startsWith("  | `leftOut` | "));
+	assert.match(row, /`overlayExtensions` \(this job's overlay switch: this host's `PI_GLOBAL_ALLOW_EXTENSIONS=0` or a canary replay/);
 });
 
 test("`absent`, `invalid` and `cut` carry no runner part, whatever the source said", () => {
@@ -694,6 +898,20 @@ test("run-container: the job's own token is what a tool name is checked against,
 	assert.equal(result.loaded.runner, "invalid");
 	assert.equal(logs.find((row) => row.event === "loaded_invalid")?.why, "ext-tools-secret");
 	assert.ok(!JSON.stringify(result.loaded).includes("sekretAPIkeyvalue1234"));
+});
+
+test("run-container: a job's token in `pi` on a signed line is `invalid`, by the shape first and off this attempt's env for a number", { skip }, async () => {
+	const known = { packagePaths: resolver({ [LINT]: KNOWN.packages[0], [FMT]: KNOWN.packages[1] }) };
+	const tail = await runWith({ job: { ...BASE_JOB, mcp: ["linear"] }, known, spawnOptions: { noted: { ...line(), pi: "1.5.0-ghs0123456789abcdefABCDEF" } } });
+	assert.equal(tail.result.exitAuth, "verified");
+	assert.equal(tail.result.loaded.runner, "invalid");
+	assert.equal(tail.logs.find((row) => row.event === "loaded_invalid")?.why, "pi");
+	assert.ok(!JSON.stringify(tail.result.loaded).includes("ghs0123456789"));
+	const number = await runWith({ job: { ...BASE_JOB, mcp: ["linear"] }, known, makeOptions: { hostEnv: { ANTHROPIC_API_KEY: "1234567890" } }, spawnOptions: { noted: { ...line(), pi: "1234567890.0.0" } } });
+	assert.equal(number.result.loaded.runner, "invalid");
+	assert.equal(number.logs.find((row) => row.event === "loaded_invalid")?.why, "pi-secret");
+	const plain = await runWith({ job: { ...BASE_JOB, mcp: ["linear"] }, known, spawnOptions: { noted: line() } });
+	assert.equal(plain.result.loaded.pi, "1.5.0", "and pi's own version is no secret of anyone's");
 });
 
 test("run-container: the real folder is what names are checked against", { skip }, async () => {

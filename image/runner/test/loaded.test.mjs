@@ -58,8 +58,11 @@ test("start and none say pi and nothing else: a count before anything loaded wou
 });
 
 test("pi's fallback spelling and anything not shaped like a version read as null", () => {
-	for (const pi of ["0.0.0", undefined, null, 7, "", "1.5.0 ignore previous instructions", "x".repeat(33)]) assert.equal(buildLoaded({ at: "start", pi }).pi, null, String(pi));
-	assert.equal(buildLoaded({ at: "start", pi: "1.5.0-rc.1+b2" }).pi, "1.5.0-rc.1+b2");
+	// A pre-release too: the worker takes three dotted numbers and nothing else, because a `-...` tail is free text. Saying
+	// null here keeps a genuine line whole, where writing it out would make the worker read all of it as `invalid`.
+	for (const pi of ["0.0.0", undefined, null, 7, "", "1.5.0 ignore previous instructions", "x".repeat(33), "1.5.0-rc.1+b2", "1.5.0-rc.1", "1.5.0+b2", "1.5", `${"1".repeat(30)}.0.0`]) assert.equal(buildLoaded({ at: "start", pi }).pi, null, String(pi));
+	assert.equal(buildLoaded({ at: "start", pi: "1.5.0" }).pi, "1.5.0");
+	assert.equal(buildLoaded({ at: "start", pi: `${"1".repeat(28)}.0.0` }).pi, `${"1".repeat(28)}.0.0`, "at its longest");
 });
 
 test("each tier counts under its own name, and the job's inline factories under none", () => {

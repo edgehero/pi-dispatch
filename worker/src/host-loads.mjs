@@ -31,7 +31,7 @@ import * as nodeFs from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { DOCTOR_HOSTS, DOCTOR_HOSTS_MAX, DOCTOR_RESULTS_TTL_MS } from "./doctor-results.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
-import { MCP_EXPOSURES, MCP_SERVER_NAME_RE, mcpServerWhere } from "./mcp-config.mjs";
+import { ABSENT_CODES, MCP_EXPOSURES, MCP_SERVER_NAME_RE, mcpServerWhere } from "./mcp-config.mjs";
 import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 
@@ -47,6 +47,10 @@ export const HOST_LOADS_MAX_BYTES = 64 * 1024;
 const FIT_ORDER = Object.freeze(["flows", "packages", "skills", "extensions", "mcp"]);
 /** The parts a read can fail to say, each then reading as unknown. */
 export const HOST_LOADS_PARTS = Object.freeze(["extensions", "skills", "mcp", "packages"]);
+/** What `more` can count: each list, and the keys a server's row left out. Each has a cap, so the caps name them. */
+const HOST_LOADS_MORE = Object.freeze(Object.keys(HOST_LOADS_CAPS));
+/** The record's five lists, every one of which a record must hold: a list it does not have is not an empty one. */
+const HOST_LOADS_LISTS = Object.freeze(HOST_LOADS_MORE.filter((part) => part !== "keys"));
 export const LOADS_EXTENSION_KINDS = Object.freeze(["file", "dir"]);
 export const LOADS_TRANSPORTS = Object.freeze(["http", "stdio"]);
 /** Where a flow resolved, the run record's words, with `unknown` for a tier this host cannot see. */
@@ -95,11 +99,11 @@ const serverOf = (row) => {
 /** A list kept through `of` and held to `cap`, with how many it did not keep: what failed its charset, and what is past the cap. */
 function within(list, of, cap) {
 	const kept = [];
-	for (const entry of Array.isArray(list) ? list : []) {
+	for (const entry of list) {
 		const value = of(entry);
 		if (value !== null && kept.length < cap) kept.push(value);
 	}
-	return { kept, rest: (Array.isArray(list) ? list.length : 0) - kept.length };
+	return { kept, rest: list.length - kept.length };
 }
 
 /** The servers, whose rows each carry their own count of keys left out. */
@@ -107,7 +111,7 @@ function serversWithin(list, cap) {
 	const kept = [];
 	let rest = 0;
 	let keys = 0;
-	for (const entry of Array.isArray(list) ? list : []) {
+	for (const entry of list) {
 		const server = serverOf(entry);
 		if (server !== null && kept.length < cap) {
 			kept.push(server.row);
@@ -179,11 +183,15 @@ export function buildHostLoads({ at, every = null, by = null, overlayExtensionsA
 }
 
 /**
- * A record read back through an ALLOWLIST, or null where it does not read: JSON that does not parse, or any `v` but this
- * one, newer included. Another host wrote it, so a row that fails its charset is dropped and COUNTED in `more`: a list
- * shorter than what that host said can never read as the same as another's.
+ * A record read back through an ALLOWLIST, or null where it does not read: text past `HOST_LOADS_MAX_BYTES`, which no builder
+ * writes; JSON that does not parse; any `v` but this one, newer included; and a record with no shape. Another host wrote it,
+ * so a row that fails its charset is dropped and COUNTED in `more`: a list shorter than what that host said can never read
+ * as the same as another's. A list that is not there, or a `more` that cannot be read, is not that: nothing can be counted.
+ * REJECTED: reading such a part as empty or off, as this did until a check found `{"v":1,"at":1000}` parsed as a real host
+ * with nothing on it, agreeing with one. Null reads as unknown, and unknown is the rule (`hostsAgree`).
  */
 export function parseHostLoads(text) {
+	if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > HOST_LOADS_MAX_BYTES) return null;
 	let doc;
 	try {
 		doc = JSON.parse(text);
@@ -191,6 +199,12 @@ export function parseHostLoads(text) {
 		return null;
 	}
 	if (!isObject(doc) || doc.v !== HOST_LOADS_VERSION || !Number.isSafeInteger(doc.at) || doc.at < 0) return null;
+	if (!HOST_LOADS_LISTS.every((part) => Array.isArray(doc[part])) || typeof doc.overlayExtensionsAllowed !== "boolean" || !isObject(doc.by)) return null;
+	// A word that is not there, or not a count, would read as nothing left out or as a host with no interval, which never ages.
+	if (doc.every !== null && count(doc.every) === null) return null;
+	if (!isObject(doc.more) || !HOST_LOADS_MORE.every((part) => doc.more[part] === undefined || count(doc.more[part]) !== null)) return null;
+	// Absent is none and the builder's own way of saying so. A part this reader has no word for is one it cannot say was read.
+	if (doc.unread !== undefined && (!Array.isArray(doc.unread) || !doc.unread.every((part) => HOST_LOADS_PARTS.includes(part)))) return null;
 	const parts = {
 		extensions: within(doc.extensions, extensionOf, HOST_LOADS_CAPS.extensions),
 		skills: within(doc.skills, skillOf, HOST_LOADS_CAPS.skills),
@@ -198,13 +212,13 @@ export function parseHostLoads(text) {
 		flows: within(doc.flows, flowOf, HOST_LOADS_CAPS.flows),
 	};
 	const servers = serversWithin(doc.mcp, HOST_LOADS_CAPS.mcp);
-	const said = (part) => (isObject(doc.more) ? (count(doc.more[part]) ?? 0) : 0);
-	const unread = Array.isArray(doc.unread) ? HOST_LOADS_PARTS.filter((part) => doc.unread.includes(part)) : [];
+	const said = (part) => doc.more[part] ?? 0;
+	const unread = HOST_LOADS_PARTS.filter((part) => doc.unread?.includes(part));
 	return {
 		at: doc.at,
 		every: count(doc.every),
 		by: { uid: count(doc.by?.uid), worker: doc.by?.worker === true },
-		overlayExtensionsAllowed: doc.overlayExtensionsAllowed === true,
+		overlayExtensionsAllowed: doc.overlayExtensionsAllowed,
 		extensions: parts.extensions.kept,
 		skills: parts.skills.kept,
 		mcp: servers.kept,
@@ -305,12 +319,13 @@ function loadsFingerprint(row) {
  * Whether every host's jobs can load the same things: true, false, or null when that cannot be said. NEVER true unless every
  * host named has a current record that lists everything. An unknown or old host, a part a host could not read and a list
  * past its cap are each a reason to say nothing, because each is what "the same" would be guessing at: a host on an older
- * release publishes no record and may run anything. Null also for no hosts at all. A difference between two known hosts
- * still reads as null beside an unknown third: this is a question about all of them.
+ * release publishes no record and may run anything. So is a server whose `where` reads null: it failed its charset or held a
+ * secret, and two different places read the same that way. Null also for no hosts at all. A difference between two known
+ * hosts still reads as null beside an unknown third: this is a question about all of them.
  */
 export function hostsAgree(rows) {
 	if (!Array.isArray(rows) || rows.length === 0) return null;
-	if (!rows.every((row) => row?.state === "current" && Array.isArray(row.unread) && row.unread.length === 0 && isObject(row.more) && Object.keys(row.more).length === 0)) return null;
+	if (!rows.every((row) => row?.state === "current" && Array.isArray(row.unread) && row.unread.length === 0 && isObject(row.more) && Object.keys(row.more).length === 0 && HOST_LOADS_LISTS.every((part) => Array.isArray(row[part])) && row.mcp.every((server) => server.where !== null))) return null;
 	const [first, ...others] = rows.map(loadsFingerprint);
 	return others.every((other) => other === first);
 }
@@ -388,36 +403,59 @@ export async function flowTierOf({ flow, folder = null, skillsDir = null, packag
 /** The ignore files a job's discovery honours (image/runner/src/loader.mjs `EXTENSION_IGNORE_FILES`, pinned). */
 export const LOADS_IGNORE_FILES = Object.freeze([".gitignore", ".ignore", ".fdignore"]);
 
+/**
+ * Whether a path is there, by the one answer that says so: only `ABSENT_CODES` mean it is not, and anything else THROWS.
+ * REJECTED: `existsSync`, which answers false on EACCES too, so an overlay at mode 000 or an operator's doctor run under
+ * another uid read as a host with nothing on it, over the worker's good record, with `unread` empty.
+ */
+export function pathIsThere(path, fs = nodeFs) {
+	try {
+		fs.statSync(path);
+		return true;
+	} catch (error) {
+		if (ABSENT_CODES.has(error?.code)) return false;
+		throw error;
+	}
+}
+
+/** A file's text, or null where it is absent. Anything else throws, as `pathIsThere` does and for its reason. */
+function readIfThere(path, fs) {
+	try {
+		return fs.readFileSync(path, "utf8");
+	} catch (error) {
+		if (ABSENT_CODES.has(error?.code)) return null;
+		throw error;
+	}
+}
+
 /** Whether a file holds an ignore pattern at all, the job's own test: an empty one or one of comments changes nothing. */
 function holdsPatterns(path, fs) {
-	try {
-		return fs.readFileSync(path, "utf8").split(/\r?\n/).some((line) => {
-			const trimmed = line.trim();
-			return trimmed !== "" && (!trimmed.startsWith("#") || trimmed.startsWith("\\#"));
-		});
-	} catch {
-		return false;
-	}
+	const text = readIfThere(path, fs);
+	return text !== null && text.split(/\r?\n/).some((line) => {
+		const trimmed = line.trim();
+		return trimmed !== "" && (!trimmed.startsWith("#") || trimmed.startsWith("\\#"));
+	});
 }
 
 /**
  * A directory's own entries by the job's first step (`directoryExtensionEntries`): a manifest's `pi.extensions` that exist, a
- * directory among them being skipped as the job skips it, else `index.ts`, else `index.js`, else null.
+ * directory among them being skipped as the job skips it, else `index.ts`, else `index.js`, else null. A manifest that does
+ * not parse is the job's "declares nothing"; one that cannot be read throws, since what it declares is then not known.
  */
 function ownEntries(dir, fs) {
-	const manifest = join(dir, "package.json");
-	if (fs.existsSync(manifest)) {
+	const text = readIfThere(join(dir, "package.json"), fs);
+	if (text !== null) {
 		let declared = [];
 		try {
-			const listed = JSON.parse(fs.readFileSync(manifest, "utf8").replace(/^﻿/, ""))?.pi?.extensions;
+			const listed = JSON.parse(text.replace(/^﻿/, ""))?.pi?.extensions;
 			declared = Array.isArray(listed) ? listed.filter((entry) => typeof entry === "string") : [];
 		} catch {
 			declared = [];
 		}
-		const found = declared.map((entry) => resolve(dir, entry)).filter((entry) => fs.existsSync(entry));
+		const found = declared.map((entry) => resolve(dir, entry)).filter((entry) => pathIsThere(entry, fs));
 		if (found.length > 0) return found.filter((entry) => !fs.statSync(entry).isDirectory());
 	}
-	for (const index of ["index.ts", "index.js"]) if (fs.existsSync(join(dir, index))) return [join(dir, index)];
+	for (const index of ["index.ts", "index.js"]) if (pathIsThere(join(dir, index), fs)) return [join(dir, index)];
 	return null;
 }
 
@@ -427,12 +465,13 @@ function ownEntries(dir, fs) {
  * its own entries; a folder that is itself a package is that package. Each row's name is a first path segment, the name a
  * run's record uses. `null`, for "this read cannot say", when an ignore file holds a pattern: the job honours it with pi's
  * own matcher, which the host does not have, and listing what it ignores would name an extension no job loads. Throws on
- * a read that fails for any reason but absence. No folder is no extensions.
+ * a read that fails for any reason but absence, a folder of one extension included: leaving that one out would be a list
+ * that looks whole. No folder is no extensions.
  */
 export function readOverlayExtensionRows(overlay, { fs = nodeFs } = {}) {
 	if (typeof overlay !== "string" || overlay === "") return [];
 	const dir = join(overlay, "extensions");
-	if (!fs.existsSync(dir)) return [];
+	if (!pathIsThere(dir, fs)) return [];
 	const own = ownEntries(dir, fs);
 	if (own !== null) {
 		// An entry a manifest points outside the folder is no first segment of it, so it has no name here.
@@ -448,13 +487,10 @@ export function readOverlayExtensionRows(overlay, { fs = nodeFs } = {}) {
 		let isDir = entry.isDirectory();
 		let isFile = entry.isFile();
 		if (entry.isSymbolicLink()) {
-			try {
-				const stats = fs.statSync(path);
-				isDir = stats.isDirectory();
-				isFile = stats.isFile();
-			} catch {
-				continue;
-			}
+			if (!pathIsThere(path, fs)) continue;
+			const stats = fs.statSync(path);
+			isDir = stats.isDirectory();
+			isFile = stats.isFile();
 		}
 		if (isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) rows.push({ name: entry.name, kind: "file" });
 		else if (isDir && (ownEntries(path, fs) ?? []).length > 0) rows.push({ name: entry.name, kind: "dir" });
@@ -465,16 +501,16 @@ export function readOverlayExtensionRows(overlay, { fs = nodeFs } = {}) {
 /**
  * The overlay's `skills/` by folder name, each holding a `SKILL.md`: the layout doctor's flow line reads, so the two agree.
  * pi names a skill `frontmatter.name` or else its folder, so a rename reads under the folder's name here (that line's own
- * residual). No folder is no skills; any other failed read throws.
+ * residual). No folder is no skills; any other failed read throws, a skill's own folder included.
  */
 export function readOverlaySkillNames(overlay, { fs = nodeFs } = {}) {
 	if (typeof overlay !== "string" || overlay === "") return [];
 	const dir = join(overlay, "skills");
-	if (!fs.existsSync(dir)) return [];
+	if (!pathIsThere(dir, fs)) return [];
 	const names = [];
 	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
 		if (entry.name.startsWith(".")) continue;
-		if (fs.existsSync(join(dir, entry.name, "SKILL.md"))) names.push(entry.name);
+		if (pathIsThere(join(dir, entry.name, "SKILL.md"), fs)) names.push(entry.name);
 	}
 	return names.sort((a, b) => a.localeCompare(b));
 }

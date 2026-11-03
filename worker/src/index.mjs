@@ -1732,7 +1732,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 								if (deps?.subscriptionRuntime) await deps.subscriptionRuntime.observe(effectiveJob, r, ctx.subscriptionAuth ?? []);
 								if (r.providerFailure) await markModelCooldown(redis, `${effectiveJob.provider}/${effectiveJob.model}`, r.providerFailure, { now });
 							} catch (cause) {
-								throw new InfraRetry("the provider failure could not be recorded", { cause, reason: "container-infra-exit", exitCode: r.code, turns: r.turns, tokens: r.tokens, usage: r.usage, provider: effectiveJob.provider, model: effectiveJob.model });
+								// Issue #800: a verified line was read, and the processor never sees this result, so the throw carries what it said.
+								throw new InfraRetry("the provider failure could not be recorded", { cause, reason: "container-infra-exit", exitCode: r.code, turns: r.turns, tokens: r.tokens, usage: r.usage, provider: effectiveJob.provider, model: effectiveJob.model, loaded: r.loaded });
 							}
 						}
 						// Issue #646: what this attempt said about steering, for the record's `steerSkipped` (settleSteer above).
@@ -1977,7 +1978,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				}
 				const was = keeperHold.startedMs ?? young.startedMs;
 				await markKeeperLoop(job, was === young.startedMs ? [was] : [was, young.startedMs]);
-				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was, now: young.startedMs, heldMs, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was, now: young.startedMs, heldMs, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false, loaded: error.loaded });
 				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				await noteRetry(job, { project });
@@ -1986,7 +1987,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && keeperHold.startedMs !== null) {
 				// The keeper this job was waiting on is no longer running on its bridge: it died young, the loop's other face.
 				await markKeeperLoop(job, [keeperHold.startedMs]);
-				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs, now: null, problem: error.keeperProblem ?? null, heldMs: keeperHold.at - keeperHold.since, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				const loop = new InfraRetry(netnsKeeperCrashLoopSentence({ was: keeperHold.startedMs, now: null, problem: error.keeperProblem ?? null, heldMs: keeperHold.at - keeperHold.since, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false, loaded: error.loaded });
 				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				await noteRetry(job, { project });
@@ -1999,7 +2000,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// failure of this job after it is still named the loop.
 			const loopSeen = job.data?.netnsKeeperLoopSeen;
 			if (error?.reason === NETNS_KEEPER_NOT_HOLDING && Array.isArray(loopSeen) && loopSeen.length > 0) {
-				const loop = new InfraRetry(netnsKeeperLoopAgainSentence({ seen: loopSeen, problem: error.keeperProblem ?? null, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false });
+				const loop = new InfraRetry(netnsKeeperLoopAgainSentence({ seen: loopSeen, problem: error.keeperProblem ?? null, remedy: error.keeperRemedy }), { reason: NETNS_KEEPER_CRASH_LOOP, provider: error.provider ?? null, model: error.model ?? null, budgetReserved: false, loaded: error.loaded });
 				await settleSteer({ error: loop });
 				recordAfterGate({ job, error: loop, startedAt, endedAt: new Date().toISOString() });
 				await noteRetry(job, { project });
