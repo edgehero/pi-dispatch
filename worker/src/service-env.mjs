@@ -21,7 +21,7 @@
  *
  * Nothing here loads a `.env` into a process (`docs/secrets.md`): the result is an object the caller judges from.
  */
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, readEnvAssignments } from "./env-file.mjs";
@@ -246,4 +246,31 @@ export function deploymentServiceEnv({ env, dir, keys, platform = process.platfo
 	const raw = untrusted ? null : bytes;
 	const file = raw === null ? null : serviceEnvFileOf(raw, path, serviceEnvLoader(platform));
 	return { ...resolveServiceEnv({ env, file, keys }), path, unreadable, untrusted, hazard: file?.hazard ?? null };
+}
+
+/**
+ * Deployment keys for a CLI verb that acts for the deployment (review of PR #575): `keys` resolved by issue #471's rule
+ * (`resolveServiceEnv`, above), the one doctor and `up` read the service's keys by. This shell's value where
+ * it sets the key, else the `.env` in `cwd` from a line the service's loader reads as written. Where the two disagree,
+ * or a line naming the key cannot be read as the loader reads it, or the file cannot be read and this shell sets none,
+ * the answer is unknown and the verb refuses (`problem`), as `up` refuses on a PI_JOB_IMAGE disagreement: a job queued
+ * on a queue no worker drains, or from a triggers file the worker does not read, is a silent no-op. Returns
+ * `{ env }` (this shell's with the file's values filled in) or `{ problem }`.
+ */
+export function cliDeploymentEnv(env, keys, { cwd = process.cwd(), platform = process.platform, readFile = (p) => readFileSync(p) } = {}) {
+	const envPath = join(cwd, ".env");
+	let file;
+	try {
+		file = serviceEnvFileOf(readFile(envPath), envPath, serviceEnvLoader(platform));
+	} catch (error) {
+		const unset = keys.filter((k) => typeof env[k] !== "string");
+		if (error?.code !== "ENOENT" && unset.length > 0) return { problem: `${envPath} could not be read (${error?.code ?? "error"}), so ${unset.join(" and ")} cannot be told` };
+		return { env };
+	}
+	const read = resolveServiceEnv({ env, file, keys });
+	const [d] = read.disagreements;
+	if (d) return { problem: `${d.key} is ${JSON.stringify(d.shell)} in this shell and ${JSON.stringify(d.file)} in ${envPath}: make them agree (the service runs the file's)` };
+	const unread = [...read.unread.map((u) => u.key), ...read.hazardSkipped];
+	if (unread.length > 0) return { problem: `${envPath} has a line for ${unread.join(" and ")} that the service's loader may read differently, so it cannot be told (pi-dispatch doctor names the line)` };
+	return { env: read.env };
 }

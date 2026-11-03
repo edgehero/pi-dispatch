@@ -70,7 +70,7 @@ Each guide keeps the notes about its own feature. [The last sections](#notes-kep
 ```bash
 docker pull ghcr.io/edgehero/pi-job:<version>   # then set PI_JOB_IMAGE=ghcr.io/edgehero/pi-job:<version> in .env
 npm install --save-exact @edgehero/pi-dispatch@<version> @edgehero/pi-dispatch-receiver@<version> @edgehero/pi-dispatch-admin@<version>
-pi-dispatch service restart --drain   # pause the shared queue, wait for its running jobs, restart the worker, resume it
+pi-dispatch service restart --drain   # pause this host's queues, wait for their running jobs, restart the worker, resume them
 pi-dispatch service restart --receiver
 pi-dispatch service restart --console
 pi install npm:@edgehero/pi-dispatch-admin@<version>   # then start pi again, for /dispatch
@@ -81,10 +81,12 @@ The worker resumes a few seconds before the receiver restarts. A delivery in bet
 and if it needs a field the old one drops, the worker refuses it before it spends (`trigger-skew`): run it again.
 A receiver run from compose moves as step 5 says.
 
-`--drain` pauses, watches and resumes the shared queue only. Two hosts need the whole pause instead. A host that sets
-`PI_WORKER_NAME` also runs jobs from a queue of its own (cron, chained and manual runs), which `--drain` neither
-pauses, waits for nor resumes. On rootless Podman, `service install --force` restarts Valkey when its unit changed,
-under any job still running. There, after the `docker pull` and the `npm install`:
+`--drain` pauses, watches and resumes this host's queues: the shared one and, on a host that sets `PI_WORKER_NAME`, its
+own, where its cron, chained and manual runs wait, and the forge deliveries a secret or wait profile routes to it
+([several machines](multi-host.md#a-forge-delivery-that-needs-one-particular-machine)). A queue paused before it stays
+paused. It is not the fleet's pause, so two hosts need the whole pause instead. On rootless Podman,
+`service install --force` restarts Valkey when its unit changed, under any job still running. There, after the
+`docker pull` and the `npm install`:
 
 ```bash
 pi-dispatch pause                     # every queue, this host's own included

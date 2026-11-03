@@ -34,8 +34,8 @@ test("fleetVersionChecks: this doctor against this host's worker row, as two fac
 	assert.doesNotMatch(line.label, /restart/);
 	// The row, not "the running worker": a worker killed without deleting its row leaves it for up to HOST_TTL_MS (90 s).
 	assert.doesNotMatch(line.label, /running/);
-	// `service restart --drain` pauses and watches the shared queue only: a job on a host queue (PI_WORKER_NAME) is not
-	// waited for, and that queue stays paused. The fix names the steps that cover both.
+	// `service restart --drain` covers this host's queues alone and resumes them after its own restart: it is not the
+	// fleet's pause, and a peer's own queue keeps running under it. The fix names the steps that hold every host.
 	assert.doesNotMatch(line.fix, /--drain/);
 	assert.ok(NAMED_CHECK_IDS.includes("fleet.versions"));
 });

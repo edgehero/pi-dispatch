@@ -366,8 +366,8 @@ have a [setup page each](#other-forges).
 **Add a second machine.** Point it at the same Valkey and give every worker a name with `PI_WORKER_NAME`. Each host keeps its own logs, jobs and
 sandbox folders ([several machines](docs/multi-host.md)). Run one worker per container daemon.
 
-**Keep it working.** `pi-dispatch service restart --drain` restarts after running jobs finish, and `/config/updates` in the console shows what is
-newer ([service](docs/service.md)).
+**Keep it working.** `pi-dispatch service restart --drain` restarts after this host's running jobs finish, and `/config/updates` in the console shows
+what is newer ([service](docs/service.md)).
 
 ## Providers and models
 
@@ -583,7 +583,7 @@ instructions ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
 pi-dispatch service render    # show the unit it would install, with the real paths
 pi-dispatch service install   # LaunchAgent (macOS), systemctl --user (Linux), nssm (Windows, a machine service)
 pi-dispatch service status    # which unit exists, where, and whether it runs
-pi-dispatch service restart --drain   # pause, wait for running jobs, restart, resume
+pi-dispatch service restart --drain   # pause this host's queues, wait for their running jobs, restart, resume
 ```
 
 `install` renders the [`deploy/`](deploy/) templates without sudo (`--system` on Linux prints the sudo commands instead, for a manual

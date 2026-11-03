@@ -7931,7 +7931,23 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   deployment pointer (`INT-DEPLOYMENT-POINTER-CONTRACT`). **AMENDED 2026-10-21 (#712)**: on a deployment whose only
   venues are the OpenShell ones, its host pre-check is the gateway's engine (`openshellSetupOf`, the rule `up` reads)
   and the openshell CLI and gateway, and it offers the venue by name or refuses it by name with the fix; it gains no
-  power (the probes are reads, and `up` remains what registers the gateway).
+  power (the probes are reads, and `up` remains what registers the gateway). **AMENDED 2026-11-03 (#804)**:
+  `restart --drain` covers this host's queues, the ones its worker drains: the shared `pi-jobs` and, when the
+  deployment declares `PI_WORKER_NAME`, `pi-jobs@<name>`, where the host's cron, chained and manual runs and the forge
+  deliveries routed to it wait. The name is read as `pi-dispatch run` reads it, this shell's value else the deployment
+  `.env`'s; a disagreement, a `.env` line the service's loader may read differently, a `.env` that cannot be read while
+  this shell sets no name, or a name the worker refuses at boot exits 1 before any queue is opened, saying nothing was
+  paused. That is the name the next worker will run, not the running worker's, so a `PI_WORKER_NAME` renamed or removed
+  in the `.env` just before `--drain` leaves the old `pi-jobs@<old>` unwatched, and a name the `--env-setup` script sets
+  is invisible to it, as it is to `pi-dispatch run`. It reads each queue's paused flag first, opening each queue only
+  once the one before it answered, and pauses only the ones that were running, waits until none of them has an active
+  job (a queue paused before the drain included), restarts the worker and resumes only the queues it paused, so a queue
+  paused before the drain is paused after it (the drain used to resume the shared queue whatever it found). A timeout,
+  a failed stop or start, or a Valkey failure after a pause names each queue this drain left paused and says that
+  `pi-dispatch resume` resumes every queue, one paused before the drain included. It is not the fleet's pause: pausing
+  the shared queue stops every host taking from it, and a peer's own queue is neither paused nor waited for. A name
+  only this shell sets is drained too, and opening its queue writes that queue's BullMQ meta key (bullmq 5.80.4), so
+  `pause`, `resume` and `status` list `pi-jobs@<name>` from then on even when no worker drains it.
 - **Why**: The quickstart was five hand-typed infra chores whose commands were already fixed strings —
   automation removes typing, not decisions. The decisions stay human: every mutating action is printed
   verbatim and runs only on an explicit accept (y/N, default No, No on non-TTY), because "pulled onto
@@ -8000,6 +8016,17 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   record, nor any absolute path; given a triggers file JSON.parse refuses, then no byte of the file's text appears; given a write that fails, then the exit code is the same as without publishing. Tests:
   `worker/test/doctor.test.mjs` ("doctor publishes one record per run", "publishing is best effort"),
   `worker/test/doctor-results.test.mjs`, `worker/test/doctor-spawner.test.mjs`, `worker/test/cli.test.mjs`.
+  AMENDED 2026-11-03 (#804): given a deployment `.env` declaring `PI_WORKER_NAME` and a job active on `pi-jobs@<name>`
+  while `pi-jobs` is idle, when `service restart --drain` runs, then the worker is not stopped until that job is no
+  longer active; given no name in this shell or the `.env`, or an empty one, then only `pi-jobs` is opened, paused and
+  resumed; given a queue paused before the drain, then it is not paused again and not resumed, and a job active on it
+  is still waited for; given this shell and the `.env` naming different hosts, or a name the worker refuses, then no
+  queue is opened and nothing is stopped; given the shared queue's paused flag unreadable, then the host queue is never
+  opened; given the second open throwing, then the first handle is closed; given the second pause failing, then nothing
+  is stopped, both handles are closed and the queue already paused is named; given a resume failing partway, then only
+  the queues not yet resumed are named; given a timeout or a failed stop or start, then only the queues this drain
+  paused are named as staying paused, and the advice says `pi-dispatch resume` resumes every queue. Tests:
+  `worker/test/service.test.mjs` (the `restart --drain` cases).
 
 ## Notes (not requirements)
 
@@ -8379,6 +8406,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-03 (#804) | `service restart --drain` covers this host's queues. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, a dated sentence in its Scope and a dated acceptance paragraph: the drain pauses, waits for and resumes the queues this host's worker drains, the shared `pi-jobs` and, when the deployment declares `PI_WORKER_NAME` (this shell's, else the `.env`'s, as `pi-dispatch run` reads it), `pi-jobs@<name>`; a disagreement or a name the worker refuses exits 1 before any queue is opened; only the queues that were running are paused and only those are resumed, so a queue paused before the drain stays paused, and a job active on it is still waited for; each queue is opened only once the one before it answered; a timeout, a failed stop or start, or a Valkey failure after a pause names the queues this drain left paused and says that `pi-dispatch resume` resumes every queue, one paused before the drain included; it is not the fleet's pause. Where it said only `restart [--drain]`, and the code drained `pi-jobs` alone, so a named host could restart under a cron, chained or manual run from its own queue and abort it as `worker-abort`. Two residuals are stated: a name only this shell sets leaves that queue's meta key, so `pause`, `resume` and `status` list it afterwards; and the name read is the one the next worker will run, not the running worker's, so a `PI_WORKER_NAME` renamed or removed in the `.env` just before `--drain` leaves the old host queue unwatched, and a name the `--env-setup` script sets is invisible to it, as it is to `pi-dispatch run`. The `VALKEY_URL` clause (the drain reads it as the CLI verbs do) UNCHANGED, checked. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: the drain takes the identity by its rule as written (a declared name the worker refuses is refused, never repaired) and reads nothing from the registry. **Code evidence**: worker/src/service.mjs -> doRestart, runService (`queueFor`); worker/src/service-env.mjs -> cliDeploymentEnv (moved from cli.mjs, which re-exports it); worker/src/config.mjs -> workerName; worker/src/queue.mjs -> QUEUE, hostQueueName. |
 | 2026-11-03 (#812) | `REQ-MODEL-POLICY` UNCHANGED, checked: failover still switches only on proven replay eligibility, and missing evidence still never authorizes a switch; the attempt key keeps no expiry while the queue may retry the job, and a console retry takes a finished job's expiry off again, so a retry that waits keeps its evidence; only a finished or removed job's key gets an end, and a retry that finds it gone (a failed job BullMQ removed late, or a `PERSIST` that failed) is refused, free, never switched. **Code evidence**: worker/src/model-attempts.mjs -> finishModelAttempt, dropModelAttempt, keepModelAttempt; admin/src/job-actions.mjs -> retryKeepingAttempt; worker/src/model-failover.mjs -> selectFailoverJob. |
 | 2026-11-03 (#761, upgrade path) | `REQ-CONSOLE-SECURITY` AMENDED, the overview's scheduler clause: a scheduler's id or job name is read up to `SCHEDULER_NAME_MAX`, which is now `SCHEDULER_ID_MAX` (200), the bound every reader of a scheduler key in Valkey shares and at least the loader's `CRON_ID_MAX` (176), where it said the bound IS `CRON_ID_MAX`; the rule (charset, null and never cut, the entry kept, named by its key alone) is unchanged. `REQ-DURABLE-RUN-HISTORY` UNCHANGED, checked: the record's new `dollars.reservedIn` is dates and a digest, so the record stays PII-free, and nothing about its durability moved. `REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked: the windows, their caps and their enforcement are as before; doctor's `dollars.window-reset` only reports a counter below this host's records (`DES-DOLLAR-RESERVE-AND-SETTLE`). **Code evidence**: admin/src/read-model.mjs -> SCHEDULER_NAME_MAX, mapSchedulers; worker/src/bullmq-internals.mjs -> SCHEDULER_ID_MAX, SCHEDULER_ID_RE; admin/test/read-model.test.mjs. |
 | 2026-11-03 (#752, #692, #737) | The console redesign closes. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: the reverse check covers every golden, computed; ledgers read their cards; a viewer on Fleet no longer reads the queue's address or a held job's check name, the rule the card and the other screens already kept. The run page draws its card while a job runs, Progress and the transcript first, by CSS order, so its panels and the stream are unchanged. Watch stays a tab of Triggers: #752 asked for a pill before #773 recorded the opposite, and the later decision stands. Every remaining difference between a card and its page is recorded with its reason in that card's ledger. `REQ-CONSOLE-SECURITY`: a viewer reads less, nothing else moves; UNCHANGED, checked: the CSP, the write funnel and the roles that may act. No release is implied: the install lines stay at the workspace version. |

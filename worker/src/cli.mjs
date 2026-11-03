@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { loadConfig } from "./config.mjs";
 import { EXIT_POLICY, installRejectionPrinter, installStdoutPipeGuard } from "./exit-code.mjs";
@@ -8,7 +8,11 @@ import { isEntryModule } from "./entry.mjs";
 import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
-import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
+import { cliDeploymentEnv } from "./service-env.mjs";
+
+// Issue #804: `cliDeploymentEnv` lives in service-env.mjs, where `service restart --drain` reads it too (service.mjs
+// must not import this entry module). Re-exported so every caller that took it from here keeps working.
+export { cliDeploymentEnv };
 
 /** How long the kill switch waits on the host registry before acting on the shared queue alone. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
@@ -62,7 +66,7 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch service <render|install|uninstall|status|start|stop|restart> [--receiver|--console] [--user|--system] [--force]
                            run the worker (or --receiver, or --console) as an OS service — the deploy/ templates
                            rendered with this host's real paths, installed user-level;
-                           \`service restart --drain\` lets the in-flight job finish first
+                           \`service restart --drain\` lets this host's running jobs finish first
   pi-dispatch egress render
                            write model-endpoints.conf here from model-endpoints.json (in place), then print
                            the command that reloads the egress proxy; it never reloads the proxy itself
@@ -477,33 +481,6 @@ async function runTrigger(values, positionals, env, { write, valkeyRefusal, now 
  * trigger loader (`loadSchedules`: `triggersFile`, `maxCostUsd`, and `fleet` from a declared worker name) judges a file by.
  */
 export const TRIGGER_LOADER_ENV_KEYS = Object.freeze(["PI_TRIGGERS_FILE", "PI_WORKER_NAME", "PI_MAX_COST_USD"]);
-
-/**
- * Deployment keys for a CLI verb that acts for the deployment (review of PR #575): `keys` resolved by issue #471's rule
- * (`resolveServiceEnv`, service-env.mjs), the one doctor and `up` read the service's keys by. This shell's value where
- * it sets the key, else the `.env` in `cwd` from a line the service's loader reads as written. Where the two disagree,
- * or a line naming the key cannot be read as the loader reads it, or the file cannot be read and this shell sets none,
- * the answer is unknown and the verb refuses (`problem`), as `up` refuses on a PI_JOB_IMAGE disagreement: a job queued
- * on a queue no worker drains, or from a triggers file the worker does not read, is a silent no-op. Returns
- * `{ env }` (this shell's with the file's values filled in) or `{ problem }`.
- */
-export function cliDeploymentEnv(env, keys, { cwd = process.cwd(), platform = process.platform, readFile = (p) => readFileSync(p) } = {}) {
-	const envPath = join(cwd, ".env");
-	let file;
-	try {
-		file = serviceEnvFileOf(readFile(envPath), envPath, serviceEnvLoader(platform));
-	} catch (error) {
-		const unset = keys.filter((k) => typeof env[k] !== "string");
-		if (error?.code !== "ENOENT" && unset.length > 0) return { problem: `${envPath} could not be read (${error?.code ?? "error"}), so ${unset.join(" and ")} cannot be told` };
-		return { env };
-	}
-	const read = resolveServiceEnv({ env, file, keys });
-	const [d] = read.disagreements;
-	if (d) return { problem: `${d.key} is ${JSON.stringify(d.shell)} in this shell and ${JSON.stringify(d.file)} in ${envPath}: make them agree (the service runs the file's)` };
-	const unread = [...read.unread.map((u) => u.key), ...read.hazardSkipped];
-	if (unread.length > 0) return { problem: `${envPath} has a line for ${unread.join(" and ")} that the service's loader may read differently, so it cannot be told (pi-dispatch doctor names the line)` };
-	return { env: read.env };
-}
 
 /** `workerHint`'s line when the queue cannot say, true whether or not a worker runs. */
 export const WORKER_HINT_UNKNOWN = "a worker picks it up; start one with `pi-dispatch worker` if none is running.";

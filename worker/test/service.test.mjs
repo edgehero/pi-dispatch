@@ -100,7 +100,9 @@ function harness({
 	files = {},
 	euid = 501,
 	plan = {},
-	queue = null,
+	// `{ [queueName]: fake }`: the handles `restart --drain` opens, by name. A name the drain asks for that is not here
+	// throws, so a test sees a queue it did not expect as a failed drain rather than as a silent pass.
+	queues = null,
 	events = null,
 	cwd = DEPLOY_AT,
 	moduleDir = WORKER_SRC,
@@ -112,6 +114,7 @@ function harness({
 	const errBuf = [];
 	const mkdirs = [];
 	const store = new Map(Object.entries(files));
+	const asked = [];
 	let clock = 0;
 	const deps = {
 		// A login's user manager, which uninstall now requires before it touches anything (issue #430 round 3, D3).
@@ -134,7 +137,13 @@ function harness({
 			events?.push("sleep");
 		},
 		now: () => clock,
-		queue,
+		queueFor: queues
+			? (name) => {
+					asked.push(name);
+					if (!Object.hasOwn(queues, name)) throw new Error(`no fake queue named ${name}`);
+					return queues[name];
+				}
+			: null,
 		fs: {
 			existsSync: (p) => store.has(p),
 			readFileSync: (p, encoding) => (store.has(p) ? store.get(p) : readFileSync(p, encoding)),
@@ -146,7 +155,7 @@ function harness({
 		findBin: () => null,
 		...extra,
 	};
-	return { run: () => runService(argv, deps), calls, store, mkdirs, text: () => buf.join(""), errText: () => errBuf.join("") };
+	return { run: () => runService(argv, deps), calls, store, mkdirs, asked, text: () => buf.join(""), errText: () => errBuf.join("") };
 }
 
 const USER_UNIT = "/home/tester/.config/systemd/user/pi-dispatch-worker.service";
@@ -765,18 +774,35 @@ test("status is informational: exits 0 whether or not anything is installed", as
 // restart --drain
 // ---------------------------------------------------------------------------------------------------
 
-function fakeQueue(activeSeries, events, extraCounts = {}) {
+/**
+ * One queue handle. `activeSeries` is the active count of each read, the last repeating. `name` tags this queue's
+ * events (`pause pi-jobs@mini1`) where a test drains two; untagged events stay as they were. `paused` is what
+ * `isPaused()` answers, and `isPausedError`, `pauseError` and `resumeError` make that call reject.
+ */
+function fakeQueue(activeSeries, events, extraCounts = {}, { name = null, paused = false, isPausedError = null, pauseError = null, resumeError = null } = {}) {
+	const tag = (e) => (name ? `${e} ${name}` : e);
 	return {
-		pause: async () => events.push("pause"),
-		resume: async () => events.push("resume"),
+		isPaused: async () => {
+			events.push(tag("isPaused"));
+			if (isPausedError) throw isPausedError;
+			return paused;
+		},
+		pause: async () => {
+			events.push(tag("pause"));
+			if (pauseError) throw pauseError;
+		},
+		resume: async () => {
+			events.push(tag("resume"));
+			if (resumeError) throw resumeError;
+		},
 		getJobCounts: async () => {
 			const active = activeSeries.length > 1 ? activeSeries.shift() : activeSeries[0];
-			events.push(`counts:${active}`);
+			events.push(tag(`counts:${active}`));
 			// `extraCounts` rides every answer (the drain note's own read asks for "delayed"); the default
 			// empty object keeps every existing fixture byte-identical.
 			return { active, ...extraCounts };
 		},
-		close: async () => events.push("close"),
+		close: async () => events.push(tag("close")),
 	};
 }
 
@@ -786,11 +812,13 @@ test("restart --drain: pause, poll until active hits 0, restart the unit, resume
 		platform: "linux",
 		argv: ["restart", "--drain"],
 		plan: { systemctl: 0 },
-		queue: fakeQueue([3, 1, 0], events),
+		queues: { "pi-jobs": fakeQueue([3, 1, 0], events) },
 		events,
 	});
 	assert.equal(await h.run(), 0);
 	assert.deepEqual(events, [
+		// Asked first (issue #804): only a queue that was running is paused, so only it is resumed at the end.
+		"isPaused",
 		"pause",
 		"counts:3",
 		"sleep",
@@ -807,18 +835,22 @@ test("restart --drain: pause, poll until active hits 0, restart the unit, resume
 		"resume",
 		"close",
 	]);
+	// No PI_WORKER_NAME in this shell and no .env: the shared queue alone, as before issue #804.
+	assert.deepEqual(h.asked, ["pi-jobs"]);
+	assert.match(h.text(), /^paused pi-jobs: no new jobs will start; waiting for their active jobs to finish$/m);
+	assert.match(h.text(), /^resumed pi-jobs: drained restart complete$/m);
 });
 
 test("restart --drain names the delayed population it cannot drain, and stays silent when there is none", async () => {
 	// A drain that says "drained" about a queue holding jobs is the honest-reporting failure this project
 	// refuses elsewhere; a note on every restart of every deployment is the always-on noise it also refuses.
-	const quiet = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queue: fakeQueue([0], []), events: [] });
+	const quiet = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queues: { "pi-jobs": fakeQueue([0], []) }, events: [] });
 	assert.equal(await quiet.run(), 0);
 	assert.equal(quiet.text().includes("delayed set"), false, "nothing delayed, nothing said");
 
 	// The note's population list is the ONE honest label the CLI has, and it undercounted by one until
 	// issue #289: scope/host deferrals sit in the same set.
-	const noisy = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queue: fakeQueue([0], [], { delayed: 3 }), events: [] });
+	const noisy = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queues: { "pi-jobs": fakeQueue([0], [], { delayed: 3 }) }, events: [] });
 	await noisy.run();
 	assert.ok(noisy.text().includes("delayed set"), "3 delayed jobs must produce the note (a silent guard here would let the real assertion never run -- review finding)");
 	assert.ok(noisy.text().includes("scope/host deferrals"), "the note names every population, or it is the undercount it replaced");
@@ -830,15 +862,211 @@ test("restart --drain timeout: stops WITHOUT restarting, and resume is NOT calle
 		platform: "linux",
 		argv: ["restart", "--drain", "--drain-timeout", "4"],
 		plan: { systemctl: 0 },
-		queue: fakeQueue([2], events),
+		queues: { "pi-jobs": fakeQueue([2], events) },
 		events,
 	});
 	assert.equal(await h.run(), 1);
 	assert.ok(!events.includes("resume"), "resume would feed jobs toward a restart that is still owed");
 	assert.ok(!events.some((e) => e.startsWith("spawn")), "no restart of a unit with a job still in flight");
 	assert.ok(events.includes("close"), "the queue connection is still closed");
-	assert.match(h.text(), /STAYS PAUSED/);
 	assert.match(h.text(), /NOT restarting/);
+	assert.match(h.text(), /^The queue pi-jobs STAYS PAUSED so the running job can finish undisturbed\. Investigate \(pi-dispatch status\), then restart and resume yourself: `pi-dispatch resume` resumes every queue of the deployment\.$/m);
+});
+
+// Issue #804: a worker with PI_WORKER_NAME also drains `pi-jobs@<name>`, where its cron, chained and manual runs wait.
+const DEPLOY_ENV = join(DEPLOY_AT, ".env");
+const hostDrain = (events, { shared = [0], host = [0], hostOpts = {}, sharedOpts = {}, argv = ["restart", "--drain"], plan = { systemctl: 0 }, env = {}, files = { [DEPLOY_ENV]: "PI_WORKER_NAME=mini1\n" } } = {}) =>
+	harness({
+		platform: "linux",
+		argv,
+		plan,
+		files,
+		queues: { "pi-jobs": fakeQueue(shared, events, {}, { name: "pi-jobs", ...sharedOpts }), "pi-jobs@mini1": fakeQueue(host, events, {}, { name: "pi-jobs@mini1", ...hostOpts }) },
+		events,
+		extra: { env: { XDG_RUNTIME_DIR: "/run/user/501", ...env } },
+	});
+
+test("restart --drain on a named host waits for a job running from its own queue before restarting (issue #804)", async () => {
+	// The shared queue is idle from the start; the host queue's job finishes on the third read. Waiting for the shared
+	// queue alone restarted here at once and aborted that job as `worker-abort`.
+	const events = [];
+	const h = hostDrain(events, { host: [1, 1, 0] });
+	assert.equal(await h.run(), 0);
+	assert.deepEqual(h.asked, ["pi-jobs", "pi-jobs@mini1"], "the name came from the deployment .env, as `pi-dispatch run` reads it");
+	assert.deepEqual(events, [
+		"isPaused pi-jobs",
+		"isPaused pi-jobs@mini1",
+		"pause pi-jobs",
+		"pause pi-jobs@mini1",
+		"counts:0 pi-jobs",
+		"counts:1 pi-jobs@mini1",
+		"sleep",
+		"counts:0 pi-jobs",
+		"counts:1 pi-jobs@mini1",
+		"sleep",
+		"counts:0 pi-jobs",
+		"counts:0 pi-jobs@mini1",
+		"counts:0 pi-jobs",
+		"counts:0 pi-jobs@mini1",
+		"spawn systemctl --user stop pi-dispatch-worker.service",
+		"spawn systemctl --user start pi-dispatch-worker.service",
+		"resume pi-jobs",
+		"resume pi-jobs@mini1",
+		"close pi-jobs",
+		"close pi-jobs@mini1",
+	]);
+	assert.match(h.text(), /^paused pi-jobs and pi-jobs@mini1: no new jobs will start; waiting for their active jobs to finish$/m);
+	assert.match(h.text(), /^ {2}1 active \(pi-jobs 0, pi-jobs@mini1 1\), waiting$/m);
+	assert.match(h.text(), /^resumed pi-jobs and pi-jobs@mini1: drained restart complete$/m);
+});
+
+test("restart --drain leaves a queue paused before it paused after it, and resumes only what it paused (issue #804)", async () => {
+	const events = [];
+	const h = hostDrain(events, { hostOpts: { paused: true } });
+	assert.equal(await h.run(), 0);
+	assert.ok(!events.includes("pause pi-jobs@mini1"), "an already paused queue is not paused again");
+	assert.ok(!events.includes("resume pi-jobs@mini1"), "and not resumed: the operator's pause outlives the drain");
+	assert.ok(events.includes("resume pi-jobs"), "the queue this drain paused is resumed");
+	assert.match(h.text(), /^paused pi-jobs; pi-jobs@mini1 was paused before the drain and stays paused: no new jobs will start; waiting for the active jobs on pi-jobs and pi-jobs@mini1 to finish$/m);
+	assert.match(h.text(), /^resumed pi-jobs: drained restart complete; pi-jobs@mini1 was paused before the drain and stays paused$/m);
+
+	// The shared queue alone, paused beforehand (`pi-dispatch pause` on a single host): the drain resumes nothing.
+	const solo = [];
+	const s = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, queues: { "pi-jobs": fakeQueue([0], solo, {}, { paused: true }) }, events: solo });
+	assert.equal(await s.run(), 0);
+	assert.ok(!solo.includes("pause") && !solo.includes("resume"), `nothing paused, nothing resumed: ${solo.join(", ")}`);
+	assert.ok(solo.includes("spawn systemctl --user start pi-dispatch-worker.service"), "the restart still happens");
+	assert.match(s.text(), /^drained restart complete; pi-jobs was paused before the drain and stays paused$/m);
+});
+
+test("restart --drain still waits for a job running on a queue paused before it (issue #804)", async () => {
+	// A pause stops new jobs, not the one running: the stop would abort it as `worker-abort` all the same.
+	const events = [];
+	const h = hostDrain(events, { host: [1, 0], hostOpts: { paused: true } });
+	assert.equal(await h.run(), 0);
+	assert.deepEqual(events, [
+		"isPaused pi-jobs",
+		"isPaused pi-jobs@mini1",
+		"pause pi-jobs",
+		"counts:0 pi-jobs",
+		"counts:1 pi-jobs@mini1",
+		"sleep",
+		"counts:0 pi-jobs",
+		"counts:0 pi-jobs@mini1",
+		"counts:0 pi-jobs",
+		"counts:0 pi-jobs@mini1",
+		"spawn systemctl --user stop pi-dispatch-worker.service",
+		"spawn systemctl --user start pi-dispatch-worker.service",
+		"resume pi-jobs",
+		"close pi-jobs",
+		"close pi-jobs@mini1",
+	]);
+});
+
+test("restart --drain: a name only this shell sets drains both queues; none anywhere drains the shared queue alone", async () => {
+	const events = [];
+	const h = hostDrain(events, { files: {}, env: { PI_WORKER_NAME: "mini1" } });
+	assert.equal(await h.run(), 0);
+	assert.deepEqual(h.asked, ["pi-jobs", "pi-jobs@mini1"]);
+	assert.ok(events.includes("resume pi-jobs@mini1"));
+	// A .env without the key and a shell without it: no host queue is opened (the harness throws on an unknown name).
+	const none = hostDrain([], { files: { [DEPLOY_ENV]: "PI_CONCURRENCY=2\n" } });
+	assert.equal(await none.run(), 0);
+	assert.deepEqual(none.asked, ["pi-jobs"]);
+	// An empty value declares no name: the worker falls back to its default name and drains no queue of its own, so
+	// the drain must not open `pi-jobs@<that default>` either.
+	const empty = hostDrain([], { files: { [DEPLOY_ENV]: "PI_WORKER_NAME=\n" } });
+	assert.equal(await empty.run(), 0);
+	assert.deepEqual(empty.asked, ["pi-jobs"]);
+});
+
+test("restart --drain refuses a worker name it cannot tell or the worker would refuse: no queue opened, no restart (issue #804)", async () => {
+	for (const [what, opts, want] of [
+		["shell and .env disagree", { env: { PI_WORKER_NAME: "mini2" } }, /^error: PI_WORKER_NAME is "mini2" in this shell and "mini1" in \/srv\/pi-deploy\/\.env: make them agree \(the service runs the file's\)\. Nothing was paused\.$/m],
+		["a name the worker refuses", { files: { [DEPLOY_ENV]: "PI_WORKER_NAME=-bad\n" } }, /^error: PI_WORKER_NAME must match .*"-bad"\. Nothing was paused\.$/m],
+		["a .env line the service's loader may read differently", { files: { [DEPLOY_ENV]: 'PI_WORKER_NAME="$HOST"\n' } }, /has a line for PI_WORKER_NAME that the service's loader may read differently.*Nothing was paused\.$/m],
+	]) {
+		const events = [];
+		const h = hostDrain(events, opts);
+		assert.equal(await h.run(), 1, what);
+		assert.deepEqual(h.asked, [], `${what}: no queue handle opened`);
+		assert.deepEqual(events, [], `${what}: nothing paused, nothing spawned`);
+		assert.match(h.errText(), want, what);
+	}
+});
+
+test("restart --drain: the second pause failing names the queue it paused, restarts nothing and closes both (issue #804)", async () => {
+	const events = [];
+	const h = hostDrain(events, { hostOpts: { pauseError: new Error("connection is closed") } });
+	assert.equal(await h.run(), 1);
+	assert.ok(!events.some((e) => e.startsWith("spawn")), "no restart");
+	assert.ok(!events.some((e) => e.startsWith("resume")), "nothing resumed: Valkey is the thing that failed");
+	assert.ok(events.includes("close pi-jobs") && events.includes("close pi-jobs@mini1"), "both handles closed");
+	assert.match(h.errText(), /connection is closed\n {2}the queue pi-jobs STAYS PAUSED; wait until Valkey answers, then resume: `pi-dispatch resume` resumes every queue of the deployment\.\n$/);
+	// Failing before any pause says so, rather than leaving the operator to guess.
+	const first = hostDrain([], { sharedOpts: { pauseError: new Error("connection is closed") } });
+	assert.equal(await first.run(), 1);
+	assert.match(first.errText(), /\n {2}Nothing was paused\.\n$/);
+});
+
+test("restart --drain opens the host queue only once the shared one answered: a failed first read opens one handle and closes it (issue #804)", async () => {
+	// A down Valkey: the shared queue's paused flag cannot be read. The host queue is never opened, so no handle is left
+	// connecting while `finally` closes it (a real BullMQ queue then emits an `error` nothing listens for).
+	const events = [];
+	const h = hostDrain(events, { sharedOpts: { isPausedError: new Error("nothing answers VALKEY_URL") } });
+	assert.equal(await h.run(), 1);
+	assert.deepEqual(h.asked, ["pi-jobs"]);
+	assert.deepEqual(events, ["isPaused pi-jobs", "close pi-jobs"]);
+	assert.match(h.errText(), /nothing answers VALKEY_URL\n {2}Nothing was paused\.\n$/);
+});
+
+test("restart --drain: a second open that throws still closes the first handle (issue #804)", async () => {
+	const events = [];
+	// Only the shared queue exists here, so opening `pi-jobs@mini1` throws.
+	const h = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { systemctl: 0 }, files: { [DEPLOY_ENV]: "PI_WORKER_NAME=mini1\n" }, queues: { "pi-jobs": fakeQueue([0], events, {}, { name: "pi-jobs" }) }, events });
+	assert.equal(await h.run(), 1);
+	assert.deepEqual(h.asked, ["pi-jobs", "pi-jobs@mini1"]);
+	assert.deepEqual(events, ["isPaused pi-jobs", "close pi-jobs"]);
+	assert.match(h.errText(), /no fake queue named pi-jobs@mini1\n {2}Nothing was paused\.\n$/);
+});
+
+test("restart --drain: a resume that fails partway names only the queues not yet resumed (issue #804)", async () => {
+	const events = [];
+	const h = hostDrain(events, { hostOpts: { resumeError: new Error("connection is closed") } });
+	assert.equal(await h.run(), 1);
+	assert.ok(events.includes("spawn systemctl --user start pi-dispatch-worker.service"), "the restart happened");
+	assert.ok(events.includes("resume pi-jobs") && events.includes("close pi-jobs") && events.includes("close pi-jobs@mini1"));
+	assert.match(h.errText(), /connection is closed\n {2}the queue pi-jobs@mini1 STAYS PAUSED; wait until Valkey answers, then resume: `pi-dispatch resume` resumes every queue of the deployment\.\n$/);
+});
+
+test("restart --drain timeout on a named host names both queues as staying paused, with each one's active count (issue #804)", async () => {
+	const events = [];
+	const h = hostDrain(events, { argv: ["restart", "--drain", "--drain-timeout", "4"], shared: [1], host: [2] });
+	assert.equal(await h.run(), 1);
+	assert.ok(!events.some((e) => e.startsWith("spawn") || e.startsWith("resume")), "no restart and no resume");
+	assert.match(h.text(), /^drain timed out after 4s with 3 job\(s\) still active \(pi-jobs 1, pi-jobs@mini1 2\): NOT restarting\.$/m);
+	assert.match(h.text(), /^Each queue \(pi-jobs, pi-jobs@mini1\) STAYS PAUSED so the running job can finish undisturbed\. Investigate \(pi-dispatch status\), then restart and resume yourself: `pi-dispatch resume` resumes every queue of the deployment\.$/m);
+	// A unit that does not come back names both too.
+	const down = hostDrain([], { plan: { "systemctl --user start": 1, systemctl: 0 } });
+	assert.equal(await down.run(), 1);
+	assert.match(down.text(), /^the service did not come back: each queue \(pi-jobs, pi-jobs@mini1\) STAYS PAUSED; fix the service, then resume: `pi-dispatch resume` resumes every queue of the deployment\.$/m);
+});
+
+test("restart --drain that stops short names only the queues it paused, and says `pi-dispatch resume` takes the one paused before too (issue #804)", async () => {
+	// The host queue was paused before the drain and still runs a job, so the wait times out.
+	const timedOut = hostDrain([], { argv: ["restart", "--drain", "--drain-timeout", "4"], host: [1], hostOpts: { paused: true } });
+	assert.equal(await timedOut.run(), 1);
+	assert.match(timedOut.text(), /^The queue pi-jobs STAYS PAUSED so the running job can finish undisturbed\. Investigate \(pi-dispatch status\), then restart and resume yourself: `pi-dispatch resume` resumes every queue of the deployment \(pi-jobs@mini1 too, though it was paused before the drain\)\.$/m);
+	const stop = hostDrain([], { plan: { "systemctl --user stop": 1, systemctl: 0 }, hostOpts: { paused: true } });
+	assert.equal(await stop.run(), 1);
+	assert.match(stop.text(), /^restart did not happen: the queue pi-jobs STAYS PAUSED; fix the service, then resume: `pi-dispatch resume` resumes every queue of the deployment \(pi-jobs@mini1 too, though it was paused before the drain\)\.$/m);
+	// Every queue paused before the drain: it paused none, so there is nothing of its own to resume.
+	const none = hostDrain([], { argv: ["restart", "--drain", "--drain-timeout", "4"], host: [1], sharedOpts: { paused: true }, hostOpts: { paused: true } });
+	assert.equal(await none.run(), 1);
+	assert.match(none.text(), /^This drain paused no queue \(pi-jobs and pi-jobs@mini1 were paused before the drain and stay paused\)\. Investigate \(pi-dispatch status\), then restart yourself\.$/m);
+	const solo = harness({ platform: "linux", argv: ["restart", "--drain"], plan: { "systemctl --user start": 1, systemctl: 0 }, queues: { "pi-jobs": fakeQueue([0], [], {}, { paused: true }) }, events: [] });
+	assert.equal(await solo.run(), 1);
+	assert.match(solo.text(), /^the service did not come back: this drain paused no queue \(pi-jobs was paused before the drain and stays paused\); fix the service\.$/m);
 });
 
 // ---------------------------------------------------------------------------------------------------

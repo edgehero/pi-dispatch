@@ -171,7 +171,8 @@ let durable runs finish first ([upgrading.md](upgrading.md#the-order)).
   or confirmed by pi-dispatch. The agent is told and checks; the forge's own rules (a branch that already exists, a
   pull request that is already open) do the rest.
 - **A graceful stop.** Stopping or restarting the worker cleanly stops its jobs as a worker abort, which is not
-  recovered. Use `pi-dispatch service restart --drain` to let running jobs finish first.
+  recovered. Use `pi-dispatch service restart --drain` to let this host's running jobs finish first: it waits for the shared
+  queue and, on a host with `PI_WORKER_NAME`, the host's own ([service](service.md#control-the-worker)).
 
 ## Doctor
 
