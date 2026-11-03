@@ -8,8 +8,9 @@
 
 pi-dispatch runs the [pi](https://github.com/earendil-works/pi) coding agent for you in the background, on your own
 computer or server. You say what it should work on and when. Each job happens in a sealed box that is thrown away
-afterwards, stops at the spending limit you set, and shows up live on one web page. When the work is done you get a
-proposed change to review. pi-dispatch never merges anything, so what ships stays a person's decision.
+afterwards, stops at the spending limit you set, and shows up live on one web page. When it works on a project on GitHub
+or GitLab, you get back a proposed change to review. pi-dispatch never merges anything, so what ships stays a person's
+decision.
 
 It is free and open source. You pay your AI provider for what the agent uses.
 
@@ -23,8 +24,8 @@ It is free and open source. You pay your AI provider for what the agent uses.
 ## Why: from in the loop to out of the loop
 
 Working with a coding agent usually means sitting next to it. You type, it works, you check, you type again. That is
-the right way to start, and it stops where one person's attention stops. pi-dispatch lets you step back at your own
-pace, one kind of work at a time, and it never asks you to trust more than you have seen.
+the right way to start, but one person can only watch so much. pi-dispatch lets you step back at your own pace, one kind
+of work at a time, and it never asks you to trust more than you have seen.
 
 ### 1. In the loop: watch it work and step in
 
@@ -58,7 +59,8 @@ box, and a person still merges.
 
 ## Is this for you?
 
-It fits when the same kind of software work keeps coming back and you would rather not sit through it:
+It works on code: a project on GitHub, GitLab, Forgejo or Azure DevOps, or a folder under git on your own machine. It fits
+when the same kind of software work keeps coming back and you would rather not sit through it:
 
 - a nightly job that tidies a code base, updates a report or sorts new issues;
 - "label an issue and a proposed fix appears", for small everyday fixes;
@@ -71,8 +73,8 @@ For a one off task on your own machine, plain pi is enough.
 
 **Do I need to be a developer?** To use it day to day, mostly not: the web page is where you read what happened, answer
 questions, approve, add a schedule and change limits, and you describe a recurring job in plain sentences. To set it up
-you need someone comfortable in a terminal, once. And what it hands you is code, so someone should be able to judge it
-before it ships.
+you need someone comfortable in a terminal, and now and then for a setting the page does not offer. And what it hands you
+is code, so someone should be able to judge it before it ships.
 
 **Can it run up a bill?** You set limits in dollars and in jobs, per day, week and month, for everything or per project. A
 job over a limit is refused before it starts, and a job with its own cap is stopped before any model call that could
@@ -94,8 +96,9 @@ was running is lost or started over, unless its trigger opts into continuing fro
 ([durable runs](docs/durable-runs.md)).
 
 **What does it cost?** pi-dispatch is free, under the MIT license. You pay your AI provider and for the machine it runs on.
-The console shows what each project, job type, model and day cost, and whether a subscription would pay off
-([insights](docs/insights.md)).
+There is no typical figure, because a job's cost depends on your model and on the work, so start with a low daily limit and
+read what it spent. The console shows what each project, job type, model and day cost, and whether a subscription would
+pay off ([insights](docs/insights.md)).
 
 ## What you see
 
@@ -111,16 +114,18 @@ The console shows what each project, job type, model and day cost, and whether a
 
 ![One trigger's page: what starts it, the flow it runs, its limits and what it has cost so far](docs/images/console/console-trigger.png?v=2026-11-03)
 
-**Your phone:** every page fits, for answering a question from wherever you are.
+**Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
+unless you set it up otherwise, so reaching it from a phone takes a private tunnel
+([from another machine](docs/console.md#from-another-machine)).
 
 <img src="docs/images/console/console-overview-phone.png?v=2026-11-03" alt="The overview page on a phone, one column, with the questions that need you at the top" width="320">
 
 ## How to use it
 
-**1. What you need.** A computer or server that stays on: Linux, or a Mac or Windows machine with
-[Docker Desktop](https://www.docker.com/products/docker-desktop/) while you are logged in. [Node.js](https://nodejs.org)
-22.19 or newer. A key from an AI provider (Anthropic, OpenAI, Google, Groq and about thirty more). Someone comfortable
-in a terminal, for this step and the next.
+**1. What you need.** A computer or server that stays on. On a Mac or Windows machine, jobs run only while you are logged
+in. [Docker](https://www.docker.com/products/docker-desktop/), the program that runs the sealed boxes, and
+[Node.js](https://nodejs.org) 22.19 or newer. A key from an AI provider (Anthropic, OpenAI, Google, Groq and about thirty
+more). Someone comfortable in a terminal, for steps 1 to 4.
 
 **2. Install it.** If you already use pi, type this and then `/dispatch` inside pi, which offers **Finish setup in
 browser**:
@@ -152,8 +157,9 @@ fix an issue when it gets a label, tidy every night, or answer a comment.
 
 </details>
 
-**4. Run a first job and watch it.** Start the worker from the checklist, give it a folder that is a git repository, and
-open **Runs** in the console. You are in the loop.
+**4. Run a first job and watch it.** Start the worker from the checklist. Give it a folder that is a git repository, with your
+work committed, because a job on a folder edits it directly. Then open **Runs** in the console and read along. You are in
+the loop.
 
 ```bash
 ./node_modules/.bin/pi-dispatch run ./my-project --task "add type hints" --flow tidy
@@ -163,14 +169,15 @@ A flow is a short text file of instructions in your project, such as `.pi/skills
 [`examples/`](examples/) folder has one to copy.
 
 **5. Give it a schedule or a label.** On **Triggers**, add a rule: every night at three, or whenever an issue gets the label
-`pi:fix`. Turn on **steer** in the form, so you can talk to its jobs. To let a job stop and ask you, add `resume` and `awaitInput`
-to the rule in `triggers.json`. You are near the loop.
+`pi:fix`. Turn on **steer** in the form, so you can also tell its jobs what to do while they work. To let a job stop and ask you,
+add `resume` and `awaitInput` to the rule in `triggers.json`, which is a job for your technical person. You are near the loop.
 
 **6. Step back when the numbers say you can.** Read **Zero touch** under Runs. When a kind of work rarely needs you, let
 it run and review what comes back. You are out of the loop for that work, and still in charge of what ships.
 
-To open the console again later, type `/dispatch console` in pi, or `pi-dispatch-console link --name <you>` for a new sign in link
-([everything about the console](docs/console.md)).
+To open the console again later, type `/dispatch console` in pi. A sign in lasts up to 12 hours, and an hour with nothing
+happening ends it sooner. After that, you need your token or a new link, which `/dispatch console --link` or
+`pi-dispatch-console link --name <you>` makes ([everything about the console](docs/console.md)).
 
 ## Words used here
 
@@ -183,6 +190,13 @@ To open the console again later, type `/dispatch console` in pi, or `pi-dispatch
 | **Flow** | A short text file in your project with the standing instructions for a kind of job |
 | **Container** | The sealed box a job runs in, thrown away afterwards |
 | **Forge** | The place your code lives: GitHub, GitLab, Forgejo or Azure DevOps |
+| **Repository** | A project's code and its history, on a forge or in a folder (a "git repository") |
+| **Pull request** | A proposed change to a repository, for a person to review |
+| **Merge** | Accepting a pull request into the project. pi-dispatch never does this |
+| **Issue**, **label** | A note about work to do on a forge, and a tag you can put on it |
+| **Worker** | The part of pi-dispatch that takes jobs from the queue and runs them |
+| **Terminal** | The window where a developer types commands |
+| **Provider key** | The password-like key your AI provider gives you, which pays for what the agent uses |
 | **Console** | The web page shown here |
 | **Panel** | The same information inside pi, as `/dispatch` |
 

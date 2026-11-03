@@ -84,8 +84,9 @@ Two consequences worth internalising before you design anything:
 - Comments explain **why**, and especially why the obvious alternative is wrong. This codebase is dense with
   them on purpose; a comment that merely restates the code is noise, one that records a rejected approach is
   the most valuable line in the file.
-- **Both READMEs avoid dashes as punctuation** (no em dash, no ` - `). Use commas, colons or parentheses.
-  Keep the images: they carry more than the prose does.
+- **No README uses dashes as punctuation** (no em dash, no ` - `). Use commas, colons or parentheses. Keep the images:
+  they carry more than the prose does. The root README's top half is for someone who does not write code, so its words
+  stay plain until the "For engineers" heading (`admin/test/readmes.test.mjs` holds both).
 
 ## The design folder
 
@@ -96,6 +97,9 @@ Two consequences worth internalising before you design anything:
 - **The console pastes, it never reads.** A change to the look lands in `design/` first, and a console pull request
   pastes `tokens.json` or `bundle.css` into `pulse-tokens.mjs` or `pulse-css.mjs` with its new hash
   (`DES-OPERATOR-CONSOLE`, "The visual system").
+- **Render to look, not only to pin.** A golden holds bytes, not whether a page looks right. `node launch/render-images.mjs
+  --console --only <golden>` draws any state, and `--console` re-renders the READMEs' images, which no test can tell are
+  stale, so re-render them in the pull request that changes the look.
 - **A card's design status is a claim about this repository.** When a pull request builds a planned screen, move its
   card to *Built* in `STATUS` (`design/tools/fix_markers.py`) in the same pull request.
 
@@ -175,7 +179,11 @@ Two consequences worth internalising before you design anything:
   reason table, fields block and bucket lists against `worker/src/defer-reasons.mjs`, both ways, in
   `worker/test/defer-reasons.test.mjs`; and the design folder's `tokens.json` and `components/bundle.css` against
   the console's pasted copies (`admin/test/design-folder.test.mjs`: the tokens equal, the stylesheet equal or exactly
-  the version recorded as waiting to be pasted); and the record shape each release's `buildRecord` makes from the
+  the version recorded as waiting to be pasted); and `docs/console.md`'s screens table against `PAGES`
+  (`console-doc-tables.test.mjs`); and each ledger's panels and words against its design card (`console-ledger.test.mjs`,
+  `onCard` for a fragment a test keeps), so a rebuilt card fails until its ledger is re-read; and the READMEs: the docs
+  index against `docs/`, the worker's commands against the CLI, every image and cache tag, links to the root README's
+  headings, and `launch/console-picks.mjs` against `docs/images/console/` and what shows them (`readmes.test.mjs`); and the record shape each release's `buildRecord` makes from the
   shared cases, `worker/test/fixtures/run-records/` (`INT-RUN-HISTORY-FILE-CONTRACT`), which `buildRecord` must equal
   for every case (`worker/test/run-record-fixtures.test.mjs`): when `buildRecord` changes, run
   `node .github/scripts/run-record-fixtures.mjs --next-only` and commit the `next.*` files with the change, and after a
