@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { SANDBOX_DRAW, SANDBOX_HOSTS_FIXTURE } from "./helpers/sandbox-goldens.mjs";
+import { SANDBOX_DRAW, SANDBOX_HOSTS_FIXTURE, sandboxFixture } from "./helpers/sandbox-goldens.mjs";
+import { NOW } from "../../launch/fixture-deployment.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
 import { buildSandboxOpenUrl, parseSandboxOpenUrl } from "@edgehero/pi-dispatch/opener-protocol";
 import { sandboxCommand } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { outLink } from "../src/console/kit.mjs";
 import { SANDBOX_CSS } from "../src/console/sandbox-css.mjs";
-import { PAGES } from "../src/console/pages.mjs";
+import { PAGES, loadPageData, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { PAGE_CSS, pageCss } from "../src/console/page-css.mjs";
 import { chromeLaunchArgs } from "../../.github/scripts/console-width-check.mjs";
 import { sandboxBrowserLink } from "../src/console/sandbox-links.mjs";
@@ -115,4 +116,25 @@ test("the console route table documents the sandbox path and its actual operator
   const docs = readFileSync(new URL("../../docs/console.md", import.meta.url), "utf8");
   const row = docs.split("\n").find((line) => line.startsWith(`| \`${PAGES.sandboxes.path}\` |`));
   assert.equal(PAGES.sandboxes.auth, "operator"); assert.ok(row); assert.match(row, /Operators only/);
+});
+
+test("What opens says a shell has no overlay first, and an unread record or publication reads as unknown, never as an error (#800)", async () => {
+  const { LOADED_DRAW } = await import("./helpers/loaded-goldens.mjs");
+  const run = await LOADED_DRAW["sandbox-loaded-run.operator"]();
+  assert.ok(run.includes("No overlay is mounted, so pi started here loads only the workspace’s own .pi/."));
+  assert.ok(run.indexOf("No overlay is mounted") < run.indexOf("itself also loaded pi-lint 1.4.2"));
+  assert.match(run, /<a class="code" href="\/run\?id=gh-9575">gh-9575<\/a>/, "linked to the run");
+  const unknown = await LOADED_DRAW["sandbox-loaded-unknown.operator"]();
+  assert.ok(unknown.includes("On mini2"));
+  assert.ok(unknown.includes("What a job of trigger 3 would load on this host is unknown: it has published no doctor run."));
+  assert.ok(unknown.includes("pi 1.5.0 in the image."), "the host row still names its pi");
+  const parsed = parsePageQuery("sandboxes", "id=gh-9575&host=mini1");
+  const failing = { now: () => NOW, fleet: { parkedCount: async () => 1, runById: async () => { throw new Error("down"); } }, sandboxes: { hosts: () => ({ config: SANDBOX_HOSTS_FIXTURE }), read: async () => sandboxFixture() }, hostLoads: async () => { throw new Error("down"); } };
+  const data = await loadPageData("sandboxes", parsed.query, failing, { role: "operator", readOnly: false });
+  assert.equal(data.hostLoads, null);
+  assert.equal(data.sandboxRun, null);
+  const page = await renderPage("sandboxes", { data, query: parsed.query, session: { role: "operator", name: "ops" }, readOnly: false });
+  assert.equal(page.status, 200);
+  assert.match(String(page.html), /What <a [^>]*>gh-9575<\/a> itself loaded is not recorded\./);
+  assert.ok(String(page.html).includes("would load on this host is unknown"));
 });

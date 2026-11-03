@@ -39,7 +39,7 @@ import { secretsView } from "../secrets-view.mjs";
 import { secretsHeadline, secretsProblems, secretsProfiles, secretsBundles, secretsAdd, secretsHelp } from "./panels/secrets.mjs";
 import { updatesDescription, updatesHosts, updatesHow, updatesJobs, updatesProblems, updatesRecent } from "./panels/updates.mjs";
 import { connectionsDescription, connectionsProblems, connectionsForges, connectionsEgress, connectionsEndpoints, connectionsNotify, connectionsMcp, connectionsEnvironment, connectionsPackages } from "./panels/connections.mjs";
-import { projectTitle, projectDescription, projectSpend, projectRuns, projectSize, projectMembers, projectSizing, projectRecent, projectAllocation, projectLimits, projectBundle, projectTriggers, projectDelete } from "./panels/project.mjs";
+import { projectTitle, projectDescription, projectSpend, projectRuns, projectSize, projectLoads, projectMembers, projectSizing, projectRecent, projectAllocation, projectLimits, projectBundle, projectTriggers, projectDelete } from "./panels/project.mjs";
 import { triggersNavigation, triggersViewer, triggersCount, triggersNext, triggersSpend, triggersFilters, triggersWeek, triggersSchedules, triggersGithub, triggersGitlab, triggersForgejo, triggersAzure, triggersUnknown, triggersCheck, triggerCheckPage, triggersDescription } from "./panels/triggers.mjs";
 import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
@@ -183,7 +183,7 @@ const PAGE_PANELS = Object.freeze({
   secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
   updates: [["p-up-problems", updatesProblems], ["p-up-jobs", updatesJobs], ["p-up-hosts", updatesHosts], ["p-up-how", updatesHow], ["p-up-recent", updatesRecent]],
   connections: [["p-connection-problems", connectionsProblems], ["p-provider-keys", connectionsProviderKeys], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-subscription-auth", connectionsSubscriptionAuth], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
-  project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
+  project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-loads", projectLoads], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
   triggers: [["p-tr-tabs", triggersNavigation], ["p-tr-viewer", triggersViewer], ["p-tr-count", triggersCount], ["p-tr-next", triggersNext], ["p-tr-spend", triggersSpend], ["p-tr-filters", triggersFilters], ["p-tr-week", triggersWeek], ["p-tr-schedule", triggersSchedules], ["p-tr-github", triggersGithub], ["p-tr-gitlab", triggersGitlab], ["p-tr-forgejo", triggersForgejo], ["p-tr-azure", triggersAzure], ["p-tr-unknown", triggersUnknown], ["p-tr-check", triggersCheck]],
   "trigger-check": [["p-tr-check", triggerCheckPage]],
   // Issue #737: the first run's checklist (empty once the deployment runs), then what needs a person first, what waits,
@@ -245,7 +245,7 @@ const PAGE_LAYOUT = Object.freeze({
   "zero-touch": [{ cls: "cards-4 zt-kpis", items: ["p-zt-rate", "p-zt-streak", "p-zt-wait", "p-zt-handled"] }, { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions"] }, { cls: "stack zt-side", items: ["p-zt-causes", "p-zt-fixes"] }] }],
   updates: [{ cls: "stack", items: ["p-up-problems"] }, { cls: "cols updates-layout", items: [{ cls: "stack", items: ["p-up-jobs", "p-up-hosts"] }, { cls: "stack", items: ["p-up-how", "p-up-recent"] }] }],
   connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-provider-keys", "p-forges", "p-egress", "p-endpoints", "p-subscription-auth"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
-  project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
+  project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-loads", "p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
   triggers: [{ cls: "stack", items: ["p-tr-tabs", "p-tr-viewer"] }, { cls: "cards-3 triggers-kpis", items: ["p-tr-count", "p-tr-next", "p-tr-spend"] }, { cls: "cols triggers-layout", items: [{ cls: "stack triggers-rules", items: ["p-tr-filters", "p-tr-week", "p-tr-schedule", "p-tr-github", "p-tr-gitlab", "p-tr-forgejo", "p-tr-azure", "p-tr-unknown"] }, { cls: "stack triggers-check-side", items: ["p-tr-check"] }] }],
   ...SPEND_LAYOUTS,
   config: [{ cls: "stack", items: ["cf-navigation"] }, { cls: "cols cols--wide-side config-layout", items: [{ cls: "stack", items: ["cf-settings", "cf-triggers", "cf-pause-windows", "cf-scoped-limits", "cf-projects", "cf-files"] }, { cls: "stack", items: ["cf-unset", "cf-mcp-servers", "cf-packages", "cf-secret-profiles", "cf-secret-bundles"] }] }],
@@ -614,7 +614,7 @@ export function returnPathOf(raw) {
 const PAGE_READS = Object.freeze({
   setup: ["snapshot", "setup"],
   models: ["snapshot", "waiting", "models"],
-  sandboxes: ["parkedCount"],
+  sandboxes: ["parkedCount", "hostLoads"],
   "zero-touch": ["parkedCount"],
   overview: ["snapshot", "waiting"],
   runs: ["runsPage", "subscriptions", "runsWindow", "parkedCount"],
@@ -781,6 +781,10 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     try { const hosts = deps.sandboxes.hosts(); data.sandboxHosts = hosts.config ?? null; data.sandboxHostsProblem = hosts.refusal ?? null; } catch { data.sandboxHosts = null; data.sandboxHostsProblem = "Terminal host configuration could not be read. Inspect its owner, permissions and format."; }
     if (name === "sandboxes") {
       try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }
+      // The run a kept workspace came from, for what opens: its record's `loaded`, unknown when it cannot be read.
+      if (typeof q.id === "string" && typeof deps.fleet?.runById === "function") {
+        try { data.sandboxRun = (await deps.fleet.runById(q.id))?.record ?? null; } catch { data.sandboxRun = null; }
+      }
     }
   }
   // What the hosts published (issue #800). A missing or failed read is unknown, never an error page and never "the same".

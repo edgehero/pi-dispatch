@@ -74,5 +74,13 @@ export const LOADED_DRAW = Object.freeze({
   "run-loaded-not-recorded.operator": () => runPage(SAMPLES.notRecorded()),
   "run-loaded-refused.operator": () => runPage(SAMPLES.refused()),
   "runs-loaded-problems.operator": () => runsPage([SAMPLES.noFlow(), SAMPLES.extensionFailed()]),
+  "sandbox-loaded-run.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: SAMPLES.everything() }),
+  "sandbox-loaded-fresh.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: SAMPLES.everything() }),
+  "sandbox-loaded-unknown.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: SAMPLES.everything(), change: (report) => { report.hosts.push({ ...report.hosts[0], name: "mini2", rows: [] }); report.plan.host = "mini2"; report.selected.host = "mini2"; } }),
+  "project-loads.operator": () => projectPage(billingRecords()),
+  "project-loads.viewer": () => projectPage(billingRecords(), "viewer"),
+  "project-loads-same.operator": () => projectPage(webRecords()),
+  "project-loads-none.operator": () => projectPage([]),
+  "project-loads-incomplete.operator": () => projectPage(incompleteRecords()),
 });
 export const LOADED_PANEL_STATES = Object.freeze(Object.keys(LOADED_DRAW));

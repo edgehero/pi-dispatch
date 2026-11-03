@@ -28,6 +28,7 @@
     {"el":"The server provides only the existing worker facts, with unknown/unread states retained","kind":"provides","status":"new","source":"admin/src/project-view.mjs#readProjectView"},
     {"el":"The exact viable size call uses the actual machine row and person confirm","kind":"readme","status":"new","panel":"p-proj-sizing","source":"admin/src/console/panels/project.mjs#projectSizing","golden":["panels/project-populated.operator"],"shows":["dispatch_limit_edit","row 3","Preview this size"]},
     {"el":"Card sample names, amounts, runs and counts","kind":"sample","status":"illustrative","reason":"The published card uses illustrative data; the production fixture and behavioral counterexamples verify actual source semantics, not these sample values."},
-    {"el":"Completed chips in green","kind":"readme","status":"illustrative","reason":"a completed run is not a state that needs attention, so the page keeps them grey"}
+    {"el":"Completed chips in green","kind":"readme","status":"illustrative","reason":"a completed run is not a state that needs attention, so the page keeps them grey"},
+    {"el":"p-proj-loads","kind":"panel","status":"new","source":"admin/src/console/panels/project.mjs#projectLoads","golden":["panels/project-populated.operator","panels/project-populated.viewer"],"reason":"What its runs load is ProjectLoads' card, drawn first in this page's main stack (#800)."}
   ]
 }

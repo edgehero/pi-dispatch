@@ -16,6 +16,7 @@ import { readProjects, readScopedLimits, readTriggers, readSettingsView, readSub
 import { planProjectEdit, planProjectDelete } from "./write-plans.mjs";
 import { outcomeKey, recordReason, reasonWords } from "./words.mjs";
 import { fromNewerRelease, readableRecords } from "./newer-release.mjs";
+import { outcomeNote, projectLoadsOf } from "./loaded-words.mjs";
 
 const DAY = 86_400_000;
 const instant = (r) => Date.parse(r?.endedAt ?? r?.startedAt ?? "");
@@ -116,7 +117,7 @@ function projectRefusal(result, id, operation) {
 function runView(r, subscriptions, pricing) {
   const reason = recordReason(r);
   const cost = recordSpendOf(r, { subscriptions, pricing });
-  return { jobId: r.jobId ?? null, target: r.kind === "local" ? memberLabel(r.target ?? "local folder") : r.target ?? null, kind: r.kind ?? null, at: Number.isFinite(instant(r)) ? instant(r) : null, outcome: outcomeKey(r.outcome, reason) ?? "unknown", reason, reasonSentence: reason ? reasonWords(reason).sentence ?? reason : null, host: r.host ?? null, micros: cost.micros, costFloor: cost.floor };
+  return { jobId: r.jobId ?? null, target: r.kind === "local" ? memberLabel(r.target ?? "local folder") : r.target ?? null, kind: r.kind ?? null, at: Number.isFinite(instant(r)) ? instant(r) : null, outcome: outcomeKey(r.outcome, reason) ?? "unknown", reason, reasonSentence: reason ? reasonWords(reason).sentence ?? reason : null, host: r.host ?? null, micros: cost.micros, costFloor: cost.floor, note: outcomeNote(r) };
 }
 
 /**
@@ -245,6 +246,8 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
     spend: { window, since, envelope, usedMicros, settledMicros, heldMicros: holds.micros, heldKnownMicros: holds.knownMicros, heldIncomplete: holds.incomplete, floor: envelope ? false : historyFloor, shareMicros: amount(allocation?.state?.allocations?.[id]), problem: allocation?.problem ? "The allocation file could not be read. Run pi-dispatch doctor for the reason." : allocation?.unreachable ? "The allocation could not be read from Valkey." : null },
     allocation: { window, shareMicros: amount(allocation?.state?.allocations?.[id]), totalMicros: amount(allocation?.totalMicros), floorMicros: amount(allocation?.floors?.[id]), weight: amount(weights[id]), totalWeight: amount(totalWeight), split: allocation?.state ? { id: allocation.state.planId ?? null, writer: allocation.state.writer ?? null, appliedAt: allocation.state.appliedAt ?? null, validUntil: allocation.state.validUntil ?? null } : null, refused: selected.filter((r) => recordReason(r) === "allocation-cap").length, unset: !envelope, problem: allocation?.problem || allocation?.unreachable ? "The allocation could not be read." : null },
     size, sizing: sizingView, sizingUnreadable: registryUnreadable || !sizing || Boolean(sizing.unreachable) || !sl || Boolean(sl.invalid || sl.unreadable), limits: limitRows, limitsUnreadable: !sl || Boolean(sl.invalid || sl.unreadable), bundle, bundleKnown,
+    // This week, the window Members counts its runs in beside it. A rolling seven days would be a second window under a near-identical word.
+    loads: projectLoadsOf(recorded.filter((r) => instant(r) >= costsSinceMs("week", now)), { historyIncomplete: !historyReadable || fleetHistory?.incomplete !== false || newerSkipped > 0 }),
     triggers: [...triggerCounts.values()].sort((a, b) => a.index - b.index), editRefusal: projectRefusal(edit, id, "edit"), deleteRefusal: projectRefusal(deletion, id, "delete"),
   };
 }

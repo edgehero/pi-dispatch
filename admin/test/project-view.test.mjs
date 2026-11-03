@@ -7,6 +7,7 @@ import { readProjectView, projectHolds, projectWindowStart, projectSizeAction, p
 import { planProjectEdit, planProjectDelete, planLimitEdit } from "../src/write-plans.mjs";
 import { writeProjects, envelopeRefusal } from "../src/read-model.mjs";
 import { projectMembers, projectDelete, projectBundle } from "../src/console/panels/project.mjs";
+import { LOADED_SAMPLES } from "./helpers/loaded-samples.mjs";
 
 const NOW = Date.parse("2026-10-30T12:00:00Z");
 const DAY = 86_400_000;
@@ -389,4 +390,32 @@ test("month spend history includes the first day of a long month, beyond the 30-
   const got = await readProjectView(input({ now, paths: { envelopeFile: "/op/envelope.json" }, reads: { allocation: () => ({ window: "month", spend: { projects: { billing: 1_000_000 } } }), scan: ({ sinceMs }) => { readSince = sinceMs; return [record("gh-month-first", { endedAt: "2026-10-01T01:00:00Z", reason: "allocation-cap", outcome: "policy" })]; } } }));
   assert.equal(readSince, Date.parse("2026-10-01T00:00:00Z"));
   assert.equal(got.allocation.refused, 1);
+});
+
+// Issue #800: What its runs load is read over the page's own window, the one Members counts in beside it.
+test("what a project's runs load reads this week from Monday 00:00 UTC, as Members does, and never a rolling seven days", async () => {
+  // NOW is a Friday, 2026-10-30 12:00 UTC, so Monday 2026-10-26 starts the week. Five days and one minute ago is inside
+  // seven days and outside the week: a rolling window would count it, and the row beside this card would not.
+  const week = Date.parse("2026-10-26T00:00:00Z");
+  assert.equal(projectWindowStart("week", NOW), week);
+  const run = (jobId, at) => record(jobId, { host: "mini1", startedAt: new Date(at - 60_000).toISOString(), endedAt: new Date(at).toISOString() });
+  const records = [run("gh-monday", week), run("gh-friday", NOW - 1_000), run("gh-sunday", week - 60_000), run("gh-old", NOW - 20 * DAY)];
+  const view = await readProjectView(input({ reads: { scan: () => records } }));
+  assert.equal(view.loads.total, 2, "the two of this week");
+  assert.equal(view.loads.sub, "2 runs this week");
+  assert.equal(view.members[0].count, view.loads.total, "the same two the Members row counts");
+  // None of them says what it loaded, so this card says that, whatever the page's other cards count.
+  assert.equal(view.loads.state, "none");
+  // A record of another project, or one past the clock, is not this project's week.
+  const others = await readProjectView(input({ reads: { scan: () => [record("gh-other", { project: "other", endedAt: new Date(NOW - 1_000).toISOString() }), run("gh-future", NOW + 60_000)] } }));
+  assert.equal(others.loads.total, 0);
+  // A bounded or unreadable history can never read as "the same".
+  const one = (jobId) => ({ ...run(jobId, NOW - 1_000), loaded: LOADED_SAMPLES.everything().loaded });
+  const whole = await readProjectView(input({ reads: { scan: () => [one("gh-a"), one("gh-b")], fleetRuns: async () => ({ runs: [], incomplete: false }) } }));
+  assert.equal(whole.loads.state, "same");
+  const bounded = await readProjectView(input({ reads: { scan: () => [one("gh-a"), one("gh-b")], fleetRuns: async () => ({ runs: [], incomplete: true }) } }));
+  assert.equal(bounded.loads.state, "incomplete");
+  // A model never reads the card.
+  assert.equal(JSON.stringify(projectViewForAgent(whole)).includes("pi-lint"), false);
+  assert.equal(Object.hasOwn(projectViewForAgent(whole), "loads"), false);
 });

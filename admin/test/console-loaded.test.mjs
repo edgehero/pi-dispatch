@@ -203,5 +203,6 @@ test("the page CSS is the exact published generator source, served on the pages 
   assert.equal(LOADED_CSS, css);
   assert.equal(LOADED_CSS_SHA256, createHash("sha256").update(css).digest("hex"));
   assert.ok(PAGE_CSS.run.endsWith(LOADED_CSS));
+  assert.equal(PAGE_CSS.project, LOADED_CSS);
   assert.doesNotMatch(LOADED_CSS, /\.c2-/, "nothing of the sample pages' stylesheet: the console ships none of it");
 });
