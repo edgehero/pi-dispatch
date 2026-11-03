@@ -17,8 +17,8 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-11-02T14:19:13Z",
-    "via": "Codex",
-    "note": "Built #754/#792/#793: maintained-library terminal workbench with tabs and splits, one driver and consented read-only watches, run Workspace states and closed per-terminal run context."
+    "at": "2026-11-03T00:08:04Z",
+    "via": "Claude Code",
+    "note": "Built #796's Updates page: what is newer for pi and staged extensions, a paid canary a person runs, Adopt and Undo across hosts. Also the terminal workbench, watching and run Workspace cards as they shipped."
   }
 }
