@@ -1981,7 +1981,7 @@ const WRITE_RULES = {
   },
   "package-adopt": {
     fields: ["name", "version"], danger: false,
-    undo: (out) => `Undo puts each host back as it was, to ${out.payload.from}`,
+    undo: (out) => `Put each host back as it was, at ${out.payload.from}`,
     inverse: (out) => ({ action: "package-undo", body: { name: out.payload.name } }),
     confirmLabel: (out) => `Adopt ${out.target}`,
     done: (out) => `Asked every host to adopt ${out.target}`,

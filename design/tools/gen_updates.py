@@ -48,11 +48,12 @@ def jobs_table():
     ]
     body = table([("What", ""), ("Version", ""), ("Checks", ""), ("", "up-act wide")], rows, cls="tbl", caption="What jobs run, and what is available", stack=True)
     adopt = confirm("safe", "Adopt pi-lint 1.4.3",
-                    ["Re-stages <b>pi-lint</b> at exactly <b>1.4.3</b> on mini1, mini2 and build3",
+                    ["Stages <b>pi-lint</b> at exactly <b>1.4.3</b> on each host, and pins that version in each host's <span class=\"code\">pi-packages.json</span>",
                      "Jobs that start after this load it; running jobs keep 1.4.2",
-                     "A host that is offline adopts it when it returns; the page shows it as pending until then",
-                     "Triggers that set <span class=\"code\">\"packages\": false</span> are not affected (1 does)"],
-                    "adopt 1.4.2 again", "Adopt pi-lint 1.4.3")
+                     "A host that is offline adopts it when it returns, and the page shows it as pending until then",
+                     "Triggers that set <span class=\"code\">run.packages</span> to false are not affected",
+                     "Dependencies are resolved again on each host, so a tree can differ from the one the canary ran. The page says when it does"],
+                    "Put each host back as it was, at 1.4.2", "Adopt pi-lint 1.4.3")
     return card("What jobs run", body + f'<div class="up-confirm">{adopt}</div>'
                 + f'<p class="up-foot">{ic("info", "ic ic--sm")}<span>Checked daily once enabled. Nothing here changes a job until someone adopts it.</span></p>',
                 sub="pi and its extensions", id_="p-up-jobs", flush=True)
@@ -79,8 +80,7 @@ def side():
                  ("Adopting", "always a person, with a preview and Undo")], 1)
     recent = '<ul class="rows">' + "".join(
         f'<li class="rowpill">{ic("done", "ic ic--sm")}<span><b class="code">{n}</b> {v}</span><span class="end">{w}</span></li>'
-        for n, v, w in [("pi-lint", "1.4.1 to 1.4.2", "ops, 1 Oct"), ("pi", "1.4.0 to 1.5.0", "pi-dispatch 5.0.0, 24 Oct"),
-                        ("pi-test-runner", "0.8.2 to 0.9.0", "ops, 1 Oct")]) + "</ul>"
+        for n, v, w in [("pi-lint", "1.4.1 to 1.4.2", "ops, 1 Oct"), ("pi-test-runner", "0.8.2 to 0.9.0", "ops, 1 Oct")]) + "</ul>"
     return (card("How it keeps up", how, id_="p-up-how")
             + card("Recently adopted", recent, id_="p-up-recent"))
 

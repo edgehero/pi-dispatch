@@ -493,7 +493,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["remove-all-failed", bulk([null]), twice(U.removed), null, "Remove 1 job", "Removed 1 failed job", { done: 1, count: 1 }],
     ["trigger-fire", { target: "daily", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Fire now for up to $2.00", "Fired cron trigger daily once"],
     ["package-canary", { target: "pi-lint@1.4.3", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Run the canary for up to $2.00", "Queued a canary of pi-lint@1.4.3"],
-    ["package-adopt", { target: "pi-lint@1.4.3", payload: { name: "pi-lint", from: "1.4.2" } }, twice("Undo puts each host back as it was, to 1.4.2"), { action: "package-undo", body: { name: "pi-lint" } }, "Adopt pi-lint@1.4.3", "Asked every host to adopt pi-lint@1.4.3"],
+    ["package-adopt", { target: "pi-lint@1.4.3", payload: { name: "pi-lint", from: "1.4.2" } }, twice("Put each host back as it was, at 1.4.2"), { action: "package-undo", body: { name: "pi-lint" } }, "Adopt pi-lint@1.4.3", "Asked every host to adopt pi-lint@1.4.3"],
     ["package-undo", { target: "pi-lint@1.4.2" }, twice("Adopt it again from the Updates page, while its canary's run is retained"), null, "Undo", "Asked every host to go back to pi-lint@1.4.2"],
     ["rerun", { target: "gh-r", reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Re-run for up to $2.00", "Queued a re-run of gh-r"],
     ["rerun", { target: "gh-r", reserve: zero }, twice(U.rerunBefore), null, "Re-run (zero-rated)", "Queued a re-run of gh-r"],
