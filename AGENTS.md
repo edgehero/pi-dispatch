@@ -200,7 +200,35 @@ Two consequences worth internalising before you design anything:
   `STORE_FLEET_LINES` to the four version fields a worker publishes (`worker/test/store-version.test.mjs`,
   `store-versions-files.test.mjs`, `start-wiring.test.mjs`, `admin/test/store-versions-admin.test.mjs`). The first
   row in any of those tables, field or value, ships only once every host and every panel and console runs issue #761's
-  release or later.
+  release or later. The tolerant readers and the retention module of the same issue add these:
+  - `INT-CONSOLE-AUDIT-LOG`'s action, outcome and actor role lists against `CONSOLE_AUDIT_ACTIONS`,
+    `CONSOLE_AUDIT_OUTCOMES` and the roles the console writes, and every member of both code lists against
+    `CONSOLE_AUDIT_ACTION_RE` and `CONSOLE_AUDIT_OUTCOME_RE` (`worker/test/console-audit.test.mjs`). The writer stays
+    closed and only the verifier reads the shape: a value a release adds outside it would make every older verifier
+    call an intact chain broken, so that release fails its own build. `TOKEN_ROLES` is held to `TOKEN_ROLE_RE` the
+    same way (`console-tokens.test.mjs`): an older console keeps an entry of a shaped role and refuses the whole file
+    for any other. A field of an entry or a key of the tokens file that would narrow who may sign in raises its
+    `version`.
+  - The checkpoint version tables, `CHECKPOINT_POINTER_SHAPES` (`run-checkpoint.mjs`) and `CHECKPOINT_MANIFEST_READS`
+    (`workspace-checkpoint.mjs`), each reading exactly its newest version and the one before it, with the version its
+    writer writes among them (so a release may read v + 1 while it still writes v, and the next release writes v + 1),
+    and the pointer's TTL equal to the store's (`run-checkpoint.test.mjs`). The rule no test can check: a release that
+    adds a version only reads it, and the writer of it ships a release later, and an older reader is dropped only in a
+    release shipped at least 7 days after the writers stopped writing its version. A later pointer version keeps
+    `host` and `jobDir` as they are, since the boot sweep's keep-list (`pointerKeepEntry`) reads every version and its
+    "no" deletes.
+  - The job retention: a forge job's 31 days and a local job's day and week live in `worker/src/retention.mjs`
+    (`@edgehero/pi-dispatch/retention`, a leaf the receiver and the admin import too), every value that must move with
+    them is derived from it (a marker that stands in for a job key, the console's re-run windows and their sentences,
+    the dashboard's FAILED header), and a source scan
+    (`worker/test/retention.test.mjs`) refuses a 31-day literal in `worker/src`, `receiver/src` or `admin/src` outside
+    its named exemptions (the watch ceiling plus a day, the OAuth lifetime bounds), each of which must match exactly
+    one line. A 31-day literal is 31 times a day's factor (24, 1440, a day in seconds or milliseconds written 86400,
+    86_400, 864e2, 8.64e4, 86400000, 86_400_000, 86400e3, 864e5, 86.4e6 or 8.64e7, or a name with "day" in it), in
+    either order and through other factors, or 2678400 in seconds or milliseconds (2_678_400, 2.6784e6, 2.6784e9),
+    with `_` between any digit groups and a capital `E` taken as well. The scan reads one line at a time and misses
+    every other spelling (`8.64e+7`, a BigInt) and a product split across lines. Put a new retention-shaped value
+    there, never in the file that uses it.
   Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.

@@ -39,6 +39,40 @@ test("every action and outcome the console writes has the shape an older verifie
 	assert.equal(String(CONSOLE_AUDIT_OUTCOME_RE), String(/^[a-z][a-z0-9-]{0,39}$/));
 });
 
+test("INT-CONSOLE-AUDIT-LOG lists exactly the actions, outcomes and actor roles the console writes (issue #761)", async () => {
+	// The contract's three lists are hand-written copies of what the code writes, so they are held to it here (AGENTS.md,
+	// "Rules that bite"): `write-applied` was written for a release while the contract still listed eleven actions. Each
+	// list is read between its own fixed words, so a name in backticks elsewhere in its bullet is never taken for a member.
+	const text = fs.readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const from = text.indexOf("\n## INT-CONSOLE-AUDIT-LOG\n");
+	assert.ok(from >= 0, "specs/interfaces.md has an INT-CONSOLE-AUDIT-LOG section");
+	const end = text.indexOf("\n## ", from + 1);
+	const section = text.slice(from, end < 0 ? undefined : end).replace(/\s*\n\s*/g, " ");
+	const between = (start, stop) => {
+		const a = section.indexOf(start);
+		assert.ok(a >= 0, `the section says ${JSON.stringify(start)}`);
+		const b = section.indexOf(stop, a + start.length);
+		assert.ok(b >= 0, `and ${JSON.stringify(stop)} after it`);
+		return [...section.slice(a + start.length, b).matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+	};
+	assert.deepEqual(between("`action`: the writer writes exactly one of", "(`CONSOLE_AUDIT_ACTIONS`)"), [...CONSOLE_AUDIT_ACTIONS]);
+	assert.deepEqual(between("`outcome`: the writer writes exactly one of", "(`CONSOLE_AUDIT_OUTCOMES`)"), [...CONSOLE_AUDIT_OUTCOMES]);
+	// The roles: a session's is its token's (`TOKEN_ROLES`); the panel's and the extension's tools' are their actor
+	// functions'; the CLI's and a request's without a session are constants in the console's source, read from it here so
+	// that one renamed fails rather than leaving the contract naming a role nothing writes.
+	const { TOKEN_ROLES } = await import("../src/console-tokens.mjs");
+	const { panelActor, agentActor } = await import("../../admin/src/audited-write.mjs");
+	const constantRole = (file, name) => {
+		const source = fs.readFileSync(new URL(`../../admin/src/console/${file}`, import.meta.url), "utf8");
+		const found = [...source.matchAll(new RegExp(`^const ${name} = Object\\.freeze\\(\\{ name: "[a-z]+", role: "([a-z]+)", session: null \\}\\);$`, "gm"))];
+		assert.equal(found.length, 1, `admin/src/console/${file} declares ${name} once, in the shape this test reads`);
+		return found[0][1];
+	};
+	const user = () => ({ username: "rob" });
+	const written = new Set([...TOKEN_ROLES, panelActor(user).role, agentActor(user).role, constantRole("cli.mjs", "SHELL"), constantRole("server.mjs", "ANONYMOUS")]);
+	assert.deepEqual(between("The roles written are", ":").sort(), [...written].sort());
+});
+
 test("append stamps at, seq and prev (sha256 of the previous raw line), into a 0700 dir and a 0600 month file", () => {
 	const { dir, audit, clock, lines } = setup();
 	const first = audit.append(row());
