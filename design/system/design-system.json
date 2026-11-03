@@ -17,7 +17,7 @@
   },
   "lastChange": {
     "by": "Rob",
-    "at": "2026-11-03T12:50:17Z",
-    "note": "Proposed (#802): what a trigger's jobs get on each host, changed in place by a person: model, flow and skills, extensions, MCP servers and tools, with one preview and Confirm. Also (#800): what each run loaded."
+    "at": "2026-11-03T12:54:14Z",
+    "note": "Proposed (#800): what a job gets. Part 1: what each run loaded, on its run page, in a sandbox, on a trigger and on its project. Part 2: what a trigger's jobs get on each host, changed in place by a person with one preview and Confirm."
   }
 }

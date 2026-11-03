@@ -28,7 +28,7 @@ Start with **Start here**: the concept map shows how the pieces connect, the glo
 | Runs | Runs, Sandboxes (#771, operator only; optional separate gateway #754), Sandbox workbench with tabs and splits, Sandbox terminal, Sandbox gateway sign-in and states, a run's workspace on its page and outcome by outcome with per-terminal run context (#793), watching a shell (observer mode, #792), what a run loaded and the same record by run, in a sandbox and on a trigger (proposed, #800), Zero touch with its viewer view (#770), Parked with answer rules and its viewer view (#772), Run live, Run ended, Run refused, Run parked, Run recovered (durable run), Run in a sandbox (openshell-bind), Run chat states, Run as a viewer |
 | Fleet | Fleet, Fleet part paused (bulk actions, held, delayed), Host detail (registry row, budget, capacity, doctor), Venue detail (14 properties), Fleet as a viewer |
 | Spend | Spend, Budget split, Capacity, Breakdown, Flows map, as tabs of one page |
-| Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, what a trigger's jobs get on each host, changed in place, and its preview (proposed, #802), Add a trigger, Triggers as a viewer |
+| Triggers | Triggers (every rule as "when this happens, run that", a week of schedules, and which rule an event would start), Trigger detail, what a trigger's jobs get on each host, changed in place, and its preview (proposed, #800), Add a trigger, Triggers as a viewer |
 | Configuration | Configuration, Secrets, Connections, Project detail, what a project's runs load by host (proposed, #800), Updates |
 | Access and audit | Sign-in, Access states (one-time link, operator, viewer, read-only), Audit, Error |
 | Phone | Overview, Runs, Parked, Spend, Run live, Fleet, Triggers, Parked with a draft, Zero touch |
@@ -85,7 +85,7 @@ Every page, panel, state and write of the console at `ce5338f`, plus the 5.0.0 i
 | `/config`: settings, triggers, pause windows, scoped limits, projects, MCP servers, packages | Configuration |
 | Every trigger rule: kind, selectors, forge, flow, options, last run, next fire, one-shot state, pause windows | Triggers |
 | A trigger's fields, trust model, cron health, one-shots, edit and delete | Trigger detail |
-| What a trigger's jobs get on each host (model, flow and skills, extensions, MCP servers, tools), changed in place with one preview and Confirm (proposed, #802) | Trigger environment, Trigger environment change |
+| What a trigger's jobs get on each host (model, flow and skills, extensions, MCP servers, tools), changed in place with one preview and Confirm (proposed, #800) | Trigger environment, Trigger environment change |
 | `trigger-add` for all five kinds, with the fields only the file can set | Add a trigger |
 | Secret profiles and bundles, resolver roots, add and remove | Secrets |
 | Forges, egress per host, model endpoints, provider keys by name, notifications, MCP, staged packages | Connections |
@@ -112,7 +112,7 @@ What this design asks the repo for, because the repo cannot do it yet:
 - Triggers as a page of its own, with Watch as its second tab;
 - delivery health for webhooks, which the receiver does not publish;
 - what a run loaded, kept in its run record from the runner's exit line, so a run page, a sandbox, a trigger and a project can say what the job had (#800);
-- what a trigger's jobs get, resolved per host, and a person-only edit of it from the trigger page, with `run.excludeExtensions` and extension tools in the exclusions (#802);
+- what a trigger's jobs get, resolved per host, and a person-only edit of it from the trigger page, with `run.excludeExtensions` and extension tools in the exclusions (#800);
 
 The original #753 proposals are implemented by #770 (Zero touch), #771 (native sandbox handoff and preparation) and #772 (cited answer drafts a person sends). Their integration counts a confirmed draft, including an edited one, once on its source workload run in the selected covered interval. Unsent drafts and helper runs add none.
 
