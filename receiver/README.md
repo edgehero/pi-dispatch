@@ -1,18 +1,20 @@
 # @edgehero/pi-dispatch-receiver
 
 The trigger edge of **[pi-dispatch](https://github.com/edgehero/pi-dispatch)**, which runs the
-[pi](https://github.com/earendil-works/pi) coding agent as a self hosted background service.
+[pi](https://github.com/earendil-works/pi) coding agent for you in the background. Most people want the
+[main README](https://github.com/edgehero/pi-dispatch#readme) first: it explains why and how to use it.
 
 The receiver turns forge activity into queued jobs for the
 [worker](https://www.npmjs.com/package/@edgehero/pi-dispatch). It reads the same `triggers.json` as the
 worker, checks each delivery, and queues at most one job per event (one per replica when a trigger sets
 `run.replicas`). It never runs a job itself.
 
-## Two ways to run it
+## Three ways to run it
 
 ```bash
 npx @edgehero/pi-dispatch-receiver         # serve: the webhook receiver (the default)
 npx @edgehero/pi-dispatch-receiver poll    # poll: no public URL, reads GitHub with your own credential
+npx @edgehero/pi-dispatch-receiver watch   # watch: pulls findings from your own alert sources
 ```
 
 - **`serve`** verifies GitHub, GitLab, Forgejo and Azure DevOps webhooks (at `/`, `/gitlab`, `/forgejo`
@@ -22,6 +24,14 @@ npx @edgehero/pi-dispatch-receiver poll    # poll: no public URL, reads GitHub w
   runs it as a service, and a container image is published as `ghcr.io/edgehero/pi-dispatch-receiver`.
 - **`poll`** fetches GitHub issue events, comments and pull requests about once a minute, over TLS, with
   the same gates and the same queue. A new poller starts from now and never replays old labels.
+
+- **`watch`** pulls findings from the sources in `triggers.json`. `serve` takes them pushed to `/watch/<source>` as well. A finding starts a
+  read only investigation or files an issue, and cannot choose a job's permissions
+  ([watch](https://github.com/edgehero/pi-dispatch/blob/main/docs/watch.md)).
+
+**Steering from a comment.** While a job of a steer armed trigger runs on an issue or pull request, a comment with your comment trigger's
+phrase goes to that running job instead of starting a second one, once the comment trigger has `"steer": true` as well
+([steering](https://github.com/edgehero/pi-dispatch/blob/main/docs/steering.md#steering-from-a-comment)).
 
 The receiver checks each delivery's signature, the bot loop guard, the forge's own permission check and
 dedup. The worker then applies quiet hours, the image preflight, branch protection and the spend caps.

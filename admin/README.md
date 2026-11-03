@@ -1,31 +1,24 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2.0.0" alt="pi-dispatch: run the pi coding agent as a self-hosted service" width="880">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-03" alt="pi-dispatch: hand software work to an AI coding agent, and decide how closely you watch it" width="880">
 </p>
 
-# pi-dispatch: run the pi coding agent as a self-hosted service
+# pi-dispatch: hand software work to an AI coding agent, and decide how closely you watch it
 
-**Let a coding agent work on your repositories while you are not watching, without surprise bills and
-without giving it the keys to your machine.**
+[pi](https://github.com/earendil-works/pi) is an open source coding agent that you normally run in a terminal. pi-dispatch runs it for you
+in the background: on a schedule, on your repo's issues and pull requests, or from the command line. Each job happens in a sealed box that is
+thrown away afterwards, stops at the spending limit you set, and shows up live on one web page. You start in the loop, watching it work. You
+move to near the loop, where it asks when it needs you, and to out of the loop, where you review what comes back. pi-dispatch never merges
+anything, so what ships stays a person's decision. The [main README](https://github.com/edgehero/pi-dispatch#readme) explains all of it.
 
-[pi](https://github.com/earendil-works/pi) is an open source coding agent that you normally run in a
-terminal. It has no job queue, no spend limit and, by its own README, no permission system. pi-dispatch
-adds exactly those, so pi can run unattended: on a cron schedule, on your repo's issues and PRs, or from
-the command line. Every job runs in its own container. Spend is checked before a single token is spent:
-job counts and a daily token count for the whole deployment, job counts per repo, folder or project, and
-dollars per day, week or month for the deployment and per repo, folder, project or model, plus an optional
-dollar cap per job. Everything the agent did, and what it cost, is
-recorded, graphed and priced.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-overview.png?v=2026-11-03" alt="The web console's overview page: what needs you, what is waiting and why, what is running, what today has cost, and a timeline of every project's runs" width="820">
+</p>
 
-On a forge you stay in control at both ends. A job starts only when someone with write access to the repo
-asks for one, with a label, an `@pi` comment or a review. What comes back is a pull request that you
-review and merge yourself, because pi-dispatch never merges anything. It is not another agent to compare
-with the one you use. It is the queue, the budget and the box around the pi you already run.
-
-> This npm package, **`@edgehero/pi-dispatch-admin`**, is the **operator console**, a pi extension. The
-> service itself is [`@edgehero/pi-dispatch`](https://www.npmjs.com/package/@edgehero/pi-dispatch)
-> (worker and CLI) and [`@edgehero/pi-dispatch-receiver`](https://www.npmjs.com/package/@edgehero/pi-dispatch-receiver)
-> (the webhook edge). The [main repo](https://github.com/edgehero/pi-dispatch) has the job image, the
-> docs (Docker, Podman, egress, every forge) and SECURITY.md.
+> This npm package, **`@edgehero/pi-dispatch-admin`**, holds the two ways to work with a deployment: the **web console**
+> (`pi-dispatch-console`, above) and the **`/dispatch` panel**, a pi extension. The service itself is
+> [`@edgehero/pi-dispatch`](https://www.npmjs.com/package/@edgehero/pi-dispatch) (worker and CLI) and
+> [`@edgehero/pi-dispatch-receiver`](https://www.npmjs.com/package/@edgehero/pi-dispatch-receiver) (the webhook edge). The
+> [main repo](https://github.com/edgehero/pi-dispatch) has the job image, the docs (Docker, Podman, egress, every forge) and SECURITY.md.
 
 ## How it works
 
@@ -82,7 +75,7 @@ default and goes through an allowlist proxy, and the allowed hosts are yours to 
 ## Triggers: what starts a job
 
 Every trigger is one `{ on, run }` entry in a single `triggers.json`. The worker reads it live for cron,
-the receiver reads it live for forge webhooks, and the console can edit it. **`on` is what fires it;
+the receiver reads it live for forge webhooks, and the panel and the web console can edit it. **`on` is what fires it;
 `run` is the skill it runs.**
 
 | `on.type` | Fires on | What the agent gets as its task |
@@ -124,7 +117,7 @@ Four things to know before you build on it:
   persists. A forge job gets a fresh clone that is thrown away with the container
   ([`docs/workflows.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/workflows.md)).
 
-## The console: `/dispatch`
+## The panel: `/dispatch`
 
 One command puts a live terminal view over the whole deployment:
 
@@ -154,7 +147,7 @@ One command puts a live terminal view over the whole deployment:
   always marked as one ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/insights-view.png?v=2026-10-22-710" alt="The insights page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-spend.png?v=2026-11-03" alt="The Spend page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
 </p>
 
 - **Triggers, editable live.** Add, edit and delete triggers without a restart. Drill-ins show what
@@ -250,7 +243,9 @@ whole fleet as it changes: an overview of what needs you, what waits and why, an
 deployment that has not run yet, what stands before its first job), every run with filters, one search by
 repository, target or job id, the last 24 hours counted by outcome and paging, a card for each run waiting for an
 answer, spend and insights by range, queues, hosts and schedules, the configuration and its own audit
-log, plus `/api/state` as JSON for scripts. It reads through the same code as the panel, so the two never disagree;
+log, plus `/api/state` as JSON for scripts. It also has Models (roles, fallbacks and canary comparisons), Updates (what jobs run and what is
+newer), Watch (findings from your alerts), Sandboxes (kept workspaces and shells), Zero touch (how often runs needed a person) and
+Setup (a live checklist for a new deployment). It reads through the same code as the panel, so the two never disagree;
 the panel shows the waiting runs too.
 It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
 and edit the configuration, each previewed (with how to undo it), confirmed and recorded in one audit log that holds
@@ -268,7 +263,7 @@ when the session is local (not over SSH; `--no-open` keeps it closed). See
 
 ## More than one machine
 
-The console reads the whole deployment, not one host. The status line names the workers once they have
+The panel reads the whole deployment, not one host. The status line names the workers once they have
 names. The run detail names the machine that ran a job. The pause switch stops every queue, and the
 scheduler view spans hosts. On a single host none of that shows, because there is nothing to tell apart.
 The HOSTS view (`u`) shows each machine's slots, budget and running jobs now and how busy it was over the last 7

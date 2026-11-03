@@ -96,7 +96,7 @@ Keep the file small (< ~3 MB): trim to ~25s, cap width at ~1200px, and prefer th
 
 ## The CLI transcript images
 
-`docs/images/cli-init.svg`, `cli-up.svg`, `cli-doctor.svg` and `cli-service-windows.svg` are real command
+`docs/images/cli-doctor.svg` and `cli-service-windows.svg` are real command
 output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate them when the output changes:
 
 1. On a Linux host with Docker, as a throwaway account `you` (uid 1000) that is in the `docker` group and has
@@ -120,8 +120,6 @@ output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate the
 3. Render:
 
    ```sh
-   node launch/transcript-svg.mjs --fit --title "~/pi-work · pi-dispatch init" --prompt '$ pi-dispatch init' init.txt > docs/images/cli-init.svg
-   node launch/transcript-svg.mjs --fold-doctor --title "~/pi-work · pi-dispatch up --yes" --prompt '$ pi-dispatch up --yes' up.txt > docs/images/cli-up.svg
    node launch/transcript-svg.mjs --title "~/pi-work · pi-dispatch doctor" --prompt '$ pi-dispatch doctor' doctor.txt > docs/images/cli-doctor.svg
    ```
 
@@ -129,6 +127,20 @@ output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate the
 
 `cli-service-windows.svg` is `service render` with `platform: "win32"` and Windows paths passed through
 `runService`'s seams, titled `PowerShell · C:\Users\you\pi-work`.
+
+## The console images
+
+The web console is the main image now. Every console image in `docs/images/console/` is one of the console's goldens
+(`admin/test/fixtures/console/`) in headless Chrome, listed in `launch/console-picks.mjs`:
+
+```sh
+node launch/render-images.mjs --console              # the READMEs' picks, into docs/images/console/
+node launch/render-images.mjs --console --all        # every golden at 1440 and 375, light and dark, into docs/images/console/all/
+node launch/render-images.mjs --console --only panels/confirm-done.operator   # any one state
+```
+
+It needs Google Chrome and no server. `--all` is about a gigabyte and four minutes, and its folder is gitignored. After a change to the look,
+re-render the picks and bump the `?v=` on each changed image, since no test catches a stale PNG.
 
 ## The panel and insights images
 

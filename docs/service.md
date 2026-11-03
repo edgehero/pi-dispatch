@@ -45,4 +45,4 @@ From any terminal:
   `--valkey-url`), `PI_LOGS_DIR`, `PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME`, from the shell or the `.env` of the folder you run it in (the
   logs directory defaults to `~/.pi-dispatch/logs`, the worker name to this machine's hostname as the worker names itself: lowercased, with
   any other character a dash), so a broken forge setting cannot stop it. It counts jobs only, so a machine busy with other work reads as idle
-  ([capacity](insights.md#pi-dispatch-capacity)).
+  ([capacity](insights.md)).
