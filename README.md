@@ -1,7 +1,7 @@
 # Visual evidence for #753, #754, #792, #793 and #796
 
 Unmodified screenshots from fixture deployments, separate from the implementation branch.
-Implementation: `08c52a8e44ea770bec51a6f42d574a75a1e891b9` (the final commit). The workbench, watching, run Workspace and Updates captures were taken at its parent `be89961f13516a8de1bdaaddf8bcdd6d76c9bf03`; the final commit adds one test and the design index, and changes nothing drawn. Zero touch is from `2b41c3abea7728f2d594d6d3a5fb7008be4be530`, and has not changed since.
+Implementation: `f34497701964c4ff0097b808efc37cf5ca9ab403` (the final commit), which the Updates captures are from. The workbench, watching and run Workspace captures were taken at `be89961f13516a8de1bdaaddf8bcdd6d76c9bf03`; the commits after it change tests, a test harness's wait, the design index and the words of the Adopt preview, and nothing those captures draw. Zero touch is from `2b41c3abea7728f2d594d6d3a5fb7008be4be530`, and has not changed since.
 Before: `deb7dfef867d469e0e90279719b3ecc033c60a27`.
 
 Zero touch before and after use the same six sent-draft runs. Gateway captures use a real existing Docker sandbox, production application handlers and CSPs, distinct TLS sites, Secure/Strict cookies, xterm.js, and actual input/output. The driver follows both rendered Run and Sandboxes new-tab entry points. Its isolated certificate allowlist trusts only the generated fixture certificate; an unrelated self-signed certificate is rejected. No system trust store is changed.
