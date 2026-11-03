@@ -131,7 +131,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, durable = {} } = {}) {
+async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, durable = {} } = {}) {
 	// Every real socket in this helper must use the injected test service, including callers that only override other settings.
 	env = { VALKEY_URL, ...env };
 	const secretsResolverCalls = [];
@@ -322,6 +322,8 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 			...(makeLiveTranscriptOpener ? { makeLiveTranscriptOpener } : {}),
 			...(makeStatusCommenter ? { makeStatusCommenter } : {}),
 			...(readProgressKey ? { readProgressKey } : {}),
+			...(makeRunMirror ? { makeRunMirror } : {}),
+			...(makePortfolioSnapshot ? { makePortfolioSnapshot } : {}),
 			// Issue #645: the durable-run seams (makeWorkspaceCheckpointer, loadRunCheckpoint, makeRunBudgetLedger,
 			// makeRecoveryEnqueuer, sweepOrphanJobDirs), handed through whole.
 			...durable,
@@ -2865,6 +2867,80 @@ test("boot itself reaps the allocation and console audit month files past retent
 	assert.ok(logs.some((l) => l.event === "reaped_console_audit" && l.file === "2024-01.jsonl"));
 });
 
+test("the console audit trail is reaped on PI_CONSOLE_AUDIT_RETENTION_DAYS, not the run history's, in either direction (#761)", { skip }, async () => {
+	// Two crossed deployments, each with an old audit month and an old allocation month (both on the run history's
+	// retention before this), the sweep held inert so only boot's own calls reap. The old mtime is fixed far in the past
+	// and judged against the subject's real clock, which only grows MORE true as the clock moves: no fuse.
+	const old = 1_000_000_000;
+	const seeded = () => {
+		const logsDir = tempDir("pi-boot-audit-reap-");
+		for (const [sub, names] of [["console-audit", ["2024-01.jsonl", "2024-02.jsonl"]], ["allocations", ["2024-01.jsonl"]]]) {
+			mkdirSync(join(logsDir, sub), { recursive: true });
+			for (const name of names) {
+				writeFileSync(join(logsDir, sub, name), "");
+				utimesSync(join(logsDir, sub, name), old, old);
+			}
+		}
+		return logsDir;
+	};
+	const inert = () => ({ start() {}, sweepOnce: async () => {}, close: async () => {} });
+
+	// The run history kept forever, the audit trail 30 days: the old audit month goes, the allocations stay.
+	const trailShort = seeded();
+	const first = await runStart({ env: { PI_LOGS_DIR: trailShort, PI_LOG_RETENTION_DAYS: "0", PI_CONSOLE_AUDIT_RETENTION_DAYS: "30" }, makeRetentionSweep: inert });
+	assert.deepEqual(readdirSync(join(trailShort, "console-audit")), ["2024-02.jsonl"], "the audit trail's own 30 days reap the old month");
+	assert.deepEqual(readdirSync(join(trailShort, "allocations")), ["2024-01.jsonl"], "the run history's keep-forever still holds the allocations");
+	const started = first.logs.find((l) => l.event === "worker_started");
+	assert.deepEqual([started.logRetentionDays, started.consoleAuditRetentionDays], [0, 30], "worker_started announces both");
+
+	// The reverse: the run history 30 days, the audit trail kept forever.
+	const trailKept = seeded();
+	await runStart({ env: { PI_LOGS_DIR: trailKept, PI_LOG_RETENTION_DAYS: "30", PI_CONSOLE_AUDIT_RETENTION_DAYS: "0" }, makeRetentionSweep: inert });
+	assert.deepEqual(readdirSync(join(trailKept, "console-audit")).sort(), ["2024-01.jsonl", "2024-02.jsonl"], "0 keeps the audit trail forever");
+	assert.deepEqual(readdirSync(join(trailKept, "allocations")), [], "the run history's 30 days reap the allocations");
+});
+
+test("the sweep re-runs the audit reaper boot built on its own retention: a tick reaps what boot was told to (#761)", { skip }, async () => {
+	// Boot keeps everything (the file is written after it), then the handed console_audit reaper runs as a tick would.
+	const logsDir = tempDir("pi-sweep-audit-reap-");
+	let handed;
+	await runStart({
+		env: { PI_LOGS_DIR: logsDir, PI_LOG_RETENTION_DAYS: "0", PI_CONSOLE_AUDIT_RETENTION_DAYS: "30" },
+		makeRetentionSweep: (args) => {
+			handed = args;
+			return { start() {}, sweepOnce: async () => {}, close: async () => {} };
+		},
+	});
+	mkdirSync(join(logsDir, "console-audit"), { recursive: true });
+	for (const name of ["2024-01.jsonl", "2024-02.jsonl"]) {
+		writeFileSync(join(logsDir, "console-audit", name), "");
+		utimesSync(join(logsDir, "console-audit", name), 1_000_000_000, 1_000_000_000);
+	}
+	await handed.reapers.find((r) => r.name === "console_audit").reap();
+	assert.deepEqual(readdirSync(join(logsDir, "console-audit")), ["2024-02.jsonl"]);
+});
+
+test("the run mirror writer and the portfolio snapshot are handed this host's PI_RUN_MIRROR_MAX_RUNS as indexMax (#761)", { skip }, async () => {
+	const mirrorCalls = [];
+	const snapshotCalls = [];
+	const { logs } = await runStart({
+		env: { PI_WORKER_NAME: "w761-cap", PI_RUN_MIRROR_MAX_RUNS: "1500" },
+		makeRunMirror: (args) => (mirrorCalls.push(args), { mirror: async () => true }),
+		makePortfolioSnapshot: (args) => (snapshotCalls.push(args), async () => null),
+	});
+	assert.equal(mirrorCalls.length, 1);
+	assert.equal(mirrorCalls[0].indexMax, 1500, "the writer trims the shared index to this host's cap");
+	assert.equal(snapshotCalls.length, 1);
+	assert.equal(snapshotCalls[0].indexMax, 1500, "the snapshot reads as many as this host keeps");
+	assert.equal(snapshotCalls[0].mirror, true);
+	assert.equal(logs.find((l) => l.event === "worker_started").runMirrorMaxRuns, 1500);
+
+	// Unset: the default, the cap every writer before this setting trimmed to.
+	const defaults = [];
+	await runStart({ env: { PI_WORKER_NAME: "w761-cap" }, makeRunMirror: (args) => (defaults.push(args), { mirror: async () => true }) });
+	assert.equal(defaults[0].indexMax, 5000);
+});
+
 test("settleWithin clears its fuse when the read wins, and still answers when it does not", async () => {
 	// ISSUE #300, the timer half. The boot-image read races a five-second unref'd fuse, and when the read
 	// won, the inline race left that fuse armed for its full term -- invisible to every census, because
@@ -5308,11 +5384,25 @@ test("issue #761: a running worker's watchers carry a newer pause windows or tri
 	const today = (doc) => `${JSON.stringify(doc, null, 2)}\n`;
 	writeFileSync(pausePath, today({ windows: [] }));
 	writeFileSync(triggersPath, today({ triggers: [] }));
-	// The watchers' debounce, then a read and a reload: polled, because the moment fs.watch delivers is the platform's.
-	const until = async (what, predicate) => {
+	// Each step writes its files, then waits for the watchers' debounce, a read and a reload, WRITING THE SAME BYTES AGAIN
+	// every half second until the reload is seen. One write is not enough on macOS: `fs.watch` there is libuv's single
+	// FSEvents stream, rebuilt from "now" for every watch armed (watch-closer.mjs, issue #386), and a write that lands
+	// before the rebuilt stream is live is never delivered, to this watcher or any other in the process. The boot arms
+	// both watchers just before `whileRunning`, so the first write lands in that gap whenever the machine's file events
+	// are busy: measured with four processes renaming files elsewhere on the disk, a write right after arming was lost
+	// 10 times in 10 and the first re-write half a second later was seen every time, and this test then timed out 4 runs
+	// in 5 with no event reaching even a watch the test had armed before the boot. A write after the stream is live is
+	// not lost, so the step no longer rests on one event; the half second outlasts the 150 ms debounce, so a re-write
+	// never holds back the reload it is waiting for. Linux's inotify is live before `fs.watch` returns.
+	const until = async (what, predicate, files) => {
 		const deadline = Date.now() + 10_000;
+		let rewriteAt = 0;
 		while (!predicate()) {
 			if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+			if (Date.now() >= rewriteAt) {
+				for (const [path, text] of files) writeFileSync(path, text);
+				rewriteAt = Date.now() + 500;
+			}
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
 	};
@@ -5324,14 +5414,10 @@ test("issue #761: a running worker's watchers carry a newer pause windows or tri
 		whileRunning: async ({ captured }) => {
 			assert.equal(captured.pauseWindowsNewer(), false, "a boot that loaded both starts not newer");
 			assert.equal(captured.triggersNewer(), false);
-			writeFileSync(pausePath, today({ version: 2, windows: [] }));
-			await until("the pause windows reload", () => captured.pauseWindowsNewer() === true);
+			await until("the pause windows reload", () => captured.pauseWindowsNewer() === true, [[pausePath, today({ version: 2, windows: [] })]]);
 			// The triggers watcher was handed the state the processor reads; with its own default the gate never moves.
-			writeFileSync(triggersPath, today({ version: 2, triggers: [] }));
-			await until("the triggers reload", () => captured.triggersNewer() === true);
-			writeFileSync(pausePath, today({ windows: [] }));
-			writeFileSync(triggersPath, today({ triggers: [] }));
-			await until("both good reloads", () => captured.pauseWindowsNewer() === false && captured.triggersNewer() === false);
+			await until("the triggers reload", () => captured.triggersNewer() === true, [[triggersPath, today({ version: 2, triggers: [] })]]);
+			await until("both good reloads", () => captured.pauseWindowsNewer() === false && captured.triggersNewer() === false, [[pausePath, today({ windows: [] })], [triggersPath, today({ triggers: [] })]]);
 			seen = "cleared";
 		},
 	});

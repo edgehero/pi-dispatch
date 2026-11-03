@@ -50,6 +50,7 @@ import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, readFleetQueues
 import { RECORD_REASON_RE, recordReason } from "./words.mjs";
 import { fromNewerRelease, shownRecord } from "./newer-release.mjs";
 import { jobDataNewer } from "@edgehero/pi-dispatch/job-data-version";
+import { FORGE_JOB_RETENTION_DAYS, FORGE_JOB_RETENTION_MS, LOCAL_JOB_KEPT_COMPLETED_S, LOCAL_JOB_KEPT_FAILED_S } from "@edgehero/pi-dispatch/retention";
 
 /** The most jobs one bulk action names, and so the most one preview lists (issue #642). */
 export const BULK_MAX = 100;
@@ -937,14 +938,29 @@ export const RERUN_BAD_ID = "a run id is letters, digits and . _ : -, at most 20
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * How long the queue keeps a finished job's data, by kind, at the LONGEST it can (queue.mjs: a local job's
- * `removeOnComplete` is 24 hours and its `removeOnFail` 7 days; a forge job's, and a recovery job's, 31 days either way).
+ * How long the queue keeps a finished job's data, by kind, at the LONGEST it can, from the queue's own values
+ * (`@edgehero/pi-dispatch/retention`, issue #761): a local job's `removeOnComplete` is `LOCAL_JOB_KEPT_COMPLETED_S` and
+ * its `removeOnFail` `LOCAL_JOB_KEPT_FAILED_S`; a forge job's, and a recovery job's, `FORGE_JOB_RETENTION_*` either way.
  * The record does not say which of BullMQ's two ends a local job met (a policy refusal or a failure the worker returned
  * is BullMQ's "completed", a thrown one its "failed"), so a record alone may only infer the data gone past the longer.
- * A recovery job (a record with `recoveryOf`, `<runId>.r<n>`) is kept 31 days whatever its kind (recovery-queue.mjs
- * adds it with the forge jobs' retention), so a local run's recovery is judged by that window, not the local one.
+ * A recovery job (a record with `recoveryOf`, `<runId>.r<n>`) is kept the forge retention whatever its kind
+ * (recovery-queue.mjs adds it with the forge jobs' retention), so a local run's recovery is judged by that window, not
+ * the local one.
+ *
+ * Inlined into the admin's build (`admin/build.mjs`), so a console built one release behind a changed value judges by
+ * its old one; that inference is made only when the data was not read, and `RERUN_KEPT_SLACK_MS` gives it a day.
  */
-export const RERUN_DATA_KEPT_MS = Object.freeze({ local: 7 * DAY_MS, forge: 31 * DAY_MS, recovery: 31 * DAY_MS });
+export const RERUN_DATA_KEPT_MS = Object.freeze({ local: LOCAL_JOB_KEPT_FAILED_S * 1000, forge: FORGE_JOB_RETENTION_MS, recovery: FORGE_JOB_RETENTION_MS });
+
+/**
+ * What each re-run and reply refusal says of `RERUN_DATA_KEPT_MS`, worded from the same values, so the sentence cannot
+ * state a retention the queue does not keep. The local one names both of BullMQ's ends, for the reason above.
+ */
+export const RERUN_DATA_KEPT_TEXT = Object.freeze({
+  local: `a local job's data is kept ${LOCAL_JOB_KEPT_COMPLETED_S / 3600} hours after it completes and ${LOCAL_JOB_KEPT_FAILED_S / 86_400} days after it fails`,
+  forge: `a forge job's data is kept ${FORGE_JOB_RETENTION_DAYS} days`,
+  recovery: `a recovery job's data is kept ${FORGE_JOB_RETENTION_DAYS} days`,
+});
 
 /**
  * The slack past `RERUN_DATA_KEPT_MS` before a record alone says the data is gone. The window runs from BullMQ's
@@ -969,7 +985,7 @@ export const RERUN_KEPT_SLACK_MS = DAY_MS;
  *   - data a newer pi-dispatch queued (`jobDataNewer`: a `dataVersion` this build cannot read), whose fields the copy
  *     would drop, refused as a record a newer release wrote is;
  *   - the data gone: `data === null`, or, NOT READ, a record that ended longer ago than its kind's longest retention
- *     (`RERUN_DATA_KEPT_MS` plus `RERUN_KEPT_SLACK_MS`; a recovery record's is 31 days), which is the one refusal a
+ *     (`RERUN_DATA_KEPT_MS` plus `RERUN_KEPT_SLACK_MS`; a recovery record's is the forge one), which is the one refusal a
  *     record alone can make;
  *   - a `/command` run, and a forge run that answered a parked run (both facts of the data, which the record does not
  *     carry: unread data refuses neither);
@@ -995,7 +1011,7 @@ export function rerunRefusalOf(record, now, data) {
   const keptMs = !windowed ? null : recovery ? RERUN_DATA_KEPT_MS.recovery : kind === "local" ? RERUN_DATA_KEPT_MS.local : RERUN_DATA_KEPT_MS.forge;
   const inferredGone = data === undefined && keptMs !== null && Number.isFinite(ended) && Number.isFinite(now) && now - ended > keptMs + RERUN_KEPT_SLACK_MS;
   if (data === null || inferredGone) {
-    const kept = recovery ? "a recovery job's data is kept 31 days" : kind === "local" ? "a local job's data is kept 24 hours after it completes and 7 days after it fails" : "a forge job's data is kept 31 days";
+    const kept = recovery ? RERUN_DATA_KEPT_TEXT.recovery : kind === "local" ? RERUN_DATA_KEPT_TEXT.local : RERUN_DATA_KEPT_TEXT.forge;
     return `the queue no longer holds ${jobId}'s data (${kept}), and the run record cannot rebuild it, so it cannot be re-run from here`;
   }
   if (data === undefined || data === null || typeof data !== "object") return null;
@@ -1034,18 +1050,19 @@ function notParkedRefusal(jobId, record) {
  *
  *   - LOCAL (a `/dispatch run`, `pi-dispatch run` or a chained child): the retained job's folder, flow and task, queued
  *     as `/dispatch run` queues them (`enqueueLocalJobReporting`, this host's queue), after its folder rule (a
- *     repository root with a commit, no uncommitted changes). A local job's data is kept 24 hours after it completes
- *     and 7 days after it fails; past that the run cannot be rebuilt (the record holds no folder, by design).
+ *     repository root with a commit, no uncommitted changes). A local job's data is kept `LOCAL_JOB_KEPT_COMPLETED_S`
+ *     after it completes and `LOCAL_JOB_KEPT_FAILED_S` after it fails; past that the run cannot be rebuilt (the record
+ *     holds no folder, by design).
  *   - CRON (`repeat:` or `manual:` ids): the trigger as the triggers file says NOW, fired once by hand
  *     (`enqueueTriggerRunReporting`, `pi-dispatch run --trigger`'s path and refusals: gone from the file, another
  *     host's folder, not a repository).
- *   - FORGE: the WHERE from the retained job's data (kept 31 days: repo, target, projectId, azure, the trigger context),
- *     the WHAT from the triggers file NOW: the trigger at the retained `matched.index` must still be the one that matched
- *     (same forge, type, action or label, and flow; `currentTriggerFor`), else refused "the trigger that started this
- *     run changed or is gone; start it again from the forge". Its run fields are copied as the receiver copies them
- *     (`runFieldsOf`), so a narrowed trigger re-runs narrowed and a deleted one does not re-run. A fresh delivery id
- *     (`console-<hex>`) makes the job id new, and it is routed as the receiver routes it (a host queue when a secret or
- *     wait profile needs one).
+ *   - FORGE: the WHERE from the retained job's data (kept `FORGE_JOB_RETENTION_DAYS`: repo, target, projectId, azure,
+ *     the trigger context), the WHAT from the triggers file NOW: the trigger at the retained `matched.index` must still
+ *     be the one that matched (same forge, type, action or label, and flow; `currentTriggerFor`), else refused "the
+ *     trigger that started this run changed or is gone; start it again from the forge". Its run fields are copied as the
+ *     receiver copies them (`runFieldsOf`), so a narrowed trigger re-runs narrowed and a deleted one does not re-run. A
+ *     fresh delivery id (`console-<hex>`) makes the job id new, and it is routed as the receiver routes it (a host queue
+ *     when a secret or wait profile needs one).
  *
  * Refused by name: no record, data expired, a `/command` run (commands run only from their reviewed trigger), an answer
  * to a parked run (answer the parked run again instead), a record or a job a newer pi-dispatch wrote (issue #761), and
@@ -1129,9 +1146,10 @@ export async function planRerun({
 
     if (isForgeKind(kind)) {
       // WHERE comes from the retained job, WHAT RUNS from the triggers file now. The retained run fields are what the
-      // trigger said 31 days ago at most: replaying them would run a cap, a model list, a secret profile or an image the
-      // operator has since narrowed or removed, under a trigger that may be gone. So the trigger at the retained index
-      // must still be the one that matched, and the run fields are copied from it as the receiver would copy them.
+      // trigger said up to `FORGE_JOB_RETENTION_DAYS` ago: replaying them would run a cap, a model list, a secret profile
+      // or an image the operator has since narrowed or removed, under a trigger that may be gone. So the trigger at the
+      // retained index must still be the one that matched, and the run fields are copied from it as the receiver would
+      // copy them.
       if (typeof triggersPath !== "string" || triggersPath === "") return { refusal: "the triggers file is not known here (PI_TRIGGERS_FILE), so a forge run cannot be rebuilt from its trigger" };
       const loaded = loadTriggerEntries(triggersPath, fs);
       if (loaded.refusal) return { refusal: loaded.refusal };
@@ -1252,7 +1270,7 @@ function commentTriggerFor(triggersPath, kind, fs) {
  * unanswered is the caller's (the record and `chatModeOf`).
  */
 export function parkedAnswerRefusalOf({ jobId, data, triggersPath, approval = false, fs = nodeFs }) {
-  if (data === null || data === undefined) return { refusal: `the queue no longer holds ${jobId}'s data (a forge job's data is kept 31 days), so the reply cannot be built; answer on the forge instead` };
+  if (data === null || data === undefined) return { refusal: `the queue no longer holds ${jobId}'s data (${RERUN_DATA_KEPT_TEXT.forge}), so the reply cannot be built; answer on the forge instead` };
   // Issue #761: the reply copies its repo, project and target (and an approval's match) from this job, and is stamped
   // with this build's version: a newer pi-dispatch's job may carry a field that copy drops, so it is answered from a
   // console of that release, in the words a re-run of such a job uses.

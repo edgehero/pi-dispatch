@@ -67,7 +67,7 @@ test("doctorCapacity reads through its seam over the last 7 days, and a slow or 
 	const read = async ({ signal, ...args }) => (asked.push({ ...args, signal: signal instanceof AbortSignal }), { records: [run("1", 2, 1)], coverage: { source: "local", localHost: "a", local: { fromMs: args.sinceMs }, mirror: null } });
 	const env = { PI_LOGS_DIR: "/srv/logs", PI_LOG_RETENTION_DAYS: "3" };
 	const lines = await doctorCapacity({ seams: { readCapacity: read, wallClock: () => NOW }, env, home: "/home/op", url: "redis://v:6379", hosts: [], localHost: "a" });
-	assert.deepEqual(asked, [{ url: "redis://v:6379", logsDir: "/srv/logs", sinceMs: NOW - W.ms, nowMs: NOW, retentionDays: 3, localHost: "a", signal: true }]);
+	assert.deepEqual(asked, [{ url: "redis://v:6379", logsDir: "/srv/logs", sinceMs: NOW - W.ms, nowMs: NOW, retentionDays: 3, localHost: "a", indexMax: 5000, signal: true }]);
 	assert.match(lines[0].label, /^Host a: last 7d busy/);
 	const slow = await doctorCapacity({ seams: { readCapacity: () => new Promise(() => {}), wallClock: () => NOW, capacityTimeoutMs: 20 }, env, home: "/h", url: null, hosts: [], localHost: "a" });
 	assert.deepEqual(slow, [{ ok: true, label: "Capacity: the run history did not answer in time, so nothing is shown (pi-dispatch capacity waits up to 2 s per Valkey call)" }]);
@@ -85,6 +85,18 @@ test("doctorCapacity reads through its seam over the last 7 days, and a slow or 
 	const asked30 = [];
 	await doctorCapacity({ seams: { readCapacity: async (a) => (asked30.push(a.retentionDays), { records: [], coverage: {} }), wallClock: () => NOW }, env: { PI_LOG_RETENTION_DAYS: "x" }, home: "/h", url: null, hosts: [], localHost: "a" });
 	assert.deepEqual(asked30, [30]);
+});
+
+test("the default read hands the mirror's cap, PI_RUN_MIRROR_MAX_RUNS, to the records reader (issue #761)", async () => {
+	// `seams.readCapacityRecords` stands in for `readCapacityRecords` behind the default read (this file never forbids the
+	// real read, and the seam lifts that guard for no other file); no url, so no client is made.
+	const asked = [];
+	const readCapacityRecords = async (args) => (asked.push(args), { records: [], coverage: { source: "local", localHost: "a", local: null, mirror: null } });
+	for (const value of ["1000", "20000", undefined, "abc"]) {
+		await doctorCapacity({ seams: { readCapacityRecords, wallClock: () => NOW }, env: { PI_LOGS_DIR: "/srv/logs", PI_RUN_MIRROR_MAX_RUNS: value }, home: "/h", url: null, hosts: [], localHost: "a" });
+	}
+	// The cap as set, the default when unset, and the default for a value the worker refuses (which doctor fails elsewhere).
+	assert.deepEqual(asked.map((a) => [a.indexMax, a.redis, a.logsDir, a.localHost]), [[1000, null, "/srv/logs", "a"], [20000, null, "/srv/logs", "a"], [5000, null, "/srv/logs", "a"], [5000, null, "/srv/logs", "a"]]);
 });
 
 test("a full mirror (5000 runs) costs doctor well under a second: eleven bounded round trips and one sweep", async () => {

@@ -2,13 +2,14 @@
  * The version of a queued job's data (issue #761, `DES-STORE-VERSION-WHEN-NEEDED`). A LEAF apart from the shared rule,
  * so the receiver can stamp the jobs it stores for later (`fallbackJobOf`) with the same rule the worker's builders use.
  *
- * Jobs outlive an upgrade: a forge job is kept 31 days, a recovery may wait up to 7, held and parked runs wait as long
- * as their conditions do. A field a newer release adds to job data is DROPPED by an older worker's builders and IGNORED
- * by its processor, which for a field that narrows a job (a model list, a cost cap) is a wider job, run and paid for.
- * `trigger-skew` catches that only for the fields it lists, and only for forge jobs. So a field whose absence an older
- * worker would misread declares the version that introduced it here, the builders stamp `dataVersion` with the lowest
- * version the data needs, and a worker that meets a version above its own DEFERS the job (`newer-release`) rather than
- * run it: the job waits, with its reason shown, for a worker that can read it, and nothing is spent or lost.
+ * Jobs outlive an upgrade: a forge job is kept `FORGE_JOB_RETENTION_DAYS` (retention.mjs), a recovery may wait up to 7
+ * days, held and parked runs wait as long as their conditions do. A field a newer release adds to job data is DROPPED
+ * by an older worker's builders and IGNORED by its processor, which for a field that narrows a job (a model list, a
+ * cost cap) is a wider job, run and paid for. `trigger-skew` catches that only for the fields it lists, and only for
+ * forge jobs. So a field whose absence an older worker would misread declares the version that introduced it here, the
+ * builders stamp `dataVersion` with the lowest version the data needs, and a worker that meets a version above its own
+ * DEFERS the job (`newer-release`) rather than run it: the job waits, with its reason shown, for a worker that can read
+ * it, and nothing is spent or lost.
  *
  * Unversioned on purpose: answer-draft, watch and question-grouping jobs carry only references their runtime resolves at
  * pickup, and sandbox prepare requests live 30 minutes on their own host's queue.

@@ -40,6 +40,7 @@ import { LIVE_FRESH_MS } from "@edgehero/pi-dispatch/capacity";
 import { basisNote, durationText, fleetRecordNotes, historyNotes, hostCaveats, milliText, noRunText, notSharedWhy, percentText, share, shareText } from "@edgehero/pi-dispatch/capacity-cli";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { LIVE_MAX_ENTRIES } from "@edgehero/pi-dispatch/live-transcript";
+import { FORGE_JOB_RETENTION_DAYS, LOCAL_JOB_KEPT_FAILED_S } from "@edgehero/pi-dispatch/retention";
 import { sizeBits, renderStatus, renderBudget, renderHeldJobs, renderScopedLimits, renderTriggers, renderSettingsView, commandSlashLabel, scrubTrigger, skillsBasename, allocAt, allocHostsShown, allocPlanId, outsideEdit, outsideEditText, splitTotalMicros, fileTotalText, allocationRowIds, SPLIT_ONLY_MARK } from "./render.mjs";
 import { matchesKey } from "./keys.mjs";
 // The one vocabulary both surfaces read (issue #710): outcome words, the venue label, the Spend and Held titles.
@@ -87,6 +88,10 @@ function centerBlock(lines: string[], overlayWidth: number, blockWidth: number):
 // How many failed rows the LIST section spends before counting the rest (issue #289); the read model's fleet reader
 // bounds what the FAILED drill view gets.
 const FAILED_ON_DASHBOARD = 3;
+// The FAILED view's header (issue #761): how long the queue keeps a failed job, by class, from the queue's own values, so
+// a changed retention changes this line with it. A forge job's `removeOnFail` is the forge retention; a local or cron
+// job's is `LOCAL_JOB_KEPT_FAILED_S`, a whole number of days.
+export const FAILED_KEPT_TEXT = `reasons kept ${FORGE_JOB_RETENTION_DAYS}d (forge) / ${LOCAL_JOB_KEPT_FAILED_S / 86_400}d (local & cron)`;
 // How many parked runs the LIST section shows before counting the rest, and the PARKED view's viewport (issue #641): the
 // fleet reader folds parked runs from a window of up to 1000 records, so the view scrolls rather than growing.
 const PARKED_ON_DASHBOARD = 3;
@@ -1669,10 +1674,10 @@ function renderPanelLines(snapshot: any, width: number, state: any, styler: any)
     const detailTitle = `failed · ${total} in the queue`;
     const dw = framed ? Math.min(Math.trunc(width), DRILL_WIDTH) : Math.trunc(width);
     const iw = framed ? dw - 4 : 24;
-    // Retention honesty in the header: the two job classes age out differently (31d forge, 7d
-    // local/cron), so a uniform claim would be false for half the rows.
+    // Retention honesty in the header: the two job classes age out differently (`FAILED_KEPT_TEXT`), so a uniform
+    // claim would be false for half the rows.
     const lines = [
-      styler.cell("reasons kept 31d (forge) / 7d (local & cron)", iw, { color: "dim" }),
+      styler.cell(FAILED_KEPT_TEXT, iw, { color: "dim" }),
       ...(rows.length === 0 ? [styler.cell("(nothing failed)", iw)] : rows.map((r: any) => failedRow(r, iw, styler))),
     ];
     if (Number(failed.more) > 0) lines.push(styler.cell(`↓ ${failed.more} more (redis-cli holds the rest)`, iw, { color: "dim" }));

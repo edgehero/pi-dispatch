@@ -9,6 +9,16 @@ import { configError } from "@edgehero/pi-dispatch/config";
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const RELEASE = "if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) end return 0";
 const CHECKPOINT = "if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end redis.call('SET',KEYS[2],ARGV[2],'PX',ARGV[3]); return 1";
+/**
+ * How long a pull source's cursor is kept, in MILLISECONDS (the checkpoint's `PX`), renewed by every checkpoint: 35 days
+ * (docs/watch.md), so a collector stopped for weeks resumes where it left off. It is a resume point, NOT a dedup window,
+ * and deliberately not derived from the forge job retention (`FORGE_JOB_RETENTION_S`, the time a forge redelivery is
+ * refused): no forge job id stands behind it. Watch deliveries are deduplicated by the watch store's replay keys and
+ * the watch queue's job ids, both kept seven days, and a cursor that expires only costs a re-read (a file from its
+ * start, journald and Loki from a minute before the next poll), so tying it to the forge retention would move a
+ * collector's resume window for a reason that has nothing to do with it.
+ */
+export const WATCH_PULL_CURSOR_TTL_MS = 35 * 86_400_000;
 
 /** One bounded cycle, also the test seam for restart, partial enqueue and concurrent-producer behavior. */
 export async function pollWatchSources({ cfg, redis, store, enqueue, adapterFactory = makeWatchPullAdapter, env = process.env, now = () => Date.now(), log = () => {}, due = new Map() }) {
@@ -25,7 +35,7 @@ export async function pollWatchSources({ cfg, redis, store, enqueue, adapterFact
 			const batch = await adapter.poll(cursor);
 			if (!Array.isArray(batch.findings) || !Array.isArray(batch.deliveries) || batch.findings.length !== batch.deliveries.length || batch.findings.length > 100 || Buffer.byteLength(JSON.stringify(batch.cursor)) > 32768) throw new Error("invalid watch pull batch");
 			for (const [index, finding] of batch.findings.entries()) await ingestWatchFinding({ cfg, store, enqueue, source, finding, delivery: batch.deliveries[index], log, signature: "host-pull" });
-			if (!await redis.eval(CHECKPOINT, 2, leaseKey, cursorKey, token, JSON.stringify(batch.cursor), 35 * 86400000)) throw new Error("watch pull lease lost");
+			if (!await redis.eval(CHECKPOINT, 2, leaseKey, cursorKey, token, JSON.stringify(batch.cursor), WATCH_PULL_CURSOR_TTL_MS)) throw new Error("watch pull lease lost");
 			due.set(source, now() + (declaration.pull.intervalSeconds ?? 30) * 1000);
 			log("watch_pull_cycle", { source, count: batch.findings.length, status: "checkpointed" });
 		} catch { failures++; log("watch_pull_source_failed", { source, reason: "source-unavailable-cursor-retained" }); } finally { try { await redis.eval(RELEASE, 1, leaseKey, token); } catch { failures++; } }

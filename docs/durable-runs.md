@@ -145,7 +145,21 @@ own code and instructions, and the restored tree was written by the agent.
 - **What it saves.** A recovery pays only for what comes after the checkpoint, where a retry pays for the whole run
   again.
 - **Disk.** The store is capped at 20 GiB in total, and a run's checkpoints are removed when the run ends, or 7
-  days after its last checkpoint when it never does.
+  days after its last checkpoint when it never does. A crashed attempt's job folder is kept for as long as the run's
+  checkpoint pointer names it (at most 7 days), also a pointer a newer pi-dispatch wrote, so a recovery that waits for
+  an upgrade (below) still finds it.
+
+## Across versions
+
+A checkpoint a newer pi-dispatch wrote than the worker its recovery lands on (a fleet halfway through an upgrade, or a
+host rolled back) is never thrown away. The recovery waits for a worker that can read the checkpoint, re-checked every
+ten minutes, without spending its one attempt: the console shows it waiting with "Queued or configured by a newer
+pi-dispatch: waits for this host's upgrade", nothing is commented or recorded, and the checkpoint, its pointer and the
+lost attempt's job folder all stay. Upgrade that host and the run carries on. The wait has the bound every recovery
+has: once seven days have passed since it was queued, it ends as `recovery-host-lost`, with that comment (which speaks
+of a worker that has not come back, not of a version) and `on_failure`. Each release reads checkpoints of two
+versions only, the newest it knows and the one before it, so when you upgrade across more than one release at a time,
+let durable runs finish first.
 
 ## What is not covered
 

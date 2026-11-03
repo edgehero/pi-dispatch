@@ -18,6 +18,7 @@ import { configError } from "./config.mjs";
 import { triggerCapAboveDeployment } from "./money.mjs";
 import { parseTriggers } from "./triggers.mjs";
 import { withJobDataVersion } from "./job-data-version.mjs";
+import { LOCAL_JOB_KEPT_COMPLETED_S, LOCAL_JOB_KEPT_FAILED_S } from "./retention.mjs";
 
 /**
  * Parse, validate, and select the cron schedules from the triggers file named by `config.triggersFile`.
@@ -195,8 +196,9 @@ function normalizeCronSchedule({ on, run }, path, existsSync, fleet, dataVersion
 	// `dataVersions` is the version rule, injectable for tests.
 	const data = withJobDataVersion({ kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.backend !== undefined && { backend: run.backend }), ...(run.excludeTools !== undefined && { excludeTools: run.excludeTools }), ...(run.mcp !== undefined && { mcp: run.mcp }), ...(run.models !== undefined && { models: run.models }), ...(run.fallbackModels !== undefined && { fallbackModels: run.fallbackModels }), ...(run.maxCostUsd !== undefined && { maxCostUsd: run.maxCostUsd }), ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, ...(run.portfolio !== undefined && { portfolio: run.portfolio }), ...(run.progress === true && { progress: true }), ...(run.steer === true && { steer: true }), trigger: { id: on.id, pattern: on.pattern } }, dataVersions);
 	// Retention only; the deterministic repeat:<id>:<millis> jobId supplies dedup, so no jobId here, and
-	// scheduler jobs are not retried (DES-CRON-VIA-BULLMQ-SCHEDULER) so no attempts/backoff.
-	const opts = { removeOnComplete: { age: 24 * 3600 }, removeOnFail: { age: 7 * 24 * 3600 } };
+	// scheduler jobs are not retried (DES-CRON-VIA-BULLMQ-SCHEDULER) so no attempts/backoff. A local job's retention, in
+	// SECONDS (BullMQ's `age`), from the one place the console's re-run reads it too (retention.mjs).
+	const opts = { removeOnComplete: { age: LOCAL_JOB_KEPT_COMPLETED_S }, removeOnFail: { age: LOCAL_JOB_KEPT_FAILED_S } };
 
 	return { schedulerId: on.id, name: "local", pattern: on.pattern, data, opts };
 }

@@ -6,6 +6,7 @@ import { CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, DEFAULT_MODEL, DEFA
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { WAIT_INTERVAL_FLOOR_MS } from "../src/wait-for.mjs";
+import { RUN_MIRROR_MAX_RUNS_DEFAULT } from "../src/retention.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 test("loads conservative defaults with an empty-ish env", () => {
@@ -236,6 +237,31 @@ test("logRetentionDays rejects negative and non-integer values as config errors"
 			`PI_LOG_RETENTION_DAYS=${bad}`,
 		);
 	}
+});
+
+test("consoleAuditRetentionDays inherits PI_LOG_RETENTION_DAYS when unset or empty, 0 included, and takes its own value when set (#761)", () => {
+	const both = (env) => {
+		const c = loadConfig(env);
+		return [c.logRetentionDays, c.consoleAuditRetentionDays];
+	};
+	assert.deepEqual(both({}), [30, 30], "unset: the run history's default");
+	assert.deepEqual(both({ PI_LOG_RETENTION_DAYS: "7" }), [7, 7], "unset: the run history's own value");
+	assert.deepEqual(both({ PI_LOG_RETENTION_DAYS: "0" }), [0, 0], "unset: keep-forever is inherited too");
+	assert.deepEqual(both({ PI_LOG_RETENTION_DAYS: "7", PI_CONSOLE_AUDIT_RETENTION_DAYS: "" }), [7, 7], "empty is unset");
+	assert.deepEqual(both({ PI_CONSOLE_AUDIT_RETENTION_DAYS: "0" }), [30, 0], "0 keeps the trail forever");
+	assert.deepEqual(both({ PI_CONSOLE_AUDIT_RETENTION_DAYS: "365" }), [30, 365]);
+	assert.deepEqual(both({ PI_LOG_RETENTION_DAYS: "0", PI_CONSOLE_AUDIT_RETENTION_DAYS: "30" }), [0, 30], "each on its own value");
+	for (const bad of ["-1", "abc", "1.5"]) assert.throws(() => loadConfig({ PI_CONSOLE_AUDIT_RETENTION_DAYS: bad }), (e) => e.piDispatchConfig === true && e.message === `invalid PI_CONSOLE_AUDIT_RETENTION_DAYS: ${JSON.stringify(bad)} (want a non-negative integer)`, bad);
+	// A bad run history value is still named as itself, not as the audit key that inherits it.
+	assert.throws(() => loadConfig({ PI_LOG_RETENTION_DAYS: "abc" }), (e) => e.piDispatchConfig === true && /^invalid PI_LOG_RETENTION_DAYS:/.test(e.message));
+});
+
+test("runMirrorMaxRuns is 5000 unless set, takes 1000 to 20000, and refuses anything else naming the key (#761)", () => {
+	assert.equal(loadConfig({}).runMirrorMaxRuns, RUN_MIRROR_MAX_RUNS_DEFAULT);
+	assert.equal(RUN_MIRROR_MAX_RUNS_DEFAULT, 5000);
+	assert.equal(loadConfig({ PI_RUN_MIRROR_MAX_RUNS: "" }).runMirrorMaxRuns, 5000, "empty is unset");
+	for (const [raw, want] of [["1000", 1000], ["20000", 20000], ["7500", 7500]]) assert.equal(loadConfig({ PI_RUN_MIRROR_MAX_RUNS: raw }).runMirrorMaxRuns, want, raw);
+	for (const bad of ["999", "20001", "abc", "1.5", "-1", "0"]) assert.throws(() => loadConfig({ PI_RUN_MIRROR_MAX_RUNS: bad }), (e) => e.piDispatchConfig === true && e.message === `invalid PI_RUN_MIRROR_MAX_RUNS: ${JSON.stringify(bad)} (want an integer 1000-20000)`, bad);
 });
 
 test("positiveInt is unchanged: a spend var of 0 still throws", () => {

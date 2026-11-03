@@ -20,10 +20,11 @@ const T0 = Date.UTC(2026, 9, 14, 12, 0, 0);
 const TOKEN = `pdc_${"t".repeat(43)}`;
 const CODE = "k".repeat(43);
 
-function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".repeat(64), createdAt: "2026-10-01T00:00:00.000Z" }], tokensRefusal = null, auditFails = false, verify = { ok: true, rows: 3, startsAt: null } } = {}) {
+function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".repeat(64), createdAt: "2026-10-01T00:00:00.000Z" }], kept = [], tokensRefusal = null, auditFails = false, verify = { ok: true, rows: 3, startsAt: null } } = {}) {
   const rows = [];
   const calls = [];
-  const file = { version: 1, generation: 0, tokens };
+  // `kept`: entries of a role this console does not know (issue #761), carried apart from `tokens` as the parser does.
+  const file = kept.length === 0 ? { version: 1, generation: 0, tokens } : { version: 1, generation: 0, tokens, carry: { kept, extras: {}, top: {} } };
   // The #641 read side, faked: one fleet reader the serve tests can watch being built and disposed.
   const fleet = {
     built: [],
@@ -64,6 +65,7 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
       tokensFilePath: (env, dir) => join(dir, env.PI_CONSOLE_TOKENS_FILE || "console-tokens.json"),
       readTokensFile: () => (tokensRefusal ? { refusal: tokensRefusal } : { file }),
       operatorCount: (f) => f.tokens.filter((t) => t.role === "operator").length,
+      keptTokens: (f) => f.carry?.kept ?? [],
       findToken: () => null,
       addToken: (args) => {
         calls.push(["add", args]);
@@ -1046,4 +1048,48 @@ test("setup key metadata matches shell/file/overlay precedence and refuses inval
   assert.equal(read(), null, "invalid effective provider refuses metadata");
   chmodSync(join(dir, ".env"), 0o666);
   assert.equal(read(), null, "unsafe deployment metadata refuses without loading a host executor");
+});
+
+// Issue #761: what a newer release wrote. Tokens kept for a role this console does not know are listed and refused a
+// link; an audit chain with rows a newer console wrote is intact, and the sentence counts them.
+
+test("token list marks an entry of a role this console does not know, and link refuses it naming the role", async () => {
+  const kept = [{ name: "aud", role: "auditor", sha256: "b".repeat(64), createdAt: "2026-10-02T00:00:00.000Z", scope: ["runs"] }];
+  const list = await cli(["token", "list"], { modules: fakeModules({ kept }) });
+  assert.deepEqual([list.code, list.out], [0, ["alice\toperator\t2026-10-01T00:00:00.000Z", "aud\tauditor (not known to this pi-dispatch-console: signs in nowhere here)\t2026-10-02T00:00:00.000Z"]]);
+  assert.ok(![...list.out, ...list.err].join("\n").includes("b".repeat(64)), "never a hash");
+  // A file holding only kept entries is not "no tokens": they are listed.
+  const only = await cli(["token", "list"], { modules: fakeModules({ tokens: [], kept }) });
+  assert.deepEqual(only.out, ["aud\tauditor (not known to this pi-dispatch-console: signs in nowhere here)\t2026-10-02T00:00:00.000Z"]);
+  const link = await cli(["link", "--name", "aud"], { modules: fakeModules({ kept }) });
+  assert.equal(link.code, 2);
+  assert.deepEqual(link.err, ['pi-dispatch-console: the token "aud" has the role `auditor`, which this pi-dispatch-console does not know, so it signs in nowhere here and no link is made for it']);
+  assert.deepEqual([link.out, link.modules.calls.filter((c) => c[0] === "mint"), link.modules.rows], [[], [], []], "no code minted, nothing audited");
+  // A name the file does not hold at all is still the missing token, kept entries beside it or not.
+  const gone = await cli(["link", "--name", "nobody"], { modules: fakeModules({ kept }) });
+  assert.deepEqual([gone.code, gone.err], [2, ['pi-dispatch-console: there is no token named "nobody"; see pi-dispatch-console token list']]);
+  assert.deepEqual(gone.modules.calls.filter((c) => c[0] === "mint"), [], "no code minted");
+});
+
+test("serve hands the server the tokens module's keptTokens, which a login code's refusal reads", async () => {
+  const dep = deployment();
+  const modules = fakeModules();
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  let stop;
+  const until = new Promise((resolve) => { stop = resolve; });
+  const errors = [];
+  const code = await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (line) => errors.push(line), until, onListening: () => stop() });
+  assert.equal(code, 0, errors.join("\n"));
+  assert.equal(captured.keptTokens, modules.tokens.keptTokens);
+});
+
+test("audit verify: an intact chain with rows a newer console wrote is 0, and the sentence counts them, in the singular for one", async () => {
+  const r = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: true, rows: 12, startsAt: null, unknown: 3 } }) });
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.out, ["the console audit log holds 12 rows and its chain is intact, and 3 of them name an action or outcome this pi-dispatch-console does not know (a newer release writes such rows)"]);
+  const one = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: true, rows: 12, startsAt: null, unknown: 1 } }) });
+  assert.deepEqual([one.code, one.out], [0, ["the console audit log holds 12 rows and its chain is intact, and 1 of them names an action or outcome this pi-dispatch-console does not know (a newer release writes such rows)"]]);
+  const plain = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: true, rows: 12, startsAt: null } }) });
+  assert.deepEqual(plain.out, ["the console audit log holds 12 rows and its chain is intact"]);
 });

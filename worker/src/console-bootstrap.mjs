@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { resolveConsoleEntry, findOnPath, consoleTokensPathFor, installedUnitPaths, planServiceSetup, runService } from "./service.mjs";
-import { addToken, readTokensFile, TOKEN_NAME_RE } from "./console-tokens.mjs";
+import { addToken, readTokensFile, TOKEN_NAME_RE, tokenNames } from "./console-tokens.mjs";
 import { makeConsoleAudit } from "./console-audit.mjs";
 import { deploymentServiceEnv } from "./service-env.mjs";
 import { logsDirPath } from "./config.mjs";
@@ -104,7 +104,8 @@ export async function runConsoleUp(argv, deps = {}) {
 	}
 	if (operators.length === 0) {
 		name = argv.includes("--yes") ? "operator" : String(await prompt("Name the new operator entry [operator]: ")).trim() || "operator";
-		if (!TOKEN_NAME_RE.test(name) || existing?.tokens.some((row) => row.name === name)) return refuse("choose an unused valid operator name; nothing was changed.");
+		// Every name the file holds, an entry kept for a role this build does not know included (issue #761).
+		if (!TOKEN_NAME_RE.test(name) || tokenNames(existing).includes(name)) return refuse("choose an unused valid operator name; nothing was changed.");
 	}
 	out("Console bootstrap will grant this account's console bounded local host setup (--host-setup). It starts the console service; the worker is started only by a separate confirmed action.\n");
 	if (!argv.includes("--yes") && !/^y(es)?$/i.test(String(await prompt("Proceed with console bootstrap? [y/N] ")).trim())) { out("Console bootstrap declined; nothing was changed.\n"); return 0; }

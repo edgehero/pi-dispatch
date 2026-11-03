@@ -4,6 +4,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { buildRecord, makeRecordWriter } from "../src/run-history.mjs";
 import { TOUCH_SCRIPTS } from "../src/touch-state.mjs";
 import { readZeroTouch } from "../src/zero-touch.mjs";
+import { READ_SCRIPT } from "../src/run-mirror.mjs";
 
 const DAY = 86400_000;
 const NOW = Date.UTC(2026, 9, 30, 12);
@@ -74,4 +75,22 @@ test("the real reader recounts expired and revoked approvals as closed waits wit
 	assert.equal(report.totals.waitingPartial, false);
 	assert.deepEqual(report.totals.waitingNow, []);
 	assert.equal(report.causes.reduce((sum, row) => sum + row.count, 0), 0);
+});
+
+test("the run index cap reaches the run records read: a large index of a raised cap is not read as cut by count (#761)", async () => {
+	// The mirror holds 6,000 runs (none in this window) and its own start long ago, its oldest run two days old; the touch
+	// index has observed ten days. At the built-in 5,000 cap that index reads as cut at its oldest run; told the
+	// deployment's 10,000, it is whole, and the observed interval is the touch index's.
+	const redis = {
+		async eval(script) {
+			if (script === TOUCH_SCRIPTS.READ) return [["since", String(NOW - 10 * DAY)], [], 0, 0];
+			if (script === READ_SCRIPT) return [6000, String(NOW - 2 * DAY), null, String(NOW - 100 * DAY), 1, []];
+			return [0];
+		},
+		async mget() { return []; },
+	};
+	const cut = await readZeroTouch({ redis, logsDir: localRecord(), now: () => NOW, retentionDays: 90 });
+	assert.equal(cut.coverage.fromMs, NOW - 2 * DAY, "the built-in cap: the oldest run is the start");
+	const whole = await readZeroTouch({ redis, logsDir: localRecord(), now: () => NOW, retentionDays: 90, indexMax: 10_000 });
+	assert.equal(whole.coverage.fromMs, NOW - 10 * DAY, "the deployment's cap: nothing was cut");
 });

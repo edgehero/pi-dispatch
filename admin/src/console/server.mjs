@@ -26,7 +26,8 @@
  *
  * EVERY COLLABORATOR IS INJECTED: the token reader, the session store and its cookie helpers, the confirm tickets, the
  * login-code consumer, the audit log, the pause-windows writer and (issue #642) the action deps. This module imports none of them, so its tests run
- * on small fakes and `cli.mjs` is the one place the real ones are wired.
+ * on small fakes and `cli.mjs` is the one place the real ones are wired. `keptTokens` defaults to the tokens module's
+ * own (issue #761): it is no collaborator but a pure read of the file `readTokens` answered, with no disk and no state.
  *
  * THE WRITES ARE A TABLE (issue #642). Every change the console can make is an entry of `ACTIONS` (`actions.mjs`), and
  * `actionRoutes` makes its two routes; one preview/confirm pipeline there holds the ticket, `expect`, audit-first and
@@ -80,6 +81,7 @@
 import * as nodeFs from "node:fs";
 import { createServer } from "node:http";
 import { readRawBody } from "@edgehero/pi-dispatch/http-body";
+import { keptTokens as realKeptTokens } from "@edgehero/pi-dispatch/console-tokens";
 import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { ACTIONS, actionNamed, cancelAction, confirmAction, plural, previewAction } from "./actions.mjs";
 import { refusalHtml } from "./confirm-view.mjs";
@@ -360,7 +362,12 @@ async function postLoginCode(ctx) {
   const file = tokensOr503(ctx);
   if (!file) return;
   const entry = file.tokens.find((t) => t.name === consumed.name);
-  if (!entry) return refuse("the link named a token that no longer exists");
+  if (!entry) {
+    // Issue #761: a name the file still holds, for a role this console does not know (`keptTokens`), is no missing
+    // token, and the row says which; it signs in nowhere here all the same.
+    const kept = ctx.deps.keptTokens(file).some((t) => t.name === consumed.name);
+    return refuse(kept ? "the link named a token whose role this console does not know" : "the link named a token that no longer exists");
+  }
   if (consumed.binding !== undefined && !invitationMatches(consumed.binding, entry, file)) return refuse("the viewer invitation entry or generation changed");
   // Issue #708: the page the link returns to, judged HERE by the page parser (`returnPathOf`), so the browser is only
   // ever sent to one of this console's own pages; anything else, or nothing, lands on the overview. The script checks
@@ -892,7 +899,10 @@ async function dispatch(req, res, deps) {
  *
  *   - `config`: `consoleConfig`'s result (`allowedHosts`, `readOnly`, `idleMs`, `maxMs`, `maxStreams`, `listen`,
  *     `pauseWindowsPath`).
- *   - `readTokens()` -> `{file}` | `{refusal}`; `findToken(file, presented)` -> entry | null.
+ *   - `readTokens()` -> `{file}` | `{refusal}`; `findToken(file, presented)` -> entry | null; `keptTokens(file)` -> the
+ *     entries the file keeps for a role this console does not know (issue #761), which a login code's refusal names
+ *     (default: the tokens module's own, a pure read of the file it is handed, so a caller that leaves it out still
+ *     answers a kept name's code 401 with its row, never a 500).
  *   - `sessions`: `create`, `get(id, file)`, `peek(id, file)` (the 404 and 405 pages' bar), `destroy(id, reason)`
  *     (`elsewhere` or null; it answers who it ended, `{name, role}`, or null, which the sign-out's audit row names),
  *     `endedOf(id)` (why a refused cookie's session ended), and the flash, `setFlash(id,
@@ -928,6 +938,7 @@ export function createConsoleServer({
   log = () => {},
   readTokens,
   findToken,
+  keptTokens = realKeptTokens,
   consumeLoginCode,
   writePauseWindows,
   actionDeps = null,
@@ -942,7 +953,7 @@ export function createConsoleServer({
 }) {
   const limits = { ...SERVER_LIMITS, streamsTotal: STREAMS_TOTAL_MAX, streamsOperatorReserve: STREAMS_OPERATOR_RESERVE, ...limitsOverride };
   const refusalRows = makeLoginLimiter({ now, perMinute: REFUSAL_ROWS_PER_MINUTE, burst: 2 * REFUSAL_ROWS_PER_MINUTE });
-  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin };
+  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
   const server = createServer({ headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval }, (req, res) => {

@@ -115,7 +115,7 @@ const EXPECTED = {
 	fleet: { runsComplete: true },
 };
 
-function factory({ flag = true, governing = { envelope: ENVELOPE, digest: DIGEST }, redis = fakeRedis(COUNTERS), mirror = true, readMirror = async () => ({ runs: MIRRORED, degraded: "ok" }), logsDir, state = STATE, reconcileThrows = false } = {}) {
+function factory({ flag = true, governing = { envelope: ENVELOPE, digest: DIGEST }, redis = fakeRedis(COUNTERS), mirror = true, readMirror = async () => ({ runs: MIRRORED, degraded: "ok" }), indexMax, logsDir, state = STATE, reconcileThrows = false } = {}) {
 	const logs = [];
 	const build = makePortfolioSnapshot({
 		checkPortfolioFlag: async () => flag,
@@ -132,6 +132,7 @@ function factory({ flag = true, governing = { envelope: ENVELOPE, digest: DIGEST
 		logsDir,
 		mirror,
 		readMirror,
+		...(indexMax !== undefined ? { indexMax } : {}),
 		now: () => NOW,
 		log: (event, fields) => logs.push({ event, ...fields }),
 	});
@@ -176,6 +177,15 @@ test("without a run mirror (no PI_WORKER_NAME) runsComplete is false and only lo
 	assert.equal(snap.fleet.runsComplete, false);
 	assert.equal(asked, false, "no mirror is read without one");
 	assert.equal(snap.projects.find((p) => p.id === "platform").runs7d.completed, 0, "the other host's run is not here");
+});
+
+test("the mirror read asks for this host's run index cap, the default 5000 unless the wiring hands another (#761)", async () => {
+	const asked = [];
+	const readMirror = async (_redis, opts) => (asked.push(opts), { runs: MIRRORED, degraded: "ok" });
+	await factory({ logsDir: logsDirWith(LOCAL), readMirror }).build(JOB);
+	await factory({ logsDir: logsDirWith(LOCAL), readMirror, indexMax: 12_000 }).build(JOB);
+	assert.deepEqual(asked.map((o) => o.limit), [5_000, 12_000]);
+	assert.equal(asked[1].sinceMs, NOW.getTime() - 7 * 24 * 3600 * 1000, "the same window, only the cap moves");
 });
 
 test("a mirror that could not be read, or was cut short, makes runsComplete false; a mirror with nothing in it does not (#505)", async () => {

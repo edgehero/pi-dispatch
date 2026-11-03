@@ -371,7 +371,11 @@ The threat model, and what answers each part:
   two phone widths and eighteen desktop widths, and fails on any violation it reports.
 - **A leaked tokens file grants nothing.** The file stores sha256 hashes, never a token; a token is shown once, at
   `token add` or `token rotate`, and appears in no log, audit row or page. Revoking or rotating a token, or
-  `sessions end-all`, ends the affected sessions on their next request.
+  `sessions end-all`, ends the affected sessions on their next request. An entry a later release wrote for a role this
+  console does not know is kept in the file and signs in nowhere here (issue #761), and a field of an entry or a key of
+  the file that would narrow who may sign in (an expiry, a scope, another hash, a file-wide minimum role) raises the
+  file's version, which an older console refuses whole: a field or key it carried and ignored would widen access
+  there.
 - **Why a session ended is told, and tells nothing else** (issue #737). A session that ends leaves a tombstone in
   the console's memory: its 256-bit session id and one word from a closed list (idle, max, revoked, role, all,
   elsewhere), so the next page request that presents that cookie is sent to `/login?ended=<word>` and the sign-in page
@@ -428,7 +432,8 @@ The threat model, and what answers each part:
   against a fixed character set and length, and a bad one is refused by name, never echoed back. A run page reads at
   most 100 runs and examines at most 2000 records before it answers with what it found, so a filter that matches
   nothing costs a bounded read of the mirror, not a walk of its whole history. This host's own run files are read
-  into one shared index at most every 15 seconds, whatever the filter, and the newest 5000 kept; a live runs page
+  into one shared index at most every 15 seconds, whatever the filter, and the newest `PI_RUN_MIRROR_MAX_RUNS` kept
+  (5000 unless set, at most 20000, the run mirror's own cap); a live runs page
   refreshes every few seconds rather than every second, and one token's streams share one budget, so distinct
   filters cannot multiply the load past a fixed bound. The parked page reads whether each run can be answered here
   for at most 20 runs a load, each answer kept 15 seconds whether or not it could be read, all of them sharing one
@@ -546,7 +551,18 @@ The threat model, and what answers each part:
   that, so a flood cannot grow the log without bound. The chain makes an edit evident, not impossible: whoever can write that file can also rewrite every
   row after the one they changed. Nothing vouches for the newest row, and an edit to it is never seen: the next row
   the console writes links to the newest row as it then is on disk, edit included. A last line cut short by a crash
-  leaves the row before it not verified.
+  leaves the row before it not verified. The trail is kept `PI_CONSOLE_AUDIT_RETENTION_DAYS` days (by default as long
+  as `PI_LOG_RETENTION_DAYS` keeps run history; `0` keeps it forever), its own setting so that shortening the run
+  history for privacy does not shorten the security trail, and the month file holding the chain's head is never
+  removed. The worker prunes it, by that setting; on a logs folder several hosts share, the shortest setting among
+  them wins. A worker from before that setting prunes the trail by `PI_LOG_RETENTION_DAYS`, so copy `console-audit/`
+  aside before rolling a host back past it with a longer audit retention; one still running on a logs folder the
+  upgraded hosts share prunes it the same way, so upgrade every host before relying on a longer audit retention. A row
+  with an action or outcome this console does not know, of the shape the console writes (a newer release writes such
+  rows), is verified like any row and counted on an intact chain, not reported as damage, so an older console in a
+  mixed deployment does not call an intact trail tampered with. The check knows only that the word has that shape and
+  the row links, not who wrote it: whoever can write the file can add such a row, as they always could one of a word
+  the console lists.
 - **No terminal in the console process.** The native opener and `pi-dispatch sandbox <job>` command remain available.
   An optional, separately enrolled [sandbox browser gateway](#the-sandbox-browser-gateway) may attach to an existing
   sandbox through its own process and hostname. The console gains no runtime socket, pty or WebSocket and never starts

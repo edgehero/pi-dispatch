@@ -265,8 +265,13 @@ export function readLocalRuns({ logsDir, sinceMs, fs = nodeFs }) {
  * anything yet, so it is retried rather than run on a snapshot with holes. The run mirror is a view and never throws; a
  * mirror that could not be read makes `runsComplete` false. A snapshot over 64 KiB is refused as
  * `portfolio-snapshot-oversize`, before any spend, and the log line names the project count.
+ *
+ * `indexMax` is this host's run index cap (`PI_RUN_MIRROR_MAX_RUNS`, issue #761), the most the mirror read asks for.
+ * Every writer trims the shared index to its own cap, this host included, so a read of this many is the whole index
+ * unless a peer with a larger cap has written since this host last did; a read cut short says `truncated`, which makes
+ * `runsComplete` false rather than leaving a short count unflagged.
  */
-export function makePortfolioSnapshot({ checkPortfolioFlag, governing, projects = () => [], limits = () => null, allocation, redis, logsDir, mirror = false, readMirror = readMirroredRuns, fs = nodeFs, now = () => new Date(), log = () => {} }) {
+export function makePortfolioSnapshot({ checkPortfolioFlag, governing, projects = () => [], limits = () => null, allocation, redis, logsDir, mirror = false, readMirror = readMirroredRuns, indexMax = RUNS_INDEX_MAX, fs = nodeFs, now = () => new Date(), log = () => {} }) {
 	return async function portfolioSnapshot(job) {
 		const flagged = await Promise.resolve()
 			.then(() => checkPortfolioFlag(job))
@@ -292,7 +297,7 @@ export function makePortfolioSnapshot({ checkPortfolioFlag, governing, projects 
 			let complete = false;
 			let newerSkipped = local.newerSkipped ?? 0;
 			if (mirror) {
-				const read = await readMirror(redis, { limit: RUNS_INDEX_MAX, sinceMs, now: () => at.getTime() });
+				const read = await readMirror(redis, { limit: indexMax, sinceMs, now: () => at.getTime() });
 				for (const r of Array.isArray(read?.runs) ? read.runs : []) {
 					if (recordReadable(r)) mirrored.push(r);
 					else if (r !== null && typeof r === "object" && !Array.isArray(r)) newerSkipped++;

@@ -258,8 +258,19 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`gh-` prefixed), GitLab's `webhook-id` / `Idempotency-Key` (`gl-` prefixed) — giving exactly-once
   semantics per delivery **for as long as the job key is retained**. The prefixes keep the two id spaces
   disjoint, so a value that collided across forges could never suppress the other's job. `removeOnComplete` / `removeOnFail` retention
-  shall therefore be set to meet or exceed GitHub's redelivery window.
-- **Why**: GitHub redelivers on timeout. A redelivered job is a second paid agent run **and** a second
+  shall therefore be set to meet or exceed GitHub's redelivery window. That retention is ONE value,
+  `FORGE_JOB_RETENTION_S` (31 days, `worker/src/retention.mjs`, AMENDED 2026-11-03, #761), from which every marker
+  that stands in for a job key once it is gone (a steered delivery's marker, the poller's cursor four days past it,
+  the approval's finished mark a day past it, the console trail's claim) is derived, and a source scan
+  (`worker/test/retention.test.mjs`) refuses a 31-day literal in `worker/src`, `receiver/src` or `admin/src` outside
+  its named exemptions (the watch ceiling plus a day, the OAuth lifetime bounds), each of which must match exactly one
+  line. A 31-day literal is 31 times a day's factor (24, 1440, a day in seconds or milliseconds written 86400, 86_400,
+  864e2, 8.64e4, 86400000, 86_400_000, 86400e3, 864e5, 86.4e6 or 8.64e7, or a name with "day" in it), in either order
+  and through other factors, or 2678400 in seconds or milliseconds (2_678_400, 2.6784e6, 2.6784e9), with `_` between
+  any digit groups and a capital `E` taken as well. The scan reads one line at a time and misses every other spelling
+  (`8.64e+7`, a BigInt) and a product split across lines.
+- **Why**: a delivery can arrive again: on GitHub when someone redelivers it by hand (within 3 days, never on its own;
+  see the correction below), on GitLab through its own retries. A redelivered job is a second paid agent run **and** a second
   pull request on one issue — visible, embarrassing, and billed. The GUID rather than `repo#issue`
   because it is exactly-per-delivery and GitHub-generated, so no coordination is needed and the queue
   can reject the duplicate without a lookup. Semantic dedup on `repo#issue:flow` is a separate, additive
@@ -268,8 +279,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   BullMQ's dedup is literally `if rcall("EXISTS", jobIdKey) == 1 then return handleDuplicatedJob(...)`:
   it is a key-existence test and nothing more. Once `removeOnComplete` deletes the job hash, the same
   GUID is added **fresh**, with no memory that it ever ran. The source design document paired a 7-day
-  `removeOnComplete` with a claim of exactly-once; GitHub retains deliveries for roughly 30 days and
-  permits manual redelivery throughout, so days 8–30 were an unguarded gap. Retention is not
+  `removeOnComplete` with a claim of exactly-once, and this requirement, reading GitHub as retaining deliveries for
+  roughly 30 days with manual redelivery throughout, set 31 days to close days 8 to 30. CORRECTED 2026-11-03 (#761):
+  that reading was wrong. GitHub documents "You can redeliver webhook deliveries that occurred in the past 3 days"
+  and "GitHub does not automatically redeliver failed deliveries" (docs.github.com, Redelivering webhooks). The 31
+  days stay: they are comfortably longer than any forge's redelivery window, and every marker derived from them keeps
+  its meaning. Retention is not
   housekeeping here — **it *is* the dedup window**, and shortening it silently shortens the guarantee.
   **GitLab keeps `webhook-id` constant across its own retries**, which is exactly the property this
   requirement needs, so the guarantee transfers unchanged — and so does the retention bound.
@@ -1193,9 +1208,16 @@ writes retain their existing interactive confirmation. This adds no unattended p
     nothing; given `PI_CONSOLE_BIND_PUBLIC=1`, doctor warns. Given a tokens file that is group or world accessible,
     a symlink, not a regular file, owned by another account, or holding no operator token, `serve` refuses to start
     and doctor names the problem; given a tokens file inside any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`), doctor fails; given a second
-    `serve` on the same deployment while the first runs, it refuses on the lock. Tests:
-    `admin/test/console-listen.test.mjs`, `admin/test/console-config.test.mjs`, `admin/test/console-cli.test.mjs` (the lock),
-    `worker/test/console-tokens.test.mjs`, `worker/test/doctor-console.test.mjs`.
+    `serve` on the same deployment while the first runs, it refuses on the lock. AMENDED 2026-11-03 (#761): given a
+    tokens file that also holds an entry whose role this release does not know but has a role's shape (a role a later
+    release added), `serve` still starts, and that entry signs in nowhere (its secret and a one-time code for it are
+    401, `link` makes no code for it), is no operator, `token list` marks it and doctor warns; a role of no role's shape
+    still refuses the whole file, and so does a `version` other than 1 (`INT-CONSOLE-TOKENS-FILE-CONTRACT`). Tests:
+    `admin/test/console-listen.test.mjs`, `admin/test/console-config.test.mjs`, `admin/test/console-cli.test.mjs` (the lock;
+    "token list marks an entry of a role this console does not know, and link refuses it naming the role"),
+    `worker/test/console-tokens.test.mjs`, `worker/test/doctor-console.test.mjs`, `admin/test/console-server.test.mjs`
+    ("a token kept for a role this console does not know signs in nowhere: its secret and its one-time code are both
+    401 (issue #761)").
   - (b) **The Host hostname allowlist.** Given a request whose Host hostname is not `127.0.0.1`, `localhost`,
     `[::1]` or a name in `PI_CONSOLE_ALLOWED_HOSTS` (`evil.test`, `127.0.0.1.nip.io`, `host.docker.internal`,
     `host.containers.internal`, `gateway.docker.internal`), it is answered 421 and its handler never runs; given
@@ -1283,10 +1305,19 @@ writes retain their existing interactive confirmation. This adds no unattended p
     tell whether row N was changed.") and that rows through the one before that are intact ("No row before it is
     vouched for" when there is none), where it counted the row before the break as intact; at a line whose `prev`
     matched and that fails another check, the rows through the one before it are intact. An audit directory it cannot
-    read is "cannot be checked". Tests: `worker/test/console-audit.test.mjs`, `admin/test/console-server.test.mjs`,
-    `worker/test/doctor-console.test.mjs`, `admin/test/console-cli.test.mjs` ("audit verify on a broken prev vouches
-    for neither end of the link ...", "audit verify: an edited row followed by a garbled line is not vouched for,
-    whatever the garbled line says").
+    read is "cannot be checked". AMENDED 2026-11-03 (#761): given rows whose action or outcome this release does not
+    list but has the shape every listed one has (a newer console writes such rows), `audit verify` calls the chain
+    intact and counts them (exit 0), doctor's line stays ok and counts them, and the audit page keeps their state,
+    notes the word this console does not know on a verified row only and counts them in About on an intact chain only;
+    a broken chain counts none of them, and no surface says a newer console wrote such a row, since the check knows
+    only that its word has the shape and the row links; given an action or outcome of no such shape, the chain is
+    broken there ("the row's action or outcome is not of the shape the console writes"); given such a row edited, the
+    link after it names the break, as for any row (`INT-CONSOLE-AUDIT-LOG`, "Across versions"). Tests:
+    `worker/test/console-audit.test.mjs`, `admin/test/console-server.test.mjs`, `admin/test/console-panels.test.mjs`
+    ("the audit panels: a shaped word this console does not know on a row the chain does not vouch for gets no note,
+    and the broken chain counts none"), `worker/test/doctor-console.test.mjs`, `admin/test/console-cli.test.mjs`
+    ("audit verify on a broken prev vouches for neither end of the link ...", "audit verify: an edited row followed by
+    a garbled line is not vouched for, whatever the garbled line says").
   - (i) **Session limits and revocation.** Given a session idle past `PI_CONSOLE_IDLE_MINUTES` or older than
     `PI_CONSOLE_MAX_HOURS`, its next request is unauthenticated; given its token revoked or rotated, its role
     changed, or `sessions end-all` run, its next request is unauthenticated; login issues a new session id each
@@ -5971,8 +6002,17 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
     run whose base holds `.pi/extensions` is not armed (no ledger, no prime, no checkpoint args) and a recovery of one
     is `recovery-unsafe-extensions` before the restore and any reserve; every never-started fault of a recovery is a
     60 s wait hold; a recovery whose container ran and could not queue another returns `recovery-failed`; the
-    base-running check excludes the recovery's own entry; a settled record of the base run supersedes. Tests:
-    `worker/test/processor-durable.test.mjs` (among them "a fresh run whose base holds .pi/extensions is not armed: no
+    base-running check excludes the recovery's own entry; a settled record of the base run supersedes. AMENDED
+    2026-11-03 (#761): a recovery whose checkpoint a newer pi-dispatch wrote (a manifest of a higher `v`) is deferred
+    `newer-release`, at the model pin or the pickup, before the mint and every reserve, and is never refused over it:
+    its one attempt is not spent, nothing is commented or recorded, and the store, the pointer, the run budget ledger
+    and the lost attempt's job folder (the salvage answers `checkpoint-newer`) stay, until a worker that reads the
+    checkpoint takes it or the host-lost sweep's seven days end it (`INT-WORKSPACE-CHECKPOINT-STORE`). Tests:
+    `worker/test/model-failover.test.mjs` ("a recovery whose checkpoint a newer release wrote is deferred newer-release
+    at the model pin, not refused: ..."), `worker/test/recovery-queue.test.mjs` ("salvage meeting a checkpoint a newer
+    release wrote takes nothing and removes nothing: ..."),
+    `worker/test/processor-durable.test.mjs` ("a checkpoint a newer release wrote is waited on, never refused: ...", and
+    among them "a fresh run whose base holds .pi/extensions is not armed: no
     ledger, no prime, no checkpoint args, recoverSkipped workspace-extensions", "every never-started fault of a
     RECOVERY job becomes a 60 s wait hold, never a spent attempt", "a recovery whose container ran and ended infra, with
     no further recovery queued, RETURNS recovery-failed with its comment", "the base-running check excludes the
@@ -8336,6 +8376,7 @@ instead of drifting.
 | Date | Change |
 |---|---|
 | 2026-11-02 (#754, #792, #793; approved extension) | REQ-SANDBOX-BROWSER-GATEWAY, REQ-SANDBOX-FROM-THE-CONSOLE and REQ-OPERATOR-CONSOLE-SCREENS amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
+| 2026-11-03 (#761, tolerant readers) | `REQ-CONSOLE-SECURITY` AMENDED: (a) a tokens file that also holds an entry of a role this release does not know but of a role's shape still starts `serve`, and that entry signs in nowhere (its secret and a code for it 401, no `link`), is no operator, is marked by `token list` and warned of by doctor, while a role of no role's shape and a `version` other than 1 still refuse the whole file (`INT-CONSOLE-TOKENS-FILE-CONTRACT`); (h) rows of an action or outcome this release does not list but of the shape every listed one has (a newer console writes such rows) count as intact (`audit verify` exits 0 and counts them, doctor stays ok, the audit page keeps their state, notes the word this console does not know on a verified row only and counts such rows in About on an intact chain only), a broken chain counts none of them, no surface says who wrote such a row (the check knows only that its word has the shape and the row links), a value of no such shape breaks the chain with its own reason, and such a row edited is named by the link after it (`INT-CONSOLE-AUDIT-LOG`), with `admin/test/console-panels.test.mjs` among its tests; the rest of both clauses UNCHANGED, checked. `REQ-RUN-RECOVERY` (d) AMENDED: a recovery whose checkpoint a newer pi-dispatch wrote is deferred `newer-release` at the model pin or the pickup, before the mint and every reserve, and never refused over it: its one attempt is not spent, nothing is commented or recorded, and the store, the pointer, the run budget ledger and the lost attempt's job folder stay, until a worker that reads the checkpoint takes it or the host-lost sweep's seven days end it (`INT-WORKSPACE-CHECKPOINT-STORE`); the rest of (d) UNCHANGED, checked. `REQ-DEDUP-BY-DELIVERY-GUID` AMENDED and CORRECTED: AMENDED, the retention that is the dedup window is one value, `FORGE_JOB_RETENTION_S` (31 days, `worker/src/retention.mjs`), every marker that stands in for a job key derived from it, and a source scan (`worker/test/retention.test.mjs`) refuses a 31-day literal (31 times a day's factor in the spellings it lists, in either order and through other factors, or 2678400 in seconds or milliseconds, read one line at a time) outside named exemptions that each match exactly one line; CORRECTED, the Why's "GitHub redelivers on timeout" and "GitHub retains deliveries for roughly 30 days and permits manual redelivery throughout", which were wrong: GitHub documents redelivery of the past 3 days only and no automatic redelivery of a failed delivery, and the 31 days stay, comfortably longer than any forge's redelivery window, every marker derived from them keeping its meaning; the guarantee, its retention bound and both layers UNCHANGED, checked. **Code evidence**: worker/src/console-tokens.mjs -> parseTokensFile, keptTokens, tokenNames; admin/src/console/cli.mjs -> run (`token list`, `link`, `audit verify`); worker/src/console-audit.mjs -> verifyConsoleAudit; worker/src/doctor.mjs -> consoleChecks; admin/src/console/panels/audit.mjs -> unknownWordsNote, auditAbout; worker/src/index.mjs -> makeProcessor (the recovery's model pin); worker/src/processor.mjs -> runAttempt (the recovery pickup's manifest read); worker/src/recovery-queue.mjs -> makeSalvager; worker/src/retention.mjs -> FORGE_JOB_RETENTION_S; worker/src/queue.mjs -> forgeJobOpts. |
 | 2026-11-02 (#761, store versions) | `REQ-DURABLE-RUN-HISTORY` AMENDED (acceptance): a record is written to a temporary file and renamed, so a crash mid-write leaves the previous record or the new one (the in-place fallback excepted, logged `run_record_in_place`), and a record a newer pi-dispatch wrote still shows which run it was, how it ended and when, while no total reads the rest of it (`INT-RUN-HISTORY-FILE-CONTRACT`, `DES-STORE-VERSION-WHEN-NEEDED`). `REQ-OPERATOR-CONSOLE-ACTIONS` (e) AMENDED by one clause: `rerunRefusalOf` refuses a record a newer pi-dispatch wrote, whose job this console cannot rebuild, and a job whose `dataVersion` this build cannot read (a cron run, rebuilt from its trigger, excepted); (f) AMENDED by one clause: a parked run whose job a newer pi-dispatch queued is refused (`parkedAnswerRefusalOf`, so the Chat panel offers no form for it); the rest of both rules is UNCHANGED, checked. UNCHANGED, checked: `REQ-SCOPED-PAUSE-WINDOWS` (the gate, its place before the reservation and the live reload are as written; a newer file adds a deferral, `INT-PAUSE-WINDOWS-FILE-CONTRACT`) and `REQ-LOCAL-JOB-VISIBILITY` (a lost lock on this attempt's newer `failed` record still ends with exactly one terminal line, `job_lost_lock_after_completion` with the outcome, in place of `job_failed`). |
 | 2026-11-02 (#776) | NEW `REQ-DISPATCHERS`, PROPOSED, spec only: bounded multi-input selection and person-reviewed proposals, deterministic collection, fresh event decisions and read-only LLM jobs and local children. Includes independent event replay and target/flow dedup, pre-spend day/window/scoped limits, conservative crash accounting, private evidence and explicit stop controls. No runtime feature, schema, console tab or doctor check is built. `REQ-PARKED-ANSWERER` AMENDED in words only: dispatchers now have a proposed specification and remain no dependency of answer rules. `REQ-WATCH-TRIGGER`, `REQ-WATCH-DECISION-STEP`, `REQ-JOB-TIMEOUT-30M` and `REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked: existing watch behavior, timeouts and budget mechanics are not widened. To be AMENDED by later builds, not claimed unchanged in their future scope: `REQ-AI-TRIGGERED-RUNS` for a new reviewed producer, `REQ-OPERATOR-CONSOLE-ACTIONS` and `REQ-OPERATOR-CONSOLE-SCREENS` for proposals, controls and views, and `REQ-DURABLE-RUN-HISTORY` for validated dispatcher provenance. Future behavioral acceptance is specified here; no test is claimed to implement the proposed feature. |
 | 2026-11-01 (#774, coverage verification) | `REQ-BROWSER-FIRST-RUN-SETUP` acceptance clarified: exact-pin catalogue and credential-source coverage, exhaustive eligible API-key Add/resolve/Replace tests and explicit authentication/runtime limits. Browser regression checks identify account owner and copy controls independently of preceding help guides, retaining exact destinations, full commands and actual clipboard effects. Runtime/provider authentication capabilities, cloud/custom admission, credential forwarding, spend gates, `REQ-CONSOLE-SECURITY`, `CONST-*`, `DES-*` and `INT-*` contracts UNCHANGED, checked. |

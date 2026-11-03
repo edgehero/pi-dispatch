@@ -60,3 +60,16 @@ test("broken, unreadable and malformed evidence is unavailable instead of zero",
     assert.ok(!JSON.stringify(got).includes("private error"));
   }
 });
+
+test("an agent row a newer console wrote makes the count partial, the count itself unchanged (issue #761)", async () => {
+  const applied = [row(2, "write-applied"), row(1, "write")];
+  assert.deepEqual([(await recount(applied)).count, (await recount(applied)).partial], [1, false]);
+  for (const [what, extra] of [["an unknown action", row(3, "write-revoked")], ["an unknown outcome", row(3, "write", { ticket: "three", outcome: "deferred" })]]) {
+    const got = await recount([extra, ...applied]);
+    assert.equal(got.count, 1, what);
+    assert.equal(got.partial, true, `${what}: the count is a floor`);
+  }
+  // Only the agent's own rows in the window decide it: a person's newer row, or one from yesterday, does not.
+  assert.equal((await recount([row(3, "write-revoked", { role: "operator" }), ...applied])).partial, false);
+  assert.equal((await recount([...applied, row(0, "write-revoked", { at: AT - 86400000 })])).partial, false);
+});

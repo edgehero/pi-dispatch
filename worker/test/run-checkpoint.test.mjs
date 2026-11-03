@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
 	CHECKPOINT_POINTER_PREFIX,
+	CHECKPOINT_POINTER_SHAPES,
 	CHECKPOINT_POINTER_TTL_MS,
+	CHECKPOINT_POINTER_VERSION,
 	DEFAULT_RUN_CHECKPOINT_LIMITS,
 	HOST_SNAPSHOT_CONCURRENCY,
 	UNPAUSE_TRIES,
@@ -13,11 +15,13 @@ import {
 	makeQuietTracker,
 	makeRunCheckpointer,
 	makeSemaphore,
+	pointerKeepEntry,
 	readCheckpointPointer,
 	removeCheckpointPointer,
 	validPointer,
 	writeCheckpointPointer,
 } from "../src/run-checkpoint.mjs";
+import { CHECKPOINT_MANIFEST_READS, CHECKPOINT_MANIFEST_VERSION, DEFAULT_CHECKPOINT_LIMITS } from "../src/workspace-checkpoint.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #645: when a running job is checkpointed, how the freeze is balanced, and the Valkey pointer. Every
@@ -181,6 +185,73 @@ test("validPointer: exactly the pointer's keys, every value typed; anything loos
 	}
 	const { jobDir, ...missing } = good;
 	assert.equal(validPointer(missing), null, `no ${Object.keys({ jobDir })[0]}`);
+});
+
+test("pointerKeepEntry: host and jobDir from a pointer of any version, ignoring every other key; anything that cannot name this host's directory is null (issue #761)", () => {
+	const good = { v: 1, host: "host-a", hostQueue: "pi-jobs@host-a", seq: 3, attempt: 1, at: 1, jobDir: "job-ab12cd" };
+	const kept = { host: "host-a", jobDir: "job-ab12cd" };
+	assert.deepEqual(pointerKeepEntry(good), kept, "an exact version-1 pointer");
+	assert.deepEqual(pointerKeepEntry({ ...good, v: 2, lease: { until: 9 }, hostQueue: 7 }), kept, "a newer pointer with a key this build does not know");
+	assert.deepEqual(pointerKeepEntry({ v: 7, host: "host-a", jobDir: "job-ab12cd", seq: "x" }), kept, "a field typed as this build never would, and keys missing");
+	for (const bad of [{ ...good, v: 0 }, { ...good, v: 1.5 }, { ...good, v: "2" }, (({ v, ...rest }) => rest)(good), { ...good, host: "a/b" }, { ...good, host: 7 }, { ...good, jobDir: "../job-x" }, { ...good, jobDir: "/jobs/job-ab" }, { ...good, jobDir: "other" }, null, [good], "job-ab12cd"]) {
+		assert.equal(pointerKeepEntry(bad), null, JSON.stringify(bad));
+	}
+});
+
+/**
+ * The version rule a table must follow, or why not: it reads exactly its newest version and the one before it (a
+ * version is 1 or more), and the version its writer writes is one of them. So a release may read v + 1 while it still
+ * writes v (readers first), and the next release writes v + 1.
+ */
+function versionPolicyProblem(reads, written) {
+	const newest = Math.max(...reads);
+	const want = [newest - 1, newest].filter((v) => v >= 1);
+	if (reads.length !== want.length || !want.every((v, i) => v === reads[i])) return `reads ${JSON.stringify(reads)}, not ${JSON.stringify(want)}`;
+	if (!reads.includes(written)) return `writes ${written}, which it does not read`;
+	return null;
+}
+
+test("the version policy is pinned: each table reads exactly its newest version and the one before it, and writes one of them, for one checkpoint lifetime (issue #761)", () => {
+	// The rule itself: today's state, the readers-first state, the release that then writes, and the next readers-first.
+	for (const [reads, written] of [[[1], 1], [[1, 2], 1], [[1, 2], 2], [[2, 3], 2], [[4, 5], 5]]) {
+		assert.equal(versionPolicyProblem(reads, written), null, `reads ${reads}, writes ${written}`);
+	}
+	// A writer ahead of its readers, a dropped previous reader, a gap, three versions, a version 0.
+	for (const [reads, written] of [[[1], 2], [[1, 2], 3], [[2], 2], [[1, 3], 1], [[1, 2, 3], 2], [[0, 1], 1]]) {
+		assert.notEqual(versionPolicyProblem(reads, written), null, `reads ${reads}, writes ${written}`);
+	}
+	assert.equal(versionPolicyProblem(Object.keys(CHECKPOINT_POINTER_SHAPES).map(Number), CHECKPOINT_POINTER_VERSION), null, "the pointer");
+	assert.equal(versionPolicyProblem([...CHECKPOINT_MANIFEST_READS], CHECKPOINT_MANIFEST_VERSION), null, "the manifest");
+	assert.ok(Object.isFrozen(CHECKPOINT_POINTER_SHAPES) && Object.values(CHECKPOINT_POINTER_SHAPES).every(Object.isFrozen) && Object.isFrozen(CHECKPOINT_MANIFEST_READS));
+	// The current shape is exactly what the writer writes and the reader hands back.
+	const written = { v: CHECKPOINT_POINTER_VERSION, host: "host-a", hostQueue: null, seq: 1, attempt: 0, at: 1, jobDir: "job-ab12cd" };
+	assert.deepEqual([...CHECKPOINT_POINTER_SHAPES[CHECKPOINT_POINTER_VERSION]].sort(), Object.keys(validPointer(written)).sort());
+	// "One checkpoint lifetime" is one number: the pointer lives exactly as long as the store it points into.
+	assert.equal(CHECKPOINT_POINTER_TTL_MS, DEFAULT_CHECKPOINT_LIMITS.ttlMs);
+});
+
+test("the pointer version policy, through its seam: a build that reads 1 and 2 and writes 1 (readers first) routes the pointer it writes and a v2 one, refuses v0, and routes no v3 while keeping its directory (issue #761)", () => {
+	const v1 = { v: 1, host: "host-a", hostQueue: "pi-jobs@host-a", seq: 3, attempt: 1, at: 1, jobDir: "job-ab12cd" };
+	const shapes = Object.freeze({ 1: CHECKPOINT_POINTER_SHAPES[1], 2: Object.freeze([...CHECKPOINT_POINTER_SHAPES[1], "lease"]) });
+	assert.equal(versionPolicyProblem(Object.keys(shapes).map(Number), 1), null, "the readers-first state follows the rule");
+	// The pointer the checkpointer writes (`v: CHECKPOINT_POINTER_VERSION`, 1 here) still routes under the wider table.
+	const written = { ...v1, v: CHECKPOINT_POINTER_VERSION };
+	assert.deepEqual(validPointer(written, { shapes }), written, "the written version routes");
+	assert.deepEqual(validPointer(v1, { shapes }), v1, "v1 routes");
+	assert.deepEqual(pointerKeepEntry(v1), { host: "host-a", jobDir: "job-ab12cd" }, "and is kept");
+	const v2 = { ...v1, v: 2, lease: 5 };
+	assert.deepEqual(validPointer(v2, { shapes }), { ...v1, v: 2 }, "v2 is read by its own closed shape");
+	assert.equal(validPointer({ ...v1, v: 2 }, { shapes }), null, "a v2 pointer without its v2 key is not of its shape");
+	assert.equal(validPointer({ ...v1, lease: 5 }, { shapes }), null, "nor is a v1 pointer with a v2 key");
+	assert.equal(validPointer({ ...v1, v: 0 }, { shapes }), null, "v0 is refused");
+	assert.equal(validPointer(v2), null, "this build's own table does not read v2");
+	// v3 is above the newest the wider table reads: no pointer for routing, salvage or the next seq, its directory kept.
+	const v3 = { ...v2, v: 3 };
+	assert.equal(validPointer(v3, { shapes }), null, "v3 never routes");
+	assert.deepEqual(pointerKeepEntry(v3), { host: "host-a", jobDir: "job-ab12cd" }, "and keeps its directory");
+	const v7 = { ...v1, v: 7, lease: 5, region: "eu" };
+	assert.equal(validPointer(v7, { shapes }), null, "a version neither table holds never routes");
+	assert.deepEqual(pointerKeepEntry(v7), { host: "host-a", jobDir: "job-ab12cd" }, "and still keeps its directory");
 });
 
 // --- the live checkpoint --------------------------------------------------------------------------------------------

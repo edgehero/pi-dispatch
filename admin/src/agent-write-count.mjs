@@ -1,3 +1,5 @@
+import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_OUTCOMES } from "@edgehero/pi-dispatch/console-audit";
+
 /** Count this host's applied agent-write receipts, never the bounded fleet mirror or pre-write intentions. */
 export const AGENT_WRITE_SCAN_MAX = 10000;
 
@@ -35,5 +37,9 @@ export async function readAgentWritesToday({ read, verify, now = Date.now, host 
   const receipts = new Set(rows.filter(row => row.action === "write-applied" && row.outcome === "ok" && !failed.has(key(row))).map(key));
   const pending = rows.some(row => row.action === "write" && row.outcome === "ok" && !receipts.has(key(row)) && !failed.has(key(row)));
   const checkedSeq = chain.last?.seq ?? chain.rows ?? 0;
-  return { ...base, count: receipts.size, examined, partial: !complete || chain.startsAt !== null && chain.startsAt !== undefined || pending || newestSeq !== null && newestSeq > checkedSeq };
+  // Issue #761: an agent row a newer console wrote, with an action or an outcome this build does not know, may be a
+  // receipt this build cannot count, or a write that failed in words it does not read (counted above as failed, which an
+  // outcome it does not know need not mean), so the count is a floor, never exact.
+  const newer = rows.some(row => !CONSOLE_AUDIT_ACTIONS.includes(row.action) || !CONSOLE_AUDIT_OUTCOMES.includes(row.outcome));
+  return { ...base, count: receipts.size, examined, partial: !complete || chain.startsAt !== null && chain.startsAt !== undefined || pending || newestSeq !== null && newestSeq > checkedSeq || newer };
 }

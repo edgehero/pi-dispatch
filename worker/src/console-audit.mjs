@@ -23,6 +23,12 @@
  * string like the name, not a closed set. A write row may also carry `kind` (which write), `reserve` (micro-dollars a
  * paid action holds) and `count` (a bulk action's size), all optional: a row without them verifies as it always did.
  *
+ * ACROSS VERSIONS (issue #761): the writer writes only the actions and outcomes this build lists, and the verifier links
+ * any row whose action and outcome have their shape (`CONSOLE_AUDIT_ACTION_RE`, `CONSOLE_AUDIT_OUTCOME_RE`), so a chain
+ * a newer console wrote into is still intact here, and an intact chain counts the rows with a value it does not know as
+ * `unknown`. A row carries no version: a version an older verifier refused would bring back the false "chain is broken"
+ * this rule removes. Keys a row holds beyond the ones judged here are not judged, as before.
+ *
  * A row is mirrored to Valkey (`console:audit`, LPUSH then LTRIM, the `alloc:log` precedent in `allocation.mjs`) as a
  * VIEW: the file is the record, and a mirror that fails loses nothing the file does not hold.
  */
@@ -42,6 +48,15 @@ export const CONSOLE_AUDIT_FIELD_MAX = 200;
 // lowercase word with dashes: a closed charset rather than an escaped free string, so a reader can group rows by it and
 // no caller can carry text in it. `action` itself stays the closed vocabulary above; `kind` only says which write.
 export const CONSOLE_AUDIT_KIND_RE = /^[a-z0-9-]{1,40}$/;
+// The SHAPE of an action and of an outcome (issue #761): what every value either list above has ever held, and what a
+// value a later release adds must keep (a test holds every member to it). The writer stays closed (`auditRowBody` writes
+// only the lists' members); the verifier links a row whose action or outcome it does not know but that has this shape,
+// and counts it as `unknown`: such a row is shaped and linked, which is what a newer console writes, so it is not
+// damage. Refusing it, as the verifier did before, reported an intact chain as broken at the first row a newer console
+// wrote, and the older console then said "a row was changed" about a row nobody changed. Letter first, like every value
+// so far, and `kind`'s cap of 40.
+export const CONSOLE_AUDIT_ACTION_RE = /^[a-z][a-z0-9-]{0,39}$/;
+export const CONSOLE_AUDIT_OUTCOME_RE = /^[a-z][a-z0-9-]{0,39}$/;
 // Only names of this shape are the log's: the reaper and the verifier never touch or read anything else an operator put
 // in the directory.
 const MONTH_FILE_RE = /^\d{4}-\d{2}\.jsonl$/;
@@ -192,6 +207,11 @@ function optionalFieldsWellFormed(row) {
 	return true;
 }
 
+/** Whether a parsed row's action or outcome is a string of `re`'s shape (issue #761). */
+function shapedWord(value, re) {
+	return typeof value === "string" && re.test(value);
+}
+
 /** The `YYYY-MM.jsonl` names in `dir`, oldest first; [] when the directory does not exist. Other errors throw. */
 function monthFiles(dir, fs) {
 	let names;
@@ -304,6 +324,12 @@ export function makeConsoleAudit({ logsDir, fs = nodeFs, now = () => Date.now(),
  * there is reported as `startsAt: { file, seq }`, not as broken. `startsAt` is null when the chain starts at its very
  * first row (seq 1, prev null). Never throws: an unreadable directory or file is the broken link.
  *
+ * The intact shape also carries `unknown: n` when n of its `rows` have an action or outcome this build does not know but
+ * of the shape the console writes (issue #761: shaped and linked, which a newer console writes), and only then. A broken
+ * result never carries it: the row before a break whose line shows no matching `prev` passed its own checks and is
+ * counted in `rows`, yet nothing vouches for it, so a count there would vouch for a row the chain does not, and no
+ * reader shows it for a broken chain.
+ *
  * `withLast` (issue #737, the console's audit screen) adds three fields to both shapes, for a reader that marks rows by
  * their place (the place is the one thing that tells two rows apart reliably: a damaged line has no seq, and a tampered
  * file can hold one seq twice):
@@ -333,9 +359,14 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs, withLast = false }) {
 	let last = null; // { file, line, seq } of the last good row, for `withLast`
 	let beforeLast = null; // the good row before `last`, which a line that does not link to `last` leaves as the last vouched for
 	const index = []; // { file, seq, rows } per month file the walk passed a row in, for `withLast`
+	let unknown = 0; // rows that passed every check with an action or outcome this build does not know (issue #761)
+	// `unknown` only on an intact chain and only when some row has it (issue #761), so a chain of known rows answers
+	// exactly as it always did (doctor, the CLI and the tests compare this result whole), and a broken one never counts
+	// the row before its break, which nothing vouches for.
 	const shaped = (result, unlinked = false) => {
-		if (!withLast) return result;
-		return unlinked ? { ...result, last: beforeLast, suspect: last, files: index } : { ...result, last, suspect: null, files: index };
+		const counted = result.ok && unknown > 0 ? { ...result, unknown } : result;
+		if (!withLast) return counted;
+		return unlinked ? { ...counted, last: beforeLast, suspect: last, files: index } : { ...counted, last, suspect: null, files: index };
 	};
 	let files;
 	try {
@@ -366,8 +397,12 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs, withLast = false }) {
 				if (row === null || typeof row !== "object" || Array.isArray(row) || !Number.isInteger(row.seq) || row.seq < 1 || !(row.prev === null || (typeof row.prev === "string" && /^[0-9a-f]{64}$/.test(row.prev)))) {
 					return broken("the row has no valid seq and prev");
 				}
-				if (!CONSOLE_AUDIT_ACTIONS.includes(row.action) || !CONSOLE_AUDIT_OUTCOMES.includes(row.outcome)) {
-					return broken("the row's action or outcome is not one the console writes");
+				// Known, or of the shape a newer console's value keeps (issue #761): linked either way, and an unknown one is
+				// counted below once the row passed every other check. Judged after `linked`, so an edited unknown row is still
+				// named by the broken link of the row after it, exactly as an edited known row is.
+				const known = CONSOLE_AUDIT_ACTIONS.includes(row.action) && CONSOLE_AUDIT_OUTCOMES.includes(row.outcome);
+				if (!known && !(shapedWord(row.action, CONSOLE_AUDIT_ACTION_RE) && shapedWord(row.outcome, CONSOLE_AUDIT_OUTCOME_RE))) {
+					return broken("the row's action or outcome is not of the shape the console writes");
 				}
 				if (WATCH_AUDIT_KINDS.has(row.kind) ? !consoleAuditDriver(row.driver) : row.driver !== undefined) return broken("the row's watch driver is not one the console writes");
 				if (!optionalFieldsWellFormed(row)) return broken("the row's kind, reserve or count is not one the console writes");
@@ -388,6 +423,7 @@ export function verifyConsoleAudit({ logsDir, fs = nodeFs, withLast = false }) {
 				if (index.length === 0 || index[index.length - 1].file !== file) index.push({ file, seq: row.seq, rows: 0 });
 				index[index.length - 1].rows += 1;
 				rows += 1;
+				if (!known) unknown += 1;
 			}
 		} catch (err) {
 			return shaped({ ok: false, rows, broken: { file, line: i + 1, reason: `the file cannot be read (${err?.code ?? "error"})` } });
@@ -519,9 +555,10 @@ function* fileLines(fs, path, chunkBytes = 1 << 20) {
 }
 
 /**
- * The reaper of the audit files, on `PI_LOG_RETENTION_DAYS` like the run history (a sibling of
- * `makeAllocationLogReaper`): a `YYYY-MM.jsonl` file whose last write (mtime) is older than the retention goes, 0 keeps
- * everything, nothing of another name is touched. The NEWEST file is never reaped, however old: it holds the chain's
+ * The reaper of the audit files (a sibling of `makeAllocationLogReaper`), on `PI_CONSOLE_AUDIT_RETENTION_DAYS`, which
+ * inherits `PI_LOG_RETENTION_DAYS` when unset (issue #761: its own setting, so shortening the run history for privacy
+ * does not shorten the security trail; the caller passes the resolved days): a `YYYY-MM.jsonl` file whose last write
+ * (mtime) is older than the retention goes, 0 keeps everything, nothing of another name is touched. The NEWEST file is never reaped, however old: it holds the chain's
  * head, and without it the next row would start a new chain at seq 1 that `verifyConsoleAudit` cannot tell from a
  * forged one. Never throws.
  */

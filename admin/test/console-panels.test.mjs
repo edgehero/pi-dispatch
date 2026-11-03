@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { parseDocument } from "./helpers/script-dom.mjs";
 import { readFileSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
@@ -855,11 +856,13 @@ test("the audit panels: an edited outcome is never shown as verified; the banner
   assert.ok(k.chain.includes('<p class="banner__t">Chain verified through row 2. Line 3 of 2026-10.jsonl is damaged.</p>') && !k.chain.includes("Neither can"), k.chain);
 });
 
-test("the audit panels: an edited row followed by a garbled line, an unknown action or a prev that is not a hash is not shown as verified", async () => {
+test("the audit panels: an edited row followed by a garbled line, a malformed or unknown action or a prev that is not a hash is not shown as verified", async () => {
   // Row 3's outcome edited from refused to ok, then line 4 damaged so that it shows no prev matching row 3: whatever
   // else is wrong with line 4, nothing vouches for row 3, so the page must not draw its edited outcome as verified.
   const damages = {
     "a garbled line": [(l) => l.slice(0, 25), "line4"],
+    "a malformed action": [(l) => l.replace('"action":"login"', '"action":"Z Z"'), "4"],
+    // A shaped action this console does not know is linked like a known one (issue #761): what damages line 4 is its link.
     "an unknown action": [(l) => l.replace('"action":"login"', '"action":"zz"'), "4"],
     "a prev that is not a hash": [(l) => JSON.stringify({ ...JSON.parse(l), prev: "x" }), "4"],
   };
@@ -2003,4 +2006,81 @@ test("the run summary shows selected model and closed provider failure facts (#7
   assert.equal(bad.includes("PRIVATE-ERROR-TEXT"), false);
   assert.equal(bad.includes("Model choice"), false);
   assert.equal(bad.includes("Provider failure"), false);
+});
+
+// Issue #761: rows with an action or outcome this console does not list, of the console's shape (a newer release writes
+// such rows). The chain check links them, so they keep their state; a verified one says which word this console does
+// not know, and About counts them on an intact chain.
+
+/** `log` with rows linked after its last as the writer links them, whatever action or outcome they hold. */
+function appendLinked(log, rows) {
+  const lines = log.lines();
+  for (const extra of rows) {
+    const last = lines.at(-1);
+    const seq = JSON.parse(last).seq + 1;
+    lines.push(JSON.stringify({ at: AT(seq), seq, prev: createHash("sha256").update(last).digest("hex"), actor: OPS, action: "login", outcome: "ok", ...extra }));
+  }
+  log.write(lines);
+  return log;
+}
+
+/** The note a verified row with a word this console does not know carries, for `words`. */
+const unknownNote = (words) => `<span class="reason">Not known to this console: ${words} (a newer release writes such rows).</span>`;
+
+test("the audit panels: a verified row with a word this console does not know keeps its state, names the word, and About counts it", async () => {
+  const log = appendLinked(auditLogDir(3), [{ action: "token-expired" }, { action: "write", kind: "fleet-pause", target: "fleet", outcome: "deferred" }, { action: "token-expired", outcome: "damaged" }, {}]);
+  const v = await readAuditView({ read: log.read, verify: async () => ({ ...log.verify(), checkedAt: NOW }), query: parseAuditQuery("").query });
+  assert.deepEqual(v.rows.map(label), ["7:ok", "6:ok", "5:ok", "4:ok", "3:ok", "2:ok", "1:ok"]);
+  assert.equal(v.chain.unknown, 3);
+  const p = auditPanels(v);
+  assert.ok(p.chain.includes('<p class="banner__t">Chain verified through row 7</p>'), p.chain);
+  const row = (seq) => new RegExp(`<tr id="seq-${seq}">.*?</tr>`).exec(p.log)?.[0] ?? "";
+  // An unknown action: its own outcome badge, and the note under the reason.
+  assert.ok(row(4).includes('<span class="code">token-expired</span>') && row(4).includes(">ok</span>") && row(4).includes(`<span class="au-why">${unknownNote("the action token-expired")}</span>`), row(4));
+  // An unknown outcome: the attention badge with the word as written, and the note after the row's own reason text.
+  const attention = (word) => `<span class="badge tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"></use></svg>${word}</span>`;
+  assert.ok(row(5).includes(attention("deferred")) && row(5).includes(unknownNote("the outcome deferred")), row(5));
+  // An unknown outcome that happens to name a state is never drawn as that state's badge; both words, joined by "and".
+  assert.ok(row(6).includes(attention("damaged")) && !row(6).includes("tone-failed") && row(6).includes(unknownNote("the action token-expired and the outcome damaged")), row(6));
+  assert.ok(!row(7).includes("Not known to this console") && !row(3).includes("Not known to this console"), "a known row has no note");
+  assert.ok(!p.log.includes("newer console"), "no row is said to be a newer console's: the check knows only that it is shaped and linked");
+  assert.ok(p.about.includes("<dt>Not known to this console</dt><dd>3 rows (a newer release writes such rows)</dd>"), p.about);
+  const one = appendLinked(auditLogDir(3), [{ outcome: "deferred" }]);
+  const oneAbout = auditPanels(await readAuditView({ read: one.read, verify: one.verify, query: parseAuditQuery("").query })).about;
+  assert.ok(oneAbout.includes("<dt>Not known to this console</dt><dd>1 row (a newer release writes such rows)</dd>"), oneAbout);
+  // A chain of known rows says nothing of it; and a filter stays this console's lists, so such a row is found under who.
+  assert.ok(!auditPanels(await readAuditView({ read: auditLogDir(3).read, verify: auditLogDir(3).verify, query: parseAuditQuery("").query })).about.includes("Not known"));
+  assert.match(parseAuditQuery("action=token-expired").refusal, /^action must be one of /);
+  assert.ok(!p.filter.includes("token-expired"), "the action list is the console's own");
+  const who = parseAuditQuery("who=ops").query;
+  assert.ok(auditPanels(await readAuditView({ read: log.read, verify: log.verify, query: who }), who).log.includes('<tr id="seq-4">'), "found by who");
+});
+
+test("the audit panels: a shaped word this console does not know on a row the chain does not vouch for gets no note, and the broken chain counts none", async () => {
+  // Row 3's action edited to a shaped word nobody lists, the rows after it left alone: line 4's prev no longer matches,
+  // so line 4 is damaged, row 3 is the suspect before it, and rows 5 and 6 (row 5 with a shaped outcome of its own) are
+  // not verified. The check vouches for none of what those rows say, so neither the rows nor About name the words.
+  const log = auditLogDir(6);
+  log.write(log.lines().map((l, i) => (i === 2 ? l.replace('"action":"login"', '"action":"token-wiped"') : i === 4 ? l.replace('"outcome":"ok"', '"outcome":"deferred"') : l)));
+  const verified = log.verify();
+  assert.equal(Object.hasOwn(verified, "unknown"), false, "no count on a broken result");
+  const v = await readAuditView({ read: log.read, verify: async () => ({ ...log.verify(), checkedAt: NOW }), query: parseAuditQuery("").query });
+  assert.deepEqual(v.rows.map(label), ["6:unverified", "5:unverified", "4:damaged", "3:suspect", "2:ok", "1:ok"]);
+  assert.equal(v.chain.unknown, 0);
+  const p = auditPanels(v);
+  const row = (seq) => new RegExp(`<tr id="seq-${seq}">.*?</tr>`).exec(p.log)?.[0] ?? "";
+  assert.ok(row(3).includes("Not verified: the link to the row after it does not hold. Written as ok.") && row(5).includes("Not verified: it follows the damaged row. Written as deferred."), p.log);
+  assert.ok(!p.log.includes("Not known to this console") && !p.log.includes("newer") && !p.about.includes("Not known"), p.log);
+});
+
+test("the audit panels: a word not of the console's shape on a row the chain does not vouch for gets no note", async () => {
+  // Line 3 has a malformed outcome (the chain breaks there); the row after it is not verified, and its own malformed
+  // action is not a word of the console's shape either.
+  const log = auditLogDir(4);
+  log.write(log.lines().map((l, i) => (i === 2 ? l.replace('"outcome":"ok"', '"outcome":"OK NOW"') : i === 3 ? l.replace('"action":"login"', '"action":"Log In"') : l)));
+  const v = await readAuditView({ read: log.read, verify: log.verify, query: parseAuditQuery("").query });
+  assert.deepEqual(v.rows.map(label), ["4:unverified", "3:damaged", "2:ok", "1:ok"]);
+  const p = auditPanels(v);
+  assert.ok(p.chain.includes("the row&#39;s action or outcome is not of the shape the console writes"), p.chain);
+  assert.ok(!p.log.includes("Not known to this console") && !p.about.includes("Not known"), p.log);
 });

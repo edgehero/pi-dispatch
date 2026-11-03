@@ -94,3 +94,27 @@ test("readCapacity with the insights page's span: its start and bucket, the same
   assert.deepEqual(sevenDays.report.hosts.map((h) => [h.name, h.busyMs, h.peak, h.waits]), named.report.hosts.map((h) => [h.name, h.busyMs, h.peak, h.waits]), "the bucket changes the chart, never the numbers");
   assert.match((await readCapacity({ url: "not a url", env, now: () => NOW, span: { sinceMs: (n) => n, bucketMs: H } })).error, /must start before now/);
 });
+
+test("readCapacity reads the mirror at the deployment's PI_RUN_MIRROR_MAX_RUNS: an index a raised cap let grow is not read as cut short (issue #761)", async () => {
+  const { env, records, rows } = fixture();
+  // The index claims 6,000 members, past the built-in 5,000 and inside a raised 10,000, with its start trusted 30 days
+  // back, so only the cap decides whether its oldest member reads as where a trim cut the history.
+  const grown = () => {
+    const valkey = fakeValkey(records, rows);
+    const snapshot = valkey.eval;
+    valkey.eval = async (...args) => {
+      const snap = await snapshot(...args);
+      return [6000, ...snap.slice(1)];
+    };
+    return valkey;
+  };
+  const builtIn = await readCapacity({ url: "redis://127.0.0.1:6399", env, window: "24h", now: () => NOW, redisFn: grown });
+  assert.equal(builtIn.report.coverage.truncated, true, "at the built-in cap, an index this full may have been trimmed");
+  assert.equal((await readCapacity({ url: "redis://127.0.0.1:6399", env: { ...env, PI_RUN_MIRROR_MAX_RUNS: "" }, window: "24h", now: () => NOW, redisFn: grown })).report.coverage.truncated, true, "empty is the built-in cap");
+  // A value the worker refuses to start on is refused here too, naming the key, as a bad retention is: never read at a
+  // cap no worker trims to.
+  assert.match((await readCapacity({ url: "redis://127.0.0.1:6399", env: { ...env, PI_RUN_MIRROR_MAX_RUNS: "abc" }, window: "24h", now: () => NOW, redisFn: grown })).error, /PI_RUN_MIRROR_MAX_RUNS must be an integer 1000-20000/);
+  const raised = await readCapacity({ url: "redis://127.0.0.1:6399", env: { ...env, PI_RUN_MIRROR_MAX_RUNS: "10000" }, window: "24h", now: () => NOW, redisFn: grown });
+  assert.equal(raised.report.coverage.truncated, false, "under a raised cap it was not, so the window is read whole");
+  assert.equal(raised.report.window.fromMs, NOW - 24 * H);
+});

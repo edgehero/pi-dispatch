@@ -13,6 +13,7 @@ import { DEFAULT_BACKEND, OPENSHELL_BACKENDS, OPENSHELL_BIND_BACKEND, backendRef
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
+import { RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RUNS_MIN } from "./retention.mjs";
 import { DOCTOR_INTERVAL_HOURS, DOCTOR_INTERVAL_MAX_HOURS } from "./doctor-spawner.mjs";
 import { parseSecretBundleProfiles, parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
@@ -489,6 +490,8 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 	// called twice a few properties down for the same reason -- so this is about the index, not the throw.)
 	const backends = backendSet(env);
 	const backendFloor = backendFloorOf(env);
+	// Issue #761: hoisted for the same reason, `consoleAuditRetentionDays` inherits it when its own key is unset.
+	const logRetentionDays = nonNegativeInt(env, "PI_LOG_RETENTION_DAYS", 30); // 0 = keep forever
 	const config = {
 		valkeyUrl: env.VALKEY_URL ?? DEFAULT_VALKEY_URL,
 		// Issue #57. What this machine calls itself: the key of its registry row, the `host` on every log
@@ -570,7 +573,19 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		captureJobLogs: env.PI_CAPTURE_JOB_LOGS === "1", // no-pii-in-logs: raw job-log capture is opt-in; anything but "1" is off
 		liveTranscripts: liveTranscriptsEnabled(env), // issue #643: the live transcript stream, ON unless PI_LIVE_TRANSCRIPTS=0
 		runProgress: runProgressEnabled(env), // issue #644: run progress (key, record field, status comment), ON unless PI_RUN_PROGRESS=0
-		logRetentionDays: nonNegativeInt(env, "PI_LOG_RETENTION_DAYS", 30), // 0 = keep forever
+		logRetentionDays,
+		// Issue #761: the console audit trail's own retention (`console-audit/` month files), so that shortening the run
+		// history for privacy does not shorten the security trail with it. Unset or empty INHERITS `logRetentionDays`,
+		// 0 included (keep forever), which is exactly what every release before this one did; "0" keeps forever; any other
+		// non-negative integer is days; anything else refuses to boot naming the key. The worker reads it because the worker
+		// runs the sweep (start.mjs `makeConsoleAuditReaper`); the console never reaps. Not a `PI_CONSOLE_*` key the console
+		// reads (doctor's `CONSOLE_ENV_KEYS`): setting only this one must not make doctor think a console exists here.
+		consoleAuditRetentionDays: nonNegativeInt(env, "PI_CONSOLE_AUDIT_RETENTION_DAYS", logRetentionDays),
+		// Issue #761: how many runs the shared run index (`runs:index`) keeps. Every writer trims the shared index to its
+		// OWN cap, so in a fleet the lowest setting wins, and each trim raises the fleet's horizon (`runs:horizon`) so a
+		// reader sees the cut rather than idle time. Bounded both ways (retention.mjs says why): a value out of bounds, or
+		// not a plain integer, refuses to boot naming the key; unset or empty is the default.
+		runMirrorMaxRuns: boundedInt(env, "PI_RUN_MIRROR_MAX_RUNS", RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MIN, `an integer ${RUN_MIRROR_MAX_RUNS_MIN}-${RUN_MIRROR_MAX_RUNS_MAX}`, RUN_MIRROR_MAX_RUNS_MAX),
 		// issue #292, OQ-007: how often the three host-side retention sweeps re-run while the worker is up.
 		// 0 = BOOT-ONLY, which is byte-identical to every version before this one -- start.mjs does not even
 		// CONSTRUCT the sweep at 0, so no timer, no closer and no second invocation of any reaper is reachable.

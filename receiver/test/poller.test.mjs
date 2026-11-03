@@ -5,7 +5,8 @@ import { filter } from "../src/filter.mjs";
 import { parseSubset } from "../src/receiver.mjs";
 import { loadReceiverConfig } from "../src/config.mjs";
 import { loadPollerConfig } from "../src/poller-config.mjs";
-import { cancellableSleep, startPoller as startPollerReal } from "../src/poller.mjs";
+import { CURSOR_TTL_SECONDS, cancellableSleep, startPoller as startPollerReal } from "../src/poller.mjs";
+import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
 
 // Issue #464 (gate round 3): never this host's Valkey. Every start here is judged as answering, unless a test judges it.
 const startPoller = (env, deps = {}) => startPollerReal(env, { judgeValkey: async () => {}, ...deps });
@@ -464,6 +465,13 @@ test("cursor keys carry the ~35-day TTL (outliving the 31-day gh-* jobId retenti
 	for (const key of ["poll:o/r:cursor:events", "poll:o/r:cursor:comments", "poll:o/r:cursor:prs", "poll:o/r:prs"]) {
 		assert.equal(redis.ttls.get(key), ttl, `${key} must expire with the rest of its family`);
 	}
+});
+
+test("the cursor TTL is derived from the gh-* job retention and strictly outlives it, in seconds (#761)", () => {
+	// Derived AND pinned: the literal 35 days above still holds, and a change to the retention moves the cursor with it.
+	assert.ok(CURSOR_TTL_SECONDS > FORGE_JOB_RETENTION_S, "the cursor must outlive the job id it backs up");
+	assert.equal(CURSOR_TTL_SECONDS, FORGE_JOB_RETENTION_S + 4 * 86_400);
+	assert.equal(CURSOR_TTL_SECONDS, 35 * 24 * 3600);
 });
 
 // ---------------------------------------------------------------------------------------------------

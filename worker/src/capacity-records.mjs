@@ -23,8 +23,9 @@
  *     written before that key, recreated by a worker that does not know it, or whose key was lost, vouches for nothing
  *     older), the deepest window any writer keeps
  *     (`mirrorWindowMs(0)`), the fleet horizon (`runs:horizon`, raised by every writer whose trim removed runs, by its
- *     OWN retention or the count cap, so a peer with a short retention cuts everyone's history and says so), the oldest
- *     run at the `RUNS_INDEX_MAX` cap when that run ended after the window began, and the newest run whose body has
+ *     OWN retention or its own count cap, so a peer with a short retention cuts everyone's history and says so), the oldest
+ *     run when the index is at the cap (`indexMax`, the deployment's `PI_RUN_MIRROR_MAX_RUNS`; see `readMirrorWindow`)
+ *     and that run ended after the window began, and the newest run whose body has
  *     expired while its index member stayed (its writer has not trimmed since). Any of these past the window's start
  *     makes it `truncated`. The start is the one bound that survives losing the mirror's keys: a flushed or replaced
  *     Valkey, or an index that expired, loses the horizon with the runs, and the next write recreates an index whose
@@ -52,7 +53,10 @@ import { READ_SCRIPT, RUNS_HORIZON, RUNS_HORIZON_MEMBER, RUNS_INDEX, RUNS_INDEX_
 import { recordReadable } from "./run-history.mjs";
 import { SIZING_RECORD_MAX_BYTES } from "./size-records.mjs";
 
-/** How many record bodies one MGET asks for: a full mirror is ten round trips, never one 5,000-key command. */
+/**
+ * How many record bodies one MGET asks for: a full mirror at the default cap of 5,000 runs is ten round trips, never one
+ * 5,000-key command, and at the 20,000 ceiling (`RUN_MIRROR_MAX_RUNS_MAX`) forty.
+ */
 export const CAPACITY_MGET_CHUNK = 500;
 /** How long one Valkey call may take before the mirror is read as unreachable. */
 export const CAPACITY_OP_TIMEOUT_MS = 2_000;
@@ -84,8 +88,17 @@ function bounded(promise, ms) {
  * records from a newer pi-dispatch were left out, and `newerIds`, their job ids, only when there were any. A newer
  * record with no job id is not counted: `mergeRuns` keeps no record without one, so it is none the report would read.
  * Never throws.
+ *
+ * `indexMax` is the deployment's run index cap (`PI_RUN_MIRROR_MAX_RUNS`, issue #761; the built-in 5,000 when not
+ * given). An index at or over it may have been cut by count, so its history starts no earlier than its oldest run. The
+ * cap the reader is told, not the built-in one: an index of a raised cap that holds 6,000 runs was never trimmed, and
+ * reading it against 5,000 marked a whole history as cut. A count trim since issue #599 also raises the horizon, which
+ * says the same; this clause is for a writer from before that, which trimmed at the built-in 5,000 and recorded no
+ * horizon. A reader told a cap above that writer's misses its cut (a fleet that still runs such a worker caps the
+ * index at 5,000 anyway); one told a lower cap than the fleet's reads its history as starting at the oldest run, which
+ * errs toward missing history, never toward idle time.
  */
-export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPACITY_OP_TIMEOUT_MS, chunk = CAPACITY_MGET_CHUNK } = {}) {
+export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPACITY_OP_TIMEOUT_MS, chunk = CAPACITY_MGET_CHUNK, indexMax = RUNS_INDEX_MAX } = {}) {
 	const none = (state) => ({ records: [], state, fromMs: null, truncated: false, skipped: 0 });
 	if (!redis) return none("off");
 	try {
@@ -137,7 +150,7 @@ export async function readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs = CAPA
 		if (Number.isFinite(startMs)) fromMs = Math.max(fromMs, startMs);
 		else if (Number.isFinite(oldestMs)) fromMs = Math.max(fromMs, oldestMs);
 		if (Number.isFinite(horizonMs)) fromMs = Math.max(fromMs, horizonMs);
-		if (size >= RUNS_INDEX_MAX && Number.isFinite(oldestMs)) fromMs = Math.max(fromMs, oldestMs);
+		if (size >= indexMax && Number.isFinite(oldestMs)) fromMs = Math.max(fromMs, oldestMs);
 		if (Number.isFinite(expiredMs)) fromMs = Math.max(fromMs, expiredMs);
 		fromMs = Math.min(fromMs, nowMs);
 		return { records, state: "ok", fromMs, truncated: fromMs > sinceMs, skipped, ...newerOf(newerIds) };
@@ -201,10 +214,11 @@ export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFile
  * `coverage` being `{ source, reason, localHost, localHosts, local: { fromMs } | null, mirror: { fromMs, truncated,
  * hosts } | null, skipped }` as `computeCapacity` reads it, plus `newerSkipped` when records from a newer pi-dispatch
  * were left out (the reason then names how many). `redis` may be null (no Valkey to ask); `noMirrorReason` then
- * says why, in place of "no run mirror". `localHost` is this host's name. Never throws.
+ * says why, in place of "no run mirror". `localHost` is this host's name. `indexMax` is the deployment's run index cap
+ * (`readMirrorWindow`; capacity-cli.mjs `deploymentFacts` reads it). Never throws.
  */
-export async function readCapacityRecords({ redis = null, logsDir, sinceMs, nowMs, fs, retentionDays = 0, localHost = null, noMirrorReason = null, timeoutMs = CAPACITY_OP_TIMEOUT_MS, chunk = CAPACITY_MGET_CHUNK } = {}) {
-	const mirror = await readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs, chunk });
+export async function readCapacityRecords({ redis = null, logsDir, sinceMs, nowMs, fs, retentionDays = 0, localHost = null, noMirrorReason = null, timeoutMs = CAPACITY_OP_TIMEOUT_MS, chunk = CAPACITY_MGET_CHUNK, indexMax = RUNS_INDEX_MAX } = {}) {
+	const mirror = await readMirrorWindow(redis, { sinceMs, nowMs, timeoutMs, chunk, indexMax });
 	const local = readLocalWindow(logsDir, { sinceMs, ...(fs ? { fs } : {}) });
 	const mirrored = mirror.state === "ok";
 	const days = Number(retentionDays);

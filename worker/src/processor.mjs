@@ -37,6 +37,7 @@ import { callableModelRefs, zeroRatedFor } from "./reserve-estimate.mjs";
 import { outputCapView } from "./output-cap.mjs";
 import { answerTrailComment, consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
 import { forgeDeliveryJobId } from "./job-id.mjs";
+import { FORGE_JOB_RETENTION_MS } from "./retention.mjs";
 // The forge-comment tables (issue #710): every fixed sentence this file posts, in one leaf the reason catalog can import
 // without the job path. Re-exported below under the names they always had here.
 import { MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS, APPROVAL_PARK_NEWER_COMMENT, BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
@@ -183,8 +184,11 @@ function modelPrefixesOf(modelDollars) {
 	return new Set((modelDollars ?? []).map((m) => m.keyPrefix));
 }
 
-/** How long a console answer's trail claim lives: a forge job's retained data (31 days), the longest the same id can return. */
-export const CONSOLE_TRAIL_CLAIM_MS = 31 * 24 * 60 * 60 * 1000;
+/**
+ * How long a console answer's trail claim lives: a forge job's retained data (`FORGE_JOB_RETENTION_MS`, retention.mjs),
+ * the longest the same id can return. Derived, so a change to the retention moves the claim with it.
+ */
+export const CONSOLE_TRAIL_CLAIM_MS = FORGE_JOB_RETENTION_MS;
 
 /**
  * Claim the one trail comment of a console answer (issue #642): true when this attempt set `console:trail:<jobId>` and
@@ -1480,6 +1484,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 					log("recovery_superseded", { n });
 					return { outcome: "policy", reason: RECOVERY_SUPERSEDED, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 				}
+				// A store a newer pi-dispatch wrote is one this build cannot judge either way: waited on like the read below.
+				if (still?.newer === true) throw new NewerReleaseHold("the run's checkpoint");
 				log("recovery_pointer_unread", { n });
 				throw new InfraRetry("the run's checkpoint pointer is missing while its checkpoint is still there", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
 			}
@@ -1512,6 +1518,13 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// may hold tool-call arguments the current schema refuses (the run.resume rule), and a checkpoint from another
 			// venue was quiesced under another runtime's pause.
 			const read = await workspaceCheckpointer.readManifest(runId);
+			// Issue #761: a checkpoint a newer pi-dispatch wrote is not an absent one. Refused here, the run's final outcome
+			// would remove its store and its pointer (`endDurableRun`) and a host upgraded again could never continue it; so
+			// the recovery WAITS (`newer-release`, index.mjs) for a worker that reads the checkpoint, without spending its one
+			// attempt (the never-started conversion in `runJobInner` takes only `container-never-started`, which this is
+			// not), with no comment and no record, and with the store, the pointer and the job directory left in place. What
+			// bounds the wait is the host-lost sweep's hard maximum (recovery-queue.mjs, `RECOVERY_MAX_WAIT_MS`).
+			if (read?.newer === true) throw new NewerReleaseHold("the run's checkpoint");
 			const m = read?.ok === true ? read.manifest : null;
 			const venue = resolveBackendName(job, blessedBackends[0]);
 			const why = m === null ? (read?.absent ? "absent" : "invalid") : typeof hostName === "string" && hostName !== "" && m.host !== normalizeHost(hostName) ? "host" : piVersion === null || m.piVersion !== piVersion ? "pi-version" : m.venue !== venue ? "venue" : (m.provider !== job.provider || m.model !== job.model) ? "model" : null;
@@ -2341,10 +2354,10 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		//
 		// ONCE PER JOB, not once per attempt: a forge job has `attempts: 2`, so an InfraRetry after this point re-runs every
 		// gate and would reach here again, and a console retry of a failed answer job is the same job id again. The claim
-		// is `SET console:trail:<jobId> 1 NX PX <31 days>` (the retention of a forge job's data, so the claim outlives every
-		// way the same id can come back), and only the attempt that set it posts. On a Valkey error the trail is SKIPPED
-		// and logged, never posted blind: at most once is the promise, because a duplicate trail reads on the forge as a
-		// second answer, while a missing one leaves the answer in the job and the audit log. Never throws: the trail is
+		// is `SET console:trail:<jobId> 1 NX PX CONSOLE_TRAIL_CLAIM_MS` (the retention of a forge job's data, so the claim
+		// outlives every way the same id can come back), and only the attempt that set it posts. On a Valkey error the trail
+		// is SKIPPED and logged, never posted blind: at most once is the promise, because a duplicate trail reads on the forge
+		// as a second answer, while a missing one leaves the answer in the job and the audit log. Never throws: the trail is
 		// provenance, and a failed claim is no reason to refuse a job every gate has admitted.
 		if (job.parkedReply === true && job.console !== undefined) {
 			const by = consoleAnswerBy(job.console);

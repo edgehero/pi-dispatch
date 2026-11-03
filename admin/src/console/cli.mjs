@@ -31,6 +31,7 @@ import { consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
 import { makeLoginLimiter } from "./guards.mjs";
 import { listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
+import { keptTokenLinkRefusal } from "./login-codes.mjs";
 import { makeAnswererService } from "../answerer-data.mjs";
 import { readAgentWritesToday } from "../agent-write-count.mjs";
 import { readSandboxGateways } from "../sandbox-gateways.mjs";
@@ -391,8 +392,12 @@ async function run(argv, io) {
     case "token list": {
       const read = m.tokens.readTokensFile({ path: config.tokensPath, fs, uid });
       if (read.refusal) throw new Refusal(read.refusal);
-      if (read.file.tokens.length === 0) io.out(`no tokens in ${config.tokensPath}; add one with pi-dispatch-console token add --name <name> --role operator`);
+      // Issue #761: an entry a newer release wrote for a role this one does not know is kept in the file and listed, so
+      // it can be revoked, and said to sign in nowhere here.
+      const kept = m.tokens.keptTokens(read.file);
+      if (read.file.tokens.length === 0 && kept.length === 0) io.out(`no tokens in ${config.tokensPath}; add one with pi-dispatch-console token add --name <name> --role operator`);
       for (const t of read.file.tokens) io.out(`${t.name}\t${t.role}\t${t.createdAt}`);
+      for (const t of kept) io.out(`${t.name}\t${t.role} (not known to this pi-dispatch-console: signs in nowhere here)\t${t.createdAt}`);
       return 0;
     }
     case "sessions end-all": {
@@ -407,7 +412,12 @@ async function run(argv, io) {
       const port = values.port === undefined ? null : linkPortOf(values.port);
       const read = m.tokens.readTokensFile({ path: config.tokensPath, fs, uid });
       if (read.refusal) throw new Refusal(read.refusal);
-      if (!read.file.tokens.some((t) => t.name === name)) throw new Refusal(`there is no token named "${name}"; see pi-dispatch-console token list`);
+      if (!read.file.tokens.some((t) => t.name === name)) {
+        // A code only for an entry this console signs in (issue #761): a kept entry's code would be refused at sign-in.
+        const kept = m.tokens.keptTokens(read.file).find((t) => t.name === name);
+        if (kept) throw new Refusal(keptTokenLinkRefusal(kept));
+        throw new Refusal(`there is no token named "${name}"; see pi-dispatch-console token list`);
+      }
       // Bootstrap composes this command, so its audit intent must exist before a code file can be created.
       const row = { actor: SHELL, action: "login-code", target: name, ticket: (random ?? randomBytes)(6).toString("hex") };
       try { audit.append({ ...row, outcome: "ok" }); }
@@ -434,7 +444,12 @@ async function run(argv, io) {
       const res = m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs, withLast: true });
       if (res.ok) {
         const from = res.startsAt ? ` (starts at ${res.startsAt.file} row ${res.startsAt.seq}: older files were removed by retention)` : "";
-        io.out(`the console audit log holds ${res.rows} rows and its chain is intact${from}`);
+        // Issue #761: a row with a shaped action or outcome this console does not know links like any other; such rows
+        // are counted, and the chain is still intact. The sentence claims only what the check knows: the word is unknown
+        // here and shaped, which is what a newer release writes.
+        const n = res.unknown;
+        const newer = n > 0 ? `, and ${n} of them ${n === 1 ? "names" : "name"} an action or outcome this pi-dispatch-console does not know (a newer release writes such rows)` : "";
+        io.out(`the console audit log holds ${res.rows} rows and its chain is intact${from}${newer}`);
         return 0;
       }
       const { broken, last, suspect } = res;
@@ -698,6 +713,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       log,
       readTokens,
       findToken: m.tokens.findToken,
+      keptTokens: m.tokens.keptTokens,
       consumeLoginCode: (code) => m.loginCodes.consumeLoginCode({ dir: codesDir, code, fs, now }),
       writePauseWindows: m.readModel.writePauseWindows,
       // What the action table writes with (issue #642, `actions.mjs`): the read model's funnels and the pi-free planners

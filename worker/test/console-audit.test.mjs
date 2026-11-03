@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { join } from "node:path";
-import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_FIELD_MAX, CONSOLE_AUDIT_KEY, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, makeConsoleAudit, makeConsoleAuditReaper, mirrorRow, readConsoleAudit, verifyConsoleAudit } from "../src/console-audit.mjs";
+import { CONSOLE_AUDIT_ACTION_RE, CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_FIELD_MAX, CONSOLE_AUDIT_KEY, CONSOLE_AUDIT_OUTCOME_RE, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_READ_MAX, makeConsoleAudit, makeConsoleAuditReaper, mirrorRow, readConsoleAudit, verifyConsoleAudit } from "../src/console-audit.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // The console's audit log (issue #640, INT-CONSOLE-AUDIT-LOG). Every test drives an injected clock: rows land in the
@@ -52,6 +52,49 @@ test("verification refuses a fabricated peer even on the last row, where no late
 	fs.writeFileSync(join(f.dir, "2026-10.jsonl"), JSON.stringify(value) + "\n");
 	const verdict = verifyConsoleAudit({ logsDir: f.logsDir });
 	assert.equal(verdict.ok, false); assert.match(verdict.broken.reason, /watch driver/);
+});
+
+test("every action and outcome the console writes has the shape an older verifier links (issue #761)", () => {
+	// The shape is the promise a verifier of an older release relies on: a value a later release adds outside it would
+	// make that verifier call an intact chain broken, so a list member outside it fails here, in the build that adds it.
+	for (const action of CONSOLE_AUDIT_ACTIONS) assert.match(action, CONSOLE_AUDIT_ACTION_RE, action);
+	for (const outcome of CONSOLE_AUDIT_OUTCOMES) assert.match(outcome, CONSOLE_AUDIT_OUTCOME_RE, outcome);
+	assert.equal(String(CONSOLE_AUDIT_ACTION_RE), String(/^[a-z][a-z0-9-]{0,39}$/));
+	assert.equal(String(CONSOLE_AUDIT_OUTCOME_RE), String(/^[a-z][a-z0-9-]{0,39}$/));
+});
+
+test("INT-CONSOLE-AUDIT-LOG lists exactly the actions, outcomes and actor roles the console writes (issue #761)", async () => {
+	// The contract's three lists are hand-written copies of what the code writes, so they are held to it here (AGENTS.md,
+	// "Rules that bite"): `write-applied` was written for a release while the contract still listed eleven actions. Each
+	// list is read between its own fixed words, so a name in backticks elsewhere in its bullet is never taken for a member.
+	const text = fs.readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const from = text.indexOf("\n## INT-CONSOLE-AUDIT-LOG\n");
+	assert.ok(from >= 0, "specs/interfaces.md has an INT-CONSOLE-AUDIT-LOG section");
+	const end = text.indexOf("\n## ", from + 1);
+	const section = text.slice(from, end < 0 ? undefined : end).replace(/\s*\n\s*/g, " ");
+	const between = (start, stop) => {
+		const a = section.indexOf(start);
+		assert.ok(a >= 0, `the section says ${JSON.stringify(start)}`);
+		const b = section.indexOf(stop, a + start.length);
+		assert.ok(b >= 0, `and ${JSON.stringify(stop)} after it`);
+		return [...section.slice(a + start.length, b).matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+	};
+	assert.deepEqual(between("`action`: the writer writes exactly one of", "(`CONSOLE_AUDIT_ACTIONS`)"), [...CONSOLE_AUDIT_ACTIONS]);
+	assert.deepEqual(between("`outcome`: the writer writes exactly one of", "(`CONSOLE_AUDIT_OUTCOMES`)"), [...CONSOLE_AUDIT_OUTCOMES]);
+	// The roles: a session's is its token's (`TOKEN_ROLES`); the panel's and the extension's tools' are their actor
+	// functions'; the CLI's and a request's without a session are constants in the console's source, read from it here so
+	// that one renamed fails rather than leaving the contract naming a role nothing writes.
+	const { TOKEN_ROLES } = await import("../src/console-tokens.mjs");
+	const { panelActor, agentActor } = await import("../../admin/src/audited-write.mjs");
+	const constantRole = (file, name) => {
+		const source = fs.readFileSync(new URL(`../../admin/src/console/${file}`, import.meta.url), "utf8");
+		const found = [...source.matchAll(new RegExp(`^const ${name} = Object\\.freeze\\(\\{ name: "[a-z]+", role: "([a-z]+)", session: null \\}\\);$`, "gm"))];
+		assert.equal(found.length, 1, `admin/src/console/${file} declares ${name} once, in the shape this test reads`);
+		return found[0][1];
+	};
+	const user = () => ({ username: "rob" });
+	const written = new Set([...TOKEN_ROLES, panelActor(user).role, agentActor(user).role, constantRole("cli.mjs", "SHELL"), constantRole("server.mjs", "ANONYMOUS")]);
+	assert.deepEqual(between("The roles written are", ":").sort(), [...written].sort());
 });
 
 test("append stamps at, seq and prev (sha256 of the previous raw line), into a 0700 dir and a 0600 month file", () => {
@@ -328,7 +371,7 @@ test("a takeover removes the dead lock only while it still holds the text judged
 	assert.equal(removed.includes(fresh), false, "the other writer's fresh lock was never unlinked by this one");
 });
 
-test("verify names a seq that does not rise by one, and an action or outcome the console never writes", () => {
+test("verify names a seq that does not rise by one, and an action or outcome not of the shape the console writes", () => {
 	const skipped = chain(3);
 	// Re-link row 3 to row 2 so only its seq is wrong: prev still matches.
 	skipped.rewrite((ls) => [ls[0], ls[1], JSON.stringify({ ...JSON.parse(ls[2]), seq: 5 })]);
@@ -336,12 +379,19 @@ test("verify names a seq that does not rise by one, and an action or outcome the
 	assert.equal(s.ok, false);
 	assert.deepEqual({ line: s.broken.line, reason: s.broken.reason }, { line: 3, reason: "seq 5 follows seq 2" });
 
-	for (const change of [{ action: "delete-everything" }, { outcome: "maybe" }]) {
+	for (const change of [{ action: "Delete-Everything" }, { outcome: "may be" }]) {
 		const odd = chain(2);
 		odd.rewrite((ls) => [ls[0], JSON.stringify({ ...JSON.parse(ls[1]), ...change })]);
 		const v = verifyConsoleAudit({ logsDir: odd.logsDir });
 		assert.equal(v.ok, false, JSON.stringify(change));
-		assert.deepEqual({ line: v.broken.line, reason: v.broken.reason }, { line: 2, reason: "the row's action or outcome is not one the console writes" });
+		assert.deepEqual({ line: v.broken.line, reason: v.broken.reason }, { line: 2, reason: "the row's action or outcome is not of the shape the console writes" });
+	}
+	// A shaped word the console does not write is linked, as a newer console writes it (issue #761, below): the last row
+	// has no successor whose link it could break, so it verifies.
+	for (const change of [{ action: "delete-everything" }, { outcome: "maybe" }]) {
+		const newer = chain(2);
+		newer.rewrite((ls) => [ls[0], JSON.stringify({ ...JSON.parse(ls[1]), ...change })]);
+		assert.deepEqual(verifyConsoleAudit({ logsDir: newer.logsDir }), { ok: true, rows: 2, startsAt: null, unknown: 1 }, JSON.stringify(change));
 	}
 });
 
@@ -723,7 +773,9 @@ test("verifyConsoleAudit with withLast: a row is vouched for only by a next line
 	const edited = (ls) => ls.map((l, i) => (i === 3 ? l.replace('"outcome":"ok"', '"outcome":"refused"') : l));
 	const cases = {
 		"a garbled line": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4].slice(0, 20)], reason: "the line is not a JSON row (damaged, or written by something else)" },
-		"an unknown action": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4].replace('"action":"login"', '"action":"zz"')], reason: "the row's action or outcome is not one the console writes" },
+		"a malformed action": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4].replace('"action":"login"', '"action":"Z Z"')], reason: "the row's action or outcome is not of the shape the console writes" },
+		// A shaped action this build does not know passes its own check (issue #761), so what names the line is its link.
+		"an unknown action": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4].replace('"action":"login"', '"action":"zz"')], reason: "prev does not match the row before it (seq 4): a row was changed, removed or moved" },
 		"a prev that is not a hash": { edit: (ls) => [...edited(ls).slice(0, 4), JSON.stringify({ ...JSON.parse(ls[4]), prev: "x" })], reason: "the row has no valid seq and prev" },
 		"a prev that does not match": { edit: (ls) => [...edited(ls).slice(0, 4), ls[4]], reason: "prev does not match the row before it (seq 4): a row was changed, removed or moved" },
 		// The fields check comes after the prev is judged too: a line whose kind, reserve or count the console never writes
@@ -745,10 +797,10 @@ test("verifyConsoleAudit with withLast: a row is vouched for only by a next line
 	const c = verifyConsoleAudit({ logsDir: cut.logsDir, withLast: true });
 	assert.deepEqual([c.broken.line, c.last, c.suspect], [5, { file: "2026-10.jsonl", line: 3, seq: 3 }, { file: "2026-10.jsonl", line: 4, seq: 4 }]);
 	// A line whose prev DOES match the row before it vouches for that row, and is damaged alone whatever else it gets
-	// wrong: an action the console never writes, a seq that is not a number, a seq that does not follow, a kind, reserve
-	// or count the console never writes.
+	// wrong: an action not of the shape the console writes, a seq that is not a number, a seq that does not follow, a
+	// kind, reserve or count the console never writes.
 	const alone = {
-		"an unknown action": (l) => l.replace('"action":"login"', '"action":"zz"'),
+		"a malformed action": (l) => l.replace('"action":"login"', '"action":"Z Z"'),
 		"a seq that is not a number": (l) => JSON.stringify({ ...JSON.parse(l), seq: "five" }),
 		"a seq that does not follow": (l) => JSON.stringify({ ...JSON.parse(l), seq: 9 }),
 		"a kind the console never writes": (l) => JSON.stringify({ ...JSON.parse(l), kind: "BAD KIND" }),
@@ -761,4 +813,76 @@ test("verifyConsoleAudit with withLast: a row is vouched for only by a next line
 		const v = verifyConsoleAudit({ logsDir: d.logsDir, withLast: true });
 		assert.deepEqual([v.broken.line, v.last, v.suspect], [5, { file: "2026-10.jsonl", line: 4, seq: 4 }, null], what);
 	}
+});
+
+// Issue #761: a chain a newer console wrote into. The writer stays closed; the verifier links a row whose action and
+// outcome have the console's shape, counts the ones it does not know, and still refuses a malformed one.
+
+/** Rows linked as the writer links them (seq from 1, prev the sha256 of the line before), whatever action they hold. */
+function linkedChain(rows) {
+	const logsDir = tempDir("pd-console-audit-newer-");
+	const dir = join(logsDir, "console-audit");
+	fs.mkdirSync(dir, { recursive: true });
+	const lines = [];
+	let prev = null;
+	rows.forEach((extra, i) => {
+		const line = JSON.stringify({ at: new Date(T0 + i * 1000).toISOString(), seq: i + 1, prev, actor, action: "login", target: `t${i}`, outcome: "ok", ...extra });
+		lines.push(line);
+		prev = sha(line);
+	});
+	const file = join(dir, "2026-10.jsonl");
+	fs.writeFileSync(file, `${lines.join("\n")}\n`);
+	return { logsDir, file, lines };
+}
+
+test("verify links rows whose action or outcome a newer console wrote, and counts them as unknown", () => {
+	const c = linkedChain([{}, { action: "token-expired" }, {}, { outcome: "deferred" }, {}]);
+	assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir }), { ok: true, rows: 5, startsAt: null, unknown: 2 });
+	assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir, withLast: true }), { ok: true, rows: 5, startsAt: null, unknown: 2, last: { file: "2026-10.jsonl", line: 5, seq: 5 }, suspect: null, files: [{ file: "2026-10.jsonl", seq: 1, rows: 5 }] });
+	// Both words unknown on one row is one row.
+	assert.equal(verifyConsoleAudit({ logsDir: linkedChain([{}, { action: "token-expired", outcome: "deferred" }]).logsDir }).unknown, 1);
+	// The longest shaped word, and the writer's own words, still verify; a chain of known rows has no `unknown` at all.
+	assert.equal(verifyConsoleAudit({ logsDir: linkedChain([{ action: `a${"-".repeat(39)}` }]).logsDir }).unknown, 1);
+	const known = verifyConsoleAudit({ logsDir: linkedChain([{}, { action: "write", outcome: "failed" }]).logsDir, withLast: true });
+	assert.equal(Object.hasOwn(known, "unknown"), false, "absent, never 0: doctor and the CLI compare the result whole");
+});
+
+test("verify refuses an action or outcome that is not of the shape the console writes, with its own reason", () => {
+	const reason = "the row's action or outcome is not of the shape the console writes";
+	const malformed = { "upper case": "Login", "a space": "a b", "41 characters": `a${"b".repeat(40)}`, "a number": 7, null: null, missing: undefined, "a leading dash": "-x", "a leading digit": "7x", empty: "", "an array": ["login"] };
+	for (const [what, value] of Object.entries(malformed)) {
+		for (const field of ["action", "outcome"]) {
+			const c = linkedChain([{}, { [field]: value }, {}]);
+			assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir }), { ok: false, rows: 1, broken: { file: "2026-10.jsonl", line: 2, reason } }, `${field}: ${what}`);
+		}
+	}
+});
+
+test("an edited unknown row is named by the broken link after it, and a broken result counts no row as unknown", () => {
+	// Row 2 is a newer console's; editing it to another shaped word moves its hash, which only line 3's prev shows. Row 2
+	// is then the suspect row: it passed its own checks and is among `rows`, but nothing vouches for it, so it is not
+	// counted as unknown (no `unknown` at all on a broken result, which no reader shows).
+	const c = linkedChain([{}, { action: "token-expired" }, {}, {}]);
+	fs.writeFileSync(c.file, `${c.lines.map((l, i) => (i === 1 ? l.replace('"token-expired"', '"token-renewed"') : l)).join("\n")}\n`);
+	const broken = { file: "2026-10.jsonl", line: 3, reason: "prev does not match the row before it (seq 2): a row was changed, removed or moved" };
+	assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir }), { ok: false, rows: 2, broken });
+	assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir, withLast: true }), { ok: false, rows: 2, broken, last: { file: "2026-10.jsonl", line: 1, seq: 1 }, suspect: { file: "2026-10.jsonl", line: 2, seq: 2 }, files: [{ file: "2026-10.jsonl", seq: 1, rows: 2 }] });
+	// Nor a row the line after it vouches for: its prev matched, and the break is that line's own seq.
+	const vouched = linkedChain([{}, { outcome: "deferred" }, { seq: 9 }]);
+	assert.deepEqual(verifyConsoleAudit({ logsDir: vouched.logsDir, withLast: true }), { ok: false, rows: 2, broken: { file: "2026-10.jsonl", line: 3, reason: "seq 9 follows seq 2" }, last: { file: "2026-10.jsonl", line: 2, seq: 2 }, suspect: null, files: [{ file: "2026-10.jsonl", seq: 1, rows: 2 }] });
+	// The row AT a break is never counted: its prev matched, but its seq does not follow.
+	const at = linkedChain([{}, {}, { action: "token-expired", seq: 9 }]);
+	assert.deepEqual(verifyConsoleAudit({ logsDir: at.logsDir }), { ok: false, rows: 2, broken: { file: "2026-10.jsonl", line: 3, reason: "seq 9 follows seq 2" } });
+});
+
+test("the writer stays closed: an action or outcome it does not list throws and writes nothing, however well shaped", () => {
+	const { dir, audit } = setup();
+	assert.throws(() => audit.append(row({ action: "delete-everything" })), /unknown action "delete-everything"/);
+	assert.throws(() => audit.append(row({ outcome: "deferred" })), /unknown outcome "deferred"/);
+	assert.equal(fs.existsSync(join(dir, "2026-10.jsonl")), false);
+	// A console of this release appends after a newer console's row: the head needs only its seq.
+	const c = linkedChain([{}, { action: "token-expired" }]);
+	const after = makeConsoleAudit({ logsDir: c.logsDir, now: () => T0 + 5000 }).append(row());
+	assert.deepEqual([after.seq, after.prev], [3, sha(c.lines[1])]);
+	assert.deepEqual(verifyConsoleAudit({ logsDir: c.logsDir }), { ok: true, rows: 3, startsAt: null, unknown: 1 });
 });

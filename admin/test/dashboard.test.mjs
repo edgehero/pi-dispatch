@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { FORGE_JOB_RETENTION_DAYS, LOCAL_JOB_KEPT_FAILED_S } from "@edgehero/pi-dispatch/retention";
 import { stripAnsi, visibleLen } from "../src/style.mjs";
 
 /**
@@ -15,7 +16,7 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const dashboardPath = fileURLToPath(new URL("../src/dashboard.ts", import.meta.url));
-const { makeDashboard, targetUrl, createDashboardDeps } = await jiti.import(dashboardPath);
+const { makeDashboard, targetUrl, createDashboardDeps, FAILED_KEPT_TEXT } = await jiti.import(dashboardPath);
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -3371,6 +3372,10 @@ test("f opens the FAILED view with every hydrated row and the retention split; E
   assert.match(view, /failed · 6 in the queue/, "the view titles itself with the honest total");
   assert.match(view, /gh-dead-4/, "the view shows every hydrated row, past the section's 3-row bound");
   assert.match(view, /reasons kept 31d \(forge\) \/ 7d \(local & cron\)/, "the retention split is stated -- a uniform 31d claim would be false for half the rows");
+  // Issue #761: the header is worded from the queue's retention values, so a header left as a literal when one changes
+  // fails here; and pinned at today's, so a changed one is read again.
+  assert.equal(FAILED_KEPT_TEXT, `reasons kept ${FORGE_JOB_RETENTION_DAYS}d (forge) / ${LOCAL_JOB_KEPT_FAILED_S / 86_400}d (local & cron)`);
+  assert.equal(FAILED_KEPT_TEXT, "reasons kept 31d (forge) / 7d (local & cron)");
   assert.match(view, /↓ 2 more \(redis-cli holds the rest\)/);
   comp.handleInput("\x1b");
   await flush();

@@ -33,11 +33,11 @@
  *
  * Pi-free: index.ts hands in the deployment's env, paths and the ctx's UI; the tests hand in fakes for each seam.
  */
-import { readTokensFile } from "@edgehero/pi-dispatch/console-tokens";
+import { keptTokens, readTokensFile } from "@edgehero/pi-dispatch/console-tokens";
 import { isLocalBrowserSession, openBrowser } from "@edgehero/pi-dispatch/open-browser";
 import { panelActor, panelAudit, writeTicket } from "./audited-write.mjs";
 import { consolePageLines, consolePageUrl } from "./console/link.mjs";
-import { loginCodesDir, mintLoginCode } from "./console/login-codes.mjs";
+import { keptTokenLinkRefusal, loginCodesDir, mintLoginCode } from "./console/login-codes.mjs";
 import { openLinkViaFile } from "./console/open-link.mjs";
 import { probeConsole } from "@edgehero/pi-dispatch/console-probe";
 import { CONSOLE_START_ADVICE } from "./console/link.mjs";
@@ -164,6 +164,10 @@ export async function consoleCommand(words, deps) {
     let name = args.name;
     if (name !== null) {
       const entry = read.file.tokens.find((t) => t.name === name);
+      // Issue #761: a name the file keeps for a role this console does not know is no missing token; it is refused as
+      // `pi-dispatch-console link` refuses it.
+      const kept = entry ? undefined : keptTokens(read.file).find((t) => t.name === name);
+      if (kept) return refuse(keptTokenLinkRefusal(kept));
       if (!entry) return refuse(`there is no token named "${name}"; see pi-dispatch-console token list`);
       if (entry.role !== "operator") return refuse(`"${name}" is a ${entry.role} token, and the panel signs in operators only; use pi-dispatch-console link --name ${name} in a shell for it`);
     } else if (operators.length === 0) {

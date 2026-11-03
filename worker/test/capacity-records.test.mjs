@@ -114,6 +114,24 @@ test("the mirror's history starts at the latest of its cap, the fleet horizon an
 	assert.equal(merged.coverage.source, "mirror+local");
 });
 
+test("the cap clause judges the index against the deployment's cap (indexMax), not the built-in 5,000 (#761)", async () => {
+	const kept = [rec("new", H), rec("old", 3 * DAY)];
+	// A raised cap, never reached: 6,000 runs is an index that was never trimmed by count, so nothing of the window is cut.
+	const raised = await readMirrorWindow(fakeMirror(kept, { size: 6_000 }), { sinceMs: SINCE, nowMs: NOW, indexMax: 10_000 });
+	assert.deepEqual([raised.truncated, raised.fromMs], [false, SINCE]);
+	assert.equal((await readMirrorWindow(fakeMirror(kept, { size: 6_000 }), { sinceMs: SINCE, nowMs: NOW })).truncated, true, "the built-in cap read it as cut");
+	// At the deployment's cap, raised or lowered, the oldest kept run is the start.
+	for (const indexMax of [10_000, 1_000]) {
+		const at = await readMirrorWindow(fakeMirror(kept, { size: indexMax }), { sinceMs: SINCE, nowMs: NOW, indexMax });
+		assert.deepEqual([at.truncated, at.fromMs], [true, NOW - 3 * DAY], String(indexMax));
+		const under = await readMirrorWindow(fakeMirror(kept, { size: indexMax - 1 }), { sinceMs: SINCE, nowMs: NOW, indexMax });
+		assert.equal(under.truncated, false, `one under ${indexMax}`);
+	}
+	// The merged read hands it on.
+	const merged = await readCapacityRecords({ redis: fakeMirror(kept, { size: 6_000 }), logsDir: tempDir("pi-cap-records-"), sinceMs: SINCE, nowMs: NOW, retentionDays: 30, indexMax: 10_000 });
+	assert.deepEqual(merged.coverage.mirror, { fromMs: SINCE, truncated: false, hosts: ["a"] });
+});
+
 test("the mirror's history starts no earlier than the mirror itself: its start, else its oldest run, and no index covers nothing", async () => {
 	const kept = [rec("new", H), rec("old", 3 * DAY)];
 	// The start the write that created the index recorded: a new deployment, or one whose keys were lost and recreated.

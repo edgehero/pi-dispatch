@@ -5908,7 +5908,11 @@ validator rather than a second copy of it.
   **The fleet copy (issue #57) and its horizon (issue #599).** Where a worker declares `PI_WORKER_NAME`, each record is
   also written to Valkey after its file: `runs:rec:<sanitizedJobId>` holds the file's own bytes under a PX of the
   writer's retention (at most 92 days), and `runs:index` is a ZSET of sanitized job id to the run's end (or start) in
-  millis, trimmed by every writer by its own retention and to 5,000 members. The index's PEXPIRE, set on every write,
+  millis, trimmed by every writer by its own retention and to its own member cap, `PI_RUN_MIRROR_MAX_RUNS` (5,000
+  unless set, an integer from 1,000 to 20,000, `worker/src/retention.mjs`; issue #761, before which the cap was a
+  fixed 5,000): every writer trims the SHARED index to its own cap, so in a fleet the lowest cap wins, a worker from
+  before #761 trims at 5,000, and a count trim raises the horizon (below) to the oldest run it kept, so a reader sees
+  the cut, not idle time. The index's PEXPIRE, set on every write,
   is always the deepest reader window (92 days), never the writer's own retention: members are trimmed by score anyway,
   and a short-retention writer that set the SHARED key's TTL to its window made the whole index expire on a quiet day,
   every peer's history with it and no horizon to say so. A body keeps its own PX.
@@ -6961,8 +6965,16 @@ validator rather than a second copy of it.
   (`worker/src/capacity-records.mjs`) states what each source covers: this host's files (and every host's, on a shared
   logs directory) from `PI_LOG_RETENTION_DAYS` on, and nothing when the directory is absent or unreadable; the run
   mirror from the latest of the mirror's own start (`runs:since` while trusted, else the index's oldest run), the deepest window any
-  writer keeps (92 days), the fleet horizon (`runs:horizon`, `INT-RUN-HISTORY-FILE-CONTRACT`), the oldest run at the 5,000 run cap when it ended inside the window, and the newest
-  run whose body expired while its index member stayed. A host is covered by the files when it is this host or its
+  writer keeps (92 days), the fleet horizon (`runs:horizon`, `INT-RUN-HISTORY-FILE-CONTRACT`), the oldest run when
+  the index holds at least the cap the reader is told (`indexMax`: the deployment's `PI_RUN_MIRROR_MAX_RUNS`, 5,000
+  unless set, which the CLI reads with `CAPACITY_ENV_KEYS` in `deploymentFacts` and doctor, the console, the panel
+  and zero touch read from the same deployment; AMENDED 2026-11-03, #761, before which it was a fixed 5,000) and that
+  run ended inside the window, and the newest
+  run whose body expired while its index member stayed. The cap clause is the reader's own: a count trim since #599
+  raises the horizon, which says the same, so the clause is for a writer from before the horizon, which trimmed at
+  5,000 and recorded nothing. A reader told a cap above 5,000 misses that writer's cut (`OQ-039`), and one told a lower
+  cap than the fleet's reads the history as starting at the oldest run, which errs toward missing history, never
+  toward idle time. A host is covered by the files when it is this host or its
   runs are in them, and by the mirror when its live row says it routes (it declared `PI_WORKER_NAME`) or, with no live
   row, when the mirror holds its runs; it starts at the earliest of the sources that cover it (the files' on a tie, which
   the mirror's cap does not cut), and `source` names the one, or `mirror+local` when both cover it. A host no source covers is `shared: false`, listed in `historyNotShared`, and missing for the whole window;
@@ -7066,7 +7078,9 @@ validator rather than a second copy of it.
   Valkey: this host's files), each Valkey call bounded, the connection (and its ready check) bounded at 2 s, and the
   whole read under 5 s; past it the read is told to stop and its client is disconnected, so it cannot hold the process,
   and one line says nothing is shown, as it does on any fault. A host whose list of running jobs did not parse says
-  so. Every control character is removed. A full mirror (5,000 runs) reads in fourteen round trips.
+  so. Every control character is removed. A full mirror at the default cap (5,000 runs) reads in fourteen round
+  trips, ten of them the record bodies' MGETs of 500 (`CAPACITY_MGET_CHUNK`); at the 20,000 ceiling the MGETs are
+  forty.
 - **The tool** (`dispatch_capacity`, `admin/src/read-model.mjs -> readCapacity`): `window` `24h`, `7d` (default) or
   `30d`, optional `host`; it returns `{ window, text, report }`, `text` the CLI's human report and `report` this
   object (cut to the host as `--host` cuts it), through the CLI's own read and functions, so the three surfaces print
@@ -7676,7 +7690,10 @@ validator rather than a second copy of it.
 - **The manifest** (`cp-<seq>/manifest.json`, one line of JSON, mode 0600). Every field is an integer, a boolean, an
   enum, hex, a host name or a short token, and none is ever a path or a file name; `readManifest` and `restore` both
   re-validate it with `manifestProblem`, so a manifest is never trusted because of where it sits.
-  - `v`: integer, exactly `1`.
+  - `v`: integer, exactly `1`. AMENDED 2026-11-03 (#761): the writer writes `CHECKPOINT_MANIFEST_VERSION` (1) and the
+    reader takes the versions `CHECKPOINT_MANIFEST_READS` holds (`[1]` alone today; a readers-first release holds
+    `[1, 2]` and still writes 1); an integer `v` above the highest of them is a NEWER manifest ("Versions", below),
+    and any other value (`0`, `"1"`, `1.5`, or a version the table no longer reads) is `field:v`.
   - `runId`: string, `sanitizeJobId(runId)` cut to 200 characters, matching `[A-Za-z0-9._-]{1,200}`. The run
     directory is found by the hash, never by this field; `restore` refuses a manifest whose `runId` is not its own
     argument sanitised the same way (`run-mismatch`), so one run's manifest is never applied in another's name.
@@ -7709,7 +7726,29 @@ validator rather than a second copy of it.
 
   Every object is CLOSED, at every level: a missing or extra key is `field:keys` at the top, `field:transcript`,
   `field:workspace`, `field:counts` (for `counts` and `counts.skipped`) or `field:git`. An open nested object is
-  where a path or a payload string would ride along unvalidated into everything that reads a manifest.
+  where a path or a payload string would ride along unvalidated into everything that reads a manifest. So a key
+  added in a later version raises `v` (AMENDED 2026-11-03, #761): the newer `v` is judged before the closed keys, and
+  an older reader then waits on the manifest rather than calling it broken.
+- **Versions** (AMENDED 2026-11-03, #761). `readManifest` answers a manifest whose integer `v` is above every version
+  `CHECKPOINT_MANIFEST_READS` holds with `{ invalid: true, reason: "field:newer", newer: true }`, judged before the
+  closed key set: still `invalid` to every caller that only asks whether it can use it, and `newer` to the callers
+  that would otherwise remove what they could not read. Those keep it and wait: the recovery's model pin
+  (`index.mjs`) and the processor's recovery pickup throw `NewerReleaseHold("the run's checkpoint")`, so the recovery
+  defers `newer-release` (`INT-DEFER-REASON-KEY`) with its one attempt unspent, no comment and no record, and the store
+  and the pointer left in place; the salvage returns `{ skipped: "checkpoint-newer" }` and removes nothing
+  (`DES-RUN-CHECKPOINT-PAIRED`); `restore` still refuses such a manifest (`bad-manifest`) and is never reached with
+  one. The wait is bounded by the host-lost sweep (`INT-RECOVERY-JOB`): at `recoverBy` a recovery whose host is live
+  is extended an hour at a time up to seven days from its enqueue (`RECOVERY_MAX_WAIT_MS`), and at that limit it is
+  removed, recorded failed `recovery-host-lost`, given the host-lost comment and fires `on_failure`; that comment's
+  words ("a worker that has not come back") are a known residual for this case. A newer pointer beside a version 1
+  store reads as no pointer and is retried every minute, logged `recovery_pointer_unread`, until the same limit;
+  nothing is removed, and the reason shown is a residual too. The policy, as the pointer's
+  (`INT-RUN-CHECKPOINT-POINTER`): the table reads exactly its newest version and the one before it, and the version
+  written (`CHECKPOINT_MANIFEST_VERSION`) is one of them (pinned by a test), so a release may read v + 1 while it
+  still writes v; "newer" is a `v` above the newest version read; the store's `ttlMs` (7 days) is the pointer's TTL;
+  a release that adds a version only reads it, and the writer of it ships a release later; and the older reader is
+  dropped only in a release shipped at least 7 days after the writers stopped writing it. It is tested through the
+  store's `manifestReads` option, a seam no wiring sets.
 - **The commit point**, in `snapshot`'s order. Free refusals and caps first: arguments, the run directory and the
   store's `HEAD` exist (`not-primed`), no `base-too-large` marker, the lock, `seq` above `CURRENT` (`stale-seq`;
   an unreadable or malformed `CURRENT` does not refuse here and is replaced by a successful snapshot), the
@@ -7845,9 +7884,10 @@ validator rather than a second copy of it.
   `CURRENT`), or `{ invalid: true, reason }` with
   `bad-args`, `current-unreadable`, `current-malformed`, `manifest-unreadable`, `manifest-json`, `seq-mismatch`,
   `transcript-mismatch` (the copy's length or sha256 differs from the manifest's, because a resume feeds it to a
-  paid model), `internal-error`, or `field:<name>` where name is one of `not-object`, `keys`, `v`, `runId`, `seq`,
-  `attempt`, `host`, `kind`, `quiesced`, `at`, `transcript`, `workspace`, `objectFormat`, `commit`, `baseSha`,
-  `flags`, `counts`, `git`, `piVersion`, `imageDigest`, `venue`, `provider`, `model`.
+  paid model), `internal-error`, or `field:<name>` where name is one of `not-object`, `newer`, `keys`, `v`, `runId`,
+  `seq`, `attempt`, `host`, `kind`, `quiesced`, `at`, `transcript`, `workspace`, `objectFormat`, `commit`, `baseSha`,
+  `flags`, `counts`, `git`, `piVersion`, `imageDigest`, `venue`, `provider`, `model` (`field:newer` also carries
+  `newer: true`, since #761).
   `restore`: skipped `bad-args`, `not-primed`, `workspace-not-directory`, `locked`, `lock-failed`,
   `store-unreadable`, `timeout`, `internal-error`; refused `bad-manifest`, `run-mismatch`, `base-mismatch`,
   `tampered`, `path-through-symlink`, `case-collision`, `path-conflict`.
@@ -7942,7 +7982,9 @@ validator rather than a second copy of it.
 worker that must route the run's recovery (the host that noticed a stall can be any host), by the recovery job and by
 the boot's orphan sweep. The constants are exported from `@edgehero/pi-dispatch/run-checkpoint`
 (`CHECKPOINT_POINTER_PREFIX`, `CHECKPOINT_POINTER_TTL_MS`, `checkpointPointerKey`, `validPointer`,
-`readCheckpointPointer`, `writeCheckpointPointer`, `removeCheckpointPointer`).
+`readCheckpointPointer`, `writeCheckpointPointer`, `removeCheckpointPointer`, and since #761
+`CHECKPOINT_POINTER_VERSION`, `CHECKPOINT_POINTER_SHAPES`, `pointerKeepEntry` and `JOB_DIR_RE`, the one job folder
+pattern the salvage and the boot sweep also judge a name by).
 
 - **Key**: `run:checkpoint:<sanitized run id>`, the RUN id (`recoveryOf ?? job.id`) through `sanitizeJobId`, never a
   recovery job's own id, so a run has one pointer across its attempts and recoveries.
@@ -7958,7 +8000,9 @@ the boot's orphan sweep. The constants are exported from `@edgehero/pi-dispatch/
   ```
   A reader accepts a plain object with EXACTLY these seven keys, each typed as above, and treats anything else
   (malformed JSON, a value over 4 KiB, a missing or extra key) as no pointer. A pointer is peer-written data, and it
-  decides where a recovery is queued and which folder a salvage looks at, so nothing loose rides along.
+  decides where a recovery is queued and which folder a salvage looks at, so nothing loose rides along. AMENDED
+  2026-11-03 (#761): the keys are those of the pointer's own version (`CHECKPOINT_POINTER_SHAPES[v]`), and a `v` the
+  table does not hold is no pointer too, so the one exception is the boot sweep's keep-list (below).
 - **When it is written**: after every committed checkpoint (live, exit or salvage), never before: a reader that finds
   a pointer finds a checkpoint behind it. A failed write leaves the previous pointer (stale, never ahead) and is logged
   (`checkpoint_pointer_failed`).
@@ -7970,12 +8014,32 @@ the boot's orphan sweep. The constants are exported from `@edgehero/pi-dispatch/
 - **Failure**: every call is bounded (1 s by default, 2 s for the wiring's reads) and never throws: a read that fails
   or times out answers null, which is why a recovery never reads a lone null as superseded.
 - **Readers**: the processor's infra-exit path and the failed listener (routing), the recovery job (superseded, the
-  salvage), the run checkpointer (the next `seq`), the boot's orphan sweep (`pointedJobDirs`: a `SCAN` of
-  `run:checkpoint:*`, bounded at 10,000 keys, refusing rather than answering partially, so a folder a recovery is about
-  to salvage is never swept).
+  salvage), the run checkpointer (the next `seq`), all through `validPointer`, and the boot's orphan sweep
+  (`pointedJobDirs`: a `SCAN` of `run:checkpoint:*`, bounded at 10,000 keys, refusing rather than answering partially,
+  so a folder a recovery is about to salvage is never swept). AMENDED 2026-11-03 (#761): the sweep reads each pointer
+  through `pointerKeepEntry`, which takes any version: an integer `v` of 1 or more, a `host` and a `jobDir` of the
+  patterns above, every other key, a missing one or the type of any other field ignored. Its "no" deletes, so a
+  pointer a newer release wrote (a new key, a new `v`) still keeps the folder it names on this host, for the pointer's
+  life (7 days), after which the sweep takes the folder as any orphan; `validPointer` stays the reader for routing,
+  the salvage and the next `seq`, so such a pointer is never misread, only kept from deleting.
+- **Versions** (AMENDED 2026-11-03, #761): this build writes `v: CHECKPOINT_POINTER_VERSION` (1) and reads the
+  versions `CHECKPOINT_POINTER_SHAPES` holds (1 alone today; a readers-first release holds 1 and 2 and still writes
+  1), each with its own closed key set. The policy, pinned by a test: the table reads exactly its newest version and
+  the one before it, and the version written is one of them, so a release may read v + 1 while it still writes v and
+  the next release writes v + 1; a pointer the previous release wrote still routes for one pointer lifetime after an
+  upgrade; a `v` above the newest version read is newer (no pointer for routing, its folder kept, as above); and the
+  pointer's TTL equals the store's (`CHECKPOINT_POINTER_TTL_MS` is `DEFAULT_CHECKPOINT_LIMITS.ttlMs`, 7 days). The
+  order no test can check: a release that adds a version only reads it, and the writer of it ships a release later,
+  and the older reader may be dropped only in a release shipped at least 7 days after the writers stopped writing its
+  version; an operator who skips two bumps at once drains durable runs first. A later version keeps `host` and
+  `jobDir` with these meanings and patterns, or uses a new key prefix rather than a new `v`, so that
+  `pointerKeepEntry` stays true for every version it will meet. The policy is tested through an injected two-version
+  table (`validPointer(p, { shapes })`).
 - **Acceptance**: `REQ-RUN-RECOVERY` (c) and (f); `worker/test/run-checkpoint.test.mjs` ("validPointer: exactly the
   pointer's keys, every value typed; anything loose is null", "the pointer round trip: written with its TTL, read back
-  validated, removed").
+  validated, removed", "pointerKeepEntry: host and jobDir from a pointer of any version, ...", "the pointer version
+  policy, through its seam: ..."), `worker/test/recovery-queue.test.mjs` ("a newer release's pointer keeps its job
+  dir through the boot sweep: ...").
 
 ## INT-RUN-BUDGET-LEDGER
 
@@ -9544,7 +9608,10 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
   one, else the `.env` value the service reads (a plain line only, by the worker's shared resolver, a
   relative path resolved against the deployment folder), else the pointer's. The `.env` read is the
   pointer's `deploymentDir`'s and never another folder's; it covers the path, URL and number keys the panel reads (`PANEL_SERVICE_KEYS`, with the
-  worker name its `dispatch_run` routes by), never a capability grant; a disagreement or an unreadable
+  worker name its `dispatch_run` routes by, and since #761 `PI_RUN_MIRROR_MAX_RUNS`, the run index cap the panel's and
+  the console's run index and capacity reads are held to: the run index reads it leniently, a value the worker refuses
+  being the default there, and the capacity read refuses that value naming the key, as it refuses a bad retention),
+  never a capability grant; a disagreement or an unreadable
   line is one surfaced notice naming keys, never values. The pointer still carries paths only.
   CORRECTED in gate round 1: the `.env` read is the pointer's `deploymentDir`'s ONLY, never a cwd carrying init's
   scaffold (a repository can commit those four files, and pi started in it took its `VALKEY_URL`, triggers path
@@ -10847,7 +10914,7 @@ onFailureTimeoutMs; worker/test/on-failure.test.mjs; worker/test/start-wiring.te
   or replaced name. A failure minting a code after a write reports the retained entry and CLI recovery; an audit
   intent is not proof that the two files changed atomically. No existing tool gains token-write authority.
 
-- **Upgrade order (#766)**: Upgrade both console and host `pi-dispatch` before minting an `agent` token. Older readers reject the whole file for its unknown role; older doctor/service installation fail and older up cannot establish operator readiness. The format version stays 1; roles form a closed vocabulary.
+- **Upgrade order (#766)**: Upgrade both console and host `pi-dispatch` before minting an `agent` token. Older readers reject the whole file for its unknown role; older doctor/service installation fail and older up cannot establish operator readiness. The format version stays 1; roles form a closed vocabulary. AMENDED 2026-11-03 (#761): from that release on, a reader KEEPS an entry of a role it does not know and signs it in nowhere ("Across versions", below); a release before it still refuses the whole file, so the upgrade order stands for any host or console older than #761.
 
 **`pi-dispatch-console token ...` → the console server and doctor.** Who may sign in to the operator console, by
 name and role (`DES-OPERATOR-CONSOLE`, `REQ-CONSOLE-SECURITY`). The file holds hashes only: a copy of it signs no one
@@ -10870,12 +10937,13 @@ in.
     minted under an older generation ends on its next request.
   - `tokens[].name`: `^[a-z0-9][a-z0-9._-]{0,31}$`, unique in the file. It is what the audit log names, so it should
     name a person.
-  - `tokens[].role`: `operator` (reads and writes), `viewer` (reads), or `agent` (redacted viewer reads and only explicitly unattended transitions).
+  - `tokens[].role`: `operator` (reads and writes), `viewer` (reads), or `agent` (redacted viewer reads and only explicitly unattended transitions) (`TOKEN_ROLES`), the only roles a writer of this release writes. Since #761 a reader keeps an entry of any other role of a role's shape and signs it in nowhere ("Across versions", below).
   - `tokens[].sha256`: the sha256 hex of the token, 64 lowercase hex characters, unique in the file.
   - `tokens[].createdAt`: an ISO instant, set when the token was added or last rotated.
   Any problem refuses the WHOLE file with a sentence naming the entry and the fix (invalid JSON, a missing list, a
-  duplicate name or hash, a bad role, hash or date): a console that half-reads its own access list is not one an
-  operator can reason about.
+  duplicate name or hash, a role of no role's shape, a bad hash or date): a console that half-reads its own access
+  list is not one an operator can reason about. An entry kept for a role this build does not know is read, not
+  half-read: it is judged as every entry is and signs in nowhere.
 - **The token**: `pdc_` followed by base64url of 32 random bytes (256 bits). The prefix makes a leaked token
   greppable and recognisable to a secret scanner. It is printed ONCE, on one line, by `token add` and `token rotate`,
   and never stored, logged, audited or rendered anywhere. sha256 is the right hash for a 256-bit random secret: a KDF
@@ -10904,6 +10972,46 @@ in.
   entry, the start refusal above made before a unit is written; and `pi-dispatch up` counts its `operator` entries
   in that same file (one helper, `consoleTokensPathFor`) to decide whether to name that install among its
   next steps. Neither prints a name, a hash or a count beyond "none".
+- **Across versions** (AMENDED 2026-11-03, #761). `version` must still be exactly 1: a file of any other version is
+  refused whole, as before. Within version 1 a release may add only what an older reader can safely ignore or refuse:
+  a ROLE, which an older reader keeps and signs in nowhere (narrower than refusing nothing), and a FIELD of an entry
+  or a top-level KEY, which an older reader carries and ignores. A field of an entry or a key of the file that would
+  narrow who may sign in (an expiry, a scope, another hash algorithm, a file-wide minimum role) must raise `version`
+  instead, which every older reader refuses as a whole file: carried and ignored, it would widen access on an older
+  console. The parse (`parseTokensFile`):
+  - an entry whose role is in `TOKEN_ROLES` is read into `tokens` with its four fields, as before, so every reader of
+    `tokens` (the sign-in, the login code, the operator count, the setup grants, doctor) is unchanged. An entry whose
+    role is not, but has a role's shape, `^[a-z][a-z0-9-]{0,31}$` (`TOKEN_ROLE_RE`, which every role in `TOKEN_ROLES`
+    has), is KEPT as written, apart from `tokens` (`carry.kept`, `keptTokens`), its name, `sha256` and `createdAt`
+    judged as a known entry's are. Any other role refuses the file: "... has a role other than operator or viewer or
+    agent, and not the shape of one a later pi-dispatch adds (a-z, 0-9 and '-', starting with a letter, at most 32)".
+    Names and hashes are unique across the known and the kept entries together.
+  - A known entry's fields beyond its four (`carry.extras`, by the entry's name) and the file's keys beyond `version`,
+    `generation` and `tokens` (`carry.top`) are carried. The parsed file has `carry` only when it holds something, and
+    a file with nothing to carry is written byte for byte as before; otherwise every writer writes the known entries,
+    each with its carried fields after its four, then the kept entries as they were read, then the carried keys.
+  - A kept entry signs in nowhere, because no reader of `tokens` meets it: its secret is answered 401 with a
+    `login-failed` row; `pi-dispatch-console link` refuses to make a code for it ("the token "<name>" has the role
+    `<role>`, which this pi-dispatch-console does not know, so it signs in nowhere here and no link is made for it"),
+    and `/dispatch console --link <name>` refuses it with the same sentence (`keptTokenLinkRefusal`); a code for it is
+    answered 401 with a `login-code` row, outcome `refused`, reason "the link named a token whose role this console
+    does not know" (a name the file no longer holds is still "the link named a token that no longer exists"); it is
+    never an operator (a file of kept entries alone holds no operator, and `serve` refuses it) and never matches a
+    setup grant.
+  - The writers: `token add` refuses a name a kept entry holds (the file would then hold the name twice, which the
+    release that knows the role refuses); `token revoke` removes a kept entry, and an entry's carried fields go with
+    it; `token rotate` refuses a kept entry ("... cannot be rotated here: its role `<role>` is not one this
+    pi-dispatch-console knows; rotate it with the release that added that role, or revoke it") and keeps a known
+    entry's carried fields; every name check (`token add`, the setup page's viewer add, `pi-dispatch console
+    bootstrap`'s operator name) takes every name the file holds, kept ones included (`tokenNames`); the setup page's
+    viewer undo (its `identity`) matches a known entry only.
+  - `token list` prints a kept entry as `<name>`, a tab, `<role> (not known to this pi-dispatch-console: signs in
+    nowhere here)`, a tab and `<createdAt>`; doctor warns "console: 1 token carries a role this pi-dispatch does not
+    know, so a console of this release signs it in nowhere", or for N above 1 "console: N tokens carry a role this
+    pi-dispatch does not know, so a console of this release signs them in nowhere", fix "upgrade pi-dispatch and the
+    console".
+  - A release before this one still refuses the whole file on a role it does not know, and drops a carried field or
+    key when it writes the file.
 - **Acceptance**: `REQ-CONSOLE-SECURITY` (a) and (i).
 
 ## INT-CONSOLE-AUDIT-LOG
@@ -10976,10 +11084,17 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     names no token holder. Since issue #642 a write made from the `/dispatch` TUI, its commands and dialogs or the
     extension's tools is `{name: <the OS login, reduced to [A-Za-z0-9._@-] and 64 characters, "unknown" when there is
     none>, role: "panel", session: null}` (`panelActor`, `admin/src/audited-write.mjs`), appended to the deployment's
-    `PI_LOGS_DIR`. The roles written are `operator`, `viewer`, `shell` and `panel`; `role` is an escaped string like
-    `name`, not a closed set, so the verifier does not judge it.
-  - `action`, exactly one of: `login`, `login-failed`, `login-code`, `logout`, `refused`, `write`, `token-added`,
-    `token-revoked`, `token-rotated`, `sessions-ended`, `serve-started` (`CONSOLE_AUDIT_ACTIONS`). A `login-code` row
+    `PI_LOGS_DIR`. The roles written are `operator`, `viewer`, `agent`, `shell`, `panel` and `none`: a session's role is
+    its token's (`TOKEN_ROLES`), `shell` is the CLI's, `panel` the TUI's and its dialogs', `agent` also the extension's
+    tools' since #766 (`agentActor`), and `none` the actor of a request that carried no session, `{name: "anonymous",
+    role: "none", session: null}` (a failed login, a refused code, a refusal, a sign-out with no session held). CORRECTED
+    2026-11-03 (#761): this list named neither `agent` nor `none`. `role` is an escaped string like `name`, not a closed
+    set, so the verifier does not judge it.
+  - `action`: the writer writes exactly one of `login`, `login-failed`, `login-code`, `logout`, `refused`, `write`,
+    `write-applied`, `token-added`, `token-revoked`, `token-rotated`, `sessions-ended`, `serve-started`
+    (`CONSOLE_AUDIT_ACTIONS`), and the verifier links any action of the shape every one of them has,
+    `^[a-z][a-z0-9-]{0,39}$` (`CONSOLE_AUDIT_ACTION_RE`, "Across versions" below). CORRECTED 2026-11-03 (#761): the
+    list lacked `write-applied`, written since #766; a test now holds it to the code. A `login-code` row
     comes from three writers: the console's sign-in with a code (the session's actor, or `anonymous` for a refused
     code, target `/login/code`), `pi-dispatch-console link` (actor role `shell`, target the token's name), and since
     issue #708 `/dispatch console --link`: actor role `panel`, target the token's name, outcome `ok`, appended BEFORE
@@ -10990,7 +11105,8 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     that the console holds, one `logout` row for each, and a sign-out with no session held (an unknown cookie, or
     none) is still answered and still a row, one, `anonymous`, target `/logout`, outcome `ok`, reason "no session was
     held, so only the cookie was cleared", rate limited like every other row without a session.
-  - `outcome`, exactly one of: `ok`, `refused`, `failed` (`CONSOLE_AUDIT_OUTCOMES`).
+  - `outcome`: the writer writes exactly one of `ok`, `refused`, `failed` (`CONSOLE_AUDIT_OUTCOMES`), and the verifier
+    links any outcome of the same shape (`CONSOLE_AUDIT_OUTCOME_RE`).
   - `target`, `reason` (optional, absent when unset): short strings, control characters written out as `\u{XXXX}`,
     at most 200 characters. A refusal's `reason` starts with the guard (`host`, `origin`, `content-type`,
     `read-only`, `role`, `auth`, and since #737 (PR 2) `person`, a write from a page drawn for another person than the
@@ -11034,7 +11150,8 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     166 characters is cut before it so the 32-hex message id always fits the 200-character cap) and the sha256 of the
     message text, as the run's inbox stores it after the scrub, in `afterDigest`; the text is never in a row. A
     `steer-withdraw` row has the same `target` and nothing else of the message.
-  - An unknown action or outcome throws in the writer: the vocabulary is closed. A `kind`, `reserve` or `count` of
+  - An action or outcome the lists do not hold throws in the writer, however well shaped: the writer's vocabulary is
+    closed, and only the verifier reads the shape. A `kind`, `reserve` or `count` of
     the wrong shape throws too, and writes nothing. A row without them is a row from before them and verifies as it
     always did.
 - **Rate-limited refusals**: a refusal of a request that carried no session (`actor.name` `anonymous`) is written
@@ -11052,8 +11169,12 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   record. A write that cannot be audited does not happen.
 - **Verification**: `pi-dispatch-console audit verify` and doctor walk every month file in order and check each `prev`
   and `seq`. The result is `{ok: true, rows, startsAt}` or `{ok: false, rows, broken: {file, line, reason}}`, naming
-  the first broken link. A row whose `kind`, `reserve` or `count` is present and not of the shape above is a broken
-  link too. The first row of the oldest SURVIVING file is not checked against a predecessor: when the
+  the first broken link, the ok shape also with `unknown: n` when n > 0 ("Across versions", below). A row whose
+  `kind`, `reserve` or `count` is present and not of the shape above is a broken link too, and so is a row whose
+  action or outcome is neither listed nor of its shape ("the row's action or outcome is not of the shape the console
+  writes"; before #761 every unlisted value was refused, as "... is not one the console writes"). The first row of
+  the oldest SURVIVING
+  file is not checked against a predecessor: when the
   retention reaper removed older months, verify reports where the chain starts (`startsAt`, the file and `seq`), and
   does not call it broken. A broken chain is a doctor warning. Since #737 (PR 2) a caller may ask `withLast: true`
   (the console's audit page does, cached 30 s), which adds three fields to either shape: `last: {file, line, seq}`, the
@@ -11070,9 +11191,53 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   no line vouches for yet, since none follows it. Without `withLast` the result is exactly
   the one above, which doctor, the CLI and the tests compare whole. The row format, the files and the chain are
   unchanged.
-- **Retention**: reaped on `PI_LOG_RETENTION_DAYS` by the worker (`makeConsoleAuditReaper`, at boot and on each
-  retention sweep, beside the allocation log reaper), because the worker always runs and the console may not. Only
-  names of the `YYYY-MM.jsonl` shape are touched, and the newest file is never reaped, since it holds the head.
+- **Across versions** (AMENDED 2026-11-03, #761): a console of a later release may write an action or an outcome this
+  one does not list. The WRITER stays closed (above); the VERIFIER links a row whose action and outcome are each either
+  listed or of the shape (`CONSOLE_AUDIT_ACTION_RE`, `CONSOLE_AUDIT_OUTCOME_RE`, both `^[a-z][a-z0-9-]{0,39}$`, the
+  shape of every value either list has held), and counts a row with an unlisted one as `unknown` only after it passed
+  every check. `unknown: n` is in the result only on the ok shape, with or without `withLast`, only when n > 0, so a
+  chain of listed rows answers exactly as it did; a broken result never carries it (the row before a break whose line's
+  `prev` does not match is counted in `rows`, but nothing vouches for it). Before this release such a row broke the
+  chain, and an older console called a row nobody changed "changed". The check knows only that such a row's word has the
+  shape and that the row links, never who wrote it: whoever can write the file can add such a row, as they always could
+  one of a listed word (the chain makes an edit evident, not impossible), so no surface says a newer console wrote it.
+  The order of the checks is unchanged (the next line's `prev` is compared against the row's hash before its seq), so an
+  edited row of an unlisted action is named by the broken link after it, as an edited listed row is. Keys a row holds
+  beyond those judged here are not judged, as before. The shapes of `kind`, `reserve` and `count` never widen, and a row
+  carries no version: a version an older verifier refused would bring the false "chain is broken" back. A value a later
+  release adds keeps the shape (a test holds every member of both lists to it, so a release that adds one outside it
+  fails its own build). A console of this release appends after such a row, since the head read takes only the last
+  line's `seq` and its hash. What each surface says of such a row: the audit page keeps its state, shows an unlisted
+  outcome as its word on the `attention` badge (a word that happens to name a state, `damaged`, does not take that
+  state's badge), and only on a verified row (state `ok`) notes under its reason "Not known to this console: the action
+  X (a newer release writes such rows)." (or "the outcome Y", or "the action X and the outcome Y"; a row in any other
+  state, or a word of no such shape, gets no such note, since the chain vouches for nothing else a row says); About,
+  on an intact chain only, adds "Not known to this console", with "1 row (a newer release writes such rows)" or "N
+  rows (a newer release writes such rows)"; the filter's action and outcome lists stay this console's own, so such a
+  row is found unfiltered and under who, role and the search; `audit verify` adds ", and 1 of them names an action or
+  outcome this pi-dispatch-console does not know (a newer release writes such rows)", with "N of them name" for N
+  above 1, and exits 0; doctor's line stays ok, "console: audit log chain intact (120 rows, 3 not known to this
+  pi-dispatch: a newer console writes such rows)", and with a reaped start "(120 rows, starting at seq 5 in
+  2026-09.jsonl (older rows reaped), 3 not known to this pi-dispatch: a newer console writes such rows)"; and the
+  overview's count of agent writes (`readAgentWritesToday`) is partial when an agent row in its window has an unlisted
+  action or outcome, since an unlisted outcome need not mean the write failed. A console from before this release
+  still calls such a row broken.
+- **Retention** (AMENDED 2026-11-03, #761): reaped by the worker on `PI_CONSOLE_AUDIT_RETENTION_DAYS`
+  (`makeConsoleAuditReaper`, at boot and on each retention sweep, beside the allocation log reaper), because the worker
+  always runs and the console may not. Unset or empty, it is `PI_LOG_RETENTION_DAYS`'s value, 0 included, which is
+  the retention every release before this one reaped the trail by; `0` keeps the trail forever; any other
+  non-negative integer is a number of days; anything else refuses the worker's start naming the key, and doctor fails
+  the same value (`workerIntSettingChecks`). It is its own key so that shortening the run history for privacy does not
+  shorten the security trail. The worker reads it, not the console: it is in doctor's `WORKER_SERVICE_KEYS` and not
+  in `CONSOLE_ENV_KEYS`, since a console key set alone makes doctor judge a console. `worker_started` logs it
+  (`consoleAuditRetentionDays`). Only names of the `YYYY-MM.jsonl` shape are touched, and the newest file is never
+  reaped, since it holds the head. On a logs directory several hosts share, every host's worker reaps the same
+  `console-audit/` by its own setting, so the shortest wins. ROLLBACK: a worker from before this release reaps the
+  trail by `PI_LOG_RETENTION_DAYS`, so before rolling a host back past it with the audit retention set longer, copy
+  `console-audit/` aside or raise `PI_LOG_RETENTION_DAYS`, or that worker's first sweep removes the months between
+  the two. MID-UPGRADE, the same: a worker from before this release that shares `PI_LOGS_DIR` with upgraded hosts
+  reaps `console-audit/` by `PI_LOG_RETENTION_DAYS`, so upgrade every host before relying on a longer audit
+  retention.
 - **The Valkey mirror**: each row `serve` writes is also pushed, after the file holds it and best effort, onto the
   list `console:audit` (`LPUSH` then `LTRIM` to 500 rows), the `alloc:log` precedent, so a console on another host
   can show recent rows later. The short-lived CLI commands do not connect to Valkey, so their rows are in the file
@@ -12117,7 +12282,7 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   | `wait-unclear` | check | a wait check that answered what the gate cannot read |
   | `podman-restart` | ready | rootful Podman's service, restarting |
   | `netns-keeper` | ready | the rootless network keeper, too young |
-  | `newer-release` | ready | job data, or a settings, triggers or pause windows file, written by a newer pi-dispatch than this worker, or a model failover retry whose previous attempt's run record one wrote (`DES-STORE-VERSION-WHEN-NEEDED`) |
+  | `newer-release` | ready | job data, or a settings, triggers or pause windows file, written by a newer pi-dispatch than this worker, a model failover retry whose previous attempt's run record one wrote, or a recovery whose run's checkpoint one wrote (`DES-STORE-VERSION-WHEN-NEEDED`) |
   | `retry` | retry | an infrastructure retry's backoff (`noteRetry`) |
 
   `newer-release` (AMENDED 2026-11-02, #761) waits one fixed re-check, `NEWER_RELEASE_RECHECK_MS` (ten minutes):
@@ -12130,7 +12295,9 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   read (an overlay that turned newer since the head's read), at the model failover selection, before the endpoint gate
   (a retry whose previous attempt's run record a newer pi-dispatch wrote, with no model attempt key,
   `INT-RUN-HISTORY-FILE-CONTRACT`; that wait also ends when the record is replaced or ages out), by the processor's
-  catch for a `NewerReleaseHold` (the one-shot, skew and approval checks' live reads of the triggers file), and in a
+  catch for a `NewerReleaseHold` (the one-shot, skew and approval checks' live reads of the triggers file, and since
+  2026-11-03, #761, a recovery's read of its run's checkpoint manifest, at the model pin and at the pickup, whose
+  wait the host-lost sweep bounds at seven days, `INT-WORKSPACE-CHECKPOINT-STORE`), and in a
   watch, answer-draft or question-grouping job (its runtime's `{ newer }` answer, before a finding is taken or
   anything is written; the watch job also on the pause windows file state, before its runtime judges its own pause);
   `project` rides only where
@@ -12287,7 +12454,13 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   transcripts, 1,024 source directories and 64 captured points per run. A separate `.workspaces` checkpointer keeps
   historical snapshots, bounded by its 20 GiB store cap and conservative base admission. Archive mutations are
   serialized within the worker; a busy optional archive is skipped by name. Unsafe base extensions leave a private
-  refusal marker, so selection returns `fork-unsafe-extensions` before a job can spend.
+  refusal marker, so selection returns `fork-unsafe-extensions` before a job can spend. AMENDED 2026-11-03 (#761):
+  the retention sweep ages a source by its manifest's own creation time (`at`) whenever the manifest carries an
+  integer `v` of 1 or more, a run id whose source key is the folder's own and a safe integer `at` of 0 or more,
+  whatever else it holds (`sweepAge`), so a source a newer release published is aged by its own publish time rather
+  than by an earlier `origin.json` or the folder's mtime, and its workspace archive is still removed with it. A source
+  read stays strict: a manifest of any version but 1 is still refused `fork-source-corrupt` (a `fork-source-newer`
+  word waits for the release that raises the fork manifest's version).
 - **Read failures and context**: Missing, expired, malformed, incompatible or digest-mismatched artifacts return
   determinate `refused` results. Temporary filesystem failures (`EIO`, `EAGAIN`, `EMFILE`, `ENFILE`, `ETIMEDOUT`,
   `EINTR`) return `unavailable` through source, point and restore reads, so pickup throws an infrastructure retry;
@@ -12944,6 +13117,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 |---|---|
 | 2026-11-02 (#754, #792; independent security review) | INT-SANDBOX-GATEWAY-CONTRACT tightens HTTPS browser binding to the __Host- cookie prefix and rejects legacy/domain-cookie migration. Sibling-cookie fixation is tested before first bootstrap. Explicit loopback compatibility, console cookies, grant/tab/token proof, expiry and native/container/budget contracts UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, #793; approved extension) | INT-SANDBOX-GATEWAY-CONTRACT and INT-CONSOLE-AUDIT-LOG amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
+| 2026-11-03 (#761, tolerant readers) | Readers that keep what a newer release wrote, and the job retention and the run index cap as named values (`DES-STORE-VERSION-WHEN-NEEDED`). **`INT-CONSOLE-AUDIT-LOG` AMENDED and CORRECTED**: CORRECTED, the action list gains `write-applied` (written since #766; the list held eleven) and the role list `agent` and `none` (the actor of a request without a session), and a test now holds the three lists to the code; AMENDED, the `action` and `outcome` bullets say the writer writes exactly its list and the verifier links any value of the shape `^[a-z][a-z0-9-]{0,39}$` (`CONSOLE_AUDIT_ACTION_RE`, `CONSOLE_AUDIT_OUTCOME_RE`), and the writer's bullet says only the verifier reads the shape; a new "Across versions" bullet: a row whose action or outcome is unlisted but shaped is linked, and counted as `unknown` only after it passed every check; `unknown: n` is in the result only on the ok shape, with or without `withLast`, only when n > 0, and never on a broken one (the row before a break whose line's `prev` does not match is counted in `rows`, but nothing vouches for it); the check knows only that the word has the shape and the row links, never who wrote it, so no surface says a newer console wrote such a row; the check order is unchanged, so an edited unlisted row is named by its link; extra row keys are not judged, as before; no row version, and the optional fields' shapes never widen; a console of this release appends after such a row; and what the audit page (a note naming the word this console does not know on a verified row only, About's count on an intact chain only), its filter, `audit verify` (singular for one row), doctor (the count after a reaped start) and the agent write count say of such a row; the Verification bullet gains `unknown` on the ok shape and the reason "the row's action or outcome is not of the shape the console writes"; the Retention bullet: `PI_CONSOLE_AUDIT_RETENTION_DAYS`, read by the worker, defaulting to `PI_LOG_RETENTION_DAYS`'s value (0 included), `0` forever, any other value that is not a non-negative integer refusing the worker's start and failing doctor, in doctor's `WORKER_SERVICE_KEYS` and not `CONSOLE_ENV_KEYS`, logged by `worker_started`, the shortest setting winning on a shared logs folder, and the hazard at a rollback and mid-upgrade (a worker from before reaps the trail by `PI_LOG_RETENTION_DAYS`, so every host is upgraded before a longer audit retention is relied on). **`INT-CONSOLE-TOKENS-FILE-CONTRACT` AMENDED**: a new "Across versions" bullet: `version` is still exactly 1; an entry of an unknown role of a role's shape (`TOKEN_ROLE_RE`) is kept as written (`carry.kept`) and signs in nowhere (its secret and a code for it 401, the code's row saying the token's role is one this console does not know, no `link`, `/dispatch console --link` refusing it in `link`'s sentence, never an operator or a setup grant), any other role refusing the file in the new sentence; names and hashes unique across both sets; a known entry's extra fields and the file's extra keys carried (`carry`, present only when it holds something, a file with nothing to carry written byte for byte as before); add refuses a kept name, revoke removes a kept entry, rotate refuses one and keeps a known entry's extras, and every name check takes kept names (`tokenNames`); `token list` and doctor name kept entries (doctor in the singular for one); the version 1 rule (a role, a field or a key an older reader can ignore or refuse, while a field of an entry or a key of the file that narrows who may sign in raises `version`); releases before this one still refuse the whole file; the #766 upgrade order note, the role bullet and the whole-file refusal say what changed. **`INT-RUN-CHECKPOINT-POINTER` AMENDED**: `CHECKPOINT_POINTER_VERSION` and `CHECKPOINT_POINTER_SHAPES` (a reader takes its version's closed keys, a version it does not hold is no pointer); the boot sweep's keep-list reads any version through `pointerKeepEntry`, so a newer pointer's folder is kept for the pointer's 7 days; a new Versions bullet: 1 alone read today, a readers-first release reading 1 and 2 while it still writes 1; the policy pinned by a test (exactly the newest version and the one before, the version written one of them, so a release may read v + 1 while it still writes v; the pointer's TTL the store's) and the one no test can check (a release that adds a version only reads it, its writer a release later, an older reader dropped only 7 days after the writers stopped), a later version keeping `host` and `jobDir` or using a new key prefix, tested through `validPointer(p, { shapes })`; `JOB_DIR_RE` is one export. **`INT-WORKSPACE-CHECKPOINT-STORE` AMENDED**: `CHECKPOINT_MANIFEST_VERSION` and `CHECKPOINT_MANIFEST_READS`; a manifest of a higher integer `v` is `field:newer` with `newer: true`, judged before the closed keys, while `0`, `"1"`, `1.5` or a version no longer read stay `field:v`; the closed-key rule gains "a key added in a later version raises `v`"; a new Versions bullet: the recovery's model pin and pickup defer `newer-release` with nothing spent, commented, recorded or removed, the salvage takes and removes nothing, `restore` still refuses, the wait bounded by the host-lost sweep's seven days (`recovery-host-lost`, its comment's words a residual), a newer pointer beside a version 1 store retried every minute (`recovery_pointer_unread`) to the same limit, and the policy, the pointer's (`[1]` alone today, a readers-first release holding `[1, 2]` while it still writes 1, newer being a `v` above the newest read), tested through the `manifestReads` option. **`INT-MANAGED-FORK-CONTRACT` AMENDED**: the sweep ages a source by its manifest's own `at` for any integer `v` of 1 or more with a run id of its own folder, and still removes its archive; a read still refuses a newer source as `fork-source-corrupt`. **`INT-DEFER-REASON-KEY` AMENDED**: `newer-release` also covers a recovery whose run's checkpoint a newer release wrote (the gate column and where it is written); its bucket, sentence and re-check UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the index is trimmed to each writer's own `PI_RUN_MIRROR_MAX_RUNS` (5,000 unless set, 1,000 to 20,000), the lowest winning in a fleet, a count trim raising the horizon, a worker from before trimming at 5,000. **`INT-CAPACITY-REPORT` AMENDED**: the cap clause judges the cap the reader is told (`indexMax`, `CAPACITY_ENV_KEYS`), a reader told one above 5,000 misses a pre-horizon writer's cut (`OQ-039`), one told a lower cap errs toward missing history, and the MGETs at the default and at 20,000. **`INT-DEPLOYMENT-POINTER-CONTRACT` AMENDED**: `PANEL_SERVICE_KEYS` gains `PI_RUN_MIRROR_MAX_RUNS`, read leniently by the panel's and the console's run index and refused naming the key by their capacity read, as a bad retention is. UNCHANGED, checked: `INT-DOCTOR-RESULTS-KEY` (the new doctor lines, a failure for a bad `PI_CONSOLE_AUDIT_RETENTION_DAYS` or `PI_RUN_MIRROR_MAX_RUNS` and a warning for kept tokens, take derived ids in `state` and `console`; no named id), `INT-RECOVERY-JOB` (its deadline, extension and loss rules bound the new wait as written, and its options' 31 days are now `FORGE_JOB_RETENTION_S`), `INT-STEER-INBOX-CONTRACT` (the steered marker still lives 31 days, now `STEER_MARKER_TTL_S = FORGE_JOB_RETENTION_S`), `INT-SANDBOX-CONTRACT`, `INT-CONFIG-OVERLAY-CONTRACT` and `INT-TRIGGERS-FILE-CONTRACT` (no version, carry or refusal rule of theirs moves). **Code evidence**: worker/src/console-audit.mjs -> CONSOLE_AUDIT_ACTION_RE, CONSOLE_AUDIT_OUTCOME_RE, verifyConsoleAudit, makeConsoleAuditReaper; worker/src/console-tokens.mjs -> TOKEN_ROLE_RE, parseTokensFile, keptTokens, tokenNames, serialize, addToken, revokeToken, rotateToken; worker/src/config.mjs -> loadConfig (consoleAuditRetentionDays, runMirrorMaxRuns); worker/src/doctor.mjs -> WORKER_SERVICE_KEYS, WORKER_INT_SETTINGS, workerIntSettingChecks, consoleChecks; worker/src/run-checkpoint.mjs -> CHECKPOINT_POINTER_VERSION, CHECKPOINT_POINTER_SHAPES, validPointer, pointerKeepEntry, JOB_DIR_RE; worker/src/recovery-queue.mjs -> makeSalvager, pointedJobDirs; worker/src/workspace-checkpoint.mjs -> CHECKPOINT_MANIFEST_VERSION, CHECKPOINT_MANIFEST_READS, manifestProblem, readManifest; worker/src/processor.mjs, worker/src/index.mjs -> NewerReleaseHold; worker/src/fork-store.mjs -> sweepAge; worker/src/retention.mjs -> FORGE_JOB_RETENTION_S, RUN_MIRROR_MAX_RUNS_DEFAULT, runMirrorMaxRunsOf; worker/src/capacity-records.mjs -> readMirrorWindow; worker/src/capacity-cli.mjs -> CAPACITY_ENV_KEYS, deploymentFacts; worker/src/start.mjs -> startWorker; admin/src/read-model.mjs -> PANEL_SERVICE_KEYS, resolvePaths; admin/src/console/panels/audit.mjs -> unknownWordsNote, outcomeCell, auditAbout; admin/src/console/cli.mjs -> run; admin/src/console/login-codes.mjs -> keptTokenLinkRefusal; admin/src/console/server.mjs -> postLoginCode; admin/src/console-command.mjs -> consoleCommand; admin/src/agent-write-count.mjs -> readAgentWritesToday. |
 | 2026-11-02 (#761, store versions) | Stored state that outlives a release, made safe across upgrades and mixed versions (`DES-STORE-VERSION-WHEN-NEEDED`). **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: an optional `version`, judged before any key (`SETTINGS_VERSION`, `SETTINGS_KEY_VERSIONS`, `SETTINGS_VALUE_VERSIONS`, 1 and empty today, with `BUNDLE_FORMATS` pinned) and never a settable key; a file newer at the processor's head defers the job (`newer-release`) there, before every runtime and refusal, and again at the pickup's read for a file that turned newer between the two, unless a refusal that reads no settings (an unreadable wait condition, a job too big for the host) ends it first (so the overlay is read at least twice for a job that reaches the pickup's read, once more in the runtime of a question-grouping job and of a deciding watch rule's dispatch, and once more by the secret-bundle lookup for a job with a project on a host with no triggers file and no environment bundle profile, and a malformed one's `settings_overlay_invalid` line appears at each read), and refuses every admin write, while a broken, repeated or under-declared one stays `settings-overlay-invalid` (a hand-written `version` that earlier releases ignored is now judged); the keys this build does not know are carried by every write of this release or later, in the file's order (`readOverlayDocument`'s carry; an earlier panel or console, 4.3.1 included, still drops them); `writeSettings` re-checks against its own read by default; doctor's `settings.unknown-keys` and the newer `settings.overlay` fix (`newerFileFix`). **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED**: "This file has no version" replaced by an optional `version`, with a field and a value table (`PAUSE_WINDOW_VALUE_VERSIONS`, `DAYS` exported and pinned); a hand-written `version` is now judged, and a repeated one read by its last value; every other top-level key carried by both writers (`pauseWindowsText`); a newer file refuses the worker's start, defers every job that reaches the pause gate, and every watch job, after a live edit (`pause_windows_reload_newer`; a job ended earlier spends nothing) and refuses both writers; the unparseable-file repair stays. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: an optional `version` the writer owns, judged before the array, with field tables and value tables for an entry's fields, its `run` keys and the top-level blocks; a repeated `version` is never read as newer by any reader (the loaders refuse it as broken, and the console's triggers view shows one whose last value does not read newer as leniently as before); a newer file is refused by the writers before `mutate`, while the one-shot disarm still writes its one key into it with every other key kept (each value re-encoded, as by every write of the file), and a release that raises the version keeps accepting `on.disarmed` as `{ at, jobId? }`; the console's display reader calls a file whose `version` reads newer only through a repeated key broken, as the loaders do; a worker-wide state from the triggers watcher (`triggers_reload_newer`), the live one-shot, skew and approval reads and the watch, answer-draft and question-grouping runtimes defer the jobs; `dataVersion` is a job data field (with `JOB_DATA_VALUE_VERSIONS`) stamped only above 1 and never part of `/job`, a malformed one held like a newer one, and a job a newer release queued is neither re-run nor answered from an older console; the narrowing-fields bolt and the bolts on `WAIT_CONDITION_KEYS`, `RUN_KINDS`, `ON_TYPES` and the file's other exported closed lists; the other-top-level-keys bullet (#704) now says that a 4.3.1 writer still writes `triggers` alone; "an unparseable file is still repaired from empty" stays. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a record is written to a temporary file and renamed, EPERM retried once, written in place as a logged fallback (`run_record_in_place`) opened with `O_NOFOLLOW`, so a symbolic link at the record's name leaves it unwritten (`ELOOP`; Windows a residual); `v` (1) is its last key; the stable core (`RECORD_CORE_FIELDS`) and `recordReadable`, a malformed `v` read as newer; a newer record is read by its core everywhere (a lost lock's replay, touches and the failed listener included); one rule for "this attempt's record" (`recordOfThisJob`: the same id, that attempt, and not older than the job by its `startedAt`, or its `endedAt` when it has none), shared by the failed listener's own-record check and the failover wait, while the lost-lock settle check shares its id and attempt checks and still judges a settling record's age by its `startedAt` alone; the failed listener reads its own record from this host's file and the run mirror, each side held to the rule before the higher attempt is kept, for every release (so the #645 branch for a version 1 `recovery-failed` or `recovery-enqueued` record now also finds one in the mirror and refuses one older than the job), and on this attempt's newer `failed` record takes the terminal failure path without its comment (one `job_lost_lock_after_completion` line, the approval claim closed, an answer draft refused, the inbox and held replies closed unless the job is recovery-armed, one page whose argv carries `infra`; no comment, recovery request or record); a model failover retry with no model attempt key whose previous attempt's record passes the rule defers `newer-release` instead of being refused `model-failover-no-candidate`, while a stale newer record under a reused id makes no retry wait; a newer record is skipped by every fold, which says how many where it reports what it read (`newerSkipped`; the capacity report by distinct job id, the panel's PROJECTS view, `dispatch_costs`' `dollars.newerSkipped`, narrowed by the project filter but not by flow or repo, and the insights spend view's, counted the same way over its own week, by the selected project, each up to now), and shown as its core, with the run page's and `dispatch_runs`' own sentences (the only `note` values the agent projection lets through) and a Run card whose kind row is "Kind" unless the kind is a forge; the record fixtures and their generator; the reaper removes a temporary file after an hour, also at retention 0, a matching temporary file of another atomic writer included. **`INT-SANDBOX-CONTRACT` AMENDED**: an optional manifest `version`; `manifest-newer` for an open, a pin and the console, `manifest-unreadable` in the console's verdict for a broken one; the sweep unchanged. **`INT-SUBSCRIPTIONS-FILE-CONTRACT` AMENDED, its repair REVERSED**: only a missing file starts empty; an unset, unreadable, invalid or newer file refuses the write, in the writer's own sentences that never quote the file, now through `replaceFile`, because the repair dropped every declared plan and a newer file's fields; the writer calls a file newer exactly when the parser marks its refusal `newer`. **`INT-SCOPED-LIMITS-FILE-CONTRACT` CORRECTED in one clause**: its contrast with that repair said the repair risked nothing; its own version and write rules UNCHANGED, checked. **`INT-PROJECTS-FILE-CONTRACT` AMENDED**: the writer writes `projectsVersionFor(rows)`, 1 today, never a literal. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: `settingsVersion`, `pauseWindowsVersion`, `triggersVersion` and `jobDataVersion`, read by doctor only (`fleet.store-versions`, silent while every need is 1; a lower triggers peer defers every job from its next reload, a lower pause windows peer every job that reaches the pause gate and every watch job, and the job data fix names the receivers, which publish no row). **`INT-DOCTOR-RESULTS-KEY` AMENDED**: `settings.unknown-keys` and `fleet.store-versions` are named ids. **`INT-DEFER-REASON-KEY` AMENDED**: `newer-release` (bucket `ready`), its ten-minute re-check and where it is written, the model failover selection included. **`INT-CONSOLE-STATE-API` AMENDED**: `/api/run` answers a newer record with its core, `newer` and the run page's `note`, for every role, and the agent's copy now carries `run.finishedAt` as every other role's does, for a record of any version (it had no end time for any run before). UNCHANGED, checked: `INT-CONTAINER-JOB-INPUTS` (`dataVersion` rides at job level and every `/job` input is an explicit literal, so it never reaches the container) and `INT-CONSOLE-AUDIT-LOG` (the pause windows action's before and after digests are still the written file's). Tests: `worker/test/store-version.test.mjs`, `store-versions-files.test.mjs`, `settings-carry.test.mjs`, `job-data-stamp.test.mjs`, `newer-release-gate.test.mjs`, `newer-release-holds.test.mjs`, `newer-release-runtimes.test.mjs`, `doctor-store-versions.test.mjs`, `doctor.test.mjs`, `start-wiring.test.mjs`, `defer-write.test.mjs`, `subscriptions.test.mjs`, `run-record-fixtures.test.mjs`, `run-history.test.mjs`, `capacity-records.test.mjs`; `admin/test/settings-carry-writers.test.mjs`, `store-versions-admin.test.mjs`, `run-record-fixtures.test.mjs`, `size-suggest.test.mjs`, `dollar-tools.test.mjs`, `record-reason-out.test.mjs`, `console-run-api.test.mjs`, `insights-views.test.mjs`, `read-model.test.mjs`. |
 | 2026-11-02 (#776) | PROPOSED dispatcher requirements/design only; no new executable `INT-` entry or runtime shape. `INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked now: this issue adds no key or loader vocabulary; later builds must define reviewed dispatcher declarations and limits. `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-OUTBOX-CONTRACT` UNCHANGED, checked now: no mount, marker, output file, custody rule or generic same-folder chain authority changes; future restricted engine/input/intent contracts must be specified before use. `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked now: no dispatcher/proposal field or action is registered; later builds must define validated dispatcher provenance and proposal-linked adopt/dismiss/pause/resume/manual-association audit semantics. `INT-WATCH-EVENT-CONTRACT`, `INT-WATCH-FINDINGS-FILE`, `INT-WATCH-TRACE-STREAM` and `INT-WATCH-BOARD-FILE` UNCHANGED, checked: existing watch collection, fresh decisions, private/public projections and person-adopted boards remain their own contracts. Future dispatcher cursor/journal/cap/coalescer/proposal/private-trace contracts need atomic identities, finite byte/count/age limits, known-credential redaction before persistence, conservative unresolved holds, role projections and explicit unavailable/partial states; none is promised by borrowing a watch key or current local dedup. `INT-CONSOLE-STATE-API` and `INT-CONSOLE-TOKENS-FILE-CONTRACT` UNCHANGED, checked now: no tab, API, token role or #766 authority changes. This row identifies future amendments distinctly from today's checked unchanged interfaces. |
 | 2026-11-01 (#774, shared auth metadata) | Subscription adapter descriptors move to an SDK-free metadata leaf, mirrored byte-identically into the runner and added to its mirror guard. Policy parsing moves without changing validation or schemas. `INT-AUTH-CONNECTIONS-FILE-CONTRACT`, `INT-SUBSCRIPTION-CREDENTIAL-STORE`, adapter transformation/output/source pins and container credential capabilities UNCHANGED, checked. Private setup lifetime now starts at input receipt, including a pending planner; abort, navigation and sign-in changes cannot restart it or mint a late usable ticket. |

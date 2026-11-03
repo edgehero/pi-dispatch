@@ -11,7 +11,8 @@ import { makeLiveHub } from "../src/console/live.mjs";
 import { createFleetReader, fleetQueuesOn, readFleetQueues, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD } from "../src/read-model.mjs";
 import { runUnreadText, runUntoldText } from "../src/console/panels/run.mjs";
 import { sandboxRetentionOf } from "../src/sandbox-verdict.mjs";
-import { RERUN_DATA_KEPT_MS, RERUN_KEPT_SLACK_MS, rerunRefusalOf } from "../src/job-actions.mjs";
+import { parkedAnswerRefusalOf, RERUN_DATA_KEPT_MS, RERUN_DATA_KEPT_TEXT, RERUN_KEPT_SLACK_MS, rerunRefusalOf } from "../src/job-actions.mjs";
+import { FORGE_JOB_RETENTION_MS, LOCAL_JOB_KEPT_FAILED_S } from "@edgehero/pi-dispatch/retention";
 import { DOCS_ROOT } from "../src/words.mjs";
 import { parseDocument } from "./helpers/script-dom.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -273,6 +274,21 @@ test("rerunRefusalOf, table-driven: each cheap refusal, the record-only inferenc
     ["unread data never refuses a /command or a parked answer", rec(), undefined, null],
   ];
   for (const [name, record, data, want] of rows) assert.equal(rerunRefusalOf(record, NOW, data), want, name);
+});
+
+test("the re-run windows and the sentences that state them are the queue's own retention values, pinned at today's (issue #761)", () => {
+  // Derived: the windows ARE the queue's values, so a changed retention cannot leave the console judging by the old one.
+  assert.deepEqual(RERUN_DATA_KEPT_MS, { local: LOCAL_JOB_KEPT_FAILED_S * 1000, forge: FORGE_JOB_RETENTION_MS, recovery: FORGE_JOB_RETENTION_MS });
+  // Pinned in literal days and words: a changed retention fails here on purpose, so its sentences are read again.
+  assert.deepEqual(RERUN_DATA_KEPT_MS, { local: 7 * DAY, forge: 31 * DAY, recovery: 31 * DAY });
+  assert.deepEqual(RERUN_DATA_KEPT_TEXT, {
+    local: "a local job's data is kept 24 hours after it completes and 7 days after it fails",
+    forge: "a forge job's data is kept 31 days",
+    recovery: "a recovery job's data is kept 31 days",
+  });
+  assert.ok(Object.isFrozen(RERUN_DATA_KEPT_MS) && Object.isFrozen(RERUN_DATA_KEPT_TEXT));
+  // The parked reply's refusal states the forge one in the same words.
+  assert.deepEqual(parkedAnswerRefusalOf({ jobId: "gh-1", data: null }), { refusal: "the queue no longer holds gh-1's data (a forge job's data is kept 31 days), so the reply cannot be built; answer on the forge instead" });
 });
 
 // ---- the checks through the fleet reader ---------------------------------------------------------------------------------

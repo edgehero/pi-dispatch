@@ -5,17 +5,20 @@ import { test } from "node:test";
 import {
 	TOKEN_NAME_RE,
 	TOKEN_PREFIX,
+	TOKEN_ROLE_RE,
 	TOKEN_ROLES,
 	addToken,
 	endAllSessions,
 	findToken,
 	hashToken,
+	keptTokens,
 	newToken,
 	operatorCount,
 	parseTokensFile,
 	readTokensFile,
 	revokeToken,
 	rotateToken,
+	tokenNames,
 	tokensFilePath,
 	tokensFileProblem,
 } from "../src/console-tokens.mjs";
@@ -84,7 +87,25 @@ test("parseTokensFile refuses every malformed file with a sentence naming the pa
 		[fileText([null]), /entry 1 .* is not an object/],
 		[fileText([entry("Bad Name")]), /has a name that is not/],
 		[fileText([entry("rob"), entry("rob", "viewer", H("b"))]), /entry 2 .* repeats the name "rob"/],
-		[fileText([entry("rob", "admin")]), /role other than operator or viewer/],
+		[fileText([entry("rob", "Admin")]), /role other than operator or viewer or agent, and not the shape of one/],
+		[fileText([entry("rob", "Admin!")]), /role other than/],
+		[fileText([entry("rob", 7)]), /role other than/],
+		[fileText([entry("rob", "")]), /role other than/],
+		[fileText([entry("rob", "a b")]), /role other than/],
+		[fileText([entry("rob", "-x")]), /role other than/],
+		[fileText([entry("rob", "7x")]), /role other than/],
+		[fileText([entry("rob", `a${"b".repeat(32)}`)]), /role other than/],
+		[fileText([{ ...entry("rob"), role: undefined }]), /role other than/],
+		// A kept entry (issue #761) is judged as a known one is: its name, its secret and its date.
+		[fileText([entry("Bad Name", "auditor")]), /has a name that is not/],
+		[fileText([entry("aud", "auditor", "ABC")]), /sha256 that is not 64 lowercase hex/],
+		[fileText([{ ...entry("aud", "auditor"), createdAt: "yesterday" }]), /createdAt that is not an ISO date/],
+		// Names and secrets are unique across the known and the kept entries.
+		[fileText([entry("rob"), entry("rob", "auditor", H("b"))]), /entry 2 .* repeats the name "rob"/],
+		[fileText([entry("aud", "auditor", H("b")), entry("rob", "operator", H("b"))]), /entry 2 .* \("rob"\) has the same secret as another entry/],
+		[fileText([entry("rob", "operator", H("b")), entry("aud", "auditor", H("b"))]), /entry 2 .* \("aud"\) has the same secret as another entry/],
+		// A version this build does not read stays refused whole, whatever it holds (a narrowing field raises it).
+		[JSON.stringify({ version: 2, tokens: [entry("aud", "auditor")] }), /has version 2, and this pi-dispatch reads only version 1/],
 		[fileText([entry("rob", "operator", "ABC")]), /sha256 that is not 64 lowercase hex/],
 		[fileText([entry("rob", "operator", H("A"))]), /sha256 that is not 64 lowercase hex/],
 		[fileText([entry("rob"), entry("ann", "viewer", H("a"))]), /same secret as another entry/],
@@ -382,4 +403,131 @@ test("browser setup token writes compare the preview and revoke only the exact v
 	assert.ok(revokeToken({ path, name: "observer", identity: current, random, uid }).ok);
 	assert.equal(readTokensFile({ path, uid }).file.tokens.some(t => t.name === "observer"), false);
 	assert.ok(fs.readdirSync(dir).every(name => !name.endsWith(".tmp")));
+});
+
+// Issue #761: what a later release writes into a version-1 file. An entry whose role this build does not know is KEPT
+// apart from `tokens` (it signs in nowhere here), a known entry's other fields and the file's other keys are carried,
+// and every writer writes all of it back.
+
+/**
+ * A file a later release wrote: a known operator with a field of its own, a role this build does not know, more keys.
+ * The carried top-level key is a neutral one (a key that would narrow who may sign in raises `version`, see the header).
+ */
+function laterFile() {
+	const auditor = { name: "aud", role: "auditor", sha256: hashToken("pdc_aud"), createdAt: "2026-10-02T00:00:00.000Z", scope: ["runs"] };
+	const rob = { ...entry("rob", "operator", hashToken("pdc_rob")), note: "on call" };
+	// `__proto__` as a JSON key is an own key of the parsed object: carried as one, never as a prototype.
+	const text = `{"version":1,"generation":2,"tokens":[${JSON.stringify(rob)},${JSON.stringify(auditor)}],"note":{"text":"kept as written"},"__proto__":{"polluted":true}}`;
+	return { text, auditor, rob };
+}
+
+test("TOKEN_ROLE_RE: every role this build knows has the shape a later role keeps", () => {
+	for (const role of TOKEN_ROLES) assert.match(role, TOKEN_ROLE_RE, role);
+	assert.equal(String(TOKEN_ROLE_RE), String(/^[a-z][a-z0-9-]{0,31}$/));
+});
+
+test("parseTokensFile keeps an entry of a role it does not know apart from tokens, and carries other fields and keys", () => {
+	const { text, auditor } = laterFile();
+	const parsed = parseTokensFile(text, "/t.json");
+	assert.deepEqual(parsed.tokens, [entry("rob", "operator", hashToken("pdc_rob"))], "tokens holds the known entries, four fields each");
+	assert.deepEqual(parsed.carry.kept, [auditor], "the kept entry as written");
+	assert.deepEqual(parsed.carry.extras, { rob: { note: "on call" } });
+	assert.deepEqual(Object.keys(parsed.carry.top), ["note", "__proto__"]);
+	assert.deepEqual(parsed.carry.top.note, { text: "kept as written" });
+	assert.equal(Object.getPrototypeOf(parsed.carry.top), Object.prototype, "a carried __proto__ key is an own key");
+	assert.equal({}.polluted, undefined);
+	// No reader of `tokens` meets it: it signs in by no secret, counts as no operator, and is named by the helpers only.
+	assert.equal(findToken(parsed, "pdc_aud"), null);
+	assert.equal(findToken(parsed, "pdc_rob").name, "rob");
+	assert.equal(operatorCount(parseTokensFile(fileText([entry("rob"), entry("boss", "superoperator", H("b"))]), "/t.json")), 1);
+	assert.deepEqual(keptTokens(parsed), [auditor]);
+	assert.deepEqual(tokenNames(parsed), ["rob", "aud"]);
+	// Nothing to carry: no `carry` at all, so the parsed shape is exactly what it always was.
+	const plain = parseTokensFile(fileText([entry("rob")]), "/t.json");
+	assert.deepEqual(plain, { version: 1, generation: 0, tokens: [entry("rob")] });
+	assert.deepEqual([keptTokens(plain), tokenNames(plain), keptTokens(null), tokenNames(null)], [[], ["rob"], [], []]);
+});
+
+test("a file with nothing to carry is written byte for byte as before", { skip: !posix }, () => {
+	const dir = tempDir("pd-ctok-");
+	const path = join(dir, "console-tokens.json");
+	const added = addToken({ path, name: "rob", role: "operator", now, random: counter(), uid });
+	const exact = (generation) => `{\n  "version": 1,\n  "generation": ${generation},\n  "tokens": [\n    {\n      "name": "rob",\n      "role": "operator",\n      "sha256": "${hashToken(added.token)}",\n      "createdAt": "2026-10-14T12:00:00.000Z"\n    }\n  ]\n}\n`;
+	assert.equal(fs.readFileSync(path, "utf8"), exact(0));
+	endAllSessions({ path, random: counter(9), uid });
+	assert.equal(fs.readFileSync(path, "utf8"), exact(1));
+});
+
+test("every writer writes back the kept entries, the carried fields and the carried keys", { skip: !posix }, () => {
+	const dir = tempDir("pd-ctok-");
+	const path = join(dir, "console-tokens.json");
+	const { text, auditor } = laterFile();
+	writePrivate(path, text);
+	const random = counter();
+	const carried = (what) => {
+		const raw = JSON.parse(fs.readFileSync(path, "utf8"));
+		assert.deepEqual(raw.tokens.find((t) => t.name === "aud"), auditor, `${what}: the kept entry, as written`);
+		assert.equal(raw.tokens.at(-1).name, "aud", `${what}: kept entries are written after the known ones`);
+		assert.deepEqual(raw.note, { text: "kept as written" }, `${what}: a carried key`);
+		assert.ok(Object.hasOwn(raw, "__proto__") && raw.__proto__.polluted === true, `${what}: a carried __proto__ key`);
+		return raw;
+	};
+	const ann = addToken({ path, name: "ann", role: "viewer", now, random, uid });
+	assert.ok(ann.entry, ann.invalid);
+	assert.equal(carried("add").tokens.find((t) => t.name === "rob").note, "on call");
+	const rotated = rotateToken({ path, name: "rob", now, random, uid });
+	const rob = carried("rotate").tokens.find((t) => t.name === "rob");
+	assert.deepEqual(rob, { ...rotated.entry, note: "on call" }, "a rotated entry keeps its carried fields after its four");
+	assert.ok(revokeToken({ path, name: "ann", random, uid }).ok);
+	carried("revoke");
+	assert.equal(endAllSessions({ path, random, uid }).generation, 3);
+	assert.deepEqual(carried("end-all").tokens.map((t) => t.name), ["rob", "aud"]);
+	const { file } = readTokensFile({ path, uid });
+	assert.equal(findToken(file, rotated.token).name, "rob");
+	assert.equal(findToken(file, "pdc_aud"), null);
+});
+
+test("writers and a kept entry: add refuses its name, rotate refuses it, revoke removes it and its fields go with an entry", { skip: !posix }, () => {
+	const dir = tempDir("pd-ctok-");
+	const path = join(dir, "console-tokens.json");
+	const { text } = laterFile();
+	writePrivate(path, text);
+	const random = counter();
+	const before = fs.readFileSync(path, "utf8");
+	assert.match(addToken({ path, name: "aud", role: "viewer", now, random, uid }).invalid, /a token named "aud" already exists, with the role `auditor` that this pi-dispatch-console does not know; choose another name/);
+	assert.match(rotateToken({ path, name: "aud", now, random, uid }).invalid, /the token "aud" cannot be rotated here: its role `auditor` is not one this pi-dispatch-console knows; rotate it with the release that added that role, or revoke it/);
+	// The setup page's undo names the viewer it made: a kept entry never matches it.
+	assert.match(revokeToken({ path, name: "aud", identity: { sha256: hashToken("pdc_aud"), createdAt: "2026-10-02T00:00:00.000Z", role: "viewer" }, random, uid }).invalid, /the viewer entry changed/);
+	assert.equal(fs.readFileSync(path, "utf8"), before, "nothing was written");
+	assert.deepEqual(revokeToken({ path, name: "aud", random, uid }), { ok: true });
+	assert.deepEqual(readTokensFile({ path, uid }).file.carry.kept, []);
+	// Revoking a known entry takes its carried fields with it: the same name added again does not inherit them.
+	assert.ok(revokeToken({ path, name: "rob", random, uid }).ok);
+	assert.ok(addToken({ path, name: "rob", role: "operator", now, random, uid }).entry);
+	const raw = JSON.parse(fs.readFileSync(path, "utf8"));
+	assert.equal(Object.hasOwn(raw.tokens[0], "note"), false);
+	assert.deepEqual(raw.note, { text: "kept as written" }, "the top-level keys stay");
+});
+
+test("a known entry's own `__proto__` field is carried as an own key, pollutes nothing, and is written back", { skip: !posix }, () => {
+	// In JSON text `__proto__` is an ordinary key, and JSON.parse makes it an own key of the entry. Assigned onto a plain
+	// object it would set that object's prototype instead: the field would vanish from the carry and the entry's carried
+	// object would answer for keys it does not hold.
+	const rob = entry("rob", "operator", hashToken("pdc_rob"));
+	const text = `{"version":1,"generation":0,"tokens":[${JSON.stringify(rob).slice(0, -1)},"__proto__":{"polluted":true}}]}`;
+	const parsed = parseTokensFile(text, "/t.json");
+	assert.deepEqual(parsed.tokens, [rob]);
+	const extra = parsed.carry.extras.rob;
+	assert.deepEqual(Object.keys(extra), ["__proto__"]);
+	assert.ok(Object.hasOwn(extra, "__proto__"), "an own key");
+	assert.deepEqual(extra.__proto__, { polluted: true });
+	assert.equal(Object.getPrototypeOf(extra), Object.prototype, "the carried object's prototype is untouched");
+	assert.equal(extra.polluted, undefined);
+	assert.equal({}.polluted, undefined);
+	const dir = tempDir("pd-ctok-");
+	const path = join(dir, "console-tokens.json");
+	writePrivate(path, text);
+	assert.equal(endAllSessions({ path, random: counter(), uid }).generation, 1);
+	const written = JSON.parse(fs.readFileSync(path, "utf8")).tokens[0];
+	assert.ok(Object.hasOwn(written, "__proto__") && written.__proto__.polluted === true, "written back as the field it was");
 });
