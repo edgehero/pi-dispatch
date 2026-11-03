@@ -114,5 +114,5 @@ test("What a job gets says what the console says: the words a row reads, and eve
 });
 
 test("the words the root README's new section leans on are in its glossary", () => {
-  for (const word of ["Extension", "MCP server", "Tool"]) assert.match(ROOT, new RegExp(`^\\| \\*\\*${word}\\*\\* \\| `, "m"), word);
+  for (const word of ["Skill", "Extension", "Overlay", "Host", "MCP server", "Tool"]) assert.match(ROOT, new RegExp(`^\\| \\*\\*${word}\\*\\* \\| `, "m"), word);
 });

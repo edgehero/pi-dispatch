@@ -682,7 +682,7 @@ function skipRows(r, view) {
  * the sandbox was given) and "Rule hosts" (the hosts its policy admitted, with the count of any the record does not
  * list), the worker's rebuild (`recordOpenshell`: hosts held to the host-name charset), escaped by the renderer; and
  * "Secrets profile", the profile NAME run.secrets resolved through. No row for a record without the keys, so every
- * other run renders byte-identical. MCP connection state is not recorded on any venue, so no row claims it.
+ * other run renders byte-identical. MCP connection state is no part of these fields: the record's `loaded.mcp` holds it (#800).
  */
 function openshellRows(r) {
   const o = recordOpenshell(r);

@@ -4442,7 +4442,7 @@ function renderRunDetail(record: any, inner: number, styler: any, allRuns: any[]
   // the hosts its policy admitted, WRAPPED under the label (a cut host list would read as the whole policy), at most four
   // lines, the rest counted. `recordOpenshell` is the worker's rebuild (the host-name charset, counts bounded), and each
   // part still goes through `show`. Then the secrets profile NAME run.secrets resolved through. A record without either
-  // key (every other venue, every run without secrets) renders byte-identical. MCP connection state is recorded nowhere.
+  // key (every other venue, every run without secrets) renders byte-identical. MCP connection state is no part of these fields: the record's `loaded.mcp` holds it (#800).
   const policy = recordOpenshell(r);
   if (policy !== null) {
     wrapColumns(show(openshellCountsText(policy)), Math.max(1, inner - 13), styler).forEach((part: string, i: number) => out.push(kv(i === 0 ? "policy" : "", part, "dim")));

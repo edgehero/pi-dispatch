@@ -1353,9 +1353,9 @@ is what ran.
 
 - **A run's page**, in the **Loaded** card under the Run card. Its top line says whether everything the trigger asks for
   loaded, or names what did not, with a button to where that is fixed. Under it is one line per kind: pi and its image,
-  the model, extensions, skills, MCP servers and tools. A fold holds each item and where it came from, and what no top
-  line mentions: a skill a package had replaced, prompt templates and themes, an extension the recursion guard dropped,
-  and what was left out.
+  the model, extensions, skills, MCP servers and tools. A fold holds each item and where it came from, what was left out,
+  and what no top line mentions: a skill a package had replaced, prompt templates and themes, and an extension the
+  recursion guard dropped.
 - **The Runs list and the run's outcome banner.** A run that completed without its flow reads **Completed, without its
   flow**, and one with an extension that failed to load reads **Completed, with a failed extension**, or says how many,
   or says both. Its record still says `completed`, so no count moves and `outcome=completed` still finds it, and **Only
@@ -1373,7 +1373,8 @@ from an older release, or one that never reached its container, has no list, and
 by its first path segment, a server the trigger names, pi's own tools, and the tools a package or an overlay extension
 brought. What the repository holds is counts, because a repository picks its own names. On a run with a forge link, the
 button on a repository extension's problem and the fold's row of repository skills open the base commit, the code that
-ran. A failure's path and error stay in the job's log. A repository's extension shares the
+ran. A failure's path and a fixed kind stay in the job's log. pi's error text is kept nowhere, because it can quote the
+module's source. A repository's extension shares the
 process that reports this, so the worker checks every name against what it knows, and holds a tool's name, which it has
 nothing to compare with, to one closed shape (`INT-RUN-HISTORY-FILE-CONTRACT`). A viewer reads the same lines and gets no
 button. No tool and no agent reads the list. A model that reads such a run reads `completed` and, as its `note`, the same word a
@@ -1388,10 +1389,10 @@ line is one of these states:
 | `left-out` | Everything loaded, and what the trigger's `run.excludeTools` or `"packages": false`, this job's overlay switch or this kind of run left out, in green, as a choice and never as missing. | Nothing, unless you did not mean it: change the trigger, or `PI_GLOBAL_ALLOW_EXTENSIONS` on the host. |
 | `host-differs` | This run loaded something from its host's overlay or staged packages that its host still publishes and another host's publication lacks, and which hosts have published nothing. A past run whose name every host has moved past is no difference. | Open the host. If they should match, run `import-pi` on the one that is behind, or Adopt the version on [Updates](#updates). A trigger's own choice and a canary's candidate are never counted as a difference. |
 | `no-flow` | pi found no skill named for its flow in any tier it looked in. A skill with no description is not loaded and `name` in its frontmatter renames it, so this says what pi found, not what the repository holds. If the agent started, it ran without its instructions; the line says so only then. | Read what it did before you trust it. Open the trigger and correct `run.flow`, open the base commit to read what it held, or add the skill to the repository's default branch, the overlay, the skills folder or a staged package. |
-| `extension-failed` | An extension failed to load, by whose it was, and that the run went on. Its path and error are in the job's log. | The button goes where it is fixed: a repository's opens the base commit, an overlay's the host's page, a package's [Updates](#updates), a skills folder's the trigger. |
+| `extension-failed` | An extension failed to load, by whose it was, and, where the run got that far, that it went on. Its path and a fixed kind (`load`, `conflict` or `manifest-dir`) are in the job's log, and pi's error text is not. | The button goes where it is fixed: a repository's opens the base commit, an overlay's the host's page, a package's [Updates](#updates), a skills folder's the trigger. |
 | `mcp-stopped` | An MCP server did not answer in time, so the run stopped before the agent started. The queue retries it as any infrastructure failure. | Open Connections, and check that the server answers from that host. |
 | `mcp-failed` | An MCP server could not be used, so the run stopped before the agent started. It is not retried, because the next attempt would find it the same ([`mcp-unavailable`](reasons.md#mcp-unavailable)). | Open Connections, and check that the server starts and accepts its credentials. |
-| `stopped` | It stopped before anything loaded, while its extensions and skills loaded, or while its MCP servers connected. | Read the outcome above it, which says why it stopped. |
+| `stopped` | It stopped before anything loaded, after its extensions and skills loaded but before its tools were ready, before its MCP servers started, or while they were connecting. | Read the outcome above it, which says why it stopped. |
 | `no-agent` | This kind of run has no agent, so it has nothing to load. | Nothing. |
 | `running` | The card arrives when the run ends. | Nothing yet. The trigger's page says what it asks for. |
 | `not-recorded` | There is no list: an older release wrote this record, or the run ended before its container reported. | Nothing for this run. Later runs of an upgraded worker have one. |

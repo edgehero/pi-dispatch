@@ -185,7 +185,7 @@ you send it ([answer rules](docs/answer-rules.md)).
 **Picking up where it stopped:** if a machine restarts or a job's box dies, a job that opted in continues from its last checkpoint
 instead of paying for everything again ([durable runs](docs/durable-runs.md)).
 
-![A run that lost its first attempt and continues as a recovery job: the attempt that failed, the checkpoints it had written and the recovery job that goes on from them](docs/images/console/console-recovery.png?v=2026-11-03-800)
+![A run that lost its first attempt and continues as a recovery job: the attempt that failed, the checkpoints it had written and the recovery job that goes on from them](docs/images/console/console-recovery.png?v=2026-11-04-800)
 
 **Trying it yourself:** reopen a finished job's workspace in a fresh box with no keys, or prepare one from scratch, and open it in your
 own terminal or your browser. The page says what pi can load there, which is only what the project holds
@@ -198,10 +198,10 @@ updates by itself ([updates](docs/console.md#updates)).
 
 ![The Updates page: what jobs run now, what is newer, a button to run a canary, and which version each host holds](docs/images/console/console-updates.png?v=2026-11-03)
 
-**Projects:** group your repositories into a project, with its own limits, share of the budget and history, and see what its runs
-loaded on each machine ([projects](docs/projects.md), [budget split](docs/allocation.md)).
+**Projects:** group your repositories into a project, with its own limits, share of the budget and history, and see
+[what its runs loaded](#what-a-job-gets) on each machine ([projects](docs/projects.md), [budget split](docs/allocation.md)).
 
-![One project: what it has spent, its runs of the last day, what its runs loaded on each machine and where they differ, its members and its limits](docs/images/console/console-project.png?v=2026-11-03-800)
+![One project: what it has spent, its runs of the last day, what its runs loaded on each machine and where they differ, its members and its limits](docs/images/console/console-project.png?v=2026-11-04-800)
 
 **A trigger:** what starts it, what it runs and what it has cost. A schedule also gets a button that fires it now
 ([triggers](docs/triggers.md)).
@@ -245,20 +245,22 @@ really got ([What a job gets](#what-a-job-gets)).
 ## What a job gets
 
 A job starts with four things: your setup on the machine it runs on, what the repository holds, what its trigger says, and
-the box it runs in. Each changes on its own, so two jobs of one trigger can start differently.
+the box it runs in. Each changes on its own: one machine misses an update, or someone removes a skill from the repository. So
+two jobs of one trigger can start differently.
 
-**Every run keeps a list of what it had:** the version of pi, the model, its skills, its extensions, the outside systems it
-connected to, and its tools. The run's page shows that list and says plainly when something is missing, so you can check a
-job you did not watch.
+**A job that starts keeps a list of what it had:** the version of pi, the model, its skills, its extensions, the outside systems
+(MCP servers) it connected to, and its tools. The run's page shows that list and says plainly when something is missing, so you
+can check a job you did not watch before you accept its work.
 
-![The Loaded card of a finished run: everything its trigger asks for loaded, then pi, the model, extensions, skills, outside systems and tools, one line each](docs/images/console/console-run-loaded.png?v=2026-11-03-800)
+![The Loaded card of a finished run that had no flow: it says so at the top, with buttons to where it is fixed, then pi, the model, extensions, skills, outside systems and tools, one line each](docs/images/console/console-run-loaded.png?v=2026-11-04-800)
 
 **A clean finish can still be missing something:** a job that finishes without its instructions reads **Completed, without
 its flow**, and one with an extension that failed to load reads **Completed, with a failed extension**. The Runs list says the
 same, so it does not read as fine. A project's page says when its runs differ from machine to machine.
 
-**What the list holds:** the names of what you set up, the tools those brought, and counts. It keeps no text from an issue,
-and a repository's own skills and extensions are only counted: you read those in the repository. A run from an older release says its list was not recorded ([what each line means and what to do](docs/console.md#what-a-run-loaded)).
+**What the list holds:** the names of what you set up, the tools those brought, and counts. It keeps no text from an issue, which a
+stranger may have written, and a repository's own skills and extensions are only counted: to see them, open the repository. A run that
+ended before it could report, or one from an older release, says its list was not recorded ([what its top line can say, and what to do](docs/console.md#what-a-run-loaded)).
 
 ## How to use it
 
@@ -295,7 +297,10 @@ happening ends it sooner. After that, you need your token or a new link, which `
 | **Job**, or **run** | One piece of work, from start to finish |
 | **Trigger** | A rule for what starts a job: a schedule, a label, a comment |
 | **Flow** | A short text file in your project with the standing instructions for a kind of job |
+| **Skill** | A short text file that teaches the agent one kind of task. A job's flow is one of them |
 | **Extension** | An add-on for pi, which can give the agent new tools |
+| **Overlay** | The console's word for your setup on one machine, which jobs there start with |
+| **Host** | The console's word for a machine that runs jobs |
 | **MCP server** | An outside system a job can connect to |
 | **Tool** | One thing the agent can do, such as read a file |
 | **Container** | The sealed box a job runs in, thrown away afterwards |

@@ -5,10 +5,10 @@ import { ACTIONS } from "../src/console/actions.mjs";
 import { PAGES } from "../src/console/pages.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { ENDED_REASONS, endedNotices } from "../src/console/session-ends.mjs";
-import { LOADED_STATES, outcomeNote } from "../src/loaded-words.mjs";
+import { LOADED_STATES, loadedVerdict, outcomeNote, runningVerdict } from "../src/loaded-words.mjs";
 import { RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES } from "../src/run-filter.mjs";
 import { planTriggerAdd, TRIGGER_ADD_FIELDS } from "../src/write-plans.mjs";
-import { LOADED_SAMPLES as S } from "./helpers/loaded-samples.mjs";
+import { HOST_LOADS, LOADED_SAMPLES as S, loadedField, loadedRecord, source } from "./helpers/loaded-samples.mjs";
 
 /**
  * The console's hand-written lists in the docs and the specs, each held to the code it restates (AGENTS.md: a table
@@ -95,6 +95,31 @@ test("docs/console.md's table of the Loaded card's top lines: one row per LOADED
   for (const [state, says, todo] of rows) {
     assert.ok(says.length > 0 && todo.length > 0, `${state} says what it means and what to do`);
   }
+});
+
+test("each row of that table says what to do on the page its line's own buttons open, and none says the log keeps pi's error", () => {
+  const rows = new Map(tableRows(read("docs/console.md"), "| State | The top line says | What to do |").map(([state, says, todo]) => [state.replaceAll("`", ""), { says, todo }]));
+  // A kind of way to a fix, as a row must name it: the code's word, because a row that sends a person elsewhere is the defect this holds.
+  const WORD = { trigger: /[Tt]rigger/, repository: /base commit/, connections: /Connections/, updates: /Updates/, host: /host/ };
+  const overlay = loadedRecord({ host: "mini2", loaded: loadedField({ sources: [source("overlay", { failed: 1, failedNames: ["b.js"] }), source("repository"), source("trigger"), source("other")], problems: { failed: 1, dropped: 0, mcp: 0 } }) });
+  const skillsFolder = loadedRecord({ loaded: loadedField({ sources: [source("overlay"), source("repository"), source("trigger", { failed: 1 }), source("other")], problems: { failed: 1, dropped: 0, mcp: 0 } }) });
+  const samples = { "host-differs": [S.hostDiffers()], "no-flow": [S.noFlow()], "extension-failed": [S.extensionFailed(), S.twoTiers(), overlay, skillsFolder], "mcp-stopped": [S.mcpTimeout()], "mcp-failed": [S.mcpFailed()] };
+  for (const [state, records] of Object.entries(samples)) {
+    for (const record of records) {
+      const verdict = loadedVerdict(record, HOST_LOADS);
+      assert.equal(verdict.state, state, record.jobId);
+      assert.ok(verdict.fixes.length > 0, `${state}: this sample offers a way to a fix`);
+      for (const fix of verdict.fixes) assert.match(rows.get(state).todo, WORD[fix.kind], `${state}: its line opens ${fix.label}, and its row does not say so`);
+    }
+  }
+  // A running job's line opens its trigger, and has no record to sample.
+  assert.match(rows.get("running").todo, WORD[runningVerdict(2).fixes[0].kind]);
+  // A state with nothing to fix tells nobody to open a page.
+  for (const state of ["everything", "no-agent", "cut"]) assert.equal(loadedVerdict(S[{ everything: "everything", "no-agent": "noAgent", cut: "noRoom" }[state]]()).fixes.length, 0, state);
+  // The runner logs a path and a kind and never pi's error text (`reportExtensionLoadErrors`), so the row may mention that text only to say it is not there.
+  const failed = rows.get("extension-failed");
+  assert.doesNotMatch(`${failed.says} ${failed.todo}`.replace("pi's error text is not", ""), /error/i);
+  assert.match(failed.says, /`load`, `conflict` or `manifest-dir`/);
 });
 
 // The console's other sentences are left to the card (the docs point there, and a test here would only freeze them). These
