@@ -77,7 +77,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | The operator's browser | **Operator, while it holds a session** | A signed-in browser acts as the token's person. Every other page that browser opens, including one on another `localhost` port, is **None**: the console refuses its writes by origin, not by trust in the browser |
 | The console tokens file (`PI_CONSOLE_TOKENS_FILE`) | **Operator, the same trust as the deployment's `.env`** | It says who may sign in. It holds sha256 hashes only, so a copy signs no one in, but whoever can WRITE it can add a person. The console refuses to start on one that is group or world accessible, a symlink or another account's; the pi extension guards it from its own session's `write` and `edit`; doctor fails it inside any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`) |
 | The login-code drop directory (`console-login-codes/` beside the tokens file) | **Operator, the same trust as the tokens file** | `pi-dispatch-console link` and, since issue #708, `/dispatch console --link` write a one-time code's hash there (directory 0700, file 0600, 60 seconds, consumed by the first `unlink` that wins; the panel appends its audit row first). Whoever can write it can mint a login, which is why it must be the deployment account's alone, and why the pi extension guards the directory, every path under it, from its own session's `write` and `edit`, as it guards the tokens file |
-| Receiver, worker, queue, admin extension, operator console | Trusted | They never execute agent-authored content: the admin extension feeds only PII-free, fixed-enum run records to the model; raw container output stays in the overlay viewer. The operator console renders untrusted text as data only: escaped, behind the operator role, and never in a list view |
+| Receiver, worker, queue, admin extension, operator console, sandbox gateway | Trusted | They never execute agent-authored content: the admin extension feeds only PII-free, fixed-enum run records to the model; raw container output stays in the overlay viewer. The operator console renders untrusted text as data only: escaped, behind the operator role, and never in a list view |
 
 ## What is defended
 
@@ -311,7 +311,7 @@ refuse; resurrected sandboxes remain credential-free. See [subscription-auth.md]
 
 ## The operator console
 
-The admin extension binds no port. The operator console does: `pi-dispatch-console serve` is a separate process
+The admin extension binds no port. The optional sandbox gateway binds its own, on a hostname of its own (below). The operator console does too: `pi-dispatch-console serve` is a separate process
 that serves a web page to manage the deployment ([`docs/console.md`](docs/console.md), `DES-OPERATOR-CONSOLE`,
 `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`). It never runs on the receiver, which faces the internet. It listens on `127.0.0.1:4790` by
 default, or on a unix socket at mode 0600, and refuses any other address unless you set `PI_CONSOLE_BIND_PUBLIC=1`
