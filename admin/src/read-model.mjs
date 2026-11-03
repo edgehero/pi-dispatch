@@ -32,6 +32,7 @@ import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { LOADED_BASE_SHA_RE } from "@edgehero/pi-dispatch/loaded-record";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
@@ -7518,7 +7519,7 @@ function forgeBase(kind, env) {
  */
 /**
  * The record's repository on its forge, or null: `forgeLinkOf`'s checks and instance rule, without the issue. For a problem
- * fixed in the repository (issue #800), where the record keeps no base commit to link: this opens the repository and says so.
+ * fixed in the repository (issue #800), through `forgeBaseLinkOf`.
  */
 export function forgeRepoLinkOf(record, env = {}) {
   const kind = record?.kind;
@@ -7534,6 +7535,22 @@ export function forgeRepoLinkOf(record, env = {}) {
     return `${base}/${project}/_git/${name}`;
   }
   return `${base}/${repo}`;
+}
+
+/** Where a commit's page sits under a repository's own link, per forge. Held to every forge kind by a test. */
+export const FORGE_COMMIT_PATH = Object.freeze({ github: "/commit/", gitlab: "/-/commit/", forgejo: "/commit/", azure: "/commit/" });
+
+/**
+ * Where a problem in a run's repository is read (issue #800): the commit its record names on the forge, the code that ran,
+ * or the repository itself where the record names none, or null where no link can be built. Built on `forgeRepoLinkOf`, so it
+ * refuses what that refuses, and the commit is held to the rule `recordedLoaded` keeps it by, so a button's words
+ * (`repositoryFix`) and its address agree about which records name one.
+ */
+export function forgeBaseLinkOf(record, env = {}) {
+  const repository = forgeRepoLinkOf(record, env);
+  const sha = record?.loaded?.baseSha;
+  if (repository === null || typeof sha !== "string" || !LOADED_BASE_SHA_RE.test(sha)) return repository;
+  return `${repository}${FORGE_COMMIT_PATH[record.kind] ?? "/commit/"}${sha}`;
 }
 
 export function forgeLinkOf(record, env = {}) {

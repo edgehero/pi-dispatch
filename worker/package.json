@@ -135,6 +135,7 @@
     "./hook-runs": "./src/hook-runs.mjs",
     "./doctor-results": "./src/doctor-results.mjs",
     "./host-loads": "./src/host-loads.mjs",
+    "./loaded-record": "./src/loaded-record.mjs",
     "./identity": "./src/identity.mjs",
     "./gitlab-identity": "./src/gitlab-identity.mjs",
     "./forgejo-identity": "./src/forgejo-identity.mjs",

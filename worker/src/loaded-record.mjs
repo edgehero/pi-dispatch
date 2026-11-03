@@ -24,8 +24,9 @@ import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
  * A tool name or a `pi` holding one of the job's secrets or a known token's shape is refused anyway (`known.redact`); a secret
  * transformed, or cut across two values, or spelled in counts, is not, as everywhere the redactor stands (redact-secrets.mjs,
  * NOT DEFENDED). Every other string kept is a closed word, a folder listing's name, or the worker's own: a package's name and
- * version off its stage manifest, a server's name off the trigger, the image and `leftOut`. A package's version keeps its
- * pre-release tail because the line cannot choose it; it picks a row by position and the worker writes what is in that row.
+ * version off its stage manifest, a server's name off the trigger, the image, `leftOut` and the base commit. A package's version
+ * keeps its pre-release tail because the line cannot choose it; it picks a row by position and the worker writes what is in
+ * that row.
  *
  * Never read to decide anything: a display, as `resources` is.
  *
@@ -88,6 +89,13 @@ const DROPPED_SLOT = LOADED_ROW.indexOf("dropped");
 const IMAGE_MAX = 512;
 /** `sha256:` and 64 hex: `normalizeImageId` gives every runtime's id this one spelling (image-preflight.mjs). */
 const IMAGE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+/**
+ * The commit a run's workspace was prepared at, in full, sha1 or sha256: what `validPin` (prepare-github.mjs) holds a pin to
+ * and what `git rev-parse` prints. Exported because a surface that builds a link from it holds it to this same rule, so a
+ * link's words and its address cannot disagree about which records name a commit. REJECTED: a short hash, which a forge may
+ * not resolve or may resolve to another commit as the repository grows.
+ */
+export const LOADED_BASE_SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const PI_VERSION_MAX = 32;
 /** A package's name and version as `parsePackageCanary` bounds them. */
 const PACKAGE_NAME_MAX = 214;
@@ -384,6 +392,18 @@ export function loadedWithImage(loaded, img) {
 	return { ...(loaded ?? workerOnly("absent")), ...facts };
 }
 
+/**
+ * The field with the commit this run's workspace was prepared at, which only the worker can say: a repository extension in the
+ * runner's process can write anything on its line, so a line's `baseSha` is never read (`readLine` names what it keeps) and this
+ * value replaces whatever the object held. Null stays null, undefined or a non-string adds nothing: a record that has no base
+ * to name has no key, and a preflight's image-only field before the workspace was prepared is byte-identical to what it was.
+ * The shape is held where every other fact's is, at `recordedLoaded`.
+ */
+export function loadedWithBase(loaded, baseSha) {
+	if (loaded === null || loaded === undefined) return null;
+	return typeof baseSha === "string" ? { ...loaded, baseSha } : loaded;
+}
+
 const namesWithin = (value, max, ok) => Array.isArray(value) && value.length <= max && value.every(ok);
 
 /** A count field of a source, or undefined when any is not a count: its tier's row, by name. */
@@ -492,6 +512,9 @@ export function recordedLoaded(value) {
 	const image = typeof value.image === "string" && value.image.length <= IMAGE_MAX && imageRefProblem(value.image) === null ? value.image : null;
 	const imageDigest = typeof value.imageDigest === "string" && IMAGE_DIGEST_RE.test(value.imageDigest) ? value.imageDigest : null;
 	const imagePi = isPiVersion(value.imagePi) ? value.imagePi : null;
+	// A CONDITIONAL key, the last of the field. Null, as `image` is, would change the bytes of every record written before the
+	// workspace was prepared, and those have nothing to say about a commit.
+	const base = typeof value.baseSha === "string" && LOADED_BASE_SHA_RE.test(value.baseSha) ? { baseSha: value.baseSha } : {};
 	const leftOut = recordedLeftOut(value.leftOut ?? null);
 	if (leftOut === undefined) return null;
 	let runnerPart = { at: null, cut: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null };
@@ -500,11 +523,11 @@ export function recordedLoaded(value) {
 		if (runnerPart === undefined) return null;
 	}
 	const { at, cut, pi, flow, sources, mcp, tools, problems } = runnerPart;
-	const out = { v: LOADED_RECORD_VERSION, runner: value.runner, at, cut, image, imageDigest, imagePi, pi, flow, sources, mcp, tools, problems, leftOut };
+	const out = { v: LOADED_RECORD_VERSION, runner: value.runner, at, cut, image, imageDigest, imagePi, pi, flow, sources, mcp, tools, problems, leftOut, ...base };
 	if (Buffer.byteLength(JSON.stringify(out), "utf8") <= LOADED_RECORD_MAX_BYTES) return out;
 	// No job's line gets here today (the tests measure the worst one); a cap that grows would. REJECTED: null, as this read
 	// until a check found it. The bound falls after the image's facts are added, so a line that had passed every check then
 	// left no key at all, and the run read like an older worker's. What is left always fits: the image's three facts and at
-	// most 32 left-out tools, a few KiB between them.
+	// most 32 left-out tools and the base commit, a few KiB between them.
 	return { ...out, runner: "cut", at: null, cut: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null };
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
 import { recordedLoaded } from "../../worker/src/loaded-record.mjs";
@@ -37,6 +38,24 @@ test("each state of the LoadedStates card, in its words, tone and way to where i
   assert.deepEqual(loadedVerdict(S.mcpConnected()).small, ["MCP: linear connected, with 12 tools."]);
   assert.deepEqual(loadedVerdict(S.cut()).small, ["Cut to fit: this record keeps the counts and leaves out the tool names."]);
   assert.deepEqual(loadedVerdict(S.mcpFailed()).small, ["Not retried: the next attempt would find it the same."]);
+});
+
+test("a repository extension's fix names the commit a record names, and says the repository where it names none", () => {
+  assert.equal(loadedVerdict(S.extensionFailed()).fix.label, "Open the base commit a41c0d2");
+  const { baseSha: _sha, ...older } = S.extensionFailed().loaded;
+  assert.equal(loadedVerdict({ ...S.extensionFailed(), loaded: older }).fix.label, "Open the repository");
+  // Another tier's problem is fixed elsewhere, whatever commit the run was at.
+  const overlay = loadedRecord({ target: "acme/api#120", host: "mini2", loaded: loadedField({ sources: [source("overlay", { failed: 1, failedNames: ["git-guard"] }), source("repository"), source("trigger"), source("other")], problems: { failed: 1, dropped: 0, mcp: 0 } }) });
+  assert.equal(loadedVerdict(overlay).fix.label, "Open mini2");
+  // No field a record's rebuild refuses reaches the words as a commit.
+  const bad = { ...S.extensionFailed(), loaded: { ...S.extensionFailed().loaded, baseSha: "<script>" } };
+  assert.equal(loadedVerdict(bad).fix.label, "Open the repository");
+});
+
+test("the words read the record's module through the worker's exports, as every other worker module in admin/src is read", () => {
+  const dir = new URL("../src/", import.meta.url);
+  const byPath = readdirSync(dir, { recursive: true }).filter((file) => /\.(?:mjs|ts)$/.test(file)).filter((file) => /from\s+"[^"]*worker\/src\//.test(readFileSync(new URL(file, dir), "utf8")));
+  assert.deepEqual(byPath, []);
 });
 
 test("the extension that failed: a total is said only where it is known, because a conflicted extension counts on both sides", () => {

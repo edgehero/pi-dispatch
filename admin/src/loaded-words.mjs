@@ -36,8 +36,7 @@
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
-// By path: the worker's exports map has no `./loaded-record` entry. esbuild inlines either spelling, so the published bundle is the same.
-import { recordedLoaded } from "../../worker/src/loaded-record.mjs";
+import { recordedLoaded } from "@edgehero/pi-dispatch/loaded-record";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { repoOfTarget } from "./costs.mjs";
@@ -144,11 +143,13 @@ function factsOf(record) {
 
 /**
  * Where each problem is fixed. `href` null is the repository, which the surface links by the forge's own rule
- * (`forgeRepoLinkOf`, which needs the deployment's forge variables). The record keeps no base commit, so that link opens
- * the repository rather than claim a commit it cannot name.
+ * (`forgeBaseLinkOf`, which needs the deployment's forge variables). A record that names the base commit says so with its
+ * short hash, and the link opens that commit: it is the code that ran, while the repository has moved on. A record that names
+ * none (an older worker's, or a throw before its container) opens the repository and says that instead, rather than claim a
+ * commit it cannot name.
  */
 const triggerFix = (index) => (index === null ? null : { kind: "trigger", label: `Open trigger ${index + 1}`, icon: "config", href: `/config/trigger?index=${index}` });
-const repositoryFix = (facts) => (facts.forge ? { kind: "repository", label: "Open the repository", icon: "git", href: null } : null);
+const repositoryFix = (facts, baseSha = null) => (facts.forge ? { kind: "repository", label: typeof baseSha === "string" ? `Open the base commit ${baseSha.slice(0, 7)}` : "Open the repository", icon: "git", href: null } : null);
 const CONNECTIONS_FIX = Object.freeze({ kind: "connections", label: "Open Connections", icon: "plug", href: "/config/connections" });
 const UPDATES_FIX = Object.freeze({ kind: "updates", label: "Open Updates", icon: "box", href: "/config/updates" });
 const hostFix = (name) => (name === null ? null : { kind: "host", label: `Open ${name}`, icon: "fleet", href: `/fleet/host?${new URLSearchParams({ name })}` });
@@ -209,8 +210,8 @@ function noFlowSentence(loaded, facts) {
 }
 
 /** How a tier's failed extensions are named: whose they are, and which way fixes them. */
-function failedTierOf(source, facts) {
-  if (source.tier === "repository") return { whose: `${facts.repo ?? "this repository"}’s`, from: facts.repo ?? "the repository", fix: repositoryFix(facts) };
+function failedTierOf(source, facts, baseSha = null) {
+  if (source.tier === "repository") return { whose: `${facts.repo ?? "this repository"}’s`, from: facts.repo ?? "the repository", fix: repositoryFix(facts, baseSha) };
   if (source.tier === "overlay") return { whose: `${facts.host ?? "this host"}’s overlay`, from: `${facts.host ?? "this host"}’s overlay`, fix: hostFix(facts.host) };
   if (source.tier === "package") return { whose: source.name !== null ? `${source.name}’s` : "a staged package’s", from: source.name ?? "a staged package", fix: UPDATES_FIX };
   if (source.tier === "trigger") return { whose: "the skills folder’s", from: "the skills folder", fix: triggerFix(facts.index) };
@@ -230,10 +231,10 @@ function failedLine(loaded, facts) {
   if (rows.length === 0) return { bold: `${plural(failed, "extension")} failed to load.`, rest: "The run went on. This record was cut to fit, so it does not say which.", fix: null, banner: failedBannerWords(failed, false) };
   if (rows.length > 1) {
     const named = rows.map((source) => `${source.failed} from ${failedTierOf(source, facts).from}`);
-    return { bold: `${failed} of this run’s extensions failed to load.`, rest: `${andList(named)}. The run went on.`, fix: failedTierOf(rows[0], facts).fix, banner: failedBannerWords(failed, false) };
+    return { bold: `${failed} of this run’s extensions failed to load.`, rest: `${andList(named)}. The run went on.`, fix: failedTierOf(rows[0], facts, loaded.baseSha).fix, banner: failedBannerWords(failed, false) };
   }
   const [source] = rows;
-  const { whose, fix } = failedTierOf(source, facts);
+  const { whose, fix } = failedTierOf(source, facts, loaded.baseSha);
   const names = source.tier === "overlay" && Array.isArray(source.failedNames) && source.failedNames.length > 0 ? ` ${andList(source.failedNames)}.` : "";
   const banner = failedBannerWords(source.failed, source.extensions === 0);
   if (source.extensions > 0) return { bold: `${source.failed} of ${whose} extensions failed to load.`, rest: `The run went on.${names}`, fix, banner };

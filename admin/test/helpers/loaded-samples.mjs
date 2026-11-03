@@ -8,6 +8,8 @@ import { recordedLoaded } from "../../../worker/src/loaded-record.mjs";
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DIGEST = `sha256:7c1e0b4${"a".repeat(57)}`;
+/** The commit the cards name, a41c0d2, in full as a record holds it. */
+export const BASE_SHA = `a41c0d2${"b".repeat(33)}`;
 
 /** One `sources` row, every count zero but what it names. */
 export const source = (tier, over = {}) => ({
@@ -32,6 +34,7 @@ export function loadedField(over = {}) {
     tools: { active: 10, own: ["read", "bash", "edit", "write"], job: ["report_progress"] },
     problems: { failed: 0, dropped: 0, mcp: 0 },
     leftOut: NOTHING_LEFT_OUT,
+    baseSha: BASE_SHA,
     ...over,
   };
   const kept = recordedLoaded(field);

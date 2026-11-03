@@ -12,7 +12,7 @@ import { makeRedactor } from "../src/redact-secrets.mjs";
 import { buildRecord, makeLogSink } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
-const { LOADED_COUNT_MAX, LOADED_RECORD_MAX_BYTES, leavesOut, leftOutOf, loadedWithImage, rebuildLoaded, recordedLoaded } = record;
+const { LOADED_BASE_SHA_RE, LOADED_COUNT_MAX, LOADED_RECORD_MAX_BYTES, leavesOut, leftOutOf, loadedWithBase, loadedWithImage, rebuildLoaded, recordedLoaded } = record;
 const { buildLoaded, fitLoaded } = runnerLoaded;
 
 // Issue #800, INT-RUN-HISTORY-FILE-CONTRACT's `loaded`: the worker's half. The lines here come out of the runner's own
@@ -574,18 +574,19 @@ function maximal() {
 		leftOut: { tools: Array.from({ length: 32 }, (_, i) => `mcp__${String(i).padStart(2, "0")}${"y".repeat(41)}*`), packages: false, overlayExtensions: false, restricted: false },
 	};
 	const img = { image: `ghcr.io/${"i".repeat(504)}`, imageDigest: `sha256:${"f".repeat(64)}`, piVersion: piLongest };
-	return { forged, known, img };
+	return { forged, known, img, baseSha: "e".repeat(64) };
 }
 
 /** Measured off `maximal` below, and said in INT-RUN-HISTORY-FILE-CONTRACT. A new cap moves this and the spec together. */
-const WORST_RECORD_BYTES = 15_874;
+const WORST_RECORD_BYTES = 15_951;
 
 test("the record stays under 16 KiB at every cap, and the worst case is measured and pinned", () => {
-	const { forged, known, img } = maximal();
+	const { forged, known, img, baseSha } = maximal();
 	const built = rebuildLoaded(forged, known);
 	assert.equal(built.runner, "reported", "the premise: this worst line passes every check");
-	const kept = recordedLoaded(loadedWithImage(built, img));
+	const kept = recordedLoaded(loadedWithBase(loadedWithImage(built, img), baseSha));
 	assert.ok(kept !== null, "and the record keeps it");
+	assert.equal(kept.baseSha.length, 64, "a sha256 commit, the longest it can name");
 	const bytes = Buffer.byteLength(JSON.stringify(kept), "utf8");
 	assert.equal(kept.sources.filter((row) => row.tier === "package").length, 16);
 	assert.equal(kept.image.length, 512);
@@ -627,8 +628,8 @@ test("the record stays under 16 KiB at every cap, and the worst case is measured
 });
 
 test("past the bound it reads as `cut` and keeps the worker's facts: a key that vanished would read like an older worker's run", () => {
-	const { forged, known, img } = maximal();
-	const kept = recordedLoaded(loadedWithImage(rebuildLoaded(forged, known), img));
+	const { forged, known, img, baseSha } = maximal();
+	const kept = recordedLoaded(loadedWithBase(loadedWithImage(rebuildLoaded(forged, known), img), baseSha));
 	// No line reaches this, so a source by hand, every package row holding every tool name the door lets a row hold.
 	const huge = { ...kept, sources: kept.sources.map((row) => (row.tier === "package" ? { ...row, toolNames: Array.from({ length: 24 }, (_, i) => `${"t".repeat(40)}${i}`) } : row)) };
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
@@ -639,9 +640,10 @@ test("past the bound it reads as `cut` and keeps the worker's facts: a key that 
 	assert.deepEqual(built.loaded.sources, []);
 	assert.deepEqual([built.loaded.image, built.loaded.imageDigest, built.loaded.imagePi], [img.image, img.imageDigest, img.piVersion]);
 	assert.deepEqual(built.loaded.leftOut, known.leftOut);
+	assert.equal(built.loaded.baseSha, baseSha, "and the commit, which is the worker's too");
 	const bytes = Buffer.byteLength(JSON.stringify(built.loaded), "utf8");
 	assert.ok(bytes <= LOADED_RECORD_MAX_BYTES, "what is left fits, and it is the most the worker alone can say");
-	assert.equal(bytes, 2_522);
+	assert.equal(bytes, 2_599);
 	assert.deepEqual(recordedLoaded(built.loaded), built.loaded, "and it reads back as itself");
 	assert.deepEqual(Object.keys(built).slice(-2), ["loaded", "v"]);
 	// The bound itself, to the byte. A name costs its length, two quotes and a comma, less the one comma the first has none of.
@@ -690,6 +692,48 @@ test("`absent`, `invalid` and `cut` carry no runner part, whatever the source sa
 		assert.deepEqual(kept.leftOut, good.leftOut, "what the worker said stays");
 	}
 	for (const bad of [null, "x", [], { v: 2, runner: "absent" }, { v: 1, runner: "fine" }, { v: 1, runner: "reported", at: "ready" }]) assert.equal(recordedLoaded(bad), null, JSON.stringify(bad));
+});
+
+test("the base commit is the worker's alone: a line that names one is not read, whatever form the field takes", () => {
+	const forged = "f".repeat(40);
+	for (const raw of [{ ...line(), baseSha: forged }, { baseSha: forged }, { v: 99, baseSha: forged }]) {
+		const built = rebuildLoaded(raw, KNOWN);
+		assert.equal(Object.hasOwn(built, "baseSha"), false, `runner ${built.runner}`);
+		assert.equal(Object.hasOwn(recordedLoaded(built), "baseSha"), false);
+	}
+	assert.equal(rebuildLoaded({ ...line(), baseSha: forged }, KNOWN).runner, "reported", "the premise: the line held up, and the key it invented is dropped by never being read");
+	const worker = "a".repeat(40);
+	assert.equal(recordedLoaded(loadedWithBase(rebuildLoaded({ ...line(), baseSha: forged }, KNOWN), worker)).baseSha, worker, "what the worker prepared is what is kept");
+	assert.equal(recordedLoaded(loadedWithBase({ ...rebuildLoaded(line(), KNOWN), baseSha: forged }, worker)).baseSha, worker, "and it replaces whatever the object held");
+});
+
+test("the base commit has one shape, sha1 or sha256 in full, and a value that fails it is no key rather than an unreadable field", () => {
+	const ran = rebuildLoaded(line(), KNOWN);
+	for (const good of ["a".repeat(40), "0123456789abcdef".repeat(4)]) assert.equal(recordedLoaded({ ...ran, baseSha: good }).baseSha, good);
+	for (const bad of ["", "a".repeat(39), "a".repeat(41), "a".repeat(63), "a".repeat(65), "A".repeat(40), "g".repeat(40), `${"a".repeat(40)}\n`, `\n${"a".repeat(40)}`, `${"a".repeat(39)}/`, "a41c0d2", null, 7, [], {}, ["a".repeat(40)]]) {
+		const kept = recordedLoaded({ ...ran, baseSha: bad });
+		assert.equal(kept.runner, "reported", `${JSON.stringify(bad)} costs the commit and not the field: it is the worker's fact, as the image is`);
+		assert.equal(Object.hasOwn(kept, "baseSha"), false, JSON.stringify(bad));
+		if (typeof bad === "string") assert.equal(LOADED_BASE_SHA_RE.test(bad), false, JSON.stringify(bad));
+	}
+});
+
+test("a field with no commit to name has no key, so a record written before the workspace was prepared is byte-identical", () => {
+	const only = loadedWithImage(null, { image: "pi-job:4.3.1", imageDigest: null, piVersion: "1.5.0" });
+	assert.deepEqual(loadedWithBase(only, undefined), only);
+	assert.deepEqual(loadedWithBase(only, null), only);
+	assert.equal(Object.hasOwn(recordedLoaded(only), "baseSha"), false);
+	assert.equal(JSON.stringify(recordedLoaded(only)), JSON.stringify(recordedLoaded(loadedWithBase(only, undefined))));
+	assert.equal(loadedWithBase(null, "a".repeat(40)), null, "no field is not made up for a commit alone");
+	assert.equal(loadedWithBase(undefined, "a".repeat(40)), null);
+	const kept = recordedLoaded(loadedWithBase(only, "a".repeat(40)));
+	assert.equal(Object.keys(kept).at(-1), "baseSha", "the last of the field, so what was there keeps its place");
+	assert.equal(kept.runner, "absent", "a commit says nothing about what loaded");
+});
+
+test("the console reads this through the package's exports", () => {
+	const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+	assert.equal(pkg.exports["./loaded-record"], "./src/loaded-record.mjs");
 });
 
 test("the image is the worker's alone, and an unknown image leaves no key at all", () => {

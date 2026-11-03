@@ -284,7 +284,7 @@
       "el": "the repository's .pi/skills at a41c0d2",
       "kind": "readme",
       "status": "illustrative",
-      "reason": "The record keeps no base commit, so the console says 'at its base commit' and names no commit, and the link opens the repository."
+      "reason": "The fold says 'at its base commit' and its link opens that commit. The short hash stays on the problem's button, where a person is about to open it."
     },
     {
       "el": "one of pi-test-runner's, by the repository's skill of that name",

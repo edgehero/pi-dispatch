@@ -63,9 +63,9 @@
       "shows": [
         "Completed, with a failed extension",
         "Read what it did before you trust it.",
-        "Open the repository"
+        "Open the base commit a41c0d2"
       ],
-      "reason": "The card's 'Open the base commit' opens the repository: the record keeps no base commit. Its 'without 1 of acme/api's 2 extensions' and 'threw' are not said: the record keeps no kind, so neither the total nor whether the extension stayed loaded is known."
+      "reason": "Its 'without 1 of acme/api's 2 extensions' and 'threw' are not said: the record keeps no kind, so neither the total nor whether the extension stayed loaded is known. A record that names no commit opens the repository and says so."
     },
     {
       "el": "p-loaded-sandbox",
@@ -223,9 +223,9 @@
       "shows": [
         "1 of acme/api’s extensions failed to load.",
         "The run went on.",
-        "Open the repository"
+        "Open the base commit a41c0d2"
       ],
-      "reason": "The card's '1 of acme/api's 2 extensions' needs a total. pi 1.5.0 keeps a conflicted extension loaded and reports it too, so loaded plus failed can count one twice, and the record keeps no kind. 'The run went on without it' holds only when none of that tier's extensions loaded, and then it is said. The button opens the repository, because the record keeps no base commit."
+      "reason": "The card's '1 of acme/api's 2 extensions' needs a total. pi 1.5.0 keeps a conflicted extension loaded and reports it too, so loaded plus failed can count one twice, and the record keeps no kind. 'The run went on without it' holds only when none of that tier's extensions loaded, and then it is said. The button opens the commit the record names, and the repository where it names none."
     },
     {
       "el": "An MCP server could not be used (gh-6b0d)",
@@ -394,12 +394,6 @@
       "kind": "readme",
       "status": "illustrative",
       "reason": "A total the record cannot honestly give: see the state above."
-    },
-    {
-      "el": "Open the base commit",
-      "kind": "readme",
-      "status": "illustrative",
-      "reason": "The record keeps no base commit, so the button is Open the repository."
     },
     {
       "el": "Every run with its outcome and host",

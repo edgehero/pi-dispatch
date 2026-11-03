@@ -391,7 +391,8 @@
       "packages": false,
       "overlayExtensions": false,
       "restricted": false
-    }
+    },
+    "baseSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
   "v": 1
 }

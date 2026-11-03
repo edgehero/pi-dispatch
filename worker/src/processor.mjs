@@ -17,7 +17,7 @@ import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { mergeBundleSecrets } from "./secret-bundles.mjs";
 import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
-import { loadedWithImage } from "./loaded-record.mjs";
+import { loadedWithBase, loadedWithImage } from "./loaded-record.mjs";
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "./record-reason.mjs";
@@ -359,8 +359,8 @@ export async function runJob(job, deps) {
 		if (error && typeof error === "object") {
 			const ran = error.loaded ?? null;
 			// A throw that already holds what the container said (`InfraRetry`'s `loaded`) came out of the run's own wrapper before
-			// the processor could note it, so what is noted here is the image alone. The line stands, with the image added.
-			if (ran !== null && canaryFacts.loaded !== null) error.loaded = { ...ran, image: canaryFacts.loaded.image, imageDigest: canaryFacts.loaded.imageDigest, imagePi: canaryFacts.loaded.imagePi };
+			// the processor could note it, so what is noted here is the worker's own facts alone. The line stands, with them added.
+			if (ran !== null && canaryFacts.loaded !== null) error.loaded = loadedWithBase({ ...ran, image: canaryFacts.loaded.image, imageDigest: canaryFacts.loaded.imageDigest, imagePi: canaryFacts.loaded.imagePi }, canaryFacts.loaded.baseSha);
 			else if (ran === null && canaryFacts.loaded !== null) error.loaded = canaryFacts.loaded;
 		}
 		if (touches.length && error && typeof error === "object") error.touches = touches;
@@ -2402,8 +2402,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// refused job never writes to the store. A recovery's base is already there. A base that could not be primed means
 		// no checkpoint of this run can ever be restored: the run goes on unprotected and the record says so.
 		let checkpointArgs = null;
+		const baseSha = isRecovery ? manifest.workspace.baseSha : prepared.sha;
 		if (armed) {
-			const baseSha = isRecovery ? manifest.workspace.baseSha : prepared.sha;
 			if (!isRecovery) {
 				const objectFormat = typeof baseSha === "string" && baseSha.length === 64 ? "sha256" : "sha1";
 				let primed = null;
@@ -2426,6 +2426,10 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
 		if (subscriptionAuth.length > 0 && !(await validateSubscriptionAuth(subscriptionAuth))) throw new InfraRetry("subscription binding changed before container start", { reason: "container-never-started", budgetReserved: true });
+		// Issue #800: the commit the repository's part of this run came from, beside the image's facts. Noted here, the last
+		// thing before the container, and not at the prepare above: a refusal between the two loaded nothing, so it has nothing
+		// to point at, and its record stays byte-identical to what it was. Every way out from here keeps it, a retried attempt's too.
+		if (deps.canaryFacts) deps.canaryFacts.loaded = loadedWithBase(deps.canaryFacts.loaded, baseSha);
 		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
@@ -2467,7 +2471,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
 		resources = ranResources ?? null;
 		if (deps.canaryFacts && job.packageCanary !== undefined) deps.canaryFacts.load = canaryLoadOfRun ?? null;
-		if (deps.canaryFacts && loadedOfRun !== null) deps.canaryFacts.loaded = loadedWithImage(loadedOfRun, img);
+		if (deps.canaryFacts && loadedOfRun !== null) deps.canaryFacts.loaded = loadedWithBase(loadedWithImage(loadedOfRun, img), baseSha);
 		progress = ranProgress ?? null;
 		// Issue #596: CONFIRMED killed for memory. The image's supervisor (image/runner/src/supervise.mjs) outlives the runner,
 		// whose process tree it gives the highest OOM score, and when the runner dies of SIGKILL with the cgroup's

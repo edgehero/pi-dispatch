@@ -222,6 +222,7 @@ export function caseInput(name) {
 						tools: { active: 23, own: ["read", "bash"], job: ["report_progress"] },
 						problems: { failed: 0, dropped: 0, mcp: 0 },
 						leftOut: { tools: ["write"], packages: false, overlayExtensions: false, restricted: false },
+						baseSha: hex(40, "a"),
 					},
 				},
 				startedAt: "2026-09-14T14:00:00.000Z",

@@ -11,11 +11,12 @@ import { loadedList, wordsHtml } from "../src/console/panels/loaded-parts.mjs";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { LOADED_WORDS, loadedFold, loadedOf, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, projectLoadsOf, wordsText } from "../src/loaded-words.mjs";
 import { projectViewForAgent } from "../src/project-view.mjs";
-import { forgeRepoLinkOf, modelRunRecord } from "../src/read-model.mjs";
+import { FORGE_KINDS } from "@edgehero/pi-dispatch/forges";
+import { FORGE_COMMIT_PATH, forgeBaseLinkOf, forgeRepoLinkOf, modelRunRecord } from "../src/read-model.mjs";
 import { parseRunFilter, runMatches } from "../src/run-filter.mjs";
 import { runForAgent } from "../src/tool-reads.mjs";
 import { outcomeKey } from "../src/words.mjs";
-import { HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, SCRIPT, billingRecords, loadedField } from "./helpers/loaded-samples.mjs";
+import { BASE_SHA, HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, SCRIPT, billingRecords, loadedField } from "./helpers/loaded-samples.mjs";
 
 // Issue #800: what the console's surfaces do with `loaded-words.mjs`: the run page's card and banner, the Runs list and its
 // filter, `/api/run`'s neighbours, and every read that must NOT carry the field to a model.
@@ -131,7 +132,7 @@ test("the fold is a details element, the card's words, and the page draws the pa
   assert.ok(page.indexOf('id="p-loaded" data-panel') < page.indexOf('id="p-progress" data-panel'));
   assert.match(page, /<details class="ld-more"><summary>Each item, and where it came from<\/summary>/);
   assert.ok(page.includes(LOADED_WORDS.foot));
-  assert.ok(page.includes(`href="${"https://github.com/acme/web"}"`), "Read them there links the repository");
+  assert.ok(page.includes(`href="https://github.com/acme/web/commit/${BASE_SHA}"`), "Read them there opens the commit the run was at");
   const viewer = await pageOf(S.everything(), "viewer");
   assert.ok(viewer.includes(LOADED_WORDS.foot));
   // A record a newer release wrote shows its core alone.
@@ -171,6 +172,69 @@ test("the repository link: the forge's own, by the record's checks, and none for
   for (const record of [{ kind: "local", target: "local:site" }, { kind: "github", target: "../evil#1" }, { kind: "github", target: "acme/web" }, { kind: "github", target: "<script>#1" }, { kind: "gitlab", target: "a/b#1" }, {}, null]) {
     assert.equal(forgeRepoLinkOf(record, record?.kind === "gitlab" ? {} : env), null, JSON.stringify(record));
   }
+});
+
+test("the base commit's link: the commit on each forge, the repository where a record names none, and nothing it cannot build", () => {
+  const env = { GITLAB_URL: "https://gitlab.example.com/sub", FORGEJO_URL: "https://code.example.org", AZURE_ORG_URL: "https://dev.azure.com/acme" };
+  const sha = BASE_SHA;
+  const at = (kind, target, baseSha = sha) => ({ kind, target, loaded: { baseSha } });
+  assert.equal(forgeBaseLinkOf(at("github", "acme/web#12"), env), `https://github.com/acme/web/commit/${sha}`);
+  assert.equal(forgeBaseLinkOf(at("gitlab", "group/sub/project!3"), env), `https://gitlab.example.com/sub/group/sub/project/-/commit/${sha}`);
+  assert.equal(forgeBaseLinkOf(at("forgejo", "acme/web#12"), env), `https://code.example.org/acme/web/commit/${sha}`);
+  assert.equal(forgeBaseLinkOf(at("azure", "proj/repo#7"), env), `https://dev.azure.com/acme/proj/_git/repo/commit/${sha}`);
+  assert.deepEqual(Object.keys(FORGE_COMMIT_PATH).sort(), [...FORGE_KINDS].sort(), "a forge with no entry would say a commit and open the repository");
+  // Where a record names none, or names something that is not a commit: the repository, as the words then say.
+  for (const baseSha of [undefined, null, "", "a41c0d2", "A".repeat(40), `${"a".repeat(40)}/../../evil`, "../../evil", 7]) {
+    assert.equal(forgeBaseLinkOf({ kind: "github", target: "acme/web#12", loaded: { baseSha } }, env), "https://github.com/acme/web", String(baseSha));
+  }
+  assert.equal(forgeBaseLinkOf({ kind: "github", target: "acme/web#12" }, env), "https://github.com/acme/web", "a record with no field");
+  // Where no link can be built, a commit changes nothing: no guessed host, and the words stand with no button.
+  for (const record of [at("local", "local:site"), at("github", "../evil#1"), at("gitlab", "a/b#1"), { ...at("github", "acme/web#12"), kind: "nope" }, null, {}]) {
+    assert.equal(forgeBaseLinkOf(record, record?.kind === "gitlab" ? {} : env), null, JSON.stringify(record));
+  }
+});
+
+test("a repository extension's problem opens the commit that ran: an operator's button and the banner's, with the short hash, and none for a viewer", async () => {
+  const panel = (page) => page.slice(page.indexOf('id="p-loaded" data-panel'), page.indexOf("</section>", page.indexOf('id="p-loaded" data-panel')));
+  const banner = (page) => page.slice(page.indexOf('id="p-outcome" data-panel'), page.indexOf('id="p-workspace" data-panel'));
+  const record = S.extensionFailed();
+  const v = loadedVerdict(record);
+  assert.equal(v.fix.label, `Open the base commit ${BASE_SHA.slice(0, 7)}`);
+  assert.equal(outcomeBanner(record).fix.label, v.fix.label, "the banner's button says the same");
+  const href = `https://github.com/acme/api/commit/${BASE_SHA}`;
+  const page = await pageOf(record);
+  assert.ok(panel(page).includes(`href="${href}"`), "the card");
+  assert.ok(panel(page).includes(v.fix.label));
+  assert.ok(banner(page).includes(`href="${href}"`), "the banner");
+  const viewer = await pageOf(record, "viewer");
+  assert.ok(panel(viewer).includes(lineOf(v).split(". ")[0]), "the same words");
+  assert.ok(!panel(viewer).includes(v.fix.label), "with no button");
+  assert.ok(!banner(viewer).includes(v.fix.label));
+
+  // A record that names no commit: an older worker's, whose line says the repository and whose button opens it.
+  const { baseSha: _sha, ...older } = record.loaded;
+  const noCommit = { ...record, loaded: older };
+  assert.equal(loadedVerdict(noCommit).fix.label, "Open the repository");
+  assert.equal(outcomeBanner(noCommit).fix.label, "Open the repository");
+  const olderPage = await pageOf(noCommit);
+  assert.ok(panel(olderPage).includes('href="https://github.com/acme/api"'));
+  assert.ok(!olderPage.includes("/commit/"), "no commit it cannot name");
+
+  // A forge the deployment has no address for: the words stand, with nothing to open.
+  const gitlab = { ...record, kind: "gitlab", target: "acme/api!3" };
+  assert.equal(loadedVerdict(gitlab).fix.label, `Open the base commit ${BASE_SHA.slice(0, 7)}`);
+  const noHost = await pageOf(gitlab);
+  assert.ok(!panel(noHost).includes("Open the base commit"), "a button that opens nothing is not drawn");
+  assert.ok(panel(noHost).includes("failed to load."));
+
+  // A local run has no forge at all, so a commit is nothing to link, and its record may still name one.
+  const local = { ...record, kind: "local", target: "local:site" };
+  assert.equal(loadedVerdict(local).fix, null);
+});
+
+test("the fold's Read them there opens the commit too: the words say at its base commit", async () => {
+  const page = await pageOf(S.everything());
+  assert.match(page, new RegExp(`href="https://github\\.com/acme/web/commit/${BASE_SHA}"[^>]*>Read them there`));
 });
 
 test("what the hosts published, beside what they beat out: a live host with no record still has its pi, and a failed read says so", async () => {
