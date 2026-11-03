@@ -9,7 +9,8 @@
  * redeliver webhook deliveries that occurred in the past 3 days" and "GitHub does not automatically redeliver failed
  * deliveries". Every marker that stands in for a job key once it is gone (a steered delivery's marker, the poller's
  * cursor, the approval's finished mark, the console trail's claim) is derived from it, so shortening it shortens all of
- * them together, and lengthening it cannot leave one of them shorter than the job it guards.
+ * them together, and lengthening it cannot leave one of them shorter than the job it guards. So is the life of a finished
+ * job's model attempt key (`MODEL_ATTEMPT_FINISHED_TTL_MS`, below), which must outlive the finished job itself.
  *
  * BullMQ's `removeOnComplete.age` / `removeOnFail.age` are in SECONDS and a Valkey `PX` is in milliseconds, so both are
  * exported and each site takes the one its call wants, never a conversion of its own.
@@ -21,6 +22,13 @@ export const FORGE_JOB_RETENTION_DAYS = 31;
 export const FORGE_JOB_RETENTION_S = FORGE_JOB_RETENTION_DAYS * 86_400;
 /** The same, in milliseconds: a Valkey `PX`, an age compared with `Date.now()`. */
 export const FORGE_JOB_RETENTION_MS = FORGE_JOB_RETENTION_S * 1000;
+
+/**
+ * How long a finished job's model attempt key is kept, in MILLISECONDS (the `PEXPIRE` of model-attempts.mjs, issue #812):
+ * a day past a forge job's retention, the longest age the queue keeps a finished job for, so the key outlives every
+ * finished job a console retry can still bring back to read it.
+ */
+export const MODEL_ATTEMPT_FINISHED_TTL_MS = FORGE_JOB_RETENTION_MS + 86_400_000;
 
 /**
  * A local or cron job's retention, in seconds. Local jobs are not redelivered, so their window only has to cover a

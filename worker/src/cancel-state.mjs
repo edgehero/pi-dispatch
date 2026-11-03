@@ -50,6 +50,7 @@ function stopTouch(job, queue, jobId, now) {
  */
 
 import { deferKey } from "./defer-reasons.mjs";
+import { dropKey, dropModelAttempt, modelAttemptIdOf } from "./model-attempts.mjs";
 import { HELD_SET, jobKey, leaseKey } from "./wait-state.mjs";
 
 /** How long an unanswered request may sit before redis reaps it (the requester deletes it sooner). */
@@ -137,9 +138,12 @@ async function holdInPlace(redis, jobId) {
  * resend of a delete that already ran. Never throws.
  * Writes no run record of its own (INT-RUN-HISTORY-FILE-CONTRACT records terminal states of runs, and a removed hold
  * is none); `attemptsMade` is what the job had done before, for the caller's sentence (`ranBefore`, issue #477): a job
- * held again on a retry has made attempts, and whatever they recorded stays.
+ * held again on a retry has made attempts, and whatever they recorded stays. Once the job is removed, its model attempt
+ * key goes too (`dropModelAttempt`, issue #812: bounded by `timeoutMs`, best-effort), since no retry is left to read it.
+ * `dropDefer` (removeQueuedJob's) deletes the job's defer record beside it, both sent before either is waited for, so the
+ * two cost a caller one bound, as they do for a waiting job, rather than two in a row.
  */
-export async function removeHeldJob({ redis, queue, jobId, touchStore = undefined, touchOutbox = null, now = Date.now, interventionOrigin = "human" }) {
+export async function removeHeldJob({ redis, queue, jobId, timeoutMs = 2_000, dropDefer = false, touchStore = undefined, touchOutbox = null, now = Date.now, interventionOrigin = "human" }) {
 	// Set as the first hold key's delete is sent, before it is answered: a delete lost in transit may still have landed.
 	let cleared = false;
 	try {
@@ -177,6 +181,7 @@ export async function removeHeldJob({ redis, queue, jobId, touchStore = undefine
 		}
 		const store = touchStore === undefined ? (typeof redis?.eval === "function" ? makeTouchStore({ redis, now }) : null) : touchStore;
 		const removal = interventionOrigin === "agent" ? (await job.remove(), { ok: true }) : await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
+		await Promise.all([dropDefer ? dropDeferRecord(redis, jobId, timeoutMs) : null, dropAttemptOf(redis, queue, jobId, timeoutMs)]);
 		// Issue #477: what the job had done, for the caller's sentence (`ranBefore`); read off the job just removed.
 		return { ok: true, jobId, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };
 	} catch (err) {
@@ -213,7 +218,9 @@ export const QUEUED_STATES = Object.freeze(["delayed", "waiting", "prioritized",
  * at its own earlier check.
  *
  * Once the job is removed, its defer record (`defer:job:<jobId>`) is deleted too: bounded by `timeoutMs`, best-effort,
- * and only after a removal that succeeded, so a job that stays keeps its reason. Returns, and never throws:
+ * and only after a removal that succeeded, so a job that stays keeps its reason. Its model attempt key goes the same way
+ * (issue #812), beside the record, so the two deletes share one bound: here for a waiting job, inside `removeHeldJob`
+ * (`dropDefer`) for a held one. Returns, and never throws:
  *   `{ ok: true, held: true, jobId, attemptsMade }`         a held job, removed;
  *   `{ invalid }`                                            `removeHeldJob`'s own refusal of a held job, nothing changed;
  *   `{ invalid, cleared: true }`                             `removeHeldJob` failed after its hold's keys were deleted: the
@@ -235,9 +242,8 @@ export async function removeQueuedJob({ redis, queue, job, jobId, state = null, 
 	if (hash?.since) {
 		const stop = await guarded(guard, job);
 		if (stop !== null) return stop;
-		const res = await removeHeldJob({ redis, queue, jobId, touchStore, touchOutbox, now, interventionOrigin });
+		const res = await removeHeldJob({ redis, queue, jobId, timeoutMs, dropDefer: true, touchStore, touchOutbox, now, interventionOrigin });
 		if (!res.ok) return res.cleared === true ? { invalid: res.invalid, cleared: true } : { invalid: res.invalid };
-		await dropDeferRecord(redis, jobId, timeoutMs);
 		return { ok: true, held: true, jobId: res.jobId, attemptsMade: res.attemptsMade, ...(res.touchWarning ? { touchWarning: res.touchWarning } : {}) };
 	}
 	if (!job) return { notQueued: true, state: "unknown" };
@@ -252,7 +258,7 @@ export async function removeQueuedJob({ redis, queue, job, jobId, state = null, 
 	} catch (error) {
 		return { raced: true, state: await stateOf(job), error };
 	}
-	await dropDeferRecord(redis, jobId, timeoutMs);
+	await Promise.all([dropDeferRecord(redis, jobId, timeoutMs), dropAttemptOf(redis, queue, jobId, timeoutMs)]);
 	return { ok: true, held: false, jobId, state: current, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };
 }
 
@@ -275,23 +281,18 @@ function stateOf(job) {
 }
 
 /**
- * Delete a removed job's defer record, bounded and best-effort: the record's own TTL is the backstop, and a record whose
- * job is gone is never read. The bound's timer is cleared when the delete wins, so a CLI that sets its exit code rather
- * than exiting is not held open by it.
+ * Delete a removed job's model attempt key (issue #812), under the id the processor wrote it with: the job's queue's name
+ * and its id. A queue handle without a name (BullMQ's always has one) names no key, so nothing is sent.
  */
-async function dropDeferRecord(redis, jobId, timeoutMs) {
-	if (typeof redis?.del !== "function") return;
-	let timer;
-	try {
-		await Promise.race([
-			Promise.resolve().then(() => redis.del(deferKey(jobId))),
-			new Promise((resolve) => {
-				timer = setTimeout(resolve, timeoutMs);
-			}),
-		]);
-	} catch {
-		// A delete that fails leaves the record to its TTL.
-	} finally {
-		clearTimeout(timer);
-	}
+async function dropAttemptOf(redis, queue, jobId, timeoutMs) {
+	if (typeof queue?.name !== "string" || queue.name === "") return;
+	await dropModelAttempt(redis, modelAttemptIdOf(queue.name, jobId), timeoutMs);
+}
+
+/**
+ * Delete a removed job's defer record, bounded and best-effort (model-attempts.mjs `dropKey`, the one such delete): the
+ * record's own TTL is the backstop for a delete that fails, and a record whose job is gone is never read.
+ */
+function dropDeferRecord(redis, jobId, timeoutMs) {
+	return dropKey(redis, deferKey(jobId), timeoutMs);
 }

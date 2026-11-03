@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ReplyError } from "ioredis";
 import { CANCEL_ACK_TTL_MS, CANCEL_REQ_TTL_MS, QUEUED_STATES, agentCancelAckKey, agentCancelReqKey, cancelAckKey, cancelReqKey, removeHeldJob, removeQueuedJob, requestCancel } from "../src/cancel-state.mjs";
+import { modelAttemptKey } from "../src/model-attempts.mjs";
 
 test("the cancel keyspace is exactly cancel:req:/cancel:ack: -- the CLI, the panel and the worker meet on these strings", () => {
 	assert.equal(cancelReqKey("j1"), "cancel:req:j1");
@@ -471,3 +472,44 @@ test("removeQueuedJob: the defer record's delete is best-effort and bounded, and
 	await removeQueuedJob({ redis, queue, job, jobId: "j1", timeoutMs: 60_000 });
 	assert.equal(timers(), before);
 });
+
+// ---- issue #812: a removed job's model attempt key goes with it ---------------------------------------------------
+
+test("a cancel deletes the removed job's model attempt key, named by its queue and id, and none when the removal fails", async () => {
+	const attempt = modelAttemptKey("pi-jobs@mini1:j1");
+	const named = (world) => Object.assign(world.queue, { name: "pi-jobs@mini1" });
+	// A waiting job: the key beside its defer record, after the removal.
+	const plain = queuedWorld();
+	named(plain);
+	assert.deepEqual(await removeQueuedJob({ redis: plain.redis, queue: plain.queue, job: plain.job, jobId: "j1" }), { ok: true, held: false, jobId: "j1", state: "delayed", attemptsMade: 0 });
+	assert.deepEqual(plain.ops, [["hgetall", "wait:job:j1"], ["getState"], ["remove"], ["del", "defer:job:j1"], ["del", attempt]]);
+	// A held job, through either entry: the key right after the job's removal; through removeQueuedJob, beside its record.
+	const held = heldWorld({ hash: { since: "1" } });
+	named(held);
+	assert.deepEqual(await removeHeldJob({ redis: held.redis, queue: held.queue, jobId: "j1" }), { ok: true, jobId: "j1", attemptsMade: 0 });
+	assert.deepEqual(held.ops.slice(-2), [["remove"], ["del", attempt]]);
+	const queuedHeld = queuedWorld({ hash: { since: "1" } });
+	named(queuedHeld);
+	assert.equal((await removeQueuedJob({ redis: queuedHeld.redis, queue: queuedHeld.queue, job: queuedHeld.job, jobId: "j1" })).held, true);
+	assert.deepEqual(queuedHeld.ops.slice(-3), [["remove"], ["del", "defer:job:j1"], ["del", attempt]]);
+	// The removal raced (a worker took the job, or BullMQ refused it): the job is still there, so its key stays.
+	for (const world of [queuedWorld({ state: ["delayed", "active"], removeThrows: true }), queuedWorld({ hash: { since: "1" }, removeThrows: true })]) {
+		named(world);
+		const res = await removeQueuedJob({ redis: world.redis, queue: world.queue, job: world.job, jobId: "j1" });
+		assert.ok(res.raced === true || res.cleared === true, JSON.stringify(res));
+		assert.ok(!world.ops.some((op) => op[0] === "del" && op[1] === attempt), "no delete of the key of a job that stays");
+	}
+	// Two deletes that hang cost the answer one bound, not two: both are sent before either is waited for, for a waiting
+	// job and for a held one alike (the console's cancel has one outer bound for the whole sequence).
+	for (const hash of [{}, { since: "1" }]) {
+		const hung = queuedWorld({ hash, del: "hang" });
+		named(hung);
+		const del = hung.redis.del;
+		hung.redis.del = (key) => (key === attempt ? (hung.ops.push(["del", key]), new Promise(() => {})) : del(key));
+		const pending = removeQueuedJob({ redis: hung.redis, queue: hung.queue, job: hung.job, jobId: "j1", timeoutMs: 50 });
+		for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(hung.ops.filter((op) => op[0] === "del" && op[1] !== "wait:job:j1"), [["del", "defer:job:j1"], ["del", attempt]], JSON.stringify(hash));
+		assert.equal((await pending).ok, true);
+	}
+});
+

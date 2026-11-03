@@ -35,6 +35,8 @@ import {
 } from "../src/read-model.mjs";
 import { createHash } from "node:crypto";
 import { makeApprovalStore } from "../../worker/src/approval-state.mjs";
+import { finishModelAttempt, modelAttemptIdOf, modelAttemptKey } from "@edgehero/pi-dispatch/model-attempts";
+import { MODEL_ATTEMPT_FINISHED_TTL_MS } from "@edgehero/pi-dispatch/retention";
 import { closeInbox, listInboxPublic, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { makeQueue, enqueueForgeJob, enqueueLateForgeJob, forgeDeliveryJobId, manualTriggerJobId } from "@edgehero/pi-dispatch/queue";
@@ -236,9 +238,13 @@ test("retryFailedJob and removeFailedJob act only on a job still failed as previ
     assert.match(stale.invalid, /changed since the preview/);
     assert.equal(await (await host.getJob("gh-f1")).getState(), "failed");
     assert.match((await retryFailedJob({ url: URL12, jobId: "gh-f1" })).invalid, /attemptsMade and finishedOn are required/);
-    // The previewed one retries: back to waiting on the queue it was on.
+    // The previewed one retries: back to waiting on the queue it was on, its model attempt key without the expiry its
+    // failure gave it (issue #812), taken off on the queue's own client.
+    const attempt = modelAttemptKey(modelAttemptIdOf("pi-jobs@mini1", "gh-f1"));
+    await v.redis.set(attempt, "{}", "PX", MODEL_ATTEMPT_FINISHED_TTL_MS);
     assert.deepEqual(await retryFailedJob({ url: URL12, jobId: "gh-f1", expect }), { ok: true, jobId: "gh-f1", queue: "pi-jobs@mini1" });
     assert.equal(await (await host.getJob("gh-f1")).getState(), "waiting");
+    assert.equal(await v.redis.pttl(attempt), -1);
     // Now it is not failed: a second retry from the same preview refuses.
     assert.match((await retryFailedJob({ url: URL12, jobId: "gh-f1", expect })).invalid, /Nothing was done: it is waiting now, not failed; it changed since the preview; job gh-f1$/);
     const f2 = await host.getJob("gh-f2");
@@ -1317,6 +1323,40 @@ test("single and bulk failed retries preserve publication warnings without repea
   const many = await retryFailedJobs({ ...fakes, jobs: [{ jobId: "failed-two", attemptsMade: 1, finishedOn: 1 }] });
   assert.equal(many.results[0].touchWarning, "touch-tracking-incomplete");
   assert.equal(retries, 2, "each authorized retry happens once even when metric publication fails");
+});
+
+test("a console retry takes the failed job's model attempt expiry off, single and bulk, and only once the retry landed (#812)", async () => {
+  // The failure gave the key its expiry; the retried job can then wait past it (a paused queue, a busy scope, a newer
+  // release's hold) before the processor's selection writes the key again, and a key gone by then refuses the retry.
+  const at = { now: Date.parse("2026-11-03T12:00:00.000Z") };
+  const store = new Map();
+  const valkey = {
+    async pexpire(key, ms) { const e = store.get(key); if (!e) return 0; e.expireAt = at.now + ms; return 1; },
+    async persist(key) { const e = store.get(key); if (!e || e.expireAt === null) return 0; e.expireAt = null; return 1; },
+    pttl(key) { const e = store.get(key); return !e ? -2 : e.expireAt === null ? -1 : e.expireAt - at.now; },
+  };
+  const failed = (id, retry = async () => {}) => ({ id, queueName: "pi-jobs", data: { kind: "github", repo: "acme/api" }, attemptsMade: 2, finishedOn: 1, getState: async () => "failed", retry });
+  const jobs = new Map([["gh-one", failed("gh-one")], ["gh-two", failed("gh-two")], ["gh-refused", failed("gh-refused", async () => { throw new Error("Missing key for job gh-refused. reprocessJob"); })]]);
+  const attempt = (id) => modelAttemptKey(modelAttemptIdOf("pi-jobs", id));
+  for (const id of jobs.keys()) {
+    store.set(attempt(id), { value: "{}", expireAt: null });
+    await finishModelAttempt(valkey, modelAttemptIdOf("pi-jobs", id));
+  }
+  at.now += MODEL_ATTEMPT_FINISHED_TTL_MS - 2 * 86_400_000;
+  const fakes = {
+    url: "redis://unused", parseConnectionFn: () => ({}), timeoutMs: 200,
+    redisFn: () => ({ on() {}, smembers: async () => [], scan: async () => ["0", []], disconnect() {} }),
+    queueFn: (_connection, { name }) => ({ name, client: Promise.resolve(valkey), getJob: async (id) => jobs.get(id) ?? null, close: async () => {} }),
+    touchStore: { begin: async (event) => ({ event, ok: true }), write: async () => ({ ok: true }), abort: async () => ({ ok: true }) },
+  };
+  assert.equal((await retryFailedJob({ ...fakes, now: () => at.now, jobId: "gh-one", expect: { attemptsMade: 2, finishedOn: 1 } })).ok, true);
+  assert.equal(valkey.pttl(attempt("gh-one")), -1);
+  const many = await retryFailedJobs({ ...fakes, now: () => at.now, jobs: [{ jobId: "gh-two", attemptsMade: 2, finishedOn: 1 }, { jobId: "gh-refused", attemptsMade: 2, finishedOn: 1 }] });
+  assert.equal(many.results[0].ok, true);
+  assert.equal(valkey.pttl(attempt("gh-two")), -1);
+  // A retry BullMQ refused leaves the job failed, and its key to the expiry its failure gave it.
+  assert.match(many.results[1].unreachable, /Missing key/);
+  assert.equal(valkey.pttl(attempt("gh-refused")), 2 * 86_400_000);
 });
 
 

@@ -19,6 +19,7 @@ import {
 	sweepOrphanJobDirs,
 } from "../src/recovery-queue.mjs";
 import { FORGE_JOB_RETENTION_S } from "../src/retention.mjs";
+import { modelAttemptKey } from "../src/model-attempts.mjs";
 import { JOB_DIR_RE } from "../src/run-checkpoint.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -267,6 +268,8 @@ test("the host-lost sweep on an injected clock: a waiting recovery past its dead
 	assert.equal(q.jobs.has("gh-a.r1"), true);
 	assert.deepEqual([...redis.zset.keys()], [late], "a member not yet due stays");
 	assert.deepEqual(logs.find((l) => l[0] === "job_recovery_host_lost"), ["job_recovery_host_lost", { jobId: "gh-w.r1", runId: "gh-w", queue: "pi-jobs@h1", state: "waiting", reason: "host-absent" }]);
+	// Issue #812: the removed recovery's model attempt key goes with it, under its queue and id; the active one keeps its.
+	assert.deepEqual(redis.calls.filter((c) => c[0] === "del"), [["del", modelAttemptKey("pi-jobs@h1:gh-w.r1")]]);
 });
 
 test("a deadline is not a verdict: an alive host, a paused queue or an unreadable registry extends it, up to the hard maximum", async () => {

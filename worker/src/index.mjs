@@ -3,6 +3,7 @@ import { SubscriptionWait } from "./subscription-wait.mjs";
 import { zeroRatedFor } from "./reserve-estimate.mjs";
 import { isTransientOverlayRead } from "./model-catalog.mjs";
 import { checkFailoverCandidate, markModelCooldown, readModelAttempt, selectFailoverJob, writeModelAttempt } from "./model-failover.mjs";
+import { modelAttemptIdOf } from "./model-attempts.mjs";
 import { availableParallelism } from "node:os";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
@@ -1103,7 +1104,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// Set by the selection when a retry can be judged only by a record a newer pi-dispatch wrote (issue #761): the job
 		// then waits below, outside this block's `try`, instead of being refused.
 		let priorRecordNewer = false;
-		const modelAttemptId = `${job.queueName ?? QUEUE}:${job.id}`;
+		const modelAttemptId = modelAttemptIdOf(job.queueName ?? QUEUE, job.id);
 		if (!settingsThrew && !settings?.invalid) {
 			try {
 				let effective = resolveModelRoles(effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields })), job.data.watch || job.data.answerDraft ? {} : await readModelRoles(), project, { authoredProvider: job.data.provider });

@@ -134,6 +134,7 @@ import { makeWorkspaceCheckpointer } from "./workspace-checkpoint.mjs";
 import { makeRunBudgetLedger } from "./run-budget-ledger.mjs";
 import { normalizeHost } from "./run-checkpoint.mjs";
 import { isRecoveryArmed, makeHostLostSweep, makeRecoveryEnqueuer, makeSalvager, pointedJobDirs, runIdOf, sweepOrphanJobDirs } from "./recovery-queue.mjs";
+import { finishModelAttempt, modelAttemptIdOf } from "./model-attempts.mjs";
 
 
 /** How long boot will wait for `docker image inspect` before shipping without a digest. */
@@ -907,6 +908,9 @@ export async function startWorker(
 		makeHostLostSweep: makeHostLostSweepFn = makeHostLostSweep,
 		// The boot sweep of orphaned job directories, a seam so a wiring test drives it against a directory of its own.
 		sweepOrphanJobDirs: sweepOrphanJobDirsFn = sweepOrphanJobDirs,
+		// Issue #812: the expiry a finished job's model attempt key is given, a seam so a wiring test sees which id the
+		// listeners below hand it, since the harness's client is closed by the time a test drives one.
+		finishModelAttempt: finishModelAttemptFn = finishModelAttempt,
 	} = {},
 ) {
 	const config = loadConfigFn(env);
@@ -3299,7 +3303,19 @@ export async function startWorker(
 		// BOTH workers, or a cron job on the host queue produces no `job_completed` line at all -- and
 		// REQ-LOCAL-JOB-VISIBILITY's whole point is that a missing line is what tells a human a run did nothing.
 		const allWorkers = [worker, ...(worker.hostWorker ? [worker.hostWorker] : [])];
+		// Issue #812: a finished job's model attempt key gets its expiry (model-attempts.mjs), on the queue's own word that
+		// the job finished: this event, and `failed` with `finishedOn` below. Fire and forget, inside the existing listener
+		// bodies: an expiry that fails leaves the key as it was, without one, and the fixed line says so. The id is the
+		// processor's (index.mjs `modelAttemptId`); a job with no queue name to read names no key, so nothing is sent.
+		const finishAttempt = (w, job) => {
+			const queueName = job?.queueName ?? w.name;
+			if (typeof queueName !== "string" || queueName === "" || job?.id === undefined || job?.id === null) return;
+			void Promise.resolve()
+				.then(() => finishModelAttemptFn(redis, modelAttemptIdOf(queueName, job.id)))
+				.catch(() => log("model_attempt_finish_failed", { jobId: String(job.id) }));
+		};
 		for (const w of allWorkers) w.on("completed", (job, result) => {
+			finishAttempt(w, job);
 			log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) });
 			// The hook's POLICY half (issue #288): worker-abort, runner-policy and provider-auth-refused RETURN, so they land here
 			// and never in the failed listener -- a failed-only mount would miss exactly the paid terminals
@@ -3434,6 +3450,9 @@ export async function startWorker(
 			return true;
 		};
 		for (const w of allWorkers) w.on("failed", (job, err) => {
+			// `finishedOn` is the queue's word that no retry follows (`onFailed` reads it the same way), so the expiry is set
+			// here, before any path below returns: the terminal failure, the stall and the lost-lock checks alike.
+			if (job?.finishedOn) finishAttempt(w, job);
 			if (!(job?.finishedOn && err?.message === STALLED_FAILED_REASON)) return onFailed(job, err);
 			void (async () => {
 				// `attemptsMade` is read AFTER BullMQ's moveToFailed added one, so it equals the attempt number the
