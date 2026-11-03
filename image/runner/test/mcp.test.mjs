@@ -234,12 +234,94 @@ test("a real session: a server that exits, refuses, or whose command fails is mc
 		const document = doc({ files: stdio({ env: { MCP_STUB_MODE: "silent" } }) }, { files: [] });
 		const { session, jobMcp } = await realSession(f, document, { PI_MCP_SERVERS: "files", PATH: process.env.PATH });
 		try {
+			assert.deepEqual(jobMcp.lifecycle.states(), [["pending", 0]], "issue #800: before the wait, it is only pending");
 			await assert.rejects(jobMcp.lifecycle.start(session.extensionRunner.createContext()), (error) => error.piDispatchReason === "mcp-unreachable" && error.piDispatchExit === 1);
+			assert.deepEqual(jobMcp.lifecycle.states(), [["timeout", 0]], "issue #800: past the wait, the record says what stopped the job");
 		} finally {
 			await jobMcp.lifecycle.stop();
 			session.dispose();
 		}
 	});
+});
+
+test("states (issue #800): a server that connected reads connected with its tools, one that refused reads failed, and a throw from start does not lose them", { skip }, async () => {
+	const f = sessionFixture();
+	const ok = await realSession(f, doc({ files: stdio({ exposure: "direct" }) }, { files: ["FILES_TOKEN"] }), { PI_MCP_SERVERS: "files", FILES_TOKEN: "x", PATH: process.env.PATH });
+	try {
+		await ok.jobMcp.lifecycle.start(ok.session.extensionRunner.createContext());
+		assert.deepEqual(ok.jobMcp.lifecycle.states(), [["connected", 1]], "the stub lists one tool");
+		assert.ok(ok.session.getAllTools().some((tool) => tool.name === "mcp__files__echo"), "the count is the one pi registered");
+	} finally {
+		await ok.jobMcp.lifecycle.stop();
+		ok.session.dispose();
+	}
+	const g = sessionFixture();
+	const refused = await realSession(g, doc({ files: stdio({ env: { MCP_STUB_MODE: "refuse" } }) }, { files: [] }), { PI_MCP_SERVERS: "files", PATH: process.env.PATH });
+	try {
+		await assert.rejects(refused.jobMcp.lifecycle.start(refused.session.extensionRunner.createContext()), (error) => error.piDispatchReason === "mcp-unavailable" && error.piDispatchExit === 2);
+		assert.deepEqual(refused.jobMcp.lifecycle.states(), [["failed", 0]]);
+	} finally {
+		await refused.jobMcp.lifecycle.stop();
+		refused.session.dispose();
+	}
+});
+
+test("states (issue #800): every server the document names, in its order: a disabled one reads disabled, and one still pending when another's failure ended the wait reads pending, not timeout", { skip }, async () => {
+	const f = sessionFixture();
+	const servers = { off: stdio({ enabled: false }), bad: stdio({ env: { MCP_STUB_MODE: "refuse" } }), slow: stdio({ env: { MCP_STUB_MODE: "silent" } }) };
+	const { session, jobMcp } = await realSession(f, doc(servers, { off: ["FILES_TOKEN"], bad: [], slow: [] }), { PI_MCP_SERVERS: "off,bad,slow", FILES_TOKEN: "x", PATH: process.env.PATH });
+	try {
+		assert.deepEqual(jobMcp.lifecycle.states(), [["disabled", 0], ["pending", 0], ["pending", 0]]);
+		await assert.rejects(jobMcp.lifecycle.start(session.extensionRunner.createContext()), (error) => error.piDispatchReason === "mcp-unavailable");
+		assert.deepEqual(jobMcp.lifecycle.states(), [["disabled", 0], ["failed", 0], ["pending", 0]]);
+	} finally {
+		await jobMcp.lifecycle.stop();
+		session.dispose();
+	}
+});
+
+test("states (issue #800): a server's tool count sums its pages and starts over when pi retries the connection", { skip }, async () => {
+	let attempts = 0;
+	const seen = [];
+	const server = createServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => (body += chunk));
+		req.on("end", () => {
+			if (req.method !== "POST") return res.writeHead(405).end();
+			const message = JSON.parse(body);
+			if (message.id === undefined) return res.writeHead(202).end();
+			if (message.method === "initialize") attempts++;
+			seen.push([attempts, message.method, message.params?.cursor ?? null]);
+			const tool = (name) => ({ name, inputSchema: { type: "object" } });
+			if (message.method === "tools/list" && message.params?.cursor && attempts === 1) return res.writeHead(503).end();
+			const result =
+				message.method === "initialize"
+					? { protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "h", version: "1" } }
+					: message.method === "tools/list"
+						? message.params?.cursor
+							? { tools: [tool("c")] }
+							: { tools: [tool("a"), tool("b")], nextCursor: "page-2" }
+						: {};
+			res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	try {
+		const f = sessionFixture();
+		const document = doc({ docs: http({ url: `http://127.0.0.1:${server.address().port}/mcp`, exposure: "direct" }) }, { docs: ["DOCS_TOKEN"] });
+		const { session, jobMcp } = await realSession(f, document, { PI_MCP_SERVERS: "docs", DOCS_TOKEN: "t" });
+		try {
+			await jobMcp.lifecycle.start(session.extensionRunner.createContext());
+			assert.ok(attempts >= 2, `the first attempt's second page failed, so pi tried again: ${JSON.stringify(seen)}`);
+			assert.deepEqual(jobMcp.lifecycle.states(), [["connected", 3]], "three tools on the attempt that held, not five across both");
+			assert.equal(session.getAllTools().filter((tool) => tool.name.startsWith("mcp__docs__")).length, 3, "the count is the one pi registered");
+		} finally {
+			await jobMcp.lifecycle.stop();
+			session.dispose();
+		}
+	} finally {
+		server.close();
+	}
 });
 
 test("a real session: an HTTP server is reached through the guarded fetch with its resolved headers; a 401 is mcp-unavailable and never a sign-in", { skip }, async () => {

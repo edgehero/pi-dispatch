@@ -301,7 +301,7 @@ function failurePhrase(error) {
  * attempt decides it, or the runner's wait runs out) and any other settles it failed.
  */
 function readiness(names) {
-	const servers = new Map(names.map((name) => [name, { state: "pending", why: null, transient: false }]));
+	const servers = new Map(names.map((name) => [name, { state: "pending", why: null, transient: false, tools: 0 }]));
 	let wake = () => {};
 	const changed = () => wake();
 	return {
@@ -312,6 +312,16 @@ function readiness(names) {
 				server.state = "ready";
 				changed();
 			}
+		},
+		/** A connect starting over: pi retries from `initialize`, so what an earlier attempt listed is not this one's. */
+		restarted(name) {
+			const server = servers.get(name);
+			if (server) server.tools = 0;
+		},
+		/** One page of a tool list. Summed, because a server may answer in pages. */
+		listed(name, count) {
+			const server = servers.get(name);
+			if (server) server.tools += count;
 		},
 		failed(name, error) {
 			const server = servers.get(name);
@@ -374,7 +384,10 @@ function observed(Base, name, track, live, { network = false } = {}) {
 				if (message.error !== undefined && (method === "initialize" || method === "tools/list")) return this.#fail(new Error(`${method} refused`));
 				// Truthy, as pi asks it (runtime.js connectOnce): a server declaring `tools: null` is asked for none.
 				if (method === "initialize") this.#tools = Boolean(message.result?.capabilities?.tools);
-				if (method === "tools/list") this.#toolsAnswered = true;
+				if (method === "tools/list") {
+					this.#toolsAnswered = true;
+					track.listed(name, Array.isArray(message.result?.tools) ? message.result.tools.length : 0);
+				}
 				this.#check();
 			});
 			this.onClose(() => {
@@ -412,6 +425,7 @@ function observed(Base, name, track, live, { network = false } = {}) {
 		async send(message, options) {
 			const request = message?.id !== undefined && typeof message.method === "string";
 			if (request) this.#requests.set(message.id, message.method);
+			if (message?.method === "initialize") track.restarted(name);
 			// A request pi gave up on (its timeout, or one it tolerates failing) is answered by nothing.
 			if (message?.method === "notifications/cancelled" && this.#requests.delete(message.params?.requestId)) this.#check();
 			try {
@@ -585,6 +599,7 @@ export function createJobMcp(doc, { pi, env = process.env, cwd = LAYOUT.workspac
 	const timeouts = names.filter((name) => doc.servers[name].enabled !== false).map((name) => (doc.servers[name].timeout ?? 0) * 1000);
 	const waitMs = Math.min(Math.max(MCP_READY_TIMEOUT_MS, ...timeouts), MCP_READY_TIMEOUT_MAX_MS);
 	let started = false;
+	let waitRanOut = false;
 	const lifecycle = {
 		/**
 		 * Connect every server and wait for each to answer, before the prompt. A server that refused (its command, an
@@ -605,6 +620,7 @@ export function createJobMcp(doc, { pi, env = process.env, cwd = LAYOUT.workspac
 				throw configError(`MCP server ${JSON.stringify(name)} cannot be used: ${server.why}`, "mcp-unavailable");
 			}
 			if (!settled) {
+				waitRanOut = true;
 				const [name, server] = [...track.servers].find(([, s]) => s.state === "pending");
 				const error = new Error(`MCP server ${JSON.stringify(name)} did not answer within ${waitMs / 1000}s${server.why ? ` (${server.why})` : ""}`);
 				error.piDispatchExit = EXIT_INFRA;
@@ -612,6 +628,22 @@ export function createJobMcp(doc, { pi, env = process.env, cwd = LAYOUT.workspac
 				throw error;
 			}
 			log("mcp_servers_ready", { servers: track.servers.size, ms: now() - began });
+		},
+		/**
+		 * Each server the document names, in its order (which is PI_MCP_SERVERS'), as `[state, tools]`, for the record of
+		 * what the job loaded (issue #800): every server, a disabled one included, so a row always lines up with its name.
+		 * A server still pending once the wait has run out reads `timeout`, because that is what stopped the job. One still
+		 * pending because another's failure ended the wait reads `pending`: nothing timed it out. Read after a throw from
+		 * start() too, which is the point: a stopped job names which server stopped it.
+		 */
+		states() {
+			return names.map((name) => {
+				if (doc.servers[name].enabled === false) return ["disabled", 0];
+				const server = track.servers.get(name);
+				if (server.state === "ready") return ["connected", server.tools];
+				// A count only for a server that connected: one that listed pages and then failed brought the job nothing.
+				return [server.state === "failed" ? "failed" : waitRanOut ? "timeout" : "pending", 0];
+			});
 		},
 		/** Close every server, bounded: pi's own exit hook kills a stdio server's process group if this runs out. */
 		async stop() {

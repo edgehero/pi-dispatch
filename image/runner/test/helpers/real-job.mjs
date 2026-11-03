@@ -83,8 +83,7 @@ export function piTheme(name) {
 
 /**
  * Run the job in the tree. Resolves with the exit code, the signal, the raw stdout and stderr, the parsed JSON lines and
- * the last exit line. `key` hands the exit key over as the worker does; `stopWhen(line, stdout)` is called for each
- * chunk, and the test may send a SIGTERM from it through `child`.
+ * the last exit line. `key` hands the exit key over as the worker does; `whenStarted(child)` lets a test stop the job.
  */
 export async function runRealJob(root, env = {}, { key = null, whenStarted = () => {} } = {}) {
 	const child = spawn(process.execPath, [`--import=${REMAP}`, RUN_JOB], {

@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { readSync, writeSync } from "node:fs";
+import { fitLoaded } from "./loaded.mjs";
 import { readKeyFrame } from "./steer-frames.mjs";
 
 /**
@@ -85,7 +86,7 @@ export function exitLineMaxBytes(jobId) {
 }
 
 /**
- * A value as the line's JSON, in ASCII: every code unit past 0x7f spelled `\\uXXXX`, which JSON.parse reads back as the
+ * A value as the line's JSON, in ASCII: every code unit past 0x7f spelled `\uXXXX`, which JSON.parse reads back as the
  * same string. The worker's sink decodes each stdout chunk alone (`chunk.toString("utf8")`), so a multi-byte character
  * that a pipe hands over in two chunks becomes U+FFFD twice, and the MAC, taken over the bytes the runner wrote, no
  * longer verifies: one curly quote in a provider's error could cost the whole line. Escaped BEFORE signing, so the
@@ -208,22 +209,39 @@ export function writeAllSync(fd, text, { write = writeSync, sleep = (ms) => Atom
 	}
 }
 
+/** The forms of a noted `loaded`. A throw here would lose the whole line and its money over a record nothing decides by. */
+function loadedForms(loaded) {
+	try {
+		return fitLoaded(loaded);
+	} catch {
+		return [null];
+	}
+}
+
 /** What a line keeps when nothing else fits: its verdict and what the settlement reads, each only when the line had it. */
 function lastResortFields(fields) {
 	return Object.fromEntries(["code", "reason", "why", "by", "tokens"].filter((name) => fields?.[name] !== undefined).map((name) => [name, fields[name]]));
 }
 
 /**
- * The line to write: as composed when it fits, else with `message` cut to the room left, else the last resort. Measured
- * in bytes on the whole write, signature and newlines included, because that is what has to stay inside the tail.
+ * The line to write, measured in bytes on the whole write, signature and newlines included, because that is what has to
+ * stay inside the tail. In the order the room runs out: the largest form of `loaded` that fits; then the smallest form
+ * and `message` cut to the room left, because the head of a provider's error says what it is and nothing else says
+ * what the job loaded; then no `loaded` and the message given what that frees; then the last resort. `forms` is `[null]`
+ * for a line with nothing noted.
  */
-function fitExitLine({ compose, message, maxBytes, lastResort }) {
+function fitExitLine({ compose, forms, message, maxBytes, lastResort }) {
 	const size = (line) => Buffer.byteLength(line, "utf8");
-	const whole = compose();
-	if (size(whole) <= maxBytes) return whole;
-	if (typeof message === "string") {
-		const room = maxBytes - size(compose({ message: "" }));
-		if (room >= 0) return compose({ message: cutExitMessage(message, room) });
+	for (const form of forms) {
+		const line = compose(form);
+		if (size(line) <= maxBytes) return line;
+	}
+	for (const form of new Set([forms.at(-1), null])) {
+		const whole = compose(form);
+		if (size(whole) <= maxBytes) return whole;
+		if (typeof message !== "string") continue;
+		const room = maxBytes - size(compose(form, { message: "" }));
+		if (room >= 0) return compose(form, { message: cutExitMessage(message, room) });
 	}
 	return lastResort();
 }
@@ -239,9 +257,10 @@ function fitExitLine({ compose, message, maxBytes, lastResort }) {
  * exit code and the last line still agree. Before this the runner had no handler, so a `docker stop` killed it
  * mid-run and no genuine line followed whatever a tool had written.
  *
- * The line it writes always fits `maxBytes` (exitLineMaxBytes): a `message` too long for the room left is cut, and, past
- * that, only what the settlement reads is kept, marked `lineCut`, because such a line still verifies and an oversized
- * one reads as no line at all. `maxBytes` is a seam for the harness that proves a write past a pipe's buffer survives.
+ * The line it writes always fits `maxBytes` (exitLineMaxBytes): a noted `loaded` falls to a smaller form, a `message` too
+ * long for the room left is cut, and, past that, only what the settlement reads is kept, marked `lineCut`, because such
+ * a line still verifies and an oversized one reads as no line at all. `maxBytes` is a seam for the harness that proves a
+ * write past a pipe's buffer survives.
  */
 export function createExitWriter({ key = null, jobId, write, exit, resources = () => null, maxBytes = exitLineMaxBytes(jobId) }) {
 	let written = false;
@@ -269,8 +288,11 @@ export function createExitWriter({ key = null, jobId, write, exit, resources = (
 			const body = exitLineJson(value);
 			return `\n${key ? signExitLine(body, key) : body}\n`;
 		};
-		const compose = (over = {}) => lineOf({ event: "exit", jobId, ...noted, ...fields, ...over, ...usedField });
-		write(fitExitLine({ compose, message: fields?.message, maxBytes, lastResort: () => lineOf({ event: "exit", jobId, ...lastResortFields(fields), lineCut: true }) }));
+		// `loaded` (issue #800) is noted whole and fitted here, the one place that knows how much room this line leaves it.
+		const { loaded, ...notes } = noted;
+		const forms = loaded === undefined ? [null] : loadedForms(loaded);
+		const compose = (form, over = {}) => lineOf({ event: "exit", jobId, ...notes, ...(form === null ? {} : { loaded: form }), ...fields, ...over, ...usedField });
+		write(fitExitLine({ compose, forms, message: fields?.message, maxBytes, lastResort: () => lineOf({ event: "exit", jobId, ...lastResortFields(fields), lineCut: true }) }));
 		return true;
 	}
 	function terminate(fields = {}) {

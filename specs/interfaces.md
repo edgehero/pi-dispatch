@@ -910,6 +910,55 @@ refactor apart.
   acks, marks each id `delivered` in the inbox, then stops the relay (`INT-STEER-INBOX-CONTRACT`, the signed exit line
   as a second witness). The record's `steered` is still counted off the inbox at the final outcome, never off this
   line.
+  **The runner's exit line carries `loaded`** (issue #800, `image/runner/src/loaded.mjs`): what the job loaded, because a
+  failed load only logs and the job carries on, so a flow found nowhere or an extension that threw can exit 0. Noted
+  through the `canaryLoad` route (`exitWriter.note`), so the decided line, the catch path, SIGTERM, the classifier's
+  and the answer draft's lines all carry the latest note. A line the supervisor writes has none, which is how a reader can
+  tell the runner never said. **Exit codes are UNCHANGED** and no decision reads it: it is telemetry, and an older worker, which reads
+  named keys, ignores it with no change. The worker's half is `INT-RUN-HISTORY-FILE-CONTRACT`'s.
+
+  ```json
+  "loaded":{"v":1,"at":"ready","pi":"1.5.0","flow":"package","flowPackage":0,
+  "packages":[[1,2,0,0,3,0,0,0]],"tiers":{"package":[1,2,0,0,3,0,0,0],"repository":[0,1,0,0,0,0,0,0],"trigger":[0,0,0,0,0,0,0,0],"overlay":[1,0,0,0,1,0,0,0],"other":[0,0,0,0,0,0,0,0]},
+  "overlay":{"loaded":["git-guard.ts"],"failed":[]},"mcp":[["connected",12]],
+  "tools":{"active":23,"own":["read","bash"]},"extTools":{"p":[[0,"lint_run"]],"o":[[0,"guard_check"]]},
+  "cut":{"form":"full","packages":0,"servers":0,"names":0,"counts":0}}
+  ```
+
+  | Key | Holds |
+  |---|---|
+  | `at` | How far the job got, one of `start`, `none`, `loader`, `session`, `ready`. `start` is the first line of `main` and `none` a classifier that owns the container: both say `v`, `at`, `pi` and `cut` and no more, because a count before anything loaded would be a claim. `loader` is after the skills are read, `session` after `createAgentSession`, `ready` after the servers connected and before the first prompt. A job a server stopped ends at `session`, its server states included, because the note is in a `finally` around `lifecycle.start` |
+  | `pi` | pi's own `VERSION`, or null for its `0.0.0` fallback or anything not shaped like a version |
+  | `flow` | The tier the job's flow loaded from, one of `repository`, `trigger`, `overlay`, `package`, `other`, or `none` when the job names a flow and no tier holds it. **Absent** when the job names no flow or the stage does not know yet: only `none` is the failure. `flowPackage` is its row, only when it is `package` |
+  | `packages` | One row per staged package, in `PI_PACKAGES` order, with no name: the worker joins it. Positions: `extensions`, `skills`, `prompts`, `themes`, `tools`, `failed`, `dropped`, `shadowed` |
+  | `tiers` | One row per tier in those positions, keyed `package`, `repository`, `trigger`, `overlay`, `other`, by path containment most specific first (a package sits under the overlay), with `/job/pi` and `/workspace` both `repository`. `<inline:` paths, the job's own factories, count nowhere, and pi's own tools count only in `tools`. True totals: a row in `packages` is clamped, this is not |
+  | `overlay` | `loaded` and `failed`: overlay extensions by first path segment, failed ones first when the cap is reached |
+  | `mcp` | One `[state, tools]` per server, in `PI_MCP_SERVERS` order, with no name, every server the document names included. State is one of `connected`, `failed`, `timeout`, `pending`, `disabled`. `timeout` is a server still pending when the wait ran out; `pending` is one still waiting at a note, or when another's failure ended the wait. `tools` sums the pages of a tool list and starts over when pi retries the connection |
+  | `tools` | `active`, the session's active count, and `own`, the active tools that are pi's own by name and by source: an extension's tool of the same name is not pi's. Read again after the servers connect |
+  | `extTools` | The names of the tools a staged package or an overlay extension brought, for a later switch that excludes one: `p` rows of `[PI_PACKAGES position, ...names]`, `o` rows of `[overlay.loaded position, ...names]`, sorted, each name matching `^[A-Za-z][A-Za-z0-9_-]{0,47}$`. Read before the first prompt, so nothing the agent writes can reach it |
+  | `cut` | `form`, one of `full`, `compact`, `minimal`, and how many `packages` rows, `servers`, `names` and `counts` a cap took. Nothing is dropped silently |
+
+  **The hostile-name rule: no string a repository chose reaches this field.** A repository's skills, extensions and
+  tools are counts. Failures and drops are read by teeing the loader's own log (`createLoadTee`), so record and log cannot
+  disagree, and of each entry only its root and kind survive the tee, plus the first path segment for an overlay
+  entry alone; those log lines can name repository paths, and that stops there. One extension is one failure however
+  many entries name it. `kind: "conflict"` counts as failed, as it does on the log line: pi loaded the extension, but a
+  tool or flag it registered is shared with another, so one of them is not what it was written to be. A held-back
+  overlay (`overlay_extensions_withheld`) counts one failure on `overlay`. Every other string on the line is from a closed set, or passes a shape: an overlay
+  name at most 48 characters of `[A-Za-z0-9._-]`, a tool name as above. A name failing its shape is dropped and counted in
+  `cut.names`. **Residual, stated:** a repository extension shares this process, so it could mutate a loaded extension's
+  source and make a name of the right shape read as a package's. The signature vouches for the runner and not for what
+  an extension did in its process, so the worker checks each name against what it knows. A name can only narrow what a later
+  switch excludes, and a wrong one refuses the job.
+
+  **Bounded, in three forms.** Caps: 16 `packages` rows, 8 servers, 16 overlay names, 24 extension tool names overall. A
+  row's first five counts clamp at 999 and its last three at 99, `active` and a server's tools at 9999. Anything over a
+  cap raises `cut`. `fitLoaded` makes three forms, largest first, and the writer takes the largest that fits the line:
+  `full` (worst case 3,844 characters); `compact`, no `packages`, overlay names, own tools or `extTools` (1,118); `minimal`,
+  only `v`, `at`, `pi`, `flow`, the `failed` and `dropped` totals, `mcpBad` (servers that failed or timed out) and `cut` (232). Tool names go first. Past
+  `minimal` the writer cuts `message`, then drops the field. A test pins those three sizes. The record never stops a job:
+  a throw while reading what loaded keeps the last note and logs `loaded_unavailable` with the stage alone.
+
   **The exit line's `reason` is read for one purpose and cannot move a job between classes** (issue #437).
   `parseExitReason` returns it only when it is a member of the worker's CLOSED `RUNNER_POLICY_REASONS`
   (`provider-auth-refused`, and since issues #501/#502 `cost-cap`, `model-not-allowed`,
@@ -13639,3 +13688,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-02 (#796, pi 1.5.0) | `INT-RUN-HISTORY-FILE-CONTRACT`: each `usage.models` row gains `providerBilled`, the count of its calls whose cost is the provider's billed total (pi-ai 1.5.0's `usage.cost.totalFromProvider`), a count because a row aggregates calls; an older record reads 0, and a present value that is not a non-negative number refuses the block as for every other counter. The exit line's `message` cap moves from 1800 to 1700 serialized characters so that the worst-case line stays under 6 KiB, the same trade as before: the diagnostic gives way, never the label. Trap (g): since 1.5.0 an extension gets a view of pi-ai rather than the compat namespace itself, so the compat half is accepted by identity of the five registry and stream functions, with names still proving nothing. UNCHANGED, checked: the exit line's other keys, `tokens`, the ledger partition rule (rows sum to the totals, and `providerBilled` is not a total), and the child ledger's version, since parent and child always run the same image. |
 | 2026-11-02 (#796) | New `INT-UPDATES-KEYS`: the look, the desired generation and each host's applied state; the `packageCanary` job field and run-record field, `canaryLoad` on the exit line, `PI_PACKAGE_CANARY`, and the image capability `packageCanary`. `INT-PI-PACKAGES-FILE-CONTRACT`: a host applying a person's Adopt or Undo also writes the file, and the stage manifest's `dir` now names a directory per stage rather than per package. A manifest from before keeps working: `dir` was always only a plain path segment. `INT-SDK-SESSION-OPTIONS`: staged packages stay off `/job`, with a canary's one candidate as the only exception. |
 | 2026-11-03 (#800, exit line limit) | `INT-RUNNER-EXIT-CODE-PROTOCOL`: the 6 KiB sentence said what the worst-case line was, and it was not: it left out `modelRoles`, `steer`, `recovery`, `providerFailure` and more, and every field together measures 7,961 characters, 8,454 with a supervisor's line after it, past the 8,192-character tail. Restated as what that test holds, and the whole line now has a limit: `EXIT_LINE_MAX_BYTES`, 7680, less any job id's excess past 63 characters. The writer ASCII-escapes the body, which also closes a MAC lost to a non-ASCII character split across two stdout chunks, cuts `message` to fit, and past that keeps only the verdict and the tokens, marked `lineCut`. `TAIL_CAP_BYTES`, the 1700 cap and its test, the exit codes and the MAC framing are UNCHANGED, checked. |
+| 2026-11-03 (#800, what a job loaded) | `INT-RUNNER-EXIT-CODE-PROTOCOL`: the runner's exit line carries `loaded`, noted at five stages through the `canaryLoad` route so every path the runner writes carries the latest, with a `finally` around `lifecycle.start`, so a job a server stopped still names which server, as a position in `PI_MCP_SERVERS`. Counts and closed words: no string a repository chose reaches it, failures and drops come from teeing the loader's log so record and log cannot disagree, and a repository extension's tool is a count. Named here with its residual: `extTools`, the tools a staged package or an overlay extension brought. Bounded by caps that raise `cut`, in three forms the writer picks from by measuring the line. Beyond the example the issue drew, `cut` also counts `servers`, since a cap with nowhere to say it would drop silently. Also the theme count, which read `filePath` at `run-job.mjs` where pi 1.5.0's `Theme` has `sourcePath`. An MCP failure still stops the job (`mcp-unavailable`, `mcp-unreachable`), and the exit codes, the signature and the `RUNNER_POLICY_REASONS` set are UNCHANGED, checked. The worker's half (`INT-RUN-HISTORY-FILE-CONTRACT`) comes with the record, so an older worker ignores the key, checked through its real sink. |
