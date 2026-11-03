@@ -16,7 +16,8 @@ import { FORGE_COMMIT_PATH, forgeBaseLinkOf, forgeRepoLinkOf, modelRunRecord } f
 import { parseRunFilter, runMatches } from "../src/run-filter.mjs";
 import { runForAgent } from "../src/tool-reads.mjs";
 import { outcomeKey } from "../src/words.mjs";
-import { BASE_SHA, HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, SCRIPT, billingRecords, loadedField } from "./helpers/loaded-samples.mjs";
+import { cardPreview, cardReadme, cardText } from "./helpers/card-structure.mjs";
+import { BASE_SHA, HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, SCRIPT, billingRecords, incompleteRecords, loadedField, webRecords } from "./helpers/loaded-samples.mjs";
 
 // Issue #800: what the console's surfaces do with `loaded-words.mjs`: the run page's card and banner, the Runs list and its
 // filter, `/api/run`'s neighbours, and every read that must NOT carry the field to a model.
@@ -235,6 +236,68 @@ test("a repository extension's problem opens the commit that ran: an operator's 
 test("the fold's Read them there opens the commit too: the words say at its base commit", async () => {
   const page = await pageOf(S.everything());
   assert.match(page, new RegExp(`href="https://github\\.com/acme/web/commit/${BASE_SHA}"[^>]*>Read them there`));
+});
+
+// A card's Built status is a claim about this repository. These cards said things the record cannot hold ("1 of acme/api's 2
+// extensions", "trigger 3 allows any model") while their goldens said otherwise, and the ledgers could only note it. So what the
+// console draws from a card's own samples is read here against the card, line by line. REJECTED: comparing whole panels, since
+// the trigger line (#800, part 2) and each sample's run ids and counts are the card's own.
+test("the cards draw what the console says: each line from the cards' own samples, word for word", () => {
+  const words = (card) => cardText(cardPreview(card)).replace(/\s+/g, " ").replace(/ ([,;:’]|\.(?= |$))/g, "$1");
+  const said = (parts) => wordsText(parts).replace(/\s+/g, " ").trim();
+  const holds = (card, text, why) => assert.ok(words(card).includes(text), `${card} no longer says what the console says (${why}): ${text}`);
+
+  const states = [S.everything(), S.leftOut(), S.leftOutOverlay(), S.mcpConnected(), S.dropped(), S.cut(), S.noFlow(), S.extensionFailed(), S.mcpFailed(), S.mcpTimeout(), S.hostDiffers(), S.notRecorded(), S.refused()];
+  for (const record of states) {
+    const v = loadedVerdict(record, HOST_LOADS, { jobEnded: record.outcome === "failed" });
+    holds("LoadedStates", lineOf(v), record.jobId);
+    for (const small of v.small) holds("LoadedStates", small, `${record.jobId}'s small line`);
+    if (v.fix) holds("LoadedStates", v.fix.label, `${record.jobId}'s button`);
+  }
+  for (const record of [S.noFlow(), S.extensionFailed()]) {
+    const banner = outcomeBanner(record);
+    holds("LoadedStates", outcomeNote(record), `${record.jobId}'s outcome`);
+    for (const sentence of banner.sentences) holds("LoadedStates", sentence, `${record.jobId}'s banner`);
+    holds("LoadedStates", banner.fix.label, `${record.jobId}'s banner's button`);
+  }
+
+  // Row by row and whole, because a line that says more than the console passes an `includes`: "14 calls; trigger 3 allows any
+  // model" holds "14 calls".
+  const tidy = (markup) => cardText(markup).replace(/\s+/g, " ").replace(/ ([,;:’]|\.(?= |$))/g, "$1").trim();
+  const cardRows = (card, panel) => {
+    const page = cardPreview(card);
+    const at = page.indexOf(`id="${panel}"`);
+    return [...page.slice(at, page.indexOf("</section>", at)).matchAll(/<li class="ld-row"><span class="ld-k">(.*?)<\/span><span class="ld-v">(.*?)<\/span><\/li>/g)].map(([, label, value]) => {
+      const [line, small = ""] = value.split("<small>");
+      return [tidy(label), tidy(line), tidy(small)];
+    });
+  };
+  const consoleRows = (rows) => rows.map((row) => [row.label, said(row.value), row.more ? said(row.more) : ""]);
+  assert.deepEqual(cardRows("RunLoaded", "p-loaded"), consoleRows(loadedRows(S.everything())));
+  assert.deepEqual(cardRows("ProjectLoads", "p-proj-loads"), consoleRows(projectLoadsOf(billingRecords()).rows));
+  assert.deepEqual(cardRows("ProjectLoads", "p-proj-loads-incomplete"), consoleRows(projectLoadsOf(incompleteRecords()).rows));
+  assert.deepEqual(cardRows("ProjectLoads", "p-proj-loads-same"), consoleRows(projectLoadsOf(webRecords()).rows));
+  for (const row of loadedFold(S.everything())) {
+    holds("RunLoaded", said(row.name), `the fold's ${row.kind}`);
+    holds("RunLoaded", said(row.from), `the fold's ${row.kind}, where from`);
+  }
+
+  for (const [records, what] of [[billingRecords(), "differs"], [incompleteRecords(), "incomplete"], [webRecords(), "same"], [[], "none"]]) {
+    const loads = projectLoadsOf(records);
+    assert.equal(loads.state, what, "the premise: each sample is the state the card draws it as");
+    holds("ProjectLoads", loads.top, what);
+    holds("ProjectLoads", loads.sub, `${what}, its sub`);
+    for (const small of loads.small) holds("ProjectLoads", small, `${what}, its small line`);
+    for (const row of loads.rows) {
+      holds("ProjectLoads", said(row.value), `${what}: ${row.label}`);
+      if (row.more) holds("ProjectLoads", said(row.more), `${what}: ${row.label}, its small line`);
+    }
+    if (loads.foot) holds("ProjectLoads", loads.foot, `${what}, its foot`);
+  }
+  for (const [text, why] of [[LOADED_WORDS.sandboxFoot, "a sandbox's foot"], [LOADED_WORDS.freshFoot, "a fresh sandbox's foot"]]) holds("LoadedStates", text, why);
+  // What the record cannot hold, each once on a card, in either place a card says anything.
+  const retired = ["2 extensions", "threw", "throws", "allows any model", "no trigger of this project", "as this host asks", "by the repository’s skill", "at a41c0d2"];
+  for (const card of ["RunLoaded", "LoadedStates", "ProjectLoads"]) for (const text of retired) assert.ok(!words(card).includes(text) && !cardReadme(card).includes(text), `${card}: ${text}`);
 });
 
 test("what the hosts published, beside what they beat out: a live host with no record still has its pi, and a failed read says so", async () => {

@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "b055f3f3c01abb838acbc198293b413fbe93a3daae07c664cfe9cd6941375981",
+  "words": "c0e78c0c15dfa9c35f6771d40a044c44eff3a24322a7623f0090aac88092bf6f",
   "elements": [
     {
       "el": "p-loaded",
@@ -62,10 +62,10 @@
       ],
       "shows": [
         "Completed, with a failed extension",
+        "1 of acme/api’s extensions failed to load. The extension failed while it loaded and the run went on.",
         "Read what it did before you trust it.",
         "Open the base commit a41c0d2"
-      ],
-      "reason": "Its 'without 1 of acme/api's 2 extensions' and 'threw' are not said: the record keeps no kind, so neither the total nor whether the extension stayed loaded is known. A record that names no commit opens the repository and says so."
+      ]
     },
     {
       "el": "p-loaded-sandbox",
@@ -141,7 +141,7 @@
       ]
     },
     {
-      "el": "Left out, as the host asks (gl-af91)",
+      "el": "Left out for this job (gl-af91)",
       "kind": "state",
       "status": "new",
       "panel": "p-loaded",
@@ -153,8 +153,7 @@
         "Everything trigger 4 asks for loaded.",
         "Left out for this job:",
         "the overlay’s extensions."
-      ],
-      "reason": "The card says 'as this host asks'. The record's switch is this job's: a host's PI_GLOBAL_ALLOW_EXTENSIONS=0 closes it and so does a canary's replay, so no line says the host asked. The fold names both."
+      ]
     },
     {
       "el": "An MCP server connected (gh-2f6a)",
@@ -224,8 +223,14 @@
         "1 of acme/api’s extensions failed to load.",
         "The run went on.",
         "Open the base commit a41c0d2"
-      ],
-      "reason": "The card's '1 of acme/api's 2 extensions' needs a total. pi 1.5.0 keeps a conflicted extension loaded and reports it too, so loaded plus failed can count one twice, and the record keeps no kind. 'The run went on without it' holds only when none of that tier's extensions loaded, and then it is said. The button opens the commit the record names, and the repository where it names none."
+      ]
+    },
+    {
+      "el": "A record that names no commit says Open the repository, and a forge with no address leaves the words with no button",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/read-model.mjs#forgeBaseLinkOf",
+      "holds": "forgeRepoLinkOf"
     },
     {
       "el": "An MCP server could not be used (gh-6b0d)",
@@ -257,6 +262,18 @@
         "The run stopped before the agent started.",
         "Retried, as any infrastructure failure; this was its last attempt.",
         "Open Connections"
+      ]
+    },
+    {
+      "el": "This was its last attempt is said only when the queue reports the job failed",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "holds": "jobEnded",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.retriedLast",
+      "golden": [
+        "panels/run-loaded-mcp-stopped.operator"
       ]
     },
     {
@@ -390,12 +407,6 @@
       "holds": "piVersion"
     },
     {
-      "el": "1 of acme/api's 2 extensions",
-      "kind": "readme",
-      "status": "illustrative",
-      "reason": "A total the record cannot honestly give: see the state above."
-    },
-    {
       "el": "Every run with its outcome and host",
       "kind": "sample",
       "status": "illustrative",
@@ -408,10 +419,10 @@
       "reason": "Sample values."
     },
     {
-      "el": "mini1's doctor run at 14:39 UTC",
+      "el": "mini1's doctor run at 2026-10-08 14:39 UTC",
       "kind": "sample",
       "status": "illustrative",
-      "reason": "Sample time, the fixture's clock less an hour; the console prints its date too."
+      "reason": "Sample time, the fixture's clock less an hour."
     }
   ]
 }

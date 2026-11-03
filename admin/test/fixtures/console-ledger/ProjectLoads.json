@@ -1,7 +1,7 @@
 {
   "card": "ProjectLoads",
   "pr": 800,
-  "words": "9ac0b199d955df128574a39c1e1ff94cfe6ae49555f6dc4e07ddf5fa78958d3f",
+  "words": "bbe669ab2343c87f7c5c3d7b0dd240de4e797efe5d6b87803137ba3d0629d7b5",
   "elements": [
     {
       "el": "p-proj-loads",
@@ -103,8 +103,7 @@
         "was refused before its container started",
         "stop did not take, so it left no exit line",
         "an older release wrote"
-      ],
-      "reason": "The card's MCP sentence is 'no trigger of this project names a server'. These words read the record and no triggers file, so they say what the records hold: no recorded run names one."
+      ]
     },
     {
       "el": "By host: a table of each host's runs, how many are recorded, the extensions they loaded and the flow",

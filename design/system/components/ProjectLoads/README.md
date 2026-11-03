@@ -5,7 +5,7 @@ The project page's **What its runs load**: what its runs had this week, one line
 - **One line per kind:** pi and image, models, extensions, flows and where each was found, MCP servers, what was missing, and the runs it could not read. Every claim counts recorded runs: of the 18 on build3, gh-e9a0 was refused before its container started, gh-4a7e's stop did not take, so it left no exit line, and an older release wrote gh-c3f8's record. A cancel with a live runner does write an exit line, on SIGTERM, so cancelled alone does not mean not recorded.
 - **By host:** a table of each host's runs, how many of them are recorded, the extensions they loaded and the flow.
 - **While most runs have no record** (`p-proj-loads-incomplete`): the same card, whose top line says how few it read and why, and that runs may differ in ways it does not show. It claims no difference and no sameness on what it cannot read.
-- **When no host differs** (`p-proj-loads-same`): one green line naming the hosts, on web.
+- **When no host differs** (`p-proj-loads-same`): one green line naming the hosts, on web, whose 8 runs this week are all it counts.
 - **When nothing has a record** (`p-proj-loads-none`): one muted line, on shop, saying so, with no rows to read.
 
 **Panels.** `p-proj-loads`, and `p-proj-loads-incomplete`, `p-proj-loads-same` and `p-proj-loads-none` (the same panel in those states), beside ProjectDetail's panels.
@@ -20,4 +20,4 @@ The project page's **What its runs load**: what its runs had this week, one line
 - **This week, the page's own window.** Members counts its runs from Monday 00:00 UTC (`costsSinceMs("week")`), so 18 and 6 add up to this card's 24. A rolling 7 days beside it would be a second window under a near-identical word.
 - **The image id is not a difference.** The image id on this host; two local builds of one tag differ, so it never counts as a host difference.
 
-**Fixture note.** billing, its two repositories with 18 and 6 runs this week, its triggers' 9 and 2 runs in the last 24 hours, build3 for acme/billing, mini2 for acme/billing-ui, and gh-e9a0, gh-4a7e and gh-c3f8 are as on ProjectDetail, LoadedStates and in the fixture. Sample: git-guard in build3's overlay, review in the overlay (as on TriggerEnvironment), the incomplete card's 9 of 24 and its split, the same and none states on web and shop, and pi 1.5.0 in pi-job:4.3.1 (RunLoaded's note says why).
+**Fixture note.** billing, its two repositories with 18 and 6 runs this week, its triggers' 9 and 2 runs in the last 24 hours, build3 for acme/billing, mini2 for acme/billing-ui, and gh-e9a0, gh-4a7e and gh-c3f8 are as on ProjectDetail, LoadedStates and in the fixture. Sample: git-guard in build3's overlay, review in the overlay (as on TriggerEnvironment), the incomplete card's 9 of 24 and its split, which are all build3's and so hold git-guard, the same and none states on web and shop, and pi 1.5.0 in pi-job:4.3.1 (RunLoaded's note says why).

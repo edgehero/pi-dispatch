@@ -1,7 +1,7 @@
 {
   "card": "RunLoaded",
   "pr": 800,
-  "words": "6224a44844a116a304e4b11d56b370f16dc86d94c573dcd30a777ce10054cc4f",
+  "words": "792f69adc42d7a7ec093ba490851d77092ef00a3950ad9da1b00e0f8beb5d27b",
   "elements": [
     {
       "el": "p-outcome",
@@ -105,8 +105,7 @@
       "shows": [
         "anthropic / claude-sonnet-5-5",
         "14 calls"
-      ],
-      "reason": "The card also says what the trigger allows. The record does not hold it and these words read no triggers file, so the line stops at the calls."
+      ]
     },
     {
       "el": "Extensions: each staged package with its exact version, overlay extensions by name, and how many came from the repository",
@@ -193,7 +192,9 @@
         "Skill replaced",
         "Prompt template",
         "Extension dropped",
-        "Theme"
+        "Theme",
+        "Read them there",
+        "by a skill of that name from the repository, the skills folder or the overlay"
       ]
     },
     {
@@ -240,6 +241,12 @@
       "source": "worker/src/loaded-record.mjs#loadedWithImage"
     },
     {
+      "el": "It adds the commit the workspace was prepared at too, so the fold's Read them there and a repository extension's problem open the code that ran",
+      "kind": "provides",
+      "status": "new",
+      "source": "worker/src/loaded-record.mjs#loadedWithBase"
+    },
+    {
       "el": "Past its bound the record says it was cut and never drops an entry silently",
       "kind": "provides",
       "status": "new",
@@ -273,24 +280,6 @@
         "panels/run-loaded.viewer"
       ],
       "shows": "pi-lint 1.4.2, pi-test-runner 0.9.0"
-    },
-    {
-      "el": "the trigger allows any model",
-      "kind": "readme",
-      "status": "illustrative",
-      "reason": "The record does not hold what a trigger allows, and the words read the record and never today's triggers file. What was allowed when the run started is not known, and today's file could say otherwise."
-    },
-    {
-      "el": "the repository's .pi/skills at a41c0d2",
-      "kind": "readme",
-      "status": "illustrative",
-      "reason": "The fold says 'at its base commit' and its link opens that commit. The short hash stays on the problem's button, where a person is about to open it."
-    },
-    {
-      "el": "one of pi-test-runner's, by the repository's skill of that name",
-      "kind": "readme",
-      "status": "illustrative",
-      "reason": "The record counts a replaced skill on the package that lost its name and does not say which tier won, so the console names all three that can."
     },
     {
       "el": "gh-9575, acme/web#490, fix on mini1, trigger 3 and the model",
