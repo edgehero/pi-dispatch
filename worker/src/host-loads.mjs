@@ -200,9 +200,14 @@ export function parseHostLoads(text) {
 	}
 	if (!isObject(doc) || doc.v !== HOST_LOADS_VERSION || !Number.isSafeInteger(doc.at) || doc.at < 0) return null;
 	if (!HOST_LOADS_LISTS.every((part) => Array.isArray(doc[part])) || typeof doc.overlayExtensionsAllowed !== "boolean" || !isObject(doc.by)) return null;
+	// `{ worker: "yes" }` read as false, which says an operator ran it, and `{ uid: "root" }` as no uid known. The builder writes
+	// both keys always, a uid it does not know as null, so anything else is not this record's shape.
+	if ((doc.by.uid !== null && count(doc.by.uid) === null) || typeof doc.by.worker !== "boolean") return null;
 	// A word that is not there, or not a count, would read as nothing left out or as a host with no interval, which never ages.
 	if (doc.every !== null && count(doc.every) === null) return null;
-	if (!isObject(doc.more) || !HOST_LOADS_MORE.every((part) => doc.more[part] === undefined || count(doc.more[part]) !== null)) return null;
+	// A key with no word here is refused too. Dropping it read `{ widgets: 3 }` as nothing left out, and `hostsAgree`, whose rule is
+	// nothing in `more`, then said true of a host that says it left something out.
+	if (!isObject(doc.more) || !Object.entries(doc.more).every(([part, value]) => HOST_LOADS_MORE.includes(part) && count(value) !== null)) return null;
 	// Absent is none and the builder's own way of saying so. A part this reader has no word for is one it cannot say was read.
 	if (doc.unread !== undefined && (!Array.isArray(doc.unread) || !doc.unread.every((part) => HOST_LOADS_PARTS.includes(part)))) return null;
 	const parts = {
@@ -336,7 +341,8 @@ export function hostsAgree(rows) {
  * (`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`). Keeps doctor's existential probe: an unknown tier does not stop the walk.
  *
  *   tier     the first tier that holds it; else `none` when every tier was checked, or `unknown` when one could not be.
- *            A forge's repository is not on a host, so a forge trigger found nowhere else is `unknown`, never `none`
+ *            A forge's repository is not on a host, so a forge trigger found nowhere else is `unknown`, never `none`. A tier
+ *            that could not be read is its caller's to say, through `flowProbes`: `fileExists` here has one answer
  *   package  the staged package's name, for `package` alone
  *   repo     what the repository tier answered: `present`, `absent` or `unknown`
  *   resolved, checked, unknown   the words of doctor's own line, which name folders and so are never published
@@ -398,6 +404,40 @@ export async function flowTierOf({ flow, folder = null, skillsDir = null, packag
 		}
 	}
 	return { tier: tier ?? (unknown.length > 0 ? "unknown" : "none"), package: pkg, repo, resolved, checked, unknown };
+}
+
+/**
+ * The flow tiers' readers, each answering exactly as before so doctor's own lines do not move, and saying whether any met a
+ * failure that is not absence. `readStagedSkills` swallows such a failure ("no readable package.json: pi would skip it too") and
+ * `existsSync` answers false on `EACCES`, so a package, a skills folder or a `run.skillsDir` this uid cannot enter read as not
+ * holding the flow, and the row as `none`, with `unread` empty. `none` says every tier was checked, and that one was not.
+ * REJECTED: answering differently, or throwing, on such a failure: doctor's line says "visible here", which is still true. A
+ * `fileExists` seam keeps the answer; the `stat` beside it only notes why it might be false, since `existsSync` cannot say.
+ */
+export function flowProbes({ fileExists, fs = nodeFs }) {
+	let blind = false;
+	const noting = (read) => (...args) => {
+		try {
+			return read(...args);
+		} catch (error) {
+			if (!ABSENT_CODES.has(error?.code)) blind = true;
+			throw error;
+		}
+	};
+	const stat = noting((path) => fs.statSync(path));
+	return {
+		fileExists: (path) => {
+			try {
+				stat(path);
+			} catch {
+				// noted; the answer stays the seam's
+			}
+			return fileExists(path);
+		},
+		readFile: noting((path) => fs.readFileSync(path, "utf8")),
+		readDir: noting((path, options) => fs.readdirSync(path, options)),
+		blind: () => blind,
+	};
 }
 
 /** The ignore files a job's discovery honours (image/runner/src/loader.mjs `EXTENSION_IGNORE_FILES`, pinned). */

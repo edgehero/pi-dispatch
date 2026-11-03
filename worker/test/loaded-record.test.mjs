@@ -578,7 +578,7 @@ function maximal() {
 }
 
 /** Measured off `maximal` below, and said in INT-RUN-HISTORY-FILE-CONTRACT. A new cap moves this and the spec together. */
-const WORST_RECORD_BYTES = 15_814;
+const WORST_RECORD_BYTES = 15_874;
 
 test("the record stays under 16 KiB at every cap, and the worst case is measured and pinned", () => {
 	const { forged, known, img } = maximal();
@@ -592,11 +592,14 @@ test("the record stays under 16 KiB at every cap, and the worst case is measured
 	assert.equal(kept.mcp.length, 8);
 	assert.equal(kept.leftOut.tools.length, 32);
 	assert.equal(kept.tools.job.length, record.LOADED_JOB_TOOLS.length);
+	assert.equal(kept.tools.own.length, 8, "every name of pi's own: a worst line with none understated this by 60 bytes");
 	assert.equal(source(kept, "overlay").namedTools.length, 16, "the costliest place for a tool's name");
 	assert.ok(bytes <= LOADED_RECORD_MAX_BYTES, `the worst record is ${bytes} bytes`);
 	assert.equal(bytes, WORST_RECORD_BYTES);
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
-	assert.ok(spec.includes(`${WORST_RECORD_BYTES.toLocaleString("en-US")} bytes`), "INT-RUN-HISTORY-FILE-CONTRACT says the measured worst case");
+	// With its citation, which only the contract's own sentence has: a revision row quoting the number kept this green while
+	// the sentence said something else.
+	assert.ok(spec.includes(`${WORST_RECORD_BYTES.toLocaleString("en-US")} bytes (\`worker/test/loaded-record.test.mjs\`)`), "INT-RUN-HISTORY-FILE-CONTRACT says the measured worst case");
 	assert.equal(known.leftOut.tools[0].length, 49, "each left-out tool at the longest its shape takes");
 	// Each thing the choices above chose against is smaller, so a change in the shape that makes one of them the worst shows.
 	const sizeOf = (line_) => {
@@ -646,7 +649,10 @@ test("past the bound it reads as `cut` and keeps the worker's facts: a key that 
 		let left = target - Buffer.byteLength(JSON.stringify(kept), "utf8") + 1;
 		const names = [];
 		while (left > 0) {
-			const take = Math.min(51, left);
+			// A name costs its length, two quotes and a comma, so at least four bytes: what would leave less than that is shared
+			// with this name. REJECTED: `Math.min(51, left)`, which threw whenever the room left a remainder under four, so a
+			// new worst case could turn this test red for no reason to do with the bound.
+			const take = left <= 51 ? left : Math.min(51, left - 4);
 			names.push("t".repeat(take - 3));
 			left -= take;
 		}

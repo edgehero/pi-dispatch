@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileS
 import { join } from "node:path";
 import { test } from "node:test";
 import { DOCTOR_RESULTS_TTL_MS } from "../src/doctor-results.mjs";
-import { buildHostLoads, flowTierOf, HOST_LOADS_CAPS, HOST_LOADS_MAX_BYTES, HOST_LOADS_OLD_INTERVALS, hostLoadsKey, hostsAgree, LOADS_IGNORE_FILES, loadsFreshness, mcpRowsOf, parseHostLoads, pathIsThere, publishHostLoads, readHostLoads, readOverlayExtensionRows, readOverlaySkillNames } from "../src/host-loads.mjs";
+import { buildHostLoads, flowProbes, flowTierOf, HOST_LOADS_CAPS, HOST_LOADS_MAX_BYTES, HOST_LOADS_OLD_INTERVALS, hostLoadsKey, hostsAgree, LOADS_IGNORE_FILES, loadsFreshness, mcpRowsOf, parseHostLoads, pathIsThere, publishHostLoads, readHostLoads, readOverlayExtensionRows, readOverlaySkillNames } from "../src/host-loads.mjs";
 import { ABSENT_CODES, parseOverlayMcp } from "../src/mcp-config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -150,7 +150,7 @@ test("each list has its cap, the rest counted in `more`, and the whole record it
 });
 
 test("the parser is an allowlist: an unknown key is not read, and a row that fails is dropped and counted", () => {
-	const parsed = parseHostLoads(JSON.stringify({ ...record(), secret: "SECRET", extensions: [{ name: "ok.ts", kind: "file", path: "/etc/x" }, { name: "/etc/x", kind: "file" }, "x"], mcp: [{ ...PARTS.mcp[0], url: "https://secret" }], packages: [{ name: "pi-a", version: "1.0.0", dir: "/x" }], skills: [7], flows: [{ ...PARTS.flows[0], folder: "/srv" }], unread: ["mcp"], more: { extensions: 1, junk: 4 } }));
+	const parsed = parseHostLoads(JSON.stringify({ ...record(), secret: "SECRET", extensions: [{ name: "ok.ts", kind: "file", path: "/etc/x" }, { name: "/etc/x", kind: "file" }, "x"], mcp: [{ ...PARTS.mcp[0], url: "https://secret" }], packages: [{ name: "pi-a", version: "1.0.0", dir: "/x" }], skills: [7], flows: [{ ...PARTS.flows[0], folder: "/srv" }], unread: ["mcp"], junk: 4, more: { extensions: 1 } }));
 	assert.deepEqual(parsed.extensions, [{ name: "ok.ts", kind: "file" }]);
 	assert.deepEqual(parsed.mcp, PARTS.mcp);
 	assert.deepEqual(parsed.packages, [{ name: "pi-a", version: "1.0.0" }]);
@@ -197,6 +197,13 @@ test("a record with no shape does not read: unknown, never an empty current host
 	assert.equal(parseHostLoads(JSON.stringify({ ...good, every: null })).every, null, "null is the builder's own unknown");
 	assert.equal(parseHostLoads(JSON.stringify(without("by"))), null);
 	assert.equal(parseHostLoads(JSON.stringify({ ...good, by: "x" })), null);
+	// `{ worker: "yes" }` read as false, which says an operator ran it, and `{ uid: "root" }` as no uid known.
+	for (const by of [{}, { uid: "root", worker: true }, { uid: -1, worker: true }, { worker: true }, { uid: 501 }, { uid: 501, worker: "yes" }, { uid: 501, worker: 1 }, { uid: 501, worker: null }]) assert.equal(parseHostLoads(JSON.stringify({ ...good, by })), null, `by ${JSON.stringify(by)}`);
+	assert.deepEqual(parseHostLoads(JSON.stringify({ ...good, by: { uid: null, worker: false } })).by, { uid: null, worker: false }, "null is the builder's own unknown uid");
+	assert.deepEqual(parseHostLoads(JSON.stringify(record({ by: null }))).by, { uid: null, worker: false }, "and what the builder writes for no `by` at all reads back");
+	// A key this reader has no word for is a host saying it left out something this reader cannot name, so "nothing in `more`"
+	// cannot be said of it, and `hostsAgree` must not get the chance to say true.
+	for (const more of [{ widgets: 3 }, { extensions: 1, widgets: 0 }]) assert.equal(parseHostLoads(JSON.stringify({ ...good, more })), null, `more ${JSON.stringify(more)}`);
 	for (const notText of [null, undefined, 7, {}]) assert.equal(parseHostLoads(notText), null, String(notText));
 });
 
@@ -347,6 +354,38 @@ test("flowTierOf: the loader's order, first hit wins, and a forge trigger found 
 	assert.deepEqual(await of({ folder: "/srv" }, "absent", { ...nowhere, staged: { skills: [], unenumerable: ["pi-glob"] } }), ["unknown", null, "absent"], "a package whose manifest cannot be enumerated");
 	const words = await flowTierOf({ flow: "fix", folder: "/srv" }, { repoFlowAtHead: answer("absent"), ...nowhere });
 	assert.deepEqual([words.resolved, words.checked, words.unknown], [null, ["repo .pi/skills at HEAD", "overlay skills/", "staged packages"], []], "the words of doctor's own line");
+});
+
+test("flowProbes answers as each reader did, and notes only a failure that is not absence", () => {
+	const failing = (code) => {
+		const fail = () => {
+			throw Object.assign(new Error(code), { code });
+		};
+		return { statSync: fail, readFileSync: fail, readdirSync: fail };
+	};
+	const fine = { statSync: () => ({}), readFileSync: () => "text", readdirSync: () => ["a"] };
+	for (const answer of [true, false]) {
+		const probes = flowProbes({ fileExists: () => answer, fs: failing("EACCES") });
+		assert.equal(probes.fileExists("/x"), answer, "the seam's answer stands, whatever the stat met");
+		assert.equal(probes.blind(), true);
+	}
+	const reads = flowProbes({ fileExists: () => true, fs: fine });
+	assert.equal(reads.readFile("/x"), "text");
+	assert.deepEqual(reads.readDir("/x"), ["a"]);
+	assert.equal(reads.fileExists("/x"), true);
+	assert.equal(reads.blind(), false);
+	for (const code of ABSENT_CODES) {
+		const absent = flowProbes({ fileExists: () => false, fs: failing(code) });
+		assert.equal(absent.fileExists("/x"), false, code);
+		assert.throws(() => absent.readFile("/x"), { code }, "a read still throws, as the caller's catch expects");
+		assert.throws(() => absent.readDir("/x"), { code });
+		assert.equal(absent.blind(), false, `${code} is absence`);
+	}
+	for (const [code, use] of [["EACCES", (probes) => probes.readFile("/x")], ["EPERM", (probes) => probes.readDir("/x")], ["EIO", (probes) => probes.readFile("/x")], [undefined, (probes) => probes.readDir("/x")]]) {
+		const blocked = flowProbes({ fileExists: () => false, fs: failing(code) });
+		assert.throws(() => use(blocked));
+		assert.equal(blocked.blind(), true, `${code} is not absence`);
+	}
 });
 
 test("the overlay's extensions read by the rule a job discovers them by, held to the runner's own function on the same tree", async () => {

@@ -396,11 +396,12 @@ test("three forms, largest first: compact loses what names things, minimal keeps
 test("each form's worst case is measured and pinned (a cap that grows moves a number here, and the exit line's budget with it)", () => {
 	const [full, compact, minimal] = fitLoaded(maximalLoaded());
 	const sizes = { full: JSON.stringify(full).length, compact: JSON.stringify(compact).length, minimal: JSON.stringify(minimal).length };
-	assert.deepEqual(sizes, { full: 4177, compact: 1118, minimal: 232 });
+	assert.deepEqual(sizes, { full: 4237, compact: 1118, minimal: 232 });
 	// What the caps are, read off the line, so the pinned sizes above are of the caps this file claims.
 	assert.equal(full.packages.length, LOADED_MAX_PACKAGES);
 	assert.equal(full.mcp.length, LOADED_MAX_SERVERS);
 	assert.equal(full.overlay.loaded.length, LOADED_MAX_OVERLAY_NAMES);
+	assert.equal(full.tools.own.length, 8, "pi's own tools, which a line with none would understate");
 	assert.equal(full.extTools.p.flat().filter((v) => typeof v === "string").length + full.extTools.o.flat().filter((v) => typeof v === "string").length, LOADED_MAX_EXT_TOOLS);
 });
 

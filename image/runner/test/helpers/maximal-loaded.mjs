@@ -19,6 +19,9 @@ export function maximalLoaded() {
 		...packages.map((root, i) => ({ name: name("p", i), path: `${root}/ext.js` })),
 		...overlayNames.slice(0, LOADED_MAX_EXT_TOOLS - packages.length).map((overlayName, i) => ({ name: name("t", i), path: `/opt/pi-global/extensions/${overlayName}` })),
 		...LOADED_JOB_TOOLS.map((jobTool) => ({ name: jobTool, path: "<inline:job-own>" })),
+		// `tools.own` keeps a name only when pi's own tool list says `builtin:`, as `buildLoaded` reads it. Without these the
+		// worst line had no own tools at all, and every size measured from it was 60 characters short.
+		...["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"].map((own) => ({ name: own, path: `builtin:${own}` })),
 	];
 	const loaded = buildLoaded({
 		at: "session",

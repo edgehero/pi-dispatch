@@ -12895,6 +12895,62 @@ const fsDenying = (denied) => {
 	};
 };
 
+// One row per place the flow tiers read. Each is run twice, the same paths failing with EACCES and then with ENOENT, so the
+// readers answer the same both times: the row is all that may differ, and doctor's stdout not at all.
+test("a flow row reads `unknown`, never `none`, where a tier could not be read, and doctor's own lines do not move (#800)", { skip: skipNoPi }, async () => {
+	const dir = overlay({ skills: ["review"], packages: [{ name: "wf-tools", version: "1.0.0", dir: "wf-tools", skills: ["packed"] }] });
+	const skillsDir = join(dir, "trigger-skills");
+	mkdirSync(join(skillsDir, "lost"), { recursive: true });
+	writeFileSync(join(skillsDir, "lost", "SKILL.md"), "---\ndescription: x\n---\n");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ triggers: [
+		{ on: { type: "cron", id: "pack", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "packed", task: "t" } },
+		{ on: { type: "cron", id: "lost", pattern: "0 4 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "lost", task: "t", skillsDir, packages: false } },
+		{ on: { type: "cron", id: "over", pattern: "0 5 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t", packages: false } },
+		{ on: { type: "cron", id: "gone", pattern: "0 6 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "nowhere", task: "t", packages: false } },
+	] }));
+	const spawn = fakeSpawn({ ...green, [gitKey("/srv/repo", "rev-parse")]: { code: 0, output: `${"a".repeat(40)}\n` }, [gitKey("/srv/repo", "ls-tree")]: { code: 0, output: "" } });
+	const failing = (denied, code) => {
+		const check = (path) => {
+			if (denied.test(String(path))) throw Object.assign(new Error(`${code}: ${path}`), { code });
+		};
+		return { statSync: (path, ...rest) => (check(path), statSync(path, ...rest)), readFileSync: (path, ...rest) => (check(path), readFileSync(path, ...rest)), readdirSync: (path, ...rest) => (check(path), readdirSync(path, ...rest)) };
+	};
+	const run = async (denied, code) => {
+		const published = [];
+		const { out, text } = capture();
+		// `existsSync` answers false on any failure, so the seam beside the throwing reads does too.
+		const fileExists = (path) => !denied.test(String(path)) && existsSync(path);
+		await runDoctor({ ...publishEnv(triggers), PI_GLOBAL_PI_DIR: dir }, publishDeps(out, { publish: true, fileExists, flowFs: failing(denied, code), cwd: tmpdir(), agentDir: NO_AGENT_DIR, spawn, publishDoctor: async (url, name, record, loads) => published.push(loads) }));
+		return { rows: published[0].flows.map((row) => row.tier), stdout: text() };
+	};
+	assert.deepEqual((await run(/^$/, "EACCES")).rows, ["package", "trigger", "overlay", "none"], "the premise: with every tier read, each flow is found, and the last is nowhere");
+
+	const cases = [
+		["a staged package's folder", /packages\/wf-tools(?:\/|$)/, 0],
+		["its package.json", /wf-tools\/package\.json$/, 0],
+		["its skills folder", /wf-tools\/skills(?:\/|$)/, 0],
+		["one skill in it", /skills\/packed(?:\/|$)/, 0],
+		["run.skillsDir", /trigger-skills(?:\/|$)/, 1],
+		["the flow's folder in run.skillsDir", /trigger-skills\/lost(?:\/|$)/, 1],
+		["the flow's folder in the overlay", /skills\/review(?:\/|$)/, 2],
+	];
+	for (const [what, denied, row] of cases) {
+		const blocked = await run(denied, "EACCES");
+		const absent = await run(denied, "ENOENT");
+		assert.equal(blocked.rows[row], "unknown", `${what} at mode 000: not checked, so not none`);
+		assert.equal(absent.rows[row], "none", `${what} really absent: every tier answered`);
+		assert.equal(blocked.stdout, absent.stdout, `${what}: doctor's own lines are the same`);
+		// A row answers for its own tiers: rows 1 to 3 withhold the packages, and no row but 1 looks in that run.skillsDir. This is
+		// what keeps the last row `none` throughout, so `unknown` is never a whole host's word for one blocked folder.
+		for (const other of [0, 1, 2, 3].filter((index) => index !== row)) assert.equal(blocked.rows[other], absent.rows[other], `${what}: row ${other} is not this one's question`);
+		assert.equal(blocked.rows[3], "none", `${what}: the flow every one of its tiers answered for`);
+	}
+	// A flow found stays found: `unknown` is a word for what would have read `none`. The overlay's review is found though the
+	// stage cannot be read, and the first tier that holds it answers.
+	assert.deepEqual((await run(/packages\/wf-tools(?:\/|$)/, "EACCES")).rows.slice(1), ["trigger", "overlay", "none"]);
+});
+
 test("a part this uid cannot enter is named `unread`, never an empty list, so another uid's run cannot read as a host with nothing on it (#800)", () => {
 	const dir = overlay({ skills: ["review"], packages: [{ name: "wf-tools", version: "1.0.0", dir: "wf-tools", skills: ["packed"] }] });
 	mkdirSync(join(dir, "extensions"), { recursive: true });

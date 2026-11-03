@@ -141,7 +141,7 @@ import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
 import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, publishRedactor, secretValuesIn } from "./doctor-results.mjs";
 import { olderStateFindings as olderStateFindingsReal, VALKEY_CONTAINER } from "./older-state.mjs";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
-import { buildHostLoads, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
+import { buildHostLoads, flowProbes, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
@@ -305,6 +305,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		readEnvFile = (path) => readFileSync(path),
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf).
 		observationFs = { statSync, readFileSync, readdirSync },
+		// Issue #800: what the flow tiers read, so a test can stand in for a folder at mode 000, which root reads straight through.
+		flowFs = { statSync, readFileSync, readdirSync },
 		// Issue #464: the jobs dir check's reads (its owner, whether this account may write it, the old shared default's
 		// retained workspaces). Never a write: doctor says what the worker will meet, and the worker creates the dir.
 		jobsDirFs = { accessSync, lstatSync, readdirSync, statSync },
@@ -450,7 +452,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -2046,7 +2048,9 @@ export async function collectChecks(shellVars, seams) {
 	seams.flowRows = [];
 	if (flows.length > 0) {
 		// One stage read for the whole run; each tuple's staged probe is a lookup on its result.
-		const staged = readStagedSkills({ globalPiDir: env.PI_GLOBAL_PI_DIR, readFile: (p) => readFileSync(p, "utf8"), fileExists });
+		const flowFs = seams.flowFs ?? { statSync, readFileSync, readdirSync };
+		const stagedProbes = flowProbes({ fileExists, fs: flowFs });
+		const staged = readStagedSkills({ globalPiDir: env.PI_GLOBAL_PI_DIR, readFile: stagedProbes.readFile, fileExists: stagedProbes.fileExists, readDir: stagedProbes.readDir });
 		const groups = new Map();
 		for (const f of flows) {
 			const key = JSON.stringify([f.flow, f.folder, f.skillsDir, f.packages]);
@@ -2070,9 +2074,14 @@ export async function collectChecks(shellVars, seams) {
 				for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: null, tier: "none", package: null, repo: "unknown" });
 				continue;
 			}
-			const found = await flowTierOf(g, { repoFlowAtHead: (folder, flow) => repoFlowAtHead(spawn, folder, flow), fileExists, overlay: env.PI_GLOBAL_PI_DIR, staged });
+			const probes = flowProbes({ fileExists, fs: flowFs });
+			const found = await flowTierOf(g, { repoFlowAtHead: (folder, flow) => repoFlowAtHead(spawn, folder, flow), fileExists: probes.fileExists, overlay: env.PI_GLOBAL_PI_DIR, staged });
 			const { resolved, checked, unknown } = found;
-			for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: g.flow, tier: found.tier, package: found.package, repo: found.repo });
+			// `none` says every tier was checked. Per question, and the stage's read only where this one looks in the stage: a
+			// trigger that withholds the packages did not, and another trigger's unreadable folder says nothing of this one's.
+			const blind = probes.blind() || (g.packages !== false && stagedProbes.blind());
+			const tier = found.tier === "none" && blind ? "unknown" : found.tier;
+			for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: g.flow, tier, package: found.package, repo: found.repo });
 			if (resolved) {
 				checks.push({ ok: true, label: `Trigger flow "${g.flow}" resolves (${at}: ${resolved})` });
 			} else {
