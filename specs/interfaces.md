@@ -921,7 +921,7 @@ refactor apart.
   "loaded":{"v":1,"at":"ready","pi":"1.5.0","flow":"package","flowPackage":0,
   "packages":[[1,2,0,0,3,0,0,0]],"tiers":{"package":[1,2,0,0,3,0,0,0],"repository":[0,1,0,0,0,0,0,0],"trigger":[0,0,0,0,0,0,0,0],"overlay":[1,0,0,0,1,0,0,0],"other":[0,0,0,0,0,0,0,0]},
   "overlay":{"loaded":["git-guard.ts"],"failed":[]},"mcp":[["connected",12]],
-  "tools":{"active":23,"own":["read","bash"]},"extTools":{"p":[[0,"lint_run"]],"o":[[0,"guard_check"]]},
+  "tools":{"active":23,"own":["read","bash"],"job":["report_progress"]},"extTools":{"p":[[0,"lint_run"]],"o":[[0,"guard_check"]]},
   "cut":{"form":"full","packages":0,"servers":0,"names":0,"counts":0}}
   ```
 
@@ -934,7 +934,7 @@ refactor apart.
   | `tiers` | One row per tier in those positions, keyed `package`, `repository`, `trigger`, `overlay`, `other`, by path containment most specific first (a package sits under the overlay), with `/job/pi` and `/workspace` both `repository`. `<inline:` paths, the job's own factories, count nowhere, and pi's own tools count only in `tools`. True totals: a row in `packages` is clamped, this is not |
   | `overlay` | `loaded` and `failed`: overlay extensions by first path segment, failed ones first when the cap is reached |
   | `mcp` | One `[state, tools]` per server, in `PI_MCP_SERVERS` order, with no name, every server the document names included. State is one of `connected`, `failed`, `timeout`, `pending`, `disabled`. `timeout` is a server still pending when the wait ran out; `pending` is one still waiting at a note, or when another's failure ended the wait. `tools` sums the pages of a tool list and starts over when pi retries the connection |
-  | `tools` | `active`, the session's active count, and `own`, the active tools that are pi's own by name and by source: an extension's tool of the same name is not pi's. Read again after the servers connect |
+  | `tools` | `active`, the session's active count; `own`, the active tools that are pi's own by name and by source: an extension's tool of the same name is not pi's; and `job`, the active tools the job's own factories registered, by name from the closed `LOADED_JOB_TOOLS` and by an `<inline:` source (`report_progress`, the MCP discovery and resource tools, the watch and answer draft tools), which is how `active` adds up beside them. A server's direct tools are its row's count. Read again after the servers connect |
   | `extTools` | The names of the tools a staged package or an overlay extension brought, for a later switch that excludes one: `p` rows of `[PI_PACKAGES position, ...names]`, `o` rows of `[overlay.loaded position, ...names]`, sorted, each name matching `^[A-Za-z][A-Za-z0-9_-]{0,47}$`. Read before the first prompt, so nothing the agent writes can reach it |
   | `cut` | `form`, one of `full`, `compact`, `minimal`, and how many `packages` rows, `servers`, `names` and `counts` a cap took. Nothing is dropped silently |
 
@@ -954,7 +954,7 @@ refactor apart.
   **Bounded, in three forms.** Caps: 16 `packages` rows, 8 servers, 16 overlay names, 24 extension tool names overall. A
   row's first five counts clamp at 999 and its last three at 99, `active` and a server's tools at 9999. Anything over a
   cap raises `cut`. `fitLoaded` makes three forms, largest first, and the writer takes the largest that fits the line:
-  `full` (worst case 3,844 characters); `compact`, no `packages`, overlay names, own tools or `extTools` (1,118); `minimal`,
+  `full` (worst case 4,177 characters); `compact`, no `packages`, overlay names, own or job tools or `extTools` (1,118); `minimal`,
   only `v`, `at`, `pi`, `flow`, the `failed` and `dropped` totals, `mcpBad` (servers that failed or timed out) and `cut` (232). Tool names go first. Past
   `minimal` the writer cuts `message`, then drops the field. A test pins those three sizes. The record never stops a job:
   a throw while reading what loaded keeps the last note and logs `loaded_unavailable` with the stage alone.
@@ -5921,8 +5921,63 @@ validator rather than a second copy of it.
     "openshell"?: { "mode": "copy" | "bind", "ruleHosts": ["<host>", ...],             // issue #712: CONDITIONAL, the two OpenShell
                     "ruleHostCount": <int>, "providers": <int>, "placeholders": <int> }, // venues only; operator-config names, counts
     "secretsProfile"?: "<profile name>",                                               // issue #712: CONDITIONAL, run.secrets armed
+    "loaded"?: { "v": 1, "runner": "reported" | "absent" | "invalid", ... },           // issue #800: CONDITIONAL, what the run loaded; below
     "v":         <int> }                                                              // issue #761: the record's version, 1, ALWAYS the last key
   ```
+  **`loaded` (issue #800, `worker/src/loaded-record.mjs`) is what the run loaded, as the runner saw it and as the worker
+  could check it. Advisory: no decision reads it. A CONDITIONAL key, the last before `v`.** Adding it leaves `v` at 1: a new
+  field never raises it (`DES-STORE-VERSION-WHEN-NEEDED`, UNCHANGED, checked), and `RECORD_CORE_FIELDS` does not name it.
+  ```json
+  "loaded":{"v":1,"runner":"reported","at":"ready","cut":null,
+  "image":"pi-job:4.3.1","imageDigest":"sha256:...","imagePi":"1.5.0","pi":"1.5.0",
+  "flow":{"tier":"package","package":"pi-lint"},
+  "sources":[{"tier":"package","name":"pi-lint","version":"1.4.2","extensions":1,"skills":2,"prompts":0,"themes":0,"tools":2,"failed":0,"dropped":0,"shadowed":0,"toolNames":["lint_fix","lint_run"]},
+  {"tier":"overlay","names":["git-guard.ts"],"failedNames":[],"extensions":1,"skills":0,"prompts":0,"themes":0,"tools":1,"failed":0,"dropped":0,"shadowed":0,"namedTools":[{"name":"git-guard.ts","tools":["guard_check"]}]},
+  {"tier":"repository","extensions":0,"skills":2,"prompts":0,"themes":0,"tools":0,"failed":0,"dropped":0,"shadowed":0},
+  {"tier":"trigger",...},{"tier":"other",...}],
+  "mcp":[{"name":"linear","state":"connected","tools":12}],"tools":{"active":23,"own":["read","bash"],"job":["report_progress"]},
+  "problems":{"failed":0,"dropped":0,"mcp":0},
+  "leftOut":{"tools":["write"],"packages":false,"overlayExtensions":false,"restricted":false}}
+  ```
+  | Key | Holds |
+  |---|---|
+  | `runner` | `reported`, the runner said and it held up. `absent`, it never said: an older image on a newer worker, a line the supervisor wrote, no verified line, or a refusal before the container started. `invalid`, it said and a check below failed |
+  | `at`, `cut`, `pi`, `flow`, `sources`, `mcp`, `tools`, `problems` | The runner's part, from its exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`). On `absent` and `invalid`: `null`, and `[]` for `sources`. `cut` is null when nothing was cut, else the line's own object |
+  | `image`, `imageDigest`, `imagePi` | What the worker's image preflight read before the container started: the reference, the runtime's image id and the image's declared pi version. `imageDigest` is a LOCAL id (`{{.Id}}`): two local builds of one tag differ, so it says what ran on this host and is never compared across hosts. `pi` beside `imagePi` is what the job's own pi said. Each is null when it fails its shape |
+  | `flow` | Null when the job names no flow or the stage does not know yet; else `{ tier, package }`, the runner's word and, for `package`, the name from the worker's own list, null where the smallest form dropped which. `{ "tier": "none", ... }` is the failure this field exists to surface |
+  | `sources` | Each staged package, joined by position with what this attempt handed the job, a canary's candidate at its place, with `toolNames`; the overlay's row with `names`, `failedNames` and `namedTools`; then `repository`, `trigger` and `other`, counts and nothing else, since a repository picks its names. A package the worker could not name has `name` and `version` null. At most 16 package rows: a tool of a package past that is counted in `cut.names`. The compact form keeps one unnamed package row of totals and nulls for the name lists; the minimal form keeps no rows |
+  | `mcp` | Each server, named from the trigger's own `run.mcp` by position, with its state and tool count. Null before the session, and in the minimal form |
+  | `tools` | `active`, `own` (pi's own, by name) and `job` (`LOADED_JOB_TOOLS`, the job's own factories'). The compact form nulls the two lists. Null before the session |
+  | `problems` | `failed` and `dropped` totals across every tier, and `mcp`, how many servers failed or timed out, in every form that knows them: what a reader needs whatever was cut. Null at `start` and `none`, and `mcp` null before the session |
+  | `leftOut` | **From the worker alone**, because the runner cannot tell `"packages": false` from nothing staged: `tools` (`run.excludeTools`), `packages` (`run.packages` is `false`), `overlayExtensions` (this host's `PI_GLOBAL_ALLOW_EXTENSIONS=0`, not the value a restricted job is forced to), `restricted` (a watch, answer draft or grouping job). Null where the worker has nothing to add to the image: a record written before the container was arranged, and a run with no line that left nothing out |
+
+  **The signature does not vouch for the content.** A repository's extension runs in the runner's process and can patch
+  `JSON.stringify` before the line is signed, so `rebuildLoaded` checks the whole field against what the worker knows, and
+  ANY violation is `runner: "invalid"` with the worker's own facts kept and one `loaded_invalid` log line naming the check by a fixed word: `v`, `at` and every closed word;
+  `pi` a version; every row a list of integers within its clamp; the `packages` and `mcp` lists as long as what the worker
+  handed over, up to the caps, and `cut`'s counts agreeing; an overlay name found in a read of `<overlay>/extensions`
+  taken as the job started (a folder that cannot be read vouches for nothing, and a re-stage during the run can read as
+  `invalid`); `own` within `EXCLUDABLE_TOOL_NAMES` and `job` within `LOADED_JOB_TOOLS`; `flowPackage` and the `extTools`
+  indices in range; `extTools` names in the shape and within the cap. The sink reads the field only when a key was issued and the line verified, so a
+  line a tool printed is not read at all. A key the line invented is dropped by never being read. `runner`'s word is the whole
+  verdict: half of a line that lied about something is not a fact.
+
+  **Residual, stated: a tool name cannot be checked against anything the worker knows.** A merge-gated repository extension in
+  the same process could forge a token of the right shape (`^[A-Za-z][A-Za-z0-9_-]{0,47}$`: no space, no markup, no path) and
+  have it read as a package's or the overlay's. A chip made from it can only narrow what a job has, and a wrong name refuses the job.
+  One thing the shape would admit is refused: a word holding one of this job's secret values or a known token's shape
+  (`ext-tools-secret`, the job's own `makeRedactor`). A secret under the redactor's eight-character floor, or transformed, or
+  cut across two names, is not caught, as everywhere that redactor stands.
+
+  **Which records hold it.** The route adds to no `InfraRetry` list: `runJob` carries it on the result and on the error as it
+  carries `canaryLoad`, so a retried attempt's record keeps it, `mcp-unreachable` (exit 1) included, the run that most needs
+  it; a cancel that replaces a retry carries it too. After the image preflight found a usable image every way out holds the
+  image's three facts, with no runner part if the container never reported. Before that, on a preflight that found none,
+  and on every record of an older worker, there is no key, and the record is byte-identical to what it was.
+  **Bounded**, 16 KiB at most (`LOADED_RECORD_MAX_BYTES`): with every list and name at its cap the worst case measures
+  14,533 bytes (`worker/test/loaded-record.test.mjs`), and `recordedLoaded`, which rebuilds it on its way into the record,
+  drops a source past the bound whole. `LOADED_STAGES` and the rest of the runner's vocabulary are restated in the leaf,
+  because the worker cannot import the image, and that test holds them to the runner's.
   **`resources` (issue #596) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL position**
   after `plan`. What the job's container used, off the exit line (`INT-RUNNER-EXIT-CODE-PROTOCOL`): `memPeak` (bytes,
   `memory.peak`, the most it held at once, page cache included), `swapPeak` (bytes, `memory.swap.peak`, the most it
@@ -13689,3 +13744,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-02 (#796) | New `INT-UPDATES-KEYS`: the look, the desired generation and each host's applied state; the `packageCanary` job field and run-record field, `canaryLoad` on the exit line, `PI_PACKAGE_CANARY`, and the image capability `packageCanary`. `INT-PI-PACKAGES-FILE-CONTRACT`: a host applying a person's Adopt or Undo also writes the file, and the stage manifest's `dir` now names a directory per stage rather than per package. A manifest from before keeps working: `dir` was always only a plain path segment. `INT-SDK-SESSION-OPTIONS`: staged packages stay off `/job`, with a canary's one candidate as the only exception. |
 | 2026-11-03 (#800, exit line limit) | `INT-RUNNER-EXIT-CODE-PROTOCOL`: the 6 KiB sentence said what the worst-case line was, and it was not: it left out `modelRoles`, `steer`, `recovery`, `providerFailure` and more, and every field together measures 7,961 characters, 8,454 with a supervisor's line after it, past the 8,192-character tail. Restated as what that test holds, and the whole line now has a limit: `EXIT_LINE_MAX_BYTES`, 7680, less any job id's excess past 63 characters. The writer ASCII-escapes the body, which also closes a MAC lost to a non-ASCII character split across two stdout chunks, cuts `message` to fit, and past that keeps only the verdict and the tokens, marked `lineCut`. `TAIL_CAP_BYTES`, the 1700 cap and its test, the exit codes and the MAC framing are UNCHANGED, checked. |
 | 2026-11-03 (#800, what a job loaded) | `INT-RUNNER-EXIT-CODE-PROTOCOL`: the runner's exit line carries `loaded`, noted at five stages through the `canaryLoad` route so every path the runner writes carries the latest, with a `finally` around `lifecycle.start`, so a job a server stopped still names which server, as a position in `PI_MCP_SERVERS`. Counts and closed words: no string a repository chose reaches it, failures and drops come from teeing the loader's log so record and log cannot disagree, and a repository extension's tool is a count. Named here with its residual: `extTools`, the tools a staged package or an overlay extension brought. Bounded by caps that raise `cut`, in three forms the writer picks from by measuring the line. Beyond the example the issue drew, `cut` also counts `servers`, since a cap with nowhere to say it would drop silently. Also the theme count, which read `filePath` at `run-job.mjs` where pi 1.5.0's `Theme` has `sourcePath`. An MCP failure still stops the job (`mcp-unavailable`, `mcp-unreachable`), and the exit codes, the signature and the `RUNNER_POLICY_REASONS` set are UNCHANGED, checked. The worker's half (`INT-RUN-HISTORY-FILE-CONTRACT`) comes with the record, so an older worker ignores the key, checked through its real sink. |
+| 2026-11-03 (#800, what a run loaded) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a new conditional key `loaded`, the last before `v`, which stays 1. Named at most 16 KiB (worst case measured, 14,533 bytes). `runner` is `reported`, `absent` or `invalid`; every part of the runner's field is checked against what the worker knows, since a repository extension shares the signer's process, and any violation keeps only the worker's facts. The worker adds the image's reference, local id and declared pi version from its preflight, and `leftOut`, which the runner cannot say. The tool-name residual is stated. `imageDigest` is said to be a local id. A pre-container refusal holds the image's facts where one was found and is otherwise byte-identical. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `tools` gains `job`, the active tools of the job's own factories, held to the closed `LOADED_JOB_TOOLS`, so the card's "report_progress, the job's own" has a source; the `full` form's worst case is now 4,177 characters. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked (a new field never raises a record's version). `RECORD_CORE_FIELDS` UNCHANGED, checked. Exit codes, the MAC and the settlement UNCHANGED, checked: nothing reads this field to decide. **Code evidence**: worker/src/loaded-record.mjs -> rebuildLoaded, recordedLoaded, leftOutOf, loadedWithImage; worker/src/run-history.mjs -> parseExitLoaded, buildRecord; worker/src/run-container.mjs -> runContainer's `loadedKnown`; worker/src/processor.mjs -> runJob; worker/src/start.mjs -> getPackagePaths.rowOf; image/runner/src/loaded.mjs -> LOADED_JOB_TOOLS. |

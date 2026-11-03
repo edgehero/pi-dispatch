@@ -7,6 +7,7 @@ import {
 	createLoadTee,
 	fitLoaded,
 	LOADED_FLOW_WORDS,
+	LOADED_JOB_TOOLS,
 	LOADED_MAX_EXT_TOOLS,
 	LOADED_MAX_OVERLAY_NAMES,
 	LOADED_MAX_PACKAGES,
@@ -156,11 +157,39 @@ test("`own` is pi's own active tools: a removed tool leaves it, an inactive one 
 	const ownNames = ["read", "bash", "edit", "grep"];
 	const tools = [tool("read", "builtin:read"), tool("edit", "builtin:edit"), tool("grep", "builtin:grep"), tool("mcp__a__b", "<inline:job-mcp>")];
 	const loaded = session({ tools, active: ["read", "edit", "mcp__a__b"], ownNames });
-	assert.deepEqual(loaded.tools, { active: 3, own: ["read", "edit"] }, "bash excluded, grep registered but inactive");
+	assert.deepEqual(loaded.tools, { active: 3, own: ["read", "edit"], job: [] }, "bash excluded, grep registered but inactive");
 	const replaced = session({ tools: [tool("read", `${LINT}/ext.js`), tool("edit", "builtin:edit")], active: ["read", "edit"], ownNames });
 	assert.deepEqual(replaced.tools.own, ["edit"], "the package's `read` is the package's");
 	assert.deepEqual(replaced.extTools.p, [[0, "read"]]);
 	assert.deepEqual(session({ tools: [tool("custom", "builtin:custom")], active: ["custom"], ownNames }).tools.own, [], "only the names of pi's own set");
+});
+
+test("`job` is the job's own active tools, by name and by source: another extension's tool of that name is not the job's", () => {
+	const tools = [tool("report_progress", "<inline:job-report-progress>"), tool("await_human_input", "<inline:job-await-input>"), tool("codemode", "<inline:job-codemode>"), tool("mcp__a__b", "<inline:job-mcp>"), tool("query_logs", `${LINT}/ext.js`)];
+	const loaded = session({ tools, active: ["report_progress", "codemode", "mcp__a__b", "query_logs"] });
+	assert.deepEqual(loaded.tools.job, ["report_progress", "codemode"], "await_human_input is inactive, a server's tool is that server's, and the package's query_logs is the package's");
+	assert.deepEqual(loaded.extTools.p, [[0, "query_logs"]]);
+	assert.deepEqual(fitLoaded(loaded)[1].tools, { active: 4 }, "names go first: the compact form keeps the count");
+});
+
+test("LOADED_JOB_TOOLS is every tool a job's own factories register, read off the source of each (the list restates them because this module reads no pi)", () => {
+	const source = (file) => readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+	const constant = (file, name) => {
+		const found = new RegExp(`export const ${name} = "([a-z_]+)"`).exec(source(file));
+		assert.ok(found, `${name} is written in ${file}`);
+		return found[1];
+	};
+	const frozen = (file, name) => {
+		const found = new RegExp(`export const ${name} = Object\\.freeze\\(\\[([^\\]]+)\\]\\)`).exec(source(file));
+		assert.ok(found, `${name} is written in ${file}`);
+		return [...found[1].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]);
+	};
+	const answerTools = [...source("answerer.mjs").matchAll(/^\t\ttool\("([a-z_]+)"/gm)].map((match) => match[1]);
+	const watchTools = [...source("watch-tools.mjs").matchAll(/tools\.push\(\{ name: "([a-z_]+)"/g)].map((match) => match[1]);
+	assert.ok(answerTools.includes("submit_answer_draft") && watchTools.includes("board_write"), "the two reads above found their tools");
+	const everyOne = [constant("report-progress.mjs", "REPORT_PROGRESS_TOOL"), constant("await-input.mjs", "AWAIT_INPUT_TOOL"), constant("request-approval.mjs", "APPROVAL_TOOL"), constant("model-roles.mjs", "ROLE_SUBAGENT_TOOL"), ...frozen("mcp.mjs", "MCP_DISCOVERY_TOOLS"), ...frozen("mcp.mjs", "MCP_RESOURCE_TOOLS"), ...answerTools, ...watchTools];
+	assert.deepEqual([...LOADED_JOB_TOOLS].sort(), [...new Set(everyOne)].sort());
+	for (const name of LOADED_JOB_TOOLS) assert.ok(LOADED_TOOL_NAME_RE.test(name), name);
 });
 
 test("tools count per tier: pi's own and the job's inline ones under none, a package's on its row", () => {
@@ -338,7 +367,7 @@ test("three forms, largest first: compact loses what names things, minimal keeps
 test("each form's worst case is measured and pinned (a cap that grows moves a number here, and the exit line's budget with it)", () => {
 	const [full, compact, minimal] = fitLoaded(maximalLoaded());
 	const sizes = { full: JSON.stringify(full).length, compact: JSON.stringify(compact).length, minimal: JSON.stringify(minimal).length };
-	assert.deepEqual(sizes, { full: 3844, compact: 1118, minimal: 232 });
+	assert.deepEqual(sizes, { full: 4177, compact: 1118, minimal: 232 });
 	// What the caps are, read off the line, so the pinned sizes above are of the caps this file claims.
 	assert.equal(full.packages.length, LOADED_MAX_PACKAGES);
 	assert.equal(full.mcp.length, LOADED_MAX_SERVERS);

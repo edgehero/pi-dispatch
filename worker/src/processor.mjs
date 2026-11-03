@@ -17,6 +17,7 @@ import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { mergeBundleSecrets } from "./secret-bundles.mjs";
 import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
+import { loadedWithImage } from "./loaded-record.mjs";
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "./record-reason.mjs";
@@ -337,7 +338,9 @@ export async function runJob(job, deps) {
 	const touches = [];
 	let touchLineageSkipped = null;
 	// Issue #796: what the runner said of a canary's candidate, carried on every way out, since a job can load its candidate and still end any way at all.
-	const canaryFacts = { load: null };
+	// Issue #800: what the job loaded, the same way and for the same reason, a retried attempt's record included: a server
+	// that timed out exits 1 and retries (`mcp-unreachable`), and that record is the one a person opens to find out why.
+	const canaryFacts = { load: null, loaded: null };
 	const recordTouch = async (value) => {
 		const event = cleanTouch(value);
 		if (!event) return;
@@ -353,6 +356,7 @@ export async function runJob(job, deps) {
 		return result && typeof result === "object" && (touches.length || touchLineageSkipped) ? { ...result, ...(touches.length ? { touches } : {}), ...(touchLineageSkipped ? { touchLineageSkipped } : {}) } : result;
 	} catch (error) {
 		if (canaryFacts.load !== null && error && typeof error === "object") error.canaryLoad = canaryFacts.load;
+		if (canaryFacts.loaded !== null && error && typeof error === "object") error.loaded = canaryFacts.loaded;
 		if (touches.length && error && typeof error === "object") error.touches = touches;
 		if (touchLineageSkipped && error && typeof error === "object") error.touchLineageSkipped = touchLineageSkipped;
 		throw error;
@@ -360,7 +364,8 @@ export async function runJob(job, deps) {
 }
 
 function withCanaryLoad(result, facts) {
-	return facts.load !== null && result !== null && typeof result === "object" ? { ...result, canaryLoad: facts.load } : result;
+	if (result === null || typeof result !== "object" || (facts.load === null && facts.loaded === null)) return result;
+	return { ...result, ...(facts.load !== null ? { canaryLoad: facts.load } : {}), ...(facts.loaded !== null ? { loaded: facts.loaded } : {}) };
 }
 
 async function runJobInner(job, deps) {
@@ -1041,6 +1046,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// current schema no longer accepts -- so the resume has to be refused, not repaired mid-run. Null
 		// when the image declares none, which downstream means "never resume": the safe direction.
 		const piVersion = img.piVersion ?? null;
+		// Issue #800: from here a refusal can say which image it would have run on. Before this, and on a preflight that found
+		// no usable image, no value is set, so such a record is byte-identical to what it was.
+		if (deps.canaryFacts && img.ok === true) deps.canaryFacts.loaded = loadedWithImage(null, img);
 		if (img.missing) {
 			await comment(job, `Refused: the job image "${img.missing}" is not present on the worker host. Not run.`);
 			log("refused_image_missing", { image: img.missing });
@@ -2412,7 +2420,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
 		if (subscriptionAuth.length > 0 && !(await validateSubscriptionAuth(subscriptionAuth))) throw new InfraRetry("subscription binding changed before container start", { reason: "container-never-started", budgetReserved: true });
-		const { canaryLoad: canaryLoadOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
@@ -2453,6 +2461,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
 		resources = ranResources ?? null;
 		if (deps.canaryFacts && job.packageCanary !== undefined) deps.canaryFacts.load = canaryLoadOfRun ?? null;
+		if (deps.canaryFacts && loadedOfRun !== null) deps.canaryFacts.loaded = loadedWithImage(loadedOfRun, img);
 		progress = ranProgress ?? null;
 		// Issue #596: CONFIRMED killed for memory. The image's supervisor (image/runner/src/supervise.mjs) outlives the runner,
 		// whose process tree it gives the highest OOM score, and when the runner dies of SIGKILL with the cgroup's

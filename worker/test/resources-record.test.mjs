@@ -80,3 +80,11 @@ test("a cancel read only when a spent attempt fails ends as the cancel and keeps
 	assert.deepEqual(records.at(-1).result.resources, USED);
 	assert.deepEqual(records.at(-1).result.progress, PROGRESS);
 });
+
+test("a cancel read only when a spent attempt fails keeps what that attempt loaded through the same rebuild (#800)", { skip }, async () => {
+	const LOADED = { v: 1, runner: "absent", at: null, cut: null, image: null, imageDigest: null, imagePi: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null, leftOut: { tools: ["bash"], packages: false, overlayExtensions: false, restricted: false } };
+	const { processor, records } = harness(async () => ({ code: 1, aborted: false, turns: 1, loaded: LOADED }), { cancelReq: "1" });
+	const result = await processor(job(), "tok", new AbortController().signal);
+	assert.equal(result.reason, "operator-cancel");
+	assert.deepEqual(records.at(-1).result.loaded, LOADED);
+});

@@ -2874,3 +2874,72 @@ test("subscription refresh infrastructure failures retry without a paid containe
 	assert.equal(d.redis.incrCalls, 0);
 	assert.deepEqual(calls, []);
 });
+
+// Issue #800: what a job loaded rides the same two ways out as the canary's word (`runJob`), so no InfraRetry list knows it.
+const LOADED_IMAGE = { ok: true, image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0", capabilities: ["exitAuth"] };
+const reportedLoaded = (over = {}) => ({ v: 1, runner: "reported", at: "session", cut: null, image: null, imageDigest: null, imagePi: null, pi: "1.5.0", flow: null, sources: [], mcp: [{ name: "linear", state: "timeout", tools: 0 }], tools: { active: 4, own: ["read"], job: [] }, problems: { failed: 0, dropped: 0, mcp: 1 }, leftOut: { tools: [], packages: false, overlayExtensions: false, restricted: false }, ...over });
+
+test("`loaded` rides a completed run's result, with the image's facts the worker read itself", async () => {
+	const { deps: d } = deps({ imagePreflight: async () => LOADED_IMAGE, runContainer: async () => ({ code: 0, aborted: false, loaded: reportedLoaded({ at: "ready" }) }) });
+	const result = await runJob(ghJob, d);
+	assert.equal(result.outcome, "completed");
+	assert.equal(result.loaded.runner, "reported");
+	assert.equal(result.loaded.at, "ready");
+	assert.deepEqual([result.loaded.image, result.loaded.imageDigest, result.loaded.imagePi], [LOADED_IMAGE.image, LOADED_IMAGE.imageDigest, "1.5.0"]);
+	assert.equal(buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result }).loaded.image, LOADED_IMAGE.image);
+});
+
+test("a server that timed out exits 1 and retries, and that attempt's record still says which server stopped it", async () => {
+	const { deps: d } = deps({ imagePreflight: async () => LOADED_IMAGE, runContainer: async () => ({ code: 1, aborted: false, exitReason: null, loaded: reportedLoaded() }) });
+	let thrown;
+	await assert.rejects(() => runJob(ghJob, d), (e) => ((thrown = e), e instanceof InfraRetry && e.reason === CONTAINER_INFRA_EXIT));
+	assert.deepEqual(thrown.loaded.mcp, [{ name: "linear", state: "timeout", tools: 0 }], "on the throw itself, with no InfraRetry list naming it");
+	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, error: thrown });
+	assert.equal(record.outcome, "failed");
+	assert.deepEqual(record.loaded.mcp, [{ name: "linear", state: "timeout", tools: 0 }]);
+	assert.equal(record.loaded.image, LOADED_IMAGE.image);
+	assert.deepEqual(Object.keys(record).slice(-2), ["loaded", "v"]);
+});
+
+test("`mcp-unavailable` (exit 2) and an unknown exit keep what the job loaded the same way", async () => {
+	const stopped = deps({ imagePreflight: async () => LOADED_IMAGE, runContainer: async () => ({ code: 2, aborted: false, exitReason: "mcp-unavailable", loaded: reportedLoaded({ mcp: [{ name: "linear", state: "failed", tools: 0 }] }) }) });
+	const refused = await runJob(ghJob, stopped.deps);
+	assert.equal(refused.reason, "mcp-unavailable");
+	assert.deepEqual(refused.loaded.mcp, [{ name: "linear", state: "failed", tools: 0 }]);
+	const killed = deps({ imagePreflight: async () => LOADED_IMAGE, runContainer: async () => ({ code: 137, aborted: false, loaded: reportedLoaded() }) });
+	await assert.rejects(() => runJob(ghJob, killed.deps), (e) => e instanceof InfraRetry && e.reason === CONTAINER_EXIT_UNKNOWN && e.loaded.at === "session");
+});
+
+test("a line from an older runner gives `absent`, the image's facts kept: the container's value stands in for nothing", async () => {
+	const { deps: d } = deps({ imagePreflight: async () => LOADED_IMAGE, runContainer: async () => ({ code: 0, aborted: false }) });
+	const result = await runJob(ghJob, d);
+	assert.equal(result.loaded.runner, "absent");
+	assert.equal(result.loaded.at, null);
+	assert.deepEqual(result.loaded.sources, []);
+	assert.equal(result.loaded.image, LOADED_IMAGE.image);
+});
+
+test("a refusal after the image is known names the image and has no runner part, and one before it has no key at all", async () => {
+	const overBudget = deps({ redis: fakeRedis(10), imagePreflight: async () => LOADED_IMAGE });
+	const refused = await runJob(ghJob, overBudget.deps);
+	assert.equal(refused.reason, "over-budget");
+	assert.equal(overBudget.calls.includes("run-container"), false);
+	const record = buildRecord({ job: { id: "gh-1", name: "github", data: ghJob, attemptsMade: 0 }, result: refused });
+	assert.deepEqual(record.loaded, { v: 1, runner: "absent", at: null, cut: null, image: LOADED_IMAGE.image, imageDigest: LOADED_IMAGE.imageDigest, imagePi: "1.5.0", pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null, leftOut: null });
+
+	const missing = deps({ imagePreflight: async () => ({ missing: "nope:1" }) });
+	assert.equal(Object.hasOwn(await runJob(ghJob, missing.deps), "loaded"), false, "no image on this host: byte-identical to before");
+	const forge = deps({ imagePreflight: async () => ({ forgeUnsupported: "pi-job:1", kind: "github", declared: ["gitlab"] }) });
+	assert.equal(Object.hasOwn(await runJob(ghJob, forge.deps), "loaded"), false);
+	const noName = deps({ imagePreflight: async () => ({ ok: true }) });
+	assert.equal(Object.hasOwn(await runJob(ghJob, noName.deps), "loaded"), false, "a preflight that names no image adds nothing");
+	await assert.rejects(() => runJob(ghJob, deps({ imagePreflight: async () => ({ unavailable: "pi-job:1" }) }).deps), (e) => e instanceof InfraRetry && !Object.hasOwn(e, "loaded"));
+});
+
+test("a throw before the container started keeps the image alone, and never a line of an earlier attempt", async () => {
+	const { deps: d } = deps({ imagePreflight: async () => LOADED_IMAGE, runContainer: async () => { throw new InfraRetry("container-never-started", { reason: "container-never-started" }); } });
+	let thrown;
+	await assert.rejects(() => runJob(ghJob, d), (e) => ((thrown = e), e instanceof InfraRetry));
+	assert.equal(thrown.loaded.runner, "absent");
+	assert.equal(thrown.loaded.image, LOADED_IMAGE.image);
+});

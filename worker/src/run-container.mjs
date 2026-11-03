@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_GLOBAL_PI_DIR, CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
@@ -10,7 +10,10 @@ import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-
 import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { authenticExitLines } from "./run-history.mjs";
+import { leavesOut, leftOutOf, rebuildLoaded } from "./loaded-record.mjs";
 import { withCanaryPath } from "./package-canary.mjs";
+import { parsePackageCanary } from "./package-canary-record.mjs";
+import { EXCLUDABLE_TOOL_NAMES } from "./triggers.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { LIVE_FILE_NAME, stageLiveFile } from "./live-transcript.mjs";
 import { steerTargetOf } from "./inbox-relay.mjs";
@@ -52,7 +55,13 @@ export function makeRunContainer({
 	// REQ-GLOBAL-PI-OVERLAY: container paths of the operator-staged packages. An array, or a RESOLVER called
 	// once per job (issue #102): the wired worker passes a resolver so a re-stage lands on the next job with
 	// no restart, while the array form stays valid for every caller that has a fixed set.
+	// Issue #800: a resolver may carry `rowOf(path)`, the `{ name, version }` its last read holds for a path, which names
+	// the runner's positional rows. On the resolver, not a second option, because every venue passes this one function
+	// through untouched, and a second option could reach a venue without it and record a job's packages with no names.
 	packagePaths = [],
+	// Issue #800: the names in `<overlay>/extensions`, which an overlay name on the exit line has to be one of. A seam for
+	// the tests. A folder that cannot be read holds nothing the worker can vouch for, so a name then reads as invalid.
+	readOverlayExtensions = (dir) => readdirSync(dir),
 	forwardEnv = [],
 	authFromPi = false, // fall back to ~/.pi/agent/auth.json for the provider key when the env has none
 	forgeHosts = {}, // per-forge self-hosted instance URLs, so a forge CLI in the container talks to the right one
@@ -317,6 +326,35 @@ export function makeRunContainer({
 		const canaryPlan = prepared.packageCanary ?? null;
 		const withCanary = (list) => (canaryPlan ? withCanaryPath(list, canaryPlan, paths.job).paths : list);
 		const canaryPathOf = () => (canaryPlan ? withCanaryPath([], canaryPlan, paths.job).candidate : undefined);
+		// The staged set, read once for this job (issue #102), so the rows that name a package below are the read that chose
+		// its path. `!== false`, because staged packages LOAD unless a trigger explicitly opts out
+		// (INT-TRIGGERS-FILE-CONTRACT). The strictness that used to live in this `=== true` did not disappear, it moved:
+		// parseTriggers refuses any non-boolean run.packages fail-loud at load, so a hand-edited string "false" never becomes
+		// job data this comparison could misread as an opt-out. The opt-out short-circuits BEFORE the resolver runs: a trigger
+		// that withheld the staged set has no reason to make the worker read the manifest on its behalf.
+		const stagedPaths = beforeSpawn(() => (job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths));
+		// Issue #683: the staged packages' container paths are the overlay's, so on the sandbox layout their prefix moves with
+		// it (`/opt/pi-global` to `/sandbox/pi-global`). A path not under the overlay is passed as it was.
+		const movedPath = (p) => (layout !== "mounts" && typeof p === "string" && p.startsWith(`${CONTAINER_GLOBAL_PI_DIR}/`) ? `${paths.global}${p.slice(CONTAINER_GLOBAL_PI_DIR.length)}` : p);
+		const jobPackagePaths = withCanary(stagedPaths.map(movedPath));
+		// Issue #800: what the runner's `loaded` is checked against (loaded-record.mjs), from what this attempt hands the job.
+		const stagedRows = new Map(stagedPaths.map((p) => [movedPath(p), typeof packagePaths === "function" ? (packagePaths.rowOf?.(p) ?? null) : null]));
+		let overlayExtensions = [];
+		try {
+			overlayExtensions = globalPiDir ? readOverlayExtensions(join(globalPiDir, "extensions")) : [];
+		} catch {
+			overlayExtensions = [];
+		}
+		const loadedKnown = {
+			packages: jobPackagePaths.map((p) => (p === canaryPathOf() ? parsePackageCanary(job.packageCanary) : (stagedRows.get(p) ?? null))),
+			overlayExtensions,
+			servers: Array.isArray(job.mcp) ? job.mcp : [],
+			ownTools: EXCLUDABLE_TOOL_NAMES,
+			// The closure's value, not the job's below: a host's switch and a restricted job's forced one are different statements.
+			leftOut: leftOutOf(job, { allowGlobalExtensions }),
+			// A word from a closed list, never line text: the line is what is not trusted here.
+			onViolation: (why) => log("loaded_invalid", { container: name, why }),
+		};
 		const env = beforeSpawn(() => buildContainerEnv({
 			size,
 			provider: job.provider,
@@ -338,15 +376,7 @@ export function makeRunContainer({
 			allowGlobalExtensions: job.answerDraft || job.watch || job.questionGrouping ? false : allowGlobalExtensions,
 			// REQ-GLOBAL-PI-OVERLAY: the per-job value comes off `job` (like maxTurns), the staged set off
 			// the closure (like allowGlobalExtensions) -- so a trigger can withhold what the operator staged.
-			// `!== false`, because staged packages LOAD unless a trigger explicitly opts out
-			// (INT-TRIGGERS-FILE-CONTRACT). The strictness that used to live in this `=== true` did not
-			// disappear, it moved: parseTriggers refuses any non-boolean run.packages fail-loud at load, so a
-			// hand-edited string "false" never becomes job data this comparison could misread as an opt-out.
-			// The opt-out short-circuits BEFORE the resolver runs: a trigger that withheld the staged set has no
-			// reason to make the worker read the manifest on its behalf.
-			// Issue #683: the staged packages' container paths are the overlay's, so on the sandbox layout their prefix moves
-			// with it (`/opt/pi-global` to `/sandbox/pi-global`). A path not under the overlay is passed as it was.
-			packagePaths: withCanary((job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths).map((p) => (layout !== "mounts" && typeof p === "string" && p.startsWith(`${CONTAINER_GLOBAL_PI_DIR}/`) ? `${paths.global}${p.slice(CONTAINER_GLOBAL_PI_DIR.length)}` : p))),
+			packagePaths: jobPackagePaths,
 			packageCanaryPath: canaryPathOf(),
 			forwardEnv: job.answerDraft || job.watch || job.questionGrouping ? [] : forwardEnv,
 			// REQ-RESUMABLE-SESSION: the fixed container path, emitted only when this job HAS a transcript file, which
@@ -408,6 +438,14 @@ export function makeRunContainer({
 			bundleEnvFile: bundleEnvFile === true && Array.isArray(bundleKeys?.plain) && bundleKeys.plain.length > 0,
 			observableRunner: observableRunner === true,
 		}));
+		// Issue #800: a tool name is the one string on the line nothing here can compare with anything, so at least it must
+		// not hold this job's own secrets. Built off THIS job's env, as the transcript's is below. If it cannot be built, the
+		// names cannot be judged: they read as invalid rather than as fine.
+		try {
+			loadedKnown.redact = makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) }) });
+		} catch {
+			loadedKnown.redact = () => "";
+		}
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
 		// guard then omits the flag entirely, so the argv is byte-identical to one built before this feature.
@@ -862,12 +900,14 @@ export function makeRunContainer({
 				let steerCounts = null;
 				// Issue #796: what the runner said of a canary's candidate (parseExitCanaryLoad), or null.
 				let canaryLoad = null;
+				// Issue #800: the runner's `loaded` as it wrote it, off a verified line only, for `rebuildLoaded` below.
+				let lineLoaded = null;
 				try {
 					// `context = null` is a DEFAULT rather than a plain destructure: an injected sink that
 					// predates the field returns no such key, and `undefined` would then reach the record's
 					// shape where every other absence is spelled `null`.
 					// `exitReason` defaults the same way, for the same reason.
-					({ canaryLoad = null, turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
+					({ canaryLoad = null, loaded: lineLoaded = null, turns, tokens, session, usage, context = null, exitReason = null, exitLineCode = null, exitWhy = null, modelRoles = null, providerFailure = null, toolsStarted = null, replaySafe = null, exitAuth: exitAuthResult = null, resources = null, exitOomKilled = false, recovery = null, steer: steerCounts = null, approval = null, answerDraftDigest = null, questionRefDigest = null } = await sink.close());
 				} catch {
 					turns = null;
 					tokens = null;
@@ -887,6 +927,7 @@ export function makeRunContainer({
 					recovery = null;
 					steerCounts = null;
 					canaryLoad = null;
+					lineLoaded = null;
 					// The sink could not say, and a key was issued: nothing it returned was verified.
 					exitAuthResult = exitKey !== null ? "unverified" : null;
 				}
@@ -911,6 +952,7 @@ export function makeRunContainer({
 					recovery = null;
 					steerCounts = null;
 					canaryLoad = null;
+					lineLoaded = null;
 				}
 				// Spread only when a key was issued, so a run without one resolves the very object it always did.
 				const auth = exitKey !== null ? { exitAuth: exitAuthResult } : {};
@@ -944,7 +986,10 @@ export function makeRunContainer({
 				const steerShown = steerCounts !== null && typeof steerCounts === "object" ? { delivered: steerCounts.delivered ?? null, pending: steerCounts.pending ?? null } : null;
 				const steered = steerAsked ? { ...(steerArmed && steerShown !== null ? { steer: steerShown } : {}), ...(steerSkipped !== null ? { steerSkipped } : {}) } : {};
 				// Issue #712: the named live-transcript skip, for the record's `liveSkipped`, only when there was one.
-				const liveShown = { ...(liveSkipped !== null ? { liveSkipped } : {}), ...(canaryLoad !== null ? { canaryLoad } : {}) };
+				// Issue #800: what the job loaded, when the line said or the worker has something of its own to say; otherwise the run
+				// resolves the object it always did, and the processor's image-only value stands.
+				const loadedShown = lineLoaded !== null || leavesOut(loadedKnown.leftOut) ? { loaded: rebuildLoaded(lineLoaded, loadedKnown) } : {};
+				const liveShown = { ...(liveSkipped !== null ? { liveSkipped } : {}), ...(canaryLoad !== null ? { canaryLoad } : {}), ...loadedShown };
 				resolve(aborted ? { code: code ?? 137, aborted: true, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered } : { code: code ?? 1, aborted: false, turns, tokens, session, usage, context, exitReason, exitLineCode, ...(approval ? { approval } : {}), ...why, ...used, ...auth, ...ranProgress, ...recovered, ...steered, ...liveShown, ...checkpointResult, ...stoppedForCheckpoint, ...lingered });
 			});
 		});

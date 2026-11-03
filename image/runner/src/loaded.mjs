@@ -46,11 +46,40 @@ export const LOADED_MAX_TOOL_COUNT = 9999;
 const FIRST_PROBLEM_SLOT = SLOT.failed;
 export const LOADED_OVERLAY_NAME_RE = /^[A-Za-z0-9._-]{1,48}$/;
 export const LOADED_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,47}$/;
+/**
+ * The tools the job's own factories can register, by name: the only tools `tools.job` may name, so `active` adds up for a
+ * reader who sees pi's own and the extensions' beside it. Written out rather than imported, because the modules that hold
+ * these names read pi and this one reads none; a test holds the list to each of those constants. Not the servers' direct
+ * `mcp__` tools: those are the operator's servers' and a server's row counts them.
+ */
+export const LOADED_JOB_TOOLS = Object.freeze([
+	"report_progress",
+	"await_human_input",
+	"request_approval",
+	"subagent",
+	"codemode",
+	"tool_search",
+	"list_mcp_resources",
+	"list_mcp_resource_templates",
+	"read_mcp_resource",
+	"query_logs",
+	"decide",
+	"board_write",
+	"read_question",
+	"list_repository",
+	"read_repository",
+	"read_standing_answer",
+	"read_reply",
+	"list_replies",
+	"submit_answer_draft",
+]);
 /** pi's own version constant, read as a version only: pi falls back to this spelling when it cannot read its package. */
 const PI_VERSION_UNKNOWN = "0.0.0";
 const PI_VERSION_RE = /^[0-9A-Za-z.+-]{1,32}$/;
 /** The prefix on a tool's source path when pi itself provides it (source-info.js BUILTIN_PATH_PREFIX, pinned). */
 const BUILTIN_TOOL_PREFIX = "builtin:";
+/** The prefix on the source path of a factory the job itself passed (`tierOf` reads these as no tier's). */
+const INLINE_PATH_PREFIX = "<inline:";
 
 /**
  * The tier of a path, by containment, or null for what no tier owns: no path, or `<inline:...>`, a factory the job itself
@@ -59,7 +88,7 @@ const BUILTIN_TOOL_PREFIX = "builtin:";
  * `owningRoot`, so `/opt/pi-global/packages/tool` never claims a path under `/opt/pi-global/packages/tools`.
  */
 export function tierOf(path, { packages = [], jobPi, triggerSkills, overlay, workspace } = {}) {
-	if (typeof path !== "string" || path === "" || path.startsWith("<inline:")) return null;
+	if (typeof path !== "string" || path === "" || path.startsWith(INLINE_PATH_PREFIX)) return null;
 	const ordered = [...packages.map((root) => [root, "package"]), [jobPi, "repository"], [triggerSkills, "trigger"], [overlay, "overlay"], [workspace, "repository"]];
 	const owner = owningRoot(path, ordered.map(([root]) => root));
 	return owner === null ? "other" : ordered.find(([root]) => root === owner)[1];
@@ -186,7 +215,9 @@ export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skill
 	if (tools !== null) {
 		const builtin = new Set(toolRows.filter((tool) => tool.path.startsWith(BUILTIN_TOOL_PREFIX)).map((tool) => tool.name));
 		const own = new Set(ownNames);
-		out.tools = { active: clamp(active.length, LOADED_MAX_TOOL_COUNT), own: active.filter((name) => own.has(name) && builtin.has(name)) };
+		// By name AND by source, as `own` is: another extension's tool of a job tool's name is not the job's.
+		const job = new Set(toolRows.filter((tool) => tool.path.startsWith(INLINE_PATH_PREFIX) && LOADED_JOB_TOOLS.includes(tool.name)).map((tool) => tool.name));
+		out.tools = { active: clamp(active.length, LOADED_MAX_TOOL_COUNT), own: active.filter((name) => own.has(name) && builtin.has(name)), job: active.filter((name) => job.has(name)) };
 		out.extTools = extensionTools({ tools: toolRows, roots, overlayNames: keptLoaded, cut });
 	}
 	out.cut = cut;
@@ -243,7 +274,7 @@ function extensionTools({ tools, roots, overlayNames, cut }) {
  * The field's three forms, largest first, for the writer to pick from by measuring the line (exit-line.mjs). Tool names
  * go first: compact keeps what a person needs to know whether the run was fine and loses what names things.
  *   - full: everything;
- *   - compact: no package rows, no overlay names, no own tools, no extension tools;
+ *   - compact: no package rows, no overlay names, no own or job tools, no extension tools;
  *   - minimal: v, at, pi, flow, the failed and dropped totals, and how many servers failed or timed out.
  * Each says which it is in `cut.form`.
  */

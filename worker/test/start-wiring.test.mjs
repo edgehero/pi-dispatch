@@ -1257,6 +1257,12 @@ test("staged packages: a re-stage after boot reaches the NEXT job, with no worke
 		const second = whileCapturingLogs(() => resolve());
 		assert.deepEqual(second.value, ["/opt/pi-global/packages/a__b"]);
 		assert.equal(second.logs.filter((l) => l.event === "packages_stage_changed").length, 0, "logged once per CHANGE, not once per job");
+		// Issue #800: the name and version of each path, off the read that chose it, which is what names a run's rows.
+		assert.deepEqual(resolve.rowOf("/opt/pi-global/packages/a__b"), { name: "@a/b", version: "1.0.0" });
+		assert.equal(resolve.rowOf("/opt/pi-global/packages/other"), null);
+		writeFileSync(join(overlay, "packages", "packages.json"), "not json");
+		assert.deepEqual(resolve(), ["/opt/pi-global/packages/a__b"], "a failed read keeps last-known-good");
+		assert.deepEqual(resolve.rowOf("/opt/pi-global/packages/a__b"), { name: "@a/b", version: "1.0.0" }, "and the rows of the paths it keeps");
 	} finally {
 		rmSync(overlay, { recursive: true, force: true });
 	}

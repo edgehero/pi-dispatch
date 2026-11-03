@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { rebuildLoaded } from "../../../worker/src/loaded-record.mjs";
 import { makeLogSink } from "../../../worker/src/run-history.mjs";
+import { EXCLUDABLE_TOOL_NAMES } from "../../../worker/src/triggers.mjs";
 import { EXIT_LINE_MAX_BYTES } from "../src/exit-line.mjs";
 import { fitLoaded, LOADED_ROW } from "../src/loaded.mjs";
 import { chatServer, jobTree, piTheme, put, runRealJob } from "./helpers/real-job.mjs";
@@ -112,6 +114,15 @@ test("a whole job: every tier counts under its own name, off what pi really load
 		assert.equal(read.exitAuth, "verified", "an older worker reads the line exactly as before");
 		assert.equal(read.exitLineCode, 0);
 		assert.equal(read.tokens.calls, 1);
+
+		// The worker's half, on what a real job wrote: every check holds against a genuine line, and the rows take their names.
+		const record = rebuildLoaded(read.loaded, { packages: [{ name: "lint", version: "1.0.0" }], overlayExtensions: ["git-guard.js", "broken.js"], servers: [], ownTools: EXCLUDABLE_TOOL_NAMES, leftOut: null });
+		assert.equal(record.runner, "reported", JSON.stringify(read.loaded));
+		assert.deepEqual(record.flow, { tier: "package", package: "lint" });
+		assert.deepEqual(record.sources[0].toolNames, ["lint_fix", "lint_run"]);
+		assert.deepEqual(record.sources[1].namedTools, [{ name: "git-guard.js", tools: ["guard_check"] }]);
+		assert.deepEqual(record.problems, { failed: 2, dropped: 1, mcp: 0 }, "the overlay's and the repository's failed extensions, and the dropped admin one");
+		assert.doesNotMatch(JSON.stringify(record), /repo_secret_tool|repo-tool|repo-broken|dispatch-admin|dispatch_run|repoflow|triggerflow|overlayflow/, "and the record holds no name the repository chose");
 	} finally {
 		await server.close();
 	}
@@ -292,6 +303,20 @@ test("a classifier that owns the container says pi and that nothing loaded (`non
 const STUB = fileURLToPath(new URL("./fixtures/mcp-stub-server.mjs", import.meta.url));
 const stdioServer = (extra = {}) => ({ type: "stdio", command: process.execPath, args: [STUB], description: "A stub.", exposure: "direct", ...extra });
 const mcpDocument = (servers) => JSON.stringify({ version: 1, codemodeModels: false, servers, refs: Object.fromEntries(Object.keys(servers).map((name) => [name, []])) });
+
+test("the job's own tool is named as the job's, on a real session, and a package's tool of the same name would not be", { skip }, async () => {
+	const server = await chatServer();
+	try {
+		const root = jobTree({ base: server.base });
+		const { exit, stderr, code } = await runRealJob(root, { PI_REPORT_PROGRESS: "1" }, { key: KEY });
+		assert.equal(code, 0, `${JSON.stringify(exit)}\n${stderr}`);
+		assert.deepEqual(exit.loaded.tools.job, ["report_progress"]);
+		assert.equal(exit.loaded.tools.active, exit.loaded.tools.own.length + 1, "pi's own and the job's add up to what is active");
+		assert.deepEqual(exit.loaded.extTools, { p: [], o: [] }, "not an extension's");
+	} finally {
+		await server.close();
+	}
+});
 
 test("a server that connects counts its tools beside a disabled one, and neither name reaches the line", { skip }, async () => {
 	const server = await chatServer();

@@ -1,4 +1,4 @@
-import { buildLoaded, LOADED_MAX_COUNT, LOADED_MAX_EXT_TOOLS, LOADED_MAX_OVERLAY_NAMES, LOADED_MAX_PACKAGES, LOADED_MAX_PROBLEM_COUNT, LOADED_MAX_SERVERS, LOADED_MAX_TOOL_COUNT, LOADED_ROW } from "../../src/loaded.mjs";
+import { buildLoaded, LOADED_JOB_TOOLS, LOADED_MAX_COUNT, LOADED_MAX_EXT_TOOLS, LOADED_MAX_OVERLAY_NAMES, LOADED_MAX_PACKAGES, LOADED_MAX_PROBLEM_COUNT, LOADED_MAX_SERVERS, LOADED_MAX_TOOL_COUNT, LOADED_ROW } from "../../src/loaded.mjs";
 
 /** The roots a job's record is measured against, at the mounts layout. */
 export const ROOTS = Object.freeze({ packages: [], jobPi: "/job/pi", triggerSkills: "/job/trigger-skills", overlay: "/opt/pi-global", workspace: "/workspace" });
@@ -16,6 +16,7 @@ export function maximalLoaded() {
 	const tools = [
 		...packages.map((root, i) => ({ name: name("p", i), path: `${root}/ext.js` })),
 		...overlayNames.slice(0, LOADED_MAX_EXT_TOOLS - packages.length).map((overlayName, i) => ({ name: name("t", i), path: `/opt/pi-global/extensions/${overlayName}` })),
+		...LOADED_JOB_TOOLS.map((jobTool) => ({ name: jobTool, path: "<inline:job-own>" })),
 	];
 	const loaded = buildLoaded({
 		at: "session",
@@ -25,7 +26,7 @@ export function maximalLoaded() {
 		skills: [{ name: "deep", filePath: `${packages[LOADED_MAX_PACKAGES + 7]}/skills/deep/SKILL.md` }],
 		extensions: overlayNames.map((overlayName) => `/opt/pi-global/extensions/${overlayName}`),
 		tools,
-		active: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"],
+		active: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls", ...LOADED_JOB_TOOLS],
 		ownNames: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"],
 		mcp: Array.from({ length: LOADED_MAX_SERVERS }, () => ["connected", LOADED_MAX_TOOL_COUNT]),
 	});

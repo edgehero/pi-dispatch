@@ -2076,6 +2076,9 @@ export async function startWorker(
 		if (lastPackageKey !== null && key !== lastPackageKey) log("packages_stage_changed", { count: key === "" ? 0 : key.split(":").length });
 		lastPackageKey = key;
 	};
+	// Issue #800: the name and version each path of the last good read stood for, so the rows a job's record names are the
+	// read that chose its paths. Beside last-known-good, and replaced with it.
+	let stagedRowByPath = new Map();
 	const getPackagePaths = () => {
 		if (!config.globalPiDir) return [];
 		const staged = readStageManifest({ globalPiDir: config.globalPiDir });
@@ -2090,8 +2093,10 @@ export async function startWorker(
 		const paths = containerPackagePaths(staged);
 		notePackageKey(paths.join(":"));
 		lastGoodPackagePaths = paths;
+		stagedRowByPath = new Map(staged.packages.map((p) => [containerPackagePaths({ packages: [p] })[0], { name: p.name, version: p.version }]));
 		return paths;
 	};
+	getPackagePaths.rowOf = (path) => stagedRowByPath.get(path) ?? null;
 	// One read at boot, for the same log line the boot read always emitted, and to seed last-known-good.
 	if (config.globalPiDir && !readStageManifest({ globalPiDir: config.globalPiDir })) log("packages_manifest_absent", { overlay: config.globalPiDir });
 	getPackagePaths();

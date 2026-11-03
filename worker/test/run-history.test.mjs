@@ -4,7 +4,7 @@ import { constants as fsConstants, lstatSync, readdirSync, readFileSync, symlink
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac, randomBytes } from "node:crypto";
-import { authenticExitLines, AWAIT_INPUT_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, RECORD_CORE_FIELDS, RECORD_TMP_MAX_AGE_MS, RECORD_TMP_RE, RUN_RECORD_VERSION, earlierFrom, recordOfThisJob, recordReadable, recordVerdict, recordVersionOf, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, parseExitLoaded, AWAIT_INPUT_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, RECORD_CORE_FIELDS, RECORD_TMP_MAX_AGE_MS, RECORD_TMP_RE, RUN_RECORD_VERSION, earlierFrom, recordOfThisJob, recordReadable, recordVerdict, recordVersionOf, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -2697,4 +2697,59 @@ test("makeFindPreviousRun reads a scheduler of any id length, by both of its pre
 	const findPreviousRun = makeFindPreviousRun({ logsDir: "/logs", fs });
 	assert.equal(findPreviousRun({ schedulerId: long, beforeMillis: 199 }), "2026-07-26T01:00:00.000Z");
 	assert.equal(findPreviousRun({ schedulerId: long, beforeMillis: 999 }), "2026-07-26T02:00:00.000Z");
+});
+
+// Issue #800: the sink's half of what a job loaded. The line's content is judged in loaded-record.test.mjs; these say which
+// lines it is read off at all, and where it lands on the record.
+test("`loaded` is read off a signed line only: an unsigned or forged one is not read, and a keyless run never reads it", async () => {
+	const KEY = "0".repeat(64);
+	const { signExitLine } = await import("../../image/runner/src/exit-line.mjs");
+	const body = (fields) => JSON.stringify({ event: "exit", jobId: "j", code: 0, ...fields });
+	const close = async (text, options = { exitKey: KEY }) => {
+		const log = makeLogSink({ logsDir: "/logs", enabled: false, fs: makeFakeFs({ stream: makeFakeStream() }) })("j", options);
+		log.write(Buffer.from(text));
+		return await log.close();
+	};
+	const SAID = { v: 1, at: "start" };
+	assert.deepEqual((await close(`${signExitLine(body({ loaded: SAID }), KEY)}\n`)).loaded, SAID, "handed on as written: judging it is the rebuild's");
+	assert.deepEqual((await close(`${signExitLine(body({ loaded: "not an object" }), KEY)}\n`)).loaded, "not an object", "so a value of the wrong type reads as a line that failed, not one that said nothing");
+	assert.equal(Object.hasOwn(await close(`${signExitLine(body({}), KEY)}\n`), "loaded"), false, "an older image's line has none");
+	assert.equal(Object.hasOwn(await close(`${body({ loaded: SAID })}\n`), "loaded"), false, "printed by a tool");
+	assert.equal(Object.hasOwn(await close(`${signExitLine(body({ loaded: SAID }), "1".repeat(64))}\n`), "loaded"), false, "signed with another key");
+	assert.deepEqual((await close(`${signExitLine(body({ loaded: SAID }), KEY)}\n${body({ loaded: { v: 1, at: "ready" } })}\n`)).loaded, SAID, "a printed line after the signed one is not read");
+	assert.equal(Object.hasOwn(await close(`${body({ loaded: SAID })}\n`, {}), "loaded"), false, "with no key issued, nothing vouches for any line");
+	assert.equal(parseExitLoaded(`${body({ loaded: SAID })}\n`).v, 1, "the parser itself reads what it is handed: the sink decides what that is");
+	assert.equal(parseExitLoaded(`${body({})}\n`), null);
+	assert.equal(parseExitLoaded("not a line"), null);
+});
+
+test("a line the supervisor wrote says nothing of what loaded, and a runner's line before it still decides", async () => {
+	const KEY = "0".repeat(64);
+	const { signExitLine } = await import("../../image/runner/src/exit-line.mjs");
+	const supervisor = JSON.stringify({ event: "exit", jobId: "j", code: 137, reason: "oom-killed", by: "supervisor" });
+	const runner = JSON.stringify({ event: "exit", jobId: "j", code: 0, loaded: { v: 1, at: "ready" } });
+	const close = async (text) => {
+		const log = makeLogSink({ logsDir: "/logs", enabled: false, fs: makeFakeFs({ stream: makeFakeStream() }) })("j", { exitKey: KEY });
+		log.write(Buffer.from(text));
+		return await log.close();
+	};
+	assert.equal(Object.hasOwn(await close(`${signExitLine(supervisor, KEY)}\n`), "loaded"), false, "killed before it wrote: the supervisor has no note");
+	assert.deepEqual((await close(`${signExitLine(runner, KEY)}\n${signExitLine(supervisor, KEY)}\n`)).loaded, { v: 1, at: "ready" }, "killed after it wrote: the runner's line is the run's");
+});
+
+test("the record's `loaded` is the last key before `v`, absent when the source has none, and read off a throw too", () => {
+	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
+	const loaded = { v: 1, runner: "absent", at: null, cut: null, image: "pi-job:4.3.1", imageDigest: null, imagePi: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null, leftOut: null };
+	const plain = buildRecord({ job, result: { outcome: "completed" } });
+	const carrying = buildRecord({ job, result: { outcome: "completed", loaded } });
+	assert.deepEqual(Object.keys(carrying).slice(-2), ["loaded", "v"], "before the record's version, always last");
+	assert.deepEqual(Object.keys(carrying).filter((key) => key !== "loaded"), Object.keys(plain), "every other key where it was");
+	assert.equal(Object.hasOwn(plain, "loaded"), false, "an older run, and a refusal before the image was known, is byte-identical");
+	assert.deepEqual(carrying.loaded, loaded);
+	assert.equal(carrying.v, 1, "a new field never raises the record's version (`DES-STORE-VERSION-WHEN-NEEDED`)");
+	assert.deepEqual(buildRecord({ job, error: Object.assign(new Error("x"), { loaded }) }).loaded, loaded, "an attempt that retries keeps what it loaded");
+	const late = buildRecord({ job, result: { outcome: "completed", loaded, touches: [] }, touchTracking: true });
+	assert.deepEqual(Object.keys(late).slice(-2), ["loaded", "v"], "after every other conditional key too");
+	assert.equal(Object.hasOwn(buildRecord({ job, result: { outcome: "completed", loaded: { ...loaded, runner: "fine" } } }), "loaded"), false, "a source that fails its door holds no key");
+	assert.ok(!RECORD_CORE_FIELDS.includes("loaded"), "not core: a reader of a newer record does not need it to say what the run was");
 });
