@@ -6,8 +6,16 @@
  */
 import { createHash } from "node:crypto";
 import { ANSWER_TEXT_MAX_BYTES, scrubAnswerText } from "./console-answer.mjs";
+import { FORGE_JOB_RETENTION_MS } from "./retention.mjs";
 
-export const APPROVAL_FINISHED_TTL_MS = 32 * 86400_000;
+/**
+ * How long a finished or cancelled request is kept, in MILLISECONDS (the `PEXPIRE` below, and the expiry comment's NX
+ * mark in start.mjs): a day past a forge job's retention, so the evidence of a decision outlives every queued job that
+ * could still carry its request id, the expiry job (a forge-kind job built from the request's `resumeJob`) included.
+ * Derived, so lengthening the forge retention cannot leave it shorter than the jobs it answers for. Interpolated into
+ * the script as a plain integer, so its text is what it was when this was the literal 32 days.
+ */
+export const APPROVAL_FINISHED_TTL_MS = FORGE_JOB_RETENTION_MS + 86_400_000;
 export const APPROVAL_PREFIX = "run:approval:";
 export const APPROVAL_DUE_KEY = `${APPROVAL_PREFIX}due`;
 const ID = /^[A-Za-z0-9._:-]{1,200}$/;

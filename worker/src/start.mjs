@@ -19,7 +19,7 @@ import { checkFailoverCandidate, failoverEgressRequired } from "./model-failover
 import { parseTriggers, parseTriggersDocument, TRIGGERS_FILE_VERSION } from "./triggers.mjs";
 import { watchDurationMs } from "./watch-contract.mjs";
 import { makeApprovalSessionCheck } from "./approval-session.mjs";
-import { makeApprovalStore } from "./approval-state.mjs";
+import { APPROVAL_FINISHED_TTL_MS, makeApprovalStore } from "./approval-state.mjs";
 import { makeApprovalRuntime, approvalExpiryJobId } from "./approval-runtime.mjs";
 import { makeCheckApprovalPolicy } from "./approval-policy.mjs";
 import { APPROVAL_LABEL } from "./parked.mjs";
@@ -75,6 +75,7 @@ import { checkSandboxWorkspace } from "./sandbox-workspace-guard.mjs";
 import { startSandboxPrepareWorker } from "./sandbox-prepare-requests.mjs";
 import { makeSandboxInventory } from "./sandbox-inventory.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
+import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
 import { makeDoctorSpawner } from "./doctor-spawner.mjs";
 import { fileURLToPath } from "node:url";
 import { listSandboxes, sandboxDeadline, makeSandboxReaper } from "./sandbox-store.mjs";
@@ -198,6 +199,15 @@ export { makeWatchCloser } from "./watch-closer.mjs";
 
 /** The bound on `recordRun`'s final status edit for an attempt that registered no commenter, as the commenter's own. */
 const STATUS_UNREGISTERED_EDIT_MS = 4_000;
+
+/**
+ * The approval expiry job's options (issue #649): its id is the request's own (`approvalExpiryJobId`), and it is a
+ * forge-kind job built from the request's `resumeJob`, so it is kept as long as a forge job (`FORGE_JOB_RETENTION_S`,
+ * in SECONDS: BullMQ's `removeOn*.age`), the window in which its id still answers a second enqueue as the same job.
+ */
+export function approvalExpiryJobOpts(jobId) {
+	return { jobId, attempts: 2, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: FORGE_JOB_RETENTION_S }, removeOnFail: { age: FORGE_JOB_RETENTION_S } };
+}
 
 /**
  * Race a read against a fuse, and CLEAN THE FUSE UP whichever side wins (issue #300). The fuse is
@@ -769,6 +779,8 @@ export async function startWorker(
 		makeLogSink: makeLogSinkFn = makeLogSink,
 		makeRecordWriter: makeRecordWriterFn = makeRecordWriter,
 		makeRunMirror: makeRunMirrorFn = makeRunMirror,
+		// Issue #761: the portfolio snapshot's factory, a seam so a wiring test sees the run index cap it is handed.
+		makePortfolioSnapshot: makePortfolioSnapshotFn = makePortfolioSnapshot,
 		// The fleet copy's by-id read, seamed so a wiring test can answer it without a live mirror.
 		readMirroredRecord: readMirroredRecordFn = readMirroredRecord,
 		makeLogReaper: makeLogReaperFn = makeLogReaper,
@@ -1463,10 +1475,12 @@ export async function startWorker(
 	// reaper above never reaches (it reaps the top-level `.log` and `.json` only). Never throws, so no double wrap.
 	const reapAllocationLogs = makeAllocationLogReaper({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
 	reapAllocationLogs();
-	// Issue #640: the operator console's audit files (`console-audit/YYYY-MM.jsonl`) on the same retention. The worker
-	// runs it, not the console, because the worker always runs and the console may never; it never reaps the newest file
-	// (the chain's head). Never throws.
-	const reapConsoleAudit = makeConsoleAuditReaper({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
+	// Issue #640: the operator console's audit files (`console-audit/YYYY-MM.jsonl`). The worker runs it, not the console,
+	// because the worker always runs and the console may never; it never reaps the newest file (the chain's head). Never
+	// throws. Issue #761: on its OWN retention (`PI_CONSOLE_AUDIT_RETENTION_DAYS`, which inherits the run history's when
+	// unset), so shortening the run history for privacy does not shorten the security trail. The periodic sweep below
+	// re-runs this closure, so boot and every tick read the one value.
+	const reapConsoleAudit = makeConsoleAuditReaper({ logsDir: config.logsDir, retentionDays: config.consoleAuditRetentionDays, log });
 	reapConsoleAudit();
 
 	// REQ-RESURRECTABLE-SANDBOX: sweep retained per-job directories past their window, so what `cleanup`
@@ -1706,7 +1720,9 @@ export async function startWorker(
 	// a worker name: an unnamed one is a single host, its own files ARE the whole history, and a mirror
 	// would be bytes nothing reads. That is also what keeps a single-host deployment byte-identical, since
 	// no job then issues a single extra Valkey command.
-	const runMirror = config.workerNameDeclared ? makeRunMirrorFn({ redis, retentionDays: config.logRetentionDays, log }) : null;
+	// Issue #761: trimmed to this host's `PI_RUN_MIRROR_MAX_RUNS`; every writer trims the shared index to its own cap, so a
+	// fleet's lowest wins, and each trim raises the horizon a reader sees the cut by.
+	const runMirror = config.workerNameDeclared ? makeRunMirrorFn({ redis, retentionDays: config.logRetentionDays, indexMax: config.runMirrorMaxRuns, log }) : null;
 	// Issue #644: the forge status comment's two calls, the `comment` adapter's shape below (forgeFor, the auth re-resolve,
 	// a token minted per call) and its rule: they NEVER throw, since the comment decides nothing. `statusPost` answers
 	// `{ id }` or null; `statusEdit` answers `{ ok: true }`, `{ stop }` for a 403, 404 or 429 (the comment is gone, the
@@ -2017,7 +2033,8 @@ export async function startWorker(
 	const collectPlan = makeCollectPlan({ allocation: allocationState, governing: governingNow, projects: () => projects.current, checkPortfolioFlag, log });
 	// The snapshot a confirmed portfolio job reads as /job/portfolio.json, built at prepare. The run counts are complete
 	// only with the run mirror, which a declared worker name arms (the `runMirror` rule below).
-	const portfolioSnapshot = makePortfolioSnapshot({ checkPortfolioFlag, governing: governingNow, projects: () => projects.current, limits: () => scopedLimits.current, allocation: allocationState, redis, logsDir: config.logsDir, mirror: config.workerNameDeclared === true, log });
+	// `indexMax` (issue #761): the snapshot reads the whole index, which this host's own trim keeps at or under its cap.
+	const portfolioSnapshot = makePortfolioSnapshotFn({ checkPortfolioFlag, governing: governingNow, projects: () => projects.current, limits: () => scopedLimits.current, allocation: allocationState, redis, logsDir: config.logsDir, mirror: config.workerNameDeclared === true, indexMax: config.runMirrorMaxRuns, log });
 
 	// REQ-GLOBAL-PI-OVERLAY staged packages: read the operator's stage manifest at EACH job start, like
 	// getSettings above and the pause-window ref below.
@@ -2703,11 +2720,12 @@ export async function startWorker(
 				...request.resumeJob,
 				approvalRequestId: request.requestId,
 				trigger: { ...request.resumeJob.trigger, deliveryId: `expiry-${request.requestId}`, comment: { body: "/decline" } },
-			}, { jobId, attempts: 2, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 31 * 86400 }, removeOnFail: { age: 31 * 86400 } });
+			}, approvalExpiryJobOpts(jobId));
 			return { ok: true };
 		},
 		comment: async (request, text) => {
-			if (await redis.set(`run:approval:expiry-comment:${request.requestId}`, "1", "PX", 32 * 86400_000, "NX") === "OK") await comment(request.resumeJob, text);
+			// One expiry comment per request: the mark lives as long as the request's finished state (MILLISECONDS, PX).
+			if (await redis.set(`run:approval:expiry-comment:${request.requestId}`, "1", "PX", APPROVAL_FINISHED_TTL_MS, "NX") === "OK") await comment(request.resumeJob, text);
 		},
 	});
 
@@ -3043,9 +3061,9 @@ export async function startWorker(
 				const held = await runtimeQueue.getJob(id);
 				if (!held) return false;
 				// EXISTENCE IS NOT LIVENESS, and the difference decides whether a target stays deafened:
-				// `removeOnComplete`/`removeOnFail` keep a finished job's hash for 31 days, so a holder that
-				// can never wake again would answer "still waiting" for a month. Only a state it can still be
-				// picked up from counts.
+				// `removeOnComplete`/`removeOnFail` keep a finished job's hash for `FORGE_JOB_RETENTION_S`, so a
+				// holder that can never wake again would answer "still waiting" for a month. Only a state it can
+				// still be picked up from counts.
 				const state = await held.getState();
 				return state === "delayed" || state === "waiting" || state === "active" || state === "prioritized" || state === "waiting-children";
 			},
@@ -3664,6 +3682,8 @@ export async function startWorker(
 			settingsFile: config.settingsFile,
 			captureJobLogs: config.captureJobLogs,
 			logRetentionDays: config.logRetentionDays,
+			consoleAuditRetentionDays: config.consoleAuditRetentionDays, // issue #761: the console audit trail's own; 0 = kept forever
+			runMirrorMaxRuns: config.runMirrorMaxRuns, // issue #761: the shared run index's cap this host trims to
 			sandboxRetentionHours: config.sandboxRetentionHours, // 0 = retention off; a run's directory is deleted as before
 			// Issue #645 (durable runs): where checkpoints go (null = none: an armed job is refused before it spends) and
 			// whether this host takes them (the store AND the run checkpointer); doctor reads the same directory.

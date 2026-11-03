@@ -2,7 +2,7 @@
 import * as nodeFs from "node:fs";
 import { randomBytes } from "node:crypto";
 import { SETUP_OPERATIONS, SETUP_REASONS, SETUP_LIMITS } from "@edgehero/pi-dispatch/setup-contract";
-import { addToken, revokeToken, readTokensSnapshot, TOKEN_NAME_RE } from "@edgehero/pi-dispatch/console-tokens";
+import { addToken, revokeToken, readTokensSnapshot, TOKEN_NAME_RE, tokenNames } from "@edgehero/pi-dispatch/console-tokens";
 import { loginCodesDir, mintLoginCode } from "./console/login-codes.mjs";
 import { apiKeyVariable, nonApiKeyKind, needsHostAuthentication } from "@edgehero/pi-dispatch/provider-key";
 import { acquireSetupLock, setupDeploymentIdentity } from "@edgehero/pi-dispatch/setup-lock";
@@ -117,7 +117,8 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
       if (typeof name !== "string" || !TOKEN_NAME_RE.test(name)) return problem("A viewer name uses 1 to 32 lowercase letters, digits, dots, underscores or hyphens.", 400);
       const before = tokenSnapshot();
       if (!before) return problem("The protected tokens file could not be read. Run pi-dispatch doctor on the host.");
-      if (action === "setup-viewer-add" && before.file.tokens.some(t => t.name === name)) return problem("That token name already exists. Choose a new viewer name.");
+      // Every name the file holds, one kept for a role this console does not know included (issue #761).
+      if (action === "setup-viewer-add" && tokenNames(before.file).includes(name)) return problem("That token name already exists. Choose a new viewer name.");
       let identity = null;
       if (action === "setup-viewer-revoke") {
         const receipt = safeId(body.identity) ? receipts.get(body.identity) : null;

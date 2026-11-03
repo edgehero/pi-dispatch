@@ -348,3 +348,38 @@ test("readMirroredPage pages below an exclusive score cursor, by offset under on
 		await redis.cleanup();
 	}
 });
+
+test("two writers of different caps on one index: each trims to its own, so the lowest wins, and its trim raises the horizon a reader sees (#761)", { skip }, async () => {
+	const { makeRunMirror, RUNS_HORIZON, RUNS_HORIZON_MEMBER, RUNS_INDEX } = await import("../src/run-mirror.mjs");
+	const { readMirrorWindow } = await import("../src/capacity-records.mjs");
+	const redis = await prefixed("caps");
+	const T0 = Date.parse("2026-11-03T12:00:00.000Z");
+	const at = (i) => T0 - (20 - i) * 60_000;
+	// Each run is written as it ends, so the mirror's start is the first run's end.
+	let clock = T0;
+	const write = (writer, i, host) => {
+		clock = at(i);
+		return writer.mirror({ jobId: `r${i}`, host, endedAt: new Date(at(i)).toISOString() }, `r${i}`);
+	};
+	// Caps of 5 and 3 stand for any two settings (the bounds are the configuration's; the writer trims to whatever it is
+	// handed), so the test writes a handful of runs, not thousands.
+	const high = makeRunMirror({ redis, retentionDays: 30, now: () => clock, indexMax: 5 });
+	const low = makeRunMirror({ redis, retentionDays: 30, now: () => clock, indexMax: 3 });
+	try {
+		for (let i = 0; i < 5; i++) assert.equal(await write(high, i, "hosta"), true);
+		assert.equal(await redis.zcard(RUNS_INDEX), 5, "the larger cap holds its five");
+		assert.equal(await redis.zscore(RUNS_HORIZON, RUNS_HORIZON_MEMBER), null, "nothing trimmed yet, no horizon");
+		assert.equal(await write(low, 5, "hostb"), true);
+		assert.deepEqual(await redis.zrange(RUNS_INDEX, 0, -1), ["r3", "r4", "r5"], "the smaller cap's write trims the shared index to three");
+		assert.equal(await redis.zscore(RUNS_HORIZON, RUNS_HORIZON_MEMBER), String(at(3)), "raised to the oldest run kept");
+		// The larger writer only trims to its own cap, so the index grows again between the smaller one's writes.
+		assert.equal(await write(high, 6, "hosta"), true);
+		assert.equal(await redis.zcard(RUNS_INDEX), 4);
+		// A reader told the larger cap sees an index under it: the cap clause says nothing, and the horizon still marks the
+		// cut, so the runs the smaller cap removed read as missing, never as idle.
+		const read = await readMirrorWindow(redis, { sinceMs: T0 - 3_600_000, nowMs: T0, indexMax: 5 });
+		assert.deepEqual([read.truncated, read.fromMs, read.records.map((r) => r.jobId)], [true, at(3), ["r6", "r5", "r4", "r3"]]);
+	} finally {
+		await redis.cleanup();
+	}
+});

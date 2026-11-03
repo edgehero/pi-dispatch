@@ -684,3 +684,19 @@ test("viewer apply rechecks the captured deployment incarnation after acquiring 
   assert.equal(fs.existsSync(loginCodesDir(f.path)), false);
   assert.equal(f.service.privateSize(), 0);
 });
+
+test("a viewer name an entry of a role this console does not know holds is taken, and that entry is no viewer to undo (issue #761)", async t => {
+  const f = fixture(t);
+  const raw = JSON.parse(fs.readFileSync(f.path, "utf8"));
+  const kept = { name: "observer", role: "auditor", sha256: "c".repeat(64), createdAt: "2026-10-02T00:00:00.000Z" };
+  raw.tokens.push(kept);
+  fs.writeFileSync(f.path, JSON.stringify(raw), { mode: 0o600 });
+  const before = fs.readFileSync(f.path, "utf8");
+  const p = await f.preview("setup-viewer-add", { name: "observer" });
+  assert.equal(p.status, 409);
+  assert.match(p.body.error, /That token name already exists/);
+  // An undo names the viewer it made by a receipt; a kept entry has none, and is never revoked from the browser.
+  assert.equal((await f.preview("setup-viewer-revoke", { name: "observer", identity: "0".repeat(32) })).status, 409);
+  assert.equal(fs.readFileSync(f.path, "utf8"), before, "nothing was written");
+  assert.deepEqual(f.readTokens().file.carry.kept, [kept]);
+});

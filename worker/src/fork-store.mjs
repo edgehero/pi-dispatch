@@ -97,6 +97,22 @@ function validManifest(m) {
 	return m && Object.keys(m).length === fields.length && fields.every((k) => Object.hasOwn(m, k)) && m.v === 1 && ID.test(m.runId) && KEY.test(m.sessionKey) && SHA.test(m.baseSha) && TOKEN.test(m.venue) && /^\d+\.\d+\.\d+$/.test(m.piVersion) && Number.isSafeInteger(m.attempt) && m.attempt >= 0 && HOST.test(m.host) && (m.hostQueue === null || /^pi-jobs@[A-Za-z0-9._-]{1,64}$/.test(m.hostQueue)) && Number.isSafeInteger(m.at) && m.at >= 0 && Number.isSafeInteger(m.bytes) && m.bytes >= 0 && HEX.test(m.transcriptSha256) && HEX.test(m.sourceDigest);
 }
 
+/**
+ * The sweep's age of a source from its manifest, of ANY version (issue #761): `{ runId, at }` when the manifest carries
+ * an integer `v` of 1 or more, a run id that names this very directory (`forkSourceKey(runId) === key`) and a publish
+ * time that is a safe integer of 0 or more; null otherwise. For the sweep alone, and lenient on purpose: judged by
+ * `validManifest`, a source a newer release published reads as no manifest, so it would be aged by its earlier
+ * `origin.json` (removed while young) or by the folder's mtime, and with no run id its workspace archive would never be
+ * removed. `read` stays strict, so a newer source is still never served here.
+ */
+function sweepAge(m, key) {
+	if (!m || typeof m !== "object" || Array.isArray(m)) return null;
+	if (!Number.isSafeInteger(m.v) || m.v < 1) return null;
+	if (typeof m.runId !== "string" || !ID.test(m.runId) || forkSourceKey(m.runId) !== key) return null;
+	if (!Number.isSafeInteger(m.at) || m.at < 0) return null;
+	return { runId: m.runId, at: m.at };
+}
+
 export function createForkStore({ dir, now = Date.now, limits = {}, hostName = hostname(), hostQueue = null, checkpointer = null, checkpointLimits = {}, readRegular = regular } = {}) {
 	const L = { ...FORK_SOURCE_LIMITS, ...limits };
 	const root = typeof dir === "string" && dir ? resolve(dir) : null;
@@ -302,7 +318,7 @@ export function createForkStore({ dir, now = Date.now, limits = {}, hostName = h
 			for (const key of fs.readdirSync(root)) {
 				if (!KEY.test(key) || !fs.lstatSync(join(root, key)).isDirectory()) continue;
 				let runId, at;
-				try { const m = JSON.parse(readRegular(join(root, key, "manifest.json"), 8192)); if (validManifest(m) && forkSourceKey(m.runId) === key) { runId = m.runId; at = m.at; } } catch {}
+				try { const age = sweepAge(JSON.parse(readRegular(join(root, key, "manifest.json"), 8192)), key); if (age) ({ runId, at } = age); } catch {}
 				if (at === undefined) {
 					try {
 						const origin = JSON.parse(readRegular(join(root, key, "origin.json"), 4096));

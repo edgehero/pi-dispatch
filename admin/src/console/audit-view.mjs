@@ -232,7 +232,7 @@ function indexOf(files) {
 
 /** The chain as the screen reads it, from a `verifyConsoleAudit({ withLast: true })` result or anything else. */
 function chainOf(v) {
-  const unread = (why) => ({ state: "unreadable", why, from: null, through: null, startsAt: null, broken: null, last: null, suspect: null, index: Object.freeze([]), checkedAt: null });
+  const unread = (why) => ({ state: "unreadable", why, from: null, through: null, startsAt: null, broken: null, last: null, suspect: null, index: Object.freeze([]), checkedAt: null, unknown: 0 });
   if (v === null || typeof v !== "object" || typeof v.ok !== "boolean") return unread("error");
   const checkedAt = Number.isFinite(v.checkedAt) ? v.checkedAt : null;
   const last = v.last ? rowPlace(v.last) : null;
@@ -242,7 +242,10 @@ function chainOf(v) {
   // prev that did not match), so the run's first is known too.
   const end = suspect ?? last;
   const from = end !== null && rows > 0 && end.seq - rows + 1 >= 1 ? end.seq - rows + 1 : null;
-  const base = { from, through: last?.seq ?? null, last, suspect, index: indexOf(v.files), checkedAt };
+  // The rows an intact chain holds with an action or outcome this console does not know (issue #761; the verifier says
+  // so only on an intact chain and only when there are some), for About.
+  const unknown = Number.isSafeInteger(v.unknown) && v.unknown > 0 ? v.unknown : 0;
+  const base = { from, through: last?.seq ?? null, last, suspect, index: indexOf(v.files), checkedAt, unknown };
   if (v.ok) return { state: "ok", why: null, ...base, startsAt: Number.isSafeInteger(v.startsAt?.seq) ? v.startsAt.seq : null, broken: null };
   const b = v.broken ?? {};
   const pos = placeText(b.file, b.line);
@@ -326,7 +329,8 @@ function matches(entry, q) {
  * `newest` is the newest row's seq when the view read from the top (else null), `first` the log's first row's seq by
  * the index (else null). `who` is the sorted token names the examined rows name, for the filter's list (the chosen one
  * included). `chain` is `{ state: "ok"|"broken"|"unreadable", why, from, through, startsAt, broken, last, suspect, index,
- * checkedAt }`. `unreadable` is the reader's sentence when it could not read (no rows then).
+ * checkedAt, unknown }` (`unknown`: the rows an intact chain holds whose action or outcome this console does not know,
+ * issue #761, else 0). `unreadable` is the reader's sentence when it could not read (no rows then).
  *
  * `seq` opens the `perPage`-row chunk that holds that row: rows numbered from `(k - 1) * perPage + 1` to `k * perPage`
  * for the `k` that holds it, with the damaged lines among them, so a link to "row 41" lands on one page however many

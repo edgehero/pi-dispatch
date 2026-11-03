@@ -170,3 +170,17 @@ test("an existing granted console carries its exact preflight into the final ser
 	};
 	assert.equal(await runConsoleUp(["--console", "--yes"], deps), 0);
 });
+
+test("an entry of a role this release does not know is no operator to reuse, and its name is not free (issue #761)", async () => {
+	const { deps, calls, lines, cwd } = harness();
+	const path = join(cwd, "console-tokens.json");
+	const kept = { name: "operator", role: "auditor", sha256: "c".repeat(64), createdAt: "2026-10-02T00:00:00.000Z" };
+	fs.writeFileSync(path, JSON.stringify({ version: 1, generation: 0, tokens: [kept] }), { mode: 0o600 });
+	fs.chmodSync(path, 0o600);
+	const before = fs.readFileSync(path, "utf8");
+	// No known operator, so bootstrap would make one under the default name, which the kept entry holds.
+	assert.equal(await runConsoleUp(["--console", "--yes"], deps), 2);
+	assert.match(lines.join(""), /choose an unused valid operator name; nothing was changed/);
+	assert.equal(fs.readFileSync(path, "utf8"), before);
+	assert.equal(calls.some((argv) => argv[0] === "up"), false);
+});

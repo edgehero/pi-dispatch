@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CONSOLE_ENV_KEYS, consoleChecks, consoleListenOf, consoleServiceChecks } from "../src/doctor.mjs";
+import { createHash } from "node:crypto";
+import { CONSOLE_ENV_KEYS, WORKER_INT_SETTINGS, WORKER_SERVICE_KEYS, consoleChecks, consoleListenOf, consoleServiceChecks, workerIntSettingChecks } from "../src/doctor.mjs";
+import { loadConfig } from "../src/config.mjs";
 import { runService } from "../src/service.mjs";
 import { collectChecks } from "./helpers/doctor.mjs";
 import { addToken } from "../src/console-tokens.mjs";
@@ -245,7 +247,13 @@ test("collectChecks: the console lines judge the tokens file against the trigger
 });
 
 test("CONSOLE_ENV_KEYS is the contract's PI_CONSOLE_* set", () => {
+	// The PI_CONSOLE_* keys the CONSOLE reads. PI_CONSOLE_AUDIT_RETENTION_DAYS (issue #761) is not one, though named for
+	// it: the worker reads it (its retention sweep reaps the audit files), so it is a worker service key, and listed here
+	// it would make doctor judge a console on a deployment that only set how long the audit trail is kept.
 	assert.deepEqual([...CONSOLE_ENV_KEYS].sort(), ["PI_CONSOLE_ALLOWED_HOSTS", "PI_CONSOLE_BIND_PUBLIC", "PI_CONSOLE_IDLE_MINUTES", "PI_CONSOLE_LISTEN", "PI_CONSOLE_MAX_HOURS", "PI_CONSOLE_MAX_STREAMS", "PI_CONSOLE_READ_ONLY", "PI_CONSOLE_TOKENS_FILE"]);
+	assert.ok(WORKER_SERVICE_KEYS.includes("PI_CONSOLE_AUDIT_RETENTION_DAYS") && WORKER_SERVICE_KEYS.includes("PI_RUN_MIRROR_MAX_RUNS"));
+	const d = deployment();
+	assert.deepEqual(consoleChecks({ ...d.env, PI_CONSOLE_AUDIT_RETENTION_DAYS: "90" }, { cwd: d.cwd }), [], "no console line for the worker's key");
 });
 
 // Issue #708: whether a service unit keeps this deployment's console running, and whether the console answers.
@@ -330,4 +338,142 @@ test("collectChecks: the console's service line follows its other lines, and a d
 	const lines = labels((await collectChecks({ ...d.env, PI_PROVIDER: "anthropic" }, seams(DOWN))).filter((c) => c.label.startsWith("console:")));
 	assert.equal(lines.at(-1), "warn console: not running on 127.0.0.1:4790 (nothing listens there), and no service unit keeps it running");
 	assert.equal(probes, 1);
+});
+
+// Issue #761: what a newer release wrote, as doctor reads it.
+
+test("tokens kept for a role this release does not know: a warning, in the singular for one, and never an operator", { skip: !posix }, () => {
+	const d = deployment();
+	withToken(d);
+	const raw = JSON.parse(readFileSync(d.tokens, "utf8"));
+	const kept = [{ name: "aud", role: "auditor", sha256: "c".repeat(64), createdAt: "2026-10-02T00:00:00.000Z" }, { name: "boss", role: "superoperator", sha256: "d".repeat(64), createdAt: "2026-10-02T00:00:00.000Z" }];
+	const write = (entries) => {
+		writeFileSync(d.tokens, JSON.stringify({ ...raw, tokens: [...raw.tokens, ...entries] }));
+		chmodSync(d.tokens, 0o600);
+	};
+	write(kept);
+	assert.deepEqual(labels(consoleChecks(d.env, { cwd: d.cwd })), [
+		`ok console: tokens file ${JSON.stringify(d.tokens)} is owner-only and outside every job folder (1 operator, 0 viewers)`,
+		"warn console: 2 tokens carry a role this pi-dispatch does not know, so a console of this release signs them in nowhere",
+		"ok console: listens on 127.0.0.1:4790 (the default)",
+	]);
+	assert.equal(consoleChecks(d.env, { cwd: d.cwd })[1].fix, "upgrade pi-dispatch and the console");
+	write(kept.slice(0, 1));
+	assert.equal(labels(consoleChecks(d.env, { cwd: d.cwd }))[1], "warn console: 1 token carries a role this pi-dispatch does not know, so a console of this release signs it in nowhere");
+});
+
+test("the audit chain with rows a newer console wrote: still ok, and the line counts them", { skip: !posix }, () => {
+	const d = deployment();
+	withToken(d);
+	const audit = makeConsoleAudit({ logsDir: d.logs, now: () => T0 });
+	for (const target of ["a", "b"]) audit.append({ actor: { name: "alice", role: "operator", session: "s" }, action: "write", target, outcome: "ok" });
+	const file = join(d.logs, "console-audit", "2026-10.jsonl");
+	const lines = readFileSync(file, "utf8").split("\n").filter((l) => l !== "");
+	const prev = createHash("sha256").update(lines[1]).digest("hex");
+	writeFileSync(file, `${[...lines, JSON.stringify({ at: new Date(T0).toISOString(), seq: 3, prev, actor: { name: "alice", role: "operator", session: "s" }, action: "token-expired", outcome: "ok" })].join("\n")}\n`);
+	assert.equal(labels(consoleChecks(d.env, { cwd: d.cwd })).at(-1), "ok console: audit log chain intact (3 rows, 1 not known to this pi-dispatch: a newer console writes such rows)");
+});
+
+test("the audit chain with a reaped start and rows a newer console wrote: still ok, the start said before the count", { skip: !posix }, () => {
+	const d = deployment();
+	withToken(d);
+	let t = Date.UTC(2026, 8, 20);
+	const audit = makeConsoleAudit({ logsDir: d.logs, now: () => t });
+	const actor = { name: "alice", role: "operator", session: "s" };
+	for (const target of ["a", "b", "c", "d"]) audit.append({ actor, action: "write", target, outcome: "ok" });
+	t = T0;
+	for (const target of ["e", "f"]) audit.append({ actor, action: "write", target, outcome: "ok" });
+	// September's file reaped: the chain now starts at seq 5, in October's file.
+	rmSync(join(d.logs, "console-audit", "2026-09.jsonl"));
+	const file = join(d.logs, "console-audit", "2026-10.jsonl");
+	const lines = readFileSync(file, "utf8").split("\n").filter((l) => l !== "");
+	for (const seq of [7, 8]) {
+		const prev = createHash("sha256").update(lines.at(-1)).digest("hex");
+		lines.push(JSON.stringify({ at: new Date(T0).toISOString(), seq, prev, actor, action: "token-expired", outcome: "ok" }));
+	}
+	writeFileSync(file, `${lines.join("\n")}\n`);
+	assert.equal(labels(consoleChecks(d.env, { cwd: d.cwd })).at(-1), "ok console: audit log chain intact (4 rows, starting at seq 5 in 2026-10.jsonl (older rows reaped), 2 not known to this pi-dispatch: a newer console writes such rows)");
+});
+
+/** The values each setting is judged on: the edges, the shapes `boundedInt` refuses, and the default's spellings. */
+const INT_CASES = {
+	PI_CONSOLE_AUDIT_RETENTION_DAYS: { accepted: [undefined, "", "0", "1", "365", " 30 ", "100000"], refused: ["-1", "abc", "1.5", "030", "1e3", " ", "+5"] },
+	PI_RUN_MIRROR_MAX_RUNS: { accepted: [undefined, "", "1000", "5000", "20000", " 2000 "], refused: ["999", "20001", "0", "abc", "1.5", "-1", "05000", " ", "1e4"] },
+};
+
+test("a bad PI_CONSOLE_AUDIT_RETENTION_DAYS or PI_RUN_MIRROR_MAX_RUNS fails doctor, naming the boot refusal", () => {
+	assert.deepEqual(Object.keys(INT_CASES).sort(), Object.keys(WORKER_INT_SETTINGS).sort(), "every judged setting has its cases");
+	for (const [key, { accepted, refused }] of Object.entries(INT_CASES)) {
+		for (const value of accepted) assert.deepEqual(workerIntSettingChecks({ [key]: value }), [], `${key}=${JSON.stringify(value)}`);
+		for (const value of refused) {
+			const checks = workerIntSettingChecks({ [key]: value }, (k) => ` -- ${k} read from .env`);
+			assert.equal(checks.length, 1, `${key}=${JSON.stringify(value)}`);
+			assert.equal(checks[0].ok, false);
+			assert.equal(checks[0].warn, undefined, "a fail: the worker does not start");
+			assert.match(checks[0].label, new RegExp(`^${key} is .*: the worker refuses to boot on it \\(exit 2\\) -- ${key} read from \\.env$`));
+		}
+	}
+	assert.deepEqual(workerIntSettingChecks({ PI_CONSOLE_AUDIT_RETENTION_DAYS: "-1", PI_RUN_MIRROR_MAX_RUNS: "999" }).map((c) => [c.label, c.fix]), [
+		['PI_CONSOLE_AUDIT_RETENTION_DAYS is "-1", which is not a non-negative integer: the worker refuses to boot on it (exit 2)', "set it to a whole number of days (0 keeps the console audit trail forever), or delete the line so the trail is kept as long as PI_LOG_RETENTION_DAYS keeps run history"],
+		['PI_RUN_MIRROR_MAX_RUNS is "999", which is not an integer 1000-20000: the worker refuses to boot on it (exit 2)', "set it to a whole number from 1000 to 20000, or delete the line for the default (5000)"],
+	]);
+});
+
+test("doctor fails exactly the values of PI_CONSOLE_AUDIT_RETENTION_DAYS and PI_RUN_MIRROR_MAX_RUNS the worker refuses to boot on", () => {
+	// The worker's own loader is the oracle (config.mjs reads both keys, issue #761): a configuration error naming the key
+	// for every value doctor fails, and a boot for every value it passes.
+	const base = { HOME: "/home/u", PATH: "/usr/bin", ANTHROPIC_API_KEY: "x", WEBHOOK_SECRET: "s", PI_TRIGGERS_FILE: "/d/triggers.json" };
+	const fileExists = (p) => typeof p === "string" && p.startsWith("/");
+	const boots = (env) => {
+		try {
+			loadConfig(env, { fileExists });
+			return true;
+		} catch (error) {
+			assert.equal(error?.piDispatchConfig, true, `an untagged throw: ${error?.message}`);
+			return error;
+		}
+	};
+	assert.equal(boots(base), true, "the base itself boots");
+	for (const [key, { accepted, refused }] of Object.entries(INT_CASES)) {
+		for (const value of [...accepted, ...refused]) {
+			const env = value === undefined ? base : { ...base, [key]: value };
+			const got = boots(env);
+			const doctorFails = workerIntSettingChecks(env).length > 0;
+			assert.equal(got !== true, doctorFails, `${key}=${JSON.stringify(value)}: the worker ${got === true ? "boots" : "refuses"}, doctor ${doctorFails ? "fails" : "passes"}`);
+			if (got !== true) assert.match(got.message, new RegExp(key));
+		}
+	}
+});
+
+test("collectChecks: a bad PI_CONSOLE_AUDIT_RETENTION_DAYS or PI_RUN_MIRROR_MAX_RUNS fails doctor, from the deployment .env or this shell", { skip: !posix }, async () => {
+	const d = deployment();
+	mkdirSync(d.logs, { recursive: true });
+	const spawn = () => {
+		const handlers = {};
+		const stream = () => ({ on() { return this; } });
+		const child = { stdout: stream(), stderr: stream(), stdin: { on() { return this; }, end() {} }, kill() {}, on(ev, cb) { handlers[ev] = cb; return this; } };
+		queueMicrotask(() => handlers.close?.(1));
+		return child;
+	};
+	const envPath = join(d.cwd, ".env");
+	const run = async (envText, shell = {}) => {
+		writeFileSync(envPath, envText);
+		const file = serviceEnvFileOf(Buffer.from(envText), envPath, serviceEnvLoader(process.platform));
+		const seams = { out: () => {}, cwd: d.cwd, home: d.cwd, spawn, probeValkey: async () => false, nodeVersion: "22.19.0", fileExists: existsSync, readEnvFile: (p) => readFileSync(p, "utf8"), serviceEnvFile: file };
+		const checks = await collectChecks({ ...d.env, PI_PROVIDER: "anthropic", ...shell }, seams);
+		return labels(checks.filter((c) => Object.keys(WORKER_INT_SETTINGS).some((key) => c.label.startsWith(`${key} is `))));
+	};
+	const fromFile = (key) => ` -- ${key} read from ${envPath}, as the service reads it; this shell does not set it`;
+	// The audit retention from the .env (with its note), the mirror's cap from this shell (without one).
+	assert.deepEqual(await run("PI_CONSOLE_AUDIT_RETENTION_DAYS=-1\n", { PI_RUN_MIRROR_MAX_RUNS: "999" }), [
+		`fail PI_CONSOLE_AUDIT_RETENTION_DAYS is "-1", which is not a non-negative integer: the worker refuses to boot on it (exit 2)${fromFile("PI_CONSOLE_AUDIT_RETENTION_DAYS")}`,
+		'fail PI_RUN_MIRROR_MAX_RUNS is "999", which is not an integer 1000-20000: the worker refuses to boot on it (exit 2)',
+	]);
+	// And with the two sources swapped.
+	assert.deepEqual(await run("PI_RUN_MIRROR_MAX_RUNS=abc\n", { PI_CONSOLE_AUDIT_RETENTION_DAYS: "1.5" }), [
+		'fail PI_CONSOLE_AUDIT_RETENTION_DAYS is "1.5", which is not a non-negative integer: the worker refuses to boot on it (exit 2)',
+		`fail PI_RUN_MIRROR_MAX_RUNS is "abc", which is not an integer 1000-20000: the worker refuses to boot on it (exit 2)${fromFile("PI_RUN_MIRROR_MAX_RUNS")}`,
+	]);
+	// Values the worker boots on: no line at all.
+	assert.deepEqual(await run("PI_CONSOLE_AUDIT_RETENTION_DAYS=0\n", { PI_RUN_MIRROR_MAX_RUNS: "20000" }), []);
 });

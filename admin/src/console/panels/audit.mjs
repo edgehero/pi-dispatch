@@ -17,8 +17,15 @@
  * damaged one, one after it, the one before a broken link and one written since the last check show their state in the
  * outcome column (the outcome as written moves to a note under the reason), since the chain does not vouch for what
  * such a row says.
+ *
+ * A ROW WITH A WORD THIS CONSOLE DOES NOT KNOW (issue #761): an action or outcome this console does not list, of the
+ * shape the console writes, which the chain check links like any other row (a newer release writes such rows). It keeps
+ * its state, and its outcome shows as the word written on the attention badge. Only a verified row (state `ok`) says,
+ * in a note under its reason, which word this console does not know, and About counts them only on an intact chain: the
+ * check vouches for nothing else a row says, so a row it does not vouch for is never labelled by its words. The
+ * filter's lists stay this console's own, so such a row is found unfiltered and under who, role and the search.
  */
-import { CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_OUTCOMES } from "@edgehero/pi-dispatch/console-audit";
+import { CONSOLE_AUDIT_ACTION_RE, CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_OUTCOME_RE, CONSOLE_AUDIT_OUTCOMES } from "@edgehero/pi-dispatch/console-audit";
 import { AUDIT_ACTOR_ROLES, AUDIT_EXAMINE_MAX, AUDIT_OUTCOME_WORDS, AUDIT_Q_MAX, auditFiltered, auditQueryString, isAuditRow } from "../audit-view.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
@@ -62,9 +69,13 @@ function rowId(entry, pos, state, used) {
   return at === null ? null : `line-${at[0]}-${at[1]}`;
 }
 
-/** The outcome column's badge for a row in `state` (see the header and `AUDIT_OUTCOME_WORDS`). */
+/**
+ * The outcome column's badge for a row in `state` (see the header and `AUDIT_OUTCOME_WORDS`). A verified row's outcome
+ * is looked up only when the console writes it: a word this console does not know (issue #761) that happens to name a
+ * state ("damaged") must not wear that state's badge, so it takes the attention badge with the word as written.
+ */
 function outcomeCell(entry, state) {
-  const key = state === "ok" ? entry.outcome : state;
+  const key = state === "ok" ? (CONSOLE_AUDIT_OUTCOMES.includes(entry.outcome) ? entry.outcome : null) : state;
   const w = typeof key === "string" && Object.hasOwn(AUDIT_OUTCOME_WORDS, key) ? AUDIT_OUTCOME_WORDS[key] : { status: "attention", icon: null, word: String(entry.outcome ?? "unknown") };
   return ui.badge(w.status, w.word, { icon: w.icon });
 }
@@ -103,6 +114,23 @@ function stateNote(entry, state, chain) {
     return html`<span class="reason">${why}${written}</span>`;
   }
   return null;
+}
+
+/**
+ * The note under a verified row's reason for an action or outcome this console does not know (issue #761, the header):
+ * a word of the console's shape that this console does not list, or null. Only for `state` ok: on any other row the
+ * chain does not vouch for what the row says, so its words are never labelled as what a newer release writes. A word of
+ * no such shape gets no note either (the chain check refuses it). The words are plain text in the sentence, as the
+ * state note's "Written as" is.
+ */
+function unknownWordsNote(entry, state) {
+  if (state !== "ok") return null;
+  const unknown = (value, list, re) => typeof value === "string" && re.test(value) && !list.includes(value);
+  const words = [
+    unknown(entry.action, CONSOLE_AUDIT_ACTIONS, CONSOLE_AUDIT_ACTION_RE) ? `the action ${entry.action}` : null,
+    unknown(entry.outcome, CONSOLE_AUDIT_OUTCOMES, CONSOLE_AUDIT_OUTCOME_RE) ? `the outcome ${entry.outcome}` : null,
+  ].filter(Boolean);
+  return words.length === 0 ? null : html`<span class="reason">Not known to this console: ${words.join(" and ")} (a newer release writes such rows).</span>`;
 }
 
 /**
@@ -155,10 +183,11 @@ function rowOf({ entry, pos, state }, chain, used) {
   const count = Number.isSafeInteger(entry.count) ? (said === "" ? countText(entry.kind, entry.count, true) : ` (${countText(entry.kind, entry.count, false)})`) : "";
   // The faint dash stands for a cell with nothing in it: a row whose state note fills the cell has no dash before it.
   const note = stateNote(entry, state, chain);
-  const reasonText = said === "" && count === "" ? (note === null ? none : null) : html`${said}${count}`;
+  const unknownNote = unknownWordsNote(entry, state);
+  const reasonText = said === "" && count === "" ? (note === null && unknownNote === null ? none : null) : html`${said}${count}`;
   const reason = state === "damaged"
     ? html`<span class="au-dmg"><b>The chain check says:</b> ${chain?.broken?.reason ?? "this row's link to the one before it does not hold"}.</span>`
-    : html`${reasonText}${note}`;
+    : html`${reasonText}${note}${unknownNote}`;
   return {
     id,
     mark: state === "damaged" ? "failed" : null,
@@ -342,6 +371,9 @@ export function auditAbout(view) {
     ["Verified", range],
     ["Damaged", label === null ? (ok ? "none" : "not checked") : html`<b class="tinted tone-failed">${label}</b>`],
     ["Not verified", label === null ? (ok ? "none" : "every row") : c.suspect ? `row ${c.suspect.seq} (its link to the damaged row does not hold) and ${after}` : after],
+    // Issue #761: the rows an intact chain holds whose action or outcome this console does not know, only when there are
+    // any (the check counts them only on an intact chain).
+    ...(ok && c.unknown > 0 ? [["Not known to this console", `${rowsText(c.unknown)} (a newer release writes such rows)`]] : []),
     ...(Number.isFinite(c?.checkedAt) ? [["Checked at", timeHtml(c.checkedAt)]] : []),
     ["Each row keeps", "who, what, target, outcome, reason and a hash of the row before"],
     ["Who sees it", "operators only; viewers do not see this page"],

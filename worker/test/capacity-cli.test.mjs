@@ -113,7 +113,27 @@ test("refusals: a window it does not offer, an unknown flag, and two Valkeys it 
 	const problem = harness(dir);
 	assert.equal(await runCapacity([], { ...problem.opts, deploymentEnv: () => ({ problem: "PI_LOGS_DIR disagrees" }) }), 1);
 	assert.match(problem.err.join(""), /PI_LOGS_DIR disagrees/);
-	assert.deepEqual(CAPACITY_ENV_KEYS, ["PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_WORKER_NAME"]);
+	assert.deepEqual(CAPACITY_ENV_KEYS, ["PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_WORKER_NAME", "PI_RUN_MIRROR_MAX_RUNS"]);
+});
+
+test("the deployment's run index cap reaches the mirror read, and a cap the worker refuses fails the command (#761)", async () => {
+	// A mirror of 6,000 runs, its oldest three hours old: at the built-in 5,000 cap that reads as cut by count; a
+	// deployment whose cap is 10,000 never trimmed it.
+	const truncatedWith = async (cap) => {
+		const h = harness(deployment([]));
+		h.opts.redisFn = () => ({ eval: async () => [6000, String(NOW - 3 * H), null, String(NOW - 100 * 24 * H), 1, []], mget: async () => [], on: () => {}, disconnect: () => {} });
+		if (cap !== undefined) h.opts.env = { ...h.opts.env, PI_RUN_MIRROR_MAX_RUNS: cap };
+		assert.equal(await runCapacity(["--since", "24h", "--json"], h.opts), 0, h.err.join(""));
+		return JSON.parse(h.out.join("")).coverage.truncated;
+	};
+	assert.equal(await truncatedWith(undefined), true, "the default cap: at or over it, the oldest run is the start");
+	assert.equal(await truncatedWith("10000"), false, "the deployment's cap: nothing was cut");
+	for (const bad of ["999", "abc"]) {
+		const h = harness(deployment([]));
+		h.opts.env = { ...h.opts.env, PI_RUN_MIRROR_MAX_RUNS: bad };
+		assert.equal(await runCapacity([], h.opts), 1, bad);
+		assert.match(h.err.join(""), new RegExp(`PI_RUN_MIRROR_MAX_RUNS must be an integer 1000-20000 \\(got "${bad}"\\)`));
+	}
 });
 
 test("a refused Valkey is not a failure: the local files are read, no client is made, and the reason is said", async () => {

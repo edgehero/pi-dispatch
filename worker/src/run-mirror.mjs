@@ -1,4 +1,5 @@
 import { UNREADABLE_RECORD } from "./run-history.mjs";
+import { RUN_MIRROR_MAX_RUNS_DEFAULT } from "./retention.mjs";
 
 /**
  * A fleet-visible copy of the run history (issue #57, Gap 3).
@@ -201,13 +202,17 @@ export const runRecordKey = (sanitizedJobId) => `runs:rec:${sanitizedJobId}`;
 export const MIRROR_MAX_DAYS = 92;
 
 /**
- * A hard ceiling on index members, independent of the time window.
+ * A hard ceiling on index members, independent of the time window: the DEFAULT of `PI_RUN_MIRROR_MAX_RUNS`
+ * (issue #761), which the worker hands `makeRunMirror` as `indexMax`. Kept under this name for its importers (a
+ * reader's default, the admin's local index).
  *
  * The window alone does not bound memory: a deployment running thousands of jobs a day would hold a
  * quarter of a million members for ninety-two days. This caps what the fleet view can cost at roughly the
- * depth a panel can display, and the file on disk remains the complete history either way.
+ * depth a panel can display, and the file on disk remains the complete history either way. Every writer trims
+ * the SHARED index to its own cap, so in a fleet the lowest setting wins; each count trim raises the horizon, so
+ * a reader sees the cut, never idle time.
  */
-export const RUNS_INDEX_MAX = 5_000;
+export const RUNS_INDEX_MAX = RUN_MIRROR_MAX_RUNS_DEFAULT;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const OP_TIMEOUT_MS = 2_000;

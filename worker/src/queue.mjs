@@ -8,6 +8,7 @@ import { targetSeparator } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
 import { consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
 import { JOB_DATA_VERSION_FIELD, withJobDataVersion } from "./job-data-version.mjs";
+import { FORGE_JOB_RETENTION_S, LOCAL_JOB_KEPT_COMPLETED_S, LOCAL_JOB_KEPT_FAILED_S } from "./retention.mjs";
 
 // The close words in every forge's spelling, derived from the one table (never re-typed here): a
 // matched PR action in this set marks a close job for the semantic-key discriminant below.
@@ -37,7 +38,7 @@ function stampJobData(data, dataVersion, dataVersions = {}) {
 /** Deterministic source/run binding survives a lost enqueue acknowledgement. No question or draft is queued. */
 export async function enqueueAnswerDraftJob(queue, { runId, ruleId, draftRunId }) {
 	if (!/^[A-Za-z0-9._:-]{1,200}$/.test(runId ?? "") || !/^[a-z][a-z0-9_-]{0,63}$/.test(ruleId ?? "") || !/^answer-draft-[a-f0-9]{40}$/.test(draftRunId ?? "")) throw new Error("invalid answer draft reference");
-	await queue.add("answer-draft", { kind: "answer-draft", purpose: "answer-draft", answerDraft: { runId, ruleId } }, { jobId: draftRunId, attempts: 2, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: 31 * 86400, count: 5000 }, removeOnFail: { age: 31 * 86400, count: 5000 } });
+	await queue.add("answer-draft", { kind: "answer-draft", purpose: "answer-draft", answerDraft: { runId, ruleId } }, { jobId: draftRunId, attempts: 2, backoff: { type: "exponential", delay: 5000 }, removeOnComplete: { age: FORGE_JOB_RETENTION_S, count: 5000 }, removeOnFail: { age: FORGE_JOB_RETENTION_S, count: 5000 } });
 	return draftRunId;
 }
 
@@ -53,7 +54,7 @@ export async function enqueueWatchJob(queue, fields, { now = Date.now, phase = "
 export async function enqueueQuestionGroupJob(queue, { runId, digest, configDigest }, { nonce = randomUUID } = {}) {
 	if (!/^[A-Za-z0-9._:-]{1,200}$/.test(runId ?? "") || !/^[a-f0-9]{64}$/.test(digest ?? "") || !/^[a-f0-9]{64}$/.test(configDigest ?? "")) throw new Error("invalid question grouping reference");
 	const jobId = `question-group-${nonce()}`;
-	await queue.add("question-grouping", { kind: "question-grouping", questionGrouping: { runId, digest, configDigest } }, { jobId, attempts: 1, removeOnComplete: { age: 31 * 86400, count: 5000 }, removeOnFail: { age: 31 * 86400, count: 5000 } });
+	await queue.add("question-grouping", { kind: "question-grouping", questionGrouping: { runId, digest, configDigest } }, { jobId, attempts: 1, removeOnComplete: { age: FORGE_JOB_RETENTION_S, count: 5000 }, removeOnFail: { age: FORGE_JOB_RETENTION_S, count: 5000 } });
 	return jobId;
 }
 
@@ -293,14 +294,14 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		jobId: id,
 		attempts: 2,
 		backoff: { type: "exponential", delay: 60_000 },
-		removeOnComplete: { age: 24 * 3600 },
-		removeOnFail: { age: 7 * 24 * 3600 },
+		removeOnComplete: { age: LOCAL_JOB_KEPT_COMPLETED_S },
+		removeOnFail: { age: LOCAL_JOB_KEPT_FAILED_S },
 	});
 	return { id };
 }
 
-// Coalesces rapid re-label spam; the GUID jobId + 31d retention handle exact redelivery, so this
-// window only needs to absorb burst re-labels, not the full redelivery window.
+// Coalesces rapid re-label spam; the GUID jobId + its retention (`FORGE_JOB_RETENTION_S`) handle exact redelivery, so
+// this window only needs to absorb burst re-labels, not the full redelivery window.
 const SEMANTIC_WINDOW_MS = 10 * 60 * 1000;
 
 /**
@@ -443,13 +444,14 @@ export async function enqueueForgeJob(queue, kind, fields, { dataVersions } = {}
 }
 
 // A forge job's retry policy and retention, one table for both of its enqueue paths (the window-deduplicated one above
-// and the late-message resume below). The retention is in SECONDS; the semantic window's ttl is in ms.
+// and the late-message resume below). The retention is in SECONDS (`FORGE_JOB_RETENTION_S`, the delivery dedup window
+// of REQ-DEDUP-BY-DELIVERY-GUID, retention.mjs); the semantic window's ttl is in ms.
 // A function, so every add gets its own objects (bullmq keeps the options it is handed on the job).
 const forgeJobOpts = () => ({
 	attempts: 2,
 	backoff: { type: "exponential", delay: 60_000 },
-	removeOnComplete: { age: 31 * 24 * 3600 },
-	removeOnFail: { age: 31 * 24 * 3600 },
+	removeOnComplete: { age: FORGE_JOB_RETENTION_S },
+	removeOnFail: { age: FORGE_JOB_RETENTION_S },
 });
 
 /**

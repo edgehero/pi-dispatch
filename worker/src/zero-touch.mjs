@@ -179,15 +179,19 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 		trend, projects, causes: current.causes, fixes: fixed, groups, touchedRunIds: current.touchedRunIds };
 }
 
-/** The expensive scan is on demand, never the short dashboard snapshot or a mutating mirror reader. */
-export async function readZeroTouch({ redis = null, logsDir, retentionDays = 30, localHost = null, now = Date.now, windowDays = 30, project = null, scopeId = null, fixes = [], groups = [], fs, timeoutMs, includeRecords = false } = {}) {
+/**
+ * The expensive scan is on demand, never the short dashboard snapshot or a mutating mirror reader. `indexMax` is the
+ * deployment's run index cap (`PI_RUN_MIRROR_MAX_RUNS`, issue #761), handed to the run records read so an index of a
+ * raised cap is not read as cut by count (capacity-records.mjs `readMirrorWindow`); absent, that read's built-in default.
+ */
+export async function readZeroTouch({ redis = null, logsDir, retentionDays = 30, localHost = null, now = Date.now, windowDays = 30, project = null, scopeId = null, fixes = [], groups = [], fs, timeoutMs, indexMax, includeRecords = false } = {}) {
 	const nowMs = now();
 	// A park may predate every plotted interval and still wait throughout this one. Read retained history,
 	// not only the trend's lookback, or a long-lived unanswered run disappears from current waiting hours.
 	const retainedFromMs = Number(retentionDays) > 0 ? nowMs - Number(retentionDays) * DAY : 0;
 	const sinceMs = Math.max(0, Math.min(retainedFromMs, nowMs - 2 * windowDays * DAY, nowMs - (windowDays + 49) * DAY, nowMs - 30 * DAY));
 	const [runs, touches] = await Promise.all([
-		readCapacityRecords({ redis, logsDir, sinceMs, nowMs, retentionDays, localHost, fs, ...(timeoutMs ? { timeoutMs } : {}) }),
+		readCapacityRecords({ redis, logsDir, sinceMs, nowMs, retentionDays, localHost, fs, ...(timeoutMs ? { timeoutMs } : {}), ...(indexMax ? { indexMax } : {}) }),
 		makeTouchStore({ redis, retentionDays, now, ...(timeoutMs ? { timeoutMs } : {}) }).read(),
 	]);
 	const boundaries = [touches.coverage.fromMs];

@@ -210,6 +210,53 @@ test("an unpublished prime is swept with its workspace archive using the injecte
 	assert.deepEqual(removed, [args.runId]);
 });
 
+test("the sweep ages a source a newer release published by its own publish time and still removes its archive; a v0 manifest is not read (issue #761)", async () => {
+	let clock = NOW;
+	const removed = [];
+	const { store, args, dir } = setup({ now: () => clock, limits: { ttlMs: 100 }, checkpointer: {
+		primeBase: async () => ({ ok: true }), remove: async (runId) => { removed.push(runId); return { removed: true }; },
+	} });
+	const other = { ...args, runId: "github:delivery:2" };
+	const isoAt = { ...args, runId: "github:delivery:3" };
+	const negativeAt = { ...args, runId: "github:delivery:4" };
+	const stray = { ...args, runId: "github:delivery:5" };
+	const all = [args, other, isoAt, negativeAt, stray];
+	// All primed at NOW (their origin.json), all published at NOW + 50 (their manifest's `at`).
+	for (const a of all) assert.equal((await store.primeBase(a)).ok, true);
+	clock += 50;
+	for (const a of all) assert.equal(store.publish(a).ok, true);
+	const rewrite = (a, over) => {
+		const path = join(dir, forkSourceKey(a.runId), "manifest.json");
+		fs.writeFileSync(path, JSON.stringify({ ...JSON.parse(fs.readFileSync(path, "utf8")), ...over }));
+	};
+	rewrite(args, { v: 2, lineage: { parent: null } });
+	rewrite(other, { v: 0 });
+	// Newer sources whose publish time is not a millisecond count: read as one, an ISO string ages as NaN and -1 as the
+	// whole epoch, and either young source would be removed with its archive. Neither is an age; each falls back to its
+	// origin.json.
+	rewrite(isoAt, { v: 2, at: new Date(NOW + 50).toISOString() });
+	rewrite(negativeAt, { v: 2, at: -1 });
+	// A folder whose manifest names ANOTHER run, with an old `at`: read as that run's, the sweep would remove the young
+	// newer source's workspace archive. It is not this folder's manifest, so the folder ages by its own origin.json.
+	rewrite(stray, { v: 2, runId: args.runId, at: 0 });
+	assert.equal(store.read({ runId: args.runId }).refused, "fork-source-corrupt", "a newer source is never served by this build");
+	// Inside every origin's age: nothing is old, so nothing goes, and no archive is touched.
+	assert.deepEqual(await store.sweep(), { removed: 0 });
+	assert.deepEqual(removed, [], "no young source and no other run's archive is removed");
+	for (const a of all) assert.equal(fs.existsSync(join(dir, forkSourceKey(a.runId), "manifest.json")), true, a.runId);
+	// Past the origin's age, inside the newer manifest's: the newer source is young by its own time; the v0 one, the two
+	// whose `at` is no age and the stray fall back to their origin.json and go, each with its OWN archive.
+	clock = NOW + 101;
+	assert.deepEqual(await store.sweep(), { removed: 4 });
+	assert.deepEqual([...removed].sort(), [other.runId, isoAt.runId, negativeAt.runId, stray.runId].sort());
+	assert.equal(fs.existsSync(join(dir, forkSourceKey(args.runId), "manifest.json")), true);
+	clock = NOW + 151;
+	assert.deepEqual(await store.sweep(), { removed: 1 });
+	assert.deepEqual(removed.at(-1), args.runId, "the newer source's workspace archive goes with it");
+	assert.equal(removed.length, 5);
+	assert.equal(fs.existsSync(join(dir, forkSourceKey(args.runId))), false);
+});
+
 test("transient source reads remain retryable through selection and restore, rather than policy refusals", async () => {
 	const { store, args, dir } = setup();
 	store.publish(args);

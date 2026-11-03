@@ -75,8 +75,9 @@
  *                                      close event (issue #231). Deliberately OUTSIDE the touched
  *                                      family, with a short ~1-day TTL of its own: the counter must
  *                                      decay with the outage it measures, not live with the repo.
- * All keys carry a ~35-day TTL and are refreshed TOGETHER after each successful repo poll. 35 days
- * deliberately exceeds the 31-day gh-* jobId retention (REQ-DEDUP-BY-DELIVERY-GUID): the cursor and
+ * All keys carry a ~35-day TTL (`CURSOR_TTL_SECONDS`) and are refreshed TOGETHER after each successful
+ * repo poll. It deliberately exceeds the gh-* jobId retention (`FORGE_JOB_RETENTION_S`,
+ * REQ-DEDUP-BY-DELIVERY-GUID) by four days, and is derived from it: the cursor and
  * the jobId are the poller's two dedup layers, and refreshing/expiring the cursor family as a unit
  * means an actively polled repo always has a coherent live family, while a repo REMOVED from the set
  * decays cleanly past both windows and re-arms from scratch if it ever returns. A partially expired
@@ -111,6 +112,7 @@ import { configError } from "@edgehero/pi-dispatch/config";
 import { judgeValkeyAtStart, makeRedisClient, parseConnection, valkeyClientContext } from "@edgehero/pi-dispatch/connection";
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { enqueueGitHubJob, makeQueue } from "@edgehero/pi-dispatch/queue";
+import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
 import { trySteer } from "./steer.mjs";
 import { holdAfterDedup, holdBeforeLabel } from "./held.mjs";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
@@ -120,8 +122,10 @@ import { loadPollerConfig } from "./poller-config.mjs";
 import { retryIdentity } from "./boot-retry.mjs";
 
 const API_URL = "https://api.github.com";
-// 35 days: strictly outlives the 31-day gh-* job retention -- see the header's cursor/TTL section.
-const CURSOR_TTL_SECONDS = 35 * 24 * 3600;
+// In SECONDS (`EX`): strictly outlives the gh-* job retention (`FORGE_JOB_RETENTION_S`) by four days, derived so that
+// lengthening the retention cannot leave the cursor the shorter of the poller's two dedup layers -- see the header's
+// cursor/TTL section.
+export const CURSOR_TTL_SECONDS = FORGE_JOB_RETENTION_S + 4 * 86_400;
 // Installation repo-list refresh cadence, in cycles (~10 minutes at the default interval): fresh
 // enough that a newly installed repo starts polling soon, cheap enough to be invisible in the quota.
 const DISCOVERY_EVERY = 10;

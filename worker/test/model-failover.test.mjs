@@ -402,6 +402,17 @@ test("all recovering jobs pin the checkpoint model before image checks, even wit
 	assert.deepEqual(missing.seen, []);
 });
 
+test("a recovery whose checkpoint a newer release wrote is deferred newer-release at the model pin, not refused: no record, no token, no clone (issue #761)", async () => {
+	const reads = [];
+	const logs = [];
+	const fixture = pickupFixture({ data: { recoveryOf: "old", recover: true, fallbackModels: undefined }, extraDeps: { log: (event, fields) => logs.push([event, fields]), workspaceCheckpointer: { readManifest: async (runId) => (reads.push(runId), { invalid: true, reason: "field:newer", newer: true }) } } });
+	await assert.rejects(fixture.run, { name: "DelayedError" });
+	assert.deepEqual(fixture.seen, ["defer"], "deferred before the mint and the clone");
+	assert.deepEqual(logs.filter(([event]) => event === "newer_release_hold").map(([, f]) => f.what), ["the run's checkpoint"]);
+	assert.deepEqual(fixture.records, [], "nothing recorded: the recovery waits, its one attempt unspent");
+	assert.deepEqual(reads, ["old"]);
+});
+
 test("checkpoint model outside the current reviewed ceiling refuses before any token or clone", async () => {
 	const fixture = pickupFixture({ data: { recoveryOf: "old", recover: true, fallbackModels: undefined, models: [primary] }, extraDeps: { workspaceCheckpointer: { readManifest: async () => ({ ok: true, manifest: { provider: "anthropic", model: "fallback" } }) } } });
 	assert.equal((await fixture.run()).reason, "model-not-allowed");
