@@ -1,5 +1,6 @@
 import * as nodeFs from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { logsDirPath } from "@edgehero/pi-dispatch/config";
 import { deploymentServiceEnv, trustedChain } from "@edgehero/pi-dispatch/service-env";
 import { cleanGatewayTarget, distinctGatewayOrigins } from "@edgehero/pi-dispatch/sandbox-gateway-protocol";
 
@@ -17,8 +18,15 @@ export function validateGatewayConfig(raw) {
 	return { version: 1, origin: raw.origin, consoleOrigin: raw.consoleOrigin, host: raw.host, deployment: raw.deployment, sockets: { ...raw.sockets }, listen: { ...listen } };
 }
 
-/** The trusted file is deployment authority. Ambient runtime, provider and forge variables never enter this process. */
-export function readGatewayConfig(path, { fs = nodeFs, uid = process.geteuid?.(), platform = process.platform, readDeployment = deploymentServiceEnv } = {}) {
+/**
+ * The trusted file is deployment authority. Ambient runtime, provider and forge variables never enter this process.
+ *
+ * `logsDir` is the worker's and the console's own rule (`logsDirPath`, resolved against the deployment folder as the
+ * console resolves it), so the gateway's audit rows join the chain the console's Audit page reads, the worker's
+ * reaper prunes and a backup copies. A default of its own would put them in `<deployment>/logs`, the service
+ * manager's capture, which none of the three looks at. `home` is a seam: undefined keeps `safeHomeDir()`.
+ */
+export function readGatewayConfig(path, { fs = nodeFs, uid = process.geteuid?.(), platform = process.platform, readDeployment = deploymentServiceEnv, home } = {}) {
 	if (!pathOk(path)) throw new Error("gateway --config requires an absolute configuration path");
 	let fd;
 	try {
@@ -35,7 +43,10 @@ export function readGatewayConfig(path, { fs = nodeFs, uid = process.geteuid?.()
 		if (env.PI_WORKER_NAME !== config.host) throw new Error("the gateway host must match PI_WORKER_NAME in the trusted deployment");
 		const idle = env.PI_SANDBOX_IDLE_MINUTES ?? "30";
 		if (!/^(0|[1-9][0-9]*)$/.test(idle) || !Number.isSafeInteger(Number(idle))) throw new Error("PI_SANDBOX_IDLE_MINUTES must be a non-negative integer");
-		return { ...config, idleMinutes: Number(idle), env, logsDir: resolve(config.deployment, env.PI_LOGS_DIR ?? "logs") };
+		// `||` inside logsDirPath, so a blank PI_LOGS_DIR= takes the default rather than making the deployment folder
+		// itself the logs folder. With no home it is /tmp/pi-dispatch-<euid>/logs whatever TMPDIR says: `env` holds only
+		// the file's keys.
+		return { ...config, idleMinutes: Number(idle), env, logsDir: resolve(config.deployment, logsDirPath(env, home)) };
 	} catch (error) {
 		// Parse errors may quote file content, which is configuration text rather than a safe diagnostic.
 		if (error instanceof SyntaxError) throw new Error("the gateway configuration is not valid JSON");
