@@ -17,6 +17,7 @@
     {"el":"Flow, venue, model, tokens and job cap are on the run page","kind":"readme","status":"new","panel":"p-runs","source":"admin/src/console/panels/runs.mjs#RUNS_TABLE_HEADS","holds":"hidePhone","golden":["runs.operator","runs.viewer"],"shows":"<td class=\"hide-phone\" data-l=\"Flow\">","reason":"left off a phone, and off a desktop narrower than the RunsScreen card's own 1,440 px (runs-css.mjs RUNS_TABLE.allMin), the kit marking each one's head as it marks its cells"},
     {"el":"The same data as the desktop page","kind":"provides","status":"new","source":"admin/src/console/pages.mjs#loadPageData","holds":"runsWindow","reason":"one page and one read at every width; a phone is the same markup under the phone's rules"},
     {"el":"The phone layout is CSS only (tbl--stack, data-l labels, filterbar--collapsible)","kind":"provides","status":"new","source":"admin/src/console/runs-css.mjs#RUNS_CSS","holds":"@media","reason":"bundle.css draws tbl--stack, the data-l labels and the fold, and runs-css.mjs orders the stacked cells; the kit writes a data-l only where a column has a phone label (the host and the cost here); the fold's class is the browser script's, so the toggle is the one part that needs it"},
-    {"el":"The same rows as RunsScreen","kind":"sample","status":"illustrative","reason":"the card's fixture rows (the RunsScreen ledger's samples)"}
+    {"el":"The same rows as RunsScreen","kind":"sample","status":"illustrative","reason":"the card's fixture rows (the RunsScreen ledger's samples)"},
+    {"el":"Four counts in one row","kind":"readme","status":"illustrative","reason":"the page draws five, since cancelled is a real outcome, and wraps them"}
   ]
 }

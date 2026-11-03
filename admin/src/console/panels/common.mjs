@@ -139,7 +139,7 @@ export const canAct = (view) => view?.role === "operator" && !view?.readOnly;
  * (`int`, `json`, `list`; text by default).
  */
 function actForm(action, { hidden = [], fields = null, label, cls = "act" }) {
-  return html`<form class="${cls}" data-action="${action}" autocomplete="off">${hidden.map(([k, v, type]) => html`<input type="hidden" name="${k}" value="${String(v)}"${type ? html` data-type="${type}"` : null}>`)}${fields}<button type="submit">${label}</button><div class="preview-area" data-preview hidden></div></form>`;
+  return html`<form class="${cls}" data-action="${action}" autocomplete="off">${hidden.map(([k, v, type]) => html`<input type="hidden" name="${k}" value="${String(v)}"${type ? html` data-type="${type}"` : null}>`)}${fields}<button class="btn btn--sm" type="submit">${label}</button><div class="preview-area" data-preview hidden></div></form>`;
 }
 
 /** A labelled text input; `type` as `actForm`'s. */
@@ -434,8 +434,11 @@ function parkedAnswerForm(jobId) {
 }
 
 // Shared with the screens' modules only; `../panels.mjs` does not re-export these.
+/** "1 slot", "2 slots": a count and its noun, agreed. */
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
 export {
-  SEC, MIN, cell, msOf, count, runLink, targetLink, titled, actForm, field, area, indexField, editor, table, facts,
+  plural, SEC, MIN, cell, msOf, count, runLink, targetLink, titled, actForm, field, area, indexField, editor, table, facts,
   fromSnapshot, costText, capMicrosOf, pausedState, beatCell, blessedText, activeTable, outcomeText, bannerCut,
   parkedAnswerForm
 };

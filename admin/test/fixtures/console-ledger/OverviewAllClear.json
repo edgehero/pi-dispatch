@@ -20,6 +20,7 @@
     {"el":"p-timeline","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewTimeline","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
     {"el":"p-caps","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewCaps","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
     {"el":"p-waitlists","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
-    {"el":"p-hosts","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"}
+    {"el":"p-hosts","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
+    {"el":"Hosts with every doctor passing","kind":"readme","status":"illustrative","reason":"the sample fixture has a host that warns, so the card's own line is not true of its sample; the page says what each host reports"}
   ]
 }

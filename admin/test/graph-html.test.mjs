@@ -342,7 +342,7 @@ test("orphan dash, potential-vs-observed labels, the caps digits, and honesty co
 
   // The two counters the text and TUI surfaces always stated and this page dropped (issue #175):
   // three surfaces of one model must not disagree about what was refused or unreadable.
-  assert.ok(out.includes("1 chain requests refused (caps or gate)"), "the canned refusals reach the legend");
+  assert.ok(out.includes("1 chain request refused (caps or gate)"), "the canned refusals reach the legend");
   const unreadable = buildGraphModel(CANNED());
   unreadable.meta.injectedUnreachable = ["/inj"];
   assert.ok(pageOf(unreadable).includes("injected skills dir unreadable: /inj"), "the unreadable-dir counter renders when set");

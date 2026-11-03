@@ -3,179 +3,24 @@
   "pr": 777,
   "words": "cc88fb5bc7e201bd15cdd593f14ffa419ec51ebe3d9af66a9b3aefcc1c8207c0",
   "elements": [
-    {
-      "el": "p-zt-rate",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchRate",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-zt-streak",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchStreak",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-zt-wait",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchWait",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-zt-handled",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchHandled",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-zt-projects",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchProjects",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-zt-questions",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchQuestions",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-zt-causes",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchCauses",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "p-zt-fixes",
-      "kind": "panel",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchFixes",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "Second Runs tab and selected 7/30/90-day window",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchTabs",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "Rate with weekly trend, dashed goal, covered interval and change in words",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchRate",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "Native project rows opening to repository and folder counts",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchProjects",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "Six causes, common bar scale, worded levels and count once per run",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchCauses",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "Cause-linked fixes compare equal spans and show missing exposure",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchFixes",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "The fixture deployment, 214 runs, 38 touches, trend points, dates and two fixes",
-      "kind": "sample",
-      "status": "illustrative",
-      "reason": "Values are the published cards sample, not asserted deployment totals. Behavioral tests independently check the fold and counterexamples."
-    },
-    {
-      "el": "Standing answers and drafting controls on this page",
-      "kind": "readme",
-      "status": "absent",
-      "sentence": "admin/src/console/panels/zero-touch.mjs#ZERO_TOUCH_WORDS.drafts",
-      "roles": [
-        "viewer"
-      ],
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ],
-      "reason": "Answer-rule and standing-answer controls live on Parked. This page reads the confirmed-draft source-run count without exposing private draft text or adding send controls."
-    },
-    {
-      "el": "Viewer sees counts and safe fix descriptions, without groups or actions",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/zero-touch-view.mjs#zeroTouchView",
-      "golden": [
-        "panels/zero-touch-populated.viewer"
-      ]
-    },
-    {
-      "el": "Confirmed draft answers, edited or as drafted, remain human touches and count once per retained source run",
-      "kind": "readme",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchHandled",
-      "panel": "p-zt-handled",
-      "golden": [
-        "panels/zero-touch-populated.viewer",
-        "panels/zero-touch-no-drafts.viewer",
-        "panels/zero-touch-partial.operator"
-      ],
-      "shows": [
-        "Sent by a person, edited or as drafted. Each run still counts as a touch."
-      ],
-      "reason": "#753 connects the existing fleet recount/projection to desktop and phone; behavior tests cover successful actual worker provenance, duplicates, scopes, intervals, partial and unavailable history."
-    },
-    {
-      "el": "Unavailable draft-answer history is unknown rather than zero",
-      "kind": "state",
-      "status": "new",
-      "source": "admin/src/console/panels/zero-touch.mjs#zeroTouchHandled",
-      "panel": "p-zt-handled",
-      "golden": [
-        "panels/zero-touch-unavailable.operator"
-      ],
-      "shows": [
-        "Zero touch could not be read. Reload to try again; missing history is never counted as zero touches."
-      ]
-    }
+    {"el":"p-zt-rate","kind":"panel","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchRate","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"p-zt-streak","kind":"panel","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchStreak","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"p-zt-wait","kind":"panel","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchWait","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"p-zt-handled","kind":"panel","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchHandled","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"p-zt-projects","kind":"panel","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchProjects","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"p-zt-questions","kind":"panel","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchQuestions","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"p-zt-causes","kind":"panel","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchCauses","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"p-zt-fixes","kind":"panel","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchFixes","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"Second Runs tab and selected 7/30/90-day window","kind":"readme","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchTabs","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"Rate with weekly trend, dashed goal, covered interval and change in words","kind":"readme","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchRate","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"Native project rows opening to repository and folder counts","kind":"readme","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchProjects","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"Six causes, common bar scale, worded levels and count once per run","kind":"readme","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchCauses","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"Cause-linked fixes compare equal spans and show missing exposure","kind":"readme","status":"new","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchFixes","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"The fixture deployment, 214 runs, 38 touches, trend points, dates and two fixes","kind":"sample","status":"illustrative","reason":"Values are the published cards sample, not asserted deployment totals. Behavioral tests independently check the fold and counterexamples."},
+    {"el":"Standing answers and drafting controls on this page","kind":"readme","status":"absent","sentence":"admin/src/console/panels/zero-touch.mjs#ZERO_TOUCH_WORDS.drafts","roles":["viewer"],"golden":["panels/zero-touch-populated.viewer"],"reason":"Answer-rule and standing-answer controls live on Parked. This page reads the confirmed-draft source-run count without exposing private draft text or adding send controls."},
+    {"el":"Viewer sees counts and safe fix descriptions, without groups or actions","kind":"readme","status":"new","source":"admin/src/zero-touch-view.mjs#zeroTouchView","golden":["panels/zero-touch-populated.viewer"]},
+    {"el":"Confirmed draft answers, edited or as drafted, remain human touches and count once per retained source run","kind":"readme","status":"new","panel":"p-zt-handled","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchHandled","golden":["panels/zero-touch-populated.viewer","panels/zero-touch-no-drafts.viewer","panels/zero-touch-partial.operator"],"shows":["Sent by a person, edited or as drafted. Each run still counts as a touch."],"reason":"#753 connects the existing fleet recount/projection to desktop and phone; behavior tests cover successful actual worker provenance, duplicates, scopes, intervals, partial and unavailable history."},
+    {"el":"Unavailable draft-answer history is unknown rather than zero","kind":"state","status":"new","panel":"p-zt-handled","source":"admin/src/console/panels/zero-touch.mjs#zeroTouchHandled","golden":["panels/zero-touch-unavailable.operator"],"shows":["Zero touch could not be read. Reload to try again; missing history is never counted as zero touches."]},
+    {"el":"Most often counts","kind":"readme","status":"illustrative","reason":"the page gives counts per project and per cause"}
   ]
 }

@@ -24,8 +24,7 @@ import {
   RUN_ID_RE,
   beatAgeOf,
   progressText,
-  workersOnline,
-} from "./common.mjs";
+  workersOnline, plural } from "./common.mjs";
 import {
   waitingSentence,
   WAITING_CUT_TEXT,
@@ -139,7 +138,7 @@ export const fleetBar = (v) => {
       : list(s.held.rows).length + Number(s.held.more ?? 0);
   return ui.card({
     ring: partial ? "attention" : null,
-    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.online ?? "unknown"} hosts beat, ${running.length} queues accept jobs. Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span></p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}. Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
+    body: html`<div class="fl-bar"><div class="fl-bar__row">${ui.tile(partial || allPaused ? "attention" : "ok", { icon: partial || allPaused ? "pause" : "fleet" })}<div class="fl-bar__t"><h2>${title}</h2><p class="muted">${online.online ?? "unknown"} ${online.online === 1 ? "host beats" : "hosts beat"}, ${plural(running.length, "queue")} ${running.length === 1 ? "accepts" : "accept"} jobs. ${v.role === "operator" ? html`Valkey <span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "Valkey answers."}</p>${partial ? html`<p class="muted">Starts nothing new: ${paused.map((q) => q.queue).join(", ")}. Keeps starting jobs: ${running.map((q) => q.queue).join(", ")}.</p>` : null}</div><div class="fl-bar__stats">${statistic(count("waiting"), "waiting")}${
       partial
         ? statistic(
             paused.reduce(
@@ -154,7 +153,7 @@ export const fleetBar = (v) => {
           )
         : null
     }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${partial ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}${running.length || !queues.length ? act(v, "fleet-pause", "Pause the fleet", [], { small: false }) : null}${allPaused ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: "Registry not read", body: html`${REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
-          block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from <span class="code">${s.valkey ?? "the deployment's Valkey"}</span> and ${list(s.hostBudgets).length} hosts' registry rows. Live: this panel redraws when the fleet changes.</span></p></div>`,
+          block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${v.role === "operator" ? html`<span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "the deployment's Valkey"} and ${list(s.hostBudgets).length} hosts' registry rows. Live: this panel redraws when the fleet changes.</span></p></div>`,
   });
 };
 
@@ -262,7 +261,7 @@ export const fleetActive = wrap(
     flush: true,
     sub: (s) =>
       s
-        ? `${list(s.active).length} running, ${orphanRows(s).length} slots held by orphans`
+        ? `${list(s.active).length} running, ${plural(orphanRows(s).length, "slot")} held by orphans`
         : null,
   },
 );
@@ -289,17 +288,13 @@ export const fleetHeld = wrap(
       (r) =>
         html`<div class="fl-held"><div class="fl-held__h">${runLink(r.jobId)}${project(r.project)}<span>${r.target ?? "no target recorded"}</span><span class="muted">held ${ageText(r.waitedMs)}</span><span class="muted">${r.checks ?? 0} of ${s.waitMaxChecks ?? 96} checks</span><span class="end">${jobAct(v, "cancel-held", "Cancel", r)}</span></div><p class="card__sub">${r.label ?? "Conditions not published"}</p><p class="card__sub">It starts when every condition is met. ${r.after ? "After a time" : "Without a time condition"}${
           list(r.answers).length
-            ? `, then ${list(r.answers).length} ${list(r.answers).length === 1 ? "check" : "checks"} named ${list(
-                r.answers,
-              )
-                .map((a) => a.profile)
-                .join(", ")}`
+            ? `, then ${list(r.answers).length} ${list(r.answers).length === 1 ? "check" : "checks"}${v.role === "operator" ? ` named ${list(r.answers).map((a) => a.profile).join(", ")}` : ""}`
             : ", with no profile answer published yet"
         }.</p><ul class="fl-cond">${r.after ? html`<li>${ui.icon("clock", { size: "sm" })}<span><b>After ${timeHtml(r.after)}</b><span class="muted">${r.after <= v.now ? "met" : `in ${ageText(r.after - v.now)}`}</span></span>${ui.chip(r.after <= v.now ? "Met" : "Pending", { status: r.after <= v.now ? "ok" : "idle", icon: r.after <= v.now ? "done" : "hourglass" })}</li>` : null}${list(
           r.answers,
         ).map((a) => {
           const state = answerView(a.answer);
-          return html`<li>${ui.icon(state.icon, { size: "sm" })}<span><b>${a.profile}</b><span class="muted">${state.text.toLowerCase()}${a.at ? html`, last checked ${timeHtml(a.at)}` : ", no check time published"}</span></span>${ui.chip(state.text, { status: state.status, icon: state.icon })}</li>`;
+          return html`<li>${ui.icon(state.icon, { size: "sm" })}<span><b>${v.role === "operator" ? a.profile : "A check"}</b><span class="muted">${state.text.toLowerCase()}${a.at ? html`, last checked ${timeHtml(a.at)}` : ", no check time published"}</span></span>${ui.chip(state.text, { status: state.status, icon: state.icon })}</li>`;
         })}</ul>${list(r.answers).some((a) => a.answer === "unclear") ? html`<p class="card__sub">${list(r.answers).filter((a) => a.answer === "unclear").length} checks could not tell (${s.waitMaxFaults ?? 5} in a row ends the wait).</p>` : null}</div>`,
     )}${!rows.length ? html`<p>No job is held.</p>` : null}<p class="note">A job starts when every condition is met. Checks spend nothing. A check profile gives up after ${Number(s.waitMaxMs ?? 86400000) / 3600000} hours or ${s.waitMaxChecks ?? 96} checks (wait-expired). A cancelled held job spent nothing while it waited. A check that cannot tell ${s.waitMaxFaults ?? 5} times in a row ends the wait.</p>${s.held.more ? html`<p>${s.held.more} more held.</p>` : null}${s.held.truncated ? html`<p>Not every held job was read.</p>` : null}`;
   },
@@ -319,11 +314,10 @@ export const fleetDelayed = wrap("Delayed", (s, v) => {
     return html`<p>The waiting jobs could not be read.</p>`;
   const cancellable = (r) =>
     r.attemptsMade === 0 && r.stalled === 0 && !r.recovery && !r.schedulerNext;
-  return html`${ui.kpi(s.queue?.counts?.delayed ?? "not read", "delayed jobs")}<p> ${list(s.schedulers).length} cron schedules; ${
-    s.held?.unreachable
-      ? "unreadable"
-      : list(s.held?.rows).length + Number(s.held?.more ?? 0)
-  } held jobs. Other jobs are grouped by the reason their worker recorded. </p> ${DEFER_BUCKETS.map(
+  const heldCount = list(s.held?.rows).length + Number(s.held?.more ?? 0);
+  return html`${ui.kpi(s.queue?.counts?.delayed ?? "not read", s.queue?.counts?.delayed === 1 ? "delayed job" : "delayed jobs")}<p> ${plural(list(s.schedulers).length, "cron schedule")}; ${
+    s.held?.unreachable ? "held jobs unreadable" : plural(heldCount, "held job")
+  }. Other jobs are grouped by the reason their worker recorded. </p> ${DEFER_BUCKETS.map(
     (bucket) => {
       const rows = w.rows.filter((r) => (r.bucket ?? "none") === bucket);
       return rows.length
@@ -522,7 +516,7 @@ export function failedWhy(r) {
     return html`<span class="note">Its run record names no reason.</span>`;
   const words = reasonWords(r.reason);
   return words.known
-    ? html`Its run record says: ${words.sentence}${words.next ? html` Next: ${words.next}` : null}`
+    ? html`Its run record says: ${ui.withCode(words.sentence)}${words.next ? html` Next: ${ui.withCode(words.next)}` : null}`
     : html`Its run record says: <span class="code">${r.reason}</span>, this console has no explanation for this reason.`;
 }
 

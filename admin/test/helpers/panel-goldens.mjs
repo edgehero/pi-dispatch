@@ -787,12 +787,34 @@ function longQueuesSnapshot(paused) {
  * closed list: a file under `panels/` that is not one of these fails `console-panel-goldens.test.mjs`.
  */
 /** The run cards' states, rendered through the production panel table without transcript text. */
-async function runCard({ role = "operator", rec = record({ jobId: "gh-pulse", maxTurns: 40, turns: 14, triggerIndex: 0, triggerType: "comment" }), chat = { state: "finished", mode: "fork", jobState: "completed" }, transcript = { exists: false }, ...extra } = {}) {
+async function runCard({ role = "operator", rec = record({ jobId: "gh-pulse", maxTurns: 40, turns: 14, triggerIndex: 0, triggerType: "comment" }), chat = { state: "finished", mode: "fork", jobState: "completed" }, transcript = { exists: false }, id = null, ...extra } = {}) {
   const data = { now: NOW, env: {}, run: rec ? { record: rec, source: "local" } : { missing: true }, chat, transcript, children: [], childrenSearched: 50, ...extra };
-  const result = await renderPage("run", { query: { id: rec?.jobId ?? "gh-pulse" }, session: role === "operator" ? OPERATOR : VIEWER, data });
+  const result = await renderPage("run", { query: { id: id ?? rec?.jobId ?? "gh-pulse" }, session: role === "operator" ? OPERATOR : VIEWER, data });
   return String(result.html);
 }
+/**
+ * Issue #752: a steer-armed job at work, the page the READMEs open their first stage with. Its progress is the fixture's
+ * running job's (`console-pages-harness.mjs`), the agent's note and phases included, and one steer has already reached it.
+ * The transcript's entries arrive over the page's stream, so the golden holds its empty box and `launch/console-render.mjs`
+ * feeds it.
+ */
+const STEER_TEXT = "Leave the payments reader for a later pull request, and say so in this one.";
+const LIVE_ARMED = Object.freeze({
+  id: "gh-b3d7",
+  rec: null,
+  chat: { state: "active", mode: "live", jobState: "active" },
+  transcript: { exists: true },
+  activeRun: { target: "acme/billing#259", kind: "github", host: "mini1", project: "billing", backend: "podman", flow: "migrate", provider: "anthropic", model: "claude-sonnet-5-5", maxTurns: 40, queue: "pi-jobs@mini1", startedAt: new Date(NOW - 12 * MIN).toISOString() },
+  inbox: { found: true, steer: true, state: "active", open: true, entries: [{ id: "a1b2c3d4", mode: "steer", source: "console", state: "delivered", at: NOW - 70_000, by: "ops", bytes: Buffer.byteLength(STEER_TEXT) }] },
+  progress: { v: 1, interrupted: 0, prior: null, startedAt: NOW - 12 * MIN, updatedAt: NOW - 2_000, ended: false, outcome: null, commentId: null, turn: 7, steps: 12, failed: 1, running: [{ tool: "bash", since: NOW - 40_000 }], recent: [{ tool: "read", status: "ok", durationMs: 120, at: NOW - 90_000 }, { tool: "bash", status: "error", durationMs: 2300, at: NOW - 60_000 }, { tool: "edit", status: "ok", durationMs: null, at: NOW - 45_000 }], phase: { index: 1, done: 3, total: 10 }, phases: ["survey", "migrate the schema", "verify", "report"], note: "three of ten tables migrated" },
+});
 const RUN_CARD_STATES = {
+  "run-live-armed.operator": () => runCard(LIVE_ARMED),
+  "run-steer-confirm.operator": async () => {
+    const planSteer = async ({ jobId, text, mode }) => ({ plan: { jobId, id: "e5f6a7b8", mode, text, bytes: Buffer.byteLength(text), digest: "c".repeat(64) } });
+    const answer = await actionWorld({ rm: { planSteer } }).preview("steer", { jobId: "gh-b3d7", mode: "steer", text: STEER_TEXT });
+    return openSlotAfter(await runCard(LIVE_ARMED), "p-chat", { inner: answerHtml(answer, 200, "steer") });
+  },
   "run-chat-live.operator": () => runCard({ rec: null, chat: { state: "active", mode: "live", jobState: "active" }, transcript: { exists: false }, activeRun: { target: "acme/web#42", kind: "github", host: "mini1", project: "web", backend: "podman", flow: "fix", provider: "anthropic", model: "claude-sonnet-5-5", maxTurns: 40, queue: "pi-jobs@mini1", startedAt: new Date(NOW - 2 * MIN).toISOString() }, inbox: { found: true, steer: true, state: "active", open: true, entries: [] } }),
   "run-chat-reply.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-input", session: { resumed: false, reason: "absent", bytes: 4096 } }), chat: { state: "parked", mode: "reply", jobState: "completed" }, transcript: { exists: true, ended: true, outcome: "completed" } }),
   "run-chat-approval.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-approval", approval: { requestId: "a".repeat(64), action: "budget-raise" }, session: { resumed: false, reason: "absent", bytes: 4096 } }), chat: { state: "awaiting-approval", mode: "reply", jobState: "completed" }, chatAnswer: { ok: true }, transcript: { exists: true, ended: true, outcome: "completed" } }),

@@ -48,6 +48,8 @@
     {"el":"Dense schedule projection is explicitly bounded","kind":"state","status":"new","panel":"p-tr-week","source":"admin/src/console/panels/triggers.mjs#triggersWeek","golden":["panels/triggers-dense.operator"],"shows":"Dense schedule: only the first projected ticks are shown."},
     {"el":"Card fixture seven rules, sample run counts, spend, last runs, spent id and example comment","kind":"sample","status":"illustrative","reason":"Published card numbers and sample checker text are illustrative. Production goldens use the seeded deployment, real retained records and actual receiver filters; no sample count or match is claimed as a live fact."},
     {"el":"Per-rule selectors, scope, flow/model/venue, chip options, one-shot state, history, next fires and pause windows","kind":"provides","status":"new","source":"admin/src/trigger-list.mjs#triggerListOf","golden":["triggers.operator"],"shows":"rules"},
-    {"el":"Add a trigger opens the existing editor from the title bar","kind":"readme","status":"new","source":"admin/src/console/pages.mjs#renderPage","golden":["triggers.operator"],"shows":"Add a trigger"}
+    {"el":"Add a trigger opens the existing editor from the title bar","kind":"readme","status":"new","source":"admin/src/console/pages.mjs#renderPage","golden":["triggers.operator"],"shows":"Add a trigger"},
+    {"el":"Filter pills with glyphs","kind":"readme","status":"illustrative","reason":"the page's pills carry words and counts"},
+    {"el":"Schedule rows headed by a sentence","kind":"readme","status":"illustrative","reason":"the page shows the cron pattern with its next fires"}
   ]
 }

@@ -48,6 +48,7 @@
     {"el":"Bundle skipped (`fork`): a pull request from another repository, and the bundle does not set forkReviews.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runChat"},
     {"el":"Bundle skipped (`chained`): a chained /outbox child, so it got no bundle: the grant was to the trigger, not to what its job queues.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runChain"},
     {"el":"Rule hosts, no rule host: the sandbox reaches nothing.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runSandbox"},
-    {"el":"**Fixture note.** All of it is sample: the billing-sweep cron trigger, the billing-jobs folder as a billing member, the variable names, the rule hosts, the token and cost figures, and the two chain children. The skip sentences and the chain cap (2 per job) are the repo's.","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."}
+    {"el":"**Fixture note.** All of it is sample: the billing-sweep cron trigger, the billing-jobs folder as a billing member, the variable names, the rule hosts, the token and cost figures, and the two chain children. The skip sentences and the chain cap (2 per job) are the repo's.","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."},
+    {"el":"Sandbox as rows plus a host list","kind":"readme","status":"illustrative","reason":"the page draws one column of facts, the same rows"}
   ]
 }

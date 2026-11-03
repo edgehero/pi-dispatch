@@ -12,6 +12,8 @@
     {"el":"Watch configuration is hand written; the trigger editor does not author it","kind":"readme","status":"real","panel":"p-watch","source":"admin/src/console/watch.mjs#watchPanel","golden":["watch.operator","watch.viewer"],"shows":"written by hand in triggers.json"},
     {"el":"Sources and rules, retained findings and counters","kind":"provides","status":"real","source":"admin/src/console/watch.mjs#loadWatchData"},
     {"el":"The earlier multi panel live dashboard","kind":"readme","status":"illustrative","reason":"the card's future design, which it says is not delivered: the page is static and Reload reads again"},
-    {"el":"Counts and timestamps","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."}
+    {"el":"Counts and timestamps","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."},
+    {"el":"Configuration active in the navigation","kind":"readme","status":"illustrative","reason":"the page lives under Triggers, whose tab it is"},
+    {"el":"Times as words","kind":"readme","status":"illustrative","reason":"the page prints the instant in full, as the retained record holds it"}
   ]
 }

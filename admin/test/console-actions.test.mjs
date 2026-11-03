@@ -294,7 +294,7 @@ const esc = (s) => String(html`${s}`);
 function confirmHtml(preview) {
   assert.ok(["unattended", "confirm", "person"].includes(preview.agent?.mode));
   const titles = { unattended: "Agent may act alone", confirm: "Person confirms for an agent", person: "Person only" };
-  const prefix = `<p class="agent-policy"><b>${titles[preview.agent.mode]}</b>: ${esc(preview.agent.reason)}</p>`;
+  const prefix = `<p class="agent-policy"><b>${titles[preview.agent.mode]}:</b> ${esc(preview.agent.reason)}</p>`;
   assert.ok(preview.html.startsWith(prefix), "the displayed policy and reason are exactly the evaluated transition");
   return preview.html.slice(prefix.length);
 }

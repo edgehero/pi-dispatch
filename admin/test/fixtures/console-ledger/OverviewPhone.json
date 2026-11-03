@@ -20,6 +20,7 @@
     {"el":"p-timeline","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewTimeline","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
     {"el":"p-caps","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewCaps","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
     {"el":"p-waitlists","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
-    {"el":"p-hosts","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"}
+    {"el":"p-hosts","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
+    {"el":"A one line summary with no sign out","kind":"readme","status":"illustrative","reason":"the phone keeps the live dot and Sign out, because the shell is the same on every page"}
   ]
 }

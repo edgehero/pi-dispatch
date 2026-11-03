@@ -886,7 +886,7 @@ test("a plan's API-equivalent settlement floor and live hold stay distinct in To
   assert.equal(summary.today.settledMicros, 9_000_000);
   const today = String(spendToday(moneyView(p)));
   assert.match(settledCell(today), /≥\$9\.00/);
-  assert.match(today, /Held for 1 running jobs<\/dt><dd>\$2\.00/);
+  assert.match(today, /Held for 1 running job<\/dt><dd>\$2\.00/);
   const chart = String(spendOver(moneyView(p)));
   assert.match(dateCell(chart), /≥\$9\.00 settled; \$2\.00 held/);
   assert.match(chart, /class="sp-held"/);

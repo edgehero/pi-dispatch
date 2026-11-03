@@ -1640,14 +1640,14 @@ export function legendHtml(norm, hiddenLabels = 0) {
   row(legendSwatch(`<rect x="1" y="1" width="14" height="10" rx="2" fill="none" stroke="${PAGE_DIM}" stroke-dasharray="10,4"/>`), "unverified: repo not readable from this host");
   rows.push(`<div class="caps">${escapeHtml(capsLineText(norm.caps))}</div>`);
   const honesty = [];
-  if (norm.meta.unattributedRuns > 0) honesty.push(`${norm.meta.unattributedRuns} runs unattributed`);
+  if (norm.meta.unattributedRuns > 0) honesty.push(`${norm.meta.unattributedRuns} ${norm.meta.unattributedRuns === 1 ? "run" : "runs"} unattributed`);
   if (norm.meta.truncated.folders) honesty.push("folder scan truncated (cap reached)");
   if (norm.meta.truncated.skills) honesty.push("skill enumeration truncated or partly unread");
   if (norm.meta.truncated.edges) honesty.push("observed edges truncated (cap reached)");
-  if (norm.meta.droppedObservedEdges > 0) honesty.push(`${norm.meta.droppedObservedEdges} observed edges dropped (no unique folder)`);
+  if (norm.meta.droppedObservedEdges > 0) honesty.push(`${norm.meta.droppedObservedEdges} observed ${norm.meta.droppedObservedEdges === 1 ? "edge" : "edges"} dropped (no unique folder)`);
   // The counters the text and TUI surfaces already state (issue #175): the page joins them.
   const refused = norm.meta.chainRefusals.reduce((a, r) => a + r.count, 0);
-  if (refused > 0) honesty.push(`${refused} chain requests refused (caps or gate)`);
+  if (refused > 0) honesty.push(`${refused} chain ${refused === 1 ? "request" : "requests"} refused (caps or gate)`);
   if (norm.meta.injectedUnreachable.length > 0) honesty.push(`injected skills dir unreadable: ${norm.meta.injectedUnreachable.join(", ")}`);
   if (norm.meta.overlayUnreachable) honesty.push("overlay skills dir unreadable (global pi dir)");
   if (norm.meta.stagedUnenumerable.length > 0) honesty.push(`staged packages not enumerable (manifest patterns): ${norm.meta.stagedUnenumerable.join(", ")}`);

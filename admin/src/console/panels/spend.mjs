@@ -276,7 +276,7 @@ export function spendToday(v) {
       [
         ["Settled in today's records", settledMoney(s)],
         [
-          `Held for ${s?.heldJobs ?? "unknown"} running jobs`,
+          `Held for ${s?.heldJobs ?? "unknown"} running ${s?.heldJobs === 1 ? "job" : "jobs"}`,
           usd(s?.heldMicros),
         ],
         ...(chargedDiffers
@@ -335,7 +335,7 @@ export function spendAverage(v) {
   const s = payload(v).spend;
   return card(
     "Average per metered run",
-    html`${ui.kpi(usd(s?.average?.costMicros), "last 24 hours")}${progress(s?.average?.costMicros, s?.jobCapMicros, "Average cost per metered run against the job cap")}<p class="sp-kf">${s?.average?.runs ?? 0} metered runs. The job cap is <b>${usd(s?.jobCapMicros)}</b>; the largest run used <b>${usd(s?.average?.largestMicros)}</b>.</p>`,
+    html`${ui.kpi(usd(s?.average?.costMicros), "last 24 hours")}${progress(s?.average?.costMicros, s?.jobCapMicros, "Average cost per metered run against the job cap")}<p class="sp-kf">${s?.average?.runs ?? 0} metered ${s?.average?.runs === 1 ? "run" : "runs"}. The job cap is <b>${usd(s?.jobCapMicros)}</b>; the largest run used <b>${usd(s?.average?.largestMicros)}</b>.</p>`,
     null,
     null,
     "sp-kpi",
@@ -445,11 +445,11 @@ export function spendSizes(v) {
         ? html`<svg class="sp-hist" height="180" role="img" aria-label="Cost per metered run, equal bins to the job cap"><line class="sp-base" x1="0" x2="100%" y1="142" y2="142"></line>${bins.map(
             (b, i) => {
               const h = (b.runs / max) * 105;
-              return html`<g><title>${markedMoneyText(b.fromMicros)} to ${markedMoneyText(b.toMicros)}: ${b.runs} metered runs</title><rect class="sp-hbin" x="${((i + 0.12) / n) * 97}%" y="${142 - h}" width="${(0.76 / n) * 97}%" height="${h}" rx="4"></rect><text class="sp-v" x="${((i + 0.5) / n) * 97}%" y="${134 - h}" text-anchor="middle">${b.runs}</text></g>`;
+              return html`<g><title>${markedMoneyText(b.fromMicros)} to ${markedMoneyText(b.toMicros)}: ${b.runs} metered ${b.runs === 1 ? "run" : "runs"}</title><rect class="sp-hbin" x="${((i + 0.12) / n) * 97}%" y="${142 - h}" width="${(0.76 / n) * 97}%" height="${h}" rx="4"></rect><text class="sp-v" x="${((i + 0.5) / n) * 97}%" y="${134 - h}" text-anchor="middle">${b.runs}</text></g>`;
             },
           )}<line class="sp-capline" x1="99%" x2="99%" y1="22" y2="142"></line><text class="sp-ll" x="98%" y="15" text-anchor="end">job cap</text>${[0, 1, 2, 3, 4].map((i) => html`<text class="sp-d" x="${i * 24.5}%" y="166" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${markedMoneyText((cap * i) / 4)}</text>`)}</svg>${note(`Axis: $0 to $${(cap / 1e6).toFixed(2)}, in equal bins; ${s?.meteredRangeRuns ?? 0} metered runs.`)}`
         : note("The per-job dollar cap could not be read.")
-    }${note("While a dollar window is set, every run reserves its per-job cap before it starts; a zero-rated one reserves nothing.")}<p class="sp-note">The largest run used <b>${usd(s?.largestRangeMicros)}</b>; a lower <code>maxCostUsd</code> would hold less money while jobs run.</p>${s?.overJobCapRuns ? note(`${s.overJobCapRuns} historical runs exceeded today's job cap and are included in the final bin.`) : null}`,
+    }${note("While a dollar window is set, every run reserves its per-job cap before it starts; a zero-rated one reserves nothing.")}<p class="sp-note">The largest run used <b>${usd(s?.largestRangeMicros)}</b>; a lower <code>maxCostUsd</code> would hold less money while jobs run.</p>${s?.overJobCapRuns ? note(`${s.overJobCapRuns} historical ${s.overJobCapRuns === 1 ? "run" : "runs"} exceeded today's job cap and ${s.overJobCapRuns === 1 ? "is" : "are"} included in the final bin.`) : null}`,
     v.role === "operator"
       ? ui.btn({
           label: "Change the job cap",
@@ -1598,7 +1598,7 @@ export function flowsMap(v) {
                     ${flows.map((f) => f.kind).join(", ")}
                   </td>
                   <td>${folder?.label ?? "unverifiable from this host"}</td>
-                  <td>${n.runs} runs; ${n.lastOutcome ?? "no outcome"}</td>
+                  <td>${n.runs} ${n.runs === 1 ? "run" : "runs"}; ${n.lastOutcome ?? "no outcome"}</td>
                   <td>${moneyCost(n.cost)}</td>
                   <td>
                     ${

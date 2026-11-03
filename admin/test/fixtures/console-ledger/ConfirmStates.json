@@ -28,6 +28,7 @@
     {"el":"Done banner with its audit row and Undo","kind":"state","status":"new","source":"admin/src/console/confirm-view.mjs#doneBannerHtml","golden":["panels/confirm-done.operator","panels/confirm-done-no-undo.operator"],"shows":"Changed by ","reason":"its title says what happened in the past tense (each action's done rule); a bulk act where only some jobs landed is in the attention tone and says how many of how many, and one where none did leaves no banner"},
     {"el":"Viewers never see this bar","kind":"readme","status":"new","source":"admin/src/console/shell.mjs#shellHtml","holds":"role === \"operator\" && !readOnly"},
     {"el":"\"within 4 seconds\", the gh ids, maxTurns 40 and the dollar figures","kind":"sample","status":"illustrative","reason":"sample values"},
-    {"el":"Agent capability and reason, including an inverse under current permissions","kind":"readme","status":"new","source":"admin/src/action-policy.mjs#evaluateAgentAction","reason":"The current transition is evaluated again for every preview and confirm; an Undo enters the ordinary inverse action and is evaluated under that action’s present policy."}
+    {"el":"Agent capability and reason, including an inverse under current permissions","kind":"readme","status":"new","source":"admin/src/action-policy.mjs#evaluateAgentAction","reason":"The current transition is evaluated again for every preview and confirm; an Undo enters the ordinary inverse action and is evaluated under that action’s present policy."},
+    {"el":"A shield icon on the capability strip","kind":"readme","status":"illustrative","reason":"the strip's words say who may act; the icon is decoration"}
   ]
 }

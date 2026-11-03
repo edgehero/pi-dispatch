@@ -578,6 +578,7 @@ const AUDIT_CSS = `
 .filterbar .search:focus-within{outline:2px solid var(--focus);outline-offset:2px}
 .filterbar .select{flex:0 1 auto;width:auto;max-width:100%;height:var(--control-h);padding-left:18px;border-radius:var(--radius-pill);background-color:var(--surface);background-position:right 18px center,right 13px center;box-shadow:none}
 .tbl tbody tr:target td{background:var(--running-tint)}
+.tbl td>time,.tbl td>.code{white-space:nowrap;overflow-wrap:normal}
 .banner__s .code{white-space:normal;overflow-wrap:anywhere}
 .banner__s .code>span{display:inline-block;max-width:100%}
 @media (max-width: ${AUDIT_LAYOUT.stackMax}px){${stackRules()}

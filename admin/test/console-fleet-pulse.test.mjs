@@ -170,8 +170,10 @@ test("held jobs sort longest first and report every condition with a bounded che
   assert.match(out, /fault/);
   assert.match(out, /class="fl-cond"/);
   assert.match(out, /<span class="chip tone-ok">.*?Met<\/span>/);
+  assert.match(out, /ci-green/, "an operator reads the check's name");
   const viewer = draw(fleet.fleetHeld, view(s, "viewer"));
-  assert.match(viewer, /ci-green/);
+  assert.doesNotMatch(viewer, /ci-green/, "a viewer reads that a check waits, never its name");
+  assert.match(viewer, /<b>A check<\/b>/);
   assert.doesNotMatch(viewer, /data-action=/);
 });
 

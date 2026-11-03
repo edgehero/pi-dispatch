@@ -29,7 +29,6 @@
     {"el":"p-role-operator","kind":"panel","status":"illustrative","reason":"a card-only comparison; each role's real page is that page's golden for the role"},
     {"el":"p-role-viewer","kind":"panel","status":"illustrative","reason":"a card-only comparison; each role's real page is that page's golden for the role"},
     {"el":"p-role-read-only","kind":"panel","status":"illustrative","reason":"a card-only comparison; the read-only frame is panels/read-only.<role>"},
-    {"el":"The navigation lists Watch and Models","kind":"sample","status":"illustrative","reason":"Models is under More (NAV_MORE). Watch is a tab of Triggers, not a pill: the navigation stays seven pills (DES-OPERATOR-CONSOLE, decided with #773)"},
     {"el":"gh-f0c2 (failed on mini1) and gh-b3d7 (running, phase 2 of 4), their failure text and phase name","kind":"sample","status":"illustrative","reason":"fixture runs and sample copy (the card's own note)"}
   ]
 }

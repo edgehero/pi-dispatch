@@ -50,9 +50,11 @@
     {"el":"gh-c9e1, gh-d4f0, gh-71b2 and gh-38aa, sample waiting jobs","kind":"sample","status":"illustrative","reason":"the pages harness puts its own in line through BullMQ and the worker's deferral, by the card's ids"},
     {"el":"Clip durations of completed runs","kind":"sample","status":"illustrative","reason":"estimated by the card; the timeline draws the fixture's records"},
     {"el":"The projects of gh-e802 and local-9e20","kind":"sample","status":"illustrative","reason":"assumed by the card; the timeline takes a running job's project from the registry"},
-    {"el":"The nav's Watch and More: Models","kind":"sample","status":"illustrative","reason":"Models is under More (the Shell ledger). Watch is a tab of Triggers, not a pill: the navigation stays seven pills (DES-OPERATOR-CONSOLE, decided with #773)"},
     {"el":"Now at 68.57%","kind":"sample","status":"illustrative","reason":"the console's zooms put now at two thirds of the window"},
     {"el":"p-agent-writes","kind":"panel","status":"new","source":"admin/src/console/panels/agent-writes.mjs#overviewAgentWrites","golden":["panels/agent-writes-populated.operator"],"shows":["Agent writes today","mini1, UTC today; local audit only","confirmed applied writes"]},
-    {"el":"Agent count is unavailable or a partial lower bound when evidence cannot prove an exact total","kind":"state","status":"new","panel":"p-agent-writes","source":"admin/src/console/panels/agent-writes.mjs#overviewAgentWrites","golden":["panels/agent-writes-partial.operator"],"shows":["read is partial"]}
+    {"el":"Agent count is unavailable or a partial lower bound when evidence cannot prove an exact total","kind":"state","status":"new","panel":"p-agent-writes","source":"admin/src/console/panels/agent-writes.mjs#overviewAgentWrites","golden":["panels/agent-writes-partial.operator"],"shows":["read is partial"]},
+    {"el":"Needs you's violet and red triangles","kind":"readme","status":"illustrative","reason":"the page leads each count with its number and word; the triangles add no fact"},
+    {"el":"Waitlists' Reason and Queue switch","kind":"readme","status":"illustrative","reason":"the page groups by reason and lists queues in a line under it, so nothing is lost without the switch"},
+    {"el":"Host pause in grey, and the longest wait as plain text","kind":"readme","status":"illustrative","reason":"the page draws pause red because it stops work, and the wait as a chip beside the title"}
   ]
 }

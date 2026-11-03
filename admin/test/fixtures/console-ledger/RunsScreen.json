@@ -46,6 +46,6 @@
     {"el":"gh-e9a0 and gh-f0c2 under billing and web","kind":"sample","status":"illustrative","reason":"the card follows the projects config; the console tags a run with its record's project"},
     {"el":"Row values: times, ids, tokens, costs and the counts (27 runs, $6.13)","kind":"sample","status":"illustrative","reason":"the card's fixture list; the goldens draw the fixture deployment's own records"},
     {"el":"The rows' reason sentences, in the catalog's style","kind":"sample","status":"illustrative","reason":"sample copy (the card's note); a row says its reason's own short catalog sentence"},
-    {"el":"The nav's Watch and More: Models","kind":"sample","status":"illustrative","reason":"Models is under More (the Shell ledger). Watch is a tab of Triggers, not a pill: the navigation stays seven pills (DES-OPERATOR-CONSOLE, decided with #773)"}
+    {"el":"In-pill filters","kind":"readme","status":"illustrative","reason":"the page uses labelled selects and Apply, which work without the script"}
   ]
 }

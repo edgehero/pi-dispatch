@@ -25,6 +25,8 @@
     {"el":"An avatar in the Who cell","kind":"readme","status":"illustrative","reason":"a row shows the token's name and role; the avatar is the signed-in person's, in the top bar"},
     {"el":"Rows 7 (damaged) and 8 (not verified)","kind":"sample","status":"illustrative","reason":"sample data (the card's note); the damaged and not-verified states are panel goldens"},
     {"el":"Rows 1 to 6","kind":"sample","status":"illustrative","reason":"the card's fixture; the console's audit golden is seeded by its own harness"},
-    {"el":"Agent role finds applied, refused and compensated attempts without hiding damage","kind":"readme","status":"new","source":"admin/src/console/audit-view.mjs#readAuditView","reason":"Native GET role filtering and pagination retain the actor role; damaged rows remain visible and verification stays independent of the filter."}
+    {"el":"Agent role finds applied, refused and compensated attempts without hiding damage","kind":"readme","status":"new","source":"admin/src/console/audit-view.mjs#readAuditView","reason":"Native GET role filtering and pagination retain the actor role; damaged rows remain visible and verification stays independent of the filter."},
+    {"el":"The About card beside the log, with a row count","kind":"readme","status":"illustrative","reason":"the page puts it under the log, where the narrow column does not squeeze the table"},
+    {"el":"Filter pills","kind":"readme","status":"illustrative","reason":"the page uses labelled selects and Filter, which work without the script"}
   ]
 }

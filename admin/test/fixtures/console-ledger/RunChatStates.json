@@ -30,6 +30,7 @@
     {"el":"A message's text is never listed: the run reads it, and the audit log keeps its sha256.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runSummary"},
     {"el":"A fork runs on a host that holds the session store (`PI_SESSIONS_DIR`). The session's transcript is not redacted and goes to the person's own pi provider; the run's own transcript is never written.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runChat"},
     {"el":"On a pull request a fork refuses because a pull or merge request's session is keyed by its head branch, which the run record does not carry.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runChat"},
-    {"el":"**Fixture note.** Message ids, times, byte counts, gh-77e0, gh-81b2, gh-a01c and gh-3e71 are sample. The sentences are the console's (`chat-mode.mjs`, `steer-inbox.mjs`, `job-actions.mjs`).","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."}
+    {"el":"**Fixture note.** Message ids, times, byte counts, gh-77e0, gh-81b2, gh-a01c and gh-3e71 are sample. The sentences are the console's (`chat-mode.mjs`, `steer-inbox.mjs`, `job-actions.mjs`).","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."},
+    {"el":"Labelled limit meters","kind":"readme","status":"illustrative","reason":"the page labels them for screen readers and draws one bar"}
   ]
 }

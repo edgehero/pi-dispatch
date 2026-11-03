@@ -12,6 +12,7 @@
     {"el":"A viewer sees counts and rule checks, never agent authored values","kind":"readme","status":"real","source":"admin/src/console/watch.mjs#publicBoardSummary"},
     {"el":"The board, findings and evidence, the last for an explicit operator session","kind":"provides","status":"real","source":"admin/src/console/watch.mjs#loadWatchData","holds":"privateRead"},
     {"el":"The earlier live shadow charts and projections","kind":"readme","status":"illustrative","reason":"the card's future design, which it says is not delivered"},
-    {"el":"Finding counts, probabilities, costs, proposals and trace entries","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."}
+    {"el":"Finding counts, probabilities, costs, proposals and trace entries","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."},
+    {"el":"Configuration active in the navigation","kind":"readme","status":"illustrative","reason":"the page lives under Triggers, whose tab it is"}
   ]
 }

@@ -132,3 +132,6 @@ plan-artifacts/
 # The release tags' worker/src, extracted while .github/scripts/run-record-fixtures.mjs builds the run-record fixtures
 # (issue #761). Inside the repository so each tag's imports resolve; the generator removes it when it finishes.
 /.run-record-fixtures/
+
+# render-images.mjs --console --all: every golden at both widths and themes, about a gigabyte. Rendered on demand.
+docs/images/console/all/

@@ -13456,14 +13456,15 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     `PULSE_TOKENS_SHA256`. It holds `bundle.css` to `PULSE_CSS_SHA256` or to exactly one version recorded as waiting
     (`DESIGN_CSS_WAITING_SHA256`), because a change to the look lands in the design first and is pasted by a console
     pull request that measures it on the console's pages. A third version fails until it is pasted or recorded.
-    - **Waiting now:** tabular figures on numbers only. `bundle.css` set them on `body`, and on running text they widen
-      a hyphen, so an id like gh-2f6a read "gh - 2f6a". The design now sets them only on the classes that hold
-      counts, money, times, table figures and the timeline's times (`.kpi b`, `.count`, `.tbl td.num`, `.wb-t`,
-      `.tax`, `.tp-sub` and the like; `.tnum` for any other number), and not on running text such as a waitlist's
-      sentence (`.wl__t`). The paste waits for #752's pass against the cards, because the console sizes some text by
-      hand on the assumption that digits are tabular, and no CI check measures it: the timeline's `SANS_CLASSES`
-      (`timeline.mjs`), the drawn widths in `console-timeline.test.mjs` (`DRAWN`) and a wait bar segment's least
-      share (`segmentPct`, `kit.mjs`). The pass re-measures those three with the pasted stylesheet.
+    - **Pasted with #750, re-measured with #752:** tabular figures on numbers only. `bundle.css` set them on `body`, and
+      on running text they widen a hyphen, so an id like gh-2f6a read "gh - 2f6a". The design now sets them only on the
+      classes that hold counts, money, times, table figures and the timeline's times (`.kpi b`, `.count`, `.tbl td.num`,
+      `.wb-t`, `.tax`, `.tp-sub` and the like; `.tnum` for any other number), and not on running text such as a
+      waitlist's sentence (`.wl__t`). `DESIGN_CSS_WAITING_SHA256` is null. Nothing in CI measures the console's hand
+      sizing, so #752 measured it in Chromium 141 under the pasted stylesheet, and all three stand unchanged: the 40
+      `DRAWN` widths (`console-timeline.test.mjs`) are within 0.05 px of what is drawn; a digit at 12 px, 500 in `.tp-sub` is
+      7.72 px against `SANS_CLASSES`' 7.9 (`timeline.mjs`), which stays on the wide side as it must; and a digit at 13 px,
+      800 in `.wb-t` is 8.83 px against the 9 `segmentPct` takes (`kit.mjs`).
     - **Not in the stylesheet:** the design status ribbon on each card (built, planned, proposed, needs a decision)
       is a note on the design, so its rules are added to the cards by `design/tools/fix_markers.py` and never enter
       `bundle.css`.

@@ -1645,7 +1645,7 @@ function fleetSwitch({ name, kind, paused }) {
           short = switchShortOf(s.snapshot);
           shortLines = switchShortLines(s.snapshot, short);
           const sum = (key) => all.reduce((n, row) => n + (Number.isSafeInteger(row.counts?.[key]) ? row.counts[key] : 0), 0);
-          pauseLines = [...Array.from({ length: Math.ceil(all.length / 20) }, (_, i) => `Queues: ${all.slice(i * 20, (i + 1) * 20).map((row) => String(row.queue)).join(", ")}`), `${sum("active")} running jobs keep running`, `${sum("delayed")} delayed jobs and ${s.snapshot.held?.unreachable || !Array.isArray(s.snapshot.held?.rows) ? "an unknown number of" : `${s.snapshot.held.truncated ? "at least " : ""}${s.snapshot.held.rows.length + (Number.isSafeInteger(s.snapshot.held.more) ? s.snapshot.held.more : 0)}`} held jobs wait until a resume`, "Audited as fleet-pause", "Undo: Resume the fleet"];
+          pauseLines = [...Array.from({ length: Math.ceil(all.length / 20) }, (_, i) => `Queues: ${all.slice(i * 20, (i + 1) * 20).map((row) => String(row.queue)).join(", ")}`), `${plural(sum("active"), "running job")} ${sum("active") === 1 ? "keeps" : "keep"} running`, `${plural(sum("delayed"), "delayed job")} and ${s.snapshot.held?.unreachable || !Array.isArray(s.snapshot.held?.rows) ? "an unknown number of" : `${s.snapshot.held.truncated ? "at least " : ""}${s.snapshot.held.rows.length + (Number.isSafeInteger(s.snapshot.held.more) ? s.snapshot.held.more : 0)}`} held ${s.snapshot.held?.rows?.length === 1 && !s.snapshot.held?.truncated && !s.snapshot.held?.more ? "job waits" : "jobs wait"} until a resume`, "Audited as fleet-pause"];
         } else pauseLines = ["The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch discovers", "Audited as fleet-pause", "Undo: Resume the fleet"];
       }
       if (!paused) {
@@ -2519,7 +2519,7 @@ export async function previewAction(ctx, action) {
     danger: meta.danger,
     confirmLabel,
     undo: meta.undo,
-    html: String(html`<p class="agent-policy"><b>${AGENT_POLICY_TITLES[judged.policy.mode]}</b>: ${judged.policy.reason}</p>${previewBarHtml({ title: meta.title, lines, reserve: reserveText(out.reserve), diff: session.role === "agent" ? null : out.diff ?? null, undo: meta.undo, undoable: meta.undoable, confirmLabel, paid: Boolean(action.paid), danger: meta.danger, expiresAt, now: clockOf(deps) })}`),
+    html: String(html`<p class="agent-policy"><b>${AGENT_POLICY_TITLES[judged.policy.mode]}:</b> ${judged.policy.reason}</p>${previewBarHtml({ title: meta.title, lines, reserve: reserveText(out.reserve), diff: session.role === "agent" ? null : out.diff ?? null, undo: meta.undo, undoable: meta.undoable, confirmLabel, paid: Boolean(action.paid), danger: meta.danger, expiresAt, now: clockOf(deps) })}`),
   });
 }
 

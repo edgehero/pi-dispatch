@@ -145,9 +145,9 @@ export const venueFix = panel(
     return properties.length
       ? html`${properties.map(
           (p) =>
-            html`<h3>${p.label}</h3> <p> ${p.observedText}. Where this does not hold, the word drops to asserted and a floor asking for enforced refuses. </p> <p> ${
-              OBSERVATION_FIX[p.observedBy] ??
-              "Check the host's runtime setup and run doctor there."
+            html`<h3>${p.label}</h3> <p> ${ui.withCode(p.observedText)}. Where this does not hold, the word drops to asserted and a floor asking for enforced refuses. </p> <p> ${
+              ui.withCode(OBSERVATION_FIX[p.observedBy] ??
+              "Check the host's runtime setup and run doctor there.")
             } </p> ${
               view.role === "operator" &&
               p.observedBy === "openshellGatewayLocal"
