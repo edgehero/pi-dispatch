@@ -8,7 +8,9 @@
 in the background: on a schedule, on your repo's issues and pull requests, or from the command line. Each job happens in a sealed box that is
 thrown away afterwards, stops at the spending limit you set, and shows up live on one web page. You start in the loop, watching it work. You
 move to near the loop, where it asks when it needs you, and to out of the loop, where you review what comes back. pi-dispatch never merges
-anything, so what ships stays a person's decision. The [main README](https://github.com/edgehero/pi-dispatch#readme) explains all of it.
+anything, so what ships stays a person's decision. It runs on a provider key or a subscription you already have, falls back to other models you
+list, and brings your own pi setup and extensions along with `pi-dispatch import-pi`. The [main README](https://github.com/edgehero/pi-dispatch#readme)
+explains all of it.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-overview.png?v=2026-11-03" alt="The web console's overview page: what needs you, what is waiting and why, what is running, what today has cost, and a timeline of every project's runs" width="820">

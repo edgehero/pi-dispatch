@@ -28,10 +28,17 @@ export const CONSOLE_PICKS = Object.freeze([
 	{ name: "console-budget-split", golden: "insights-budget-split.operator", height: 1000 },
 	{ name: "console-capacity", golden: "insights-capacity.operator", height: 1000 },
 	{ name: "console-flows", golden: "panels/spend-flows-map.viewer", height: 1000 },
-	{ name: "console-models", golden: "panels/models-populated.operator", height: 1000 },
+	{ name: "console-models", golden: "panels/models-populated.operator", height: 1040 },
 	{ name: "console-watch", golden: "watch.operator", height: 800 },
 	{ name: "console-audit", golden: "audit.operator", height: 800 },
 	{ name: "console-config", golden: "config.operator", height: 1000 },
+	{ name: "console-subscription", golden: "panels/models-subscription.operator", selector: "#p-subscription-quota" },
+	{ name: "console-approval", golden: "panels/parked-approval.operator", height: 780 },
+	{ name: "console-draft", golden: "panels/answerer-populated.operator", height: 1160 },
+	{ name: "console-recovery", golden: "panels/run-recovering.operator", height: 1000 },
+	{ name: "console-sandboxes", golden: "panels/sandboxes-populated.operator", height: 1000 },
+	{ name: "console-updates", golden: "panels/updates-newer-available.operator", height: 920 },
+	{ name: "console-project", golden: "panels/project-populated.operator", height: 960 },
 ]);
 
 /** What the agent of the fixture's running job (the schema migration) has said so far, as `readTranscriptSince` hands it to the page. */
