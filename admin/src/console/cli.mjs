@@ -529,7 +529,9 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: () => log("console: Zero touch accounting needs repair") });
-    const sandboxes = m.sandboxData?.makeSandboxService({ paths: side.paths, env: { ...side.env, ...(config.sandboxHostsFile ? { PI_SANDBOX_HOSTS_FILE: config.sandboxHostsFile } : {}) }, deploymentDir: config.dir, fleet, fs, now });
+    // The console's hosts file, always a path: the read side's environment takes PI_SANDBOX_HOSTS_FILE from this shell
+    // only, so a value set only in the deployment .env reaches the service through the console's configuration.
+    const sandboxes = m.sandboxData?.makeSandboxService({ paths: side.paths, env: { ...side.env, PI_SANDBOX_HOSTS_FILE: config.sandboxHostsFile }, deploymentDir: config.dir, fleet, fs, now });
     const gatewayRegistry = () => config.sandboxGatewaysFile ? readSandboxGateways(config.sandboxGatewaysFile, { fs, uid, platform: io.platform ?? process.platform }) : { disabled: true };
     const gatewayEnrollment = gatewayRegistry();
     if (gatewayEnrollment.refusal) io.err(`pi-dispatch-console: ${gatewayEnrollment.refusal}`);

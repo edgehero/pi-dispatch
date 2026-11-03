@@ -2083,9 +2083,10 @@ through the same code, so the two never disagree about what is waiting.
 | `PI_CONSOLE_AUDIT_RETENTION_DAYS` | `PI_LOG_RETENTION_DAYS`'s value | Days the audit log's month files are kept; `0` keeps them forever, and the newest is never removed. Read by the worker, which prunes them, not by the console; a value that is not a whole number of days (0 or more) stops the worker from starting. |
 
 `PI_SANDBOX_GATEWAYS_FILE` selects the protected hand-owned gateway enrollment file (default
-`<deployment>/sandbox-gateways.json`); an absent file disables browser attachment. This file is not the native opener's
-`PI_SANDBOX_HOSTS_FILE`. Its canonical console origin is also the exact Origin required for login and writes,
-with matching Host and the existing same-origin fetch-site policy. No forwarded header establishes that authority.
+`<deployment>/sandbox-gateways.json`); an absent file disables browser attachment. This file is not
+`PI_SANDBOX_HOSTS_FILE`, the terminal targets the native opener imports. The gateways file's canonical console origin
+is also the exact Origin required for login and writes, with matching Host and the existing same-origin fetch-site
+policy. No forwarded header establishes that authority.
 Without enrollment, the existing `http://<Host>` rule remains. See the [gateway reference](sandbox-gateway.md).
 
 The console also reads, from the same deployment, `VALKEY_URL` (the queues, hosts and run mirror), `PI_LOGS_DIR`

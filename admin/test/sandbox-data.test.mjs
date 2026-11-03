@@ -103,6 +103,17 @@ test("terminal-target previews are read-only; confirmation writes the checked cr
   assert.match((await s.service.preview("sandbox-host-set", { ...params, target: "-oProxyCommand=bad" })).refusal, /SSH target/);
 });
 
+test("the hosts file is the deployment folder's: blank is sandbox-hosts.json there, relative sits under it, never the current directory", () => {
+  const s = setup(), mapping = { target: "ops@mini1", deployment: "/srv/pi", nodePath: "/usr/bin/node", cliPath: "/srv/pi/cli.mjs", shell: "posix" };
+  mkdirSync(join(s.dir, "state"), { mode: 0o700 });
+  for (const file of ["sandbox-hosts.json", "state/hosts.json"]) writeFileSync(join(s.dir, file), JSON.stringify({ version: 1, hosts: { mini1: mapping } }), { mode: 0o600 });
+  for (const value of [undefined, "", "  ", "state/hosts.json"]) {
+    const env = value === undefined ? {} : { PI_SANDBOX_HOSTS_FILE: value };
+    const read = makeSandboxService({ paths: s.paths, env, deploymentDir: s.dir, fleet: s.fleet, now: () => NOW }).hosts();
+    assert.deepEqual(read.config?.hosts, { mini1: mapping }, JSON.stringify(value));
+  }
+});
+
 test("viewer loads never call private sandbox reads, while operator reads stay out of snapshot", async () => {
   let reads = 0;
   const query = parsePageQuery("sandboxes", "repo=acme/web&index=0&host=mini1&ref=HEAD").query;

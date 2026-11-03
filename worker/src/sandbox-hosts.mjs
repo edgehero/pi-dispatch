@@ -1,8 +1,7 @@
 /** Fleet targets are an operator-edited file. A URL cannot enroll or alter a local trusted target. */
 import * as nodeFs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, win32 } from "node:path";
+import { dirname, isAbsolute, resolve, win32 } from "node:path";
 import { sandboxOpenFields } from "./opener-protocol.mjs";
 import { trustedChain } from "./service-env.mjs";
 
@@ -10,10 +9,14 @@ const object = (value) => value !== null && typeof value === "object" && !Array.
 const text = (value) => typeof value === "string" && value.length <= 4096 && !/[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/.test(value);
 const absolute = (value) => text(value) && (isAbsolute(value) || win32.isAbsolute(value));
 const digest = (value) => createHash("sha256").update(value).digest("hex");
-export const EMPTY_SANDBOX_HOSTS = Object.freeze({ version: 1, hosts: Object.freeze({}) });
-export function sandboxHostsPath(env = process.env) {
-	// env-internal XDG_CONFIG_HOME, HOME, USERPROFILE: the current account's OS configuration directory, not job settings.
-	return env.PI_SANDBOX_HOSTS_FILE || join(env.XDG_CONFIG_HOME || join(env.HOME || env.USERPROFILE || homedir(), ".config"), "pi-dispatch", "sandbox-hosts.json");
+/**
+ * The sandbox hosts file the console edits: PI_SANDBOX_HOSTS_FILE, or `sandbox-hosts.json`, resolved against the
+ * deployment folder `dir`, as `tokensFilePath` resolves the tokens file. It is the file's only default (issue #806): a
+ * reader that guessed another folder would find no file, which reads as no hosts, and nothing would say so.
+ */
+export function sandboxHostsPath(env, dir) {
+	const configured = typeof env?.PI_SANDBOX_HOSTS_FILE === "string" ? env.PI_SANDBOX_HOSTS_FILE.trim() : "";
+	return resolve(dir, configured || "sandbox-hosts.json");
 }
 export function validateSandboxHosts(input) {
 	if (!object(input) || input.version !== 1 || !object(input.hosts) || Object.keys(input).some((key) => !["version", "hosts"].includes(key))) throw new Error("sandbox hosts must contain version 1 and a hosts object");
