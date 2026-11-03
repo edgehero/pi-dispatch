@@ -171,7 +171,8 @@ host-assigned index is not one. The branch name they imply is deliberately **not
 
 The console bundles the trigger validator at build time, so a published `/dispatch` older than this feature
 will **refuse every trigger edit** while a non-github `replicas` entry sits in the file, including the edit
-that would remove it. Upgrade the admin extension together with the worker and receiver, not after.
+that would remove it. Upgrade the admin extension together with the worker and receiver, not after: in one window,
+in [the order](upgrading.md#the-order) the upgrade guide gives.
 
 Rolling back is the mirror image: an earlier worker or receiver refuses to load a file carrying non-github
 `replicas` at all, loudly and at boot. There is no operator surface to unset the field (deliberately: it is

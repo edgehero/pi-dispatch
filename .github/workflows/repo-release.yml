@@ -1,7 +1,7 @@
 # Cut a GitHub Release for the WHOLE pi-dispatch tool when the ROOT package.json version changes on main.
 #
-# This is distinct from release.yml, which PUBLISHES the @edgehero/pi-dispatch-admin npm package (and tags
-# its own releases admin-v*). This workflow owns the v* tags = the product's releases. To cut one, bump
+# This is distinct from release.yml, which PUBLISHES the four npm packages and tags their releases worker-v*,
+# receiver-v*, admin-v* and gateway-v*. This workflow owns the v* tags = the product's releases. To cut one, bump
 # `version` in the root package.json in a PR; it is idempotent (skips when the tag already exists), so an
 # unrelated root package.json edit — a dependency bump, a script tweak — is a no-op.
 #
@@ -89,6 +89,10 @@ jobs:
             printf '\n**Full changelog**: %s/%s/compare/%s...v%s\n' \
               "${{ github.server_url }}" "${{ github.repository }}" "$PREV" "${{ steps.v.outputs.version }}" >> /tmp/notes.md
           fi
+          # The upgrade guide at this release's own tag, appended outside the PREV test so a first release carries it too,
+          # and after both paths: the order to upgrade in and what the release changed in stored state live there.
+          printf '\n**Upgrading**: %s/%s/blob/v%s/docs/upgrading.md\n' \
+            "${{ github.server_url }}" "${{ github.repository }}" "${{ steps.v.outputs.version }}" >> /tmp/notes.md
 
       - name: Create GitHub Release
         if: steps.v.outputs.release == 'yes'

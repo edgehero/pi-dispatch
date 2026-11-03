@@ -977,7 +977,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    proxy that has been up all along would otherwise read as one that restarted under it), with the usual warning that
    a running job loses its route out. `pi-dispatch up` starts the keeper too, and since it leaves a running proxy
    alone, it says to restart the proxy. Until the keeper holds, every egress job is retried and none runs, the worker
-   logs `netns_keeper_not_holding_at_boot`, and `pi-dispatch doctor` says why. On Podman 5.x nothing changes.
+   logs `netns_keeper_not_holding_at_boot`, and `pi-dispatch doctor` says why. On Podman 5.x nothing changes. The
+   order for an upgrade as a whole is in [upgrading.md](upgrading.md#the-order).
 
    **An account that is already damaged** is not healed by starting the keeper, which only prevents the next
    teardown. Start the keeper, then restart the proxy, clearing any failed state first (a squid stop ends `failed`,
@@ -1124,6 +1125,14 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
      then `resume`). `up` on this venue leaves a running Valkey alone, as it always has, so doctor names
      `service install --force` as the step, and until then warns that the Valkey answers a client that sends no
      password.
+   - **The image** (issue #761). The unit names `docker.io/valkey/valkey:8.1`, the one image every place pi-dispatch
+     starts Valkey names (`VALKEY_IMAGE`), where releases before it named the floating `valkey/valkey:8`. An installed
+     unit is rewritten only by `pi-dispatch service install --force`, which restarts the Valkey on the new image (its
+     volume and the queue in it are kept), so pause first. It restarts the worker and receiver units only when the
+     Valkey's password file changed too, so restart them as [the order](upgrading.md#the-order) says. Until then
+     `pi-dispatch doctor` names the unit in a `state.older` line. The console's service setup refuses
+     (`unsafe-dependencies`) while a unit differs from what the release renders, so run that install from a terminal
+     first ([upgrading.md](upgrading.md#valkey-and-bullmq)).
    - **A shared Valkey** (`PI_VALKEY_SHARED=1`): put `VALKEY_PASSWORD=<that Valkey's password>` in the deployment's
      `.env`; its owner gives it. `service install` and `up` generate none for a shared Valkey, since one made here
      would reach no Valkey. Without it every command refuses, naming the missing password.

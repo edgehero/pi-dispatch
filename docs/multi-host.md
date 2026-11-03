@@ -417,6 +417,24 @@ publishes no registry row, so doctor cannot see which receivers are older)". Upg
 it. Today no file needs more than version 1, so the line never shows. A run record written by a newer worker is shown
 by its core facts only (id, attempt, outcome, times, host, kind and project), and left out of totals, which say so.
 
+**Which release each worker runs** (`fleet.versions`, issue #761). Every worker publishes its pi-dispatch version on
+its registry row. Doctor warns when the live workers report different versions, naming each with its hosts
+("pi-dispatch versions differ: the live workers report 2 versions: 4.3.1 (mini2), 5.0.0 (mini1)"), and when the
+version this doctor runs differs from the one this host's worker row reports ("this doctor 5.0.0, this host's worker
+row reports 4.3.1"). Doctor says only those two facts: the usual cause is a worker not restarted after its
+`npm install`, another is a doctor run from another install (npx, another checkout), which its fix names, and a third
+is a worker killed rather than stopped, whose row stays up to 90 seconds (a stop deletes it). A
+version that is empty or not version-shaped reads as `unknown`, a group of its own; when that is the only other
+group, the warning says "pi-dispatch versions cannot all be read" instead, since doctor cannot tell whether they
+differ. The fix is to finish the upgrade in one window: the same version on every host, and on each host
+`pi-dispatch pause`, wait until `pi-dispatch status` shows no active job, restart the worker, then
+`pi-dispatch resume` (`service restart --drain` watches the shared queue only, not a host's own queue). With peers
+that agree it prints one line about the workers with a live row, "Fleet versions: the 3 workers with a live row report
+5.0.0", which leaves out a worker that publishes no row; on a single host whose versions match it prints nothing.
+During an upgrade the warning is expected until the last worker is restarted ([the order](upgrading.md#the-order)).
+Receivers are not in it: the console's Connections page shows each receiver's version
+([below](#receiver-observations)).
+
 **Each host's budget is its own.** Doctor shows this machine's [host budget](#the-host-budget), which of it and
 `PI_CONCURRENCY` binds first, and warns about a project size it can never hold and about `minJobs` it cannot keep.
 On a fleet it lists every host's budget, what its jobs hold and the largest project size that fits it, and for each
@@ -529,7 +547,8 @@ again then (`runs:since`), and `pi-dispatch capacity` reads the time before it a
 shorter retention cut inside the history that is still there can read as idle time.
 
 **Version floor**: worker 1.7.0, admin 1.7.0. Every host must be on it. A worker below the floor does not
-publish itself, so the others cannot see it, and it will not route its own work.
+publish itself, so the others cannot see it, and it will not route its own work. Above the floor, upgrade every host
+in one window, in [the order](upgrading.md#the-order) the upgrade guide gives.
 
 See also [`scoped-limits.md`](scoped-limits.md), [`wait-for.md`](wait-for.md) and
 [`secrets.md`](secrets.md), each of which has a per-host consequence noted in it.

@@ -21,7 +21,8 @@ missing evidence never becomes a zero rate. A window without ended workload runs
 and changes against the preceding interval are absent when their comparison is not covered.
 
 Tracking begins with this release. Upgrade every worker, receiver, CLI and admin process participating in the fleet
-before relying on its coverage. Older clients cannot publish interventions they were never written to record.
+before relying on its coverage ([the order](upgrading.md#the-order)). Older clients cannot publish interventions they
+were never written to record.
 `PI_LOG_RETENTION_DAYS` and the mirror's retained count also bound the report. Retained older parks still contribute
 current waiting time. With unlimited local retention, this on-demand reader scans the retained history to find them. The text-free touch index is bounded to
 365 days and 30,000 events even when ordinary history is retained indefinitely; its loss and trimming are partial.

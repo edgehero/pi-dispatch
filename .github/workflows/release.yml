@@ -142,6 +142,10 @@ jobs:
             printf '\n**Full changelog**: %s/%s/compare/%s...worker-v%s\n' \
               "${{ github.server_url }}" "${{ github.repository }}" "$PREV" "${{ steps.worker.outputs.version }}" >> /tmp/notes-worker.md
           fi
+          # The upgrade guide at this release's own tag, appended outside the PREV test so a first release carries it too,
+          # and after both paths: the order to upgrade in and what the release changed in stored state live there.
+          printf '\n**Upgrading**: %s/%s/blob/worker-v%s/docs/upgrading.md\n' \
+            "${{ github.server_url }}" "${{ github.repository }}" "${{ steps.worker.outputs.version }}" >> /tmp/notes-worker.md
 
       - name: "worker: create GitHub Release"
         if: steps.worker.outputs.release == 'yes'
@@ -213,6 +217,9 @@ jobs:
             printf '\n**Full changelog**: %s/%s/compare/%s...receiver-v%s\n' \
               "${{ github.server_url }}" "${{ github.repository }}" "$PREV" "${{ steps.receiver.outputs.version }}" >> /tmp/notes-receiver.md
           fi
+          # The upgrade guide at this release's tag, as in worker's group.
+          printf '\n**Upgrading**: %s/%s/blob/receiver-v%s/docs/upgrading.md\n' \
+            "${{ github.server_url }}" "${{ github.repository }}" "${{ steps.receiver.outputs.version }}" >> /tmp/notes-receiver.md
 
       - name: "receiver: create GitHub Release"
         if: steps.receiver.outputs.release == 'yes'
@@ -283,6 +290,9 @@ jobs:
             printf '\n**Full changelog**: %s/%s/compare/%s...admin-v%s\n' \
               "${{ github.server_url }}" "${{ github.repository }}" "$PREV" "${{ steps.admin.outputs.version }}" >> /tmp/notes-admin.md
           fi
+          # The upgrade guide at this release's tag, as in worker's group.
+          printf '\n**Upgrading**: %s/%s/blob/admin-v%s/docs/upgrading.md\n' \
+            "${{ github.server_url }}" "${{ github.repository }}" "${{ steps.admin.outputs.version }}" >> /tmp/notes-admin.md
 
       - name: "admin: create GitHub Release"
         if: steps.admin.outputs.release == 'yes'
@@ -351,6 +361,9 @@ jobs:
             printf '\n**Full changelog**: %s/%s/compare/%s...gateway-v%s\n' \
               "${{ github.server_url }}" "${{ github.repository }}" "$PREV" "${{ steps.gateway.outputs.version }}" >> /tmp/notes-gateway.md
           fi
+          # The upgrade guide at this release's tag, as in worker's group.
+          printf '\n**Upgrading**: %s/%s/blob/gateway-v%s/docs/upgrading.md\n' \
+            "${{ github.server_url }}" "${{ github.repository }}" "${{ steps.gateway.outputs.version }}" >> /tmp/notes-gateway.md
 
       - name: "gateway: create GitHub Release"
         if: steps.gateway.outputs.release == 'yes'

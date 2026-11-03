@@ -30,7 +30,7 @@ where one name is declared in both places offers no profile at all, because it r
 secrets until one of the two is removed, and `pi-dispatch doctor` names that name.
 
 When you upgrade a deployment that runs on several machines, upgrade every worker before the receiver and the
-console. An older worker does not offer a profile declared through the panel, so a newer receiver can stop
+console ([the order](upgrading.md#the-order)). An older worker does not offer a profile declared through the panel, so a newer receiver can stop
 routing a job that binds `run.secrets` without naming a profile and also waits on a `run.waitFor` profile to the
 one host that serves both, and the job can land on a host that refuses it.
 
@@ -478,7 +478,7 @@ failed, and never the reference, the resolver's path, or a byte of what it print
    container then runs with the variable unset on a clean exit, which is exactly the silent no-op this
    feature is built to refuse. A stale admin fails the other way, visibly, refusing every trigger write
    while the file holds a `run.secrets` entry. Upgrade the receiver in the same `npm install` as the
-   worker, before you bind the first secret.
+   worker, before you bind the first secret ([the order](upgrading.md#the-order)).
 
 ### From the panel
 

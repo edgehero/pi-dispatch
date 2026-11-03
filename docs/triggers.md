@@ -77,8 +77,10 @@ relative path resolves against the worker's own directory) and, with `flow`, a `
 The webhook types also charset check `run.flow` at load (skill names are lowercase). A flow that could
 never name a repo skill is refused when the file loads, at no cost, instead of failing inside a paid
 container. A cron `id` longer than 176 characters refuses the file too: each run its schedule starts is the job
-`repeat:<id>:<time>`, and the console and the panel read a job id of at most 200 characters (and a schedule's id of
-at most 176), so a longer one would run with nothing able to name it.
+`repeat:<id>:<time>`, and the console and the panel read a job id of at most 200 characters, so a longer one would
+run with nothing able to name its runs. Earlier releases took an id of any length: the console and the panel still
+name a schedule whose id is up to 200 characters long, so you can find one an earlier release made and remove it,
+and a run record is read whatever its id's length.
 
 Two matching behaviours to know before you turn on a paid trigger:
 
@@ -214,9 +216,9 @@ worker and the receiver refuse to start on it (a running worker keeps its schedu
 it), and one above 1 reads as a file a newer release wrote, so every job waits.
 
 Every top-level key beside `triggers`, and every `run` key of an entry, including ones this release does not know, is
-kept by every write of a release with issue #704 or later. A panel, console or worker from before it (4.3.1 included)
-writes `triggers` alone, dropping `version` and every other top-level block, `secretBundles` among them, so upgrade
-them first.
+kept by every write of a release with issue #704 or later. A `/dispatch` panel or worker from before it (4.3.1
+included, which had no web console) or an earlier console build writes `triggers` alone, dropping `version` and every
+other top-level block, `secretBundles` among them, so upgrade them first.
 
 ## Optional `run` fields
 
@@ -635,8 +637,8 @@ trigger by its position in the file. Inserting a trigger with the same flow, kin
 moves the ones after it down. A queued job of a moved trigger can then be checked against its neighbour, and
 refused as `trigger-skew` when that neighbour sets `models`, `maxCostUsd`, `mcp`, `awaitInput`, `progress`,
 `statusComment`, `recover` or `steer`. The comment says the trigger
-changed after the job was queued. Re-run those jobs too. Upgrade the worker and the receiver together, and restart the
-receiver after editing the file.
+changed after the job was queued. Re-run those jobs too. Upgrade the worker and the receiver together
+([the order](upgrading.md#the-order)), and restart the receiver after editing the file.
 
 Everything else is editable from the panel (`a` adds kind-first, `e` edits the flow, `x` deletes) or via
 the confirm-gated AI tools. Every write is validated. Both services reload it live.
@@ -694,7 +696,8 @@ Any trigger type can set the most one of its jobs may spend, in US dollars:
 release drops `maxCostUsd`, and its job would run under the deployment's cap or none. The worker refuses
 such a job before it spends (`trigger-skew`, naming the field), when it can read the triggers file. The
 check is strict: adding `maxCostUsd` to a trigger refuses the jobs of it that were already queued
-(`trigger-skew`). Re-run them. Upgrade the worker and the receiver together. `pi-dispatch doctor` reminds you
+(`trigger-skew`). Re-run them. Upgrade the worker and the receiver together ([the order](upgrading.md#the-order)).
+`pi-dispatch doctor` reminds you
 of this once when a trigger sets `maxCostUsd`, as it does for `models`.
 
 **Dollar windows.** A deployment can also cap what all its jobs spend per UTC day, Monday week and month:

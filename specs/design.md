@@ -175,6 +175,92 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     completion. That is the correct semantics for `DES-ADMIN-VIA-PI-EXTENSION`'s switch: **off means
     "stop starting work", not "start dropping work"** — dropping would violate `REQ-QUEUE-BURST-NO-DROP`.
   - **Stalled-job recovery re-runs paid jobs by default** — see `CONST-RETRY-INFRA-ONLY`.
+- **BullMQ's internals have one owner** (AMENDED 2026-11-03, #761, upgrade path). Every fact this project reads or
+  writes past BullMQ's public API lives in one leaf, `worker/src/bullmq-internals.mjs`
+  (`@edgehero/pi-dispatch/bullmq-internals`, which the receiver and the admin console import too, since it imports
+  nothing): the key names (`bull:<queue>:<type>`: `BULL_PREFIX`, `QUEUE_KEY`, `queueKey`, `queueKeyOf`, `jobKeyOf`,
+  `metaKeyPattern`, `queueNameOfMetaKey`), the job hash's fields (`JOB_FIELD`), the meta hash's flags (`META_FIELD`,
+  and `isPausedFlag`: a queue is paused while its `paused` field is present, whatever it holds), the delayed score
+  (`DELAYED_SCORE_SHIFT`, `dueOfScore`), the `repeat:`/`manual:` run id grammar (`DES-CRON-VIA-BULLMQ-SCHEDULER`) and
+  a custom job id's two rules (`customJobIdAllowed`: not an integer's own spelling, and a `:` only when the id splits
+  into exactly three parts). Each is cited beside the file of bullmq `BULLMQ_VERIFIED_VERSION` (5.80.4) it was read
+  from. BullMQ's public API (`Queue`, `Worker`, `getJobs`, the state names), which semver governs and a changelog
+  announces, and this project's own names (`QUEUE`, `hostQueueName`, `sanitizeJobId`) stay where they are. Two tests
+  hold it. `worker/test/bullmq-internals.test.mjs`: a single-owner scan of `worker/src`, `receiver/src`, `admin/src`,
+  `image/runner` and `gateway/src` (comments stripped, a line at a time) refuses a second spelling of a key, a field,
+  the score, the run id grammar, the three-part rule or a scheduler key's bound outside the module, with three named
+  exemptions that must each match exactly one line and a planted spelling per pattern, so it is not vacuous; text pins
+  hold each cited file of the installed BullMQ (`getDelayedScore.lua`, `addJobScheduler-11.lua`, `isQueuePaused.lua`,
+  `getTargetQueueList.lua`, `pause-7.lua`, `isJobSchedulerJob.lua`, `job.js`, `job-scheduler.js`, `queue-keys.js`,
+  `queue-base.js`, `queue.js`), and
+  `customJobIdAllowed` answers id for id as BullMQ's own `validateOptions` does; and the pins agree: the exact
+  `bullmq` pins of the worker, the receiver and the admin, the `ioredis` pins of those and the gateway and the admin's
+  `cron-parser` are one version each, the lockfile's bullmq depends on exactly those, no copy is nested, and the
+  installed bullmq is `BULLMQ_VERIFIED_VERSION`. `worker/test/bullmq-internals.integration.test.mjs` holds the
+  behaviour against a real Valkey (nine assertions). The meta hash's `version`
+  (`metaVersionOf`) is read by that test alone: every process that makes a Queue writes it, so in a fleet of mixed
+  versions it holds whichever wrote last and no warning may be built on it. A meta key is read back as its queue's
+  name only when that name holds no `:` (`queueNameOfMetaKey`; `queue-base.js` refuses one), since a SCAN pattern's
+  `*` also matches a job's own hash whose three-part custom id ends in `meta` (`bull:pi-jobs:a:b:meta`); the canary
+  lock's and the host queues' discovery read names through it, where each had cut the name out by position. A bump moves the pins, the lockfile and
+  `BULLMQ_VERIFIED_VERSION` together and re-reads every cited file in the new tarball (AGENTS.md, "BullMQ bumps"); a
+  red pin is a fact that moved. Residual: the scan reads one line at a time, so a spelling built across lines or from
+  variables is caught only by reading the change.
+- **The Valkey image is pinned to a minor** (AMENDED 2026-11-03, #761, upgrade path): `valkey/valkey:8.1`, one
+  constant, `VALKEY_IMAGE` (`worker/src/valkey-auth.mjs`). `up`'s `docker run` and its owner check run it;
+  `deploy/docker-compose.yml`, the Quadlet unit `deploy/pi-dispatch-valkey.container` (`Image=docker.io/valkey/valkey:8.1`,
+  which `service.mjs`'s `TEMPLATE_PINS` holds), their `worker/deploy/` mirrors, CI's Valkey services
+  (`pi-upgrade-check.yml`, `podman-conformance.yml`) and the image job's pull, which `canary-runtime-smoke.mjs` then
+  runs with `--pull=never`, both from the constant, all name it; `worker/test/valkey-image.test.mjs` holds each place
+  to it and refuses a Valkey image literal anywhere else in the source. This REVERSES the floating `valkey/valkey:8`
+  that every earlier release shipped, on the reasoning that a floating tag on a queue breaks loudly and spends nothing
+  (`INT-EGRESS-POLICY-CONTRACT` said so). That is not enough: the specs state measured facts about this Valkey
+  (`HEXPIRE` answers `ERR unknown command`, `DES-HOST-REGISTRY`; `/bin/sh` is dash, whose builtin `echo` keeps the
+  password off every argv, `DES-PODMAN-STACK-AS-QUADLET-UNITS`), and a floating tag makes each a claim about whatever
+  was pulled last;
+  the hosts of one fleet must not cross a minor at different times, each on its own next pull; a newer minor's data
+  files need not load in an older one, so a pull nobody chose could rule out a rollback; and an upgrade guide needs a
+  known starting point. A minor, not a patch or a digest: `:8.1` still takes 8.1's patch releases, security fixes
+  among them, which a tighter pin would hold back until someone moved it (the egress proxy, which IS the allowlist,
+  stays on a digest). Measured when pinned (2026-11-03, Docker 27.4.0, arm64): `valkey/valkey:8` and
+  `valkey/valkey:8.1` were one image, Valkey 8.1.11 (`sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809`),
+  no `:8.2` existed and `:latest` was 9, so the pin moved no host; and a volume of Valkey 8.0.2 (`valkey/valkey:8.0.2`,
+  `sha256:57bcc49c6ade1813ef25206c571b65b66bb0094235ff7fb767941622892297d9`) and one of 8.1.11 each loaded in the
+  other, through the AOF and through the RDB alone. Each was written with a password and the AOF on (strings, a key
+  with a TTL, a hash, a list, a set, a sorted set, a stream and 2,500 bulk keys, then `SAVE`, `BGREWRITEAOF` and 300
+  writes more), both wrote `REDIS0011` files and a multi-part AOF (an RDB base, an increment and a manifest), and the
+  other minor read the same 2,809 keys back, the TTL kept and the writes after the rewrite present. On `docker stop`
+  both called fsync on the AOF and saved a final RDB snapshot, so every fix that recreates the container stops it
+  first, never `docker rm -f`. On 8.1.11 `/bin/sh` is `/usr/bin/dash` on Debian 13.7 (on 8.0.2, dash on Debian 12.10).
+  What an upgrade leaves on `:8`: a compose file a setup copied into a deployment folder (create-only), an installed
+  Quadlet unit (only `service install --force` rewrites it; `up` leaves a changed unit as it is) and a
+  `pi-dispatch-valkey` container an older `up` started. Doctor's `state.older` names each (`worker/src/older-state.mjs`,
+  an exact match of `OLDER_VALKEY_IMAGES`, `valkey/valkey:8` and `docker.io/valkey/valkey:8`, so an image an operator
+  chose, `:8.1-alpine` or a digest, is never one), with the step that moves it, and `up`'s summary repeats the
+  container's as a `valkey image` row where it leaves that container as it is. A compose file counts by its `valkey`
+  service's `image:` alone, so a service an operator added on `valkey/valkey:8` is never a finding; every `image:` at
+  that service's own level counts, and a merge conflict's marker lines in it (`<<<<<<<`, `=======` and `>>>>>>>` at
+  the start of a line) read as blank, and so does the merge base that git's diff3 and zdiff3 styles add between
+  `|||||||` and `=======`, so an unresolved conflict between `:8` and `:8.1` is a finding whichever side holds `:8`
+  (an old `:8` in the merge base alone is not). The container
+  counts only when this deployment's `up` started it and still runs it itself (`valkeyContainerOwner(...).ours`, in a
+  folder not handed over to compose: `upValkeyContainerImage` in `older-state.mjs`), one rule `up`'s row and doctor share, so a container another deployment owns is
+  never named, nor its removal printed as a fix. The same rule decides a compose file's fix: where it says `up`'s
+  container is this deployment's Valkey, compose does not run that Valkey, so the fix is to change the `image:` line
+  only, since `up -d valkey` there would start a second Valkey beside it on a new, empty volume; where compose runs
+  it, or doctor cannot tell (docker not asked, no verdict, or a container not provably this deployment's), the fix
+  recreates it from the file, which stops it first. Moving the pin: change `VALKEY_IMAGE`,
+  add the value it leaves to `OLDER_VALKEY_IMAGES` in both spellings, re-measure the facts above and the load in both
+  directions, and add a row to `docs/upgrading.md`. Residuals: doctor inspects the container only where `local` is in
+  `PI_BACKENDS`, `docker info` answered (issue #433: it spawns docker nowhere else) and `VALKEY_URL` names this host
+  by a loopback address or `localhost`, as `up` judges it, read from the service's `.env` or the shell, and only where
+  `up`'s own reader (`readValkeyKeys`, from the file's bytes) reads that `.env` without an error and finds there no
+  `VALKEY_URL` but the one judged: never where the file holds a NUL or invalid UTF-8 (under systemd), or spells
+  `VALKEY_URL`, `PI_VALKEY_SHARED` or `VALKEY_PASSWORD` and has a line the service's loader reads differently or one
+  of those keys on a line that reader cannot read, whether the shell sets `VALKEY_URL` or not, nor where the shell's
+  and the `.env`'s disagree, each of which `up` refuses on Linux (the last everywhere). So an openshell deployment's
+  docker Valkey is not checked; and a Valkey container compose made, still on `:8` while its compose file already
+  names `:8.1`, is not seen (compose names that container itself, never `pi-dispatch-valkey`).
 - **Reference** (no authority): `docs.bullmq.io/guide/rate-limiting`, `/guide/workers/pausing-queues`,
   `/guide/redis-tm-compatibility`.
 
@@ -933,6 +1019,31 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Carve-out that is not optional**: scheduler jobs **bypass `maxStalledCount`** — see
   `CONST-RETRY-INFRA-ONLY`. This is the one place BullMQ's stall protection does not hold, and it is
   precisely the trigger that runs while nobody is watching.
+- **One owner of a cron run's id** (AMENDED 2026-11-03, #761, upgrade path). A scheduler's run is
+  `repeat:<id>:<slot>` and a hand-fired run of the same trigger `manual:<id>:<minute ms>` (`manualTriggerJobId`; a
+  canary's `manualCanaryJobId` adds 1 ms), both of BullMQ's three-part shape. One grammar owns both, in
+  `worker/src/bullmq-internals.mjs` (`DES-QUEUE-BULLMQ-OVER-CUSTOM`): `schedulerJobId`, `cronRunPrefixes` and `cronRunOf`
+  (`{ kind, id, ms }` or null: the id in the triggers loader's charset, `[A-Za-z0-9._-]`, so never a `:`, and the slot
+  plain digits with no leading 0, at most 16 of them), `isSchedulerJobId` (the `repeat:` namespace, parsed or not),
+  `scheduledForMillis` and `isSchedulerNext` (a `repeat:` run only: a `manual:` run has no scheduled instant and is
+  never a scheduler's next run), and `SCHEDULER_JOB_ID_OVERHEAD`, from which the loader's `CRON_ID_MAX` is derived
+  (still 176). Every reader imports it: the stall guard, a record's session key, the record writer's `scheduledFor` and
+  `findPreviousRun`, `prepare.mjs`, and the admin's per-trigger folds (`cronRunStats`, `attributeRunsToTriggers`),
+  `cronTriggerId`, the runs filter, the trigger list, the waiting reader, the console kit and the run panel;
+  `repeat-slot.mjs` is gone. **How long an id is read depends on what it is read from.** A reader of run RECORDS takes
+  a cron id of any length (`cronRunOf` without `idMax`), since every release before issue #761 took one and a record is
+  this deployment's own history. A reader of Valkey, and every surface that prints a scheduler's id, takes at most
+  `SCHEDULER_ID_MAX` (200, `SCHEDULER_ID_RE`), wider than the loader's 176, so a scheduler an earlier release upserted
+  for a longer id is still named where an operator can find and remove it, while a key anything holding the URL planted
+  still cannot widen a page. What an operator sees change: the console and the panel name a scheduler key of 177 to
+  200 characters, which they read as no id before; an id outside the grammar (a slot that is not plain digits or starts
+  with 0, a `:` inside the id, a character outside the charset), which no release mints, no longer counts as a cron
+  run where a reader took one leniently (a record's session key, the admin's folds, the runs filter, the trigger
+  list); the stall guard logs `repeat:a:b:1` as `scheduler_stall_unparsed` instead of counting it under `a:b`, and
+  returns at once for an id that is not a string, where it logged `scheduler_stall_guard_error`. The loader's refusal
+  of a longer id says why (`triggers.mjs`): each run's job id, `repeat:<id>:<up to 16 digits>`, must stay within the
+  200 characters the readers take. It said a scheduler's id is read back at most that long, which held for a run's job
+  id and no longer for the scheduler key.
 - **Traces to**: `CONST-RETRY-INFRA-ONLY`, `CONST-BUDGET-BEFORE-TOKENS`, `REQ-RUNNER-TURN-BUDGET`,
   `REQ-QUEUE-BURST-NO-DROP`
 
@@ -3841,8 +3952,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     out (a reader cannot apply what it cannot read, and `withoutOperatorOnly`'s block list keeps a future operator-only
     key out of model-visible views only because such a key never enters the overlay), but every write now carries it
     back with its value, in its place (`readOverlayDocument`'s `carry` into `writeOverlay`). Before, one `set` from an
-    older console deleted a key a newer release had added, silently, and a panel or console from before this release
-    still does (4.3.1 included: it drops every key it does not know, `secretBundles` among them), so a carried key is
+    older console deleted a key a newer release had added, silently, and a `/dispatch` panel or a console from before
+    this release still does (the panel of 4.3.1 included, which shipped no web console: it drops every key it does not
+    know, `secretBundles` among them; CORRECTED 2026-11-03, #761, upgrade path), so a carried key is
     safe only once every panel and console runs this release or later. Carrying alone is not enough for a key whose
     ABSENCE narrows a job (a cap, a refusal), since an older worker still runs without it, so such a key declares the
     version that introduced it (`SETTINGS_KEY_VERSIONS`, or `SETTINGS_VALUE_VERSIONS` for a range a later release
@@ -5214,6 +5326,55 @@ free local model, or using a few successful live probes as proof of every routin
        because the narrowed caps are read at each pickup and a hold settles on its own keys.
      - **`envelope-mismatch`** is a free gate with the others, before the mint: the pickup's reconcile found this
        host's envelope digest is not the applied split's, so no narrowed ledger is computed at all.
+  11. **A counter that lost its history** (AMENDED 2026-11-03, #761, upgrade path). A dollar counter is the only copy
+     of what its window spent, so a flushed, replaced or restored Valkey, an evicted key or a hand edit reopens the cap
+     with nothing saying so. A record cannot be bucketed by its own times to find out (the reservation's clock is
+     neither `startedAt` nor `endedAt`, and a window whose cap was set mid-window was never written by the records
+     before it), so the record says which deployment windows hold its settled amount (`dollars.reservedIn`,
+     `INT-RUN-HISTORY-FILE-CONTRACT`), and doctor holds the counters to it (`dollars.window-reset`,
+     `doctorDollarWindows`, `INT-DOCTOR-RESULTS-KEY`).
+     - **The proof.** Money moves in one order: a reserve adds R to each key of the hold, a settle adds S - R to each
+       key it reaches, a release adds -R, and the record stating S is written after the step. So on a healthy
+       deployment each key holds at least the sum of what the finished holds put in it. `deploymentWindowsOf` names a
+       window only where its key holds at least the `settledMicros` the record states, counted along the keys the step
+       walked (the job's part for a settle, the whole hold for a release): a key the step moved holds the settled
+       amount (0 after a release), and one it did not reach still holds the reservation. A settle that stopped part-way
+       while the record states a metered cost above the reservation leaves out the windows it did not reach; a release
+       that stopped part-way while the record states the whole reservation leaves out the windows it already gave
+       back; a fault before any key and a settle whose run ledger did not move record the reservation, which every key
+       still holds. Each case is tested.
+       So the sum of this host's records whose `reservedIn` names the current bucket and this Valkey's endpoint tag
+       (`dollarWindowFloors`) is at most the counter, and a counter below it lost history; the check claims nothing else.
+     - **The check.** It reads the deployment's day, week and month caps, overlay over env (`dollarWindowCaps`; a value
+       it refuses is its own line, and this check then says nothing), and reads nothing with no cap set or no Valkey
+       this command may talk to. It reads this host's records FIRST (`readLocalWindow` from the start of the earliest
+       active window, which stops opening files at a deadline, `cutShort`) and sums them per window, and only THEN, for
+       the windows whose sum is above 0, the counters, in one `MGET`: every record it read was settled before the
+       counter was read, so the counter cannot legitimately be below it. Both reads share one 5 s bound
+       (`DOLLAR_WINDOWS_DOCTOR_TIMEOUT_MS`), the default reads are refused in tests (`forbidDefaultDollarWindowRead`),
+       and a read that fails or runs out of time says nothing: silence is never a claim that nothing was lost. A
+       counter that is absent, or an integer below the sum (a negative one included), is a finding; one that is not an
+       integer is skipped. Every finding goes in ONE warning, which names each window, its key, what it holds, this
+       host's sum and the cap, says the cap counts "at least" the difference too little, and says other hosts' runs are
+       not counted. Its fix gives three ways out for the rest of the window: put back at least this host's share
+       (`valkey-cli INCRBY <key> <shortfall>`, then `valkey-cli EXPIRE <key> <seconds>` with the window's own TTL
+       printed, 172800, 777600 or 3456000, and without `NX`, which an operator's older Valkey may not take; on a fleet,
+       `INCRBY` the sum, in micro-dollars, of every host's settled share less what the counter holds now, since each
+       host's doctor sees its own records only), lower the cap by what was already spent, or
+       `pi-dispatch pause` and resume once the window ends (its end printed, UTC). A counter lowered on purpose is named
+       until its window ends.
+     - **Not checked**: the job-count windows and the token counter (no record says which of their windows it counted
+       in), the scoped, project, `_other` and model dollar windows (each key a hash per ledger), and a deployment
+       window whose only cap is an allocation envelope's total (the caps are read from the settings alone).
+     - **Residuals, each of which only lowers the sum, so it can hide a reset and never invent one**: another host's
+       records are not here (so "this host's share" and "at least"); history lost before this host's records, and a
+       reset that has since re-accumulated past this host's share, are not seen; only records written from issue
+       #761's release on count; a retried job's record shows its last attempt, and a hold a crashed worker left has no
+       record; retention shorter than the window, a record over 256 KiB, a record a newer release wrote and a read cut
+       short by the bound leave records out; a tag that differs for the same Valkey (`localhost` against `127.0.0.1` on
+       a host that pins nothing) leaves its records out, and a moved `VALKEY_URL` does not fire at all, since the old
+       records carry the old tag. A clock set back by more than a TTL's slack could meet an expired key; that is
+       theoretical.
 - **Why**: one call's dollars are not bounded by the cap's scale. On the default model one call can cost
   several dollars, so a cap checked after a call is a soft limit one call can pass by more than the cap. The
   in-flight sum is what makes parallel sessions safe: each is judged against the other's worst case, not
@@ -8573,7 +8734,9 @@ a tunnel.
   report reads them and no decision does, so deleting them costs a report its running jobs until the next beat.
 - **Rejected**:
   - *One HASH keyed by name, with per-field TTLs.* Verified unavailable: `HEXPIRE` does not exist on the
-    pinned `valkey/valkey:8` (`ERR unknown command`), so the retention window would become the writer's
+    pinned `valkey/valkey:8.1` (`ERR unknown command`; AMENDED 2026-11-03, #761, upgrade path: re-measured on Valkey
+    8.1.11, the image `VALKEY_IMAGE` pins, and on 8.0.2, after it said the floating `valkey/valkey:8`; the image's
+    `/bin/sh` is dash, on Debian 13), so the retention window would become the writer's
     bookkeeping and a worker dying mid-sweep would leak fields nothing removes.
   - *A `SCAN host:h:*` instead of an index SET.* Refused for `wait:held`'s measured reason: the panel
     reads every second, and a keyspace scan walks hardest precisely when nothing is registered.
@@ -14391,9 +14554,12 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     cron trigger's id, which the stall counts are kept under; BullMQ's `name` is the job name the scheduler mints its
     runs with (`local` for every cron trigger), so a surface that named it by `name` first drew "local" for every
     schedule and found no stall count under it. The reader carries `key` (BullMQ's `key` alone: no other field stands in
-    for one) and `name` only in the triggers loader's cron id charset and at most `SCHEDULER_NAME_MAX` characters, which
-    IS the loader's longest cron id (`CRON_ID_MAX`, 176, `INT-TRIGGERS-FILE-CONTRACT`), so every id the loader takes is
-    one the reader keeps and a scheduler the worker upserts is never read as one with no id (`mapSchedulers`), else null
+    for one) and `name` only in the triggers loader's cron id charset and at most `SCHEDULER_NAME_MAX` characters, at
+    least the loader's longest cron id (`CRON_ID_MAX`, 176, `INT-TRIGGERS-FILE-CONTRACT`), so every id the loader takes is
+    one the reader keeps and a scheduler the worker upserts is never read as one with no id (`mapSchedulers`; AMENDED
+    2026-11-03, #761, upgrade path: it said `SCHEDULER_NAME_MAX` IS that constant, and since then it is
+    `SCHEDULER_ID_MAX`, 200, the bound of every reader of a scheduler key in Valkey, so a scheduler an earlier release
+    made for a longer id is still named, `DES-CRON-VIA-BULLMQ-SCHEDULER`), else null
     and never a cut, which would name a scheduler that does not exist and could match a trigger that is not its own; the
     entry stays (its pattern and next fire still say a schedule is there), and every surface names it and matches it by
     its key alone, never by `name` and never by its pattern, which two triggers can share: the overview leaves out of
@@ -15863,7 +16029,13 @@ is introduced. The design generator owns the published card before the console u
     2026-10-25 (#737 PR 3a): `egress.proxy` (does the egress proxy run) and `provider.key` (is the provider's key found)
     join them, named for the console to read; `egress.proxy` is the one named id written at two sites
     (`REPEATED_CHECK_IDS`: docker's proxy and rootless Podman's, each judged by its own line), and no id names a
-    forge's credentials, which no one check holds (`INT-DOCTOR-RESULTS-KEY`).
+    forge's credentials, which no one check holds (`INT-DOCTOR-RESULTS-KEY`). AMENDED 2026-11-03 (#761, upgrade path):
+    three more, for an upgrade, each a warning written at one site: `fleet.versions` (the live workers' versions, and
+    this doctor's against this host's worker row), `dollars.window-reset` (a deployment dollar counter below what
+    this host's records settled into it, `DES-DOLLAR-RESERVE-AND-SETTLE` item 11, in the `dollars` section, which
+    `collectChecks` opens a second time after `fleet`, once whether doctor may talk to the Valkey is known) and
+    `state.older` (a store an older release left behind, `DES-QUEUE-BULLMQ-OVER-CUSTOM`), whose one site is a loop, so
+    a second finding publishes as `state.older-2` by the repeat suffix and `REPEATED_CHECK_IDS` is unchanged.
   - **Best effort**: a Valkey this run may not talk to (the owner rule, a database that does not exist, a line doctor
     cannot read) is not written to, a write that fails is one line on stderr, and neither changes what doctor prints on
     stdout or its exit code. `--no-publish` skips the write; `--publish` beside it is refused (exit 2).
@@ -16010,7 +16182,8 @@ is introduced. The design generator owns the published card before the console u
   whose reason fails the reason charset is no record at all); a delayed job held on `run.waitFor` with no such record
   is `check`; any other delayed job is `none`; a job in the wait list or the prioritized set waits for a `slot`,
   unless its queue is paused (its meta hash has a `paused` field at all, whatever it holds, the presence BullMQ 5.80.4
-  tests with `HEXISTS` in `isQueuePaused.lua` and `getTargetQueueList`; BullMQ's pause renames only the wait list, so
+  tests with `HEXISTS` in `isQueuePaused.lua` and `getTargetQueueList`, read by `isPausedFlag` from the BullMQ leaf
+  since issue #761; BullMQ's pause renames only the wait list, so
   a paused queue keeps its prioritized set), when it, like a job in the paused list, is `paused`. The reader asks that
   flag by presence too, `HEXISTS` (`pausedAsk`), never its value, which anything with the URL can make megabytes long
   and which would otherwise cross the wire on every read. The project is the record's, else the repository read off a
@@ -16116,12 +16289,14 @@ is introduced. The design generator owns the published card before the console u
   `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED`, `DES-OPERATOR-CONSOLE`, `REQ-OPERATOR-CONSOLE-ACTIONS`, `REQ-WAIT-FOR`,
   `CONST-RETRY-INFRA-ONLY`, `CONST-ISSUE-TEXT-IS-DATA`.
 - **Code evidence**: worker/src/defer-reasons.mjs (`DEFER_WHYS`, `DEFER_BUCKETS`, `DEFER_BUCKET_WORDS`,
-  `DEFER_DUE_SENTENCE`, `DEFER_FIELDS`, `DEFER_TIME_MAX_MS`, `deferHsetArgs`, `parseDefer`, `deferTtlMs`, `dueOfScore`,
-  `isSchedulerNext`), worker/src/defer-write.mjs (`makeDeferTo` and its guarded `say`, `retryDelayOf`,
+  `DEFER_DUE_SENTENCE`, `DEFER_FIELDS`, `DEFER_TIME_MAX_MS`, `deferHsetArgs`, `parseDefer`, `deferTtlMs`, and the
+  re-exports of `dueOfScore` and `isSchedulerNext`), worker/src/bullmq-internals.mjs (`dueOfScore`, `isSchedulerNext`,
+  `isPausedFlag`, `queueKeyOf`, `jobKeyOf`, `JOB_FIELD`, `cronRunOf`; AMENDED 2026-11-03, #761, upgrade path: these
+  moved there from defer-reasons.mjs and the admin's read model), worker/src/defer-write.mjs (`makeDeferTo` and its guarded `say`, `retryDelayOf`,
   `DEFER_WRITE_TIMEOUT_MS`, `DEFER_CAD_LUA`), worker/src/index.mjs (`makeProcessor`: every deferral, `deferScope`'s
   reason, the four retry exits, the check loop's answers), worker/src/wait-state.mjs (`hold`'s `afterMs`, `answerOf`,
   `noteAnswer`), worker/src/cancel-state.mjs (`removeQueuedJob`'s `guard`, `removeHeldJob`'s `cleared`,
-  `holdInPlace`), admin/src/read-model.mjs (`readWaiting`, `hydrateWaiting`, `readWaitingRow`, `isPausedFlag`,
+  `holdInPlace`), admin/src/read-model.mjs (`readWaiting`, `hydrateWaiting`, `readWaitingRow`, `triggerRunOf`,
   `pausedAsk`, `instantOf`, `WAITING_PER_LIST_MAX`, `WAITING_QUEUES_MAX`, `WAITING_DUE_GRACE_MS`,
   `WAITING_DISCOVERY_TTL_MS`, `WAITING_TTL_MS`, `WAITING_STATES`, `DEFER_STALE_MS`, `createFleetReader`'s
   `snapshot({ waiting })` (since #737 PR 3b; a reader option in PR 3a), `waitingOf` and `existingQueueNames`),
@@ -16899,8 +17074,9 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   - the settings overlay: every TOP-LEVEL key this build does not know, written back as read and in the file's own
     order (`readOverlayDocument`'s `carry`), never one a caller adds; a closed nested shape (a `secretBundles` entry)
     still refuses an unknown field, which is why a field added there needs a value rule. Only a panel or console of
-    this release or later carries: an earlier one (4.3.1 included) drops every key it does not know, `secretBundles`
-    among them, so every panel and console is upgraded first;
+    this release or later carries: an earlier `/dispatch` panel (4.3.1 included) or an earlier console drops every key
+    it does not know, `secretBundles` among them, so every panel and console is upgraded first (CORRECTED 2026-11-03,
+    #761, upgrade path: 4.3.1 shipped no web console);
   - the pause windows file: every top-level key but `windows` and `version`, in place (`pauseWindowsText`, the one
     serializer both writers use; a panel or console from before this release writes `windows` alone); a window's own
     fields are its writers', so a new one declares a version;
@@ -17071,6 +17247,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-03 (#761, upgrade path) | **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**, two bullets. "BullMQ's internals have one owner": every fact read past BullMQ's public API (keys, job fields, meta flags, the delayed score, the `repeat:`/`manual:` grammar, the custom id rules) is in `worker/src/bullmq-internals.mjs`, cited beside the bullmq 5.80.4 file it was read from, held by a single-owner scan of five source trees with named exemptions and planted spellings, text pins, BullMQ's own `validateOptions`, a pins test (the three bullmq pins, ioredis and cron-parser, the lockfile, no nested copy, `BULLMQ_VERIFIED_VERSION`) and a real-Valkey test; the meta `version` is read by that test alone. "The Valkey image is pinned to a minor": `valkey/valkey:8.1` (`VALKEY_IMAGE`) in every place that starts or ships one, held by `valkey-image.test.mjs`, which REVERSES the floating major and its "breaks loudly, spends nothing" reasoning, for four reasons; a minor, not a patch or a digest, so it still takes 8.1's patches; the lab (2026-11-03, Docker 27.4.0: `:8` and `:8.1` one image, Valkey 8.1.11 `sha256:8f836008...`; 8.0.2 `sha256:57bcc49c...` and 8.1.11 each loading the other's volume through the AOF and the RDB alone, 2,809 keys, a TTL and the writes after a rewrite intact; a final snapshot on `docker stop`, so a fix stops before it removes); what an upgrade leaves on `:8` and doctor's `state.older` detectors (exact `OLDER_VALKEY_IMAGES` matches only, a compose file by its `valkey` service's image alone, every `image:` at that service's level counting and a merge conflict's marker lines read as blank, a container only where this deployment's `up` started it and still runs it, the rule `up`'s row shares and the compose fix follows: only the `image:` line, with no `up -d valkey` that would start a second, empty Valkey, where `up`'s container is the Valkey), `up`'s `valkey image` row, how to move the pin, and two residuals (docker is asked only where `local` is in `PI_BACKENDS`, `docker info` answered and `VALKEY_URL` names this host, read from the `.env` or the shell, and only where `up`'s own reader (`readValkeyKeys`) reads the `.env`, from its bytes, without an error and finds there no `VALKEY_URL` but the one judged, so never where `up` refuses that file; a compose-made container on `:8` under an updated file is not seen). **`DES-CRON-VIA-BULLMQ-SCHEDULER` AMENDED**, a bullet "One owner of a cron run's id": one grammar for `repeat:` and `manual:` (`cronRunOf`, `isSchedulerJobId`, `scheduledForMillis`, `isSchedulerNext`, `SCHEDULER_JOB_ID_OVERHEAD`), every reader importing it and `repeat-slot.mjs` gone; record readers take any id length, Valkey readers and surfaces 200 (`SCHEDULER_ID_MAX`); the changes an operator sees (a 177 to 200 character scheduler named, an off-grammar id no longer a cron run at the formerly lenient readers, the stall guard's unparsed and non-string cases); the loader's refusal, which now says each run's job id must stay within the 200 characters the readers take. **`DES-DOLLAR-RESERVE-AND-SETTLE` AMENDED**, worker half item 11, "A counter that lost its history": the proof (reserve, settle and release order, `reservedIn` naming only windows whose key holds what the record states, each part-way case tested), the check (caps from the settings, records first, then one `MGET`, a 5 s bound, absent or below is a finding, a non-integer skipped, one warning, its label and its three-way fix with `INCRBY`, `EXPIRE` and no `NX`, on a fleet the sum, in micro-dollars, of every host's settled share less what the counter holds), the windows not checked (job-count, token, scoped, project, `_other`, model, and an envelope-only cap) and the residuals that only lower the sum. **`DES-DOCTOR-RESULTS-PUBLISHED` AMENDED**, the Ids bullet: the three named ids, the re-opened `dollars` section and `state.older`'s repeats. **`DES-HOST-REGISTRY` AMENDED**, the rejected per-field TTLs: the pinned image is `valkey/valkey:8.1`, `HEXPIRE` re-measured as `ERR unknown command` on 8.1.11 (and 8.0.2), `/bin/sh` dash on Debian 13. **`DES-WAITING-REASONS` AMENDED**, the code evidence and the paused-flag sentence: `dueOfScore`, `isSchedulerNext`, `isPausedFlag` and the key helpers moved to `bullmq-internals.mjs`, the read model's `TRIGGER_JOB_ID_RE` became `triggerRunOf`. **`DES-OPERATOR-CONSOLE` AMENDED**, the scheduler bound: `SCHEDULER_NAME_MAX` is `SCHEDULER_ID_MAX` (200), at least `CRON_ID_MAX`, no longer equal to it. **`DES-RUNTIME-SETTINGS-FILE-OVERLAY` and `DES-STORE-VERSION-WHEN-NEEDED` CORRECTED**, one parenthesis each: 4.3.1 shipped the `/dispatch` panel and no web console. **`DES-RUN-HISTORY-FLAT-FILES-NO-DB` UNCHANGED, checked**: doctor reads this host's records through the capacity reader, no store with query power. **Code evidence**: worker/src/bullmq-internals.mjs; worker/test/bullmq-internals.test.mjs; worker/test/bullmq-internals.integration.test.mjs; worker/src/valkey-auth.mjs -> VALKEY_IMAGE, valkeyContainerOwner; worker/src/older-state.mjs -> OLDER_VALKEY_IMAGES, olderStateFindings, upValkeyContainerImage; worker/src/up.mjs -> the valkey image row; worker/src/service.mjs -> TEMPLATE_PINS; worker/test/valkey-image.test.mjs; worker/src/scheduler-stall-guard.mjs -> makeStallGuard; worker/src/triggers.mjs -> CRON_ID_MAX; worker/src/dollar-budget.mjs -> deploymentWindowsOf, dollarWindowFloors; worker/src/capacity-records.mjs -> readLocalWindow's deadlineAt; worker/src/doctor.mjs -> doctorDollarWindows, dollarWindowResetChecks, fleetVersionChecks; admin/src/read-model.mjs -> mapSchedulers, triggerRunOf, cronRunStats, attributeRunsToTriggers. |
 | 2026-11-02 (#754, #792; independent implementation review) | DES-SANDBOX-GATEWAY-ATTACH-ONLY records the sibling-cookie fixation counterexample, HTTPS prefix-only binding, synchronous pre-attach deadline checks and bounded pending control queue. DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY also records the explicitly approved five-callable-identity facade correction verified against exact pi 1.4.0 and 1.5.0 artifacts. Production pi pins, policy/brake behavior, console CSP/cookies, native lifecycle and paid admission UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, #793; approved extension) | DES-SANDBOX-GATEWAY-ATTACH-ONLY and DES-OPERATOR-CONSOLE amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-03 (#761, tolerant readers) | **`DES-STORE-VERSION-WHEN-NEEDED` AMENDED**: a new bullet, "The tolerant readers: newer means wait, never destroy", the reading side of the same rule for four stores whose readers were closed, their writers still closed: the console audit log links an unlisted but shaped action or outcome and counts it on an intact chain, every surface saying the word is one this console does not know and none that a newer console wrote the row (the check knows only the shape and the link), with no row version (one an older verifier refused would bring back the false "chain is broken"); the tokens file keeps an entry of a shaped role it does not know, which signs in nowhere, and carries extra fields and keys, while a field of an entry or a key of the file that would narrow who may sign in must raise `version`; the boot sweep's keep-list takes a checkpoint pointer of any version, because its "no" deletes; and a newer workspace checkpoint manifest defers the recovery (`newer-release`), leaves the salvage's folder, is aged by the fork sweep by its own `at`, and waits at most the host-lost sweep's seven days; the pointer and manifest tables read exactly their newest version and the one before, the version written among them (pinned by a test), so readers ship a release before writers (a release may read v + 1 while it still writes v), newer being a `v` above the newest read. **`DES-RUN-CHECKPOINT-PAIRED` AMENDED**: the salvage reads the manifest before the snapshot whose end removes the folder, and a newer one stops it there (`checkpoint-newer`, nothing taken or removed, the folder held by the any-version keep-list until the pointer's TTL); the salvage's skips listed by what they leave, `sandbox-alive` and `checkpoint-newer` the two that find the folder and leave it. **`DES-CAPACITY-FROM-RECORDS` AMENDED**: the mirror's count cap is the deployment's `PI_RUN_MIRROR_MAX_RUNS` as the reader is told it (a fixed 5,000 before), and every writer trims the shared index to its own cap as well as its own retention, so the lowest cap wins. UNCHANGED, checked: `DES-RUN-HISTORY-FLAT-FILES-NO-DB` (still one flat file per job and no database; only the mirror's member cap became a setting), `DES-OPERATOR-CONSOLE` (one audit chain, and the tokens file as the one source of sign-ins, as written; what a newer row or role does is in the contracts and `REQ-CONSOLE-SECURITY`) and `DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST` (routing, the recovery cap, the host-lost deadline and its extension are as written, and they bound the new wait). `constitution.md` UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS` (the recovery's `newer-release` deferral comes before the mint and every reserve) and `CONST-RETRY-INFRA-ONLY` (a newer checkpoint is neither a determinate refusal nor an infrastructure failure: the job goes back to the delayed set without spending its attempt). **Code evidence**: worker/src/console-audit.mjs -> verifyConsoleAudit; worker/src/console-tokens.mjs -> parseTokensFile; worker/src/run-checkpoint.mjs -> pointerKeepEntry, CHECKPOINT_POINTER_SHAPES; worker/src/workspace-checkpoint.mjs -> CHECKPOINT_MANIFEST_READS, readManifest; worker/src/recovery-queue.mjs -> makeSalvager, pointedJobDirs; worker/src/fork-store.mjs -> sweepAge; worker/src/run-mirror.mjs -> RUNS_INDEX_MAX; worker/src/capacity-records.mjs -> readMirrorWindow; worker/src/start.mjs -> startWorker (the mirror writer's `indexMax`). |

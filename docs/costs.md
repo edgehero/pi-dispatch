@@ -299,7 +299,8 @@ setting if the server sends usage when asked, or set the model's `cost` to zeros
 
 **Upgrade order.** A worker that knows `costUnreported` reads it as missing on an exit line from an older image,
 and settles every capped job at the floor. That overcharges and never undercharges. Upgrade the image before the
-worker. An older worker with a new image drops the key, so ship them together.
+worker. An older worker with a new image drops the key, so ship them together, in the order
+[upgrading.md](upgrading.md#the-order) gives.
 
 ### Prepaid plans
 
@@ -336,6 +337,94 @@ change what the windows are charged.
 
 A non-zero `boundExceeded` anywhere means a call cost more than the bound said it could. The bound assumes one
 token is at least one byte for every tokenizer pi prices; that count is the evidence that would reopen it.
+
+### When a counter resets
+
+The window counters live only in Valkey: `budget:usd:<day>`, `budget:usd:w:<Monday>` and `budget:usd:m:<month>` for
+the deployment's windows. When Valkey is flushed, replaced or restored from an older copy, or a counter is evicted or
+deleted by hand, the counter starts again from what is left. Each cap then reopens for the rest of its window: a job
+it would have refused runs, and the window can spend its cap a second time.
+
+`pi-dispatch doctor` notices this for the deployment's day, week and month dollar windows (`dollars.window-reset`,
+issue #761). From 5.0.0 a run record that reserved in them says which windows hold its settled amount
+(`dollars.reservedIn`: the UTC day, the week's Monday, the month, and a hash of the Valkey's host, port and database
+in place of the address, never its password). Doctor reads this host's records first and adds up what they settled into each window
+that is open now and has a cap in the settings, counting only records written against this deployment's Valkey. Then
+it reads those windows' counters, and warns when a counter is missing or below that sum. A counter it cannot read as a
+whole number is skipped. For one window the warning reads like this:
+
+> A dollar window counter is below what this host's own runs settled into it, so its history was lost (a flushed,
+> replaced or restored Valkey, an evicted key, or a hand edit) and the cap can let at least that much more be spent:
+> today's (budget:usd:2026-11-03) holds $1.20 while this host's own run records settled $4.80 into it, so the $10.00
+> daily cap counts at least $3.60 too little. Other hosts' runs are not counted here
+
+and its fix:
+
+> put back at least this host's share for the rest of the window: `valkey-cli INCRBY budget:usd:2026-11-03 3600000`
+> then `valkey-cli EXPIRE budget:usd:2026-11-03 172800` (on a fleet, run doctor on every host first, then `INCRBY` the
+> sum, in micro-dollars, of what each says its records settled, less what the counter holds now), or lower the cap by
+> what was already spent, or run `pi-dispatch pause` and resume once the window ends
+> (today's at 2026-11-04 00:00 UTC). A counter lowered on purpose is named here until its window ends (docs/costs.md,
+> "When a counter resets")
+
+So there are three ways out for the rest of the window:
+
+- **Put the spend back.** `INCRBY` by the shortfall in micro-dollars, then `EXPIRE` with the window's own lifetime in
+  seconds (172800 for a day, 777600 for a week, 3456000 for a month), both printed with their values. The `EXPIRE` has
+  no `NX`, so it works on an older Valkey too. Run them with `valkey-cli` and the deployment's password. That restores
+  at least this host's share. On a fleet each host's doctor sees only its own records, so run doctor on every host
+  before you put anything back, and `INCRBY` the sum of every host's settled share (what each host's warning says its
+  own records settled) less what the counter holds now, never each host's shortfall in turn, which subtracts the
+  counter's value once per host and so puts back too little. The warnings say dollars and `INCRBY` takes micro-dollars
+  (dollars x 1,000,000): two hosts that settled $4.80 and $2.40 against a counter of $1.20 make `INCRBY` 6000000. A
+  host whose own share is at or below the counter prints nothing, so on a fleet that sum can still be short by what the
+  silent hosts settled: it restores at least every warning host's share.
+
+  `valkey-cli` runs where the Valkey is. For the `pi-dispatch-valkey` container `pi-dispatch up` starts, run it inside
+  the container, with `VALKEY_PASSWORD` set in this shell to the value in the deployment's `.env`:
+
+  ```bash
+  REDISCLI_AUTH="$VALKEY_PASSWORD" docker exec -e REDISCLI_AUTH pi-dispatch-valkey valkey-cli INCRBY budget:usd:2026-11-03 3600000
+  REDISCLI_AUTH="$VALKEY_PASSWORD" docker exec -e REDISCLI_AUTH pi-dispatch-valkey valkey-cli EXPIRE budget:usd:2026-11-03 172800
+  ```
+
+  `-e REDISCLI_AUTH` with no value hands the container this shell's, which keeps the password off the command line.
+  With a `valkey-cli` on the host, give it `VALKEY_URL`'s host and port (and `-n` with its database, when that is not
+  0): `REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h 127.0.0.1 -p 6379 INCRBY budget:usd:2026-11-03 3600000`.
+- **Lower the cap** by what was already spent, until the window ends.
+- **Pause** (`pi-dispatch pause`) and resume once the window ends; the warning prints when that is, in UTC.
+
+What it does not check:
+
+- **The other windows.** The job counts (`budget:<day>` and the rest), the token counter (`budget:t:`), and the
+  scoped-limits dollar windows (`budget:usd:s:` for a repo, folder or project row and for an allocation envelope's
+  `_other`, `budget:usd:mdl:` for a model row) reset in silence: no record says which of their windows it counted in.
+- **A window only an allocation envelope caps.** Doctor reads the caps from the settings (`dailyCostUsd`,
+  `weeklyCostUsd`, `monthlyCostUsd`, overlay over `.env`), so a deployment window with no cap of its own there is not
+  checked.
+
+What can hide a reset, though never invent one (each of these only lowers the sum):
+
+- **The fleet's total.** The sum is this host's share only, so the warning says "at least". A host whose
+  `PI_LOGS_DIR` holds other hosts' records counts only its own.
+- **A rollback that kept enough.** A counter restored from an older copy that still holds at least this host's share
+  raises no warning, though the window may have reopened by what other hosts spent. A reset that has since been spent
+  back past this host's share is not seen either.
+- **Runs from before 5.0.0.** Their records do not say which windows they were charged in, so they add nothing.
+- **A step that stopped part-way.** When a Valkey fault stops a run's settlement or give-back between two windows,
+  the run is left out of each window whose counter does not hold what its record states, so a healthy deployment does
+  not warn about it.
+- **Records doctor does not read.** A retried job's record shows only its last attempt, and a hold a crashed worker
+  left has no record. Records older than `PI_LOG_RETENTION_DAYS` (when that is shorter than the window), records over
+  256 KiB and records a newer release wrote are left out, and so is the rest when reading the records and the
+  counters takes longer than 5 seconds. A read that fails says nothing.
+- **Another address for the same Valkey.** The hash is of the address the worker connects to, so records written
+  while `VALKEY_URL` named the same Valkey another way (`localhost` rather than `127.0.0.1`, on a host where
+  pi-dispatch pins neither) do not count, and after `VALKEY_URL` moves to another Valkey the old records no longer
+  count against it.
+
+Doctor staying quiet is therefore no proof that nothing was reset. A counter you lowered on purpose keeps the warning
+until its window ends. [backup.md](backup.md#what-the-valkey-volume-holds) lists every counter a reset takes.
 
 ### What the caps do not cover
 
@@ -425,7 +514,7 @@ is an open issue.
 - **Clock skew at a window boundary**: each host builds its window keys from its own clock, so around midnight UTC
   two hosts can reserve into different days for one instant.
 - **A counter deleted by hand** while a job holds it can let that job's settlement erase part of another job's
-  hold (clamped at 0).
+  hold (clamped at 0). A counter lost with its Valkey reopens its cap ([When a counter resets](#when-a-counter-resets)).
 - **The runner's own `spent` is not on the exit line.** A floor charges at least the reservation and the metered
   cost; the cost guard's in-run charge, which can be higher, is not read.
 - **A provider that forwards to another model is counted twice.** A passthrough proxy's own call and the call

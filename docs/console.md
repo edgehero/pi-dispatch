@@ -487,10 +487,10 @@ the row before it is intact. The worker's retention sweep removes month files ol
 never the newest one; when it has removed older months, it says where the chain now starts rather than calling that a
 break. The worker reads that setting, not the console, because the worker runs the sweep: set it in the worker's
 `.env`, the same on every host that shares `PI_LOGS_DIR`, since each host's sweep prunes the one folder and the
-shortest setting wins. Before rolling a host back to a release from before this setting with it set longer than
-`PI_LOG_RETENTION_DAYS`, copy `console-audit/` aside or raise `PI_LOG_RETENTION_DAYS`: an older worker prunes the log
-by `PI_LOG_RETENTION_DAYS`. The same holds mid-upgrade: a worker from before this setting that shares `PI_LOGS_DIR`
-prunes the log that way, so upgrade every host before relying on a longer audit retention. The chain shows an edit;
+shortest setting wins. Every earlier release leaves `console-audit/` alone: a 4.x worker's sweep reads only the top of
+the logs folder, so a host rolled back, or one not yet upgraded that shares `PI_LOGS_DIR`, prunes nothing in it, and
+the folder keeps growing until a worker of this release or later sweeps it again
+([upgrading.md](upgrading.md#mixed-versions-what-is-safe)). The chain shows an edit;
 it does not prevent one, since whoever can write the file can rewrite every line after the one they changed. The rows
 `serve` writes are also copied to the Valkey list `console:audit` (the newest 500), best effort; the file is the
 record.
@@ -1081,8 +1081,9 @@ shows, which it counts as not read), or both in one sentence. Under the groups, 
   host left behind with nothing in it is not listed. A queue whose name is too long for the line puts its counts on
   the line under it;
 - **Scheduled**: the next three cron fires, soonest first, each by its trigger's id, and how many more. The console
-  shows a schedule's id only when it is made of the characters a trigger id may hold, at most 176 of them, the longest
-  cron id the triggers file takes ([triggers.md](triggers.md)); one written into Valkey by hand may be neither, and
+  shows a schedule's id only when it is made of the characters a trigger id may hold, at most 200 of them: wider than
+  the 176 the triggers file takes since 5.0.0 ([triggers.md](triggers.md)), so a schedule an earlier release made for a
+  longer id still shows by its id and can be removed; one written into Valkey by hand may be neither, and
   then no other name stands in for it (not the schedule's job name, `local` for every one): it is left out here, and
   the fleet page's Schedules table shows it as "-", with "-" for its stalls, beside its pattern and next run;
 - **the soft hold's refusals**: "The soft hold refuses rather than holds. 3 today.", linked to those runs. None of

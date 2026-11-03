@@ -303,7 +303,7 @@ Nor is there a canary on the other side. A stale **admin** gives no signal at al
 entry when it writes, and `run.waitFor` is just an unknown `run` key to a loader that predates it, which
 that loader tolerates by design. Check the installed versions directly. The detector is a backstop; the
 thing that actually prevents this is upgrading the receiver in the same `npm install` as the worker, before
-you write your first condition.
+you write your first condition ([the order](upgrading.md#the-order)).
 
 Skew in the other direction gets its own token rather than sharing this one. A job that arrives carrying a
 condition **this worker** cannot read refuses **`wait-unreadable`**: same version drift, opposite remedy.

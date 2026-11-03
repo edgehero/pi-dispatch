@@ -7,15 +7,17 @@
  * flaky API never blocks a release. Model is overridable via RELEASE_MODEL (default: a current Sonnet).
  *
  * PRODUCT is READ rather than hard-coded because two workflows call this script: release.yml ships the
- * admin extension (`admin-v*`) and repo-release.yml ships the whole tool (`v*`). It named the extension
- * unconditionally, so every tool release asked the model to describe the operator extension and then
- * handed it repo-wide commits to describe it with. The name is the caller's fact, not this file's.
+ * four npm packages (`worker-v*`, `receiver-v*`, `admin-v*`, `gateway-v*`) and repo-release.yml ships the whole
+ * tool (`v*`). It named the admin extension unconditionally, so every tool release asked the model to describe the
+ * operator extension and then handed it repo-wide commits to describe it with. The name is the caller's fact, not
+ * this file's.
  *
  * THE LENGTH CEILING IS IMPOSED HERE, NOT REQUESTED IN THE PROMPT. These notes are read in the few seconds
  * between seeing a tag and deciding whether to upgrade; asking for "terse bullet points" produced 694 words
  * of prose, section headings and a config sample at v0.3.0. So the prompt asks for the shape and `tighten`
  * then enforces it — a prompt that asks for brevity is a request, and a slice is a guarantee. Detail is not
- * lost, it is relocated: the workflow appends a compare link, which is what lets these stay short.
+ * lost, it is relocated: the workflow appends a compare link, which is what lets these stay short, and a link to
+ * the upgrade guide at the release's tag.
  */
 const MAX_BULLETS = 5;
 

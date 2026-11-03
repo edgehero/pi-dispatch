@@ -100,8 +100,9 @@ Keep the file small (< ~3 MB): trim to ~25s, cap width at ~1200px, and prefer th
 output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate them when the output changes:
 
 1. On a Linux host with Docker, as a throwaway account `you` (uid 1000) that is in the `docker` group and has
-   nothing listening on 127.0.0.1:6379, and with `pi-job:latest`, `valkey/valkey:8` and the egress proxy
-   image already pulled (so no pull progress lands in the transcript):
+   nothing listening on 127.0.0.1:6379, and with `pi-job:latest`, `valkey/valkey:8.1` (`VALKEY_IMAGE` in
+   `worker/src/valkey-auth.mjs`) and the egress proxy image already pulled (so no pull progress lands in the
+   transcript):
    - `pi-dispatch init > init.txt` in an empty folder.
    - `pi-dispatch up --yes > up.txt 2>&1` in an empty `~/pi-work`, with a pi login holding a dummy
      Anthropic key in `~/.pi/agent/auth.json`, so the folded doctor ends ready.

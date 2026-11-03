@@ -134,8 +134,9 @@ The comment on the issue names the server and the rule, never a host or a variab
 detail (`refused_mcp`). A read of the overlay's file or the allowlist that fails in a way that may pass (EIO, for
 one) is retried instead. The job gets its servers in `/job/mcp.json`, references and all, never a value.
 
-Upgrade the receiver and the worker together. A receiver older than `run.mcp` drops the field, and the worker then
-refuses each such job as `trigger-skew` rather than running it without its servers.
+Upgrade the receiver and the worker together ([the order](upgrading.md#the-order)). A receiver older than `run.mcp`
+drops the field, and the worker then refuses each such job as `trigger-skew` rather than running it without its
+servers.
 
 The registry check reads the runner's name only. A server whose own arguments or environment point the runner at
 another registry (`--registry`, `--index-url`, `npm_config_registry`) passes it and fails when it starts, before the

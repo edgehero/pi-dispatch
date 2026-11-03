@@ -257,8 +257,8 @@ measuring, setting sizes and the host budget, with a worked example.
 - A size needs `"version": 3`. The panel and the tools write it for you, and only when a row has a size. A
   version 3 row refuses a key it does not know (a misspelled `Memory` or `cpu`), so a typo cannot silently drop a
   size.
-- **Upgrade and restart every worker before you write a size.** An older worker refuses a version 3 file only when
-  it starts. One that is already running keeps its last good file when the file changes (it logs
+- **Upgrade and restart every worker before you write a size** ([the order](upgrading.md#the-order)). An older
+  worker refuses a version 3 file only when it starts. One that is already running keeps its last good file when the file changes (it logs
   `scoped_limits_reload_invalid`), so neither the size nor any later edit to the file (job counts, `concurrent`,
   dollar caps) applies on it until it is upgraded and restarted, and nothing on its jobs says so. On a fleet, doctor
   warns about each worker that predates sizes once this host's file is version 3, including a file that only

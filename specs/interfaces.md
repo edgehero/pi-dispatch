@@ -2949,10 +2949,16 @@ contract governs the argv of one container, this governs the estate that argv jo
       never a prefix (a prefix ending at an allow line opened every port of that host, measured), and says so.
       `PI_MODEL_ENDPOINTS_FILE` in this shell and in `.env` are compared as resolved paths, and a value only this
       shell sets is warned about, since the service does not see it.
-  - **The proxy image is digest-pinned**, and the `valkey/valkey:8` precedent one service over deliberately
-    does not transfer: a floating tag on a queue breaks loudly and spends nothing, while this container **is
-    the allowlist**, so a floating tag would let an upstream rebuild change what every job may reach with no
-    commit anywhere.
+  - **The proxy image is digest-pinned**, because this container **is the allowlist**: a floating tag would let an
+    upstream rebuild change what every job may reach with no commit anywhere. AMENDED 2026-11-03 (#761, upgrade path):
+    this bullet used to contrast that with the floating `valkey/valkey:8` one service over, on the reasoning that a
+    floating tag on a queue breaks loudly and spends nothing. That reasoning is reversed: the Valkey is pinned to a
+    minor too, `valkey/valkey:8.1` (`VALKEY_IMAGE`, `worker/src/valkey-auth.mjs`), because a pull nobody chose also
+    made the specs' measured facts about it a claim about whatever was pulled last, let a fleet's hosts cross a minor at
+    different times, could take a volume to a minor whose data files an older one need not load, and left an upgrade
+    no known starting point (`DES-QUEUE-BULLMQ-OVER-CUSTOM`). The two pins still differ in kind, for the reason this
+    bullet gives: the Valkey's minor still takes its patch releases, security fixes among them, while the proxy stays on
+    one digest.
   - **TLS is never terminated by the squid proxy** (on the `local` and `podman` venues, the two this contract's
     objects exist on; scoped so by issue #680, the text otherwise as written). The proxy sees the name in a `CONNECT`
     and no byte inside the tunnel, so it cannot read a credential and cannot count a token. A proxy that decrypts
@@ -4372,13 +4378,21 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   pinned (`DES-STORE-VERSION-WHEN-NEEDED`'s residuals).
 - **A cron `on.id` is at most `CRON_ID_MAX` (176) characters** (AMENDED 2026-10-25, #737 PR 3b;
   `worker/src/triggers.mjs`). The id is its scheduler's key, which every admin surface reads back from Valkey and
-  bounds there (`SCHEDULER_NAME_MAX` in `admin/src/read-model.mjs` IS this constant), since anything holding the
-  Valkey's URL can plant a scheduler and a surface prints the key in running text; and each run the scheduler mints is
+  bounds there, since anything holding the Valkey's URL can plant a scheduler and a surface prints the key in running
+  text; and each run the scheduler mints is
   the job `repeat:<id>:<slot>`, the slot the run's instant in ms (at most 16 digits), which every reader of a job id
   takes at most 200 characters long (`DEFER_ID_RE`, the console's `RUN_ID_RE`). So the id is at most 200 less the run
-  id's frame (`200 - "repeat::".length - 16`): every run of every legal id is a job id the readers take. A longer one,
+  id's frame (`200 - SCHEDULER_JOB_ID_OVERHEAD`, `worker/src/bullmq-internals.mjs`: `"repeat::".length` plus 16 digits,
+  so still 176): every run of every legal id is a job id the readers take. AMENDED 2026-11-03 (#761, upgrade path):
+  this bullet said the admin's bound on a scheduler key, `SCHEDULER_NAME_MAX`, IS this constant. Since then the bound
+  every reader of a scheduler key in Valkey shares is the wider `SCHEDULER_ID_MAX` (200, `SCHEDULER_ID_RE`, which
+  `SCHEDULER_NAME_MAX` now equals), so a scheduler an earlier release upserted for a longer id (every release before
+  issue #761 took a cron id of any length) is still named on every surface, where an operator can find and remove it;
+  and a reader of run RECORDS takes a cron id of any length (`cronRunOf` without `idMax`). The loader's 176 is
+  unchanged. A longer one,
   a schedule whose runs no surface could name, refuses the whole file at load in both services (`normalizeCron`,
-  through the shared `parseTriggers`), its message naming the entry's index and the id's length, never the id; the
+  through the shared `parseTriggers`), its message naming the entry's index and the id's length, never the id, and
+  why: each run's job id, `repeat:<id>:<up to 16 digits>`, must stay within the 200 characters the readers take; the
   setup wizard's first-trigger dialog refuses it too, without echoing it.
 - **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
   every webhook type (`label`, `comment`, `pull_request`, `issue`) `⟹ run.kind ∈ {"github", "gitlab", "forgejo", "azure"}` — a forge
@@ -5455,7 +5469,10 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
   owner (a `label` is never scheduled; a `cron` never receives a webhook). `on.id` (cron only) must be
-  `:`-free because the stall guard parses BullMQ's `repeat:<id>:<millis>` job id by splitting on `:`.
+  `:`-free because every reader of a cron run (the stall guard among them) parses BullMQ's `repeat:<id>:<millis>` job
+  id, and the hand-fired `manual:<id>:<millis>`, at its colons (`cronRunOf`, `worker/src/bullmq-internals.mjs`; CORRECTED
+  2026-11-03, #761, upgrade path: it said "by splitting on `:`"), and BullMQ takes a custom id with a `:` only in exactly
+  three parts (`customJobIdAllowed`).
   `run.task` is operator-authored natural language and therefore **DATA** (`CONST-ISSUE-TEXT-IS-DATA`): it
   lands in `/job/prompt.md`, never in a system prompt. `provider`/`model`/`maxTurns` are **absent stays
   absent, validated** (issue #502; until then this sentence said "pure passthrough", and it meant unchecked):
@@ -5783,7 +5800,9 @@ validator rather than a second copy of it.
     "backend": "<run.backend, else the deployment default PI_BACKENDS[0]>" | null,   // the venue it resolved to (#277)
     "dollars": { "reservedMicros": <int>, "settledMicros": <int>,                             // issue #501: integer micro-dollars
                  "basis": "metered" | "floor" | "refunded" | "unreserved",
-                 "modelBasis": "metered" | "floor" | "refunded" | null } | null,              // modelBasis: how the model windows settled (#502 part 6); null = none held
+                 "modelBasis": "metered" | "floor" | "refunded" | null,                       // modelBasis: how the model windows settled (#502 part 6); null = none held
+                 "reservedIn"?: { "day"?: "<YYYY-MM-DD>", "week"?: "<its Monday, YYYY-MM-DD>", // issue #761: the deployment windows whose counter holds settledMicros
+                                  "month"?: "<YYYY-MM>", "valkey": "<16 hex>" } } | null,      // of this job's, and the Valkey's endpoint tag; absent when no window does
     "why":     "<fixed token: the refusal's detail, e.g. overlay-link under model-unknown>" | null,
     "project": "<project id from projects.json, ^[a-z0-9][a-z0-9-]{0,31}$>" | null,   // issue #499; never the name
     "plan":    { "outcome": "applied" | "duplicate" | "refused",                         // issue #505: a collected plan
@@ -6223,6 +6242,31 @@ validator rather than a second copy of it.
   the floor. The repo and folder windows settle with `basis`, like the deployment's. Integers and fixed tokens only, so the record stays PII-free;
   a malformed source object records `null`. The record is one file per job id, last write wins, so a retried
   job's record shows its LAST attempt's `dollars`; the window counters are the truth for what every attempt charged.
+  **`dollars.reservedIn`** (AMENDED 2026-11-03, #761, upgrade path; `DES-DOLLAR-RESERVE-AND-SETTLE`, item 11) says
+  which of the deployment's own dollar windows hold this record's money, for doctor's `dollars.window-reset`:
+  `{ day?, week?, month?, valkey }`, in that order, after `modelBasis`. `day` is the UTC date of the key
+  `budget:usd:<day>`, `week` the Monday of `budget:usd:w:<Monday>` and `month` the `YYYY-MM` of `budget:usd:m:<month>`,
+  at least one of the three; `valkey` is the endpoint tag of the Valkey those counters are in (`valkeyEndpointTag`,
+  `worker/src/dollar-budget.mjs`: the first 16 hex characters of SHA-256 over `host:port/db` as the worker dials it,
+  the host lowercased and an IPv6 literal's brackets dropped, `127.0.0.1`, `6379` and `0` for what is missing, never the
+  scheme or a credential), so doctor, which computes it from the same pinned URL, sums only the records of the counter
+  it reads. A window is named only when its key holds at least `settledMicros` of this job's money
+  (`deploymentWindowsOf`, along the keys the settle or the release walked: a key it moved holds the settled amount, 0
+  after a release, and one it did not reach still holds the reservation): a settle that stopped part-way while the
+  record states a metered cost above the reservation leaves out the windows it did not reach, and a release that
+  stopped part-way while the record states the whole reservation leaves out the windows it already gave back. The
+  field is ABSENT when no deployment window holds the
+  job's money (no dollar setting; a zero or unreserved job; a job held only in scoped, project or model windows), on
+  the reservation's own refusal (`dollar-cap` or `allocation-cap`, whether its give-back reached every key or not),
+  when the worker has no tag, and when no window qualifies, so a record
+  of a job that reserved in no deployment window keeps the shape it had, and every record written before issue #761
+  has none. It is read through `reservedInOf`, the one rule the writer (`dollarsOf`) and doctor's sum
+  (`dollarWindowFloors`) read it by: own keys only, `day` a real calendar date, `week` a real date that is a Monday,
+  `month` a real month, at least one window, and `valkey` 16 lowercase hex; one member of any other shape makes the
+  whole field absent. Dates and a digest only, so the record stays PII-free. The digest names an address without
+  holding it and is no secret: a guessable address (`127.0.0.1:6379/0`) is confirmed by hashing the guess. Additive and
+  conditional, so `RUN_RECORD_VERSION` stays 1 (the `v` bullet below); the maximal shared case carries it, so
+  `next.maximal.json` was regenerated (`--next-only`, the record fixtures below).
 
   **`why` (PR #558, the end-of-round check of #501 and #502) is the refusal's detail, and is additive, nullable, an explicit literal, and
   TAIL position** after `dollars`, UNCONDITIONAL like `host`, `backend` and `dollars`. It is the same fixed token the
@@ -8245,9 +8289,10 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
   writer computes it from what it writes and writes it first, only when the content needs more than 1, so a
   hand-written `"version": 1` is dropped by the next write and a stamp goes with the key that needed it.
   A key this build does not know (one a later release added, or a misspelling) is still dropped from the overlay every
-  reader hands out, and logged, and is now CARRIED by every write of this release or later (an earlier panel or
-  console, 4.3.1 included, drops every key it does not know when it writes the file, `secretBundles` included, so every
-  panel and console is upgraded before a key a later release adds is relied on): `writeSettings` reads through
+  reader hands out, and logged, and is now CARRIED by every write of this release or later (an earlier `/dispatch`
+  panel, 4.3.1 included, or an earlier console build drops every key it does not know when it writes the file,
+  `secretBundles` included, so every panel and console is upgraded before a key a later release adds is relied on;
+  CORRECTED 2026-11-03, #761, upgrade path: 4.3.1 shipped the panel and no web console): `writeSettings` reads through
   `readOverlayDocument`,
   whose `carry` (the parsed document and the unknown names, decided by the one switch that decides a key is unknown)
   goes to `writeOverlay`, which writes each such key back with its value as read, in the file's own key order; a known
@@ -8261,7 +8306,8 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
   with the rest counted, never a value; its fix: "a key from a newer release is ignored here and kept by every panel
   and console from issue #761's release on, but an earlier one (4.3.1 included) drops every key it does not know when
   it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too,
-  so remove it if it is a typo"), and for a newer file its `settings.overlay` failure says the worker defers every job,
+  so remove it if it is a typo"; of 4.3.1 its "earlier one" is the `/dispatch` panel, since 4.3.1 shipped no web
+  console, CORRECTED 2026-11-03, #761, upgrade path), and for a newer file its `settings.overlay` failure says the worker defers every job,
   with the fix "upgrade this worker, and every panel and console that writes this file, to the release that wrote it;
   do not edit or delete the file, which would lose what that release wrote, unless you added `version` to it
   yourself: then remove that key" (`newerFileFix`, the one sentence doctor gives for a newer pause windows or triggers
@@ -9972,7 +10018,10 @@ and `JOB_DATA_VERSION`, all 1 at #761 and the last 2 since #796, on `limitsVersi
 Only `doctor` reads them (`doctor.mjs -> fleetStoreVersionChecks`, the named check `fleet.store-versions`,
 `INT-DOCTOR-RESULTS-KEY`): for each store whose version THIS host's own file needs above 1 (the higher of what the
 file declares and what its content needs, field and value tables alike; for job data, what the triggers' run keys
-need; a store whose file does not load here is left out), it WARNS once naming the peers that publish a lower version
+need, counted over what the triggers loader keeps of each trigger (AMENDED 2026-11-03, #761, upgrade path: the parsed
+triggers, never the raw file, so a `run` key the loader drops, a hand-written `run.packageCanary` among them, needs
+nothing and no line claims version 2 for it); a store whose file does not load here is left out), it WARNS once
+naming the peers that publish a lower version
 and once naming the peers that publish none (each reads the file without its version and drops what it does not know,
 which can widen a job). What a lower peer does is said per store (`STORE_FLEET_LINES`): with the settings overlay it
 defers every job while it reads the file; with the triggers file it defers EVERY job (`newer-release`) from its next
@@ -9989,6 +10038,21 @@ older)". Nothing at all while every need is 1, which is every deployment while t
 are named, never a file's content. Nothing refuses on them. `collectChecks` takes a test-only seam, `versionTables`,
 that hands the store tables to these need paths, so a test drives a need above 1 through the real collection before
 a table has a row.
+
+**`version` is read by doctor** (AMENDED 2026-11-03, #761, upgrade path): `doctor.mjs -> fleetVersionChecks`, the
+named check `fleet.versions` (`INT-DOCTOR-RESULTS-KEY`), over this host's own row and every live peer's. A row's
+`version` counts only in the charset the doctor record's `version` takes, `^[0-9A-Za-z.+-]{1,32}$`; `""` (a worker
+that could not read its own manifest) and anything else read as "unknown", a group of its own, so an unreadable row
+is a difference too. It warns when the live workers do not all report one version and when this doctor's installed
+version is not the one this host's row reports: "pi-dispatch versions differ" when two readable versions differ or
+this doctor and this host's worker row do, else, when the only other group is `unknown`, "pi-dispatch versions cannot all
+be read", naming the groups either way. Its fix says to finish the upgrade in one window: the same version on every
+host, and on each host `pi-dispatch pause`, wait until `pi-dispatch status` shows no active job, restart the worker,
+then `pi-dispatch resume`. It prints one ok line when peers exist and agree, naming them as the workers with a live
+row ("Fleet versions: the 2 workers with a live row report 4.3.1"), and nothing on a single host that matches.
+Workers only: a receiver publishes no row here, and its status row is never a doctor input
+(`INT-RECEIVER-STATUS-KEY` UNCHANGED, checked). Names and versions are printed, never anything else of a row.
+Nothing refuses on it.
 
 **The host budget fields are integers, `off` or empty** (issue #596, phase 2, `DES-HOST-BUDGET`). Each is a thunk over
 the worker's one budget, so every beat says what is held now. Two readers. `doctor` shows per host its budget, what
@@ -12144,7 +12208,8 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   ```
 - **Ids** (`CHECK_ID_RE`, `<section>.<name>`): a NAMED id where the check carries one (`NAMED_CHECK_IDS`:
   `triggers.file`, `triggers.file-missing`, `settings.overlay`, `settings.overlay-dollars`, `settings.unknown-keys`,
-  `fleet.store-versions` (issue #761), and for each boot file
+  `fleet.store-versions` (issue #761), `fleet.versions`, `dollars.window-reset` and `state.older` (AMENDED 2026-11-03,
+  #761, upgrade path), and for each boot file
   `<scaffold name>.file`, the service's verdict on the file it reads, and `<scaffold name>.file-shell`, this shell's);
   else `<section>.<n>`, the check's place in its section on that run (`DOCTOR_SECTIONS`, `--live` read-backs in
   `live`). A repeat gets `-2`, `-3`. A reader matches on named ids only: a derived id is stable for one host's
@@ -12165,7 +12230,25 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   level of `egress.proxy` and its repeats, the worst of `provider.key` and its repeats, and, for a deployment with a
   forge trigger, the worst of every check whose id's section is `github` or `forges`; a record with a `provider`
   derived id (`provider.<n>`) and no `provider.key` is a doctor older than the named id, and is said so. It reads no
-  derived id's number.
+  derived id's number. AMENDED 2026-11-03 (#761, upgrade path): three more named ids, each a warning and each written
+  at ONE literal site of `doctor.mjs` (`REPEATED_CHECK_IDS` is unchanged). `fleet.versions` (section `fleet`, after
+  the peers, so it is said on a single host too) is the pi-dispatch versions the live workers report on their
+  registry rows (`INT-HOST-REGISTRY-CONTRACT`), and this doctor's own against this host's worker row
+  (`fleetVersionChecks`): a warning when they do not all report one version, or when this doctor's version is not the
+  one this host's worker row reports, worded as those two facts ("this doctor X, this host's worker row reports
+  Y"), never as a worker not restarted, since doctor may run from another install and a killed worker's row stays
+  up to its 90 s TTL, and headed "pi-dispatch versions
+  differ" only when two readable versions differ or this doctor and this host's worker row do ("pi-dispatch versions
+  cannot all be read" when the only other group is `unknown`); an ok line when peers exist and every live worker
+  reports one known version, naming them as the workers with a live row; nothing on a single host whose worker
+  reports this doctor's version or publishes none. `dollars.window-reset` (section `dollars`, re-opened after
+  `fleet`, where whether doctor may talk to the Valkey is known) is one warning naming every deployment dollar window
+  whose counter is missing or below what this host's own run records settled into it (`DES-DOLLAR-RESERVE-AND-SETTLE`,
+  item 11), absent otherwise.
+  `state.older` (section `state`, after the three older-location hints, which keep their own words and places) is one
+  warning per store an older release left in a shape this build no longer writes (`olderStateFindings`,
+  `worker/src/older-state.mjs`, which never sets an id), so a run with two publishes `state.older` and
+  `state.older-2`, the repeat suffix; today each finding is the Valkey image (`DES-QUEUE-BULLMQ-OVER-CUSTOM`).
 - **Content rule** (`redactText`, applied by the writer), in this order: invisible characters (zero-width, joiners,
   marks, the soft hyphen, the byte-order mark) are deleted, and control, bidi, line and paragraph separator characters
   are spaces; every value of a secret-named variable in doctor's resolution (and the `.env` values
@@ -12218,7 +12301,9 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
 the delayed set, in the worker's own words, written at the moment it defers (issue #737, PR 3a,
 `DES-WAITING-REASONS`). The key, the closed vocabulary and every field's rule are ONE leaf,
 `worker/src/defer-reasons.mjs`, exported as `@edgehero/pi-dispatch/defer-reasons` (`./defer-reasons` in the worker's
-exports map). It imports nothing, so the console imports it without the worker's dependencies, and the writer and the
+exports map). It imports nothing but the BullMQ leaf (AMENDED 2026-11-03, #761, upgrade path:
+`worker/src/bullmq-internals.mjs`, `./bullmq-internals`, which imports nothing itself), so the console imports it
+without the worker's dependencies, and the writer and the
 reader cannot drift on the key, a field, a reason or a bucket. The writer is `worker/src/defer-write.mjs`
 (`makeDeferTo`, worker only, never loaded by the admin); the readers are the admin's `readWaiting` and
 `readWaitingRow` (`admin/src/read-model.mjs`); besides the writer itself, the one deleter is `removeQueuedJob`
@@ -12370,7 +12455,8 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   `due * 4096 + counter` (`getDelayedScore.lua`; `DELAYED_SCORE_SHIFT`), so its due time is `floor(score / 4096)`
   (`dueOfScore`, null for anything but a non-negative number or a non-empty string, so a missing member never reads
   as a due time at the epoch, and null for a due time past `DEFER_TIME_MAX_MS`, since a score anything with the URL
-  wrote can be any double and such an instant has no date a console can draw). Every other instant the admin's
+  wrote can be any double and such an instant has no date a console can draw; the BullMQ leaf's bound,
+  `SCORE_DUE_MAX_MS`, is a copy a test holds equal to it). Every other instant the admin's
   reader hands on from a hash is held to the same bound (`instantOf`, null past it): a job's enqueue instant and a
   scheduler run's slot (`queuedAt`), a hold's `since` and `after`, and each answer's `at`; and the console draws an
   instant only where `utcText` draws one, a whole number of milliseconds from 0 to `DEFER_TIME_MAX_MS`, the year
@@ -12378,9 +12464,13 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   console's line never says "at unknown": an instant no date can show is a missing value, and a sentence missing one
   says its bucket's title instead (`waitingLine`). `readWaiting` reads a record whose `until` disagrees with that due
   time (outside `until` minus 5 s to the later of `until` and `at` plus 5 s, `DEFER_STALE_MS`) as no reason at all,
-  an earlier episode's, never as the old reason. The leaf also holds `isSchedulerNext`: a `repeat:` job is its
+  an earlier episode's, never as the old reason. The leaf also exports `isSchedulerNext`: a `repeat:` job is its
   scheduler's CURRENT next run only when its id is `repeat:<scheduler>:<the scheduler's score in the queue's repeat
-  zset>` (BullMQ's `isJobSchedulerJob.lua`).
+  zset>` (BullMQ's `isJobSchedulerJob.lua`). AMENDED 2026-11-03 (#761, upgrade path): `dueOfScore`, `isSchedulerNext`
+  and `DELAYED_SCORE_SHIFT` are BullMQ's facts, so they live in `worker/src/bullmq-internals.mjs`
+  (`@edgehero/pi-dispatch/bullmq-internals`, `DES-QUEUE-BULLMQ-OVER-CUSTOM`) and this leaf re-exports them, the same
+  functions, so every name a reader imported from `@edgehero/pi-dispatch/defer-reasons` still resolves and no published
+  subpath breaks; the admin's reader imports them from the BullMQ leaf.
 - **`parseDefer(values)`**, the HMGET reply in `DEFER_FIELDS` order: null when there is no `why` (absent, null or
   empty), else every field, each null when absent or failing its rule. A `why` within `DEFER_WHY_RE` that the table
   does not hold is read as unknown (`known: false`, bucket `unknown`): a newer worker's reason an older console has no
@@ -12403,8 +12493,9 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   record that is missing or whose `until` is not the job's due time, which is how a reader tells a record that
   describes the wait from one that does not. Neither is shown once the job is more than the grace past its due:
   it is then `due`, whatever its record says.
-- **Acceptance**: worker/test/defer-reasons.test.mjs (the closed tables, the leaf imports nothing, the four copied
-  rules, `parseDefer` against hostile values, the TTL, `dueOfScore`, `isSchedulerNext`, and "INT-DEFER-REASON-KEY
+- **Acceptance**: worker/test/defer-reasons.test.mjs (the closed tables, the leaf imports nothing but its one
+  re-export of the BullMQ leaf, the four copied rules, `parseDefer` against hostile values, the TTL, the three
+  re-exports the BullMQ leaf's own functions, whose behaviour worker/test/bullmq-internals.test.mjs holds, and "INT-DEFER-REASON-KEY
   restates the leaf: its reason table is DEFER_WHYS with each bucket, its fields block DEFER_FIELDS, its bucket lists
   DEFER_BUCKETS", which reads this section's reason table, its fields block and both of its bucket lists and holds
   each two-way to the leaf), worker/test/defer-write.test.mjs (the write before the move as one transaction, a
@@ -13115,6 +13206,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-03 (#761, upgrade path) | What an upgrade leaves behind, said by doctor, and one owner for BullMQ's internals (`DES-QUEUE-BULLMQ-OVER-CUSTOM`, `DES-DOLLAR-RESERVE-AND-SETTLE`). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `dollars` gains the conditional `reservedIn`, `{ day?, week?, month?, valkey }` in that order after `modelBasis`: the UTC day, the Monday and the month of each deployment window whose key holds at least the record's `settledMicros` (`deploymentWindowsOf`, along the keys the settle or the release walked), at least one of them, and the Valkey's endpoint tag (`valkeyEndpointTag`: 16 hex of SHA-256 over `host:port/db`, never the scheme or a credential); absent with no deployment window in the hold, on the reservation's own refusal, without a tag and when no window qualifies; read through `reservedInOf` (own keys, real dates, a Monday, a real month, a tag) or not at all; dates and a digest, so PII-free, the digest no secret for a guessable address; additive, so `RUN_RECORD_VERSION` stays 1; the maximal shared case carries it, so `next.maximal.json` was regenerated (`--next-only`). **`INT-DEFER-REASON-KEY` AMENDED**: `dueOfScore`, `isSchedulerNext` and `DELAYED_SCORE_SHIFT` live in `./bullmq-internals` and `./defer-reasons` re-exports them, the same functions, so no published subpath breaks; the leaf imports nothing but that leaf, whose `SCORE_DUE_MAX_MS` a test holds equal to `DEFER_TIME_MAX_MS`; the Acceptance names the re-export test. **`INT-DOCTOR-RESULTS-KEY` AMENDED**: three named ids, `fleet.versions`, `dollars.window-reset` (in the `dollars` section opened again after `fleet`) and `state.older`, each a warning at one literal site; `state.older`'s site is a loop over `olderStateFindings`, so a second finding publishes as `state.older-2`, and `REPEATED_CHECK_IDS` is unchanged. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: doctor reads a worker row's `version` (`fleetVersionChecks`) in the doctor record's charset, `""` and anything else being one `unknown` group, workers only; the warning is headed "pi-dispatch versions differ" only when two readable versions differ or this doctor and this host's worker row do, and "pi-dispatch versions cannot all be read" when the only other group is `unknown`; it says "this doctor X, this host's worker row reports Y", since a killed worker's row stays up to 90 s; `fleet.store-versions`' job data need is counted over what the triggers loader keeps, never the raw file, so a `run` key it drops (a hand-written `run.packageCanary`) needs nothing; its fix is the whole pause (`pi-dispatch pause`, no active job in `pi-dispatch status`, restart, `pi-dispatch resume`), since `--drain` watches the shared queue only; the ok line names the workers with a live row. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**: the proxy bullet's contrast with the floating `valkey/valkey:8` ("a floating tag on a queue breaks loudly and spends nothing") is reversed by the Valkey pin, `valkey/valkey:8.1`, with its four reasons; the proxy stays on a digest, while the Valkey's minor still takes its patches. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the cron id bullet: `CRON_ID_MAX` is still 176, now `200 - SCHEDULER_JOB_ID_OVERHEAD`, but the admin's bound on a scheduler key no longer IS it: `SCHEDULER_NAME_MAX` is `SCHEDULER_ID_MAX` (200), so a scheduler an earlier release made for a longer id is still named, and a record's cron id is read at any length; and the Why's "the stall guard parses the id by splitting on `:`" now names the one grammar (`cronRunOf`) and BullMQ's three-part rule; the loader's refusal says why a longer id is refused, each run's job id staying within the 200 characters the readers take, where it said a scheduler's id is read back at most 176 long. **`INT-CONFIG-OVERLAY-CONTRACT` CORRECTED**, #761's carry sentence: 4.3.1 shipped the `/dispatch` panel and no web console, so "an earlier panel or console (4.3.1 included)" now says so; doctor's quoted `settings.unknown-keys` fix is the code's words, and a note beside it says the same. **`INT-RECEIVER-STATUS-KEY` UNCHANGED, checked**: doctor still reads no receiver row. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: `schedulers[].name` is still null where the reader refuses the key; the bound is the reader's. **Code evidence**: worker/src/bullmq-internals.mjs -> cronRunOf, SCHEDULER_ID_MAX, SCHEDULER_JOB_ID_OVERHEAD, dueOfScore, isSchedulerNext, SCORE_DUE_MAX_MS, customJobIdAllowed; worker/src/defer-reasons.mjs -> its re-export; worker/src/dollar-budget.mjs -> deploymentWindowsOf, reservedInOf, valkeyEndpointTag, dollarWindowFloors, dollarsRecord; worker/src/run-history.mjs -> dollarsOf; worker/src/processor.mjs -> runAttempt's reserve, settle, release and unsettled records; worker/src/index.mjs -> createWorker's valkeyTag; worker/src/doctor.mjs -> fleetVersionChecks, doctorDollarWindows, olderStateOf; worker/src/doctor-results.mjs -> NAMED_CHECK_IDS; worker/src/older-state.mjs -> olderStateFindings; worker/src/valkey-auth.mjs -> VALKEY_IMAGE; worker/src/triggers.mjs -> CRON_ID_MAX; admin/src/read-model.mjs -> SCHEDULER_NAME_MAX, mapSchedulers; worker/test/fixtures/run-records/next.maximal.json. |
 | 2026-11-02 (#754, #792; independent security review) | INT-SANDBOX-GATEWAY-CONTRACT tightens HTTPS browser binding to the __Host- cookie prefix and rejects legacy/domain-cookie migration. Sibling-cookie fixation is tested before first bootstrap. Explicit loopback compatibility, console cookies, grant/tab/token proof, expiry and native/container/budget contracts UNCHANGED, checked. |
 | 2026-11-02 (#754, #792, #793; approved extension) | INT-SANDBOX-GATEWAY-CONTRACT and INT-CONSOLE-AUDIT-LOG amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-03 (#761, tolerant readers) | Readers that keep what a newer release wrote, and the job retention and the run index cap as named values (`DES-STORE-VERSION-WHEN-NEEDED`). **`INT-CONSOLE-AUDIT-LOG` AMENDED and CORRECTED**: CORRECTED, the action list gains `write-applied` (written since #766; the list held eleven) and the role list `agent` and `none` (the actor of a request without a session), and a test now holds the three lists to the code; AMENDED, the `action` and `outcome` bullets say the writer writes exactly its list and the verifier links any value of the shape `^[a-z][a-z0-9-]{0,39}$` (`CONSOLE_AUDIT_ACTION_RE`, `CONSOLE_AUDIT_OUTCOME_RE`), and the writer's bullet says only the verifier reads the shape; a new "Across versions" bullet: a row whose action or outcome is unlisted but shaped is linked, and counted as `unknown` only after it passed every check; `unknown: n` is in the result only on the ok shape, with or without `withLast`, only when n > 0, and never on a broken one (the row before a break whose line's `prev` does not match is counted in `rows`, but nothing vouches for it); the check knows only that the word has the shape and the row links, never who wrote it, so no surface says a newer console wrote such a row; the check order is unchanged, so an edited unlisted row is named by its link; extra row keys are not judged, as before; no row version, and the optional fields' shapes never widen; a console of this release appends after such a row; and what the audit page (a note naming the word this console does not know on a verified row only, About's count on an intact chain only), its filter, `audit verify` (singular for one row), doctor (the count after a reaped start) and the agent write count say of such a row; the Verification bullet gains `unknown` on the ok shape and the reason "the row's action or outcome is not of the shape the console writes"; the Retention bullet: `PI_CONSOLE_AUDIT_RETENTION_DAYS`, read by the worker, defaulting to `PI_LOG_RETENTION_DAYS`'s value (0 included), `0` forever, any other value that is not a non-negative integer refusing the worker's start and failing doctor, in doctor's `WORKER_SERVICE_KEYS` and not `CONSOLE_ENV_KEYS`, logged by `worker_started`, the shortest setting winning on a shared logs folder, and the hazard at a rollback and mid-upgrade (a worker from before reaps the trail by `PI_LOG_RETENTION_DAYS`, so every host is upgraded before a longer audit retention is relied on). **`INT-CONSOLE-TOKENS-FILE-CONTRACT` AMENDED**: a new "Across versions" bullet: `version` is still exactly 1; an entry of an unknown role of a role's shape (`TOKEN_ROLE_RE`) is kept as written (`carry.kept`) and signs in nowhere (its secret and a code for it 401, the code's row saying the token's role is one this console does not know, no `link`, `/dispatch console --link` refusing it in `link`'s sentence, never an operator or a setup grant), any other role refusing the file in the new sentence; names and hashes unique across both sets; a known entry's extra fields and the file's extra keys carried (`carry`, present only when it holds something, a file with nothing to carry written byte for byte as before); add refuses a kept name, revoke removes a kept entry, rotate refuses one and keeps a known entry's extras, and every name check takes kept names (`tokenNames`); `token list` and doctor name kept entries (doctor in the singular for one); the version 1 rule (a role, a field or a key an older reader can ignore or refuse, while a field of an entry or a key of the file that narrows who may sign in raises `version`); releases before this one still refuse the whole file; the #766 upgrade order note, the role bullet and the whole-file refusal say what changed. **`INT-RUN-CHECKPOINT-POINTER` AMENDED**: `CHECKPOINT_POINTER_VERSION` and `CHECKPOINT_POINTER_SHAPES` (a reader takes its version's closed keys, a version it does not hold is no pointer); the boot sweep's keep-list reads any version through `pointerKeepEntry`, so a newer pointer's folder is kept for the pointer's 7 days; a new Versions bullet: 1 alone read today, a readers-first release reading 1 and 2 while it still writes 1; the policy pinned by a test (exactly the newest version and the one before, the version written one of them, so a release may read v + 1 while it still writes v; the pointer's TTL the store's) and the one no test can check (a release that adds a version only reads it, its writer a release later, an older reader dropped only 7 days after the writers stopped), a later version keeping `host` and `jobDir` or using a new key prefix, tested through `validPointer(p, { shapes })`; `JOB_DIR_RE` is one export. **`INT-WORKSPACE-CHECKPOINT-STORE` AMENDED**: `CHECKPOINT_MANIFEST_VERSION` and `CHECKPOINT_MANIFEST_READS`; a manifest of a higher integer `v` is `field:newer` with `newer: true`, judged before the closed keys, while `0`, `"1"`, `1.5` or a version no longer read stay `field:v`; the closed-key rule gains "a key added in a later version raises `v`"; a new Versions bullet: the recovery's model pin and pickup defer `newer-release` with nothing spent, commented, recorded or removed, the salvage takes and removes nothing, `restore` still refuses, the wait bounded by the host-lost sweep's seven days (`recovery-host-lost`, its comment's words a residual), a newer pointer beside a version 1 store retried every minute (`recovery_pointer_unread`) to the same limit, and the policy, the pointer's (`[1]` alone today, a readers-first release holding `[1, 2]` while it still writes 1, newer being a `v` above the newest read), tested through the `manifestReads` option. **`INT-MANAGED-FORK-CONTRACT` AMENDED**: the sweep ages a source by its manifest's own `at` for any integer `v` of 1 or more with a run id of its own folder, and still removes its archive; a read still refuses a newer source as `fork-source-corrupt`. **`INT-DEFER-REASON-KEY` AMENDED**: `newer-release` also covers a recovery whose run's checkpoint a newer release wrote (the gate column and where it is written); its bucket, sentence and re-check UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the index is trimmed to each writer's own `PI_RUN_MIRROR_MAX_RUNS` (5,000 unless set, 1,000 to 20,000), the lowest winning in a fleet, a count trim raising the horizon, a worker from before trimming at 5,000. **`INT-CAPACITY-REPORT` AMENDED**: the cap clause judges the cap the reader is told (`indexMax`, `CAPACITY_ENV_KEYS`), a reader told one above 5,000 misses a pre-horizon writer's cut (`OQ-039`), one told a lower cap errs toward missing history, and the MGETs at the default and at 20,000. **`INT-DEPLOYMENT-POINTER-CONTRACT` AMENDED**: `PANEL_SERVICE_KEYS` gains `PI_RUN_MIRROR_MAX_RUNS`, read leniently by the panel's and the console's run index and refused naming the key by their capacity read, as a bad retention is. UNCHANGED, checked: `INT-DOCTOR-RESULTS-KEY` (the new doctor lines, a failure for a bad `PI_CONSOLE_AUDIT_RETENTION_DAYS` or `PI_RUN_MIRROR_MAX_RUNS` and a warning for kept tokens, take derived ids in `state` and `console`; no named id), `INT-RECOVERY-JOB` (its deadline, extension and loss rules bound the new wait as written, and its options' 31 days are now `FORGE_JOB_RETENTION_S`), `INT-STEER-INBOX-CONTRACT` (the steered marker still lives 31 days, now `STEER_MARKER_TTL_S = FORGE_JOB_RETENTION_S`), `INT-SANDBOX-CONTRACT`, `INT-CONFIG-OVERLAY-CONTRACT` and `INT-TRIGGERS-FILE-CONTRACT` (no version, carry or refusal rule of theirs moves). **Code evidence**: worker/src/console-audit.mjs -> CONSOLE_AUDIT_ACTION_RE, CONSOLE_AUDIT_OUTCOME_RE, verifyConsoleAudit, makeConsoleAuditReaper; worker/src/console-tokens.mjs -> TOKEN_ROLE_RE, parseTokensFile, keptTokens, tokenNames, serialize, addToken, revokeToken, rotateToken; worker/src/config.mjs -> loadConfig (consoleAuditRetentionDays, runMirrorMaxRuns); worker/src/doctor.mjs -> WORKER_SERVICE_KEYS, WORKER_INT_SETTINGS, workerIntSettingChecks, consoleChecks; worker/src/run-checkpoint.mjs -> CHECKPOINT_POINTER_VERSION, CHECKPOINT_POINTER_SHAPES, validPointer, pointerKeepEntry, JOB_DIR_RE; worker/src/recovery-queue.mjs -> makeSalvager, pointedJobDirs; worker/src/workspace-checkpoint.mjs -> CHECKPOINT_MANIFEST_VERSION, CHECKPOINT_MANIFEST_READS, manifestProblem, readManifest; worker/src/processor.mjs, worker/src/index.mjs -> NewerReleaseHold; worker/src/fork-store.mjs -> sweepAge; worker/src/retention.mjs -> FORGE_JOB_RETENTION_S, RUN_MIRROR_MAX_RUNS_DEFAULT, runMirrorMaxRunsOf; worker/src/capacity-records.mjs -> readMirrorWindow; worker/src/capacity-cli.mjs -> CAPACITY_ENV_KEYS, deploymentFacts; worker/src/start.mjs -> startWorker; admin/src/read-model.mjs -> PANEL_SERVICE_KEYS, resolvePaths; admin/src/console/panels/audit.mjs -> unknownWordsNote, outcomeCell, auditAbout; admin/src/console/cli.mjs -> run; admin/src/console/login-codes.mjs -> keptTokenLinkRefusal; admin/src/console/server.mjs -> postLoginCode; admin/src/console-command.mjs -> consoleCommand; admin/src/agent-write-count.mjs -> readAgentWritesToday. |

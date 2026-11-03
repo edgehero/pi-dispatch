@@ -170,7 +170,8 @@ file declares 1").
 **Upgrading.** Earlier releases ignored a top-level `version` in this file; since issue #761 it is read. If you put one
 there yourself, remove it before you upgrade: one that is not a whole number of 1 or more makes the file broken, so
 the worker refuses to start on it (a live edit keeps the last good windows, and an edit through the panel or the tools
-drops it), and one above 1 reads as a file a newer release wrote, so jobs wait as described above.
+drops it), and one above 1 reads as a file a newer release wrote, so jobs wait as described above. The order to upgrade
+in is in [upgrading.md](upgrading.md#the-order).
 
 ## Managing windows
 
