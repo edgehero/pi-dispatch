@@ -48,6 +48,7 @@ const IN_SCOPE_CARDS = Object.freeze({
   ParkedAnswerer: 779, ParkedDraftViewer: 779, ParkedDraftPhone: 779,
   SandboxesScreen: 771,
   RunWorkspace: 790, RunWorkspaceStates: 790,
+  RunLoaded: 800, LoadedStates: 800, ProjectLoads: 800,
   ZeroTouchScreen: 777, ZeroTouchViewer: 777, ZeroTouchPhone: 777,
   SecretsScreen: 751, ConnectionsScreen: 784, ProjectDetail: 751, UpdatesScreen: 790,
   TriggersScreen: 750, TriggersViewer: 750, TriggersPhone: 750,

@@ -1,0 +1,233 @@
+{
+  "card": "ProjectLoads",
+  "pr": 800,
+  "words": "9ac0b199d955df128574a39c1e1ff94cfe6ae49555f6dc4e07ddf5fa78958d3f",
+  "elements": [
+    {
+      "el": "p-proj-loads",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/project.mjs#projectLoads",
+      "golden": [
+        "panels/project-loads.operator",
+        "panels/project-loads.viewer"
+      ],
+      "shows": [
+        "What its runs load",
+        "24 runs this week"
+      ]
+    },
+    {
+      "el": "p-proj-loads-incomplete",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-proj-loads",
+      "source": "admin/src/console/panels/project.mjs#projectLoads",
+      "golden": [
+        "panels/project-loads-incomplete.operator"
+      ],
+      "shows": "Read from 9 of its 24 runs this week, so runs may differ in ways this does not show."
+    },
+    {
+      "el": "p-proj-loads-same",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-proj-loads",
+      "source": "admin/src/console/panels/project.mjs#projectLoads",
+      "golden": [
+        "panels/project-loads-same.operator"
+      ],
+      "shows": "Runs load the same on each host: mini1 and mini2."
+    },
+    {
+      "el": "p-proj-loads-none",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-proj-loads",
+      "source": "admin/src/console/panels/project.mjs#projectLoads",
+      "golden": [
+        "panels/project-loads-none.operator"
+      ],
+      "shows": "Nothing to read: no run of this project has a record this week."
+    },
+    {
+      "el": "p-proj-members",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/project.mjs#projectMembers",
+      "golden": [
+        "panels/project-loads.operator"
+      ]
+    },
+    {
+      "el": "p-proj-triggers",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/project.mjs#projectTriggers",
+      "golden": [
+        "panels/project-loads.operator"
+      ]
+    },
+    {
+      "el": "The top line says what differs",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proj-loads",
+      "source": "admin/src/loaded-words.mjs#projectLoadsOf",
+      "golden": [
+        "panels/project-loads.operator"
+      ],
+      "shows": [
+        "Runs differ by host: build3 also loads git-guard from its overlay.",
+        "Open build3"
+      ]
+    },
+    {
+      "el": "One line per kind, every claim counting recorded runs",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proj-loads",
+      "source": "admin/src/loaded-words.mjs#projectLoadsOf",
+      "golden": [
+        "panels/project-loads.operator"
+      ],
+      "shows": [
+        "pi 1.5.0 in",
+        "all 21 recorded runs",
+        "anthropic / claude-sonnet-5-5",
+        "git-guard in the 15 recorded on build3; 3 did not load or were not recorded",
+        "fix from acme/billing’s .pi/skills; review from the overlay",
+        "no recorded run names a server",
+        "every recorded run found its flow and loaded every extension",
+        "3 of 24 runs",
+        "was refused before its container started",
+        "stop did not take, so it left no exit line",
+        "an older release wrote"
+      ],
+      "reason": "The card's MCP sentence is 'no trigger of this project names a server'. These words read the record and no triggers file, so they say what the records hold: no recorded run names one."
+    },
+    {
+      "el": "By host: a table of each host's runs, how many are recorded, the extensions they loaded and the flow",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proj-loads",
+      "source": "admin/src/loaded-words.mjs#projectLoadsOf",
+      "golden": [
+        "panels/project-loads.operator"
+      ],
+      "shows": [
+        "What its runs load, by host",
+        "git-guard",
+        "(overlay)"
+      ]
+    },
+    {
+      "el": "While most runs have no record: how few it read and why",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proj-loads",
+      "source": "admin/src/loaded-words.mjs#projectLoadsOf",
+      "golden": [
+        "panels/project-loads-incomplete.operator"
+      ],
+      "shows": [
+        "15 did not load or were not recorded: 12 from an older release, 2 refused, 1 cancelled with no exit line.",
+        "the 9 recorded; unknown for the other 15",
+        "nothing in the 9 recorded",
+        "a run with no record cannot say"
+      ]
+    },
+    {
+      "el": "When no host differs: one green line naming the hosts",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proj-loads",
+      "source": "admin/src/loaded-words.mjs#projectLoadsOf",
+      "golden": [
+        "panels/project-loads-same.operator"
+      ],
+      "shows": [
+        "Runs load the same on each host: mini1 and mini2.",
+        "every recorded run",
+        "which withhold them",
+        "which tried pi-lint 1.4.3"
+      ]
+    },
+    {
+      "el": "When nothing has a record: one muted line, with no rows to read",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proj-loads",
+      "source": "admin/src/loaded-words.mjs#projectLoadsOf",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.projectNone",
+      "golden": [
+        "panels/project-loads-none.operator"
+      ],
+      "shows": [
+        "Nothing to read: no run of this project has a record this week.",
+        "Either none ran, or an older release wrote their records."
+      ]
+    },
+    {
+      "el": "A viewer reads the same words, and the top line has no Open build3",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proj-loads",
+      "source": "admin/src/loaded-words.mjs#projectLoadsOf",
+      "golden": [
+        "panels/project-loads.viewer"
+      ],
+      "shows": "Runs differ by host: build3 also loads git-guard from its overlay."
+    },
+    {
+      "el": "From the records of its runs this week",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-proj-loads",
+      "source": "admin/src/loaded-words.mjs#projectLoadsOf",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.projectFoot",
+      "golden": [
+        "panels/project-loads.operator"
+      ],
+      "shows": "From the records of its runs this week."
+    },
+    {
+      "el": "Nothing new beyond RunLoaded's loaded field: the page groups its runs' records by host",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/project-view.mjs#readProjectView",
+      "holds": "projectLoadsOf"
+    },
+    {
+      "el": "This week, the page's own window: Members counts its runs from Monday 00:00 UTC",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/project-view.mjs#readProjectView",
+      "holds": "costsSinceMs(\"week\", now)"
+    },
+    {
+      "el": "A new card on the project page, beside the ones ProjectDetail draws",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "The card's own note about its page, not a thing the console draws."
+    },
+    {
+      "el": "billing, its two repositories with 18 and 6 runs this week, build3 for acme/billing and mini2 for acme/billing-ui",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample project, as on ProjectDetail."
+    },
+    {
+      "el": "git-guard in build3's overlay, review in the overlay, the incomplete card's 9 of 24 and its split, the same and none states on web and shop",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample values."
+    },
+    {
+      "el": "Its triggers' 9 and 2 runs in the last 24 hours",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample values, as on ProjectDetail."
+    }
+  ]
+}
