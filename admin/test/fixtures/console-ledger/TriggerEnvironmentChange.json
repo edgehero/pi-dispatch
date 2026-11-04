@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironmentChange",
   "pr": 800,
-  "words": "25478d1d32d1da52e26f9efd0080c6950bdd52b1954a27dfd25ee42f1d4b8763",
+  "words": "571daa871d440c69c39b15d9b540e1fc7a9bc4302ad2b6fc9b8d8d0eb4c6227d",
   "elements": [
     {
       "el": "p-trigger-gets-preview",
@@ -175,8 +175,53 @@
     {
       "el": "A host on an older release",
       "kind": "readme",
-      "status": "illustrative",
-      "reason": "The planner holds the refusal, with injected version tables, and no field this page writes needs it yet: it comes into use with the later pull request's two fields."
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "versionGate"
+    },
+    {
+      "el": "A name on no host refuses, and where a host cannot say it warns",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "onNoHostRefusal"
+    },
+    {
+      "el": "One extension left out: what comes off, the stamp, and the job in line it refuses",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "leaving",
+      "golden": [
+        "panels/trigger-gets-one-extension-off-preview.operator"
+      ],
+      "shows": [
+        "Extensions: pi-lint left out.",
+        "Where a name is a staged package, its tools, skills, prompt templates and themes go with it.",
+        "Stamps the file version 2",
+        "as trigger-skew (run.excludeExtensions)"
+      ]
+    },
+    {
+      "el": "A tool chip off: what a job does if the name matches nothing",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "extensionToolLines",
+      "golden": [
+        "panels/trigger-gets-extension-tool-off-preview.operator"
+      ],
+      "shows": [
+        "Extension tools: lint_file off.",
+        "stops before its prompt as exclude-tool-not-loaded if no extension registered lint_file when it loaded."
+      ]
+    },
+    {
+      "el": "A package a job needs: a flow, a subscription's adapter, a schedule's canary",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "package-canary-excluded"
     },
     {
       "el": "gh-c9e1, the amounts and the host names",

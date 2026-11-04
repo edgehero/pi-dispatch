@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "2dde402e0c60f96c142bec4cce1cae6b662c50be1fe13dfa4b37d3c5972d4419",
+  "words": "ab52407c181a40c66ee4c4822b17845ef7c84ff733733ba6d689806ad02d341e",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -149,7 +149,7 @@
       ]
     },
     {
-      "el": "Extensions: the all-off switch for staged packages, each extension shown, the repository's own shown",
+      "el": "Extensions: the all-off switch for staged packages, a switch per extension, the repository's own shown",
       "kind": "readme",
       "status": "new",
       "panel": "p-trigger-gets",
@@ -159,7 +159,8 @@
       ],
       "shows": [
         "data-gets-flag=\"packages\"",
-        "A trigger cannot turn off one extension: it takes all the staged packages, or none.",
+        "data-gets-list=\"excludeExtensions\"",
+        "Off leaves it out of these jobs by name: a staged package with its tools, skills, prompt templates and themes, an overlay extension before its code runs. A host without that name loads nothing for it.",
         "The repository’s own"
       ]
     },
@@ -180,7 +181,7 @@
       ]
     },
     {
-      "el": "Tools: pi's own and a server's as chips, extension tools shown, report_progress shown",
+      "el": "Tools: pi's own, a server's and an extension's as chips, report_progress shown",
       "kind": "readme",
       "status": "new",
       "panel": "p-trigger-gets",
@@ -190,7 +191,8 @@
       ],
       "shows": [
         "data-gets-inverse",
-        "lint_file",
+        "data-gets-list=\"excludeExtensionTools\"",
+        "Off removes that tool from these jobs by name, on whichever host brings it.",
         "report_progress comes with run.progress, in the Edit form: no list removes it."
       ]
     },
@@ -350,10 +352,46 @@
       "source": "admin/src/console/panels/trigger.mjs#EDIT_FIELDS"
     },
     {
-      "el": "A switch per extension, and a chip per extension tool",
+      "el": "One extension left out, in the bar, with its switch off and marked",
       "kind": "readme",
-      "status": "illustrative",
-      "reason": "Each extension is shown and not switched in this pull request: `run.excludeExtensions` and `run.excludeExtensionTools` wait on a later one, and the card's status says so."
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-one-extension-off.operator"
+      ],
+      "shows": [
+        "pi-lint left out."
+      ]
+    },
+    {
+      "el": "One of an extension's tools off, in the bar, with its chip off",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-extension-tool-off.operator"
+      ],
+      "shows": [
+        "lint_file off."
+      ]
+    },
+    {
+      "el": "A name in the file no host shows keeps its row and its switch; a tool the file removes stays a chip",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
+      "holds": "named in the file"
+    },
+    {
+      "el": "Under \"packages\": false a package's switch is moot, and the row says so",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
+      "holds": "off with them"
     },
     {
       "el": "Trigger 3, its hosts, gh-9575, gh-e9a0, gh-03a9, linear, docs, git-guard, pi-lint and pi-test-runner",

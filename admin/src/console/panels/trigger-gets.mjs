@@ -113,14 +113,19 @@ function flowBody(gets, form) {
 
 function extensionsBody(gets, form) {
   const e = gets.extensions;
-  const packagesLine = !e.packagesOn ? W.packagesOff : form ? W.packagesOn : W.packagesLoad;
+  const packagesLine = !e.packagesOn ? W.packagesOff : form ? W.packagesOn : e.anyLeftOut ? W.packagesLoadLess : W.packagesLoad;
   const toggle = form ? html`<input type="checkbox"${e.packagesOn ? html` checked` : null} data-gets-flag="packages" data-gets-on="staged packages on" data-gets-off="staged packages off">` : null;
   return html`<div class="te-items">
 ${item({ name: form ? "Staged packages" : e.packagesOn ? "Staged packages: on" : "Staged packages: off", subText: packagesLine, control: toggle, mark: form })}
-${e.items.map((entry) => item({ name: entry.name, subText: entry.sub }))}
+${e.items.map((entry) => {
+    // A moot row the file names keeps its box, disabled: what it says stays in the list an edit of the rest sends (`getsLists`).
+    const box = !form || (entry.moot && entry.on) ? null : html`<input type="checkbox"${entry.on ? html` checked` : null}${entry.moot ? html` disabled` : null} data-gets-list="excludeExtensions" data-gets-value="${entry.value}" data-gets-inverse data-gets-on="${entry.value} back on" data-gets-off="${entry.value} left out">`;
+    return item({ name: form ? entry.name : `${entry.name}: ${entry.on && !entry.moot ? "on" : "off"}`, subText: entry.sub, control: box, mark: form && !entry.moot });
+  })}
 ${item({ name: "The repository’s own", subText: W.repositoryExtensions })}
 </div>${e.none ? html`<p class="te-note">${e.noneWord}</p>` : null}${e.more > 0 ? html`<p class="te-note">And ${e.more} more past what the hosts publish.</p>` : null}
-<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.oneExtension} ${W.newExtension} <a class="link" href="/config/updates">Open Updates</a></span></p>`;
+${form && !e.packagesOn && e.items.some((entry) => entry.moot) ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.extensionsMoot}</span></p>` : null}
+<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${form ? html`${W.extensionSwitch} ` : null}${W.newExtension} <a class="link" href="/config/updates">Open Updates</a></span></p>`;
 }
 
 function mcpBody(gets, form) {
@@ -134,12 +139,13 @@ function mcpBody(gets, form) {
 function toolsBody(gets, form) {
   const t = gets.tools;
   const tool = (entry) => (form ? chip("excludeTools", { ...entry, onWord: `${entry.label} on`, offWord: `${entry.label} off` }, { inverse: true }) : roChip(entry.label, entry.on));
-  const fromExtensions = t.fromExtensions.map((group) => html`<div>${sub(`From ${group.heading}`)}${chips(group.names.map((name) => roChip(name)))}</div>`);
+  const extensionTool = (entry) => (form && entry.switched !== false ? chip("excludeExtensionTools", { ...entry, onWord: `${entry.label} on`, offWord: `${entry.label} off` }, { inverse: true }) : roChip(entry.label, entry.on));
+  const fromExtensions = t.fromExtensions.map((group) => html`<div>${sub(`From ${group.heading}`)}${chips(group.chips.map(extensionTool))}</div>`);
   return html`<div>${sub("pi’s own")}${chips(t.own.map(tool))}</div>
 <p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.toolsOn}</span></p>
-${fromExtensions}${fromExtensions.length > 0 ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.extensionTools}</span></p>` : null}
+${fromExtensions}${fromExtensions.length > 0 || t.otherTools.length > 0 ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.extensionToolChip}</span></p>` : null}
 ${t.serverChips.length > 0 ? html`<div>${sub(`From ${t.servers.join(", ")}`)}${chips(t.serverChips.map(tool))}</div><p class="te-note tone-attention">${ui.icon("attention", { size: "sm" })}<span>${W.lastWay}</span></p>` : form ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.serverToolsLater}</span></p>` : null}
-${t.other.length > 0 ? html`<div>${sub("Also in the file")}${chips(t.other.map(tool))}</div>` : null}
+${t.other.length > 0 || t.otherTools.length > 0 ? html`<div>${sub("Also in the file")}${chips([...t.other.map(tool), ...t.otherTools.map(extensionTool)])}</div>` : null}
 ${t.jobTool ? html`<div>${sub("The job’s own")}${chips(roChip("report_progress"))}</div><p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.jobTool}</span></p>` : null}`;
 }
 
@@ -178,5 +184,5 @@ export function triggerGetsHow(v) {
   const line = (icon, bold, rest) => html`<li>${ui.icon(icon)}<span><b>${bold}</b> ${rest}</span></li>`;
   const noTool = line("shield", "A person, at the console.", W.noTool);
   if (!canAct(v)) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", "Read only here.", v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
-  return ui.card({ title: W.how, body: html`<ul class="te-list">${line("edit", "Change it in place.", "A switch for the staged packages and each MCP server, a chip for each tool, a picker for the model and the flow.")}${line("skill", "The flow picker is not the whole list.", W.flowPicker)}${line("eye", "Nothing is written", "until you preview the change and confirm it.")}${noTool}${line("rerun", "Undo", "puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.")}</ul>` });
+  return ui.card({ title: W.how, body: html`<ul class="te-list">${line("edit", "Change it in place.", "A switch for the staged packages, each extension and each MCP server, a chip for each tool, a picker for the model and the flow.")}${line("skill", "The flow picker is not the whole list.", W.flowPicker)}${line("eye", "Nothing is written", "until you preview the change and confirm it.")}${noTool}${line("rerun", "Undo", "puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.")}</ul>` });
 }

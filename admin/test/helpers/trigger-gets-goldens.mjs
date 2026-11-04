@@ -111,8 +111,11 @@ export function asChanged(page, changes) {
   return out;
 }
 
-/** The changes the card's bar draws: linear on, and bash off. Git-guard's switch waits on `run.excludeExtensions`. */
+/** The changes the card's bar draws: linear on, and bash off. */
 export const GETS_CHANGES = Object.freeze([{ list: "mcp", value: "linear", on: true }, { list: "excludeTools", value: "bash", on: false }]);
+/** One extension left out, and one of an extension's tools removed, each alone. */
+export const GETS_EXTENSION_OFF = Object.freeze([{ list: "excludeExtensions", value: "pi-lint", on: false }]);
+export const GETS_TOOL_OFF = Object.freeze([{ list: "excludeExtensionTools", value: "lint_file", on: false }]);
 
 /** The longest names the card draws, for the width check, which can only see a name a golden holds. */
 function longNames() {
@@ -138,6 +141,8 @@ export const TRIGGER_GETS_DRAW = Object.freeze({
   "trigger-gets.operator": () => triggerGetsPage(),
   "trigger-gets.viewer": () => triggerGetsPage({ role: "viewer" }),
   "trigger-gets-changed.operator": async () => asChanged(await triggerGetsPage(), GETS_CHANGES),
+  "trigger-gets-one-extension-off.operator": async () => asChanged(await triggerGetsPage(), GETS_EXTENSION_OFF),
+  "trigger-gets-extension-tool-off.operator": async () => asChanged(await triggerGetsPage(), GETS_TOOL_OFF),
   "trigger-gets-host-lacks.operator": () => triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, mcp: ["docs"] } } }),
   "trigger-gets-no-flow.operator": () => triggerGetsPage({ records: [S.noFlow()], loads: hostLoads({ mini1: { ...FLOW_ROW("unknown") }, build3: { ...FLOW_ROW("unknown") } }) }),
   "trigger-gets-no-run.operator": () => triggerGetsPage({ records: [] }),

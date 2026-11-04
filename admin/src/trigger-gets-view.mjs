@@ -16,8 +16,9 @@
  */
 import * as nodeFs from "node:fs";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME } from "@edgehero/pi-dispatch/mcp-config";
-import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
+import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern, triggersFileVersionProblem, validateExcludeExtensionTools } from "@edgehero/pi-dispatch/triggers";
 import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
+import { overlayEntryNamed } from "@edgehero/pi-dispatch/loaded-record";
 import { optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { hostLoadsRow, hostPiFor, triggerLastRun } from "./loaded-words.mjs";
 import { normalizeTriggerForDisplay } from "./read-model.mjs";
@@ -37,11 +38,14 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   noLiveList: "No live host is listed just now, so these are the hosts that last published, running or not.",
   hostsUnread: "The hosts’ doctor runs could not be read, so each reads unknown, never the same.",
   repositoryExtensions: ".pi/extensions at the base commit, merge-gated. Changed in the repository, not here.",
-  oneExtension: "A trigger cannot turn off one extension: it takes all the staged packages, or none.",
+  extensionSwitch: "Off leaves it out of these jobs by name: a staged package with its tools, skills, prompt templates and themes, an overlay extension before its code runs. A host without that name loads nothing for it.",
+  extensionsMoot: "Each staged package is off with them, so it has no switch of its own: turn them on and confirm first.",
+  extensionInFile: "named in the file",
   newExtension: "A new extension, or another version, is staged first, for every trigger.",
   packagesOff: "The file says \"packages\": false, so these jobs load none of them, nor their tools, skills, prompt templates or themes.",
   packagesOn: "Off writes \"packages\": false, and none load, nor their tools, skills, prompt templates or themes.",
   packagesLoad: "Its jobs load what is staged on the host that runs them.",
+  packagesLoadLess: "Its jobs load what is staged on the host that runs them, less what the file leaves out by name.",
   noExtensions: "The hosts that can say name no staged package or overlay extension.",
   noExtensionsKnown: "No host’s doctor run can say which extensions it has.",
   forgeServer: "the job’s own forge, with its own token; in no overlay",
@@ -49,7 +53,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   noServersKnown: "No host’s doctor run can say which MCP servers it has, and this trigger names none.",
   serverRefused: "A job on a host without a server it names, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid. A key a server uses must reach the job, through run.secrets in the file or a host’s PI_FORWARD_ENV, or the job is refused as mcp-secret-unmapped.",
   toolsOn: "On means not removed. powershell, grep, find and ls stay off unless an extension turns them on, so a trigger can remove them too.",
-  extensionTools: "A trigger cannot remove a tool an extension adds. A repository’s tools stay a count, so they have no chip here.",
+  extensionToolChip: "Off removes that tool from these jobs by name, on whichever host brings it. A chip comes from what a run recorded or what the file names, since no host publishes a tool’s name. A repository’s tools stay a count, so they have no chip here.",
   serverToolsLater: "A server’s tools are offered once this trigger names it: turn it on and confirm first.",
   lastWay: "Removing every tool that reaches a server refuses its jobs at pickup as mcp-excluded, before they spend. The preview refuses that where the file alone decides it, and warns where this host’s overlay routes it so; another host’s may route it another way.",
   jobTool: "report_progress comes with run.progress, in the Edit form: no list removes it.",
@@ -113,11 +117,16 @@ function cannotSay(row, trigger) {
 /** The servers this trigger names that an overlay must define: `forge` is the job's own, on no host's list. */
 const overlayServersOf = (trigger) => (trigger.mcp ?? []).filter((name) => name !== FORGE_MCP_SERVER_NAME);
 
+/** Which of this host's packages a job of this trigger loads: none where it withholds them, and never one it leaves out by name. */
+const packagesLoaded = (row, trigger) => (trigger.packages === false ? [] : (row.packages ?? []).filter((pkg) => !(trigger.excludeExtensions ?? []).includes(pkg.name)));
+/** Which of this host's overlay entries a job of this trigger loads, by the runner's own reading of a name (`overlayEntryNamed`). */
+const overlayLoaded = (row, trigger) => (row.overlayExtensionsAllowed === true ? (row.extensions ?? []).filter((entry) => !(trigger.excludeExtensions ?? []).some((name) => overlayEntryNamed(name, entry.name))) : []);
+
 /** What a job of this trigger gets on this host, each fact keyed so two hosts can be compared and worded so a pill can say it. */
 function hostFacts(row, trigger) {
   const facts = new Map();
-  if (trigger.packages !== false) for (const pkg of row.packages ?? []) facts.set(`p:${pkg.name} ${pkg.version}`, `${pkg.name} ${pkg.version}`);
-  if (row.overlayExtensionsAllowed === true) for (const entry of row.extensions ?? []) facts.set(`o:${entry.name}`, `${entry.name}, from its overlay`);
+  for (const pkg of packagesLoaded(row, trigger)) facts.set(`p:${pkg.name} ${pkg.version}`, `${pkg.name} ${pkg.version}`);
+  for (const entry of overlayLoaded(row, trigger)) facts.set(`o:${entry.name}`, `${entry.name}, from its overlay`);
   for (const name of row.skills ?? []) facts.set(`s:${name}`, `skill ${name}`);
   for (const name of overlayServersOf(trigger)) if ((row.mcp ?? []).some((server) => server.name === name && server.enabled === true)) facts.set(`m:${name}`, name);
   return facts;
@@ -137,10 +146,10 @@ function agreeRow(row, trigger) {
     unread: [],
     more: {},
     overlayExtensionsAllowed: true,
-    extensions: row.overlayExtensionsAllowed === true ? row.extensions ?? [] : [],
+    extensions: overlayLoaded(row, trigger),
     skills: row.skills ?? [],
     mcp: (row.mcp ?? []).filter((server) => named.includes(server.name) && server.enabled === true),
-    packages: trigger.packages === false ? [] : row.packages ?? [],
+    packages: packagesLoaded(row, trigger),
     flows: (row.flows ?? []).filter((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow),
   };
 }
@@ -154,6 +163,8 @@ const FLOW_TIER_WORDS = Object.freeze({ repository: "from the repository", trigg
 function flowAnswer(row, trigger) {
   const found = (row.flows ?? []).find((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow);
   if (!found) return null;
+  // Doctor never answers this of a package the file leaves out (`flowTierOf`), so such a row is from before that was written: no answer for the file as it is.
+  if (found.tier === "package" && (trigger.excludeExtensions ?? []).includes(found.package)) return null;
   return found.tier === "package" ? `from ${found.package ?? "a staged package"}` : FLOW_TIER_WORDS[found.tier] ?? null;
 }
 
@@ -321,12 +332,19 @@ function flowRow({ trigger, rows, editor }) {
 /** Whether this host's row lists this part whole, so a name not on it is one the host does not have. */
 const listsWhole = (row, part) => row.state === "current" && !(row.unread ?? []).includes(part) && !((row.more?.[part] ?? 0) > 0);
 
-/** Which hosts have this, as a person reads it: `staged on a and b, unknown on c`. A list cut short still proves what is on it. */
-function whereWords(rows, part, holds, word) {
+/** Which hosts have this, as a person reads it: `staged on a and b, unknown on c`, or `said` in place of the first part. A list cut short still proves what is on it. */
+function whereWords(rows, part, holds, word, said = null) {
   const has = rows.filter((row) => row.state === "current" && holds(row)).map((row) => row.name);
   const lacks = rows.filter((row) => listsWhole(row, part) && !holds(row)).map((row) => row.name);
   const unknown = rows.filter((row) => !has.includes(row.name) && !lacks.includes(row.name)).map((row) => row.name);
-  return [has.length > 0 ? `${word} on ${listed(has)}` : null, lacks.length > 0 ? `not on ${listed(lacks)}` : null, unknown.length > 0 ? `unknown on ${listed(unknown)}` : null].filter(Boolean).join(", ");
+  return [said ?? (has.length > 0 ? `${word} on ${listed(has)}` : null), lacks.length > 0 ? `not on ${listed(lacks)}` : null, unknown.length > 0 ? `unknown on ${listed(unknown)}` : null].filter(Boolean).join(", ");
+}
+
+/** Where a name the file holds and no host shows is not: only a host that lists both kinds whole can say that of a name that could be either. */
+function nowhereWords(rows) {
+  const lacks = rows.filter((row) => listsWhole(row, "packages") && listsWhole(row, "extensions")).map((row) => row.name);
+  const unknown = rows.filter((row) => !lacks.includes(row.name)).map((row) => row.name);
+  return [lacks.length > 0 ? `not on ${listed(lacks)}` : null, unknown.length > 0 ? `unknown on ${listed(unknown)}` : null].filter(Boolean).join(", ");
 }
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -337,28 +355,62 @@ function broughtWords(source) {
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
+/** A name as `run.excludeExtensions` takes it for this overlay entry, when the file does not already spell it: the stem means every entry of that name, on each host. */
+const overlayStem = (segment) => segment.replace(/\.(?:ts|js)$/, "");
+
+/**
+ * One row per NAME, since a name is what a switch sends and it means every extension of that name: a package and an overlay entry that share one are one row, and two hosts on two
+ * versions of a package are one row saying so. REJECTED: a row per version, each with a switch, which would send one name twice, and the loader refuses that. A name the file holds
+ * keeps the file's spelling and its row whether or not any host shows it, so nothing in the list falls off on an edit of the rest. Under the file's `"packages": false` a package's
+ * switch is moot, so it has none (`moot`), and one the file names keeps its box, disabled and unticked, so an edit of the rest sends that name back as it was.
+ */
 function extensionsRow({ trigger, rows, last }) {
   const known = rows.filter((row) => row.state === "current");
-  const packages = [...new Map(known.flatMap((row) => row.packages ?? []).map((pkg) => [`${pkg.name} ${pkg.version}`, pkg])).values()].sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
+  const inFile = trigger.excludeExtensions ?? [];
+  const withheld = trigger.packages === false;
+  const groups = new Map();
+  const groupOf = (value) => {
+    if (!groups.has(value)) groups.set(value, { value, versions: new Set(), segments: new Set() });
+    return groups.get(value);
+  };
+  for (const pkg of [...known.flatMap((row) => row.packages ?? [])].sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version))) groupOf(pkg.name).versions.add(pkg.version);
   const overlay = unique(known.flatMap((row) => (row.extensions ?? []).map((entry) => entry.name))).sort();
+  for (const segment of overlay) groupOf(inFile.find((name) => overlayEntryNamed(name, segment)) ?? overlayStem(segment)).segments.add(segment);
+  for (const name of inFile) groupOf(name);
   const brought = (name, version = null) => {
     const row = (last?.sources ?? []).find((source) => source.name === name && (version === null || source.version === version));
     const words = broughtWords(row);
     return words === null ? null : `${words}, as ${last.id} loaded it`;
   };
-  const items = [
-    ...packages.map((pkg) => {
-      const holds = (row) => (row.packages ?? []).some((entry) => entry.name === pkg.name && entry.version === pkg.version);
-      return { name: `${pkg.name} ${pkg.version}`, sub: [whereWords(rows, "packages", holds, "staged"), ...(trigger.packages === false ? [] : [brought(pkg.name, pkg.version)])].filter(Boolean).join(" · ") };
-    }),
-    ...overlay.map((name) => {
-      const holds = (row) => (row.extensions ?? []).some((entry) => entry.name === name);
-      const off = known.filter((row) => holds(row) && row.overlayExtensionsAllowed !== true).map((row) => row.name);
-      return { name, sub: [whereWords(rows, "extensions", holds, "in the overlay"), off.length > 0 ? `its overlay extensions off on ${listed(off)}` : null, brought(name)].filter(Boolean).join(" · ") };
-    }),
-  ];
+  const items = [...groups.values()].map(({ value, versions, segments }) => {
+    const on = !inFile.includes(value);
+    const staged = [...versions];
+    const entries = [...segments];
+    const holdsPackage = (row) => (row.packages ?? []).some((entry) => entry.name === value);
+    const holdsEntry = (row) => (row.extensions ?? []).some((entry) => segments.has(entry.name));
+    const moot = withheld && staged.length > 0 && entries.length === 0;
+    const off = known.filter((row) => holdsEntry(row) && row.overlayExtensionsAllowed !== true).map((row) => row.name);
+    const hostsOn = (version) => known.filter((row) => (row.packages ?? []).some((entry) => entry.name === value && entry.version === version)).map((row) => row.name);
+    const stagedWhere = staged.length === 0 ? null : whereWords(rows, "packages", holdsPackage, "staged", staged.length === 1 ? null : staged.map((version) => `${version} on ${listed(hostsOn(version))}`).join(", "));
+    const quoted = (() => {
+      if (!on || withheld && entries.length === 0) return null;
+      if (staged.length === 0) return brought(entries[0]);
+      const running = staged.find((version) => brought(value, version) !== null);
+      if (running === undefined) return entries.length > 0 ? brought(entries[0]) : null;
+      return `${staged.length > 1 ? `${running}: ` : ""}${brought(value, running)}`;
+    })();
+    const named = staged.length > 0 ? `${value} ${listed(staged)}` : entries.length > 0 ? entries.join(", ") : value;
+    const sub = [
+      staged.length === 0 && entries.length === 0 ? [TRIGGER_GETS_WORDS.extensionInFile, nowhereWords(rows)].filter(Boolean).join("; ") : null,
+      stagedWhere,
+      entries.length > 0 ? whereWords(rows, "extensions", holdsEntry, "in the overlay") : null,
+      off.length > 0 ? `its overlay extensions off on ${listed(off)}` : null,
+      quoted,
+    ].filter(Boolean).join(" · ");
+    return { value, name: named, on, moot, sub };
+  });
   const morePackages = known.reduce((total, row) => total + (row.more?.packages ?? 0) + (row.more?.extensions ?? 0), 0);
-  return { packagesOn: trigger.packages !== false, items, more: morePackages, none: items.length === 0, noneWord: known.length > 0 ? TRIGGER_GETS_WORDS.noExtensions : TRIGGER_GETS_WORDS.noExtensionsKnown };
+  return { packagesOn: !withheld, anyLeftOut: inFile.length > 0, items, more: morePackages, none: items.length === 0, noneWord: known.length > 0 ? TRIGGER_GETS_WORDS.noExtensions : TRIGGER_GETS_WORDS.noExtensionsKnown };
 }
 
 /**
@@ -393,6 +445,16 @@ function mcpRow({ trigger, rows, overlayServers }) {
   return { items, none: items.length === 0, noneWord: rows.some((row) => row.state === "current") ? TRIGGER_GETS_WORDS.noServers : TRIGGER_GETS_WORDS.noServersKnown };
 }
 
+/** Whether the file takes this name: a chip for one it refuses (pi's own, a server's, one the job offers itself) could only end in a refusal, so that one is shown and not switched. */
+function takesToolName(name) {
+  try {
+    validateExcludeExtensionTools({}, { excludeExtensionTools: [name] }, "", "");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function toolsRow({ trigger, last }) {
   const removed = trigger.excludeTools ?? [];
   const chip = (name, label = name) => ({ name, label, on: !removed.includes(name) });
@@ -404,9 +466,23 @@ function toolsRow({ trigger, last }) {
   // An entry nothing above offers would vanish from the list on any edit of it, so it stays a chip. The loader refuses such a file, so this is a display's belt.
   const other = removed.filter((name) => !offered.has(name)).map((name) => chip(name));
   // No host publishes a tool's name: only a run knows them, so each is said as that run's. What came with the staged packages does not reach a
-  // job of a trigger that withholds them now, whatever that run had. `report_progress` is the file's: `run.progress`, and no record's.
-  const fromExtensions = (last?.tools ?? []).filter((group) => group.kind !== "package" || trigger.packages !== false).map((group) => ({ heading: `${group.from}${group.kind === "overlay" ? " in its overlay" : ""}, as ${last.id} loaded it${last.host ? ` on ${last.host}` : ""}`, names: group.names }));
-  return { own, servers, serverChips, other, fromExtensions, jobTool: trigger.progress === true };
+  // job of a trigger that withholds them now, or leaves that extension out by name, whatever that run had. `report_progress` is the file's: `run.progress`, and no record's.
+  const leftOut = trigger.excludeExtensions ?? [];
+  const removedByName = trigger.excludeExtensionTools ?? [];
+  const reachable = (last?.tools ?? []).filter((group) => (group.kind === "package" ? trigger.packages !== false && !leftOut.includes(group.from) : !leftOut.some((name) => overlayEntryNamed(name, group.from))));
+  // One box per name: two extensions can register one tool, the name means both, and a list holding it twice is refused. The second shows it, and the first's box says for both.
+  const drawn = new Set();
+  const fromExtensions = reachable.map((group) => ({
+    heading: `${group.from}${group.kind === "overlay" ? " in its overlay" : ""}, as ${last.id} loaded it${last.host ? ` on ${last.host}` : ""}`,
+    chips: group.names.map((name) => {
+      const switched = takesToolName(name) && !drawn.has(name);
+      if (switched) drawn.add(name);
+      return { name, label: name, on: !removedByName.includes(name), switched };
+    }),
+  }));
+  // A name the file holds and no chip above offers stays a chip, or it would fall off the list on an edit of the rest: a tool the file removes is on no later run's record.
+  const otherTools = removedByName.filter((name) => !drawn.has(name)).map((name) => ({ name, label: name, on: false }));
+  return { own, servers, serverChips, other, fromExtensions, otherTools, jobTool: trigger.progress === true };
 }
 
 /** Each host's image and pi, as it beats them out, or what the file names instead. */

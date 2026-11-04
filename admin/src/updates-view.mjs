@@ -109,7 +109,8 @@ export function piRow({ pinned, looks }) {
 
 /**
  * The cron triggers a canary can run as: on this deployment's file and loading staged packages. A trigger that withholds them is refused at the preview anyway, so it is not offered, and
- * neither is one the preview could only refuse. Read from the raw file, as the plan it leads to is: the snapshot's rows are for display, and they carry none of these fields.
+ * neither is one the preview could only refuse. Read from the raw file, as the plan it leads to is: the snapshot's rows are for display, and they carry none of these fields. One that leaves a
+ * package out by name is such a trigger for that package alone (`canaryTriggersFor`), so it says which, and only where it has any.
  */
 function canaryTriggers(document) {
 	const rows = document?.triggers;
@@ -117,8 +118,14 @@ function canaryTriggers(document) {
 	return rows.flatMap((trigger, index) => {
 		const on = trigger?.on, run = trigger?.run;
 		if (on?.type !== "cron" || run?.packages === false || run?.resume === true || run?.command !== undefined || run?.portfolio === true) return [];
-		return [{ index, id: typeof on.id === "string" ? on.id : null, capUsd: Number.isFinite(run?.maxCostUsd) ? run.maxCostUsd : null }];
+		const excludes = Array.isArray(run?.excludeExtensions) ? run.excludeExtensions.filter((name) => typeof name === "string") : [];
+		return [{ index, id: typeof on.id === "string" ? on.id : null, capUsd: Number.isFinite(run?.maxCostUsd) ? run.maxCostUsd : null, ...(excludes.length > 0 ? { excludes } : {}) }];
 	});
+}
+
+/** Of those, what a canary of this package can run as: one that leaves it out would load it anyway and say nothing of the jobs it goes into, and the preview refuses that. */
+export function canaryTriggersFor(triggers, name) {
+	return (triggers ?? []).filter((trigger) => !(trigger.excludes ?? []).includes(name));
 }
 
 /** The stage manifest, whole: `{ packages, unreadable }`. A manifest that is absent is nothing staged; one that is there and cannot be read is said. */

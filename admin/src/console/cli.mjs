@@ -696,6 +696,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       readHosts: () => m.readModel.readHosts({ url: side.paths.valkeyUrl, now }),
       readHostLoads: () => pageDeps.hostLoads(),
       readSkew: async (index, proposedFs) => fleet.triggerSkew(index, await fleet.waiting(), { fs: proposedFs }),
+      readRunRecords: async (index) => m.readModel.triggerDetailOf(await fleet.snapshot(), index)?.history,
       // What the worker's pickup check reads on this host: the deployment's file alone, each key by the service's own rule. The
       // console's shell is not the service's, so a value only it holds would pass a job the worker refuses, and a value it
       // overrides would refuse one the worker runs. A line the reader cannot vouch for comes back by name, never as absent, and

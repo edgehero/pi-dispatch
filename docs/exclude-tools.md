@@ -150,9 +150,10 @@ its runner would ignore both keys.
 ## The file, or a person on the trigger's page
 
 Like every `run.*` capability field: no panel key, no AI tool can set or widen it, and a chained
-job's request file can neither set nor drop it. A person can change `run.excludeTools` in the file, or with the tool chips on the
-[trigger's page](console.md#what-a-triggers-jobs-get), where a tool back on is said as a widening before anything is written. The
-other two are the file's. A chained child inherits its parent's exclusions (less the
+job's request file can neither set nor drop it. A person can change each of the three in the file or on the
+[trigger's page](console.md#what-a-triggers-jobs-get): `run.excludeTools` and `run.excludeExtensionTools` with its tool chips, and
+`run.excludeExtensions` with a switch per extension. One coming back is said as a widening before anything is written, and a name
+every live host answers for and none holds is refused there. A chained child inherits its parent's exclusions (less the
 names of MCP tools in `run.excludeTools`: the child connects no MCP server),
 because the dangerous direction here is inverted from the other inherited fields: dropping the
 inheritance would hand a read-only parent a child that can edit and run bash.
@@ -177,7 +178,7 @@ from a current tree and the refusal disappears.
 | Refused pre-spend | `job-image-exclude-tools-unsupported` (image lacks the `excludeTools` capability token); in-container exit 2 on a name the baked pi does not know (version skew, hand-run containers) |
 | Observability | `tools_excluded` log line on every flagged job: the requested exclusions and the session's active tool list read back |
 | Panel | the trigger drill-in's `excludeTools` row beside `image` (`full pinned tool set` when absent); no panel key, no AI tool |
-| Console | a chip per tool on the trigger's page, on meaning not removed, for a person only ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)) |
+| Console | a chip per tool and a switch per extension on the trigger's page, on meaning not removed or left out, for a person only ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)) |
 | Chaining | inherited from the parent's job data, less MCP tool names; the request file cannot set or drop it |
 | Role children | the same list on each child's command line (`--exclude-tools`), which beats an agent's own `tools` |
 | Version floor | worker 2.0.0, receiver 2.0.0, admin 2.0.0, plus the 2.0.0 job image (`ghcr.io/edgehero/pi-job:2.0.0`) or one rebuilt from the same tree |

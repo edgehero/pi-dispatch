@@ -183,7 +183,7 @@ export function triggerRun(v) {
   return card(
     "What it runs",
     // Each key has one editor, and a view with no card has none of these in a form: so their rows go where the card's would have been, read-only.
-    html`${triggerGetsDrawn(v) ? html`<p>The flow, the model and its cap, the staged packages, the MCP servers and the tools are in What its jobs get.</p>` : html`<h3>What its jobs get</h3>${facts(CARD_FIELDS.map((k) => fieldRow(v, t, k)))}`}<h3>Edit here</h3>
+    html`${triggerGetsDrawn(v) ? html`<p>The flow, the model and its cap, the staged packages and each extension, the MCP servers and the tools are in What its jobs get.</p>` : html`<h3>What its jobs get</h3>${facts(CARD_FIELDS.map((k) => fieldRow(v, t, k)))}`}<h3>Edit here</h3>
       ${facts(
         EDIT_FIELDS.filter(
           (k) => t.type !== "cron" || !["statusComment", "recover"].includes(k),

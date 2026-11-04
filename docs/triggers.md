@@ -29,9 +29,9 @@ The add editor and its JSON fallback write the add tool's entry, including `run.
 
 A trigger's page has two editors, and no key has both:
 
-- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages` and
-  `excludeTools`, with one preview that says each change in words and one Confirm. Only a person can use this form, and no `dispatch_*` tool
-  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other six
+- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages`,
+  `excludeTools`, `excludeExtensions` and `excludeExtensionTools`, with one preview that says each change in words and one Confirm. Only a person can use this form, and no `dispatch_*` tool
+  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other eight
   ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)).
 - **Edit** changes the venue (`backend`), `maxTurns`, `progress`, `statusComment`, `steer` and `recover`. Cron cannot enable
   statusComment or recover.
@@ -244,7 +244,7 @@ other top-level block, `secretBundles` among them, so upgrade them first.
 ## Optional `run` fields
 
 Most of these change what code runs or what it costs, so each is a deliberate edit to the file that neither the panel nor any
-`dispatch_*` tool can set. `packages`, `excludeTools` and `mcp` can also be changed by a person on the
+`dispatch_*` tool can set. `packages`, `excludeTools`, `excludeExtensions`, `excludeExtensionTools` and `mcp` can also be changed by a person on the
 [trigger's page](console.md#what-a-triggers-jobs-get), which no tool reaches. `progress`, `statusComment`, `steer` and `recover` change
 how a run is followed or picked up, and that page's Edit form and `dispatch_trigger_edit` take them too.
 

@@ -284,6 +284,17 @@ stateTest(T.getsMoveCloses, async () => {
   tick(form, "excludeTools", "bash", false);
   assert.equal(shown(slotOf(w)), false, "a second control moved: the preview did not hold it");
   assert.equal(w.fetch.calls.filter((call) => call.url.endsWith("/confirm")).length, 0, "and nothing was sent");
+  // A switch per extension and a chip per extension tool are the same controls to it, open and late.
+  await open();
+  tick(form, "excludeExtensions", "pi-lint", false);
+  assert.equal(shown(slotOf(w)), false, "a switch per extension moved");
+  await open();
+  tick(form, "excludeExtensionTools", "lint_file", false);
+  assert.equal(shown(slotOf(w)), false, "a chip per extension tool moved");
+  w.submit(form);
+  tick(form, "excludeExtensions", "pi-lint", true);
+  await w.fetch.open(`/api/act/${GETS}/preview`).answer(200, { ok: true, ticket: "tk-2", action: GETS, html: bar(), kind: "trigger-edit" });
+  assert.equal(shown(slotOf(w)), false, "a late answer is about the form as it was");
   // A text box, on its first keystroke.
   await open();
   typeIn(w, form.querySelector('input[name="flow"]'), "r");

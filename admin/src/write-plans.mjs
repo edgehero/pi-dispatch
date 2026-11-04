@@ -25,7 +25,7 @@
 import * as nodeFs from "node:fs";
 import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
-import { ISSUE_ACTIONS, excludeToolsNearMiss, isModelRolesField, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, isModelRolesField, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
@@ -257,8 +257,9 @@ function unknownTriggerField(params, kind) {
 /**
  * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap),
  * `run.models` (the models its jobs may call), `run.fallbackModels` (their reviewed retry order),
- * `run.mcp` (the MCP servers they connect, below), and since issue #800 `run.excludeTools` (the tools they lose) and
- * `run.packages` (whether they load the staged packages). Each one decides
+ * `run.mcp` (the MCP servers they connect, below), and since issue #800 `run.excludeTools` (the tools they lose),
+ * `run.packages` (whether they load the staged packages), `run.excludeExtensions` (the extensions they go without) and
+ * `run.excludeExtensionTools` (an extension's tools they lose). Each one decides
  * what a trigger's jobs can spend or reach, and removing or widening it is a widening, so it is written by hand in the
  * reviewed triggers file or by a person on the trigger's page (`trigger-environment-plans.mjs`), and never by a model's call,
  * even behind a confirm. Neither tool's schema names them, and
@@ -272,9 +273,9 @@ function unknownTriggerField(params, kind) {
  * existing value is never touched: the add tool builds entries without these keys and the edit tool spreads the entry's own
  * `run` under the fields it sets.
  */
-const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.mcp", "run.excludeTools", "run.packages"]);
+const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.mcp", "run.excludeTools", "run.packages", "run.excludeExtensions", "run.excludeExtensionTools"]);
 /** Each tool-proof field as its refusal says it. */
-const TOOL_PROOF_WORDS = Object.freeze({ "run.maxCostUsd": "per-job dollar cap", "run.models": "allowed-model list", "run.fallbackModels": "fallback-model list", "run.mcp": "list of MCP servers", "run.excludeTools": "list of removed tools", "run.packages": "staged-package switch" });
+const TOOL_PROOF_WORDS = Object.freeze({ "run.maxCostUsd": "per-job dollar cap", "run.models": "allowed-model list", "run.fallbackModels": "fallback-model list", "run.mcp": "list of MCP servers", "run.excludeTools": "list of removed tools", "run.packages": "staged-package switch", "run.excludeExtensions": "list of extensions it leaves out", "run.excludeExtensionTools": "list of an extension's tools it removes" });
 /**
  * `run.mcp` (REQ-MCP-OPERATOR-SERVERS) is tool-proof for the same reason: which outside systems a trigger's jobs act
  * on, with which credentials, is the operator's to write. Its near misses are the loader's own (`isMcpNearMiss`: the
@@ -290,6 +291,13 @@ function mcpFieldNearMiss(key) {
  */
 function excludeToolsFieldNearMiss(key) {
   return excludeToolsNearMiss(key) || ["tools", "notools"].includes(key.replace(/[^a-z0-9]/gi, "").toLowerCase()) ? "run.excludeTools" : null;
+}
+/**
+ * `run.excludeExtensions` and `run.excludeExtensionTools`, the loader's own sweeps. In this order, and both after `run.excludeTools`: a key outside plain
+ * ASCII is judged by which targets could hold its plain letters, and the longest of these holds the other two, so asking it first would name the wrong field.
+ */
+function extensionsFieldNearMiss(key) {
+  return excludeExtensionsNearMiss(key) ? "run.excludeExtensions" : excludeExtensionToolsNearMiss(key) ? "run.excludeExtensionTools" : null;
 }
 /**
  * `run.packages`, in the shape of the sweeps above. Here and not in the loader: the loader has never swept this key, a
@@ -333,7 +341,7 @@ export function wideningFieldRefusal(params, tool) {
   for (const [label, source] of objects) {
     if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
     for (const key of Object.keys(source)) {
-      const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key) ?? excludeToolsFieldNearMiss(key) ?? packagesFieldNearMiss(key);
+      const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key) ?? excludeToolsFieldNearMiss(key) ?? extensionsFieldNearMiss(key) ?? packagesFieldNearMiss(key);
       if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
       return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${TOOL_PROOF_WORDS[meant]} is set by a person on that trigger's page or by hand in the triggers file, never by a tool.`;
     }

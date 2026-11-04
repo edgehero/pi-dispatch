@@ -2,6 +2,7 @@
 import { CANNOT_ADOPT_REASONS } from "@edgehero/pi-dispatch/updates";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
+import { canaryTriggersFor } from "../../updates-view.mjs";
 import { actForm } from "./config-ui.mjs";
 import { ageText, timeHtml } from "./common.mjs";
 
@@ -41,16 +42,16 @@ const notKnownLine = (state, view) => {
 };
 
 /** What a canary would cost, in the row that offers it: a paid button says so where it is pressed. */
-function canaryCost(view) {
-	const triggers = data(view).triggers;
+function canaryCost(row, view) {
+	const triggers = canaryTriggersFor(data(view).triggers, row.name);
 	if (triggers.length !== 1) return "one paid job of the trigger you choose";
 	const [only] = triggers;
 	return `one job of trigger ${only.index + 1}${only.capUsd !== null ? `, up to $${only.capUsd.toFixed(2)}` : ", up to its cap"}`;
 }
 
 function canaryForm(row, view, label = "Run a canary") {
-	const triggers = data(view).triggers;
-	if (triggers.length === 0) return html`<p class="muted">No cron trigger that loads staged packages can run a canary here.</p>`;
+	const triggers = canaryTriggersFor(data(view).triggers, row.name);
+	if (triggers.length === 0) return html`<p class="muted">No cron trigger that loads this package can run a canary here.</p>`;
 	const hidden = [["name", row.name], ["version", row.newest]];
 	const choose = triggers.length === 1
 		? null
@@ -79,7 +80,7 @@ function packageCells(row, view) {
 	const spent = canary && money(canary.costUsd) ? `, ${money(canary.costUsd)}` : "";
 	switch (row.state) {
 		case "current": return [versions(row.version), line("ok", "done", "The newest version."), null];
-		case "newer": return [versions(row.version, row.newest), row.adapter ? html`<span class="muted">A reviewed subscription adapter. It moves with a pi-dispatch release.</span>` : html`${adoptedBefore}<span class="muted">Not tried yet. A canary runs ${canaryCost(view)}, with this version for that job only. ${npmLink(row)}</span>`, undoToo(canaryRun("Run a canary"))];
+		case "newer": return [versions(row.version, row.newest), row.adapter ? html`<span class="muted">A reviewed subscription adapter. It moves with a pi-dispatch release.</span>` : html`${adoptedBefore}<span class="muted">Not tried yet. A canary runs ${canaryCost(row, view)}, with this version for that job only. ${npmLink(row)}</span>`, undoToo(canaryRun("Run a canary"))];
 		case "canary-completed": return [versions(row.version, row.newest), html`${adoptedBefore}<p>${line("ok", "done", html`Canary completed, read the run: ${runLink(canary.jobId)}${spent}.`)}</p>${facts}`, undoToo(adopt)];
 		case "canary-failed": return [versions(row.version, row.newest), html`${adoptedBefore}<p>${line("failed", "failed", html`${canary.why === "did-not-load" ? "Canary failed: this version did not load." : "Canary failed: the run did not complete."} Read the run: ${runLink(canary.jobId)}${spent}.`)}</p>${npmLink(row)}`, undoToo(canaryRun("Run another canary"))];
 		case "adopting": return [versions(row.desired.from ?? row.version, row.desired.version), html`<p>${line("idle", "rerun", `Adopting ${row.desired.version}: ${done} of ${row.standings.length} hosts so far.`)}</p>${standingsList(row)}`, may ? undoForm(row) : null];

@@ -18,7 +18,7 @@ import * as plans from "../src/write-plans.mjs";
 const ACTION = "trigger-environment-edit";
 /** What only a person may set. `flow`, `provider` and `model` stay the tool's, so they are the card's and not this list's. */
 const PERSON_ONLY = CARD_FIELDS.filter((key) => !["flow", "provider", "model"].includes(key));
-const VALUE = { maxCostUsd: "1", models: ["anthropic/claude-haiku-4-5"], fallbackModels: ["anthropic/claude-haiku-4-5"], mcp: ["linear"], packages: false, excludeTools: ["bash"] };
+const VALUE = { maxCostUsd: "1", models: ["anthropic/claude-haiku-4-5"], fallbackModels: ["anthropic/claude-haiku-4-5"], mcp: ["linear"], packages: false, excludeTools: ["bash"], excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] };
 /** Every spelling a model might reach for: the loader's own near misses, and a homoglyph of each (Cyrillic letters). */
 const NEAR_MISSES = {
   maxCostUsd: ["MaxCostUsd", "max_cost_usd", "maxCost", "MAX-COST-USD", "m\u0430xCostUsd"],
@@ -27,6 +27,8 @@ const NEAR_MISSES = {
   mcp: ["MCP", "mcps", "mcpServers", "mcp_servers", "mcp-server", "m\u0441p"],
   packages: ["Packages", "PACKAGES", "package", "pack_ages", "p\u0430ckages"],
   excludeTools: ["ExcludeTools", "exclude_tools", "excludeTool", "excludedTools", "EXCLUDE-TOOLS", "tools", "noTools", "NoTools", "\u0435xcludeTools"],
+  excludeExtensions: ["ExcludeExtensions", "exclude_extensions", "excludeExtension", "excludedExtensions", "EXCLUDE-EXTENSIONS", "\u0435xcludeExtensions"],
+  excludeExtensionTools: ["ExcludeExtensionTools", "exclude_extension_tools", "excludeExtensionTool", "excludedExtensionTools", "EXCLUDE-EXTENSION-TOOLS", "\u0435xcludeExtensionTools"],
 };
 
 function fixture() {
@@ -86,16 +88,8 @@ test("planTriggerEdit has no such parameter: a recording call reads exactly its 
   }
 });
 
-test("a tool call carrying run.excludeExtensions or run.excludeExtensionTools, or a near miss, is refused and writes nothing, and an edit keeps the file's own", async () => {
-  // Not on `TOOL_PROOF_FIELDS` yet, which holds what a person changes on the trigger's page, so the adapter's field check is what stands here.
+test("a tool's edit of what it may set keeps run.excludeExtensions and run.excludeExtensionTools as the file holds them", () => {
   const f = fixture();
-  const before = f.read();
-  for (const key of ["excludeExtensions", "excludeExtensionTools", "exclude_extensions", "excludeExtensionTool"]) {
-    for (const params of [{ [key]: ["pi-lint"] }, { run: { [key]: ["pi-lint"] } }, { on: { [key]: ["pi-lint"] } }]) {
-      await assert.rejects(executeToolAction("dispatch_trigger_edit", { index: 0, flow: "review", ...params }, interactive, f.options), /received a field it does not take/, key);
-    }
-  }
-  assert.equal(f.read(), before);
   const { plan } = plans.planTriggerEdit({ params: { index: 0, flow: "review" }, paths: f.paths, env: {} });
   const [written] = plan.mutate([{ on: {}, run: { flow: "fix", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] } }]);
   assert.deepEqual(written.run, { flow: "review", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] }, "a tool can neither set nor drop what the file holds");
@@ -226,7 +220,7 @@ test("the action's field list is the one field list: every key, once, and the ta
   assert.equal(new Set(TRIGGER_ENVIRONMENT_EDIT_FIELDS).size, TRIGGER_ENVIRONMENT_EDIT_FIELDS.length);
   assert.deepEqual([...actionNamed(ACTION).fields], [...TRIGGER_ENVIRONMENT_EDIT_FIELDS]);
   // The two the tool keeps, and the rest, which no tool may send. Held both ways so a new card field must choose a side here.
-  assert.deepEqual(PERSON_ONLY, ["maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools"]);
+  assert.deepEqual(PERSON_ONLY, ["maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
   const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(readFileSync(new URL("../src/write-plans.mjs", import.meta.url), "utf8"))[1];
   assert.deepEqual([...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort(), [...PERSON_ONLY].sort());
   assert.equal(ACTIONS.filter((action) => action.name === ACTION).length, 1);
@@ -251,7 +245,7 @@ test("the specs' list of tool-proof fields and the two counts they say are the c
   const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(readFileSync(new URL("../src/write-plans.mjs", import.meta.url), "utf8"))[1];
   const fields = [...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual([...named].sort(), [...fields].sort(), "the requirement names each tool-proof field");
-  const WORDS = { six: 6, nine: 9 };
+  const WORDS = { eight: 8, nine: 9 };
   const all = /A person changes all (\w+) on the trigger's page/.exec(bullet)[1];
   assert.equal(WORDS[all], fields.length, "and counts them");
   // What `dispatch_trigger_edit` may set, the row number aside: the action's fields as a tool can send them.

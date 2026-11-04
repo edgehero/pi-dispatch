@@ -47,7 +47,7 @@ import { QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
-import { recordedLoaded } from "@edgehero/pi-dispatch/loaded-record";
+import { overlayEntryNamed, recordedLoaded } from "@edgehero/pi-dispatch/loaded-record";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { refusedBeforeSpend, repoOfTarget } from "./costs.mjs";
@@ -837,6 +837,19 @@ export function triggerLastRun(records, hostLoads = null) {
   };
 }
 
+/**
+ * The tools a trigger's runs say an extension brought, by name: what the card can draw a chip from, and what its preview can confirm. A staged
+ * package's or the overlay's, never a repository's, which stay a count. Null with no list to read, which is not a trigger with no such tool.
+ */
+export function toolNamesOfRuns(records) {
+  if (!Array.isArray(records)) return null;
+  return [...new Set(records.flatMap((record) => {
+    const loaded = loadedOf(record);
+    if (loaded === null) return [];
+    return [...sourcesOf(loaded, "package").flatMap((row) => row.toolNames ?? []), ...(sourcesOf(loaded, "overlay")[0]?.namedTools ?? []).flatMap((row) => row.tools ?? [])];
+  }))];
+}
+
 // ---- a sandbox -------------------------------------------------------------------------------------------------------
 
 /**
@@ -897,7 +910,7 @@ export function hostLoadsRow(hostLoads, name) {
  * Approximate in the safe direction, as the publication is: the repository's part is decided at its base commit, which the
  * foot says.
  */
-export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPackages = false, image = null }) {
+export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPackages = false, excludes = [], image = null }) {
   const row = hostLoadsRow(hostLoads, host);
   const first = noOverlay(hostPiFor(row, image));
   const unknown = (why) => [`${first} What a job of trigger ${triggerIndex + 1} would load on this host is unknown: ${why}.`];
@@ -906,10 +919,11 @@ export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPacka
   // not none. A part this job would not load from anyway (packages it withholds, an overlay that is off) changes nothing.
   const unread = (row.unread ?? []).filter((part) => (part !== "packages" || !withholdsPackages) && (part !== "extensions" || row.overlayExtensionsAllowed));
   if (unread.length > 0) return unknown(`its last doctor run could not read ${listed(unread.map((part) => UNREAD_PART_WORDS[part] ?? "part of what it publishes"))}`);
-  const packages = withholdsPackages ? [] : (row.packages ?? []).map((entry) => `${entry.name} ${entry.version}`);
-  const extensions = row.overlayExtensionsAllowed ? (row.extensions ?? []).map((entry) => entry.name) : [];
+  const packages = withholdsPackages ? [] : (row.packages ?? []).filter((entry) => !excludes.includes(entry.name)).map((entry) => `${entry.name} ${entry.version}`);
+  const extensions = row.overlayExtensionsAllowed ? (row.extensions ?? []).map((entry) => entry.name).filter((name) => !excludes.some((excluded) => overlayEntryNamed(excluded, name))) : [];
   const past = (withholdsPackages ? 0 : row.more?.packages ?? 0) + (row.overlayExtensionsAllowed ? row.more?.extensions ?? 0 : 0);
-  const named = [...packages, ...extensions, ...(past > 0 ? [`${past} more`] : [])];
+  // What the list did not name may be what the trigger leaves out, so that count is a bound there and no more.
+  const named = [...packages, ...extensions, ...(past > 0 ? [`${excludes.length > 0 ? "up to " : ""}${past} more`] : [])];
   const said = named.length > 0 ? listed(named) : "no staged package or overlay extension";
   return [`${first} A job of trigger ${triggerIndex + 1} on this host would load ${said}, from its last doctor run at `, time(row.at), row.state === "old" ? ", which is old." : "."];
 }

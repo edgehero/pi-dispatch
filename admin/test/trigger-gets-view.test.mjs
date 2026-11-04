@@ -195,10 +195,11 @@ test("where each extension is: a list cut short proves what is on it and no lack
   const wide = Array.from({ length: 70 }, (_, at) => pkg(`p${at}`));
   const loads = await published({ a: { packages: [pkg("pi-lint")] }, b: { packages: [pkg("pi-lint", "1.4.3")] }, wide: { packages: wide }, none: {}, silent: null });
   const item = (name, records = []) => triggerGetsOf({ trigger: COMMENT, hostLoads: loads, liveHosts: ["a", "b", "wide", "none", "silent"], records }).extensions.items.find((row) => row.name === name);
-  assert.equal(item("pi-lint 1.4.2").sub, "staged on a, not on b and none, unknown on wide and silent");
+  // One row for one name, since a name is what its switch sends, and the two versions each say where they are.
+  assert.equal(item("pi-lint 1.4.2 and 1.4.3").sub, "1.4.2 on a, 1.4.3 on b, not on none, unknown on wide and silent");
+  assert.equal(item("pi-lint 1.4.2 and 1.4.3").value, "pi-lint");
   const record = loadedRecord({ jobId: "gh-r1", loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.3", extensions: 1, tools: 2, toolNames: ["lint_file", "lint_fix"] }), source("overlay"), source("repository"), source("trigger"), source("other")] }) });
-  assert.ok(item("pi-lint 1.4.3", [record]).sub.endsWith("2 tools, as gh-r1 loaded it"));
-  assert.ok(!item("pi-lint 1.4.2", [record]).sub.includes("gh-r1"), "what 1.4.3 brought says nothing of 1.4.2");
+  assert.ok(item("pi-lint 1.4.2 and 1.4.3", [record]).sub.endsWith("1.4.3: 2 tools, as gh-r1 loaded it"), "what 1.4.3 brought says which it was");
   const off = await published({ a: { extensions: [{ name: "git-guard", kind: "dir" }], overlayExtensionsAllowed: false } });
   assert.equal(triggerGetsOf({ trigger: COMMENT, hostLoads: off, liveHosts: ["a"] }).extensions.items[0].sub, "in the overlay on a · its overlay extensions off on a");
 });
@@ -264,7 +265,7 @@ test("the Tools row: nothing drawn as the next job's comes from a run unless it 
   assert.deepEqual(view({ ...COMMENT, packages: false }).fromExtensions, []);
   // An overlay's stays, said as the run's, because a package switch does not reach it.
   const overlay = loadedRecord({ jobId: "gh-t1", host: "build3", loaded: loadedField({ sources: [source("overlay", { names: ["git-guard"], extensions: 1, tools: 1, namedTools: [{ name: "git-guard", tools: ["guard_push"] }] }), source("repository"), source("trigger"), source("other")] }) });
-  assert.deepEqual(triggerGetsOf({ trigger: { ...COMMENT, packages: false }, records: [overlay], liveHosts: [] }).tools.fromExtensions, [{ heading: "git-guard in its overlay, as gh-t1 loaded it on build3", names: ["guard_push"] }]);
+  assert.deepEqual(triggerGetsOf({ trigger: { ...COMMENT, packages: false }, records: [overlay], liveHosts: [] }).tools.fromExtensions, [{ heading: "git-guard in its overlay, as gh-t1 loaded it on build3", chips: [{ name: "guard_push", label: "guard_push", on: true, switched: true }] }]);
   // report_progress is the file's: `run.progress`, and not that the last run had it.
   assert.equal(view(COMMENT).jobTool, false, "the record's report_progress says nothing of the next job");
   assert.equal(view({ ...COMMENT, progress: true }).jobTool, true);

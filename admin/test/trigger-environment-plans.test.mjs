@@ -103,8 +103,8 @@ function undoBody(inverse) {
 
 // ---- the file ---------------------------------------------------------------------------------------------------------
 
-test("CARD_FIELDS are the nine the card edits, named once; image, secrets and skillsDir are not among them", () => {
-  assert.deepEqual([...CARD_FIELDS], ["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools"]);
+test("CARD_FIELDS are the eleven the card edits, named once; image, secrets and skillsDir are not among them", () => {
+  assert.deepEqual([...CARD_FIELDS], ["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
   assert.ok(Object.isFrozen(CARD_FIELDS));
   for (const key of ["image", "secrets", "secretsProfile", "skillsDir", "backend", "maxTurns"]) assert.ok(!CARD_FIELDS.includes(key), key);
 });
@@ -2141,6 +2141,7 @@ function skewFixture(jobs, options = {}) {
   const f = fixture({
     ...options,
     deps: {
+      ...options.deps,
       readSkew: (index, dry) => {
         seen.push(dry);
         return readTriggerSkew({ index, waiting, triggersPath: f.paths.triggersPath, fs: dry, lookupJob: async (_q, id) => ({ data: jobs.find((job) => job.id === id).data }) });
@@ -2188,6 +2189,8 @@ const IN_LINE = [
   [{ mcp: ["docs"] }, "mcp"],
   [{ packages: false }, null],
   [{ excludeTools: ["bash"] }, null],
+  [{ excludeExtensions: ["pi-lint"] }, "excludeExtensions"],
+  [{ excludeExtensionTools: ["lint_run"] }, "excludeExtensionTools"],
 ];
 test("the rows below hold every field the card writes", () => {
   assert.deepEqual(new Set(IN_LINE.flatMap(([change]) => Object.keys(change))), new Set(CARD_FIELDS));
@@ -2196,7 +2199,8 @@ for (const [change, field] of IN_LINE) {
   test(`a job in line under ${JSON.stringify(change)}: ${field === null ? "runs, and no sentence names it" : `refused, as run.${field}`}, as the worker's own check says of the written file`, async () => {
     // A job that carries the list, so the one thing it lacks is what this row adds.
     const carried = "fallbackModels" in change ? { models: [HAIKU, SONNET] } : {};
-    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) } });
+    // A narrowing that needs version 2 asks each live host, and this one reads it.
+    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "2" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], unread: [], more: {} }] }) } });
     const out = await f.service.preview(ask(f, change), operator);
     assert.ok(out.plan, JSON.stringify(out));
     assert.deepEqual(out.plan.skew.rows, field === null ? [] : [{ jobId: "gh-1", queue: "pi-jobs", field }], JSON.stringify(change));
@@ -2323,7 +2327,7 @@ test("while the need is 1 nothing reads a host, and a registry that cannot answe
   const f = fixture({ deps: { readHosts: async () => { reads++; throw new Error("down"); } } });
   const out = await f.service.preview(ask(f, { packages: false, mcp: ["docs"], excludeTools: ["bash"], flow: "review", maxCostUsd: "1", provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU], fallbackModels: [HAIKU] }), operator);
   assert.ok(out.plan, JSON.stringify(out));
-  assert.deepEqual(out.plan.need, { triggersVersion: 1, jobDataVersion: 1 }, "every field the card writes is version 1 at this release");
+  assert.deepEqual(out.plan.need, { triggersVersion: 1, jobDataVersion: 1 }, "every field but the two exclusions is version 1");
   assert.equal(reads, 0);
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   assert.equal(reads, 0);

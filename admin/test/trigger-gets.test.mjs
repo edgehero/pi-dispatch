@@ -312,19 +312,17 @@ test("MCP: each server with what each host says of it, flagged where one lacks i
   assert.equal(nothing.mcp.none, true);
 });
 
-test("tools: pi's own and a named server's are chips, an extension's are shown, and an entry nothing offers still stays on the list", async () => {
+test("tools: pi's own, a named server's and an extension's are chips, and an entry nothing offers still stays on the list", async () => {
   const page = panelOf(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, mcp: ["linear"], excludeTools: ["bash", "mcp__linear__*", "codemode"] } } }), "p-trigger-gets");
   for (const name of ["read", "bash", "edit", "write", "powershell", "grep", "find", "ls", "codemode", "tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "mcp__linear__*"]) assert.ok(page.includes(`data-gets-list="excludeTools" data-gets-value="${name}" data-gets-inverse`), name);
   assert.match(page, /<input type="checkbox" data-gets-list="excludeTools" data-gets-value="bash"/, "removed reads unticked");
   assert.match(page, /<input type="checkbox" checked data-gets-list="excludeTools" data-gets-value="read"/);
   assert.ok(textOf(page).includes(W.lastWay), "the rule, and how far the preview holds it");
   assert.ok(textOf(page).includes("all of linear’s tools"));
-  // No extension tool is a control: it is named from the record, and removing one comes later.
-  assert.ok(textOf(page).includes("lint_file"));
-  assert.ok(textOf(page).includes("From pi-lint, as gh-9575 loaded it on mini1"), "and it says whose it is");
-  assert.ok(!page.includes('data-gets-value="lint_file"'));
-  assert.ok(page.includes('<span class="te-chip te-chip--ro">lint_file</span>'));
-  assert.ok(textOf(page).includes(W.extensionTools));
+  // An extension's tool is a chip of its own list, named from the record, and it says whose it is.
+  assert.ok(textOf(page).includes("From pi-lint, as gh-9575 loaded it on mini1"));
+  assert.ok(page.includes('data-gets-list="excludeExtensionTools" data-gets-value="lint_file" data-gets-inverse data-gets-on="lint_file on" data-gets-off="lint_file off"'));
+  assert.ok(textOf(page).includes(W.extensionToolChip));
   // With no server named, there are no server chips and no such rule to state.
   const plain = panelOf(await triggerGetsPage(), "p-trigger-gets");
   assert.ok(!plain.includes('data-gets-value="codemode"'));
@@ -343,11 +341,11 @@ test("tools: pi's own and a named server's are chips, an extension's are shown, 
   assert.equal(triggerGetsOf({ trigger: { ...COMMENT, progress: true }, liveHosts: [] }).tools.jobTool, true);
 });
 
-test("extensions: each is shown and not switched, says where it is, and what is read from a record says whose it is", async () => {
+test("extensions: each has its switch, says where it is, and what is read from a record says whose it is", async () => {
   const panel = panelOf(await triggerGetsPage(), "p-trigger-gets");
-  assert.ok(!panel.includes('data-gets-value="pi-lint"') && !panel.includes('data-gets-list="excludeExtensions"'), "no switch per extension");
-  assert.ok(textOf(panel).includes(W.oneExtension), "and it says so, with no date");
-  for (const sentence of [W.oneExtension, W.extensionTools]) assert.doesNotMatch(sentence, /\byet\b|soon|next|release|pull request/i);
+  assert.ok(panel.includes('data-gets-list="excludeExtensions" data-gets-value="pi-lint" data-gets-inverse data-gets-on="pi-lint back on" data-gets-off="pi-lint left out"'));
+  assert.ok(panel.includes('data-gets-list="excludeExtensions" data-gets-value="git-guard"'));
+  assert.ok(textOf(panel).includes(W.extensionSwitch));
   const text = textOf(panel);
   assert.ok(text.includes("pi-lint 1.4.2 staged on build3 and mini1, unknown on mini2 · 2 tools, 1 prompt template, as gh-9575 loaded it"), text.slice(0, 2000));
   assert.ok(text.includes("git-guard in the overlay on build3, not on mini1, unknown on mini2"));
@@ -355,10 +353,13 @@ test("extensions: each is shown and not switched, says where it is, and what is 
   // Off, the file's own words, and nothing of a record claims these jobs load them.
   const off = textOf(panelOf(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, packages: false } } }), "p-trigger-gets"));
   assert.ok(off.includes(W.packagesOff));
+  assert.ok(off.includes(W.extensionsMoot));
   assert.ok(!off.includes("as gh-9575 loaded it · ") && !off.includes("0.9.0 staged on build3 and mini1, unknown on mini2 · 3 tools"), off.slice(0, 1800));
   // A viewer has no switch, so no sentence about what off writes.
   const seen = textOf(panelOf(await triggerGetsPage({ role: "viewer" }), "p-trigger-gets"));
   assert.ok(seen.includes(W.packagesLoad) && !seen.includes(W.packagesOn));
+  assert.ok(!seen.includes(W.extensionSwitch), "nor what off does");
+  assert.ok(seen.includes("pi-lint 1.4.2: on"), "and each says what it is");
 });
 
 test("the flow row says each host's answer, reads no answer from a doctor run about another flow, and a command is no flow", async () => {
@@ -401,7 +402,7 @@ test("the page CSS is the exact published generator source, served on the trigge
   assert.doesNotMatch(TRIGGER_GETS_CSS, /\.c2-/, "nothing of the sample pages' stylesheet: the console ships none of it");
 });
 
-test("the cards say what the write side says: their words are the planner's, Built, and they name what waits", async () => {
+test("the cards say what the write side says: their words are the planner's, Built, and nothing on them waits", async () => {
   const dir = tempDir("pd-800-gets-card-");
   const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), projectsFile: null, globalPiDir: join(dir, "overlay") };
   nodeFs.writeFileSync(paths.triggersPath, getsFile());
@@ -442,7 +443,7 @@ test("the cards say what the write side says: their words are the planner's, Bui
   assert.ok(stale.refusal.startsWith("This trigger changed since the page drew it"));
   // The card's rows say what the page says: each fixed sentence the panel draws is on the card, word for word.
   const page = straight(cardText(cardPreview("TriggerEnvironment")));
-  for (const sentence of [W.fileSays, W.repositoryPart, W.oneExtension, W.newExtension, W.packagesOn, W.serverRefused, W.toolsOn, W.extensionTools, W.serverToolsLater, W.jobTool, W.elsewhere, W.noTool, W.flowPicker]) assert.ok(page.includes(straight(sentence)), sentence);
+  for (const sentence of [W.fileSays, W.repositoryPart, W.extensionSwitch, W.newExtension, W.packagesOn, W.serverRefused, W.toolsOn, W.extensionToolChip, W.serverToolsLater, W.jobTool, W.elsewhere, W.noTool, W.flowPicker]) assert.ok(page.includes(straight(sentence)), sentence);
   // What each card is not to say.
   for (const name of ["TriggerEnvironment", "TriggerEnvironmentChange"]) {
     const words = `${cardText(cardPreview(name))} ${cardReadme(name)}`;
@@ -451,7 +452,7 @@ test("the cards say what the write side says: their words are the planner's, Bui
     assert.ok(!/\$2\.62(?:144)?\b(?! job cap)/.test(words) || words.includes("clears this $2.62144 job cap"), `${name}: the amount is the planner's`);
     assert.ok(!words.includes("No run yet"), `${name}: a run that aged out was a run`);
     assert.match(cardPreview(name), /aria-label="Design status: Built"/, name);
-    assert.ok(cardPreview(name).includes("wait on a later pull request"), `${name}: the status names what waits`);
+    assert.ok(!words.includes("wait on a later pull request") && !words.includes("What waits"), `${name}: what the status said waits is built`);
     assert.ok(cardReadme(name).includes("`run.excludeExtensions`"), `${name}: the README names it`);
   }
   assert.ok(cardReadme("TriggerEnvironmentChange").includes("A digest of the trigger's entry as the page read it"), "of the entry");
@@ -546,7 +547,7 @@ async function fileShownTo(role, entry) {
   const page = String((await renderPage("trigger", { query: parsed.query, session: { name: role, role }, data })).html);
   return { page, data, text: textOf(page).replace(/&lt;/g, "<").replace(/&gt;/g, ">") };
 }
-const FULL_ENTRY = Object.freeze({ on: { type: "comment", phrase: "@pi please" }, run: { kind: "gitlab", flow: "fix", provider: "anthropic", model: "claude-sonnet-5-5", maxCostUsd: "1.50", models: ["anthropic/claude-sonnet-5-5"], fallbackModels: ["anthropic/claude-haiku-4-5"], mcp: ["linear"], excludeTools: ["bash", "mcp__linear__*"], packages: false, progress: true, statusComment: true, image: "registry.example/secret image:1", instructions: "Standing words of the operator.", secrets: { SOME_KEY: "op://vault/item" } } });
+const FULL_ENTRY = Object.freeze({ on: { type: "comment", phrase: "@pi please" }, run: { kind: "gitlab", flow: "fix", provider: "anthropic", model: "claude-sonnet-5-5", maxCostUsd: "1.50", models: ["anthropic/claude-sonnet-5-5"], fallbackModels: ["anthropic/claude-haiku-4-5"], mcp: ["linear"], excludeTools: ["bash", "mcp__linear__*"], excludeExtensions: ["pi-secret-ext"], excludeExtensionTools: ["secret_tool"], packages: false, progress: true, statusComment: true, image: "registry.example/secret image:1", instructions: "Standing words of the operator.", secrets: { SOME_KEY: "op://vault/item" } } });
 
 test("an agent's page has the rows no card draws for it, each as its read holds it, and claims nothing of what its read does not", async () => {
   const { page, text, data } = await fileShownTo("agent", FULL_ENTRY);
@@ -562,6 +563,8 @@ test("an agent's page has the rows no card draws for it, each as its read holds 
   row("run.mcp", "set, and its names are not in an agent’s read");
   row("run.excludeTools", "set, and its names are not in an agent’s read");
   row("run.packages", "false");
+  row("run.excludeExtensions", "set, and its names are not in an agent’s read");
+  row("run.excludeExtensionTools", "set, and its names are not in an agent’s read");
   // What the read withholds is said to be, and is not there. Each of these read as a fact of the file: "not set", "local" or a forge's rule.
   assert.deepEqual(["forge", "phrase", "progress", "secrets", "instructions", "image"].filter((key) => data.snapshot.triggers.triggers[2][key] !== undefined && data.snapshot.triggers.triggers[2][key] !== null), [], "the premise: the read holds none of them");
   for (const key of ["Forge", "Phrase or schedule", "Who may fire it", "run.kind", "run.progress", "run.secrets", "run.instructions", "run.image"]) row(key, "not in an agent’s read");
@@ -569,7 +572,7 @@ test("an agent's page has the rows no card draws for it, each as its read holds 
   for (const never of ["No instructions are set.", "This trigger has instructions.", "set (operator only)", "GitHub association", "The actor must be", "Hosts missing its required secret"]) assert.ok(!text.includes(never), never);
   assert.ok(text.includes("Write its phrase and a flow to choose another flow"));
   assert.doesNotMatch(text, /undefined/);
-  for (const held of ["@pi please", "secret image", "Standing words", "SOME_KEY", "op://", "linear", "bash"]) assert.ok(!text.includes(held) && !page.includes(`>${held}<`), held);
+  for (const held of ["@pi please", "secret image", "Standing words", "SOME_KEY", "op://", "linear", "bash", "pi-secret-ext", "secret_tool"]) assert.ok(!text.includes(held) && !page.includes(`>${held}<`), held);
   assert.ok(!page.includes("mcp__linear"), "a server's name in a tool pattern is a server's name");
   // Whatever the deployment's defaults are, this read has none of them, so it says none of them.
   assert.ok(!text.includes("deployment default:"), "the editor's defaults are withheld whole");
