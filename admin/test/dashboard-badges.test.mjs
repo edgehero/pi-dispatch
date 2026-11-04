@@ -225,6 +225,29 @@ test("the panel's list says a triggers file could not be read, in the failure's 
   assert.doesNotMatch(unread, /no triggers · a to add|triggers file not found/);
 });
 
+test("the panel's triggers head claims no count and offers no add where the file's read failed, and does where it holds what it says", async () => {
+  const headOf = async (triggers) => {
+    const comp = makeDashboard({
+      paths: {}, done() {}, tui: { requestRender() {} }, intervalMs: 100000,
+      deps: { fetchSnapshot: async () => ({ ...BASE, triggers }), pause: async () => {}, resume: async () => {}, dispose: async () => {}, now: () => AT },
+    });
+    await flush();
+    const text = stripAnsi(comp.render(120).join("\n"));
+    await comp.dispose();
+    const head = text.split("\n").find((line) => /\bTRIGGERS ─/.test(line));
+    assert.ok(head, text.slice(0, 1600));
+    return head;
+  };
+  for (const [what, triggers] of [["a failed read", { unreadable: "EACCES" }], ["a file that does not load", { invalid: "triggers file is not valid JSON" }]]) {
+    const head = await headOf(triggers);
+    assert.match(head, /not known/, what);
+    assert.doesNotMatch(head, /standing|a add|open/, what);
+  }
+  for (const [what, triggers, count] of [["no file", { missing: true }, 0], ["an empty file", { triggers: [] }, 0], ["a row", { triggers: [{ type: "label", any: ["pi"], flow: "fix", index: 0 }] }, 1]]) {
+    assert.match(await headOf(triggers), new RegExp(`${count} standing · a add · ↵ open`), what);
+  }
+});
+
 async function openDetail(trigger, triggerInstructions, theme) {
   const snap = { ...BASE, triggers: { triggers: [{ ...trigger, index: 0 }] }, triggerInstructions };
   const comp = makeDashboard({
