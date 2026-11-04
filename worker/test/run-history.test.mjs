@@ -2461,11 +2461,20 @@ test("the record carries queuedAt and then capacity at its TAIL after hostBudget
 	const job = { id: "gh-1", name: "github", attemptsMade: 0, timestamp: Date.parse("2026-08-30T11:59:00.000Z"), opts: {}, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
 	const rec = (capacity) => buildRecord({ job, result: { outcome: "completed", exitCode: 0 }, ...(capacity === undefined ? {} : { capacity }) });
 	const keys = Object.keys(rec({ slots: 3, memMiB: 8192, cpuCenti: 400, cpus: 8 }));
-	assert.deepEqual(keys.slice(-6, -3), ["hostBudget", "queuedAt", "capacity"], "the tail when they landed; `earlier`, `stalledRepick` and `v` (#761) took it after: field order is the serialisation order");
+	assert.deepEqual(keys.slice(-7, -4), ["hostBudget", "queuedAt", "capacity"], "the tail when they landed; `earlier`, `stalledRepick`, `jobCreatedAt` (#811, a job with a timestamp) and `v` (#761) took it after: field order is the serialisation order");
 	assert.deepEqual(Object.keys(rec(undefined)), keys, "the key SET does not depend on a capacity");
 	assert.equal(rec(undefined).capacity, null, "no capacity passed (a refusal before a slot): null, key present");
 	assert.equal(rec(undefined).queuedAt, "2026-08-30T11:59:00.000Z");
 	assert.deepEqual(Object.keys(rec({ slots: 3, memMiB: 8192, cpuCenti: 400, cpus: 8, path: "/Users/rob" }).capacity), ["slots", "memMiB", "cpuCenti", "cpus"], "rebuilt: no extra key reaches the record");
+});
+
+test("the record says when its job was created (`jobCreatedAt`), the last key before `v`, only for a timestamp a Date can hold (#811)", () => {
+	const job = (timestamp) => ({ id: "gh-1", name: "github", attemptsMade: 1, stalledCounter: 1, timestamp, opts: { delay: 60_000 }, data: { kind: "github", repo: "acme/web", target: { number: 7 } } });
+	const rec = buildRecord({ job: job(Date.parse("2026-08-30T11:59:00.000Z")), result: { outcome: "completed" } });
+	assert.equal(rec.jobCreatedAt, "2026-08-30T11:59:00.000Z", "the add's moment, on a retry after a stall too, never moved by the delay");
+	assert.equal(rec.queuedAt, null, "where `queuedAt` says nothing");
+	assert.deepEqual(Object.keys(rec).slice(-2), ["jobCreatedAt", "v"]);
+	for (const bad of [undefined, null, -1, 1.5, "1756555140000", 8.64e15 + 1]) assert.equal(Object.hasOwn(buildRecord({ job: job(bad), result: { outcome: "completed" } }), "jobCreatedAt"), false, JSON.stringify(bad));
 });
 
 test("capacity is REBUILT: positive slots and cpus, each budget an integer, off or null (#599)", async () => {

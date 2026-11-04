@@ -21,7 +21,7 @@ import { imageFactsOf, loadedWithBase, loadedWithImage } from "./loaded-record.m
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "./record-reason.mjs";
-import { COST_CAP_WHYS, EXIT_OOM_KILLED, RUNNER_POLICY_REASONS, recoveryCounts, recoveryCountsFromProgress } from "./run-history.mjs";
+import { COST_CAP_WHYS, EXIT_OOM_KILLED, RECORD_CLOCK_SKEW_MS, RUNNER_POLICY_REASONS, recoveryCounts, recoveryCountsFromProgress } from "./run-history.mjs";
 import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as resetTrustPathsDefault } from "./trust-paths.mjs";
 import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
@@ -725,8 +725,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// `({ runId, pointer, attempt }) => { seq } | { skipped }` (start.mjs): a salvage checkpoint from a crashed attempt's
 		// job directory still on this host, asked for a recovery job before its manifest is read. Null takes none.
 		salvageCheckpoint = null,
-		// `(jobId) => record | null` (run-history.mjs `makeReadRecord`): the settled-run check a recovery asks first. Null
-		// skips it, and the pointer and store logic below still decide.
+		// `(jobId, { keep }) => record | null` (start.mjs `readRunRecord`): the settled-run check a recovery asks first, this
+		// host's file and then the fleet's copy, the first that passes `keep` when one is given. Null skips it, and the
+		// pointer and store logic below still decide.
 		readRecord = null,
 		// `({ workspace, baseSha }) => boolean` (trust-paths.mjs): whether the base commit holds anything under
 		// `.pi/extensions/`, which makes a run unrecoverable (see its use).
@@ -1461,16 +1462,36 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// outcome cleaned up after itself). Asked BEFORE the pointer and the store, because those can disagree after a
 			// cleanup that half failed (a store removal that failed beside a pointer delete that landed), and that
 			// disagreement must never put a failure comment under a run that completed.
+			// Only a record of THIS run settles it (issue #811). Ids come back (a lost queue, a hand redelivery) while records
+			// stay for the retention window, so a `completed` record an older job left under the run's id would end this
+			// recovery as superseded, silently, and the lost run would be neither continued nor reported. The recovery's data
+			// carries the base run's creation time (`recoveryOfCreatedAt`, recovery-queue.mjs `recoveryDataOf`), and a record
+			// whose time (`startedAt`, or `endedAt` with no start) is older than that, less `RECORD_CLOCK_SKEW_MS`, is
+			// another job's and settles nothing. Only a time that PARSES is judged so: `whyNotThisJob` would take a record
+			// with no readable time for another job's, but here that would run a run that may have completed, and paying
+			// twice for a settled run is the worse mistake, so such a record still settles, as before. A recovery without
+			// the field (queued by a build from before it) keeps the check without an age. Both sides are read, this host's
+			// file and the fleet's copy, each held to the rule (`keep`), so a stale record on this host cannot hide the
+			// settled one in the mirror; the answer is judged again, so a reader that ignores `keep` cannot settle the run
+			// on a record that fails it. Every field read is in the record's stable core, so a newer release's record is
+			// judged the same way.
+			const since = Number.isSafeInteger(job.recoveryOfCreatedAt) && job.recoveryOfCreatedAt >= 0 ? job.recoveryOfCreatedAt : null;
+			const settlesRun = (rec, id) => {
+				if (!rec || typeof rec !== "object" || rec.jobId !== id || (rec.outcome !== "completed" && rec.outcome !== "policy")) return false;
+				if (since === null) return true;
+				const at = Date.parse(rec.startedAt ?? rec.endedAt ?? "");
+				return !(Number.isFinite(at) && at < since - RECORD_CLOCK_SKEW_MS);
+			};
 			if (typeof readRecord === "function") {
 				const ids = [runId, ...Array.from({ length: Number.isSafeInteger(n) && n > 1 ? Math.min(n, RECOVERY_CAP + 1) - 1 : 0 }, (_, k) => `${runId}.r${k + 1}`)];
 				for (const id of ids) {
 					let rec = null;
 					try {
-						rec = await readRecord(id);
+						rec = await readRecord(id, { keep: (record) => settlesRun(record, id) });
 					} catch {
 						rec = null;
 					}
-					if (rec && typeof rec === "object" && rec.jobId === id && (rec.outcome === "completed" || rec.outcome === "policy")) {
+					if (settlesRun(rec, id)) {
 						log("recovery_superseded", { n: Number.isSafeInteger(n) ? n : null, by: "record" });
 						return { outcome: "policy", reason: RECOVERY_SUPERSEDED, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 					}

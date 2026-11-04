@@ -2012,12 +2012,17 @@ export async function startWorker(
 	// processor's recovery gate (a recovery whose base run already settled is superseded, not run). A recovery may land on
 	// a host that never ran its base attempt, so a local-only read would miss exactly the fleet case. Never rejects;
 	// unreadable or unreachable is null.
-	const readRunRecord = async (jobId) => {
-		const local = readRecord(jobId);
-		if (local && local !== UNREADABLE_RECORD) return local;
+	// `keep`, when given, is the rule the caller's record must pass (the processor's: this run's settled record, issue
+	// #811), applied to EACH side: this host's file answers only when it passes, and the fleet's copy is asked otherwise.
+	// Without it a stale record an older job left in this host's file under a reused id would be the answer, and the
+	// settled record in the mirror would never be looked at. Without `keep`, any record this host holds answers, as before.
+	const readRunRecord = async (jobId, { keep = null } = {}) => {
+		const kept = (record) => (record && record !== UNREADABLE_RECORD && (typeof keep !== "function" || keep(record)) ? record : null);
+		const local = kept(readRecord(jobId));
+		if (local) return local;
 		if (!runMirror) return null;
 		const mirrored = await readMirroredRecordFn(redis, sanitizeJobId(jobId)).catch(() => null);
-		return mirrored && mirrored !== UNREADABLE_RECORD ? mirrored : null;
+		return kept(mirrored);
 	};
 	// The record a retry (or a pickup after a stall) is about to replace (issue #599), read BOTH ways: this host's file and
 	// the fleet's copy where a mirror is armed. Both, because each host keeps its own file: a job that ran on A, then B,

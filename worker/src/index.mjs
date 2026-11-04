@@ -391,7 +391,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// Every attempt replaces the same record. Carry intervention fallback and uncertainty from the
 				// prior attempt, or a later cold start would erase the only proof of an earlier resumed answer.
 				// Only from a record this build can read (issue #761): a newer one's touches are outside its stable core and
-				// may mean something else, and this attempt's record would present them as this build's own.
+				// may mean something else, and this attempt's record would present them as this build's own. And only from
+				// this job's own previous attempt's record (`priorAttemptRecord` passed `recordOfThisJob` at the pickup's
+				// read, issue #811): an older job's interventions under a reused id are not this run's.
 				const prior = recordReadable(priorAttemptRecord) ? priorAttemptRecord : null;
 				if (prior?.touchLineageSkipped === "source-unavailable") target.touchLineageSkipped = "source-unavailable";
 				const touches = [...(Array.isArray(prior?.touches) ? prior.touches : []), ...(Array.isArray(target.touches) ? target.touches : [])].map(cleanTouch).filter(Boolean);
@@ -447,13 +449,32 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// before it (one file and one mirror key per job id), so that record is read NOW, before anything here can replace
 		// it, and its slot interval (with the ones it carried) rides every record this pickup writes (`earlier`). Only on
 		// such a pickup, so a first attempt reads nothing; bounded by the reader, and a fault reads as none.
+		// The record counts only when it is THIS job's previous attempt's (`recordOfThisJob`, the rule the lost-lock checks
+		// share; issue #811): ids are reused (a lost queue, a hand redelivery), and a record an older job left under the
+		// same id would hand this job that job's slot time (`earlier`), its interventions (the touches), and a
+		// never-started verdict the failover retry would start over from the primary on (`retryNeverStarted`). The
+		// previous attempt is `attemptsMade` after a failure, which BullMQ counts, or this pickup's own number,
+		// `attemptsMade + 1`, after a stall, which it does not (a scheduled job's stall puts it back to wait with only its
+		// `stalledCounter` raised). Both are kept, the higher winning, rather than one chosen from `stalledCounter`:
+		// BullMQ never lowers that count, so a job that stalled once and later failed would look for the stalled
+		// attempt's number, miss its own failed record, and a failover retry with no model attempt key would then be
+		// refused `model-failover-no-candidate` (a comment, a used-up delivery, a disarmed one-shot). What that leaves: a
+		// stall that wrote no record leaves the attempt before it to answer, which is still this job's own.
+		// Each side (this host's file, the fleet's copy) is held to the rule BEFORE the higher attempt is kept
+		// (`previousRecord`'s `keep`), so a stale record at a higher attempt cannot hide this job's own on the other side,
+		// and the answer is judged again after, so a reader that ignores `keep` cannot hand the stale record back. The count
+		// is read as `buildRecord` reads it for the record's own `attempt`, so the two cannot disagree.
+		const attemptsBefore = Number.isInteger(job.attemptsMade) && job.attemptsMade >= 0 ? job.attemptsMade : 0;
+		const ownPrior = (record) => [attemptsBefore, attemptsBefore + 1].some((attempt) => recordOfThisJob(record, { jobId: job.id, attempt, since: job.timestamp }));
 		let earlier = null;
 		let priorAttemptRecord = null;
 		if (typeof previousRecord === "function" && ((Number.isInteger(job.attemptsMade) && job.attemptsMade > 0) || Number(job.stalledCounter) > 0)) {
 			try {
-				priorAttemptRecord = await previousRecord(job.id);
+				const read = await previousRecord(job.id, { keep: ownPrior });
+				priorAttemptRecord = ownPrior(read) ? read : null;
 				earlier = earlierFrom(priorAttemptRecord);
 			} catch {
+				priorAttemptRecord = null;
 				earlier = null;
 			}
 		}
@@ -1145,37 +1166,22 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// record replaces it. Exactly that case and no other: a model attempt key keeps the lock to its model, and a
 					// record this build can read keeps today's answers. The key is read here only in that case (the selection
 					// reads it again when it is there), and a throw is the selection's own read failing, handled below as such.
-					// The record counts only when it is this job's previous attempt's (`recordOfThisJob`, the rule the lost-lock
-					// checks share): one an older job left under a reused id, or an earlier attempt's, says nothing about the
-					// attempt being retried, so the retry is judged as one with no record, never held by it. The previous attempt
-					// carries `attemptsMade` after a failure, which BullMQ counts, and this pickup's own number,
-					// `attemptsMade + 1`, after a stall, which it does not (a scheduled job's stall puts it back to wait with
-					// only its `stalledCounter` raised).
-					// The pickup's record is the higher attempt of this host's file and the fleet's copy, chosen before any
-					// rule, so a stale record an older job left at a higher attempt can hide this attempt's own on the other
-					// side. Where the wait could apply and that record is not the job's own, both sides are read again, each
-					// held to the rule first (`previousRecord`'s `keep`), and the record that passes, if any, is judged. The
-					// pickup's record still gives `earlier` and the touches, as before.
-					const ownPrior = (record) => [job.attemptsMade, job.attemptsMade + 1].some((attempt) => recordOfThisJob(record, { jobId: job.id, attempt, since: job.timestamp }));
+					// The record is the pickup's (`priorAttemptRecord`), which counts only when it is this job's previous
+					// attempt's (`recordOfThisJob`, `ownPrior` at the pickup's read): one an older job left under a reused id, or an
+					// earlier attempt's, says nothing about the attempt being retried, so the retry is judged as one with no
+					// record, never held by it. That read held each side to the rule before the higher attempt was kept, so a
+					// stale record at a higher attempt on one side hides nothing on the other, and one read serves the hold,
+					// `retryNeverStarted` below, `earlier` and the touches alike (issue #811).
 					const waitMayApply = effective.fallbackModels !== undefined && retry && !recoveryModel;
-					let priorOwnRecord = ownPrior(priorAttemptRecord) ? priorAttemptRecord : null;
-					if (waitMayApply && priorOwnRecord === null && priorAttemptRecord !== null) {
-						// Judged by the rule again, so a reader that ignores `keep` cannot hand the stale record back. A fault reads
-						// as no record, as the pickup's own read does.
-						try {
-							const again = await previousRecord(job.id, { keep: ownPrior });
-							priorOwnRecord = ownPrior(again) ? again : null;
-						} catch {
-							priorOwnRecord = null;
-						}
-					}
-					priorRecordNewer = waitMayApply && priorOwnRecord !== null && !recordReadable(priorOwnRecord) && (await readModelAttempt(redis, modelAttemptId)) === null;
+					priorRecordNewer = waitMayApply && priorAttemptRecord !== null && !recordReadable(priorAttemptRecord) && (await readModelAttempt(redis, modelAttemptId)) === null;
 					const selection = priorRecordNewer ? {} : effective.fallbackModels === undefined ? { job: effective } : await selectFailoverJob(effective, {
 						redis, id: modelAttemptId, retry,
 						// Read from a record this build can read only (issue #761): a newer one's `reason`, `budgetReserved` and
 						// `exitCode` are outside its stable core. Such a record is no usable prior record, so the retry goes by the
 						// model attempt key alone, locked to the model it names (with no key the job waited above), never started
-						// over from the primary on a record this build cannot vouch for.
+						// over from the primary on a record this build cannot vouch for. Nor on another job's (issue #811): the
+						// record is this job's previous attempt's or none, so an older job's `container-never-started` under a
+						// reused id cannot start this retry over from the primary after an attempt that may have spent.
 						recoveryModel, retryNeverStarted: recordReadable(priorAttemptRecord) && priorAttemptRecord.reason === "container-never-started" && priorAttemptRecord.budgetReserved === false && priorAttemptRecord.exitCode === null, models, limits, now, log: deps?.log,
 						reservationFor: (candidate) => zeroRatedFor(candidate, { modelEndpoints: failoverSnapshot, builtinModel: deps?.builtinModel }).zeroRated ? 0 : candidate.maxCostMicros,
 						subscriptionCheck: deps?.subscriptionRuntime ? (candidate) => deps.subscriptionRuntime.check(candidate) : null,

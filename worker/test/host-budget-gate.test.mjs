@@ -4,6 +4,7 @@ import { recordReasonEnum } from "./helpers/spec-enum.mjs";
 import { test } from "node:test";
 import { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS, hostBudgetSettings, makeHostBudget } from "../src/host-budget.mjs";
 import { parseProjects } from "../src/projects.mjs";
+import { newerRecord } from "../src/run-history.mjs";
 import { makeInFlight, parseScopedLimits } from "../src/scoped-limits.mjs";
 import { deferRecordOf, withDeferRecords } from "./helpers/defer-redis.mjs";
 
@@ -501,7 +502,7 @@ test("capacity names the RUNTIME's CPU count from the budget's facts read, the w
 
 test("a retry or a pickup after a stall reads the record it will replace and carries its slot time as `earlier`; a first attempt reads nothing (#599)", { skip }, async () => {
 	const asked = [];
-	const previous = { host: "mini1", startedAt: "2026-10-06T10:00:00.000Z", endedAt: "2026-10-06T11:00:00.000Z", size: { memMiB: 4096, cpuCenti: 200, source: "env" }, capacity: { slots: 2 } };
+	const previous = { jobId: "again", attempt: 1, host: "mini1", startedAt: "2026-10-06T10:00:00.000Z", endedAt: "2026-10-06T11:00:00.000Z", size: { memMiB: 4096, cpuCenti: 200, source: "env" }, capacity: { slots: 2 } };
 	const h = harness({ hostBudget: null, extra: { previousRecord: async (id) => (asked.push(id), previous) } });
 	const first = h.processor(ghJob("first").job, "tok", signal());
 	await h.untilStarted(1);
@@ -527,6 +528,48 @@ test("a retry or a pickup after a stall reads the record it will replace and car
 	failing.releaseNext();
 	assert.equal((await third).outcome, "completed");
 	assert.equal(failing.seen.records.at(-1).earlier, null);
+});
+
+// Issue #811: an id comes back after a lost queue and a hand redelivery, and the record an older job left under it is kept
+// for the retention window. Only this job's own previous attempt's record carries its slot time forward, judged on each
+// side (this host's file, the fleet's copy) before the higher attempt is kept, so a stale one at a higher attempt hides
+// nothing.
+test("`earlier` comes only from this job's own previous attempt's record, never from an older job's under the same id (#811)", { skip }, async () => {
+	const enqueued = Date.parse("2026-10-06T09:00:00.000Z");
+	const own = { jobId: "again", attempt: 1, host: "mini1", startedAt: "2026-10-06T10:00:00.000Z", endedAt: "2026-10-06T11:00:00.000Z", size: { memMiB: 4096, cpuCenti: 200, source: "env" }, capacity: { slots: 2 } };
+	const stale = { ...own, attempt: 3, host: "old-host", startedAt: "2026-09-20T10:00:00.000Z", endedAt: "2026-09-20T12:00:00.000Z" };
+	/** Both sides as start.mjs `previousRecord` reads them: `keep` holds each to the rule before the higher attempt wins. */
+	const twoSides = (local, mirrored, asked) => async (id, { keep = null } = {}) => {
+		asked.push(typeof keep === "function");
+		return newerRecord(...[local, mirrored].map((record) => (record !== null && typeof keep === "function" && !keep(record) ? null : record)));
+	};
+	const ownInterval = [{ host: "mini1", startedAt: own.startedAt, endedAt: own.endedAt, memMiB: 4096, cpuCenti: 200 }];
+	for (const [label, local, mirrored, expected] of [
+		["the stale record here, its own in the fleet's copy", stale, own, ownInterval],
+		["its own here, the stale record in the fleet's copy", own, stale, ownInterval],
+		["the stale record alone", stale, null, null],
+		["the stale record at the same attempt", { ...stale, attempt: 1 }, null, null],
+	]) {
+		const asked = [];
+		const h = harness({ hostBudget: null, extra: { previousRecord: twoSides(local, mirrored, asked) } });
+		const retry = ghJob("again");
+		Object.assign(retry.job, { attemptsMade: 1, timestamp: enqueued });
+		const run = h.processor(retry.job, "tok", signal());
+		await h.untilStarted(1);
+		h.releaseNext();
+		assert.equal((await run).outcome, "completed", label);
+		assert.deepEqual(asked, [true], `${label}: one read, each side held to the rule`);
+		assert.deepEqual(h.seen.records.at(-1).earlier, expected, label);
+	}
+	// A reader that ignores `keep` and hands the stale record back is judged again: no earlier attempt.
+	const careless = harness({ hostBudget: null, extra: { previousRecord: async () => stale } });
+	const retry = ghJob("again");
+	Object.assign(retry.job, { attemptsMade: 1, timestamp: enqueued });
+	const run = careless.processor(retry.job, "tok", signal());
+	await careless.untilStarted(1);
+	careless.releaseNext();
+	await run;
+	assert.equal(careless.seen.records.at(-1).earlier, null);
 });
 
 // Issue #599, phase 2: the jobs this host runs now, an entry per admitted pickup, gone on every exit.

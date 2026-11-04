@@ -840,7 +840,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     the jobs to it (`cpu-reserve.mjs`) fails open where only root can set it.
   - **Retries and stalls.** A retry overwrites its earlier attempt's record (one file and one mirror key per job id),
     so the processor reads that record when the retry is picked up, before anything can replace it (both this host's
-    file and the fleet copy, the higher attempt kept, since each host keeps its own file), and the new record
+    file and the fleet copy, the higher attempt kept, since each host keeps its own file; AMENDED 2026-11-04, #811:
+    each side held first to `recordOfThisJob` for the previous attempt, so a record an older job left under a reused id
+    carries none of its slot time into this run, `DES-STORE-VERSION-WHEN-NEEDED`), and the new record
     carries the earlier attempts' slot intervals forward (`earlier`: host, start, end and size, at most 4, never a
     cost, so no cost fold counts anything twice). The report counts each as busy on its own host. Read at pickup and
     not when the record is written, because the record writer is synchronous on the job's completion path and the
@@ -7470,7 +7472,15 @@ free local model, or using a few successful live probes as proof of every routin
     rootful Podman restart hold's and the network keeper's young-hold and crash-loop marks, which index.mjs writes with
     `updateData`, and `enqueueNonce`), plus `recoveryOf`, `recovery` and `recoverBy`. Copied, a hold mark would make
     the recovery's first pickup believe it had already been holding; a test requires every `updateData` key to be
-    stripped or kept on purpose (`RECOVERY_KEPT_HOLD_KEYS`, empty).
+    stripped or kept on purpose (`RECOVERY_KEPT_HOLD_KEYS`, empty). AMENDED 2026-11-04 (#811): and
+    `recoveryOfCreatedAt`, the base run's creation time (ms), for the superseded check below. The first recovery takes
+    it from the crashed queue job's `timestamp` (both enqueuers hold the real job: the processor's infra exit through
+    its index.mjs binding, the stall listener from BullMQ's failed event); a recovery of a recovery keeps the one its
+    data carries, never its own job's timestamp, which is later than the base run's start and would make the base
+    run's own settled record look older than the run; a `.r1` without it gives its `.r2` none. It takes no job data
+    version (`DES-STORE-VERSION-WHEN-NEEDED` versions only a field whose absence an older build would misread): an
+    older worker ignores it and runs the check without an age, which is that build's behaviour, and no released build
+    queues a recovery without it, since recoveries ship in the same release.
   - **Routing.** The pointer names the host that took the checkpoint and whether it drains a host queue
     (`hostQueue`, set only when `PI_WORKER_NAME` is declared). With one, the recovery goes to `pi-jobs@<host>`; without,
     to the shared queue, which on an unnamed deployment is one host's. A pointer is peer-written, so its routing
@@ -7492,7 +7502,20 @@ free local model, or using a few successful live probes as proof of every routin
     earlier recovery (`<runId>`, `<runId>.r1`, ...) are read, this host's file then the fleet mirror (`readRunRecord`,
     start.mjs), and a `completed` or `policy` record means the run reached its final outcome, so the recovery is
     refused silently (`recovery-superseded`). Records first because a half-failed cleanup (a store removal that failed
-    beside a pointer delete that landed) must never put a failure comment under a run that completed. Then the old
+    beside a pointer delete that landed) must never put a failure comment under a run that completed.
+    AMENDED 2026-11-04 (#811): only a record of THIS run settles it. Ids come back (a lost queue, then a hand
+    redelivery, which GitHub allows for 3 days) while records stay `PI_LOG_RETENTION_DAYS` (30 by default), and an
+    older job's `completed` record under the run id ended a lost run as superseded, silently: neither continued nor
+    reported. A record whose time (`startedAt`, or `endedAt` when it has no start) parses and is older than the data's
+    `recoveryOfCreatedAt` less `RECORD_CLOCK_SKEW_MS` (5 minutes) is another job's and settles nothing. A record whose
+    time does not parse still settles, as before: `whyNotThisJob` would call it another job's, but re-running a run
+    that may have completed pays twice, the worse mistake here. A recovery without the field keeps the check without an
+    age, its record judged by id and outcome alone, but not the read it had. The reader is handed the rule (`keep`) for
+    every recovery and holds each side to it, this host's file and then the mirror, so a record on this host that does
+    not settle the run (a stale one, a `failed` one) no longer hides a settled one in the mirror; the processor judges
+    the answer again. So a recovery without the field can now be ended as superseded by the mirror's `completed` or
+    `policy` record where this host's record used to answer first, and with no age to judge, that record may be an
+    older job's. Every field read is in the record's stable core. Then the old
     test: a missing pointer AND a missing store entry (a final outcome removes the store before the pointer) is
     superseded too. A missing pointer beside a store still there is ambiguous (a Valkey blip reads as null) and is a
     wait, never guessed.
@@ -16633,6 +16656,18 @@ is introduced. The design generator owns the published card before the console u
   record. Record host-authored opaque scope identities for repositories and local folders; display safe labels without
   treating equal basenames as equal folders. Human-event timestamps drive streaks; record end timestamps choose the
   denominator. The earliest successful cause partitions charts while all cause tags remain available.
+  AMENDED 2026-11-04 (#811): a run's touches start when its job was created. A job id comes back after a lost queue
+  and a hand redelivery, while the touch index keeps the older job's events under it, so a run's record carries its
+  job's creation time (`jobCreatedAt`, `INT-RUN-HISTORY-FILE-CONTRACT`) and an event counts against the run (its
+  count, first cause, wait answer, approval wait end, draft answer and fix match) only when it is no earlier than that
+  time less `RECORD_CLOCK_SKEW_MS`. Only such an event stands in for the record's own `operator-cancel` or delivered
+  steer, so an older job's cancel or steer under the id cannot take that evidence's place and then be dropped by the
+  bound, leaving the run untouched. A lower bound only: an answer, an approval or a re-run after the run ended is its
+  own, and so is a touch during an earlier, stalled attempt of the same job. A record without the field applies no
+  bound. The scope and project streaks still read every event: an older job's intervention in a repository is still
+  activity there. Rejected: a bound built from the record's own times (`queuedAt` is null on a retry, a stall and a
+  `run.waitFor` job, and `earlier` covers only attempts that held a slot, so either would drop a stalled attempt's
+  touches), and the record's `startedAt` (this attempt's, after a stalled attempt's touches).
 - **Reliability**: use shared domain writers for console, panel, CLI and worker events. Durable pending intents and
   idempotent completion/repair separate telemetry failure from action failure. A missing accounting write cannot
   silently become zero, and repairing one never repeats a cancellation, configuration write or paid run.
@@ -17252,7 +17287,14 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   attempt's goes by one rule (`recordOfThisJob`), used by the failed listener's own-record check and the failover
   wait: the same job id, that attempt, and not older than the job (its `startedAt`, or its `endedAt` when it has no
   start, no earlier than the job's enqueue time less `RECORD_CLOCK_SKEW_MS`), because ids are reused and a record an
-  older job left under the same id answers for nobody. The lost-lock settle check (`recordVerdict`) shares its id and
+  older job left under the same id answers for nobody. AMENDED 2026-11-04 (#811): the pickup's one read of the
+  previous record is held to it too, so `earlier`, the touches a retry carries (with `touchLineageSkipped`), the
+  failover wait and `retryNeverStarted` all take this job's previous attempt's record or none: both sides held to the
+  rule before the higher attempt is kept (`previousRecord`'s `keep`), with `attemptsMade` and `attemptsMade + 1` both
+  asked and the higher winning. Not one attempt chosen by `stalledCounter`: BullMQ never lowers it, so a job that
+  stalled once and later failed would look for the wrong number, miss its own failed record and be refused
+  `model-failover-no-candidate`. A recovery's superseded check and the Zero touch view judge age by the run's
+  creation time (`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST`, `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT`). The lost-lock settle check (`recordVerdict`) shares its id and
   attempt checks, and judges a settling record's age by its `startedAt` alone, as before this release: the end
   fallback is for the stall listener's own `failed` record, and a `failed` record never settles. A model failover
   retry that has no model attempt key to lock to, and whose previous attempt's record passes that rule, would have to
@@ -17332,10 +17374,11 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   for an ordinary failure the comment this build owes is not posted (only the page), and for a newer
   `recovery-enqueued` record a page goes out that was not owed; and when such a record was an ordinary failure of a
   recovery-armed steer or awaitInput job that the newer host did not settle, its inbox and held replies stay open
-  until their keys expire (an hour each); all only while the fleet runs two releases. The rule for a job's own
-  record is not yet everywhere: `retryNeverStarted`, the `earlier` interval (`earlierFrom`) and the touches a retry's
-  record carries still take a readable prior record without it, and a recovery's superseded check (`processor.mjs`)
-  matches a record's id and outcome but not its age. A failover retry waiting on a newer previous record waits until
+  until their keys expire (an hour each); all only while the fleet runs two releases. The pickup's read of a job's
+  previous record asks both attempt numbers, so after a stall that wrote no record the record of the attempt before it
+  answers for the stalled one: this job's own, but not that attempt's (its `earlier` misses the stalled attempt's slot
+  time, as it always did, and its `retryNeverStarted` describes the attempt before). A recovery's superseded check judges a record's age only when the recovery carries
+  `recoveryOfCreatedAt` and the record's time parses, so a record with no readable time still settles. A failover retry waiting on a newer previous record waits until
   it is cancelled on a fleet with no newer host while the record stays, and one that the selection would refuse waits
   too instead: an invalid fallback list, a local folder holding subscription auth
   (`local-folder-holds-subscription-auth`), and the subscription check after the selection, since those checks run
@@ -17362,6 +17405,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-04 (#811) | A record an older job left under a reused id answers for no newer job. **`DES-STORE-VERSION-WHEN-NEEDED` AMENDED**: the pickup's one read of the previous record is held to `recordOfThisJob`, each side before the higher attempt is kept, with `attemptsMade` and `attemptsMade + 1` both asked, so `earlier`, the touches a retry carries (with `touchLineageSkipped`), the failover wait and `retryNeverStarted` take this job's previous attempt's record or none; one attempt chosen by `stalledCounter` rejected (BullMQ never lowers it, so a job that stalled and later failed would miss its own record and be refused `model-failover-no-candidate`); the second read the failover wait made is gone. Its Residuals drop the prior-record uses without the rule and the superseded check's missing age, and gain the stall that wrote no record (the attempt before answers for it) and the superseded check's two conditions. **`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST` AMENDED**: the data gains `recoveryOfCreatedAt`, the base run's creation time (the first recovery from the crashed queue job's `timestamp`, a later one keeping its data's, none from a `.r1` without it), with no job data version because its absence is that build's own behaviour and recoveries ship in this release; Superseded: a record whose time parses and is older than that time less `RECORD_CLOCK_SKEW_MS` settles nothing, a time that does not parse still settles (re-running a settled run pays twice), a recovery without the field keeps the check without an age, and the reader holds each side to the rule for every recovery, so a record on this host that does not settle the run hides no settled one in the mirror, and a recovery without the field can now be ended by the mirror's settled record (an older job's among them) where this host's record used to answer first. **`DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` AMENDED**, Identity: an event counts against a run only from its record's `jobCreatedAt` less the skew (its count, first cause, wait answer, approval wait end, draft answer and fix match, and the index event that stands in for the record's own cancel or delivered steer), a lower bound, so late answers, approvals, re-runs and a stalled attempt's touches still count; no bound without the field; the scope and project streaks unbounded; a bound from `queuedAt`, `earlier` or `startedAt` rejected. **`DES-CAPACITY-FROM-RECORDS` AMENDED**, Retries and stalls: `earlier` comes from this job's own previous record only. UNCHANGED, checked: `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` (the lost-lock checks already took `recordOfThisJob` and are as they were) and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` (one more conditional key, no new store). **Code evidence**: worker/src/index.mjs -> makeProcessor (`ownPrior`, the pickup's read, `retryNeverStarted`); worker/src/processor.mjs -> runAttempt (`settlesRun`); worker/src/recovery-queue.mjs -> recoveryDataOf, makeRecoveryEnqueuer; worker/src/start.mjs -> readRunRecord; worker/src/run-history.mjs -> buildRecord, jobCreatedAtOf; worker/src/zero-touch.mjs -> computeZeroTouch. |
 | 2026-11-04 (#823) | The console's pre-checks judge the triggers file as the writer writes it. **`DES-STORE-VERSION-WHEN-NEEDED` AMENDED**, the triggers file in "What each writer carries": a standing answer, a model role, a zero-touch group name, an instruction sentence and its Undo are checked and previewed through the writer's own serializer (`triggersFileText`, which `writeTriggers` now calls), with the `version` the change needs stamped, and the current file, and the standing answer, model role and instruction previews, are parsed with the writer's version rules (a group name and an Undo are judged by the write's own parse), injectable in each planner and passed by its apply, as they are in `writeTriggers`. Before, each check parsed the document without the stamp, so the first rule in any of the five tables would have made the console refuse a change the writer makes correctly (a standing answer naming a forge added to `FORGES`, since #810, would have been refused with the sentence for a malformed answer), and a file declaring `"version": 1` kept, in every preview but the model role diff (there in its after digest), a line the writer drops. With every table empty each check accepts and refuses what it did, and the bytes written are unchanged. UNCHANGED, checked: `DES-MODEL-ROLES` (the same validation before preview and confirm, and the diff still shows the `modelRoles` block alone; its after digest is now the written file's) and `DES-OPERATOR-CONSOLE` (the ticket still holds the preview's digests, and the standing answer confirm still re-plans and compares them, the zero-touch confirm its after digest, now the digests of the bytes they write). **Code evidence**: worker/src/triggers-file.mjs -> triggersFileText, writeTriggers; admin/src/answerer-actions.mjs -> planStandingAnswerAdd, applyStandingAnswerAdd; admin/src/model-role-plans.mjs -> createModelRoleActions; admin/src/zero-touch-actions.mjs -> readDocument, planZeroTouchName, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan. |
 | 2026-11-04 (#809) | What a 503 means for each forge. **`DES-QUEUE-BULLMQ-OVER-CUSTOM` CORRECTED**, two Rejected bullets that assumed a forge resending on its own: the silent GUID shield is right because a resend of a delivery that IS queued (a GitHub or GitLab hand redelivery, or Azure's own resend) deserves "queued", and a Forgejo replay is not one, since it carries a new id that only the semantic window can coalesce; a non-2xx for a swallowed delivery is rejected because the forge would record a handled delivery as failed, GitLab would count it toward disabling the hook and Azure would resend it, where it said a storm of redeliveries; Azure is the one forge that resends on its own, for about 3 minutes and then on probation up to 7 more times over about 36 hours while new events are lost. **`DES-STEER-TARGET-POINTER-IS-LIVENESS-NOT-INDEX` CORRECTED**, one clause: a marker set before a failed enqueue would swallow a later redelivery by hand or Azure's resend, where it said the forge's redelivery. **Code evidence**: worker/src/queue.mjs -> enqueueForgeJob, SEMANTIC_WINDOW_MS; receiver/src/steer.mjs -> its header. |
 | 2026-11-04 (#807) | The Spend page reconciles today's dollar counter by the day each run reserved in. **`DES-COST-FOLD-BY-SCAN` AMENDED**, a dated bullet: where Today is judged against the deployment's own day counter (the day's basis `deployment`, a day counter configured), a record whose `dollars.reservedIn` (`reservedInOf`) names a `day` and the page's Valkey tag (`valkeyEndpointTag` of the console's raw `VALKEY_URL`, the URL it reads the counter at) is today's exactly when that day is today's bucket (`deploymentWindowsAt`), whenever it ended, still cut at now; every other record (before `reservedIn`, no `day`, another Valkey's tag, malformed, a project's own day window) and every page without a counter keep the end-time rule; holds unchanged, already by the reservation day; the daily chart, the 24-hour average and `dollar-windows.mjs`'s settled lines keep their rules, none being set against a counter; two rejected alternatives (the day without its tag; tagging the pinned address); the residual where the page's tag differs from the worker's (on Linux a local Valkey named by a host name, a worker's other spelling of `VALKEY_URL`, another host's records in a shared `PI_LOGS_DIR`). **`DES-DOLLAR-RESERVE-AND-SETTLE` UNCHANGED, checked**: reserve, settle, release and `reservedIn`'s writer are as they were; item 11's doctor check is unchanged, and the page only reads the field through the same `reservedInOf`. **`DES-OPERATOR-CONSOLE` UNCHANGED, checked**: the overview's Spend today is still the day counter where read, else the records' settled spend by end time (`spendByHour`), which Spend's records-only total still agrees with, since without a counter the new rule is off. **Code evidence**: admin/src/insights-assembly.mjs -> spendSummaryOf, assembleInsightsView; worker/src/dollar-budget.mjs -> reservedInOf, valkeyEndpointTag, deploymentWindowsAt; admin/test/insights-views.test.mjs; admin/test/console-spend.test.mjs; admin/test/helpers/spend-goldens.mjs -> spend-midnight-run.operator. |

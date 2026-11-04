@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { computeZeroTouch, readZeroTouch, ZERO_TOUCH_NO_PROJECT } from "../src/zero-touch.mjs";
-import { cleanTouch, touchScopeOf } from "../src/touch-state.mjs";
+import { cleanTouch, touchScopeOf, WAIT_END_REASONS } from "../src/touch-state.mjs";
 import { buildRecord } from "../src/run-history.mjs";
 
 const DAY = 86400_000;
@@ -276,4 +276,56 @@ test("telemetry rejects unknown causes and strips every text-bearing field", () 
 	assert.ok(clean);
 	assert.ok(!JSON.stringify(clean).includes("secret"));
 	assert.equal(cleanTouch({ runId: "run", cause: "steer", at: NOW, target: "<script>" }), null);
+});
+
+// Issue #811: a job id comes back after a lost queue and a hand redelivery, while the touch index keeps the older job's
+// events under it. An event counts against a run only from the run's job creation time on (`jobCreatedAt`, less the
+// clock skew); a lower bound, so a late answer and a touch during an earlier, stalled attempt still count, and a record
+// without the time applies none. The scope and project streaks still read every event.
+test("an older job's touches under a reused id do not count against the new run; its own late and stalled-attempt touches do (#811)", () => {
+	const created = NOW - 2 * DAY;
+	const reused = record("reused", 1, { jobCreatedAt: new Date(created).toISOString(), startedAt: new Date(created + 3 * 3600_000).toISOString() });
+	const older = event("reused", "steer", 20);
+	assert.deepEqual(compute({ records: [reused], events: [older] }).touchedRunIds, [], "the older job's steer is not this run's");
+	assert.deepEqual(compute({ records: [reused], events: [{ ...older, at: created - 4 * 60_000 }] }).touchedRunIds, ["reused"], "within the clock skew it is");
+	assert.deepEqual(compute({ records: [reused], events: [{ ...older, at: created - 6 * 60_000 }] }).touchedRunIds, [], "past the skew it is not");
+	const stalled = event("reused", "cancel", 0, { at: created + 3600_000 });
+	const late = event("reused", "question-answer", 0, { at: NOW - 3600_000 });
+	for (const [label, own] of [["a cancel during an earlier, stalled attempt, before this record's start", stalled], ["an answer after the run ended", late]]) {
+		const result = compute({ records: [reused], events: [older, own] });
+		assert.deepEqual(result.touchedRunIds, ["reused"], label);
+		assert.equal(result.causes.find((c) => c.cause === own.cause).count, 1, `${label}: the first cause is the run's own`);
+		assert.equal(result.causes.find((c) => c.cause === "steer").count, 0, `${label}: never the older job's`);
+	}
+	assert.equal(compute({ records: [reused], events: [event("reused", "question-answer", 20, { answerSource: "draft", draftRunId: "helper-old" }), stalled] }).totals.draftAnswers, 0, "the older job's drafted answer is not this run's");
+	const parked = record("parked", 1, { reason: "awaiting-input", parkedAt: NOW - DAY, jobCreatedAt: new Date(NOW - DAY - 600_000).toISOString() });
+	assert.equal(compute({ records: [parked], events: [event("parked", "question-answer", 20)] }).totals.pending, 1, "the older job's answer does not close the new run's wait");
+	const { jobCreatedAt: _created, ...unbounded } = reused;
+	assert.deepEqual(compute({ records: [unbounded], events: [older] }).touchedRunIds, ["reused"], "a record without the time applies no bound, as before");
+	const streak = compute({ records: [reused], events: [older] });
+	assert.equal(streak.projects[0].repositories[0].lastTouchAt, older.at, "the repository's streak still counts it as activity in that repository");
+});
+
+// Issue #811: the bound holds every per-run read, not only the counts. A record's own cancel or steer stands in for its
+// index event only while the run has none of its own, so an older job's event of that cause under the id must not take
+// that place and then be dropped by the bound. An older job's wait end does not end the new run's wait either.
+test("an older job's cancel, steer or wait end under a reused id answers for none of the new run's own evidence (#811)", () => {
+	const created = NOW - 2 * DAY;
+	const reused = (extra) => record("reused", 1, { outcome: "failed", jobCreatedAt: new Date(created).toISOString(), ...extra });
+	for (const [label, rec, older] of [
+		["its own operator cancel", reused({ reason: "operator-cancel" }), event("reused", "cancel", 20)],
+		["its own delivered steer", reused({ steered: { delivered: 1 } }), event("reused", "steer", 20)],
+	]) {
+		const result = compute({ records: [rec], events: [older] });
+		assert.deepEqual(result.touchedRunIds, ["reused"], label);
+		assert.equal(result.causes.find((c) => c.cause === older.cause).count, 1, `${label}: the run's own cause`);
+	}
+	const parked = record("parked", 1, { reason: "awaiting-approval", parkedAt: NOW - DAY, jobCreatedAt: new Date(NOW - DAY - 600_000).toISOString() });
+	for (const reason of WAIT_END_REASONS) {
+		const { totals } = compute({ records: [parked], events: [{ type: "wait-end", reason, runId: "parked", at: NOW - 20 * DAY }] });
+		assert.equal(totals.pending, 1, `${reason}: the older job's wait end does not end the new run's wait`);
+		assert.equal(totals.waitingHours, 24, reason);
+	}
+	// The run's own wait end still ends it.
+	assert.equal(compute({ records: [parked], events: [{ type: "wait-end", reason: WAIT_END_REASONS[0], runId: "parked", at: NOW - DAY / 2 }] }).totals.pending, 0);
 });

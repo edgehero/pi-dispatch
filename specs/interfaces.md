@@ -5968,10 +5968,12 @@ validator rather than a second copy of it.
                     "ruleHostCount": <int>, "providers": <int>, "placeholders": <int> }, // venues only; operator-config names, counts
     "secretsProfile"?: "<profile name>",                                               // issue #712: CONDITIONAL, run.secrets armed
     "loaded"?: { "v": 1, "runner": "reported" | "absent" | "invalid" | "cut", ... },   // issue #800: CONDITIONAL, what the run loaded; below
+    "jobCreatedAt"?: "<ISO 8601>",                                                     // issue #811: CONDITIONAL, when the job was created; below
     "v":         <int> }                                                              // issue #761: the record's version, 1, ALWAYS the last key
   ```
   **`loaded` (issue #800, `worker/src/loaded-record.mjs`) is what the run loaded, as the runner saw it and as the worker
-  could check it. Advisory: no decision reads it. A CONDITIONAL key, the last before `v`.** Adding it leaves `v` at 1: a new
+  could check it. Advisory: no decision reads it. A CONDITIONAL key, the last before `v` until `jobCreatedAt` (issue #811)
+  took the tail after it.** Adding it leaves `v` at 1: a new
   field never raises it (`DES-STORE-VERSION-WHEN-NEEDED`, UNCHANGED, checked), and `RECORD_CORE_FIELDS` does not name it.
   ```json
   "loaded":{"v":1,"runner":"reported","at":"ready","cut":null,
@@ -6225,7 +6227,14 @@ validator rather than a second copy of it.
   commented): a recovery job numbered past the cap, a recovery whose checkpoint is absent, damaged, from another host,
   pi version or venue or refused by the restore, and an armed job on a worker with no checkpoint store.
   `recovery-superseded` (outcome `policy`, pre-spend, silent): the run reached its final outcome after the recovery was
-  queued, decided first by a completed or policy record of the base run or an earlier recovery.
+  queued, decided first by a completed or policy record of the base run or an earlier recovery. AMENDED 2026-11-04
+  (#811): of THIS run. A record whose `startedAt` (or `endedAt` when it has no start) parses and is older than the
+  recovery's `recoveryOfCreatedAt` (`INT-RECOVERY-JOB`) less `RECORD_CLOCK_SKEW_MS` was left by an older job under a
+  reused id and settles nothing; one whose time does not parse still settles, and a recovery without the field is
+  judged by id and outcome alone. Each side, this host's file and then the run mirror, is held to that before it
+  answers (`readRunRecord` with `keep`, `worker/src/start.mjs`), for a recovery without the field too: a record on this
+  host that does not settle the run no longer hides the mirror's, so such a recovery can now be ended by the mirror's
+  settled record, which with no age to judge may be an older job's, where this host's record used to answer first.
   `job-image-recover-unsupported` (outcome `policy`, pre-spend, commented): the `CAPABILITY_GATES` row.
   **The steering fields (issue #646, `REQ-STEER-RUNNING-JOB`) are additive, TAIL position after the durable-run
   keys, each a CONDITIONAL key**, rebuilt by the worker (`recordedSteered`, `STEER_SKIPPED_REASONS`,
@@ -6720,6 +6729,17 @@ validator rather than a second copy of it.
   model. `admin/test/run-model-bolt.test.mjs` holds the two rules together over the pinned catalog and over ids
   generated from the worker rule. A job queued before the upgrade with an id outside the shape is the one exception,
   and it ends as it did before.
+  **`jobCreatedAt` (issue #811) is when the job under this id was created**: BullMQ's `job.timestamp` (the add's
+  moment, kept across every retry, stall and deferral of the job, and never moved by its delay) as an ISO 8601 string
+  (`jobCreatedAtOf`, `worker/src/run-history.mjs`). A CONDITIONAL key, TAIL position after `loaded` and the last before
+  `v`: absent when the job carries no non-negative safe integer timestamp a Date can hold (a record written outside
+  the queue, such as a canary replay's). Its one reader is the Zero touch view (`INT-TOUCH-INDEX`, `DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT`): an id
+  comes back after a lost queue and a hand redelivery, and an event counts against the run only from this time on,
+  less `RECORD_CLOCK_SKEW_MS`; a record without it sets no bound. Not `queuedAt`, which is the moment the job became
+  eligible (a delay moves it later) and is null on a retry, a stall and a `run.waitFor` job, and not `startedAt`,
+  which is this attempt's. A number's rendering, so PII-free. Adding it leaves `v` at 1 (a new field never raises it,
+  `DES-STORE-VERSION-WHEN-NEEDED`), `RECORD_CORE_FIELDS` does not name it, and since a record without it is read as
+  before, nothing older is left to detect (`worker/src/older-state.mjs`). The shared cases' `next` shapes carry it.
   **`v` and the stable core** (AMENDED 2026-11-02, #761, `DES-STORE-VERSION-WHEN-NEEDED`). Every record carries `v`,
   `RUN_RECORD_VERSION` (1), as its LAST key, after every conditional key, so every earlier position is untouched; a
   record without it (every record written before #761) is version 1. Unlike the stored files' versions it is written
@@ -6745,14 +6765,21 @@ validator rather than a second copy of it.
     own-record check and the failover wait below share: the same job id, that attempt, and not older than the job (its
     `startedAt`, or its `endedAt` when it has no start, no earlier than the job's enqueue time, `job.timestamp`, less
     `RECORD_CLOCK_SKEW_MS`, 5 minutes), because ids are reused and a record an older job left under the same id answers
-    for nobody. The lost-lock settle check (`recordVerdict`) shares its id and attempt checks and judges a settling
+    for nobody. AMENDED 2026-11-04 (#811): the pickup's read of the previous record (a retry, or a pickup after a
+    stall) is held to it, both sides before the higher attempt is kept (`previousRecord` with `keep`) and the answer
+    judged again, for `attemptsMade` and `attemptsMade + 1` both, the higher winning; a record that fails is no record.
+    That one read gives `earlier`, the touches the next record carries (with `touchLineageSkipped`), the failover wait
+    and `retryNeverStarted`, so an older job's record under a reused id gives this job none of its slot time, its
+    interventions or its never-started verdict. Both numbers, never one chosen by `stalledCounter`: BullMQ never lowers
+    that count, so a job that stalled once and later failed would ask for the stalled attempt's number and miss its own
+    failed record. After a stall that wrote no record, the attempt before it answers for it.
+    The lost-lock settle check (`recordVerdict`) shares its id and attempt checks and judges a settling
     record's age by its `startedAt` alone, as before this release (the end fallback serves the stall listener's own
     `failed` record, and a `failed` record never settles). With no key (and fallback models set, no
     recovery model), a retry whose previous attempt's record passes that rule (the attempt BullMQ counted,
     `attemptsMade`, after a failure, or `attemptsMade + 1` after a scheduled job's stall, which raises only its stall
-    count; judged on the record that passes the rule on either side: where the pickup's record, the higher attempt of
-    the two, does not pass, both sides are read again, each held to the rule first) is not judged on such a record at
-    all: it defers `newer-release` at the model selection, after the
+    count; judged on the record that passes the rule on either side, which the pickup's one read already is) is not
+    judged on such a record at all: it defers `newer-release` at the model selection, after the
     pickup's settings read and before the endpoint gate (logged `newer_release_hold` with `what: "the previous
     attempt's run record"`, the deferral carrying the job's `project`), every hold given back first and nothing
     recorded, posted, reserved or run, until a host that reads the record takes the job, a later attempt's record
@@ -8322,7 +8349,15 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
   `updateData`: `podmanRestartHoldSinceMs`, `podmanRestartHoldLastMs`, `netnsKeeperHoldSinceMs`,
   `netnsKeeperHoldLastMs`, `netnsKeeperHoldStartedMs`, `netnsKeeperLoopSeen`, and `enqueueNonce`; `recoveryDataOf`),
   plus `recoveryOf` (the run id, a string), `recovery` (n, an integer) and `recoverBy` (ms since epoch, the first
-  host-lost deadline). The name is the lost job's.
+  host-lost deadline). The name is the lost job's. AMENDED 2026-11-04 (#811): and `recoveryOfCreatedAt` (ms since
+  epoch), the base run's creation time, which the superseded check judges a record's age by (`recovery-superseded`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`): for `.r1` the crashed queue job's own `timestamp` (both enqueuers are handed the
+  real job), for `.r2` the value `.r1`'s data carries, never `.r1`'s timestamp; left out when that is not a
+  non-negative safe integer, and a value a base job's own data carries is never kept. No job data version
+  (`DES-STORE-VERSION-WHEN-NEEDED` versions a field whose absence an older build would misread): an older worker ignores
+  it and judges by id and outcome alone, which is its own behaviour. This build judges a recovery without it (queued
+  by a build from before it) by id and outcome alone too, but asks the run mirror past a record on this host that does
+  not settle the run (`recovery-superseded`).
 - **Options**: `attempts: 1`, no `deduplication`, `removeOnComplete` and `removeOnFail` 31 days (the forge jobs'
   retention).
 - **Claim**: `run:recover:claim:<sanitized run id>:<n>`, `SET <key> <host> PX 7d NX` (`RECOVERY_CLAIM_TTL_MS`, the
@@ -13014,6 +13049,12 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   and `touchScopeId`; at most 16 rebuilt `touches` carry source facts. The optional fixed
   `touchLineageSkipped:"source-unavailable"` records an admitted answer whose exact parked source could not be proved.
   These facts survive a same-id retry's record replacement while its fresh outcome and usage remain authoritative.
+  AMENDED 2026-11-04 (#811): only from this job's own previous attempt's record (`recordOfThisJob`), never from one an
+  older job left under a reused id. A record's `jobCreatedAt` is the lower bound of what counts against its run: an
+  event (index or record-carried) whose `at` is earlier than it less `RECORD_CLOCK_SKEW_MS` is not in that run's
+  count, first cause, wait answer, approval wait end, draft answer or fix match, and does not stand in for the record's
+  own `operator-cancel` or delivered steer; later events, a stalled attempt's and those after the run ended included,
+  still are, and a record without it sets no bound. A repository's and a project's streak still read every event.
   `purpose:"zero-touch-grouping"` identifies internal analysis, including pre-container refusals; it remains ordinary
   history/spend but is excluded from workload rates and activity. Missing legacy fields are unknown, never false.
 - **Session extension** (`INT-SESSION-STORE-CONTRACT`): new parked sidecars use
@@ -13508,6 +13549,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-04 (#811) | A record an older job left under a reused id answers for no newer job. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a new conditional key `jobCreatedAt`, BullMQ's `job.timestamp` as an ISO string, the last before `v` (TAIL after `loaded`, whose sentence now says so), absent without a representable timestamp, read by the Zero touch view only; `v` stays 1, `RECORD_CORE_FIELDS` does not name it, and no `older-state.mjs` detector is needed, since a record without it is read as before; the shared cases' `next` shapes carry it. The `recordOfThisJob` paragraph: the pickup's one read of the previous record is held to the rule on both sides with `attemptsMade` and `attemptsMade + 1` asked, and gives `earlier`, the carried touches, the failover wait and `retryNeverStarted`; why not one attempt by `stalledCounter`; the stall that wrote no record; the failover wait no longer reads twice. `recovery-superseded`: of this run only, a record whose time parses and is older than `recoveryOfCreatedAt` less `RECORD_CLOCK_SKEW_MS` settles nothing, one whose time does not parse still settles, a recovery without the field is judged by id and outcome alone, and each side is held to that before it answers, for such a recovery too, so the mirror's settled record can now end it where a record on this host that does not settle the run used to answer first. **`INT-RECOVERY-JOB` AMENDED**, Data: `recoveryOfCreatedAt` (ms), the crashed job's `timestamp` for `.r1`, kept from the data for `.r2`, left out when malformed, never a base job's own value; no job data version and why; this build judges a recovery without it by id and outcome alone, asking the mirror past a record on this host that does not settle the run. **`INT-TOUCH-INDEX` AMENDED**, Run-record extension: carried touches come from the job's own previous record only, and `jobCreatedAt` less the skew is the lower bound of what counts against a run (its count, first cause, wait answer, approval wait end, draft answer and fix match, and the index event that stands in for the record's own cancel or delivered steer), the streaks unbounded. UNCHANGED, checked: `RECORD_CORE_FIELDS` (`whyNotThisJob` and the superseded check read only core fields), `INT-CONTAINER-JOB-INPUTS` (`recoveryOfCreatedAt` rides in job data and every `/job` input is an explicit literal) and `INT-RUN-CHECKPOINT-POINTER` (the superseded check is still asked before the pointer). **Code evidence**: worker/src/run-history.mjs -> buildRecord, jobCreatedAtOf; worker/src/index.mjs -> makeProcessor (`ownPrior`); worker/src/processor.mjs -> runAttempt (`settlesRun`); worker/src/recovery-queue.mjs -> recoveryDataOf, makeRecoveryEnqueuer; worker/src/start.mjs -> readRunRecord; worker/src/zero-touch.mjs -> computeZeroTouch; worker/test/fixtures/run-records/next.*.json. |
 | 2026-11-04 (#824) | The forge list in one place: the job image's answer draft reads, the receiver status record and the console follow `FORGE_KINDS`. **`INT-RECEIVER-STATUS-KEY` AMENDED**: its forges are `FORGE_KINDS` itself (`RECEIVER_FORGES`), where the four were written out, and an unknown forge no longer makes a record unreadable. A new paragraph, Across releases, sets the rule before any release publishes the record: `forges` may hold up to a fixed 64 entries (`RECEIVER_FORGES_MAX`, where a cap of four refused a newer record before anything was dropped) and is kept to the forges this build knows, each once, and an unknown forge's `deliveries` are never read; a known forge an older record leaves out reads as zero counts with `lastAt` null; a forge named as served with no `deliveries`, `deliveries` that is no object, and a malformed entry of a known forge stay unreadable; `v` stays 1 when a forge is added; and the 64 KiB bound holds six forges at their largest values, not seven, so a release that brings the table to seven keeps its record within it or raises `v`. The served forges come from `servedForges`, which walks `FORGE_KINDS` over the config's own block per forge and reports a forge with none unserved, where the writer listed the four arms; a receiver test requires a block for every `FORGE_KINDS` member and fails if `receiver/src/start.mjs` writes a forge list out. The acceptance names the tests of both directions and the walk. **`INT-CONTAINER-JOB-INPUTS` AMENDED**, the draft profile bullet: the runner takes an answer draft's source kind only where `ANSWER_FORGES` has a row, which names its token variable, header, fixed origin and three reads; any other kind refuses `answer-draft-refused`, where a kind the runner did not name would have been read with Azure's token, header and paths had the kind check grown; and a worker test holds the table to `FORGE_KINDS` and each token to the forge's first `tokenVars`, since the image cannot import `FORGES`, and pins the method, URL and token header each forge's three reads send. Behaviour for the four forges is unchanged. **`INT-ANSWER-DRAFT-STORE` UNCHANGED, checked**: the configured forge root the console's offer and send and the worker's pickup check is now the forge table's `apiRoot`, through `forgeApiRoot`, for both, and has the same value for each forge. **Code evidence**: image/runner/src/answerer.mjs -> ANSWER_FORGES, validateAnswerInput, createAnswerSourceReader; worker/src/receiver-status.mjs -> RECEIVER_FORGES, RECEIVER_FORGES_MAX, parseReceiverStatus; receiver/src/config.mjs -> servedForges; receiver/src/start.mjs (the publisher's forges); worker/src/forges.mjs -> FORGES (apiRoot), forgeApiRoot; worker/src/start.mjs (the answer draft identity); admin/src/answerer-data.mjs -> configuredApiRoot; worker/test/runner-answer-forges.test.mjs; worker/test/receiver-status.test.mjs; receiver/test/receiver-status-start.test.mjs. |
 | 2026-11-04 (#823) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the `version` bullet: the writer's text is one export of `./triggers-file`, `triggersFileText(next, nextDocument, versions)` (`serialize` with the stamp `triggersFileVersionFor` gives the result), which `writeTriggers` calls and the console's pre-checks call too, over the change each plan hands the writer: the standing answer, model role, zero-touch group name, instruction sentence and Undo previews are the bytes the confirm writes, and the current file, and the standing answer, model role and instruction previews, are parsed with the writer's version rules (`supported` and the five tables, injectable in each planner and passed by its apply; a group name and an Undo are judged by the write's own parse). Before, the pre-checks parsed and showed the document without the stamp, so the first rule in a table would have refused a change the writer makes, and a file declaring `"version": 1` previewed a line the writer drops. A model role's diff still shows the `modelRoles` block alone; its after digest is now the whole written file's. The write protocol, the newer-file refusal and every byte written with the tables empty UNCHANGED, checked. **Code evidence**: worker/src/triggers-file.mjs -> triggersFileText, writeTriggers; admin/src/answerer-actions.mjs -> planStandingAnswerAdd, applyStandingAnswerAdd; admin/src/model-role-plans.mjs -> createModelRoleActions; admin/src/zero-touch-actions.mjs -> planZeroTouchName, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan. |
 | 2026-11-04 (#809) | What a 503 means for each forge. **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED and AMENDED**, the `run.replicas` acceptance. AMENDED: a failure enqueueing replica *k* answers **503** with `1..k-1` queued and an `enqueue_failed` line that now carries `queued` (*k-1*, created or swallowed by the semantic window) and `replicas` (*n*), the unreplicated line unchanged as `{event, delivery, reason}` (a thrown value with no `message` still leaves `reason` out). CORRECTED: it said the retry converges on exactly *n*, a retry GitHub, GitLab and Forgejo never make. What a partial failure leaves is now stated: *k-1* while nobody sends the delivery again, *n* after a GitHub or GitLab hand redelivery or Azure's resend (the same id), and after a Forgejo replay (a new id) *n* inside the 10-minute window and *n* more after it. **`INT-RECEIVER-STATUS-KEY` UNCHANGED, checked**: the outcome table, `lookup-failed` and `enqueue-failed` among them, is what the new Connections banner reads; no field, bound or version changed. **Code evidence**: receiver/src/receiver.mjs -> fanout, answerEnqueueFailed; worker/src/receiver-status.mjs -> RECEIVER_OUTCOMES, receiverOutcome. |

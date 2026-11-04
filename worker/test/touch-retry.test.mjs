@@ -53,6 +53,37 @@ test("same-ID retries retain the prior attempt's answer evidence and gap through
 	}
 });
 
+// Issue #811: an id comes back after a lost queue and a hand redelivery, while the older job's record stays for the
+// retention window and its touch events stay in the index. The retry's record carries none of that job's interventions,
+// and the Zero touch view counts none of its events against the new run.
+test("a retry under a reused id carries no touches from the older job's record, and its index events do not touch the new run (#811)", async () => {
+	const olderAt = NOW - 10 * DAY;
+	const data = { kind: "github", repo: "acme/api", flow: "fix", target: { type: "issue", number: 1 }, trigger: { deliveryId: "again", sender: { id: 1 } } };
+	const olderTouch = { runId: "gh-again", cause: "steer", at: olderAt + 60_000 };
+	// The older job's last record, at a HIGHER attempt than the retry's previous one, so it wins on attempt alone.
+	const older = buildRecord({ job: { id: "gh-again", timestamp: olderAt, attemptsMade: 2, data }, result: { outcome: "failed", reason: "infra", touches: [olderTouch], touchLineageSkipped: "source-unavailable" }, startedAt: new Date(olderAt + 1000).toISOString(), endedAt: new Date(olderAt + 120_000).toISOString(), touchTracking: true });
+	assert.equal(older.attempt, 3);
+	let record = null;
+	const processor = makeProcessor({
+		redis: { incr: async () => 1, decr: async () => 0, expire: async () => {}, get: async () => null },
+		now: () => NOW, timeoutMs: 100000, getSettings: settings,
+		previousRecord: async (_id, { keep = null } = {}) => (typeof keep === "function" && !keep(older) ? null : older),
+		recordRun: (args) => { record = buildRecord({ ...args, endedAt: new Date(NOW).toISOString(), touchTracking: true }); },
+		deps: {
+			mintToken: async () => "token", isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
+			runContainer: async () => ({ code: 0 }), cleanup: async () => {}, comment: async () => {}, log: () => {},
+		},
+	});
+	const job = { id: "gh-again", timestamp: NOW - 3600_000, attemptsMade: 1, opts: { attempts: 2 }, data };
+	assert.equal((await processor(job, "lock", new AbortController().signal)).outcome, "completed");
+	assert.equal(record.touches, undefined, "the older job's interventions are not this run's");
+	assert.equal(record.touchLineageSkipped, undefined, "nor its unprovable answer source");
+	assert.equal(record.jobCreatedAt, new Date(NOW - 3600_000).toISOString());
+	const report = computeZeroTouch({ records: [record], events: [olderTouch], nowMs: NOW + 1, windowDays: 7, coverage: { fromMs: NOW - 30 * DAY } });
+	assert.deepEqual([report.totals.runs, report.totals.touched, report.totals.rate], [1, 0, 0], "the older job's steer under the same id does not touch the new run");
+});
+
 test("a held phrase reply keeps the receiver receipt through real enqueue and pickup, rather than counting queue delay as waiting", async () => {
 	const parkedAt = NOW - 2 * 3600_000;
 	const receipt = parkedAt - 1000;

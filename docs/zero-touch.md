@@ -9,6 +9,13 @@ merges, sandbox use and automatic starts add nothing. The cause chart assigns ea
 successful intervention; later interventions remain in its history. Jobs removed before their first attempt are
 counted separately. Stops whose project or folder was never recorded remain explicitly unattributed in scoped views.
 
+A touch counts against a run only from the moment the run's job was queued (its record's `jobCreatedAt`, less five
+minutes for clocks that differ between machines). A run id can come back, when a lost queue is followed by a webhook
+redelivered by hand, and the older job's touches under that id are not the new run's, nor is its approval's expiry or
+revocation the end of the new run's wait. Later touches still count: an answer or an approval after the run ended, and
+anything during an earlier attempt of the same job. A record written before this field existed sets no such start.
+A repository's and a project's streak still count every touch in them.
+
 The denominator is distinct workload runs whose records ended in the covered interval. Internal grouping jobs keep
 normal history and spend but, like internal answer-draft jobs, are excluded from workload rates, so analysing a rate cannot improve it. The Open as
 runs links list the touched source runs, with the same window and scope.
