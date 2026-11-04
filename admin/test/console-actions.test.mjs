@@ -3471,6 +3471,26 @@ for (const [name, body, field] of [
   });
 }
 
+test("a person's change that changes nothing reads as no change through the real pipeline, with nothing to confirm", async () => {
+  const { paths } = deployment();
+  const original = { triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", models: ["anthropic/claude-haiku-4-5"] } }] };
+  writeFileSync(paths.triggersPath, `${JSON.stringify(original, null, 2)}\n`);
+  const bytes = read(paths.triggersPath);
+  const triggerEnvironment = createTriggerEnvironmentActions({ paths, env: { PI_EGRESS: "0" }, now: () => T0 });
+  const c = await start({ paths, a: { triggerEnvironment } });
+  const pageDigest = triggerEntryDigest(original.triggers[0]);
+  for (const body of [{ index: 0, pageDigest }, { index: 0, pageDigest, models: ["anthropic/claude-haiku-4-5"] }]) {
+    const p = await c.act("trigger-environment-edit", body);
+    assert.equal(p.status, 200, p.text);
+    const said = p.json();
+    assert.equal(said.unchanged, true);
+    assert.deepEqual(said.summary, ["trigger row 1 already says this."]);
+    assert.equal(said.ticket, undefined);
+    assert.ok(!said.html.includes("Send at least one field"), said.html);
+  }
+  assert.equal(read(paths.triggersPath), bytes);
+});
+
 test("a person's change to what a trigger's jobs get: the real pipeline, audited as trigger-edit by that person, with its Undo", async () => {
   const { paths } = deployment();
   const original = { triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", steer: true, packages: false, secrets: { LINEAR_API_KEY: "op://vault/linear" }, progress: true } }] };

@@ -5,7 +5,7 @@ The preview and Confirm of a change to what a trigger's jobs get, what the card 
 **How a person uses it.**
 - **Preview** shows the triggers file's row as it would be written, then the Confirm:
   - each change in words, never an arrow, a widening said as one (*connect to mcp.example.com, with LINEAR_API_KEY by name*);
-  - when it takes effect, each only as far as is true of this file on this host: the services reading this file use it from their next reload, for the jobs they queue after that; a job in line keeps what it was queued with, or is refused if this file now narrows something it lacks; a host with its own copy keeps what it has until that copy changes. On a schedule: *While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree.*
+  - when it takes effect, each only as far as is true of this file on this host: the services reading this file use it from their next reload, for the jobs they queue after that; a job in line keeps what it was queued with and runs without this change, unless it is named as refused; a host with its own copy keeps what it has until that copy changes. On a schedule: *While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree.*
   - the jobs it affects: *With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: gh-c9e1 as trigger-skew (run.mcp)*;
   - what a host without the server does: refuses the job as `mcp-server-unknown`, before it spends. A host with no overlay, or no `mcp.json`, refuses it as `mcp-config-invalid`;
   - where it is written and how it is audited (`trigger-edit`, by the person): *on this host*, because that file is all this page writes.

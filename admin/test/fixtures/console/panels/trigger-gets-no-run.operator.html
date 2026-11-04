@@ -299,8 +299,10 @@ Nothing merges by itself.
 <p>No instructions are set.</p></div></section><section id="p-trigger-kinds" data-panel><div class="card"><div class="card__head"><h2>Other kinds</h2></div><p>
 This trigger is not a schedule or a one-shot.
 </p></div></section><section id="p-trigger-change" data-panel><div class="card"><div class="card__head"><h2>Before you change it</h2></div><p>
-A job already in line is refused if this trigger has gained a field the
-job lacks. Adding or deleting a row renumbers the rows after it.
+A job already in line keeps what it was queued with and runs without a
+change here, unless this trigger has gained a narrowing field the job
+lacks, such as a list of models, a cap or a server: then it is refused.
+Adding or deleting a row renumbers the rows after it.
 </p>
 <p>
 Jobs that would be refused cannot be checked here.

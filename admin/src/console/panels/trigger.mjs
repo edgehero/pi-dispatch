@@ -330,8 +330,10 @@ export function triggerChange(v) {
   return card(
     "Before you change it",
     html`<p>
-        A job already in line is refused if this trigger has gained a field the
-        job lacks. Adding or deleting a row renumbers the rows after it.
+        A job already in line keeps what it was queued with and runs without a
+        change here, unless this trigger has gained a narrowing field the job
+        lacks, such as a list of models, a cap or a server: then it is refused.
+        Adding or deleting a row renumbers the rows after it.
       </p>
       <p>
         ${!t || detail(v).skewed == null

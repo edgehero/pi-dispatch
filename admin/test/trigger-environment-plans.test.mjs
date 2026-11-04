@@ -12,7 +12,9 @@ import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
 import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { createCostGuard } from "../../image/runner/src/usage-meter.mjs";
+import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { createFleetReader, readTriggerSkew } from "../src/read-model.mjs";
+import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
 import { CARD_FIELDS, readTriggerEntryDigest, triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
 import { doneBannerHtml } from "../src/console/confirm-view.mjs";
@@ -299,7 +301,6 @@ test("a body the form could not have sent refuses before anything is read, by na
     [{ index: 1.5, pageDigest: digest, flow: "x" }, /index must be a whole number/],
     [{ index: 1, flow: "x" }, /did not say what it saw/],
     [{ index: 1, pageDigest: "abc", flow: "x" }, /did not say what it saw/],
-    [{ index: 1, pageDigest: digest }, /Send at least one field/],
     [{ index: 1, pageDigest: digest, flow: null }, /flow cannot be removed/],
     [{ index: 1, pageDigest: digest, flow: 7 }, /flow must be a string/],
     [{ index: 1, pageDigest: digest, provider: "" }, /provider must be a non-empty string, or null/],
@@ -617,7 +618,7 @@ test("a cap below what any call needs refuses with a short task's amount, naming
   const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "5" } });
   const before = f.read();
   const out = await refusal(f, { model: "claude-opus-5-5", maxCostUsd: "2" });
-  assert.equal(out.refusal, "anthropic/claude-opus-5-5 needs at least $2.654295 for a short task's first call, above this trigger's $2.00 job cap, so the runner would refuse every call to it before it is sent. Choose another model, or a job cap of at least $2.654295; a longer task needs more.");
+  assert.equal(out.refusal, "anthropic/claude-opus-5-5 needs at least $2.654295 for a short task's first call, above this trigger's $2.00 job cap, so the runner would refuse every call to it before it is sent. Choose another model, or a job cap of at least $2.654295; a repository's context files and a longer task need more.");
   assert.equal(out.status, 400);
   assert.equal(f.read(), before);
 });
@@ -660,7 +661,7 @@ test("a cap that clears the floor and not a short task previews, with a warning 
   const f = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5" } });
   const out = await f.service.preview(ask(f, { maxCostUsd: "2.62144" }), operator);
   assert.ok(out.plan, JSON.stringify(out));
-  assert.ok(out.summary.includes("anthropic/claude-opus-5-5 clears this $2.62144 job cap only for the smallest first call: a short task's needs $2.654295, so most jobs that call it would be refused before they spend. Choose another model, or a job cap of at least $2.654295; a longer task needs more."), out.summary.join("\n"));
+  assert.ok(out.summary.includes("anthropic/claude-opus-5-5 clears this $2.62144 job cap only for the smallest first call: a short task's needs $2.654295, so most jobs that call it would be refused before they spend. Choose another model, or a job cap of at least $2.654295; a repository's context files and a longer task need more."), out.summary.join("\n"));
   assert.deepEqual(await f.service.apply(out, operator), { ok: true }, "a warning, not a refusal: the person has read it");
   // Under a deployment's cap no value here clears it, and the warning says so instead of offering one.
   const held = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "2.63" } });
@@ -1233,13 +1234,13 @@ test("a server turned on is a widening that names where it connects and with whi
   const f = fixture({ deps: { readHostLoads: async () => LOADS } });
   const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
   assert.deepEqual(out.plan.changes[0], { key: "mcp", line: "MCP: linear on.", widening: "This widens what its jobs reach: jobs queued from this file connect to mcp.example.com, with LINEAR_API_KEY by name." });
-  assert.ok(out.summary.includes("A job on a host without linear, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid. mini1 and build3 have it; bare does not; mini2, cut and unread have not said."), out.summary.join("\n"));
+  assert.ok(out.summary.includes("A job on a host without linear, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid. mini1 has it; bare does not; build3, cut, mini2 and unread read unknown."), out.summary.join("\n"));
 });
 
 test("a server off on a host reads as lacking, and a server hosts disagree about names no host", async () => {
   const f = fixture({ deps: { readHostLoads: async () => LOADS } });
   const out = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
-  assert.match(out.summary.find((line) => line.startsWith("A job on a host")), /mini1, build3 and bare do not; mini2, cut and unread have not said\.$/);
+  assert.match(out.summary.find((line) => line.startsWith("A job on a host")), /bare and mini1 do not; build3, cut, mini2 and unread read unknown\.$/);
   // No host has docs on, so where it connects is known to none.
   assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to docs.");
 
@@ -1250,6 +1251,14 @@ test("a server off on a host reads as lacking, and a server hosts disagree about
   assert.equal((await bare.service.preview(ask(bare, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to one.example.");
   const noWhere = fixture({ deps: { readHostLoads: async () => ({ hosts: [{ name: "a", state: "current", mcp: [{ name: "x", enabled: true, where: null, keys: [] }], unread: [], more: {} }] }) } });
   assert.equal((await noWhere.service.preview(ask(noWhere, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to x.");
+});
+
+test("an old publication says nothing of where a server connects, as it says nothing of whether a host has it", async () => {
+  const held = fixture({ run: HELD, deps: { readHostLoads: async () => ({ hosts: [{ name: "old1", state: "old", mcp: [{ name: "linear", enabled: true, where: "stale.example", keys: ["K"] }], unread: [], more: {} }] }) } });
+  const said = await held.service.preview(ask(held, { mcp: ["linear"] }), operator);
+  assert.equal(said.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to linear.");
+  assert.ok(said.summary.some((line) => line.endsWith("old1 reads unknown.")), said.summary.join("\n"));
+  assert.ok(!said.summary.join(" ").includes("old1 has it"));
 });
 
 test("no host's publication, or one that cannot be read, says so and is never read as lacking the server", async () => {
@@ -1281,7 +1290,7 @@ test("when a change takes effect is said of this file on this host, of the jobs 
   const out = await f.service.preview(ask(f, { packages: false }), operator);
   for (const line of [
     "The services reading this file use it from their next reload, for the jobs they queue after that.",
-    "A job already in line keeps what it was queued with, or is refused if this file now narrows something it lacks. A running job is not touched.",
+    "A job already in line keeps what it was queued with and runs without this change, unless it is named below as refused. A running job is not touched.",
     "A host with its own copy of this file keeps what it has until that copy changes.",
   ]) assert.ok(out.summary.includes(line), line);
   assert.ok(!out.summary.some((line) => /New deliveries use this|start after this/.test(line)), "nothing says this reaches every host, or a job already in line");
@@ -1289,6 +1298,121 @@ test("when a change takes effect is said of this file on this host, of the jobs 
   const schedule = await f.service.preview(ask(f, { packages: false }, 0), operator);
   assert.ok(schedule.summary.includes("While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree."), schedule.summary.join("\n"));
   assert.ok(!out.summary.some((line) => line.startsWith("While hosts' copies differ")), "a webhook trigger has no schedule to freeze");
+});
+
+// ---- a tool taken back, and a file as the loader reads it --------------------------------------------------------------------
+
+test("a tool taken out of the list widens only if a job would really have it: pi's defaults, and not what stays off without an extension", async () => {
+  for (const name of EXCLUDABLE_TOOL_NAMES) {
+    const f = fixture({ run: { excludeTools: [name, "grep"].filter((tool, at, all) => all.indexOf(tool) === at) } });
+    const kept = name === "grep" ? ["bash"] : ["grep"];
+    const out = await f.service.preview(ask(f, { excludeTools: kept }), operator);
+    const change = out.plan.changes[0];
+    if (DEFAULT_ON_TOOL_NAMES.has(name)) {
+      assert.equal(change.widening, `This widens what its jobs can do: ${name} back on.`, name);
+      assert.ok(change.line.includes(`${name} on`), change.line);
+    } else {
+      assert.equal(change.widening, undefined, name);
+      assert.ok(change.line.includes(`${name} no longer removed, and off unless an extension turns it on`), change.line);
+    }
+  }
+  // What the card's Tools row says stays off is this same set, and the pin holds it.
+  const off = [...EXCLUDABLE_TOOL_NAMES].filter((name) => !DEFAULT_ON_TOOL_NAMES.has(name));
+  assert.ok(off.length > 0);
+  for (const name of off) assert.ok(TRIGGER_GETS_WORDS.toolsOn.includes(name), name);
+  // A server's own tools come back with it: there is no default to compare them with, and the server is named.
+  const server = fixture({ run: { ...HELD, mcp: ["linear"], excludeTools: ["mcp__linear__*"] } });
+  assert.equal((await server.service.preview(ask(server, { excludeTools: null }), operator)).plan.changes[0].widening, "This widens what its jobs can do: mcp__linear__* back on.");
+});
+
+const WATCH_ENTRY = (run = {}) => ({ on: { type: "watch", id: "errors", source: "prod", fingerprint: ["service", "error.type"], window: "10m", cooldown: "6h", maxPerDay: 4 }, run: { kind: "local", folder: "/nowhere", flow: "triage", task: "look", maxCostUsd: "1", ...run } });
+const WATCH_DOC = (run) => ({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SECRET" } }, triggers: [WATCH_ENTRY(run)] });
+
+test("a watch rule's jobs never get edit, write, bash or powershell, whatever the file's list says, so taking one out widens nothing", async () => {
+  const f = fixture({ doc: WATCH_DOC({ excludeTools: ["bash", "read"] }) });
+  const out = await f.service.preview(ask(f, { excludeTools: ["read"] }, 0), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.deepEqual(out.plan.changes, [{ key: "excludeTools", line: "Tools: the file's list no longer names bash, and what its jobs lack does not change." }]);
+  // A tool the loader does not hold back is a real change, and says so.
+  const back = await f.service.preview(ask(f, { excludeTools: ["bash"] }, 0), operator);
+  assert.equal(back.plan.changes[0].widening, "This widens what its jobs can do: read back on.");
+  // And a preview of one speaks of neither a queue nor a refusal: no job of it carries an index.
+  assert.ok(!out.summary.some((line) => /trigger-skew|named below/.test(line)), out.summary.join("\n"));
+});
+
+test("a watch rule takes no mcp, packages or fallback models: the funnel refuses each in the loader's words, and nothing is written", async () => {
+  for (const change of [{ mcp: ["docs"] }, { packages: false }, { fallbackModels: [SONNET] }]) {
+    const f = fixture({ doc: WATCH_DOC({}) });
+    const before = f.read();
+    const out = await refusal(f, change, 0);
+    assert.match(out.refusal, /^rejected: .*watch: unsupported run field/, JSON.stringify(change));
+    assert.equal(f.read(), before);
+  }
+  const f = fixture({ doc: WATCH_DOC({}) });
+  const fine = await f.service.preview(ask(f, { model: "claude-haiku-4-5", provider: "anthropic" }, 0), operator);
+  assert.ok(fine.plan, JSON.stringify(fine));
+});
+
+test("a file the loader refused as it was: a true line for what moved, and no way back that this page would refuse", async () => {
+  for (const [held, change, line] of [
+    [{ excludeTools: [] }, { excludeTools: null }, "Tools: the empty list the file held removed."],
+    [{ mcp: [] }, { mcp: null }, "MCP: the empty list the file held removed."],
+    [{ models: [] }, { models: null }, "Allowed models: the list removed."],
+    [{ maxCostUsd: 0 }, { maxCostUsd: null }, null],
+  ]) {
+    const f = fixture({ doc: { triggers: [cron, comment(held)] } });
+    assert.throws(() => parseTriggers(f.read(), f.paths.triggersPath), JSON.stringify(held));
+    const out = await f.service.preview(ask(f, change), operator);
+    assert.ok(out.plan, JSON.stringify([held, out]));
+    if (line !== null) assert.equal(out.plan.changes[0].line, line);
+    assert.doesNotMatch(out.summary.join(" "), /: \.|project or role policy/, JSON.stringify(out.summary));
+    assert.equal(out.plan.inverse, null, JSON.stringify(held));
+    assert.equal(out.plan.undo, "Edit trigger row 2 back by hand: the file did not load as it was, and this page will not write that back");
+    assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+    assert.doesNotThrow(() => parseTriggers(f.read(), f.paths.triggersPath));
+  }
+});
+
+test("a body that changes nothing reads as no change, whichever way it got here: nothing sent, or what the file holds", async () => {
+  const f = fixture({ run: { models: [HAIKU] } });
+  const before = f.read();
+  assert.deepEqual(await f.service.preview({ index: 1, pageDigest: f.digest() }, operator), { unchanged: "trigger row 2 already says this." });
+  assert.deepEqual(await f.service.preview(ask(f, { models: [HAIKU] }), operator), { unchanged: "trigger row 2 already says this." });
+  assert.equal(f.read(), before);
+  // What it saw is still asked first: a page out of date is told so, and not that nothing changed.
+  assert.equal((await f.service.preview({ index: 1, pageDigest: "a".repeat(64) }, operator)).state, "changed");
+  assert.deepEqual(await f.service.apply({ payload: { body: { index: 1, pageDigest: f.digest() } } }, operator), { invalid: "trigger row 2 already says this." });
+});
+
+test("a hand-written file: the first write rewrites all of it, the Confirm says so, and the Undo says what it restores", async () => {
+  const f = fixture();
+  const written = f.read();
+  // The writer's own layout: nothing else moves, and the way back is the bytes.
+  const same = await f.service.preview(ask(f, { packages: false }), operator);
+  assert.equal(same.plan.undo, "Put trigger row 2 back as it was");
+  assert.ok(!same.summary.some((line) => line.includes("the writer's layout")), same.summary.join("\n"));
+
+  const hand = fixture();
+  nodeFs.writeFileSync(hand.paths.triggersPath, JSON.stringify(JSON.parse(written)).replace('"triggers":', '"triggers" : '));
+  const handBytes = hand.read();
+  const out = await hand.service.preview(ask(hand, { packages: false }), operator);
+  const sentence = "This file is not in the writer's layout, so this write also rewrites all of it: spacing and line breaks move in lines this change does not touch, and what each key says does not. Undo puts the values back, not that layout.";
+  assert.ok(out.summary.includes(sentence), out.summary.join("\n"));
+  assert.equal(out.plan.undo, "Put trigger row 2's values back; the file keeps the layout this write gave it");
+  assert.deepEqual(await hand.service.apply(out, operator), { ok: true });
+  const undone = await hand.service.preview(undoBody(out.plan.inverse), operator);
+  assert.ok(undone.plan, JSON.stringify(undone));
+  assert.equal(undone.plan.undo, "Put trigger row 2 back as it was", "the writer's own layout from here");
+  assert.deepEqual(await hand.service.apply(undone, operator), { ok: true });
+  assert.deepEqual(JSON.parse(hand.read()), JSON.parse(handBytes), "every value back");
+  assert.notEqual(hand.read(), handBytes, "and not the bytes, as the page said");
+});
+
+test("host names read in order, whatever order the registry answers in", async () => {
+  const hosts = [{ name: "mini1", state: "current", mcp: [{ name: "linear", enabled: true, where: "mcp.example.com", keys: [] }], unread: [], more: {} }, { name: "build3", state: "current", mcp: [{ name: "linear", enabled: true, where: "mcp.example.com", keys: [] }], unread: [], more: {} }];
+  const f = fixture({ run: HELD, deps: { readHostLoads: async () => ({ hosts }) } });
+  const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
+  assert.ok(out.summary.some((line) => line.endsWith("build3 and mini1 have it.")), out.summary.join("\n"));
 });
 
 test("the audit line and the file it writes are said, by the person who is asking", async () => {
@@ -1335,7 +1459,7 @@ test("jobs in line are judged on the PROPOSED entry: the job the new key refuses
   const { f, seen } = skewFixture([queued("gh-c9e1")]);
   const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
   assert.deepEqual(out.plan.skew, { rows: [{ jobId: "gh-c9e1", queue: "pi-jobs", field: "mcp" }], incomplete: false });
-  assert.ok(out.summary.includes("With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: gh-c9e1 as trigger-skew (run.mcp). Re-run it from its page."), out.summary.join("\n"));
+  assert.ok(out.summary.includes("With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: gh-c9e1 as trigger-skew (run.mcp)."), out.summary.join("\n"));
   // The control, the same job against the file as it stands: nothing refuses it.
   const today = await readTriggerSkew({ index: 1, waiting: { rows: [{ jobId: "gh-c9e1", queue: "pi-jobs" }] }, triggersPath: f.paths.triggersPath, lookupJob: async () => ({ data: queued("gh-c9e1").data }) });
   assert.deepEqual(today.rows, []);
@@ -1356,23 +1480,64 @@ test("a job that already carries the field, one of another trigger, and one of a
   assert.deepEqual(moved.plan.skew.rows, []);
 });
 
-test("every narrowing field the card writes is named by the worker's own table when a queued job lacks it", async () => {
-  for (const [change, field] of [[{ models: [HAIKU] }, "models"], [{ models: [HAIKU, SONNET], fallbackModels: [SONNET] }, "models"], [{ maxCostUsd: "2" }, "maxCostUsd"], [{ mcp: ["docs"] }, "mcp"]]) {
-    const { f } = skewFixture([queued("gh-1")], { run: { provider: "anthropic", model: "claude-haiku-4-5" } });
+// The sentence says a job in line runs without this change unless it is named. So every field the card writes, each with what the
+// real check says of the file that write leaves: a field that is not narrowing refuses nobody, and saying otherwise was false.
+const IN_LINE = [
+  [{ flow: "review" }, null],
+  [{ provider: "openai", model: "gpt-4o" }, null],
+  [{ model: "claude-sonnet-5-5" }, null],
+  [{ maxCostUsd: "2" }, "maxCostUsd"],
+  [{ models: [HAIKU] }, "models"],
+  [{ fallbackModels: [SONNET] }, "fallbackModels"],
+  [{ mcp: ["docs"] }, "mcp"],
+  [{ packages: false }, null],
+  [{ excludeTools: ["bash"] }, null],
+];
+test("the rows below hold every field the card writes", () => {
+  assert.deepEqual(new Set(IN_LINE.flatMap(([change]) => Object.keys(change))), new Set(CARD_FIELDS));
+});
+for (const [change, field] of IN_LINE) {
+  test(`a job in line under ${JSON.stringify(change)}: ${field === null ? "runs, and no sentence names it" : `refused, as run.${field}`}, as the worker's own check says of the written file`, async () => {
+    // A job that carries the list, so the one thing it lacks is what this row adds.
+    const carried = "fallbackModels" in change ? { models: [HAIKU, SONNET] } : {};
+    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) } });
     const out = await f.service.preview(ask(f, change), operator);
-    assert.deepEqual(out.plan.skew.rows, [{ jobId: "gh-1", queue: "pi-jobs", field }], JSON.stringify(change));
-    assert.ok(out.summary.some((line) => line.includes(`gh-1 as trigger-skew (run.${field})`)), out.summary.join("\n"));
-  }
+    assert.ok(out.plan, JSON.stringify(out));
+    assert.deepEqual(out.plan.skew.rows, field === null ? [] : [{ jobId: "gh-1", queue: "pi-jobs", field }], JSON.stringify(change));
+    assert.equal(out.summary.some((line) => line.includes("gh-1 as trigger-skew")), field !== null);
+    assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+    const answer = await makeCheckWaitSkew({ triggersPath: f.paths.triggersPath })(queued("gh-1", carried).data);
+    assert.deepEqual(answer, field === null ? { ok: true } : { skewed: true, field });
+  });
+}
+
+test("a schedule's jobs carry no index the check can compare, so nothing reads them and no sentence speaks of refusing them", async () => {
+  let reads = 0;
+  const f = fixture({ deps: { readSkew: async () => { reads += 1; return { rows: [], incomplete: true }; } } });
+  const out = await f.service.preview(ask(f, { maxCostUsd: "2" }, 0), operator);
+  assert.equal(reads, 0);
+  assert.deepEqual(out.plan.skew, { rows: [], incomplete: false });
+  assert.ok(out.summary.includes("A job already in line keeps what it was queued with and runs without this change. A running job is not touched."), out.summary.join("\n"));
+  assert.ok(!out.summary.some((line) => /trigger-skew|named below/.test(line)), out.summary.join("\n"));
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+  const answer = await makeCheckWaitSkew({ triggersPath: f.paths.triggersPath })({ kind: "local", flow: "tidy", trigger: { id: "daily" } });
+  assert.deepEqual(answer, { ok: true }, "the worker's own check, on the file with its new cap");
+});
+
+test("the sentence about jobs refused stops at their names: a /command's job is not re-run from a page", async () => {
+  const { f } = skewFixture([queued("gh-1")]);
+  const out = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
+  assert.ok(!out.summary.join(" ").includes("Re-run"), out.summary.join("\n"));
 });
 
 test("a job waiting on conditions it lost reads as wait-skew, and many jobs are counted and named up to a bound", async () => {
   const f = fixture({ deps: { readSkew: async () => ({ rows: [{ jobId: "w", queue: "q", conditions: 2 }], incomplete: false }) } });
   const out = await f.service.preview(ask(f, { packages: false }), operator);
-  assert.ok(out.summary.includes("With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: w as wait-skew (its wait conditions). Re-run it from its page."));
+  assert.ok(out.summary.includes("With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: w as wait-skew (its wait conditions)."));
   const rows = Array.from({ length: 7 }, (_, i) => ({ jobId: `gh-${i}`, queue: "q", field: "mcp" }));
   const many = fixture({ deps: { readSkew: async () => ({ rows, incomplete: false }) } });
   const said = await many.service.preview(ask(many, { packages: false }), operator);
-  assert.ok(said.summary.includes("With this change, a host reading this file refuses 7 of this trigger's jobs in line, before they spend: gh-0 as trigger-skew (run.mcp), gh-1 as trigger-skew (run.mcp), gh-2 as trigger-skew (run.mcp), gh-3 as trigger-skew (run.mcp), gh-4 as trigger-skew (run.mcp) and 2 more. Re-run each from its page."), said.summary.join("\n"));
+  assert.ok(said.summary.includes("With this change, a host reading this file refuses 7 of this trigger's jobs in line, before they spend: gh-0 as trigger-skew (run.mcp), gh-1 as trigger-skew (run.mcp), gh-2 as trigger-skew (run.mcp), gh-3 as trigger-skew (run.mcp), gh-4 as trigger-skew (run.mcp) and 2 more."), said.summary.join("\n"));
 });
 
 test("a queue it could not read whole says so and refuses nothing: a free refusal at pickup is no reason to stop a person", async () => {
@@ -1468,7 +1633,7 @@ test("every host at or above the need passes, with the stamp said out loud and w
   assert.ok(out.plan, JSON.stringify(out));
   assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 1 });
   assert.ok(out.summary.includes("Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."));
-  assert.ok(out.summary.includes("mini1, mini2 and build3 each read what this change needs."));
+  assert.ok(out.summary.includes("build3, mini1 and mini2 each read what this change needs."));
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   assert.equal(JSON.parse(f.read()).version, 2);
 });

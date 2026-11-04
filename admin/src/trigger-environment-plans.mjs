@@ -40,7 +40,7 @@ import { outputCapView, outputUnboundable } from "@edgehero/pi-dispatch/output-c
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 import { readOverlay } from "@edgehero/pi-dispatch/runtime-settings";
-import { parseTriggers, parseTriggersDocument, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
+import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, parseTriggers, parseTriggersDocument, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
 import { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
 import { dryRunFs } from "./console/actions.mjs";
 import { collectModelPolicies } from "./models-view.mjs";
@@ -71,6 +71,9 @@ const PICKUP_TAIL = "This reads this host's .env and overlay; what the worker's 
 const SKEW_NAMED_MAX = 5;
 /** How long the preview waits for the jobs in line, `SNAPSHOT_TIMEOUT_MS`'s bound and for its reason. */
 const JOBS_READ_MS = 10_000;
+
+/** A built-in tool no job has unless an extension turns it on: `DEFAULT_ON_TOOL_NAMES`' other half. */
+const offByDefault = (name) => EXCLUDABLE_TOOL_NAMES.has(name) && !DEFAULT_ON_TOOL_NAMES.has(name);
 
 /** "a", "a and b", "a, b and c". */
 function listed(names) {
@@ -121,6 +124,9 @@ function sameToAJob(key, before, after) {
   return same(read(before) ?? null, read(after) ?? null);
 }
 
+/** Host names in a sentence, sorted: `listed` keeps the order it is given, and a registry's order is nobody's to read. */
+const hostsNamed = (names) => listed([...names].sort());
+
 /** What a list gained and lost, and whether only its order moved. */
 function delta(before, after) {
   const was = Array.isArray(before) ? before : [];
@@ -136,7 +142,7 @@ function delta(before, after) {
  * a model field or the cap was sent, and those are the only changes that read it. Whether a job may call more models is not
  * said here: that is the resolver's answer, before and after (`callableWidening`), not this key's.
  */
-function changeWords(key, before, after, facts) {
+function changeWords(key, before, after, facts, effective = null) {
   const removedKey = after === undefined;
   const addedKey = before === undefined;
   switch (key) {
@@ -175,17 +181,27 @@ function changeWords(key, before, after, facts) {
     }
     case "mcp": {
       const d = delta(before, after);
-      return { line: d.reordered ? "MCP: the same servers in a new order." : `MCP: ${[...d.added.map((name) => `${name} on`), ...d.removed.map((name) => `${name} off`)].join(", ")}.`, addedServers: d.added };
+      const moved = [...d.added.map((name) => `${name} on`), ...d.removed.map((name) => `${name} off`)];
+      // An empty list the loader refuses, taken out: nothing moves, and "MCP: ." says nothing at all.
+      return { line: d.reordered ? "MCP: the same servers in a new order." : moved.length > 0 ? `MCP: ${moved.join(", ")}.` : "MCP: the empty list the file held removed.", addedServers: d.added };
     }
     case "packages": {
       return after !== false ? { line: "Staged packages: on.", widening: "This widens what its jobs load: every package staged on the host that runs them." } : { line: "Staged packages: off." };
     }
     case "excludeTools": {
-      const d = delta(before, after);
-      return {
-        line: d.reordered ? "Tools: the same removals in a new order." : `Tools: ${[...d.added.map((name) => `${name} off`), ...d.removed.map((name) => `${name} on`)].join(", ")}.`,
-        ...(d.removed.length > 0 ? { widening: `This widens what its jobs can do: ${d.removed.join(", ")} back on.` } : {}),
-      };
+      const raw = delta(before, after);
+      if (raw.reordered) return { line: "Tools: the same removals in a new order." };
+      // What a job lacks is the loader's list and not the file's: a watch rule's keeps edit, write, bash and powershell off
+      // whatever the file says. And a tool a job would not have anyway comes back to nothing: pi's defaults are read, bash,
+      // edit and write, so taking `ls` out of the list turns nothing on until an extension does.
+      const d = delta(effective?.before ?? before, effective?.after ?? after);
+      const moved = [...d.added.map((name) => `${name} off`), ...d.removed.map((name) => (offByDefault(name) ? `${name} no longer removed, and off unless an extension turns it on` : `${name} on`))];
+      if (moved.length > 0) {
+        const wider = d.removed.filter((name) => !offByDefault(name));
+        return { line: `Tools: ${moved.join(", ")}.`, ...(wider.length > 0 ? { widening: `This widens what its jobs can do: ${wider.join(", ")} back on.` } : {}) };
+      }
+      const named = [raw.added.length > 0 ? `now names ${listed(raw.added)}` : "", raw.removed.length > 0 ? `no longer names ${listed(raw.removed)}` : ""].filter(Boolean).join(" and ");
+      return { line: named !== "" ? `Tools: the file's list ${named}, and what its jobs lack does not change.` : "Tools: the empty list the file held removed." };
     }
     default:
       throw new RangeError(`no words for ${key}`);
@@ -216,7 +232,7 @@ function callableWidening(before, after, envList) {
 
 /** A server's where and key, when every host that has it agrees; a sentence must be true of each host a job can land on. */
 function serverReach(name, hosts) {
-  const rows = hosts.flatMap((host) => (Array.isArray(host?.mcp) ? host.mcp.filter((row) => row?.name === name && row.enabled === true) : []));
+  const rows = hosts.flatMap((host) => (host?.state === "current" && Array.isArray(host.mcp) ? host.mcp.filter((row) => row?.name === name && row.enabled === true) : []));
   if (rows.length === 0 || new Set(rows.map((row) => JSON.stringify([row.where, row.keys]))).size !== 1) return `connect to ${name}`;
   const [{ where, keys }] = rows;
   if (typeof where !== "string") return `connect to ${name}`;
@@ -224,8 +240,10 @@ function serverReach(name, hosts) {
 }
 
 /**
- * Which hosts have a server, by what each published (`doctor:loads:<name>`). A host that has not published, or whose list of
- * servers was cut or unread, is unknown and never reads as lacking it (`hostsAgree`'s rule).
+ * Which hosts have a server, by what each published (`doctor:loads:<name>`), read as the card reads it (`readHostLoadsView`'s
+ * `state`). A host that has not published, whose publication is old or was written by a newer release, or whose list of servers
+ * was cut or unread, reads unknown: never as having it, and never as lacking it. Names go in order, whatever order the registry
+ * answers in, so a sentence reads the same on a preview, on the card and from one page load to the next.
  */
 function serverHosts(name, hosts) {
   const has = [];
@@ -233,12 +251,12 @@ function serverHosts(name, hosts) {
   const unknown = [];
   for (const host of hosts) {
     const row = Array.isArray(host?.mcp) ? host.mcp.find((entry) => entry?.name === name) : undefined;
-    const answers = Array.isArray(host?.mcp) && !(host?.unread ?? []).includes("mcp");
+    const answers = host?.state === "current" && Array.isArray(host?.mcp) && !(host?.unread ?? []).includes("mcp");
     if (row?.enabled === true && answers) has.push(host.name);
     else if (answers && (row !== undefined || !(host?.more?.mcp > 0))) lacks.push(host.name);
     else unknown.push(host.name);
   }
-  const parts = [has.length ? `${listed(has)} ${has.length === 1 ? "has" : "have"} it` : "", lacks.length ? `${listed(lacks)} ${lacks.length === 1 ? "does" : "do"} not` : "", unknown.length ? `${listed(unknown)} ${unknown.length === 1 ? "has" : "have"} not said` : ""].filter(Boolean);
+  const parts = [has.length ? `${hostsNamed(has)} ${has.length === 1 ? "has" : "have"} it` : "", lacks.length ? `${hostsNamed(lacks)} ${lacks.length === 1 ? "does" : "do"} not` : "", unknown.length ? `${hostsNamed(unknown)} ${unknown.length === 1 ? "reads" : "read"} unknown` : ""].filter(Boolean);
   return parts.join("; ");
 }
 
@@ -539,8 +557,9 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
         const shortTask = firstCallBoundMicros(priced, FIRST_CALL_SHORT_TASK_BYTES);
         if (shortTask <= cap) continue;
         const room = facts.ceiling === null || shortTask <= facts.ceiling;
-        const out = room ? `Choose another model, or a job cap of at least ${money(shortTask)}; a longer task needs more.` : "A trigger can only lower the deployment's job cap: choose another model. The deployment's own cap belongs to its settings, not to this page.";
-        // "At least", because the bound is a lower one for any task longer than that: it grows with the whole request.
+        const out = room ? `Choose another model, or a job cap of at least ${money(shortTask)}; a repository's context files and a longer task need more.` : "A trigger can only lower the deployment's job cap: choose another model. The deployment's own cap belongs to its settings, not to this page.";
+        // "At least", because the bound is a lower one for any larger request: it grows with the whole of it, and a repository's
+        // context files go in the system prompt before any task does (`FIRST_CALL_SHORT_TASK_BYTES` holds none).
         if (floor > cap) return refuse(`${name} needs at least ${money(shortTask)} for a short task's first call, above ${room ? "this trigger's" : "the deployment's"} ${money(room ? cap : facts.ceiling)} job cap, so the runner would refuse every call to it before it is sent. ${out}`);
         thin.add(`${name} clears this ${money(cap)} job cap only for the smallest first call: a short task's needs ${money(shortTask)}, so most jobs that call it would be refused before they spend. ${out}`);
       }
@@ -557,7 +576,6 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const problem = shapeProblem(body);
     if (problem) return refuse(problem);
     if (!paths?.triggersPath) return refuse("This console does not name its triggers file.", 409);
-    if (!CARD_FIELDS.some((key) => body[key] !== undefined)) return refuse("Send at least one field to change.");
     const expect = writeInputs({ paths: [paths.triggersPath], fs });
     let doc;
     let beforeText;
@@ -576,7 +594,9 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     // trigger's edit does not send this person back (`triggerEntryDigest`).
     if (triggerEntryDigest(entry) !== body.pageDigest) return refuse("This trigger changed since the page drew it, so nothing was changed. Reload the page and make the change again.", 409, "changed");
 
-    // What the trigger edit's own body judges: a value, by the loader's words. The rest, and a null, this planner applies.
+    // What the trigger edit's own body judges: a value, by the loader's words. The rest, and a null, this planner applies. A form
+    // that had nothing to send and one that sent what the file holds are one answer: a model typed that is already on the list
+    // sends nothing, and that is no error, only no change.
     const sent = CARD_FIELDS.filter((key) => body[key] !== undefined && !sameToAJob(key, entry.run[key], body[key]));
     if (sent.length === 0) return { unchanged: `${row} already says this.` };
     const coreKeys = ["flow", "provider", "model"].filter((key) => typeof body[key] === "string");
@@ -665,13 +685,15 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     // those is said by hand rather than offered as a button that refuses.
     const afterDigest = triggerEntryDigest(nextEntry);
     const heldNull = touched.find((key) => entry.run[key] === null);
+    // A file the loader refused as it was: this write may be what fixes it, and no button writes the broken one back.
+    const beforeLoads = wasLoaded !== undefined;
     let backRefused = null;
-    if (heldNull === undefined) {
+    if (beforeLoads && heldNull === undefined) {
       if (touched.some((key) => MODEL_OR_CAP.includes(key))) backRefused = judgeModels({ entry, was: nextEntry, text: beforeText, facts, touched }).refusal ?? null;
       if (backRefused === null && reachesPickup) backRefused = judgeMcp({ was: nowRun, run: wasRun, entry, text: beforeText, facts }).refusal ?? null;
     }
     let inverse = null;
-    if (heldNull === undefined && backRefused === null) {
+    if (beforeLoads && heldNull === undefined && backRefused === null) {
       const fields = Object.fromEntries(touched.map((key) => [key, entry.run[key] ?? null]));
       const replayed = { ...nextEntry.run };
       for (const [key, value] of Object.entries(fields)) {
@@ -680,9 +702,23 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       }
       inverse = { action: "trigger-environment-edit", body: { index: body.index, pageDigest: afterDigest, ...fields, ...(same(Object.keys(replayed), Object.keys(entry.run)) ? {} : { keyOrder: Object.keys(entry.run) }) } };
     }
-    const undo = inverse !== null ? `Put ${row} back as it was` : heldNull !== undefined ? `Edit ${row} back by hand: the file held run.${heldNull} as null, which this page cannot write` : `Edit ${row} back by hand: this page would refuse what it said before. ${backRefused}`;
+    // Whether the writer, changing nothing, would write these bytes back. On a hand-written file it does not: the first write
+    // puts all of it in the writer's layout, every line of the diff moves for that, and an Undo restores values, not bytes, so
+    // neither the Confirm nor the Undo may read as though only this key moved.
+    const keepsLayout = (() => {
+      const probe = dryRunFs(fs);
+      try {
+        const same = writeTriggers({ triggersPath: paths.triggersPath, mutate: (raw) => raw, fs: probe, now, ...triggersTables });
+        if (same?.ok === true) return probe.files.get(paths.triggersPath) === beforeText;
+      } catch {
+        // The bytes are what is asked about, and they were read above.
+      }
+      return `${JSON.stringify(doc, null, 2)}\n` === beforeText;
+    })();
+    const undo = !beforeLoads ? `Edit ${row} back by hand: the file did not load as it was, and this page will not write that back` : inverse !== null ? (keepsLayout ? `Put ${row} back as it was` : `Put ${row}'s values back; the file keeps the layout this write gave it`) : heldNull !== undefined ? `Edit ${row} back by hand: the file held run.${heldNull} as null, which this page cannot write` : `Edit ${row} back by hand: this page would refuse what it said before. ${backRefused}`;
 
-    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key] ?? undefined, nextEntry.run[key] ?? undefined, facts) }));
+    const effectiveTools = wasLoaded ? { before: wasRun.excludeTools ?? [], after: nowRun.excludeTools ?? [] } : null;
+    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key] ?? undefined, nextEntry.run[key] ?? undefined, facts, key === "excludeTools" ? effectiveTools : null) }));
     if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
       const before = policyOf({ entry, text: afterText, facts });
       const after = policyOf({ entry: nextEntry, text: afterText, facts });
@@ -696,7 +732,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       jobDataVersion: parseTriggers(afterText, paths.triggersPath, triggersTables).reduce((most, trigger) => Math.max(most, jobDataVersionFor(trigger?.run, jobDataTables)), 1),
     };
     const stamped = need.triggersVersion > (Number.isSafeInteger(doc.version) ? doc.version : 1);
-    return { body, expect, row, cron: entry.on?.type === "cron", beforeText, afterText, mutate, dry, changes, unjudged, thin, warnings, pickupWarned, undo, inverse, need, stamped };
+    return { body, expect, row, type: entry.on?.type, beforeText, afterText, mutate, dry, changes, unjudged, thin, warnings, pickupWarned, keepsLayout, undo, inverse, need, stamped };
   }
 
   /**
@@ -720,7 +756,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const older = hosts.filter((host) => !silent.includes(host) && wanted.some(([field, version]) => !(Number.isSafeInteger(Number(host[field])) && Number(host[field]) >= version)));
     if (silent.length > 0 || older.length > 0) {
       const what = wanted.map(([field, version]) => `${field === "triggersVersion" ? "the triggers file" : "the job data"} at version ${version}`).join(" and ");
-      const parts = [older.length ? `${listed(older.map((host) => host.name))} ${older.length === 1 ? "reads" : "read"} less, and would hold every job this file touches` : "", silent.length ? `${listed(silent.map((host) => host.name))} ${silent.length === 1 ? "publishes" : "publish"} no version, and would drop what ${silent.length === 1 ? "it does" : "they do"} not know, which can run a job wider on a clean record` : ""].filter(Boolean);
+      const parts = [older.length ? `${hostsNamed(older.map((host) => host.name))} ${older.length === 1 ? "reads" : "read"} less, and would hold every job this file touches` : "", silent.length ? `${hostsNamed(silent.map((host) => host.name))} ${silent.length === 1 ? "publishes" : "publish"} no version, and would drop what ${silent.length === 1 ? "it does" : "they do"} not know, which can run a job wider on a clean record` : ""].filter(Boolean);
       return refuse(`This change needs ${what}. ${parts.join("; ")}. Upgrade ${silent.length + older.length === 1 ? "that host" : "those hosts"} first.`, 409);
     }
     return { hosts: hosts.map((host) => host.name) };
@@ -746,7 +782,8 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     if (rows.length > 0) {
       const said = rows.slice(0, SKEW_NAMED_MAX).map((row) => (row.conditions ? `${row.jobId} as wait-skew (its wait conditions)` : `${row.jobId} as trigger-skew (run.${row.field})`));
       const more = rows.length - said.length;
-      lines.push(`With this change, a host reading this file refuses ${rows.length} of this trigger's jobs in line, before ${rows.length === 1 ? "it spends" : "they spend"}: ${said.join(", ")}${more > 0 ? ` and ${more} more` : ""}. Re-run ${rows.length === 1 ? "it" : "each"} from its page.`);
+      // Names, and no way out: a job a `/command` queued is not re-run from the console, so no instruction here holds of them all.
+      lines.push(`With this change, a host reading this file refuses ${rows.length} of this trigger's jobs in line, before ${rows.length === 1 ? "it spends" : "they spend"}: ${said.join(", ")}${more > 0 ? ` and ${more} more` : ""}.`);
     }
     if (incomplete) lines.push("The jobs in line could not all be read, so any of them may also be refused as trigger-skew.");
     return lines;
@@ -773,21 +810,25 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const reach = [...servers.map((name) => serverReach(name, hosts)), ...(added.includes("forge") ? ["connect to the job's own forge server"] : [])];
     // "Connect" only where nothing below says a job may be refused first: a warning here is about the whole job, not one server.
     const said = changes.map((change) => (change.addedServers?.length > 0 ? { ...change, widening: pickupWarned ? `This widens what its jobs may reach: ${listed(added)}.` : `This widens what its jobs reach: jobs queued from this file ${reach.join(" and ")}.` } : change));
-    const skew = await jobsRefused(judged.body.index, judged.dry);
+    // A schedule's and a watch rule's jobs carry no matched index, so the skew check has nothing to compare them with: it answers
+    // `ok` for every one (`makeCheckWaitSkew`). Nothing to read, and nothing to say about what could not be read.
+    const noSkew = judged.type === "cron" || judged.type === "watch";
+    const skew = noSkew ? { rows: [], incomplete: false } : await jobsRefused(judged.body.index, judged.dry);
     const lines = [
       ...said.flatMap((change) => [change.line, ...(change.widening ? [change.widening] : [])]),
+      ...(judged.keepsLayout ? [] : ["This file is not in the writer's layout, so this write also rewrites all of it: spacing and line breaks move in lines this change does not touch, and what each key says does not. Undo puts the values back, not that layout."]),
       ...warnings,
       ...thin,
       // Each of these is about when this file's change takes effect, and each holds of a fleet where hosts keep their own copy
       // (docs/multi-host.md, trap 2: syncing the file is the operator's). "New deliveries use this" did not: this host's file is
       // all this page writes, and a receiver in compose's single-file mount reads it only at its restart.
       "The services reading this file use it from their next reload, for the jobs they queue after that.",
-      "A job already in line keeps what it was queued with, or is refused if this file now narrows something it lacks. A running job is not touched.",
+      noSkew ? "A job already in line keeps what it was queued with and runs without this change. A running job is not touched." : "A job already in line keeps what it was queued with and runs without this change, unless it is named below as refused. A running job is not touched.",
       "A host with its own copy of this file keeps what it has until that copy changes.",
-      ...(judged.cron ? ["While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree."] : []),
+      ...(judged.type === "cron" ? ["While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree."] : []),
       ...skewLines(skew),
       ...(judged.stamped ? [`Stamps the file version ${judged.need.triggersVersion}: a host reading less waits on every trigger's jobs, not only this one's.`] : []),
-      ...(gate.hosts === null ? [] : [gate.hosts.length > 0 ? `${listed(gate.hosts)} ${gate.hosts.length === 1 ? "reads" : "each read"} what this change needs.` : "No host is live right now, so no host's release could be checked."]),
+      ...(gate.hosts === null ? [] : [gate.hosts.length > 0 ? `${hostsNamed(gate.hosts)} ${gate.hosts.length === 1 ? "reads" : "each read"} what this change needs.` : "No host is live right now, so no host's release could be checked."]),
       ...servers.map((name) => `A job on a host without ${name}, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid.${hosts.length > 0 ? ` ${serverHosts(name, hosts)}.` : " No host has published which servers it has."}`),
       ...(unjudged.length > 0 ? [`The first call on ${listed(unjudged)} could not be bounded here, so the runner judges it when a job runs.`] : []),
       `Written to ${basename(paths.triggersPath)} on this host and audited as trigger-edit, by ${typeof ctx.name === "string" && ctx.name !== "" ? ctx.name : "the operator"} at the console.`,

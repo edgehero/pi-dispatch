@@ -218,6 +218,12 @@ const REVIEW_ACTION = "review_submitted";
 // EXPORTED for the two pinned-set bolts and for the admin, which states the vocabulary to an operator.
 export const EXCLUDABLE_TOOL_NAMES = new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
 /**
+ * The built-in tools a job has when nothing narrows them: the pinned pi's `DEFAULT_TOOL_NAMES`, a subset of the set above. The rest
+ * stay off unless an extension turns them on, so taking one of those out of `run.excludeTools` hands a job nothing by itself.
+ * Bolted to the artifact in `worker/test/exclude-tools.pinned.test.mjs`.
+ */
+export const DEFAULT_ON_TOOL_NAMES = new Set(["read", "bash", "edit", "write"]);
+/**
  * The tools a job's MCP brings (REQ-MCP-OPERATOR-SERVERS, image/runner/src/mcp.mjs), excludable only by a trigger that
  * names servers: codemode, tool_search and pi's three resource tools. One server's tools are excluded as a whole by
  * `mcpServerToolPattern(name)`; a single tool of a server is not, since its name (pi's sanitized `mcp__<server>__<tool>`)

@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironmentChange",
   "pr": 800,
-  "words": "4a7dc69d95a39c779926357ee10f5226917820609b435fe20126f35d35cf976e",
+  "words": "412360aa218f0a2c83b3e8897c3f5e0fc42e4a135b7c7f9f5ba0b7d971e1ea94",
   "elements": [
     {
       "el": "p-trigger-gets-preview",
@@ -66,7 +66,7 @@
       "golden": [
         "panels/trigger-gets-preview.operator"
       ],
-      "shows": "With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: gh-c9e1 as trigger-skew (run.mcp). Re-run it from its page."
+      "shows": "With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: gh-c9e1 as trigger-skew (run.mcp)."
     },
     {
       "el": "What a host without the server does",
@@ -101,7 +101,7 @@
       ],
       "shows": [
         "The services reading this file use it from their next reload, for the jobs they queue after that.",
-        "A job already in line keeps what it was queued with, or is refused if this file now narrows something it lacks. A running job is not touched.",
+        "A job already in line keeps what it was queued with and runs without this change, unless it is named below as refused. A running job is not touched.",
         "A host with its own copy of this file keeps what it has until that copy changes."
       ]
     },
@@ -111,6 +111,13 @@
       "status": "new",
       "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
       "holds": "makeMcpCheck"
+    },
+    {
+      "el": "A hand-written file previews, and says the first write rewrites all of it",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "the writer's layout"
     },
     {
       "el": "A cap that clears the floor but not a short task previews, and says so",

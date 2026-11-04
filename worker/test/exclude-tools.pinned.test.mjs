@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { EXCLUDABLE_TOOL_NAMES } from "../src/triggers.mjs";
+import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES } from "../src/triggers.mjs";
 
 /**
  * The bolt on `EXCLUDABLE_TOOL_NAMES` (issue #291; AGENTS.md's rule: a hand-written table that restates
@@ -40,4 +40,10 @@ test("EXCLUDABLE_TOOL_NAMES is exactly the pinned pi's allToolNames", { skip }, 
 	// package root does not export -- the same route usage-meter's own resolver takes.
 	const tools = await import(new URL("dist/core/tools/index.js", piRoot).href);
 	assert.deepEqual([...EXCLUDABLE_TOOL_NAMES].sort(), [...tools.allToolNames].sort(), PROTOCOL);
+});
+
+test("DEFAULT_ON_TOOL_NAMES is exactly the pinned pi's DEFAULT_TOOL_NAMES", { skip }, async () => {
+	const settings = await import(new URL("dist/core/settings-manager.js", piRoot).href);
+	assert.deepEqual([...DEFAULT_ON_TOOL_NAMES].sort(), [...settings.DEFAULT_TOOL_NAMES].sort(), "the pinned pi's default tools moved. Re-read what `trigger-environment-plans.mjs` says of a tool taken out of run.excludeTools, and trigger-gets-view.mjs's toolsOn sentence, against the new list.");
+	for (const name of DEFAULT_ON_TOOL_NAMES) assert.ok(EXCLUDABLE_TOOL_NAMES.has(name), name);
 });

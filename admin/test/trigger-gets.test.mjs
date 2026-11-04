@@ -411,9 +411,8 @@ test("the cards say what the write side says: their words are the planner's, Bui
   const straight = (text) => text.replaceAll("’", "'").replace(/\s+/g, " ").replace(/ ([.,;:)])/g, "$1");
   const held = (line) => assert.ok(straight(card).includes(line), `the card says: ${line}`);
   const planned = await service.preview({ index: 2, pageDigest, mcp: ["linear"], excludeTools: ["bash"] }, operator);
-  // The card names its hosts in its own order, and the planner in the file's: the same sentence, with the hosts' names apart.
   assert.ok(planned.summary.includes("The services reading this file use it from their next reload, for the jobs they queue after that."), "a line the card must carry");
-  for (const line of planned.summary) held(line.replace("build3 and mini1 have it", "mini1 and build3 have it"));
+  for (const line of planned.summary) held(line);
   held(planned.plan.undo);
   held(`Confirm: change ${planned.plan.row}`);
   const cost = await service.preview({ index: 2, pageDigest, model: "claude-opus-5-5" }, operator);

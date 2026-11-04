@@ -298,8 +298,10 @@ Keep changes focused.</pre
 </blockquote></div></section><section id="p-trigger-kinds" data-panel><div class="card"><div class="card__head"><h2>Other kinds</h2></div><p>
 Spent by gh-spent; clear on.disarmed by hand to re-arm it.
 </p></div></section><section id="p-trigger-change" data-panel><div class="card"><div class="card__head"><h2>Before you change it</h2></div><p>
-A job already in line is refused if this trigger has gained a field the
-job lacks. Adding or deleting a row renumbers the rows after it.
+A job already in line keeps what it was queued with and runs without a
+change here, unless this trigger has gained a narrowing field the job
+lacks, such as a list of models, a cap or a server: then it is refused.
+Adding or deleting a row renumbers the rows after it.
 </p>
 <p>
 Jobs that would be refused cannot be checked here.
