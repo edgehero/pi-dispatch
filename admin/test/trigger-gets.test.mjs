@@ -302,9 +302,10 @@ test("MCP: each server with what each host says of it, flagged where one lacks i
   // Past its cap a list cannot say a server is missing.
   const capped = await published({ wide: { mcp: Array.from({ length: 40 }, (_, at) => ({ ...linear, name: `s${at}` })) } });
   assert.equal(triggerGetsOf({ trigger: { ...COMMENT, mcp: ["linear"] }, hostLoads: capped, liveHosts: ["wide"] }).mcp.items.find((item) => item.name === "linear").tag, "unknown on wide");
-  // Two hosts that define one server two ways do not get one sentence.
+  // Two hosts that define one server two ways do not get one sentence, and whether that reaches these jobs depends on whether they name it.
   const differ = await published({ a: { mcp: [linear] }, b: { mcp: [{ ...linear, where: "other.example" }] } });
-  assert.equal(triggerGetsOf({ trigger: COMMENT, hostLoads: differ, liveHosts: ["a", "b"] }).mcp.items.find((item) => item.name === "linear").sub, "defined differently by host");
+  assert.equal(triggerGetsOf({ trigger: { ...COMMENT, mcp: ["linear"] }, hostLoads: differ, liveHosts: ["a", "b"] }).mcp.items.find((item) => item.name === "linear").sub, "defined differently by host");
+  assert.equal(triggerGetsOf({ trigger: COMMENT, hostLoads: differ, liveHosts: ["a", "b"] }).mcp.items.find((item) => item.name === "linear").sub, "not on for these jobs; turning it on would differ by host");
   const nothing = triggerGetsOf({ trigger: { ...COMMENT, forge: null }, hostLoads: await published({ a: {} }), liveHosts: ["a"] });
   assert.equal(nothing.mcp.none, true);
 });

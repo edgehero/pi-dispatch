@@ -127,8 +127,9 @@ function hostFacts(row, trigger) {
 /**
  * This host's record, cut to what reaches a job of this trigger, for `hostsAgree`: its packages unless it withholds them, the overlay's
  * extensions where the host allows them, its skills, the servers it names and its own flow's answer. So "the same" is asked of the one rule
- * every other surface uses. REJECTED: asking it of the whole record, where another trigger's flow or a server this one never names would
- * deny "the same" with nothing on this card to show why.
+ * every other surface uses, and it is about what these jobs get. REJECTED: asking it of the whole record, where another trigger's flow or a
+ * server this one never names would deny "the same" over what no job of this trigger touches. A server it does not name has its own row, and
+ * that row says the server is not on for these jobs and what turning it on would meet (`mcpRow`), so the pill and the row do not disagree.
  */
 function agreeRow(row, trigger) {
   const named = overlayServersOf(trigger);
@@ -352,10 +353,15 @@ function extensionsRow({ trigger, rows, last }) {
   return { packagesOn: trigger.packages !== false, items, more: morePackages, none: items.length === 0, noneWord: known.length > 0 ? TRIGGER_GETS_WORDS.noExtensions : TRIGGER_GETS_WORDS.noExtensionsKnown };
 }
 
-function serverWords(rows) {
+/**
+ * How the hosts define a server. Two definitions are a difference in what these jobs get only where this trigger names the server, and the pill
+ * says so then. Where it does not, the jobs do not use it and their pills do not compare it, so the row says that, and what it would mean to
+ * turn it on. REJECTED: "defined differently by host" there, a line that read as the contradiction of "the same" above it.
+ */
+function serverWords(rows, named) {
   const defined = rows.map((row) => row.server);
   const same = new Set(defined.map((server) => JSON.stringify([server.transport, server.where, server.exposure, server.keys]))).size === 1;
-  if (!same) return "defined differently by host";
+  if (!same) return named ? "defined differently by host" : "not on for these jobs; turning it on would differ by host";
   const [{ transport, where, exposure, keys }] = defined;
   return [transport, where, exposure, keys.length > 0 ? `uses ${listed(keys)} by name` : null].filter(Boolean).join(" · ");
 }
@@ -374,7 +380,7 @@ function mcpRow({ trigger, rows, overlayServers }) {
     const lacking = rows.filter((row) => listsWhole(row, "mcp") && !(row.mcp ?? []).some((server) => server.name === name)).map((row) => row.name);
     const unknown = rows.filter((row) => !on.includes(row.name) && !off.includes(row.name) && !lacking.includes(row.name)).map((row) => row.name);
     const tag = [on.length > 0 ? listed(on) : null, off.length > 0 ? `off on ${listed(off)}` : null, lacking.length > 0 ? `not on ${listed(lacking)}` : null, unknown.length > 0 ? `unknown on ${listed(unknown)}` : null].filter(Boolean).join("; ");
-    return { name, on: named.includes(name), sub: defined.length > 0 ? serverWords(defined) : "no host says how it is defined", tag, lacks: off.length + lacking.length > 0 };
+    return { name, on: named.includes(name), sub: defined.length > 0 ? serverWords(defined, named.includes(name)) : "no host says how it is defined", tag, lacks: off.length + lacking.length > 0 };
   });
   return { items, none: items.length === 0, noneWord: rows.some((row) => row.state === "current") ? TRIGGER_GETS_WORDS.noServers : TRIGGER_GETS_WORDS.noServersKnown };
 }

@@ -360,3 +360,27 @@ test("a flow doctor found nowhere is said on its row and each pill, before a pai
   assert.equal(triggerGetsOf({ trigger: { ...LOCAL, flow: null }, hostLoads: await published({ mini1: noFlow }), liveHosts: ["mini1"] }).flow.lacking, null);
   assert.deepEqual(await pills({ mini1: noFlow }, { ...LOCAL, flow: null }), { mini1: "the only host" });
 });
+
+test("the pills and the MCP row say one thing about a server: the pill what these jobs get, the row what it would be to turn it on", async () => {
+  const linear = { name: "linear", transport: "http", where: "mcp.example.com", exposure: "codemode", enabled: true, keys: ["LINEAR_API_KEY"] };
+  const other = { ...linear, where: "other.example" };
+  const WORDS = "http · mcp.example.com · codemode · uses LINEAR_API_KEY by name";
+  const FORGELESS = { ...NO_FLOW, forge: null };
+  const read = async (hosts, trigger = FORGELESS) => {
+    const out = triggerGetsOf({ trigger, hostLoads: await published(hosts), liveHosts: Object.keys(hosts) });
+    const row = out.mcp.items.find((item) => item.name === "linear");
+    return { pills: Object.fromEntries(out.pills.map((pill) => [pill.name, pill.word])), on: row.on, sub: row.sub };
+  };
+  const naming = { ...FORGELESS, mcp: ["linear"] };
+  // Not named, defined two ways: no job of this trigger touches it, and the row says so and what it would meet.
+  assert.deepEqual(await read({ a: { mcp: [linear] }, b: { mcp: [other] } }), { pills: { a: "the same", b: "the same" }, on: false, sub: "not on for these jobs; turning it on would differ by host" });
+  // Named, defined two ways: its jobs meet the difference, so the row and the pills both say it.
+  assert.deepEqual(await read({ a: { mcp: [linear] }, b: { mcp: [other] } }, naming), { pills: { a: "linear defined differently", b: "linear defined differently" }, on: true, sub: "defined differently by host" });
+  // One definition is said as it is, whichever way the switch stands.
+  assert.deepEqual(await read({ a: { mcp: [linear] }, b: { mcp: [linear] } }), { pills: { a: "the same", b: "the same" }, on: false, sub: WORDS });
+  assert.deepEqual(await read({ a: { mcp: [linear] }, b: { mcp: [linear] } }, naming), { pills: { a: "the same", b: "the same" }, on: true, sub: WORDS });
+  // On one host alone and not named: nothing differs for these jobs, and the row's tag says who has it.
+  const oneHost = triggerGetsOf({ trigger: FORGELESS, hostLoads: await published({ a: { mcp: [linear] }, b: {} }), liveHosts: ["a", "b"] });
+  assert.deepEqual(oneHost.pills.map((pill) => pill.word), ["the same", "the same"]);
+  assert.deepEqual(oneHost.mcp.items.map((item) => [item.sub, item.tag]), [[WORDS, "a; not on b"]]);
+});
