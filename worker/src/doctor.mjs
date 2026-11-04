@@ -1891,8 +1891,8 @@ export async function collectChecks(shellVars, seams) {
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
 	// Issue #761: the version tables, and the versions this build reads, that the store-version needs are judged by,
 	// per store: `{ settings: { supported, table, valueTable }, pauseWindows: { supported, table }, triggers: { supported,
-	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. Every table is empty in
-	// this release, so this seam is how a test drives a need above 1 through the real collection before a table has a row.
+	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. This seam is how a test
+	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
 	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(env, fileExists).projects;

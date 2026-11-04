@@ -20,7 +20,8 @@ import { isPackageName } from "./package-names.mjs";
  * WHAT SURVIVES IT, said plainly. Three things the line alone says, which the worker holds to a shape because it has nothing
  * to compare them with, so a repository extension in the same process can forge each:
  *   - an extension tool's name, `LOADED_TOOL_NAME_RE`: no space, no markup, no path, though `ignore-all-previous` passes. Nothing
- *     acts on one here. A later switch that excludes a tool by name could only narrow what a job has, and a wrong one would refuse the job.
+ *     acts on one here. A trigger's page offers one to switch off, and a person who does writes it to `run.excludeExtensionTools`, which can only narrow what a
+ *     job has; at worst a forged name, which no package or overlay extension brought, stops that trigger's strict jobs.
  *   - `pi`, `PI_VERSION_RE`: three dotted numbers, at most 32 characters. Digits, then, and no word.
  *   - every count, an integer up to `LOADED_COUNT_MAX`. It can be wrong, and a forger can spell digits in a run of them.
  * A `pi` holding one of the job's secrets or a known token's shape is refused anyway, and such a tool name is withheld (`known.redact`); a secret

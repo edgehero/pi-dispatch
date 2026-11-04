@@ -21,7 +21,7 @@ import { owningRoot } from "./packages.mjs";
  * no more, and the signature vouches for the runner's channel and not for what is on it. The worker's rebuild is the
  * boundary (worker/src/loaded-record.mjs `rebuildLoaded`): it checks every string it keeps against the same closed patterns,
  * in its own process. What survives that is a token of a closed shape (a tool's name, for which the worker has no list to
- * check against, so it could only narrow what a later switch excludes; pi's version, three dotted numbers) and the counts.
+ * check against, so it could only narrow what `run.excludeExtensionTools` takes out once a person writes it; pi's version, three dotted numbers) and the counts.
  *
  * Everything here is pure and handed its inputs, so it tests without pi or a container. packages.mjs is the one import,
  * for its segment-safe containment, and it reads no pi.
@@ -272,7 +272,7 @@ export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skill
 }
 
 /**
- * The names of the tools a staged package or an overlay extension brought, for a later switch that excludes one:
+ * The names of the tools a staged package or an overlay extension brought, which a trigger's page offers to switch off in `run.excludeExtensionTools`:
  * `{ p: [[row, ...names]], o: [[overlayIndex, ...names]] }`, by source and sorted, so the same job writes the same bytes.
  * `row` is the position in PI_PACKAGES and `overlayIndex` in `overlay.loaded`. A repository's tools are counts only, by
  * the rule at the top of this file, and never reach here. A name that fails the shape, belongs to an overlay name the

@@ -6,8 +6,8 @@ import { loadSchedules } from "../src/schedules.mjs";
 import { approvalTargetKey } from "../src/approval-state.mjs";
 
 // The job data builders stamp `dataVersion` (issue #761, DES-STORE-VERSION-WHEN-NEEDED): the lowest version the data's
-// fields need, never below the version the input arrived with, and nothing at all while that is 1. The shipped table is
-// empty, so today's data is byte-identical; an INJECTED table runs the machinery. Input from a release newer than the
+// fields need, never below the version the input arrived with, and nothing at all while that is 1. The shipped table names
+// few fields, so a job with none of them is byte-identical; an INJECTED table runs the machinery. Input from a release newer than the
 // builder's throws a RangeError (`code: "newer-release"`) before anything is queued.
 
 // A future field: an existing job data key stands in for it, at version 2, with a build that reads version 2.
