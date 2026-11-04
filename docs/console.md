@@ -2384,11 +2384,12 @@ not-found page; an unreadable file is an unavailable state.
 counts this week, so the two can differ. It says the runs differ by host, and how, when two hosts it can read differ, however few
 runs it read, and it then says how few. It says they load the same only when every host that ran something has a record that says
 so and the history could be read whole; otherwise it says how many runs it read and why it will not say more. A trigger that
-withholds its packages and a package canary's candidate are said by name and never count as a host's difference, and neither does the
-overlay of a model canary or a restricted run, which has it shut by its kind. A package canary is an ordinary job on its host's overlay
-switch, so its overlay counts, and so does a host's own `PI_GLOBAL_ALLOW_EXTENSIONS=0`. Each host is read by its newest run of each
-trigger, for names as well as versions, so an update every host took is no difference, while a host still behind is. Two triggers on one
-host add up. A difference also draws a table of each host's runs, extensions and flows. **Missing** counts runs without their flow, with a failed
+withholds its packages is no difference, and neither is a canary. **A host's fact comes from the newest of its runs able to show
+that fact:** pi and its image from its newest run, its packages from its newest run that did not withhold them, was no canary and kept
+their names, and its overlay from its newest run with the overlay open and names kept. So an update every host took is no difference
+whichever trigger ran last, while a host still behind is. A package canary is an ordinary job on its host's overlay switch, so its overlay
+counts, and so does a host's own `PI_GLOBAL_ALLOW_EXTENSIONS=0`; a model canary and a restricted run have the overlay shut by their kind. A
+run with no agent loads nothing, so the card leaves it out and says how many it left out. A difference also draws a table of each host's runs, extensions and flows. **Missing** counts runs without their flow, with a failed
 extension or stopped by an MCP server, and with anything in it the line is not green, however well the hosts agree. A run from an
 older release, or one refused before its container, is counted as not read ([What a run loaded](#what-a-run-loaded)).
 

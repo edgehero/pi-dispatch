@@ -83,7 +83,7 @@ to do about it. The record holds, by tier:
 - **The flow:** the tier it was found in, or that none held it. It is still a report: a job with no flow runs and can exit 0,
   which is why the run's outcome says so.
 - **What was left out on purpose:** `run.excludeTools`, `"packages": false`, this job's overlay switch
-  (`PI_GLOBAL_ALLOW_EXTENSIONS=0` on its host, or a canary's replay) and a kind of job that never gets the overlay. Each is
+  (`PI_GLOBAL_ALLOW_EXTENSIONS=0` on its host, or a model canary's replay) and a kind of job that never gets the overlay. Each is
   said as chosen, never as missing.
 
 A tool's name that holds one of the job's own values is left off the record and counted, because the job's redactor treats

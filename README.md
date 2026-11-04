@@ -201,7 +201,7 @@ updates by itself ([updates](docs/console.md#updates)).
 **Projects:** group your repositories into a project, with its own limits, share of the budget and history, and see
 [what its runs loaded](#what-a-job-gets) on each machine ([projects](docs/projects.md), [budget split](docs/allocation.md)).
 
-![One project: what it has spent, its runs of the last day, what its runs loaded on each machine and where they differ, its members and its limits](docs/images/console/console-project.png?v=2026-11-04-800b)
+![One project: what it has spent, its runs of the last day, what its runs loaded on each machine and where they differ, its members and its limits](docs/images/console/console-project.png?v=2026-11-04-800c)
 
 **A trigger:** what starts it, what it runs and what it has cost. A schedule also gets a button that fires it now
 ([triggers](docs/triggers.md)).
