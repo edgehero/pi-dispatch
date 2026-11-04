@@ -6396,6 +6396,21 @@ test("issue #645: the processor gets the run-record reader (local file first), s
 	assert.deepEqual(asked, ["repeat_a_1"]);
 });
 
+test("issue #811: the run-record reader holds each side to the caller's rule, so a stale record on this host hides nothing in the fleet's copy", { skip }, async () => {
+	const logsDir = tempDir("pi-readrecord-keep-");
+	const stale = lostLockRecord("gh-again", { startedAt: "2026-09-01T10:00:00.000Z", endedAt: "2026-09-01T10:04:00.000Z" });
+	const own = lostLockRecord("gh-again");
+	writeFileSync(join(logsDir, "gh-again.json"), `${JSON.stringify(stale)}\n`);
+	const asked = [];
+	const fleet = await runStart({ env: { PI_LOGS_DIR: logsDir, PI_WORKER_NAME: `rk-${process.pid}` }, readMirroredRecord: async (_r, id) => (asked.push(id), own) });
+	const recent = (record) => Date.parse(record.startedAt) >= Date.parse("2026-10-01T00:00:00.000Z");
+	assert.deepEqual(await fleet.deps.readRecord("gh-again", { keep: recent }), own, "this host's stale record fails the rule, so the fleet's copy answers");
+	assert.deepEqual(asked, ["gh-again"]);
+	assert.deepEqual(await fleet.deps.readRecord("gh-again"), stale, "without a rule this host's record answers, as before");
+	assert.deepEqual(asked, ["gh-again"], "and the fleet's copy is not asked");
+	assert.equal(await fleet.deps.readRecord("gh-again", { keep: () => false }), null, "a record no side passes is none");
+});
+
 test("issue #645: a returned recovery-failed pages once and comments nothing more; lost after returning, it still pages once and never comments", { skip }, async () => {
 	const logsDir = tempDir("pi-recfailed-");
 	const { handlers, drive, posted } = await lostLockBoot({ env: { PI_LOGS_DIR: logsDir } });

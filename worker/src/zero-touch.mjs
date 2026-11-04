@@ -1,4 +1,5 @@
 import { readCapacityRecords } from "./capacity-records.mjs";
+import { RECORD_CLOCK_SKEW_MS } from "./run-history.mjs";
 import { TOUCH_CAUSES, WAIT_END_REASONS, makeTouchStore } from "./touch-state.mjs";
 
 const DAY = 86400_000;
@@ -45,20 +46,34 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 	}
 	const sourceEvents = [...events, ...[...byId.values()].flatMap((r) => Array.isArray(r.touches) ? r.touches : [])];
 	const allEvents = sourceEvents.filter((e) => e?.type !== "stop" && e?.type !== "wait-end" && TOUCH_CAUSES.includes(e?.cause) && ID.test(e.runId ?? "") && validTime(e.at) && e.at <= nowMs);
+	// A run's touches start when its job was created (issue #811). A job id comes back after a lost queue and a hand
+	// redelivery, while the touch index keeps an older job's events under that id, so an event counts against a run only
+	// when it is no earlier than the run's `jobCreatedAt`, less the clock skew between the host that stamped the event
+	// and the one that created the job. A lower bound only: a late answer, an approval and a re-run come after the run
+	// ended and are its own. Not the record's own start (`startedAt` is this attempt's, and a touch during an earlier,
+	// stalled attempt is this run's too), and not `queuedAt` (null on a retry, a stall and a `run.waitFor` job). A record
+	// without the field (written before it, or for a job with no creation time) applies no bound, as before. Every
+	// per-run read is held to it: the wait ends, the record's own fallback evidence below and the per-run counts. The
+	// scope and project streaks read every event, since an older job's intervention in a repository is still activity
+	// in that repository.
+	const createdAtOf = new Map([...byId.values()].map((r) => [r.jobId, time(r.jobCreatedAt)]).filter(([, at]) => validTime(at)));
+	const ownEvent = (e) => { const createdAt = createdAtOf.get(e.runId); return createdAt === undefined || e.at >= createdAt - RECORD_CLOCK_SKEW_MS; };
 	const waitEndsByRun = new Map();
 	for (const event of sourceEvents) {
-		if (event?.type !== "wait-end" || !WAIT_END_REASONS.includes(event.reason) || !ID.test(event.runId ?? "") || !validTime(event.at) || event.at > nowMs) continue;
+		if (event?.type !== "wait-end" || !WAIT_END_REASONS.includes(event.reason) || !ID.test(event.runId ?? "") || !validTime(event.at) || event.at > nowMs || !ownEvent(event)) continue;
 		if (!waitEndsByRun.has(event.runId) || event.at < waitEndsByRun.get(event.runId)) waitEndsByRun.set(event.runId, event.at);
 	}
 	// A terminal cancel and the authenticated delivery counter are durable fallback evidence when their index write
 	// is being repaired. The index supplies the actual intervention time; record end is used only for older evidence.
+	// Only the run's own index event stands in for it: an older job's event of that cause under the id is not one.
 	for (const r of selected) {
 		for (const cause of [...(r.reason === "operator-cancel" ? ["cancel"] : []), ...(r.steered?.delivered > 0 ? ["steer"] : [])]) {
-			if (!allEvents.some((e) => e.runId === r.jobId && e.cause === cause)) allEvents.push({ runId: r.jobId, cause, at: time(r.endedAt), project: r.project ?? null, scopeId: scopeOf(r) });
+			if (!allEvents.some((e) => e.runId === r.jobId && e.cause === cause && ownEvent(e))) allEvents.push({ runId: r.jobId, cause, at: time(r.endedAt), project: r.project ?? null, scopeId: scopeOf(r) });
 		}
 	}
 	const eventsByRun = new Map();
 	for (const e of allEvents) {
+		if (!ownEvent(e)) continue;
 		if (!eventsByRun.has(e.runId)) eventsByRun.set(e.runId, []);
 		eventsByRun.get(e.runId).push(e);
 	}
@@ -175,7 +190,7 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 	});
 	const medianWaitMs = waits.partial ? null : waits.medianWaitMs;
 	return { nowMs, windowDays, coverage: { requestedFromMs, fromMs: intervalFrom, toMs: nowMs, partial: coverage.partial === true || intervalFrom > requestedFromMs || reasons.length > 0, reasons: [...new Set(reasons)], unknownRuns: legacy.filter((r) => time(r.endedAt) >= requestedFromMs).length, stopsPartial: stoppedUnattributed.size > 0 },
-		totals: { runs: current.runs, touched: current.touched, rate: current.rate, previousRate: previous?.rate ?? null, deltaPoints: current.rate !== null && previous?.rate !== null && previous?.rate !== undefined ? current.rate - previous.rate : null, stopped: stopped.size, stoppedUnattributed: stoppedUnattributed.size, waitingHours: waits.partial ? null : waits.waitingHours, waitingPartial: waits.partial, waitingUnknown: waits.unknown, medianWaitMs, medianWaitHours: medianWaitMs === null ? null : medianWaitMs / 3600_000, pending: waits.partial ? null : waits.pending.length, waitingNow: waits.pending, draftAnswers: new Set(allEvents.filter((e) => e.cause === "question-answer" && e.answerSource === "draft" && current.touchedRunIds.includes(e.runId)).map((e) => e.runId)).size },
+		totals: { runs: current.runs, touched: current.touched, rate: current.rate, previousRate: previous?.rate ?? null, deltaPoints: current.rate !== null && previous?.rate !== null && previous?.rate !== undefined ? current.rate - previous.rate : null, stopped: stopped.size, stoppedUnattributed: stoppedUnattributed.size, waitingHours: waits.partial ? null : waits.waitingHours, waitingPartial: waits.partial, waitingUnknown: waits.unknown, medianWaitMs, medianWaitHours: medianWaitMs === null ? null : medianWaitMs / 3600_000, pending: waits.partial ? null : waits.pending.length, waitingNow: waits.pending, draftAnswers: current.touchedRunIds.filter((id) => eventsByRun.get(id).some((e) => e.cause === "question-answer" && e.answerSource === "draft")).length },
 		trend, projects, causes: current.causes, fixes: fixed, groups, touchedRunIds: current.touchedRunIds };
 }
 

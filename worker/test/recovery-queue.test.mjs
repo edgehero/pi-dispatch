@@ -119,7 +119,9 @@ function queuesOf() {
 
 const ARMED = { kind: "github", repo: "o/r", target: { type: "issue", number: 7 }, flow: "fix", recover: true };
 const POINTER = (over = {}) => ({ v: 1, host: "h1", hostQueue: "pi-jobs@h1", seq: 3, attempt: 1, at: NOW, jobDir: "job-ab12cd", ...over });
-const bullJob = (id, data = ARMED, over = {}) => ({ id, name: data.kind, data, opts: { attempts: 2 }, attemptsMade: 1, ...over });
+// Created an hour before NOW: BullMQ's `timestamp`, the first recovery's `recoveryOfCreatedAt` (issue #811).
+const CREATED = NOW - 3_600_000;
+const bullJob = (id, data = ARMED, over = {}) => ({ id, name: data.kind, data, opts: { attempts: 2 }, attemptsMade: 1, timestamp: CREATED, ...over });
 
 test("runIdOf: a recovery belongs to the run it continues, anything else to its own id", () => {
 	assert.equal(runIdOf({ id: "gh-1", data: {} }), "gh-1");
@@ -171,7 +173,7 @@ test("the recovery's data, id and options: attempts 1, no deduplication, the for
 	assert.deepEqual(add.opts, { jobId: "gh-9.r1", attempts: 1, removeOnComplete: { age: FORGE_JOB_RETENTION_S }, removeOnFail: { age: FORGE_JOB_RETENTION_S } });
 	assert.deepEqual([add.opts.removeOnComplete, add.opts.removeOnFail], [{ age: 31 * 24 * 3600 }, { age: 31 * 24 * 3600 }]);
 	assert.equal("deduplication" in add.opts, false, "the original's semantic key would swallow the recovery");
-	assert.deepEqual(add.data, { ...ARMED, recoveryOf: "gh-9", recovery: 1, recoverBy: NOW + 60_000 });
+	assert.deepEqual(add.data, { ...ARMED, recoveryOf: "gh-9", recovery: 1, recoverBy: NOW + 60_000, recoveryOfCreatedAt: CREATED });
 	// The pending set holds it until its deadline, scored by that deadline.
 	assert.deepEqual([...redis.zset.entries()], [[pendingMember("pi-jobs@h1", "gh-9.r1", "h1", NOW), NOW + 60_000]]);
 	assert.deepEqual(JSON.parse(pendingMember("pi-jobs@h1", "gh-9.r1", "h1", NOW)), { q: "pi-jobs@h1", id: "gh-9.r1", host: "h1", at: NOW }, "the checkpoint's host and the enqueue instant ride along");
@@ -197,6 +199,30 @@ test("a recovery's own recovery is n + 1 on the same run; the third is refused b
 	assert.equal(hosts.get("pi-jobs@h1").adds.length, 1, "nothing added past the cap");
 	assert.ok(!redis.kv.has("run:recover:claim:gh-5:3"), "and nothing claimed");
 	assert.deepEqual(logs.at(-1), ["job_recovery_refused", { jobId: "gh-5.r2", runId: "gh-5", n: 3, cause: "infra", reason: "recovery-cap" }]);
+});
+
+// Issue #811: the base run's creation time rides every recovery of the run, so the processor's superseded check can tell
+// the run's own settled record from an older job's under the same id.
+test("the base run's creation time: the first recovery takes the crashed job's, a later one keeps its data's, and a bad or missing one is left out", async () => {
+	const added = async (job) => {
+		const { hosts, queues } = queuesOf();
+		await makeRecoveryEnqueuer({ redis: fakeRedis(), queues, now: clock() })({ job, cause: "stall", pointer: POINTER() });
+		return hosts.get("pi-jobs@h1").adds[0].data;
+	};
+	assert.equal((await added(bullJob("gh-t"))).recoveryOfCreatedAt, CREATED, "the base run's own timestamp");
+	// A recovery of a recovery keeps the base run's time, never its own job's, which is later than the base run's start.
+	const r1 = { ...ARMED, recoveryOf: "gh-t", recovery: 1, recoverBy: NOW, recoveryOfCreatedAt: CREATED - 7_000 };
+	assert.equal((await added(bullJob("gh-t.r1", r1))).recoveryOfCreatedAt, CREATED - 7_000);
+	// A `.r1` queued by a build from before the field has none to keep, so its `.r2` carries none either.
+	const { recoveryOfCreatedAt: _created, ...r1Untimed } = r1;
+	assert.equal("recoveryOfCreatedAt" in (await added(bullJob("gh-t.r1", r1Untimed))), false);
+	for (const bad of [undefined, null, -1, 1.5, "1760000000000", Number.MAX_SAFE_INTEGER + 2]) {
+		assert.equal("recoveryOfCreatedAt" in (await added(bullJob("gh-u", ARMED, { timestamp: bad }))), false, JSON.stringify(bad));
+	}
+	// The original's data never supplies it: a value a base job carries is not its creation time, and with no
+	// creation time of its own the field is left out, never taken from that data.
+	assert.equal((await added(bullJob("gh-v", { ...ARMED, recoveryOfCreatedAt: 1 }))).recoveryOfCreatedAt, CREATED);
+	assert.equal("recoveryOfCreatedAt" in (await added(bullJob("gh-x", { ...ARMED, recoveryOfCreatedAt: 1 }, { timestamp: "bad" }))), false);
 });
 
 test("refusals before the claim: unarmed, local, a pointer that does not route, an id bullmq would refuse", async () => {
@@ -330,7 +356,7 @@ test("the recovery's data drops every per-attempt hold key, and every key index.
 	await enqueue({ job: bullJob("gh-h", { ...ARMED, ...holds }), pointer: POINTER() });
 	const data = hosts.get("pi-jobs@h1").adds[0].data;
 	for (const key of RECOVERY_STRIPPED_KEYS) assert.equal(key in data, false, key);
-	assert.deepEqual(data, { ...ARMED, recoveryOf: "gh-h", recovery: 1, recoverBy: NOW + RECOVERY_TTL_MS });
+	assert.deepEqual(data, { ...ARMED, recoveryOf: "gh-h", recovery: 1, recoverBy: NOW + RECOVERY_TTL_MS, recoveryOfCreatedAt: CREATED });
 	// The bolt: every key any worker source writes onto a queue job through `updateData({ ...job.data, <keys> })`.
 	const { readdirSync } = await import("node:fs");
 	const srcDir = new URL("../src/", import.meta.url);

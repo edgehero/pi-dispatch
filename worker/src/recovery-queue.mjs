@@ -79,11 +79,25 @@ export const RECOVERY_STRIPPED_KEYS = Object.freeze(["podmanRestartHoldSinceMs",
 /** Keys index.mjs writes through `updateData` that a recovery deliberately KEEPS. None today; the test reads this list. */
 export const RECOVERY_KEPT_HOLD_KEYS = Object.freeze([]);
 
-/** The recovery's data: the original's, less every per-attempt key, plus the three recovery fields. */
-export function recoveryDataOf(data, { runId, n, recoverBy }) {
+/**
+ * The recovery's data: the original's, less every per-attempt key, plus the recovery fields: `recoveryOf`, `recovery`,
+ * `recoverBy`, and `recoveryOfCreatedAt`, the base run's creation time in millis (BullMQ's `job.timestamp`, issue #811).
+ *
+ * `recoveryOfCreatedAt` is what lets the recovery tell its own run's settled record from an older job's under the same
+ * id (processor.mjs, the superseded check): ids come back after a lost queue and a hand redelivery, while records stay
+ * for the retention window. The first recovery takes it from the crashed job itself (`createdAt`, the base run's own
+ * timestamp); a recovery of a recovery keeps the one its data carries, never its own job's timestamp, which is later
+ * than the base run's start and would make the base run's settled record look older than the run. A `.r1` queued by a
+ * build from before this field has none to keep, so its `.r2` carries none either, and its check stays the one without
+ * an age. A value that is not a non-negative safe integer is no value (left out), never guessed at.
+ */
+export function recoveryDataOf(data, { runId, n, recoverBy, createdAt = null }) {
 	const out = { ...data };
 	for (const key of RECOVERY_STRIPPED_KEYS) delete out[key];
-	return { ...out, recoveryOf: runId, recovery: n, recoverBy };
+	delete out.recoveryOfCreatedAt;
+	const continued = typeof data?.recoveryOf === "string" && data.recoveryOf !== "";
+	const at = continued ? data.recoveryOfCreatedAt : createdAt;
+	return { ...out, recoveryOf: runId, recovery: n, recoverBy, ...(Number.isSafeInteger(at) && at >= 0 ? { recoveryOfCreatedAt: at } : {}) };
 }
 
 /**
@@ -208,7 +222,9 @@ export function makeRecoveryEnqueuer({ redis, queues, hostQueueName = defaultHos
 			}
 			const at = now();
 			const recoverBy = at + ttlMs;
-			const recoveryData = recoveryDataOf(data, { runId, n, recoverBy });
+			// `job` is the REAL queue job on both callers (the processor's infra exit is bound to it in index.mjs, the stall
+			// listener is handed it by BullMQ), so its `timestamp` is the crashed job's creation time.
+			const recoveryData = recoveryDataOf(data, { runId, n, recoverBy, createdAt: job.timestamp });
 			await queue.add(job.name ?? data.kind, recoveryData, {
 				jobId,
 				attempts: 1,

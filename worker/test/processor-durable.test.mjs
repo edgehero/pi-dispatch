@@ -829,6 +829,50 @@ test("a settled base record supersedes a recovery FIRST, before the pointer and 
 	assert.equal((await runJob(recoveryJob(1), other.deps)).outcome, "completed");
 });
 
+// Issue #811: ids come back after a lost queue and a hand redelivery, while records stay for the retention window. The
+// recovery's data carries the base run's creation time (`recoveryOfCreatedAt`), and a settled record from before it, less
+// the clock skew, is an older job's and settles nothing: the lost run is continued, never ended as superseded in silence.
+test("a recovery is superseded only by its own run's settled record: an older job's under the same id settles nothing", async () => {
+	const createdAt = NOW.getTime() - 3_600_000;
+	const at = (ms) => new Date(ms).toISOString();
+	const older = (id, outcome = "completed") => ({ jobId: id, outcome, startedAt: at(createdAt - 20 * 86_400_000), endedAt: at(createdAt - 20 * 86_400_000 + 600_000) });
+	const timed = (n) => ({ ...recoveryJob(n), recoveryOfCreatedAt: createdAt });
+	for (const [label, n, records] of [
+		["an older job's completed record under the run id", 1, { [RUN]: older(RUN) }],
+		["an older job's policy record under the run id", 1, { [RUN]: older(RUN, "policy") }],
+		["an older job's completed record under an earlier recovery's id", 2, { [RUN]: { jobId: RUN, outcome: "failed", reason: RECOVERY_ENQUEUED, startedAt: at(createdAt + 1000), endedAt: at(createdAt + 60_000) }, [`${RUN}.r1`]: older(`${RUN}.r1`) }],
+		// A record with no start is judged by its end: one long before the run is another job's.
+		["no start, an end long before the run", 1, { [RUN]: { ...older(RUN), startedAt: null } }],
+	]) {
+		const { deps: d, calls } = deps({ readRecord: async (id) => records[id] ?? null });
+		const r = await runJob(timed(n), d);
+		assert.equal(r.outcome, "completed", `${label}: ${JSON.stringify(r)}`);
+		assert.ok(names(calls).includes("restore"), `${label}: continued from its checkpoint`);
+	}
+	// Its own run's settled record still supersedes it: started after the run was created, or within the clock skew before.
+	for (const [label, rec] of [
+		["started after the run was created", { jobId: RUN, outcome: "completed", startedAt: at(createdAt + 1000), endedAt: at(createdAt + 60_000) }],
+		["started within the clock skew before it", { jobId: RUN, outcome: "policy", startedAt: at(createdAt - 4 * 60_000), endedAt: at(createdAt + 60_000) }],
+		["no start, an end after it", { jobId: RUN, outcome: "completed", startedAt: null, endedAt: at(createdAt + 60_000) }],
+		// A time that does not parse is not taken for another job's: re-running a run that may have completed pays twice.
+		["no time that parses", { jobId: RUN, outcome: "completed", startedAt: "not a time", endedAt: null }],
+	]) {
+		const { deps: d, calls } = deps({ readRecord: async (id) => (id === RUN ? rec : null) });
+		const r = await runJob(timed(1), d);
+		assert.deepEqual([r.outcome, r.reason], ["policy", "recovery-superseded"], label);
+		assert.ok(!names(calls).includes("comment"), `${label}: silent`);
+	}
+	// A recovery queued without the time (a build from before it) keeps the check without an age.
+	const untimed = deps({ readRecord: async (id) => (id === RUN ? older(RUN) : null) });
+	assert.equal((await runJob(recoveryJob(1), untimed.deps)).reason, "recovery-superseded");
+	// The reader is handed the rule, so it can pass over a stale record on this host and ask the fleet's copy.
+	const own = { jobId: RUN, outcome: "completed", startedAt: at(createdAt + 1000), endedAt: at(createdAt + 60_000) };
+	const asked = [];
+	const twoSides = deps({ readRecord: async (id, { keep } = {}) => (asked.push(typeof keep), id === RUN ? [older(RUN), own].find((rec) => keep(rec)) ?? null : null) });
+	assert.equal((await runJob(timed(1), twoSides.deps)).reason, "recovery-superseded");
+	assert.deepEqual(asked, ["function"]);
+});
+
 test("a fresh or retried armed attempt never calls settleCrashed", async () => {
 	const ledger = fakeLedger();
 	for (let i = 0; i < 2; i++) {

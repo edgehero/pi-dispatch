@@ -320,7 +320,7 @@ test("a failover retry still waits when a stale record at a higher attempt on on
 			assert.deepEqual(r.moves, [{ ts: NOW + mod.NEWER_RELEASE_RECHECK_MS, tok: "the-token" }], name);
 			assert.deepEqual(holdsOf(r).map((fields) => fields.what), ["the previous attempt's run record"], name);
 			assert.equal(deferFieldsOf(r.redis, "gh-1")?.why, "newer-release", name);
-			assert.deepEqual(reads, [["gh-1", false], ["gh-1", true]], `${name}: the pickup's read, then both sides again, each held to the rule`);
+			assert.deepEqual(reads, [["gh-1", true]], `${name}: one read, the pickup's, each side held to the rule`);
 			assert.deepEqual(r.keysRead, [modelAttemptKey(`${mod.QUEUE}:gh-1`)], `${name}: the model attempt key, once`);
 			assert.deepEqual(r.containers, [], name);
 			assert.equal(r.seen.records, 0, `${name}: no refusal recorded`);
@@ -331,6 +331,66 @@ test("a failover retry still waits when a stale record at a higher attempt on on
 	const alone = failoverRetry({ previousRecord: twoSides(stale, null, []) });
 	assert.equal((await alone.run()).reason, "model-failover-no-candidate");
 	assert.deepEqual(alone.moves, []);
+});
+
+// Issue #811: the pickup's one read of the previous record (start.mjs `previousRecord`, both sides held to the rule before
+// the higher attempt is kept) is what the touches carry and `retryNeverStarted` read too, so an older job's record under a
+// reused id gives this job neither its interventions nor a never-started verdict.
+const longAgo = iso(ENQUEUED - 20 * 86_400_000);
+/** Both sides as `previousRecord` reads them (this host's file, the fleet's copy): `keep` holds each before the higher attempt wins. */
+const bothSides = (local, mirrored) => async (_jobId, { keep = null } = {}) => newerRecord(...[local, mirrored].map((record) => (record !== null && typeof keep === "function" && !keep(record) ? null : record)));
+
+test("a retry carries touches only from its own previous attempt's record, never from an older job's under the same id (#811)", { skip }, async () => {
+	const OWN_TOUCH = { ...TOUCH, id: "d".repeat(64), at: NOW - 4_000 };
+	const stale = { ...core({ outcome: "failed", startedAt: longAgo, endedAt: longAgo }), touches: [TOUCH], touchLineageSkipped: "source-unavailable" };
+	const own = { ...core({ outcome: "failed" }), touches: [OWN_TOUCH] };
+	for (const [label, local, mirrored, touches, lineage] of [
+		["an older job's record alone", stale, null, undefined, undefined],
+		["an older job's record at a higher attempt here, its own in the fleet's copy", { ...stale, attempt: 3 }, own, [OWN_TOUCH], undefined],
+		["its own here, an older job's record at a higher attempt in the fleet's copy", own, { ...stale, attempt: 3 }, [OWN_TOUCH], undefined],
+	]) {
+		const { processor, seen } = harness({ previousRecord: bothSides(local, mirrored) });
+		const { job } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t" });
+		Object.assign(job, { attemptsMade: 1, timestamp: ENQUEUED });
+		assert.equal((await processor(job, "tok", new AbortController().signal)).outcome, "completed", label);
+		const written = seen.recorded.at(-1).result;
+		assert.deepEqual(written.touches, touches, label);
+		assert.equal(written.touchLineageSkipped, lineage, `${label}: no answer source the older job could not prove`);
+	}
+});
+
+test("a failover retry starts over from the primary only on its own never-started record, never on an older job's under the same id (#811)", { skip }, async () => {
+	const staleNeverStarted = { ...core({ outcome: "failed", startedAt: longAgo, endedAt: longAgo }), ...NEVER_STARTED };
+	const staleStarted = { ...staleNeverStarted, reason: "infra", budgetReserved: true, exitCode: 1 };
+	const ownNeverStarted = { ...core({ outcome: "failed" }), ...NEVER_STARTED };
+	const ownStarted = { ...core({ outcome: "failed" }), reason: "infra", budgetReserved: true, exitCode: 1 };
+	// An older job's never-started record says nothing of this attempt, which may have started a container and spent: with
+	// no model attempt key, refused free, as with no record, never started over from the primary.
+	for (const [label, local, mirrored] of [
+		["an older job's never-started record alone", staleNeverStarted, null],
+		["an older job's never-started record at a higher attempt here, its own started attempt in the fleet's copy", { ...staleNeverStarted, attempt: 3 }, ownStarted],
+		["its own started attempt here, an older job's never-started record at a higher attempt in the fleet's copy", ownStarted, { ...staleNeverStarted, attempt: 3 }],
+	]) {
+		const r = failoverRetry({ previousRecord: bothSides(local, mirrored) });
+		const refused = await r.run();
+		assert.equal(refused.reason, "model-failover-no-candidate", `${label}: ${JSON.stringify(refused)}`);
+		assert.equal(refused.budgetReserved, false, `${label}: free`);
+		assert.deepEqual(r.containers, [], `${label}: not started over from the primary`);
+		assert.deepEqual(r.moves, [], label);
+	}
+	// Its own never-started record still lets it choose again, though an older job's started record sits at a higher
+	// attempt on the other side; and so does a job that stalled once and then failed, whose stall count BullMQ never
+	// lowers: the failed attempt's record carries `attemptsMade`, and both numbers are asked, never one picked by the count.
+	for (const [label, local, mirrored, job] of [
+		["its own never-started record in the fleet's copy, an older job's started record at a higher attempt here", { ...staleStarted, attempt: 3 }, ownNeverStarted, {}],
+		["a job that stalled once and then failed", ownNeverStarted, null, { attemptsMade: 1, stalledCounter: 1 }],
+	]) {
+		const r = failoverRetry({ previousRecord: bothSides(local, mirrored), job });
+		const result = await r.run();
+		assert.equal(result.outcome, "completed", `${label}: ${JSON.stringify(result)}`);
+		assert.deepEqual(r.containers, ["openai/primary"], label);
+		assert.deepEqual(r.moves, [], label);
+	}
 });
 
 test("a recovery retry never waits on a newer previous record: it is locked to its checkpoint's model", { skip }, async () => {

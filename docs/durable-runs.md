@@ -104,7 +104,11 @@ behind, once they are older than the job timeout, keeping any a recovery still n
 
 A recovery that cannot start yet for a passing reason (Valkey did not answer, a file was locked) waits a minute and
 tries again; it has one attempt and does not spend it on that. A recovery whose run has meanwhile finished (its
-record says completed or stopped) is dropped without a comment.
+record says completed or stopped) is dropped without a comment. The recovery knows when its run was first queued, so
+a finished record from more than five minutes before then (machines' clocks can differ), which an older job left under
+the same id, does not count: a run id comes back when a lost queue is followed by redelivering the same webhook by
+hand, and records are kept for 30 days by default. A finished record with no readable time still counts, since
+running a finished run again would pay for it twice.
 
 If the machine holding the checkpoint has not taken the recovery within six hours, any worker checks whether that
 machine is still alive. While it is (it still reports in), or the queue is paused, or the check cannot be made, the

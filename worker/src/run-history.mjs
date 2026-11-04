@@ -1059,6 +1059,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	if (bundle !== null && !Object.hasOwn(OPENSHELL_VENUE_MODES, backend)) delete bundle.placeholderNames;
 	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
 	const loaded = recordedLoaded(source.loaded);
+	const jobCreatedAt = jobCreatedAtOf(job);
 	return {
 		jobId: job.id,
 		// Internal references can refuse before they resolve to a local execution envelope. Keep the public
@@ -1317,11 +1318,21 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(Array.isArray(source.touches) ? { touches: source.touches.slice(0, 16).map(cleanTouch).filter(Boolean) } : {}),
 		...(source.touchLineageSkipped === "source-unavailable" ? { touchLineageSkipped: "source-unavailable" } : {}),
 		// What the run loaded (issue #800, INT-RUN-HISTORY-FILE-CONTRACT): REBUILT (`recordedLoaded`), a display no decision
-		// reads. CONDITIONAL and the last key before `v`, so a refusal before the image was known, and every older record,
-		// is byte-identical to what it was. Names only from what the deployment staged and configured, and counts for what
-		// a repository holds. A repository extension can still forge what the line alone says, each held to a closed shape
-		// (loaded-record.mjs says which and what is left).
+		// reads. CONDITIONAL, TAIL position after the touch keys, so a refusal before the image was known, and every older
+		// record, is byte-identical to what it was. Names only from what the deployment staged and configured, and counts
+		// for what a repository holds. A repository extension can still forge what the line alone says, each held to a
+		// closed shape (loaded-record.mjs says which and what is left).
 		...(loaded !== null ? { loaded } : {}),
+		// When the job under this id was created (issue #811, INT-RUN-HISTORY-FILE-CONTRACT): BullMQ's `job.timestamp`, the
+		// add's moment, kept across every retry, stall and deferral of the job, as an ISO string. An id comes back after a
+		// lost queue and a hand redelivery, while an older job's touch events stay in the touch index, so the Zero touch
+		// view counts an event against this run only from this time on (less the clock skew), and never from an older job
+		// under the same id. Not `queuedAt` (null on a retry, a stall and a `run.waitFor` job, and the moment the job became
+		// ELIGIBLE, which a delay moves later), and not the record's `startedAt` (a touch during an earlier, stalled
+		// attempt is this run's and predates it). CONDITIONAL, the last key before `v`: absent when the job carries no
+		// representable timestamp, and a reader then applies no bound. Additive, so `v` stays 1. A number's rendering,
+		// so PII-free.
+		...(jobCreatedAt !== null ? { jobCreatedAt } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
 		// asks one key, and a missing one reads as 1.
@@ -1389,6 +1400,15 @@ export function queuedAtOf(job) {
 	const at = timestamp + Math.max(0, Math.trunc(delay));
 	// 8.64e15 is the last instant a Date can hold; past it `toISOString` throws, and this function must not.
 	return at <= 8.64e15 ? new Date(at).toISOString() : null;
+}
+
+/**
+ * When a job was created, as an ISO string, or null: its `timestamp` when that is a non-negative safe integer a Date can
+ * hold (8.64e15 is the last), else null. The record's `jobCreatedAt` (issue #811).
+ */
+export function jobCreatedAtOf(job) {
+	const timestamp = job?.timestamp;
+	return Number.isSafeInteger(timestamp) && timestamp >= 0 && timestamp <= 8.64e15 ? new Date(timestamp).toISOString() : null;
 }
 
 /** A record's non-negative safe integer, else null. */
