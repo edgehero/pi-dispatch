@@ -25,10 +25,11 @@ export function consoleSecretsFixture(now, { env: extra = {}, change = () => {} 
   return secretsView({ snapshot, env, fs: { realpathSync: (path) => path } });
 }
 
-export function receiverFixture(now, { onlyUnauthorized = false, forges = ["github", "gitlab"] } = {}) {
+export function receiverFixture(now, { onlyUnauthorized = false, answered503 = false, forges = ["github", "gitlab"] } = {}) {
   const observations = makeReceiverObservations({ now: () => now - 8000 });
   if (!onlyUnauthorized) observations.observe("github", 202, "queued");
   observations.observe("github", 401);
+  if (answered503) for (const [forge, word] of [["github", "enqueue-failed"], ["github", "enqueue-failed"], ["github", "lookup-failed"], ["gitlab", "lookup-failed"]]) observations.observe(forge, 503, word);
   return { v: 1, name: "mini1", version: "4.3.1", startedAt: now - 60_000, at: now - 8000, port: 3000, bind: "all", forges, deliveries: observations.snapshot(), ageMs: 8000 };
 }
 
@@ -108,6 +109,7 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "connections-receiver-none.operator": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [], complete: true, more: 0 }); } }),
   "connections-receiver-unauthorized.viewer": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [receiverFixture(NOW, { onlyUnauthorized: true })], complete: true, more: 0 }); } }, "viewer"),
   "connections-receiver-unknown.viewer": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [], complete: false, more: 0 }); } }, "viewer"),
+  "connections-receiver-503.operator": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [receiverFixture(NOW, { answered503: true })], complete: true, more: 0 }); } }),
   "connections-proxy.operator": () => connection({ problem: "proxy" }),
   "connections-forge.operator": () => connection({ problem: "forge" }),
   "connections-hook-timeout.operator": () => connection({ change: (_, reads) => { reads.hookRuns = () => ({ partial: false, more: 0, hosts: [{ name: "mini1", runs: [buildHookRun({ jobId: "gh-f0c2", outcome: "failed", reason: "infra", detail: "timeout", code: null }, NOW - 60_000)] }] }); } }),

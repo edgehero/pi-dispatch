@@ -15,7 +15,9 @@
  * it. `OQ-013` is amended to say so rather than leaving it implied.
  *
  * The verdict shape is every other forge's: `{ authorized }` | `{ indeterminate }`. A determinate "not a
- * member" refuses; anything that could not be answered is a 503 so Azure redelivers.
+ * member" refuses; anything that could not be answered is a 503, which Azure resends up to 8 times over about
+ * 3 minutes, then retries on probation up to 7 more times over about 36 hours while new events are lost
+ * (receiver.mjs, WHAT A 503 MEANS).
  *
  * WHY MEMBERSHIP AND NOT A PERMISSION EVALUATION. Azure's Security namespace API can answer "may this
  * subject contribute to this repository" exactly, which is closer to the property the constitution wants.
@@ -153,8 +155,9 @@ export function makeResolveAzureAuthority({ orgUrl, token, fetchFn = fetch }) {
 	 *     `null`, which the caller refuses. This is the honest refusal: the entire directory was read.
 	 *   - the PAGE CAP was reached while Azure was still offering more -> `{ indeterminate }`, never `null`.
 	 *     The search was abandoned, not completed, and the module's own docblock is explicit that
-	 *     indeterminate and unauthorized must not be conflated: this way the receiver answers 503 and Azure
-	 *     redelivers, instead of burying an exhausted search inside a 204 that reads as a policy decision.
+	 *     indeterminate and unauthorized must not be conflated: this way the receiver answers 503, which Azure
+	 *     resends for about 3 minutes and then, on probation, for about 36 hours, instead of burying an
+	 *     exhausted search inside a 204 that reads as a policy decision.
 	 *
 	 * A FILTERED LOOKUP WOULD BE BETTER AND IS NOT USED. Nothing in the Graph surface this module already
 	 * speaks offers a by-mail filter on `graph/users` (`subjectTypes` selects kinds of subject, not

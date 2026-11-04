@@ -167,7 +167,10 @@ function loadGitLabConfig(env) {
 	}
 	// The gate needs this token BEFORE any job runs: the actor's access level is what authorises a GitLab
 	// trigger at all (CONST-TRIGGER-AUTHOR-GATE), and without a token every lookup is indeterminate and
-	// every delivery 503s. Refusing at boot is the difference between one clear message and a redelivery loop.
+	// every delivery 503s, which GitLab never resends. After 4 in a row GitLab disables the hook for a while
+	// (on gitlab.com, and a group hook anywhere; a self-managed project hook only where the
+	// `auto_disabling_web_hooks` feature flag is on). Refusing at boot is the difference between one clear
+	// message and every delivery failing, and perhaps the hook switched off.
 	if (typeof token !== "string" || token.trim() === "") {
 		throw configError("GITLAB_TOKEN is required for gitlab triggers -- the receiver resolves the actor's project access level before it may enqueue");
 	}
@@ -213,7 +216,8 @@ function loadForgejoConfig(env) {
 	}
 	// Needed BEFORE any job runs: the actor's repository permission is what authorises a forgejo trigger at
 	// all (CONST-TRIGGER-AUTHOR-GATE), and without a token every lookup is indeterminate and every delivery
-	// 503s. Refusing at boot is the difference between one clear message and a redelivery loop.
+	// 503s, which Forgejo never resends. Refusing at boot is the difference between one clear message and
+	// every delivery failing in a history nobody is watching.
 	if (typeof token !== "string" || token.trim() === "") {
 		throw configError("FORGEJO_TOKEN is required for forgejo triggers -- the receiver resolves the actor's repository permission before it may enqueue");
 	}

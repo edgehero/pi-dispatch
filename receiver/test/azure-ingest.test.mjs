@@ -235,9 +235,10 @@ test("azure: a replicas: 2 trigger enqueues TWICE from one delivery, with distin
 	assert.equal(logs.find((l) => l.event === "enqueued")?.replicas, 2, "the log says how many, so a pair is explainable from the receiver's own output");
 });
 
-test("azure: a throw on the SECOND replica answers 503 and leaves the first enqueued", async () => {
-	// No compensating logic exists and none is needed: the forge redelivers, replica 1 dedups on its own
-	// now-taken jobId and replica 2 enqueues. The retry converges on exactly two jobs, never three.
+test("azure: a throw on the SECOND replica answers 503, leaves the first enqueued, and logs 1 of 2 queued", async () => {
+	// No compensating logic is needed here: Azure resends the same notification for about 3 minutes (then on
+	// probation), so it carries the same `id`: replica 1 dedups on its own now-taken jobId and replica 2
+	// enqueues, two jobs, never three.
 	const seen = [];
 	const queue = {
 		add: async (name, data, opts) => {
@@ -246,12 +247,14 @@ test("azure: a throw on the SECOND replica answers 503 and leaves the first enqu
 			return { id: opts.jobId };
 		},
 	};
-	const { handler } = build({ cfg: replicaCfg, queue });
+	const { handler, logs } = build({ cfg: replicaCfg, queue });
 	const res = mockRes();
 	await drive(handler, mockReq(), res, LABELLED);
 
 	assert.equal(res.statusCode, 503);
 	assert.deepEqual(seen, [`az-delivery-guid-1-r1`], "replica 1 is already in the queue and stays there");
+	// The line an operator reads while Azure is still resending: how many of the replicas are already queued.
+	assert.deepEqual(logs.filter((l) => l.event === "enqueue_failed"), [{ event: "enqueue_failed", delivery: "delivery-guid-1", reason: "valkey down", queued: 1, replicas: 2 }]);
 });
 
 test("azure: an unflagged trigger still enqueues EXACTLY once, with no replica key and today's jobId", async () => {

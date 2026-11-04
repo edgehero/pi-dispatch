@@ -126,7 +126,8 @@ The actor's **project membership** is resolved from the Graph API. Two lookups (
 actor is resolved to a subject descriptor, then the project's own descriptor is fetched and the actor's
 memberships are checked against it, transitively, so a member of a team inside the project counts. A lookup
 that **cannot be completed** (a 5xx, a dead socket, a token that cannot read the Graph, a 200 in a shape the
-harness does not recognise) answers **503** and Azure can redeliver.
+harness does not recognise) answers **503**, which Azure resends for about 3 minutes and, if it still fails, on
+probation for about 36 hours ([When a delivery fails](#when-a-delivery-fails)).
 
 The actor arrives in two different shapes depending on the event, and this is the sharpest edge on this
 forge:
@@ -143,13 +144,40 @@ harness, or as anyone else.
 work-item path fetches the organization's user list and filters it locally, following the continuation
 token across pages until it finds the actor. An actor on the first page still costs exactly one request.
 The walk is bounded at 20 pages, and reaching that bound is reported as **indeterminate**, not as a
-refusal: the receiver answers **503** and the delivery is redelivered, because "we could not finish
+refusal: the receiver answers **503**, which Azure resends for about 3 minutes and then on probation (see
+[When a delivery fails](#when-a-delivery-fails)), because "we could not finish
 looking" and "you are not allowed" are different answers and only one of them should look like a refusal.
 An actor genuinely absent from a list that ends is still a determinate refusal (204). Pull requests skip
 all of this: a PR names its actor by GUID, which is a direct descriptor lookup.
 
 Your `AZURE_TOKEN` needs to be able to read the Graph (`vso.graph`). If it cannot, every delivery answers
 503 rather than silently admitting or refusing anyone.
+
+## When a delivery fails
+
+Azure DevOps is the one forge that sends a failed delivery again on its own, and only for a short while. The
+receiver answers **503** when it cannot finish a delivery: the membership lookup above failed
+(`azure_membership_lookup_failed`), or the enqueue failed, for example while Valkey is down (`enqueue_failed`; on a
+trigger with `replicas`, the line says how many were `queued` of the `replicas` before the failure, and those stay
+queued). Each line names the delivery id, the payload's own `id`.
+
+- **A 503 is a transient failure** to Azure, which "attempts to resend the notification" (Microsoft's words) up to 8
+  times, waiting longer each time, about 3 minutes in all. It resends the same notification, so each resend carries
+  the same payload `id` and is queued at most once, and on a replica trigger the replicas already queued stay one
+  job each while the rest queue. An outage shorter than that loses nothing.
+- **After the last resend it is an enduring failure.** Azure puts the subscription on **probation** (shown as
+  *Enabled (restricted)*): it loses the new events that arrive meanwhile, and resends the failed one up to 7 more
+  times over about 36 hours. One success brings the subscription back; if all 7 fail, Azure disables it
+  (*Disabled (due to failures)*, `DisabledBySystem`). If you re-trigger the work by hand in that time (a new label
+  or comment, so a new event with a new `id`), it can run twice: a probation resend that lands more than 10 minutes
+  after your new event is not coalesced with it. Check the subscription's History before re-triggering.
+- **A 500**, which the receiver answers only for an internal error, is an enduring failure at once: no quick resends,
+  straight to probation.
+
+**Where you see failures.** The log lines above, the subscription's **History** (Project settings, Service hooks,
+select the subscription), and the console's Connections page, which counts `lookup-failed` and `enqueue-failed` per
+forge over the last 24 UTC hours and warns when either is above zero. Each resend Azure makes adds to that count. A
+disabled subscription is turned back on from the Service hooks page.
 
 ## The scope trade-off
 

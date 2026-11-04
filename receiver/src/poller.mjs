@@ -940,9 +940,10 @@ async function pollReviews(ctx, api, repo, open, stats) {
  * stranger's close is the filter's own `closer-not-allowed` drop and the events cursor advances
  * past it -- an unauthorized close never wedges the feed.
  *
- * An INDETERMINATE lookup has no honest verdict, and the webhook arm's answer (503, forge
- * redelivers) has no analogue here -- the poller IS its own redelivery. So: bounded retry, then a
- * loud skip. Below the bound this THROWS, on purpose, into pollLabelEvents' scoped catch: the cycle
+ * An INDETERMINATE lookup has no honest verdict, and the webhook arm's answer (a 503, which GitHub
+ * never resends, so it waits for a hand redelivery) has no analogue here -- the poller IS its own
+ * retry. So: bounded retry, then a loud skip. Below the bound this THROWS, on purpose, into
+ * pollLabelEvents' scoped catch: the cycle
  * logs `poll_close_gate_retry`, the events cursor is still sitting BEFORE this event (the caller
  * advances it only after a handler returns), so the next cycle retries exactly this close -- and
  * only the EVENTS feed ends for the cycle, because a monotone cursor cannot skip an entry and come

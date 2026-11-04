@@ -20,7 +20,8 @@
  *     payload-only and lookup-free, and an unauthenticated flood cannot make this project call GitHub;
  *   - it returns a two-armed verdict, because "not a collaborator" and "could not tell" are different
  *     answers. A 404 is determinate and refuses; anything unrecognised is INDETERMINATE and the receiver
- *     answers 503, so GitHub redelivers and the stable `X-GitHub-Delivery` GUID dedups the retry.
+ *     answers 503. GitHub never resends that on its own (receiver.mjs, WHAT A 503 MEANS): a redelivery by
+ *     hand within 3 days keeps the `X-GitHub-Delivery` GUID, so it queues at most once.
  *     Collapsing indeterminate to "deny" would drop real work during an outage behind a 204 that looks
  *     exactly like a stranger being correctly refused.
  *

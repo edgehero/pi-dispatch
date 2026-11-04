@@ -46,7 +46,8 @@ export const PR_ACTIONS = new Set(["labeled", "opened", "synchronize", "reopened
  *
  * `subset` is a `parseForgejoSubset` projection; `triggers` is the forgejo rule group; `knownFlows` is the
  * whole file's flow vocabulary; `authorized` is the receiver's resolved verdict; `deliveryId` is the
- * `X-GitHub-Delivery` GUID, which Forgejo emits and keeps stable across its own retries.
+ * `X-GitHub-Delivery` GUID, which Forgejo emits once per delivery. Forgejo never resends a delivery on its own,
+ * and a replay from its UI is a new delivery with a new GUID (receiver.mjs, WHAT A 503 MEANS).
  */
 export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, authorized, deliveryId) {
 	// (0) Fail-closed on identity. MUST precede the self compare -- see header.

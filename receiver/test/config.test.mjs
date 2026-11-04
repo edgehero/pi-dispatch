@@ -545,7 +545,8 @@ test("GITLAB_WEBHOOK_MODE is required and never defaulted -- the two modes are n
 
 test("a partially-configured gitlab endpoint refuses at boot rather than half-arming", () => {
   // Each of these would produce an endpoint that accepts nothing, or one that 503s every delivery
-  // because it can never resolve an access level. One clear message beats a redelivery loop.
+  // because it can never resolve an access level, and GitLab never resends one. One clear message beats every
+  // delivery failing.
   assert.throws(() => loadReceiverConfig({ ...glEnv, GITLAB_WEBHOOK_SECRET: undefined }, validTriggers), (e) => e.piDispatchConfig === true);
   assert.throws(() => loadReceiverConfig({ ...glEnv, GITLAB_TOKEN: undefined }, validTriggers), (e) => e.piDispatchConfig === true);
   assert.throws(() => loadReceiverConfig({ ...glEnv, GITLAB_TOKEN: "   " }, validTriggers), (e) => e.piDispatchConfig === true);

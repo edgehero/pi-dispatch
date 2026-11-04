@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { makeReceiverObservations, parseReceiverStatus, RECEIVER_OUTCOMES } from "@edgehero/pi-dispatch/receiver-status";
+import { makeReceiverObservations, parseReceiverStatus, RECEIVER_FORGES, RECEIVER_OUTCOMES } from "@edgehero/pi-dispatch/receiver-status";
 import { readConnections, modelConnections } from "../src/connections-view.mjs";
-import { connectionsForges } from "../src/console/panels/connections.mjs";
+import { connectionsForges, RESEND_ADVICE } from "../src/console/panels/connections.mjs";
 import { parseDocument } from "./helpers/script-dom.mjs";
 
 const AT = Date.UTC(2026, 10, 1, 12, 0, 3);
@@ -72,6 +73,48 @@ test("an absent receiver is a warning only after a complete read; malformed, par
   assert.match(draw(await view({ hosts: [], complete: true, more: 0 })), /No live receiver reported for github/);
   for (const status of [{ hosts: [], complete: false, more: 0 }, { hosts: [receiver()], complete: false, more: 3 }, { hosts: [{ name: "mini1", unreadable: true }], complete: false, more: 0 }]) {
     const markup = draw(await view(status)); assert.doesNotMatch(markup, /No live receiver reported for github|only unauthorized/); assert.match(markup, /Counts and receiver absence are unknown/);
+  }
+});
+
+test("a forge answered 503 in 24 UTC hours warns with the count, that the forge does not resend, and where to send it again (issue #809)", async () => {
+  // One table entry per receiver forge, so a new forge cannot draw a banner with no advice in it.
+  assert.deepEqual(Object.keys(RESEND_ADVICE), RECEIVER_FORGES);
+  const says = {
+    github: /GitHub does not resend a delivery answered 503\. Redeliver each from the webhook&#39;s Recent Deliveries within 3 days/,
+    gitlab: /GitLab does not resend a delivery answered 503, and after 4 failures in a row it disables the hook for a while \(on self-managed, a project hook only where the auto_disabling_web_hooks flag is on\)\. Resend each from the webhook&#39;s Recent events within 2 days/,
+    forgejo: /Forgejo does not resend a delivery answered 503\. Replay each .*a replay is a new delivery/,
+    azure: /Azure DevOps resends a delivery answered 503 for about 3 minutes, and every resend answered 503 counts here too\. One still failing after that puts the subscription on probation: Azure retries it up to 7 more times over about 36 hours and sends no new events meanwhile\./,
+  };
+  for (const forge of RECEIVER_FORGES) {
+    const row = receiver({ change: (o) => { o.observe(forge, 503, "lookup-failed"); o.observe(forge, 503, "enqueue-failed"); o.observe(forge, 503, "enqueue-failed"); o.observe(forge, 202, "queued"); } });
+    for (const role of ["operator", "viewer"]) {
+      const markup = draw(await view({ hosts: [row], complete: true, more: 0 }), role);
+      assert.match(markup, new RegExp(`${forge}: answered 503 3 times in 24 UTC hours`), `${forge} ${role}`);
+      assert.match(markup, /Lookups or enqueues the receiver could not finish: lookup-failed 1, enqueue-failed 2\./);
+      assert.match(markup, says[forge]);
+      assert.match(markup, /a redelivery that succeeds later does not lower it/);
+      assert.ok(markup.includes(`docs/${RESEND_ADVICE[forge].doc}#when-a-delivery-fails`), `${forge} links its doc's section`);
+      assert.doesNotMatch(markup, /\blost\b/, "the counts are answers, never a claim that a delivery is gone");
+      for (const other of RECEIVER_FORGES.filter((f) => f !== forge)) assert.doesNotMatch(markup, new RegExp(`${other}: answered 503`));
+    }
+  }
+  const one = receiver({ change: (o) => o.observe("github", 503, "enqueue-failed") });
+  assert.match(draw(await view({ hosts: [one], complete: true, more: 0 })), /github: answered 503 1 time in 24 UTC hours/);
+  assert.match(draw(await view({ hosts: [one], complete: false, more: 2 })), /github: answered 503 at least 1 time in 24 UTC hours/, "an incomplete read is a lower bound");
+  // Only a 503 counts: a refusal of any other kind, and a quiet window, draw no such banner.
+  for (const change of [(o) => o.observe("github", 401), (o) => o.observe("github", 500), (o) => o.observe("github", 204), () => {}]) {
+    assert.doesNotMatch(draw(await view({ hosts: [receiver({ change })], complete: true, more: 0 })), /answered 503/);
+  }
+  // A 503 that has left the 24-hour window is no longer counted, so it draws none either.
+  let clock = AT - 25 * 3_600_000;
+  const aged = makeReceiverObservations({ now: () => clock });
+  aged.observe("gitlab", 503, "enqueue-failed");
+  clock = AT;
+  assert.doesNotMatch(draw(await view({ hosts: [{ ...receiver(), startedAt: AT - 26 * 3_600_000, deliveries: aged.snapshot() }], complete: true, more: 0 })), /answered 503/);
+  // Each forge's doc has the section the banner links.
+  for (const forge of RECEIVER_FORGES) {
+    const doc = readFileSync(new URL(`../../docs/${RESEND_ADVICE[forge].doc}`, import.meta.url), "utf8");
+    assert.match(doc, /^## When a delivery fails$/m, `docs/${RESEND_ADVICE[forge].doc}`);
   }
 });
 

@@ -754,8 +754,9 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   **(a) It is a network call, not a payload field.** GitHub computes `author_association` and hands it
   over inside the signed body, so its gate is decidable from the delivery alone. GitLab computes nothing
   equivalent, so authority is established by asking — and asking can fail. It fails *closed* for a
-  determinate answer (a 404 is level 0, refused) and *loudly* for an indeterminate one (503, redelivered),
-  but a gate with a moving part is not the same object as a gate without one.
+  determinate answer (a 404 is level 0, refused) and *loudly* for an indeterminate one (a 503, which GitLab does
+  not resend on its own, so the delivery waits for a hand resend; CORRECTED 2026-11-04, #809), but a gate with a
+  moving part is not the same object as a gate without one.
   **(b) The role table is not fixed.** The minimum role for label management has differed across GitLab
   versions, and Ultimate's **custom roles** let an operator grant individual permissions at any level. So
   `>= 30` is a claim about a number, and what that number *permits* is the operator's to know. This is
@@ -775,10 +776,13 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   gate, so the harness's own note cannot recurse even though its token IS a project member. Verification
   runs before the lookup, so an unauthenticated flood cannot make this project call GitLab at all. And
   every gate downstream is unchanged: budget, pause windows, branch protection, never-merge.
-- **What detection ships today**: An indeterminate lookup logs `gitlab_access_lookup_failed` and answers
-  503, so a broken or revoked token is loud rather than silent — the failure mode is "nothing runs and
-  GitLab keeps retrying", never "everything runs". `doctor` reports whether `GITLAB_TOKEN` is set when the
-  triggers file names gitlab, and names the `api`-scope trade-off.
+- **What detection ships today**: An indeterminate lookup logs `gitlab_access_lookup_failed` and answers 503, so a
+  broken or revoked token is loud rather than silent: the failure mode is "nothing runs, every delivery shows failed
+  in the hook's Recent events, and after 4 failures in a row GitLab disables the hook" (on gitlab.com, and a group
+  hook anywhere; on a self-managed instance a project hook only where the `auto_disabling_web_hooks` feature flag is
+  on), never "everything runs" (CORRECTED 2026-11-04, #809: GitLab makes no retries, and the Connections page warns
+  on every 503 answer). `doctor` reports whether `GITLAB_TOKEN` is set when the triggers file names gitlab, and
+  names the `api`-scope trade-off.
 - **What would close it**: A GitLab-side equivalent of `author_association` — a payload field stating the
   actor's relationship to the project, inside the signed body. None exists, and none is announced. Short
   of that, the honest improvement is narrower: cache nothing, and keep the refusal loud.
@@ -2674,6 +2678,7 @@ adversarial passes did.
 
 | Date | Change |
 |---|---|
+| 2026-11-04 (#809) | What a 503 means for each forge. **`OQ-013` CORRECTED**, two sentences: an indeterminate GitLab lookup fails loudly with a 503 that GitLab does not resend on its own, so the delivery waits for a hand resend, where it said redelivered; and the failure mode of a broken or revoked token is that nothing runs, every delivery shows failed in the hook's Recent events, and after 4 failures in a row GitLab disables the hook (for a while, growing to a day; for good after 40 from GitLab 17.11; on gitlab.com and for a group hook anywhere, and for a project hook on a self-managed instance only where the `auto_disabling_web_hooks` feature flag is on), where it said GitLab keeps retrying. The Connections page now warns on each forge's 503 answers. The risk itself, a gate with a moving part, is UNCHANGED, checked. **Code evidence**: receiver/src/receiver.mjs -> makeGitLabHandler, answerEnqueueFailed; admin/src/console/panels/connections.mjs -> receiverWarnings. |
 | 2026-11-02 (#754, #792, #793; approved extension) | OQ-050 amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-03 (#761, tolerant readers) | **`OQ-039` AMENDED**: the residual of a writer from before the fleet horizon gains its count trim: such a writer cuts the shared run index at a fixed 5,000 runs without recording it, which the reader catches by starting the mirror at the oldest run of an index at its cap, and since that cap became `PI_RUN_MIRROR_MAX_RUNS` a reader told one above 5,000 misses that cut, so its time reads as idle. Its status and its other residuals UNCHANGED, checked. **Code evidence**: worker/src/capacity-records.mjs -> readMirrorWindow (`indexMax`); worker/src/retention.mjs -> runMirrorMaxRunsOf. |
 | 2026-11-02 (#776) | NEW PROPOSED OPEN `OQ-055` (input adapters and exact host-held read-credential/replay contracts), `OQ-056` (long LLM jobs, a separate lifetime/reservation/credential decision) and `OQ-057` (machine-started forge/code-changing jobs or autonomous rule adoption, separate authority decisions). No question grants a runtime feature. `OQ-008` and `OQ-009` UNCHANGED, checked: dispatcher pause state adds only a denial to current file authority, resume cannot re-arm removed/disabled configuration, and the reviewed producer does not widen generic same-folder/local-parent outbox chaining. `OQ-053` UNCHANGED, checked: first decisions remain fresh metered containers, no host model client or resident decision agent; its board/probability/retention residuals stand. `OQ-052` UNCHANGED, checked: authenticated findings still have no human author and source/cardinality limits still bind. `OQ-051` UNCHANGED, checked: autonomous parked answers are not admitted by dispatcher proposals; #766's bounded delegation is not broadened. `OQ-054` UNCHANGED, checked: console GitHub App setup remains its own open CSP/callback question, which is why numbering starts at 055. |

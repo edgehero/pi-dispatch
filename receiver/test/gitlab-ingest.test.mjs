@@ -163,7 +163,7 @@ test("an INDETERMINATE access lookup is 503, not a silent drop", async () => {
 	const { handler, calls, logs } = build({ resolve: async () => ({ indeterminate: "members lookup returned 502" }) });
 	const res = mockRes();
 	await drive(handler, mockReq(), res, LABELLED);
-	assert.equal(res.statusCode, 503, "GitLab redelivers, and the stable webhook-id dedups the retry");
+	assert.equal(res.statusCode, 503, "a failed delivery GitLab never resends; a Resend Request keeps the webhook-id");
 	assert.equal(calls.length, 0);
 	const line = logs.find((l) => l.event === "gitlab_access_lookup_failed");
 	assert.ok(line, "the failure is observable");
@@ -282,9 +282,10 @@ test("gitlab: a replicas: 2 trigger enqueues TWICE from one delivery, with disti
 	assert.equal(logs.find((l) => l.event === "enqueued")?.replicas, 2, "the log says how many, so a pair is explainable from the receiver's own output");
 });
 
-test("gitlab: a throw on the SECOND replica answers 503 and leaves the first enqueued", async () => {
-	// No compensating logic exists and none is needed: the forge redelivers, replica 1 dedups on its own
-	// now-taken jobId and replica 2 enqueues. The retry converges on exactly two jobs, never three.
+test("gitlab: a throw on the SECOND replica answers 503, leaves the first enqueued, and logs 1 of 2 queued", async () => {
+	// No compensation: GitLab never resends the 503, so replica 1 runs alone unless someone resends it by
+	// hand. The resend keeps the webhook-id, so replica 1 dedups on its now-taken jobId, replica 2
+	// enqueues, and it converges on exactly two jobs, never three.
 	const seen = [];
 	const queue = {
 		add: async (name, data, opts) => {
@@ -293,12 +294,14 @@ test("gitlab: a throw on the SECOND replica answers 503 and leaves the first enq
 			return { id: opts.jobId };
 		},
 	};
-	const { handler } = build({ cfg: replicaCfg, queue });
+	const { handler, logs } = build({ cfg: replicaCfg, queue });
 	const res = mockRes();
 	await drive(handler, mockReq(), res, LABELLED);
 
 	assert.equal(res.statusCode, 503);
 	assert.deepEqual(seen, [`gl-wh-1-r1`], "replica 1 is already in the queue and stays there");
+	// What an operator reads before resending: how many of the replicas the failure left queued.
+	assert.deepEqual(logs.filter((l) => l.event === "enqueue_failed"), [{ event: "enqueue_failed", delivery: "wh-1", reason: "valkey down", queued: 1, replicas: 2 }]);
 });
 
 test("gitlab: an unflagged trigger still enqueues EXACTLY once, with no replica key and today's jobId", async () => {

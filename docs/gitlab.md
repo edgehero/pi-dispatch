@@ -139,11 +139,11 @@ than 80 its API calls fail too.
 ## Minimum GitLab version: 17.4
 
 pi-dispatch dedups redeliveries on GitLab's own `webhook-id` (called `Idempotency-Key` before 19.0), which
-GitLab keeps constant across its retries. Older instances send neither, and a delivery without one is
+GitLab keeps constant when you resend a delivery. Older instances send neither, and a delivery without one is
 **refused with 400** rather than run.
 
 That refusal is deliberate. The alternative — synthesising a key from the payload — produces something
-that is *not* stable across a retry, so it would dedup some redeliveries and bill you for the rest. A
+that is *not* stable across a resend, so it would dedup some redeliveries and bill you for the rest. A
 clear error beats a guarantee that silently only half holds.
 
 ## Who can trigger a job
@@ -162,9 +162,39 @@ So a GitLab label is a routing hint, never an approval, and the actor's `access_
 delivery. Group-inherited membership counts (the lookup uses `members/all`), so a maintainer who holds
 their role at the group level is not refused.
 
-If that lookup cannot complete — a 5xx, a dead socket, a revoked token — the receiver answers **503** and
-GitLab redelivers. It does not silently drop the event: "we could not tell" and "you are not allowed" are
-different answers, and only one of them should look like a refusal.
+If that lookup cannot complete (a 5xx, a dead socket, a revoked token), the receiver answers **503**. It does
+not silently drop the event: "we could not tell" and "you are not allowed" are different answers, and only one
+of them should look like a refusal. GitLab does not send it again on its own, so resend it once the lookup works
+([When a delivery fails](#when-a-delivery-fails)).
+
+## When a delivery fails
+
+GitLab sends each delivery once. A 4xx, a 5xx or a timeout is a failure, and GitLab does not retry it. The
+receiver answers **503** when it cannot finish a delivery: the access lookup above failed
+(`gitlab_access_lookup_failed`), or the enqueue failed, for example while Valkey is down (`enqueue_failed`; on a
+trigger with `replicas`, the line says how many were `queued` of the `replicas` before the failure, and those stay
+queued). Each line names the delivery id. The delivery does not run unless you resend it.
+
+**Resending one.** In the project, Settings, Webhooks, **Edit** the hook, open **Recent events** (the last 2 days),
+**View details** on the delivery, then **Resend Request**. The API can do the same on GitLab 17.4 or later:
+`GET /projects/:id/hooks/:hook_id/events` lists the last 7 days, and
+`POST /projects/:id/hooks/:hook_id/events/:hook_event_id/resend` sends one again (five requests a minute for each
+user, for a given project). A resend fails if the hook's URL has changed since.
+
+A resend carries the same `webhook-id`, so it is queued at most once, and on a replica trigger the replicas already
+queued stay one job each while the rest queue. GitLab signs a resend when it sends it, with a fresh
+`webhook-timestamp`, so the receiver's 5-minute replay window never refuses a resend in `signature` mode.
+
+**GitLab switches a failing hook off.** After 4 failures in a row it disables the hook for a while, from one minute
+growing to 24 hours as failures continue, and from GitLab 17.11 it disables the hook for good after 40. (On a
+self-managed instance this applies to project hooks only where the `auto_disabling_web_hooks` feature flag is on.)
+So a Valkey outage, or a revoked `GITLAB_TOKEN`, can switch your hook off, and while it is disabled it sends
+nothing and refuses resends. Re-enable it by sending a test request from the hook's settings: a 2xx answer turns it
+back on. Then resend what failed.
+
+**Where you see failures.** The log lines above, the hook's Recent events, and the console's Connections page,
+which counts `lookup-failed` and `enqueue-failed` per forge over the last 24 UTC hours and warns when either is above
+zero. It counts answers, so a resend that succeeds later does not lower it.
 
 ## Labels: the diff is the trigger
 

@@ -72,6 +72,17 @@ export function connectionsProblems(view) {
   return html`${hit ? ui.banner({ status: "refused", title: hit.title, body: html`${hit.text} ${hit.fix}`, actions: hit.host || hit.run ? html`${hit.host ? ui.btn({ href: `/fleet/host?name=${encodeURIComponent(hit.host)}`, label: `Open ${hit.host}` }) : null}${hit.run ? ui.btn({ href: `/run?id=${encodeURIComponent(hit.run)}`, label: `Open ${hit.run}` }) : null}` : null }) : null}${v.environmentUnknown ? ui.banner({ status: "attention", title: "Deployment metadata could not be read completely", body: "Some settings are unknown. Check the deployment's .env and its permissions; no values from an unreadable declaration are shown." }) : null}${v.snapshotUnreadable ? ui.banner({ status: "attention", title: "Fleet facts unavailable", body: "The console could not read the host registry, doctor records or trigger facts. File sections remain readable." }) : null}`;
 }
 
+/**
+ * What each forge does with a delivery the receiver answered 503, and where to send it again (receiver.mjs, WHAT A 503
+ * MEANS). Keyed by every `RECEIVER_FORGES` member, which the panel test holds; a forge without an entry would throw.
+ */
+export const RESEND_ADVICE = Object.freeze({
+  github: Object.freeze({ doc: "github.md", resend: "GitHub does not resend a delivery answered 503. Redeliver each from the webhook's Recent Deliveries within 3 days; the receiver's log lines name each delivery id." }),
+  gitlab: Object.freeze({ doc: "gitlab.md", resend: "GitLab does not resend a delivery answered 503, and after 4 failures in a row it disables the hook for a while (on self-managed, a project hook only where the auto_disabling_web_hooks flag is on). Resend each from the webhook's Recent events within 2 days." }),
+  forgejo: Object.freeze({ doc: "forgejo.md", resend: "Forgejo does not resend a delivery answered 503. Replay each from the webhook's recent deliveries; a replay is a new delivery, so replay only what did not run." }),
+  azure: Object.freeze({ doc: "azure-devops.md", resend: "Azure DevOps resends a delivery answered 503 for about 3 minutes, and every resend answered 503 counts here too. One still failing after that puts the subscription on probation: Azure retries it up to 7 more times over about 36 hours and sends no new events meanwhile. Check its history under Service hooks." }),
+});
+
 function receiverWarnings(v) {
   const read = v.receiver;
   const hosts = (read?.hosts ?? []).filter((h) => !h.unreadable);
@@ -86,6 +97,15 @@ function receiverWarnings(v) {
     }
   }
   for (const forge of RECEIVER_FORGES) if (hosts.some((h) => receiverForgeFacts(h, forge, v.now).counts["not-configured"] > 0)) banners.push(ui.banner({ status: "attention", title: `${forge}: deliveries reached an unconfigured route`, body: "Check that the receiver serves this forge and that its webhook URL names the right route.", sm: true }));
+  for (const forge of RECEIVER_FORGES) {
+    const sum = (word) => hosts.reduce((n, h) => n + receiverForgeFacts(h, forge, v.now).counts[word], 0);
+    const lookup = sum("lookup-failed");
+    const enqueue = sum("enqueue-failed");
+    const n = lookup + enqueue;
+    if (n === 0) continue;
+    const advice = RESEND_ADVICE[forge];
+    banners.push(ui.banner({ status: "attention", title: `${forge}: answered 503 ${read?.complete === true ? "" : "at least "}${n} ${n === 1 ? "time" : "times"} in 24 UTC hours`, body: html`Lookups or enqueues the receiver could not finish: lookup-failed ${lookup}, enqueue-failed ${enqueue}. ${advice.resend} The count is of answers, so a redelivery that succeeds later does not lower it. ${docs(`docs/${advice.doc}#when-a-delivery-fails`, "When a delivery fails")}`, sm: true }));
+  }
   return banners;
 }
 
