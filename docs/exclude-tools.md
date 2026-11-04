@@ -96,15 +96,15 @@ it runs. So after the extensions load the runner asks pi what they registered:
 | Nothing was held back from it: no `"packages": false`, no `run.excludeExtensions`, this host's overlay open, no parent job, and every extension loaded | It stops before its prompt, as `exclude-tool-not-loaded` |
 | Anything else: the tool may be in what it did not load, so the name may be right | It runs. The job log says `exclude_tools_unmatched`, and its record names the tool (`loaded.tools.unmatched`) |
 
-Two correct names stop a job too, so read the reason before fixing the spelling. A package that brings the tool and is missing on
-this one host stops that host's jobs. A tool an extension registers after it loads stops the job on every host, since the check reads
+A correct name can stop a job too, in two ways, so read the reason before fixing the spelling. A package that brings the tool and is
+missing on this one host stops that host's jobs. A tool an extension registers after it loads stops the job on every host, since the check reads
 what was registered when they loaded: the way out is to leave that extension out with `run.excludeExtensions`, which removes it
 and turns this check off.
 
 **What a stop costs.** The agent never starts, and the container did. An extension that calls a model while it loads is metered like
 any call, and that money is spent. A dollar reservation settles to what the job's exit line reports, down to $0 only when the worker
-trusts that line, the job has a cost cap and no call was made; otherwise the reservation stands. The job-count slot stays held. The
-forge gets a comment and `PI_ON_FAILURE` fires. It is not retried.
+trusts that line, the job has a cost cap and no call was made; otherwise the reservation stands. The job-count slot stays held. A
+forge job gets a comment, and `PI_ON_FAILURE` fires. It is not retried.
 
 ## Leaving an extension out (`run.excludeExtensions`)
 

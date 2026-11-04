@@ -12,7 +12,7 @@ import { explainReason } from "../src/reason-catalog.mjs";
 import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { makeSubscriptionRuntime } from "../src/subscription-runtime.mjs";
 import { TRIGGER_RUN_FIELD_VERSIONS, TRIGGERS_FILE_VERSION, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, parseTriggers, triggersFileVersionFor, withoutMcpExclusions } from "../src/triggers.mjs";
-import { AUTHORED_NARROWING_FIELDS, writeTriggers } from "../src/triggers-file.mjs";
+import { AUTHORED_NARROWING_FIELDS, makeCheckWaitSkew, writeTriggers } from "../src/triggers-file.mjs";
 import { overlayEntryNamed as runnerNamed } from "../../image/runner/src/loaded.mjs";
 import { secretValuesOf } from "../src/redact-secrets.mjs";
 import { collectChecks } from "./helpers/doctor.mjs";
@@ -107,6 +107,17 @@ test("each field needs file version 2 by itself: an older loader would drop it, 
 	}
 	assert.equal(triggersFileVersionFor({ triggers: [KINDS[1][1]({ excludeTools: ["bash"] })] }), 1, "run.excludeTools needs nothing, so no existing file moves");
 });
+test("a job that arrived without a field its entry authors is refused by name, each field alone, and an empty list authors nothing", async () => {
+	const fileOf = (run) => ({ readFileSync: () => JSON.stringify({ version: 2, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "f", ...run } }] }) });
+	const arrived = (extra = {}) => ({ trigger: { matched: { index: 0, type: "label" } }, kind: "github", flow: "f", ...extra });
+	for (const field of ["excludeExtensions", "excludeExtensionTools"]) {
+		const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: fileOf({ [field]: ["x"] }) });
+		assert.deepEqual(await check(arrived()), { skewed: true, field }, "a stale receiver or a dead inode dropped it");
+		assert.deepEqual(await check(arrived({ [field]: null })), { skewed: true, field });
+		assert.deepEqual(await check(arrived({ [field]: ["x"] })), { ok: true });
+	}
+});
+
 test("a watch rule refuses both keys by the rule it always had: its data is built by name, and a watch job never carries them", () => {
 	const doc = (extra) => JSON.stringify({ version: 2, watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SECRET" } }, triggers: [{ on: { type: "watch", id: "errors", source: "prod", fingerprint: ["service"], window: "10m", cooldown: "6h", maxPerDay: 4 }, run: { kind: "local", mode: "investigate", folder: "/p", flow: "f", task: "t", maxCostUsd: "1", ...extra } }] });
 	assert.equal(parseTriggers(doc({}), "/t").length, 1, "the premise: the rule loads without them");

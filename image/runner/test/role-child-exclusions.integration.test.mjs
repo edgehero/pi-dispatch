@@ -133,6 +133,30 @@ test("a whole job: the real runner hands PI_EXCLUDE_TOOLS to its role child, and
 	}
 });
 
+test("the boundary the docs state: exclusion stops what a job loads on its own, and an agent that writes pi's settings brings an excluded extension back in a child", { skip }, async () => {
+	const server = await scriptedServer();
+	try {
+		const root = jobTree({ base: server.base });
+		const ref = `${JOB_PROVIDER}/${JOB_MODEL}`;
+		put(root, "/job/model-roles.json", JSON.stringify({ version: 1, roles: {}, parent: ref, models: [ref] }));
+		put(root, "/job/agents.json", JSON.stringify({ version: 1, agents: [{ name: "scout", description: "probe", content: "Probe." }] }));
+		mkdirSync(join(root, "home", ".pi", "agent"), { recursive: true });
+		writeFileSync(join(root, "home", ".pi", "agent", "models.json"), readFileSync(join(root, "opt", "pi-global", "models.json")));
+		const overlayFile = join(root, "opt", "pi-global", "extensions", "gone.js");
+		put(root, "/opt/pi-global/extensions/gone.js", `export default function (pi) { pi.registerTool({ name: "gone_tool", label: "t", description: "t", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [] }) }); }\n`);
+		// As an agent with a shell could, before it asks for a child: the file is writable in the image (0777, image/Dockerfile).
+		writeFileSync(join(root, "home", ".pi", "agent", "settings.json"), JSON.stringify({ extensions: [overlayFile] }));
+		const { exit, stderr } = await runRealJob(root, { PI_MODEL_ROLES_FILE: "/job/model-roles.json", PI_AGENTS_FILE: "/job/agents.json", PI_EXCLUDE_EXTENSIONS: "gone", PI_ALLOWED_MODELS: ref, PI_OFFLINE: "1" });
+		assert.equal(exit?.code, 0, `${JSON.stringify(exit)}\n${stderr}`);
+		const parentCall = server.offered.find((names) => names.includes("subagent"));
+		assert.ok(!parentCall.includes("gone_tool"), "the job itself did not load it");
+		const childCall = server.offered.find((names) => !names.includes("subagent"));
+		assert.ok(childCall.includes("gone_tool"), `the residual this test pins, which the docs say out loud: ${JSON.stringify(childCall)}`);
+	} finally {
+		await server.close();
+	}
+});
+
 test("a whole job: an extension tool the trigger names is out of the child too, and a child is no strict job", { skip }, async () => {
 	const server = await scriptedServer();
 	try {
