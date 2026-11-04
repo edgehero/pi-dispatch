@@ -529,7 +529,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       jobDataVersion: parseTriggers(afterText, paths.triggersPath, triggersTables).reduce((most, trigger) => Math.max(most, jobDataVersionFor(trigger?.run, jobDataTables)), 1),
     };
     const stamped = need.triggersVersion > (Number.isSafeInteger(doc.version) ? doc.version : 1);
-    return { body, expect, row, beforeText, afterText, mutate, dry, changes, unjudged, thin, undo, inverse, need, stamped };
+    return { body, expect, row, cron: entry.on?.type === "cron", beforeText, afterText, mutate, dry, changes, unjudged, thin, undo, inverse, need, stamped };
   }
 
   /**
@@ -579,7 +579,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     if (rows.length > 0) {
       const said = rows.slice(0, SKEW_NAMED_MAX).map((row) => (row.conditions ? `${row.jobId} as wait-skew (its wait conditions)` : `${row.jobId} as trigger-skew (run.${row.field})`));
       const more = rows.length - said.length;
-      lines.push(`With this change, ${rows.length} of this trigger's jobs in line ${rows.length === 1 ? "is" : "are"} refused before ${rows.length === 1 ? "it spends" : "they spend"}: ${said.join(", ")}${more > 0 ? ` and ${more} more` : ""}. Re-run ${rows.length === 1 ? "it" : "each"} from its page.`);
+      lines.push(`With this change, a host reading this file refuses ${rows.length} of this trigger's jobs in line, before ${rows.length === 1 ? "it spends" : "they spend"}: ${said.join(", ")}${more > 0 ? ` and ${more} more` : ""}. Re-run ${rows.length === 1 ? "it" : "each"} from its page.`);
     }
     if (incomplete) lines.push("The jobs in line could not all be read, so any of them may also be refused as trigger-skew.");
     return lines;
@@ -604,18 +604,24 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       }
     }
     const reach = [...servers.map((name) => serverReach(name, hosts)), ...(added.includes("forge") ? ["connect to the job's own forge server"] : [])];
-    const said = changes.map((change) => (change.addedServers?.length > 0 ? { ...change, widening: `This widens what its jobs reach: those that start after this ${reach.join(" and ")}.` } : change));
+    const said = changes.map((change) => (change.addedServers?.length > 0 ? { ...change, widening: `This widens what its jobs reach: jobs queued from this file ${reach.join(" and ")}.` } : change));
     const skew = await jobsRefused(judged.body.index, judged.dry);
     const lines = [
       ...said.flatMap((change) => [change.line, ...(change.widening ? [change.widening] : [])]),
       ...thin,
-      "New deliveries use this. Jobs already in line keep what they were queued with.",
+      // Each of these is about when this file's change takes effect, and each holds of a fleet where hosts keep their own copy
+      // (docs/multi-host.md, trap 2: syncing the file is the operator's). "New deliveries use this" did not: this host's file is
+      // all this page writes, and a receiver in compose's single-file mount reads it only at its restart.
+      "The services reading this file use it from their next reload, for the jobs they queue after that.",
+      "A job already in line keeps what it was queued with, or is refused if this file now narrows something it lacks. A running job is not touched.",
+      "A host with its own copy of this file keeps what it has until that copy changes.",
+      ...(judged.cron ? ["While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree."] : []),
       ...skewLines(skew),
       ...(judged.stamped ? [`Stamps the file version ${judged.need.triggersVersion}: a host reading less waits on every trigger's jobs, not only this one's.`] : []),
       ...(gate.hosts === null ? [] : [gate.hosts.length > 0 ? `${listed(gate.hosts)} ${gate.hosts.length === 1 ? "reads" : "each read"} what this change needs.` : "No host is live right now, so no host's release could be checked."]),
       ...servers.map((name) => `A job on a host without ${name}, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid.${hosts.length > 0 ? ` ${serverHosts(name, hosts)}.` : " No host has published which servers it has."}`),
       ...(unjudged.length > 0 ? [`The first call on ${listed(unjudged)} could not be bounded here, so the runner judges it when a job runs.`] : []),
-      `Written to ${basename(paths.triggersPath)} and audited as trigger-edit, by ${typeof ctx.name === "string" && ctx.name !== "" ? ctx.name : "the operator"} at the console.`,
+      `Written to ${basename(paths.triggersPath)} on this host and audited as trigger-edit, by ${typeof ctx.name === "string" && ctx.name !== "" ? ctx.name : "the operator"} at the console.`,
     ];
     return {
       target: paths.triggersPath,

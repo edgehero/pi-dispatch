@@ -882,7 +882,7 @@ const LOADS = {
 test("a server turned on is a widening that names where it connects and with which key, and what a host without it does", async () => {
   const f = fixture({ deps: { readHostLoads: async () => LOADS } });
   const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
-  assert.deepEqual(out.plan.changes[0], { key: "mcp", line: "MCP: linear on.", widening: "This widens what its jobs reach: those that start after this connect to mcp.example.com, with LINEAR_API_KEY by name." });
+  assert.deepEqual(out.plan.changes[0], { key: "mcp", line: "MCP: linear on.", widening: "This widens what its jobs reach: jobs queued from this file connect to mcp.example.com, with LINEAR_API_KEY by name." });
   assert.ok(out.summary.includes("A job on a host without linear, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid. mini1 and build3 have it; bare does not; mini2, cut and unread have not said."), out.summary.join("\n"));
 });
 
@@ -891,15 +891,15 @@ test("a server off on a host reads as lacking, and a server hosts disagree about
   const out = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
   assert.match(out.summary.find((line) => line.startsWith("A job on a host")), /mini1, build3 and bare do not; mini2, cut and unread have not said\.$/);
   // No host has docs on, so where it connects is known to none.
-  assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: those that start after this connect to docs.");
+  assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to docs.");
 
   const differ = fixture({ deps: { readHostLoads: async () => ({ hosts: [{ name: "a", state: "current", mcp: [{ name: "x", enabled: true, where: "one.example", keys: [] }], unread: [], more: {} }, { name: "b", state: "current", mcp: [{ name: "x", enabled: true, where: "two.example", keys: [] }], unread: [], more: {} }] }) } });
   const two = await differ.service.preview(ask(differ, { mcp: ["x"] }), operator);
-  assert.equal(two.plan.changes[0].widening, "This widens what its jobs reach: those that start after this connect to x.");
+  assert.equal(two.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to x.");
   const bare = fixture({ deps: { readHostLoads: async () => ({ hosts: [{ name: "a", state: "current", mcp: [{ name: "x", enabled: true, where: "one.example", keys: [] }], unread: [], more: {} }] }) } });
-  assert.equal((await bare.service.preview(ask(bare, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: those that start after this connect to one.example.");
+  assert.equal((await bare.service.preview(ask(bare, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to one.example.");
   const noWhere = fixture({ deps: { readHostLoads: async () => ({ hosts: [{ name: "a", state: "current", mcp: [{ name: "x", enabled: true, where: null, keys: [] }], unread: [], more: {} }] }) } });
-  assert.equal((await noWhere.service.preview(ask(noWhere, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: those that start after this connect to x.");
+  assert.equal((await noWhere.service.preview(ask(noWhere, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to x.");
 });
 
 test("no host's publication, or one that cannot be read, says so and is never read as lacking the server", async () => {
@@ -907,7 +907,7 @@ test("no host's publication, or one that cannot be read, says so and is never re
     const f = fixture({ deps: { readHostLoads } });
     const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
     assert.ok(out.summary.some((line) => line.endsWith("No host has published which servers it has.")), out.summary.join("\n"));
-    assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: those that start after this connect to linear.");
+    assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to linear.");
   }
 });
 
@@ -915,7 +915,7 @@ test("the forge server is no host's to lack, and a server taken away reads no ho
   let reads = 0;
   const f = fixture({ deps: { readHostLoads: async () => { reads++; return LOADS; } } });
   const forge = await f.service.preview(ask(f, { mcp: ["forge"] }), operator);
-  assert.equal(forge.plan.changes[0].widening, "This widens what its jobs reach: those that start after this connect to the job's own forge server.");
+  assert.equal(forge.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to the job's own forge server.");
   assert.ok(!forge.summary.some((line) => line.startsWith("A job on a host")));
   assert.equal(reads, 0);
   const both = await f.service.preview(ask(f, { mcp: ["linear", "forge"] }), operator);
@@ -926,15 +926,30 @@ test("the forge server is no host's to lack, and a server taken away reads no ho
   assert.equal(reads, 1);
 });
 
+test("when a change takes effect is said of this file on this host, of the jobs in line, of running jobs and of other hosts", async () => {
+  const f = fixture();
+  const out = await f.service.preview(ask(f, { packages: false }), operator);
+  for (const line of [
+    "The services reading this file use it from their next reload, for the jobs they queue after that.",
+    "A job already in line keeps what it was queued with, or is refused if this file now narrows something it lacks. A running job is not touched.",
+    "A host with its own copy of this file keeps what it has until that copy changes.",
+  ]) assert.ok(out.summary.includes(line), line);
+  assert.ok(!out.summary.some((line) => /New deliveries use this|start after this/.test(line)), "nothing says this reaches every host, or a job already in line");
+  // Divergent files freeze cron (docs/multi-host.md, trap 2), so a schedule's change waits for the copies to agree, this host's included.
+  const schedule = await f.service.preview(ask(f, { packages: false }, 0), operator);
+  assert.ok(schedule.summary.includes("While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree."), schedule.summary.join("\n"));
+  assert.ok(!out.summary.some((line) => line.startsWith("While hosts' copies differ")), "a webhook trigger has no schedule to freeze");
+});
+
 test("the audit line and the file it writes are said, by the person who is asking", async () => {
   const f = fixture();
   const out = await f.service.preview(ask(f, { packages: false }), { ...operator, name: "alice" });
-  assert.equal(out.summary.at(-1), "Written to triggers.json and audited as trigger-edit, by alice at the console.");
+  assert.equal(out.summary.at(-1), "Written to triggers.json on this host and audited as trigger-edit, by alice at the console.");
   assert.equal(out.target, f.paths.triggersPath);
   assert.match(out.beforeDigest, /^[a-f0-9]{64}$/);
   assert.match(out.afterDigest, /^[a-f0-9]{64}$/);
   const unnamed = await f.service.preview(ask(f, { packages: false }), { surface: "console", role: "operator" });
-  assert.equal(unnamed.summary.at(-1), "Written to triggers.json and audited as trigger-edit, by the operator at the console.");
+  assert.equal(unnamed.summary.at(-1), "Written to triggers.json on this host and audited as trigger-edit, by the operator at the console.");
 });
 
 test("the audit row's digests are the file's own, so a reader can tie the row to the bytes", async () => {
@@ -970,7 +985,7 @@ test("jobs in line are judged on the PROPOSED entry: the job the new key refuses
   const { f, seen } = skewFixture([queued("gh-c9e1")]);
   const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
   assert.deepEqual(out.plan.skew, { rows: [{ jobId: "gh-c9e1", queue: "pi-jobs", field: "mcp" }], incomplete: false });
-  assert.ok(out.summary.includes("With this change, 1 of this trigger's jobs in line is refused before it spends: gh-c9e1 as trigger-skew (run.mcp). Re-run it from its page."), out.summary.join("\n"));
+  assert.ok(out.summary.includes("With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: gh-c9e1 as trigger-skew (run.mcp). Re-run it from its page."), out.summary.join("\n"));
   // The control, the same job against the file as it stands: nothing refuses it.
   const today = await readTriggerSkew({ index: 1, waiting: { rows: [{ jobId: "gh-c9e1", queue: "pi-jobs" }] }, triggersPath: f.paths.triggersPath, lookupJob: async () => ({ data: queued("gh-c9e1").data }) });
   assert.deepEqual(today.rows, []);
@@ -983,7 +998,7 @@ test("a job that already carries the field, one of another trigger, and one of a
   const { f } = skewFixture([queued("has", { mcp: ["linear"] }), { id: "other", data: { kind: "github", flow: "fix", trigger: { matched: { index: 0, type: "cron" } } } }]);
   const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
   assert.deepEqual(out.plan.skew, { rows: [], incomplete: false });
-  assert.ok(!out.summary.some((line) => line.includes("refused before")));
+  assert.ok(!out.summary.some((line) => line.includes("a host reading this file refuses")));
 
   // An edit of the flow: the entry no longer names the job's flow, so its identity fails and "unknown" runs (`makeCheckWaitSkew`).
   const flow = skewFixture([queued("a")], { run: { mcp: ["docs"] } });
@@ -1003,11 +1018,11 @@ test("every narrowing field the card writes is named by the worker's own table w
 test("a job waiting on conditions it lost reads as wait-skew, and many jobs are counted and named up to a bound", async () => {
   const f = fixture({ deps: { readSkew: async () => ({ rows: [{ jobId: "w", queue: "q", conditions: 2 }], incomplete: false }) } });
   const out = await f.service.preview(ask(f, { packages: false }), operator);
-  assert.ok(out.summary.includes("With this change, 1 of this trigger's jobs in line is refused before it spends: w as wait-skew (its wait conditions). Re-run it from its page."));
+  assert.ok(out.summary.includes("With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: w as wait-skew (its wait conditions). Re-run it from its page."));
   const rows = Array.from({ length: 7 }, (_, i) => ({ jobId: `gh-${i}`, queue: "q", field: "mcp" }));
   const many = fixture({ deps: { readSkew: async () => ({ rows, incomplete: false }) } });
   const said = await many.service.preview(ask(many, { packages: false }), operator);
-  assert.ok(said.summary.includes("With this change, 7 of this trigger's jobs in line are refused before they spend: gh-0 as trigger-skew (run.mcp), gh-1 as trigger-skew (run.mcp), gh-2 as trigger-skew (run.mcp), gh-3 as trigger-skew (run.mcp), gh-4 as trigger-skew (run.mcp) and 2 more. Re-run each from its page."), said.summary.join("\n"));
+  assert.ok(said.summary.includes("With this change, a host reading this file refuses 7 of this trigger's jobs in line, before they spend: gh-0 as trigger-skew (run.mcp), gh-1 as trigger-skew (run.mcp), gh-2 as trigger-skew (run.mcp), gh-3 as trigger-skew (run.mcp), gh-4 as trigger-skew (run.mcp) and 2 more. Re-run each from its page."), said.summary.join("\n"));
 });
 
 test("a queue it could not read whole says so and refuses nothing: a free refusal at pickup is no reason to stop a person", async () => {

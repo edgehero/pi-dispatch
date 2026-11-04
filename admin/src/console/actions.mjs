@@ -2008,7 +2008,7 @@ const WRITE_RULES = {
     undo: (out) => out.plan.undo,
     inverse: (out) => out.plan.inverse,
     confirmLabel: (out) => `Confirm: change ${out.plan.row}`,
-    done: (out) => `Changed ${out.plan.row}; new deliveries use it, and no run was started`,
+    done: (out) => `Changed ${out.plan.row} in this host's triggers file; no run was started`,
   },
   "run-enqueue": {
     fields: ["folder", "flow", "task"], danger: false, atConfirm: true,
