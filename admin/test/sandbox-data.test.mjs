@@ -10,6 +10,8 @@ import { sandboxFixture } from "./helpers/sandbox-goldens.mjs";
 import { NOW } from "../../launch/fixture-deployment.mjs";
 import { makeSandboxTelemetry } from "@edgehero/pi-dispatch/host-telemetry";
 import { makeSandboxInventory, readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
+import { FORGE_KINDS } from "@edgehero/pi-dispatch/forges";
+import { sandboxFromRun } from "../src/console/panels/sandboxes.mjs";
 
 function setup() {
   const dir = tempDir("pd-sandbox-console-");
@@ -268,4 +270,23 @@ test("a fresh sandbox knows whether its trigger withholds the staged packages, s
   s.triggers.triggers[0].run.packages = false;
   writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
   assert.equal((await s.service.read({})).withholdsPackages, true);
+});
+
+// Issue #824: a forge is the forge table's (`isForgeKind`), so a forge added to FORGES has its triggers offered, its run's
+// repository filled in and its workspace read as a clone, with no edit in these files.
+test("every forge's trigger is a preparation option, a run of each fills its repository and opens as its retained clone, and neither file writes the forges out", async () => {
+  const s = setup();
+  s.triggers.triggers = [...FORGE_KINDS.map((kind) => ({ on: { type: "label", any: ["pi"] }, run: { kind, flow: "fix", ...(kind === "azure" ? { repository: "web" } : {}) } })), { on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/p", flow: "fix", task: "t" } }];
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  assert.deepEqual((await s.service.read({})).options.map((o) => s.triggers.triggers[o.index].run.kind), [...FORGE_KINDS], "every forge's trigger and no local one");
+  for (const kind of [...FORGE_KINDS, "local", "bitbucket", "constructor"]) {
+    s.fleet.runById = async (id) => ({ record: { jobId: id, host: "mini1", kind, target: "acme/web#490", triggerIndex: 0 } });
+    assert.equal((await s.service.read({ fromRun: "run-1" })).sourceRun?.repo ?? null, FORGE_KINDS.includes(kind) ? "acme/web" : null, kind);
+    const view = { role: "operator", now: NOW, query: { id: "w1", host: "mini1" }, data: { sandboxes: { hosts: [{ name: "mini1", rows: [{ id: "w1", kind, v: "local", image: "pi-job:x" }] }] } } };
+    const workspace = String(sandboxFromRun(view)).match(/<dt[^>]*>\/workspace<\/dt>\s*<dd[^>]*>([^<]*)</)?.[1];
+    assert.equal(workspace, FORGE_KINDS.includes(kind) ? "Its retained clone" : kind === "local" ? "Its original host folder" : "The workspace recorded in its kept manifest", kind);
+  }
+  // Two forge names side by side are a copy of the list, which a forge added to FORGES would not reach.
+  const names = FORGE_KINDS.join("|");
+  for (const file of ["../src/sandbox-data.mjs", "../src/console/panels/sandboxes.mjs"]) assert.doesNotMatch(readFileSync(new URL(file, import.meta.url), "utf8"), new RegExp(`\\b(?:${names})\\b\\W+\\b(?:${names})\\b`), file);
 });

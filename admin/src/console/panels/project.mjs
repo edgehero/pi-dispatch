@@ -1,6 +1,7 @@
 /** ProjectDetail's pure Pulse panels (#751); reads and planner preflights live in project-view.mjs. */
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
+import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { formatCpus, parseMemory } from "@edgehero/pi-dispatch/job-size";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { bundleDeclaredText } from "../../read-model.mjs";
@@ -32,7 +33,7 @@ const runBadge = (r) => {
   const word = OUTCOME_KEY_WORDS[r.outcome];
   return ui.badge(r.outcome === "completed" ? "idle" : word?.status ?? "attention", word ? word.word.charAt(0).toUpperCase() + word.word.slice(1) : "Unknown", { icon: r.outcome === "completed" ? ui.STATUS.ok.icon : null });
 };
-const kindText = (t) => `${String(t.type ?? "unknown").replaceAll("_", " ")}${["github", "gitlab", "forgejo", "azure"].includes(t.forge) ? ` on ${t.forge}` : ""}`;
+const kindText = (t) => `${String(t.type ?? "unknown").replaceAll("_", " ")}${isForgeKind(t.forge) ? ` on ${t.forge}` : ""}`;
 
 export const projectTitle = (view) => view?.project?.name || view?.id || "Project";
 export const projectDescription = (view) => view?.state === "ready" ? `${view.members.length} member${view.members.length === 1 ? "" : "s"}; id ${view.id} in ${view.file}.` : "Project configuration could not be read.";

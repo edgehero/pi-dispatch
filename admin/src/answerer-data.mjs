@@ -3,7 +3,7 @@ import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
 import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { loadGitLabAuth, loadForgejoAuth, loadAzureAuth } from "@edgehero/pi-dispatch/config";
-import { isForgeKind } from "@edgehero/pi-dispatch/forges";
+import { forgeApiRoot, isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { makeAnswerDraftStore, answerStandingSource, answerRuleConfigDigest, answerApiRoot } from "@edgehero/pi-dispatch/answerer";
@@ -31,11 +31,12 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
     try { return await fn(storeFn({ redis, now, retentionDays: Number(env.PI_LOG_RETENTION_DAYS ?? 30) })); }
     finally { redis.disconnect?.(); }
   };
+  // The parsed forge configs under the keys the worker's config holds them by, for the forge table's `forgeApiRoot`.
+  // Getters, so only the asked forge's loader runs, inside the catch below: a broken GitLab block in the env refuses
+  // a GitLab draft and no other.
+  const forgeConfigs = { get gitlab() { return loadGitLabAuth(env); }, get forgejo() { return loadForgejoAuth(env); }, get azure() { return loadAzureAuth(env); } };
   const configuredApiRoot = kind => {
-    try {
-      const root = kind === "github" ? "https://api.github.com" : kind === "gitlab" ? loadGitLabAuth(env)?.apiUrl : kind === "forgejo" ? loadForgejoAuth(env)?.apiUrl : kind === "azure" ? loadAzureAuth(env)?.orgUrl : null;
-      return answerApiRoot(root);
-    } catch { return null; }
+    try { return answerApiRoot(forgeApiRoot(kind, forgeConfigs)); } catch { return null; }
   };
   const currentDraft = async (store, runId, config = null) => {
     const draft = await store.privateDraft(runId);

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { FORGES, FORGE_KINDS, MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS, RUN_KINDS, forgeSpec, isForgeKind, targetSeparator } from "../src/forges.mjs";
+import { FORGES, FORGE_KINDS, MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS, RUN_KINDS, forgeApiRoot, forgeSpec, isForgeKind, targetSeparator } from "../src/forges.mjs";
+import { loadAzureAuth, loadForgejoAuth, loadGitLabAuth } from "../src/config.mjs";
 import { forgeDeliveryJobId, deliveryJobId, gitlabDeliveryJobId } from "../src/job-id.mjs";
 
 test("FORGE_KINDS is exactly the table's keys, so nothing can be in one and not the other", () => {
@@ -27,7 +28,38 @@ test("every forge describes every field, so a half-filled row cannot reach a cal
 		// is pinned -- asserting a member would forbid the honest answer.
 		assert.ok(Array.isArray(spec.hostVars) && spec.hostVars.every((n) => typeof n === "string" && n !== ""), `${kind}: hostVars is a list of names, possibly empty`);
 		assert.ok(Array.isArray(spec.receiverOnlyVars) && spec.receiverOnlyVars.every((n) => typeof n === "string" && n !== ""), `${kind}: receiverOnlyVars is a list of names, possibly empty`);
+		const root = spec.apiRoot;
+		assert.ok(root && Object.keys(root).length === 1 && (typeof root.url === "string" && root.url.startsWith("https://") || typeof root.field === "string" && root.field !== ""), `${kind}: apiRoot is a fixed https url or the config field that holds one`);
 	}
+});
+
+// Issue #824: the worker's answer draft identity and the console's configuredApiRoot both take a forge's API root from
+// here, from the configs the forge loaders return. A forge needs a parsed config in this walk, which is its point: a
+// forge the table names with no root, or a field its loader does not set, fails naming it.
+const LOADED = {
+	gitlab: loadGitLabAuth({ GITLAB_TOKEN: "t", GITLAB_URL: "https://GitLab.example/team/" }),
+	forgejo: loadForgejoAuth({ FORGEJO_TOKEN: "t", FORGEJO_URL: " https://code.example/base/ " }),
+	azure: loadAzureAuth({ AZURE_TOKEN: "t", AZURE_ORG_URL: "https://dev.azure.com/acme/" }),
+};
+const rootless = (kinds) => kinds.filter((kind) => typeof forgeApiRoot(kind, LOADED) !== "string").map((kind) => `${kind}: forgeApiRoot (worker/src/forges.mjs) has no API root from its parsed config`);
+
+test("forgeApiRoot gives every forge its raw API root from the parsed forge configs, and the worker and the console ask it (#824)", async () => {
+	assert.deepEqual(rootless(FORGE_KINDS), []);
+	assert.deepEqual(rootless([...FORGE_KINDS, "bitbucket"]), ["bitbucket: forgeApiRoot (worker/src/forges.mjs) has no API root from its parsed config"]);
+	// Raw, as the loaders return it: the runner fetches under it and compares Forgejo's issue_url with it.
+	assert.deepEqual(Object.fromEntries(FORGE_KINDS.map((kind) => [kind, forgeApiRoot(kind, LOADED)])), { github: "https://api.github.com", gitlab: "https://GitLab.example/team/", forgejo: "https://code.example/base/", azure: "https://dev.azure.com/acme" });
+	// A forge that is not configured has none, but GitHub's is fixed; anything that is no forge has none.
+	for (const kind of FORGE_KINDS) assert.equal(forgeApiRoot(kind, {}), FORGES[kind].apiRoot.url ?? null, kind);
+	for (const kind of FORGE_KINDS) assert.equal(forgeApiRoot(kind, { [kind]: null }), FORGES[kind].apiRoot.url ?? null, kind);
+	for (const kind of ["local", "bitbucket", "toString", "__proto__", ["github"], null]) assert.equal(forgeApiRoot(kind, LOADED), null, String(kind));
+	// Only the asked forge's config is read, so a caller may hand in getters for loaders that can throw.
+	const asked = [];
+	const lazy = Object.fromEntries(FORGE_KINDS.map((kind) => [kind, undefined]));
+	for (const kind of FORGE_KINDS) Object.defineProperty(lazy, kind, { get: () => { asked.push(kind); return LOADED[kind]; } });
+	for (const kind of FORGE_KINDS) { asked.length = 0; forgeApiRoot(kind, lazy); assert.deepEqual(asked, FORGES[kind].apiRoot.url ? [] : [kind], kind); }
+	const { readFileSync: read } = await import("node:fs");
+	assert.match(read(new URL("../src/start.mjs", import.meta.url), "utf8"), /identity: async job => \{[^}]*apiUrl: forgeApiRoot\(job\.kind, config\)/, "the worker's answer draft identity");
+	assert.match(read(new URL("../../admin/src/answerer-data.mjs", import.meta.url), "utf8"), /answerApiRoot\(forgeApiRoot\(kind, forgeConfigs\)\)/, "the console's configuredApiRoot");
 });
 
 test("no two forges share a jobId prefix -- a collision would let one forge's delivery suppress another's job", () => {

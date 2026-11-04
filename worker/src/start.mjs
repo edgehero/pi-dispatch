@@ -10,6 +10,7 @@ import { makeQuestionGroupStore } from "./question-groups.mjs";
 import { makeQuestionGroupRuntime } from "./question-group-runtime.mjs";
 import { makeAnswerDraftStore } from "./answerer.mjs";
 import { makeAnswerDraftRuntime, readAnswerPending } from "./answerer-runtime.mjs";
+import { forgeApiRoot } from "./forges.mjs";
 import { enqueueAnswerDraftJob } from "./queue.mjs";
 import { makeWatchRuntime } from "./watch-runtime.mjs";
 import { makeWatchDrainer } from "./watch-drainer.mjs";
@@ -2121,9 +2122,11 @@ export async function startWorker(
 			const queues = [runtimeQueue, ...found.names.map(name => recoveryQueues.host(name))];
 			return readAnswerPending({ queues, source, runId: source.runId });
 		},
+		// The API root is the forge table's (`forgeApiRoot`), the one the console binds a completed draft to. Raw, as
+		// configured: the runner fetches under it and checks Forgejo's issue_url against it.
 		identity: async job => {
 			const auth = forgeFor(job)?.auth ?? await ensureAuth(job.kind);
-			return auth ? { selfId: job.kind === "azure" ? auth.selfId?.id : auth.selfId, apiUrl: job.kind === "github" ? "https://api.github.com" : job.kind === "azure" ? config.azure?.orgUrl : config[job.kind]?.apiUrl } : null;
+			return auth ? { selfId: job.kind === "azure" ? auth.selfId?.id : auth.selfId, apiUrl: forgeApiRoot(job.kind, config) } : null;
 		},
 	});
 

@@ -1,8 +1,14 @@
 /** Display-only receiver observations (#775). No request makes a storage command or carries request text here. */
 import { DEFER_TIME_MAX_MS } from "./defer-reasons.mjs";
+import { FORGE_KINDS } from "./forges.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 
-export const RECEIVER_FORGES = Object.freeze(["github", "gitlab", "forgejo", "azure"]);
+/** The forges a record counts: the forge table's own list (issue #824), so a forge added to FORGES is observed,
+ * published and read with no edit here. */
+export const RECEIVER_FORGES = FORGE_KINDS;
+/** The most `forges` entries a record may name. A fixed bound, never this build's forge count: a newer receiver that
+ * serves a forge this build does not know names more forges than this build has, and its record must still be read. */
+export const RECEIVER_FORGES_MAX = 64;
 export const RECEIVER_OUTCOMES = Object.freeze(["queued", "deduplicated", "held", "steered", "dropped", "unauthorized", "not-configured", "lookup-failed", "enqueue-failed", "malformed", "error"]);
 export const RECEIVER_TAKEN = Object.freeze(RECEIVER_OUTCOMES.slice(0, 4));
 export const RECEIVER_REFUSED = Object.freeze(RECEIVER_OUTCOMES.slice(5));
@@ -17,6 +23,14 @@ const integer = (n) => Number.isSafeInteger(n) && n >= 0;
 const instant = (n) => integer(n) && n <= DEFER_TIME_MAX_MS;
 const nameOk = (s) => typeof s === "string" && WORKER_NAME_RE.test(s);
 const hourOf = (at) => Math.floor(at / HOUR) * HOUR;
+const plainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+/** A forge's counts in a record that leaves it out: never observed, and zero in each of 24 hours, the newest the hour
+ * that holds the record's `at`, or hour 23 for an `at` under 23 hours past the epoch, so no hour falls before the epoch
+ * and a rebuilt record parses again (the console parses it twice). */
+const unobserved = (at) => {
+	const newest = Math.max(hourOf(at), 23 * HOUR);
+	return Object.fromEntries(RECEIVER_OUTCOMES.map((word) => [word, { lastAt: null, hours: Array.from({ length: 24 }, (_, i) => [newest - (23 - i) * HOUR, 0]) }]));
+};
 const safeLog = (log, reason) => { try { log("receiver_status_unavailable", { reason }); } catch {} };
 
 /** The address is classified and discarded. Both IPv4 and IPv6 socket answers occur for localhost. */
@@ -64,22 +78,37 @@ export function makeReceiverObservations({ now = Date.now } = {}) {
 	};
 }
 
-/** Strict rebuilding keeps a planted extension field out of the console and the agent's context. */
+/**
+ * Strict rebuilding keeps a planted extension field out of the console and the agent's context.
+ *
+ * Tolerant across releases both ways, on its forges only (issue #824). A NEWER record may name a forge this build does
+ * not know: it is dropped from `forges` and its `deliveries` are never read, so the forges this build knows still
+ * show. An OLDER record may leave out a forge this build knows: the release that wrote it did not know that forge,
+ * so it served none, and the forge reads as zero counts never observed. A forge the record names as served but whose
+ * deliveries it leaves out is no record any release writes, and is refused, as is a malformed entry of a known forge.
+ * So `v` stays 1 when a forge is added: another `v` still means a shape this build cannot read.
+ */
 export function parseReceiverStatus(raw) {
 	if (typeof raw !== "string" || Buffer.byteLength(raw) > RECEIVER_MAX_BYTES) return null;
 	let d;
 	try { d = JSON.parse(raw); } catch { return null; }
-	if (!d || d.v !== 1 || !nameOk(d.name) || typeof d.version !== "string" || !/^[0-9A-Za-z.+-]{1,32}$/.test(d.version) || !instant(d.startedAt) || !instant(d.at) || !Number.isInteger(d.port) || d.port < 1 || d.port > 65535 || !["all", "loopback", "address"].includes(d.bind) || !Array.isArray(d.forges) || d.forges.length > 4 || new Set(d.forges).size !== d.forges.length || d.forges.some((f) => !RECEIVER_FORGES.includes(f))) return null;
+	if (!d || d.v !== 1 || !nameOk(d.name) || typeof d.version !== "string" || !/^[0-9A-Za-z.+-]{1,32}$/.test(d.version) || !instant(d.startedAt) || !instant(d.at) || !Number.isInteger(d.port) || d.port < 1 || d.port > 65535 || !["all", "loopback", "address"].includes(d.bind) || !Array.isArray(d.forges) || d.forges.length > RECEIVER_FORGES_MAX || !plainObject(d.deliveries)) return null;
+	const forges = [...new Set(d.forges.filter((f) => RECEIVER_FORGES.includes(f)))];
 	const deliveries = {};
 	for (const forge of RECEIVER_FORGES) {
+		if (!Object.hasOwn(d.deliveries, forge)) {
+			if (forges.includes(forge)) return null;
+			deliveries[forge] = unobserved(d.at);
+			continue;
+		}
 		deliveries[forge] = {};
 		for (const word of RECEIVER_OUTCOMES) {
-			const v = d.deliveries?.[forge]?.[word];
+			const v = d.deliveries[forge]?.[word];
 			if (!v || !(v.lastAt === null || instant(v.lastAt)) || !Array.isArray(v.hours) || v.hours.length !== 24 || v.hours.some((r, i) => !Array.isArray(r) || r.length !== 2 || !instant(r[0]) || r[0] % HOUR !== 0 || !integer(r[1]) || i > 0 && r[0] !== v.hours[i - 1][0] + HOUR)) return null;
 			deliveries[forge][word] = { lastAt: v.lastAt, hours: v.hours.map(([at, n]) => [at, n]) };
 		}
 	}
-	return { v: 1, name: d.name, version: d.version, startedAt: d.startedAt, at: d.at, port: d.port, bind: d.bind, forges: [...d.forges], deliveries };
+	return { v: 1, name: d.name, version: d.version, startedAt: d.startedAt, at: d.at, port: d.port, bind: d.bind, forges, deliveries };
 }
 
 function bounded(p, timeoutMs, onTimeout = () => {}) {

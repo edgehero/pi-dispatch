@@ -1,6 +1,7 @@
 /** SandboxesScreen: private operator facts and confirmed control requests, never a browser shell (#771). */
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
+import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { sandboxLinks, sandboxBrowserLink, sandboxDriverLine } from "../sandbox-links.mjs";
 import { timeHtml, ageText } from "./common.mjs";
 import { LOADED_WORDS, hostLoadsRow, hostPiFor, sandboxFreshLine, sandboxPreparedLine, sandboxRunLine } from "../../loaded-words.mjs";
@@ -47,7 +48,7 @@ export function sandboxFromRun(v) {
   const picker = html`<form method="get" action="/runs/sandboxes" data-live-hold class="sx-picker">${ui.field({ label: "Workspace host", id: "sb-workspace-host", control: ui.select({ id: "sb-workspace-host", name: "host", value: pickerHost, options: [{ value: "", label: "Choose a host" }, ...(report(v)?.hosts ?? []).map((h) => ({ value: h.name, label: h.name }))] }) })}${ui.field({ label: "Kept workspace", id: "sb-workspace", control: ui.select({ id: "sb-workspace", name: "id", value: id ?? "", options: [{ value: "", label: "Choose a workspace" }, ...all.filter((r) => !pickerHost || r.host === pickerHost).map((r) => ({ value: rowId(r), label: `${rowId(r)} on ${r.host}${r.prepared ? " (prepared)" : ""}` }))] }) })}${ui.btn({ type: "submit", label: "Show workspace" })}</form>`;
   if (!report(v)) return card("From a run", html`<p role="status">${SANDBOX_WORDS.unavailable}</p>`);
   if (!picked) return card("From a run", html`${state(v)}${v.data?.sandboxHostsProblem ? html`<p role="status">${v.data.sandboxHostsProblem}</p>` : null}${picker}<p class="card__sub">${all.length ? "Choose a kept workspace, or open Sandboxes from a run page." : SANDBOX_WORDS.empty}</p>`, "the image, workspace and isolation the run kept");
-  const workspace = picked.kind === "local" ? "Its original host folder" : ["github", "gitlab", "forgejo", "azure"].includes(picked.kind) ? "Its retained clone" : "The workspace recorded in its kept manifest";
+  const workspace = picked.kind === "local" ? "Its original host folder" : isForgeKind(picked.kind) ? "Its retained clone" : "The workspace recorded in its kept manifest";
   // Issue #800: one column, because this row is a sentence and three narrow columns would split it mid-word.
   const piVersion = hostPiFor(hostLoadsRow(v.data?.hostLoads, picked.host), picked.image);
   const loads = picked.prepared ? sandboxPreparedLine(piVersion) : sandboxRunLine(v.data?.sandboxRun ?? null, rowId(picked), { pi: piVersion, unread: v.data?.sandboxRunUnread === true });

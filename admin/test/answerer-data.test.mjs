@@ -88,6 +88,35 @@ test("a draft's source is a forge exactly when FORGE_KINDS names it, and the sou
   assert.doesNotMatch(readFileSync(new URL("../src/answerer-data.mjs", import.meta.url), "utf8"), new RegExp(`\\b(?:${names})\\b\\W+\\b(?:${names})\\b`));
 });
 
+// Issue #824: the configured root is the forge table's (`forgeApiRoot`), so a forge added to FORGES is bound to its own
+// root, not read as config-changed. A forge needs an env here that configures it and the root a draft captured under it,
+// and that is the walk's point.
+const CONFIGURED = {
+  github: [{}, "https://api.github.com"],
+  gitlab: [{ GITLAB_TOKEN: "synthetic", GITLAB_URL: "https://gitlab.example/team" }, "https://gitlab.example/team"],
+  forgejo: [{ FORGEJO_TOKEN: "synthetic", FORGEJO_URL: "https://code.example" }, "https://code.example"],
+  azure: [{ AZURE_TOKEN: "synthetic", AZURE_ORG_URL: "https://dev.azure.com/acme" }, "https://dev.azure.com/acme"],
+};
+const unbound = async (kinds) => {
+  const refused = [];
+  for (const kind of kinds) {
+    const [env, apiUrl] = CONFIGURED[kind] ?? [{}, "https://forge.example"];
+    const { service } = setup({ env, source: { kind, apiUrl } });
+    if (!(await service.read({ role: "operator", runId: fixture.privateDraft.meta.runId })).privateDraft) refused.push(`${kind}: configuredApiRoot (admin/src/answerer-data.mjs) does not bind a draft to its configured root`);
+  }
+  return refused;
+};
+
+test("configuredApiRoot binds a draft of every FORGE_KINDS forge to its configured root, through the forge table, one loader at a time (#824)", async () => {
+  assert.deepEqual(await unbound(FORGE_KINDS), []);
+  assert.deepEqual(await unbound([...FORGE_KINDS, "bitbucket"]), ["bitbucket: configuredApiRoot (admin/src/answerer-data.mjs) does not bind a draft to its configured root"]);
+  // Only the asked forge's loader runs: a GitLab block the loader refuses leaves a Forgejo draft bound.
+  const { service } = setup({ env: { ...CONFIGURED.forgejo[0], GITLAB_TOKEN: "synthetic", GITLAB_AUTH_SOURCE: "app" }, source: { kind: "forgejo", apiUrl: CONFIGURED.forgejo[1] } });
+  assert.ok((await service.read({ role: "operator", runId: fixture.privateDraft.meta.runId })).privateDraft);
+  // GitHub's root is the table's, not written here again.
+  assert.doesNotMatch(readFileSync(new URL("../src/answerer-data.mjs", import.meta.url), "utf8"), /api\.github\.com/);
+});
+
 test("standing adoption previews exact scoped text and refuses stale, duplicate, unscoped or nonperson writes", () => {
   const { paths } = setup();
   const params = { title: "Reviewed convention", text: "Use the existing test helper.\nRun the full suite.", projects: ["api"], repo: "github:acme/api" };

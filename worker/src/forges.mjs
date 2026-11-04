@@ -49,6 +49,11 @@
  *   selector, and the reason is independent of who is gating: a rule keyed on labels that names no labels
  *   is a rule that fires on ALL of them. GitLab's is null because a label added to a merge request arrives
  *   as a plain `update`, indistinguishable from any other edit -- there is no action to attach the rule to.
+ * - `apiRoot` is where the forge's REST API lives: `url` for a forge with one public API, or `field`, the field of
+ *   the forge's parsed config (`config.<kind>`, what `loadGitLabAuth`, `loadForgejoAuth` and `loadAzureAuth` return)
+ *   that holds the instance the operator configured. `forgeApiRoot` reads it. The worker hands it to an answer draft
+ *   job as its `apiUrl`, and the console binds a completed draft to it, so the two read the same field, though each
+ *   process reads its own env.
  */
 export const FORGES = {
 	github: {
@@ -59,6 +64,7 @@ export const FORGES = {
 		hostVars: [],
 		receiverOnlyVars: [],
 		prLabelAction: "labeled",
+		apiRoot: { url: "https://api.github.com" },
 	},
 	gitlab: {
 		jobIdPrefix: "gl-",
@@ -72,6 +78,7 @@ export const FORGES = {
 		// is not an approval at all -- a Guest can set one at issue creation -- which is why every gitlab
 		// trigger is gated on the actor's resolved access level.)
 		prLabelAction: null,
+		apiRoot: { field: "apiUrl" },
 	},
 	forgejo: {
 		// Forgejo's webhook transport is byte-compatible with GitHub's -- it signs the raw body HMAC-SHA256
@@ -107,6 +114,7 @@ export const FORGES = {
 		// the actor's resolved repository permission -- see filter-forgejo.mjs for why that is not
 		// redundant belt-and-braces but the only claim about Forgejo this project is willing to make.
 		prLabelAction: "label_updated",
+		apiRoot: { field: "apiUrl" },
 	},
 	azure: {
 		// Azure Service Hooks send NO delivery-id header at all, so this id comes from the body's top-level
@@ -127,6 +135,9 @@ export const FORGES = {
 		// Azure attaches no labels to a pull request at all, so there is no action to attach the rule to and
 		// a predicated PR rule could never match. The loader refuses one rather than letting it load dead.
 		prLabelAction: null,
+		// The organization URL is the API root: an answer draft reads work item comments under it, and the graph's
+		// origin is derived from it.
+		apiRoot: { field: "orgUrl" },
 	},
 };
 
@@ -150,6 +161,23 @@ export function isForgeKind(kind) {
  */
 export function forgeSpec(kind) {
 	return isForgeKind(kind) ? FORGES[kind] : undefined;
+}
+
+/**
+ * The raw API root of `kind`'s forge, from `configs`, the parsed forge configs keyed by kind (the worker's `config`, or
+ * the console's `loadGitLabAuth`, `loadForgejoAuth` and `loadAzureAuth` results under the same keys), or null for a kind
+ * that is no forge, a forge that is not configured or a row without an `apiRoot`. Only `configs[kind]` is read, so a
+ * caller whose loaders can throw may hand in getters and run only the asked forge's.
+ *
+ * Raw, as configured, and not normalized here: the worker hands it to the job as an answer draft's `apiUrl`, which the
+ * runner fetches under and compares Forgejo's `issue_url` with, so a normalized copy would move what the runner
+ * compares. A caller that compares two roots normalizes both (`answerApiRoot`).
+ */
+export function forgeApiRoot(kind, configs) {
+	const root = forgeSpec(kind)?.apiRoot;
+	if (!root) return null;
+	const value = Object.hasOwn(root, "url") ? root.url : configs?.[kind]?.[root.field];
+	return typeof value === "string" ? value : null;
 }
 
 /**
