@@ -405,7 +405,7 @@ A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800c" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, the staged packages, the outside systems with linear switched on, pi's own tools with bash off, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
+  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800e" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool your extensions add, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
 </picture>
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
@@ -438,7 +438,8 @@ PI_GLOBAL_PI_DIR=/absolute/path/to/my-dispatch/pi-global
 | Your MCP servers, with credentials as references only | Secrets of any kind: the copy is read by jobs, so it holds none |
 
 **Read the list it prints.** An extension is code, and it runs in every job, beside work that may come from a stranger's issue text. Skip
-extensions with `--no-extensions`, or keep one trigger's jobs out of your packages with the switch on its page (`"packages": false` in the triggers file).
+extensions with `--no-extensions`, or keep one trigger's jobs out of all your packages, or out of one package or extension, with the switches on its page
+(`"packages": false` and `"excludeExtensions"` in the triggers file).
 
 Your projects still win. A job layers your setup under the project's own `.pi/` folder, so a project's skill replaces yours of the same
 name, and a small safety floor sits under both, which neither can remove. To add a language or a system tool rather than a pi setting, build
@@ -475,6 +476,10 @@ start with the same things as on your other machines, and one that has not told 
 match. Under each line is what a recent run really had, so a setting and what it did sit together. Nothing is saved while you click: your changes collect
 at the foot of the card, and you can discard them.
 
+**You can turn off one thing and keep the rest.** On a trigger's page you can turn off one of your packages or extensions, or one tool they add, for that
+trigger's jobs alone. That stops a job from loading it by itself, and does not lock it away: an agent that can run commands or write files may still bring it
+back ([what this does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)).
+
 **You see it in words first, and confirm once.** **Preview the change** says each change in a sentence, and says so when it gives
 jobs more than they had. It says when the change takes effect and which jobs already in line would be refused, warns about what would stop these jobs on the
 machine the console runs on, and says how to undo it. One
@@ -490,7 +495,8 @@ expensive for even one request under its cap, the page refuses the change and na
 If the page is out of date, it asks you to reload rather than write over someone else's change.
 
 **Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models,
-its outside systems, which tools its jobs lose or whether they load your packages: one that tries is refused before you are asked. You set those on the page,
+its outside systems, which tools its jobs lose, which of an extension's tools they lose, whether they load your packages or which of your packages or extensions
+they leave out: one that tries is refused before you are asked. You set those on the page,
 or your technical person sets them in the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
 They can still move a trigger's flow, provider and model, and only after you confirm.
 
@@ -710,17 +716,23 @@ live, and which the console and the panel can edit, or you by hand. Each entry i
 - `image`: this trigger's own job image ([job image](docs/job-image.md)).
 - `secrets`, `secretsProfile`, `secretBundle`: vault references, and a project's one shared environment ([secrets](docs/secrets.md#recipe-d-one-environment-for-a-whole-project)).
 - `mcp`, `forge`: MCP servers for its jobs ([MCP](docs/mcp.md)).
-- `excludeTools`: removes named built in tools ([excluded tools](docs/exclude-tools.md)).
 - `packages`: opts out of the staged pi packages ([workflows](docs/workflows.md)).
+- `excludeTools`: removes named tools of pi's own or an MCP server's ([excluded tools](docs/exclude-tools.md)).
+- `excludeExtensions`: leaves named staged packages and overlay extensions out of its jobs ([leaving one out](docs/exclude-tools.md#leaving-an-extension-out-runexcludeextensions)).
+- `excludeExtensionTools`: removes named tools an extension adds, and a name nothing registered can stop the job ([an extension's tools](docs/exclude-tools.md#an-extensions-tools-runexcludeextensiontools)).
 - `provider`, `model`: the model its jobs run on ([choosing the model](docs/triggers.md#choosing-the-model-and-the-turn-limit)).
 - `models`, `fallbackModels`, `maxCostUsd`: the models a job may call, the ones to try when one is rate limited, and its own dollar cap ([limiting models](docs/triggers.md#limiting-which-models-a-job-may-call), [fallback models](docs/model-failover.md), [a dollar cap](docs/triggers.md#a-dollar-cap-per-job)).
 - `replicas`: races independent sandboxes on one event ([replicas](docs/replicas.md)).
 - `waitFor`: holds a job, unstarted and unbilled, until a time or your own check ([waiting](docs/wait-for.md)).
 - `instructions`, `skillsDir`, `github`, `portfolio`: the rest are in [`docs/triggers.md`](docs/triggers.md#optional-run-fields).
 
-On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages` and
-`excludeTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
+On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages`, `excludeTools`, `excludeExtensions` and
+`excludeExtensionTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
 so on a fleet where each host keeps its own, a host keeps what it has until its copy changes. A few others have the page's Edit form. The rest change in the file, and editing the file works as it always has.
+
+`excludeExtensions` and `excludeExtensionTools` stop what a job loads on its own, not what an agent that can run commands or write files can reach
+([what exclusion does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)). A file that uses either needs `"version": 2`, so every host needs a release
+that reads a file's version first ([versions and older hosts](docs/exclude-tools.md#versions-and-older-hosts)).
 
 A whole project can get one environment from your secrets manager, granted once and read fresh at each job start. Quiet
 hours pause a repo or folder by weekday and timezone ([`docs/pause-windows.md`](docs/pause-windows.md)). The
@@ -935,7 +947,7 @@ These forges have one auth source each, a token you create, so setting theirs to
 
 **Triggers and flows:** [triggers](docs/triggers.md), [workflows](docs/workflows.md), [wait for](docs/wait-for.md),
 [pause windows](docs/pause-windows.md), [replicas](docs/replicas.md), [canary](docs/canary.md),
-[excluded tools](docs/exclude-tools.md), [MCP](docs/mcp.md), [global pi overlay](docs/global-pi-overlay.md).
+[excluded tools and extensions](docs/exclude-tools.md), [MCP](docs/mcp.md), [global pi overlay](docs/global-pi-overlay.md).
 
 **Money and machines:** [costs](docs/costs.md), [insights](docs/insights.md), [graph](docs/graph.md),
 [scoped limits](docs/scoped-limits.md), [projects](docs/projects.md), [allocation](docs/allocation.md),
