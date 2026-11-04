@@ -236,7 +236,7 @@ const MODEL_RUN = Object.freeze({ provider: "anthropic", model: "claude-haiku-4-
  */
 const REFUSALS = Object.freeze({
   "This trigger changed since the page drew it": () => plannerWorld().preview({ packages: false }, { pageDigest: "a".repeat(64) }),
-  "There is no trigger at row": () => plannerWorld().preview({ packages: false }, { index: 9 }),
+  "There is no usable trigger at row": () => plannerWorld().preview({ packages: false }, { index: 9 }),
   "The triggers file could not be read": () => { const w = plannerWorld(); const pageDigest = w.digest(); nodeFs.writeFileSync(w.paths.triggersPath, "{ not json"); return w.preview({ packages: false }, { pageDigest }); },
   "the triggers file could not be read (": () => readsThenFails(() => { throw Object.assign(new Error("busy"), { code: "EIO" }); }),
   "the triggers file does not load (": () => readsThenFails(() => "{ not json"),
@@ -274,6 +274,7 @@ const WARNINGS = Object.freeze({
   "would be refused as": () => plannerWorld({ env: { PI_FORWARD_ENV: "" } }).preview({ mcp: ["linear"] }),
   "On this host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["docs"], excludeTools: ["codemode"] }),
   "so a job cannot use it under this cap": () => plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" }),
+  "A job on a host without": () => plannerWorld().preview({ mcp: ["docs"] }),
   "no skill named": () => plannerWorld({ deps: { readHostLoads: () => published({ mini1: {} }) } }).preview({ flow: "review" }),
   "What the hosts published could not be read": () => plannerWorld({ deps: { readHostLoads: async () => { throw new Error("down"); } } }).preview({ flow: "review" }),
   "clears this": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-opus-5-5", maxCostUsd: "2.62144" }),
@@ -329,7 +330,7 @@ const REFUSAL_HEADER = "| It says | Why | What to do |";
  */
 const REFUSAL_TODO = Object.freeze({
   "This trigger changed since the page drew it": { says: /Reload the page/, shared: true },
-  "There is no trigger at row": { says: /Reload the page/, shared: true },
+  "There is no usable trigger at row": { says: /Reload the page.*correct that row in the file/i, shared: true },
   "The triggers file could not be read": { says: /Correct the file\. `pi-dispatch doctor` names what is wrong with it/ },
   "the triggers file could not be read (": { says: /Correct the file\. `pi-dispatch doctor` names what is wrong with it/ },
   "nothing was written and nothing in it was lost; change it with that release": { says: /with that release/, shared: true },
@@ -353,6 +354,7 @@ const WARNING_TODO = Object.freeze({
   "would be refused as": { says: /`?run\.secrets`? is set in the (?:triggers )?file, not on this page/, shared: true },
   "On this host this trigger's jobs would be refused as mcp-excluded": { says: /Remove the server from `run\.mcp`, or keep a tool that reaches it out of `run\.excludeTools`/, shared: true },
   "so a job cannot use it under this cap": { says: /Choose another model/i },
+  "A job on a host without": { says: /overlay `mcp\.json`/ },
   "no skill named": { says: /Check the flow's name/ },
   "What the hosts published could not be read": { says: /Doctor's run on each host/ },
   "clears this": { says: /Choose another model/i, shared: true },
@@ -426,12 +428,12 @@ test("every warning the planner can say is in that table: a new sentence has to 
   // Not read here, on purpose: `denied`, the answer to a tool or a viewer, which no person at an operator's form meets; and the summary's two lines
   // of a host's release ("Stamps the file version", "reads what this change needs"), which wait on a file needing a version above 1, a paragraph of its own.
   const cannot = /const cannot = "([^"]+)"/.exec(source)[1];
-  const literals = [...source.matchAll(/(?:\bwarnings\.(?:push|add)\((?:\[|failedRead \? )?|\bthin\.add\(|\bcould\(|\bnotRead = |\bonHost\("[^"]+", |\bnote: |\blacking\.length > 0 \? \[|\bunjudged\.length > 0 \? \[)(?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => literal !== "" && !literal.startsWith("${unresolved.project")).map((literal) => literal.replace("${cannot}", cannot));
+  const literals = [...source.matchAll(/(?:\bwarnings\.(?:push|add)\((?:\[|failedRead \? )?|\bservers\.map\(\(name\) => |\bthin\.add\(|\bcould\(|\bnotRead = |\bonHost\("[^"]+", |\bnote: |\blacking\.length > 0 \? \[|\bunjudged\.length > 0 \? \[)(?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => literal !== "" && !literal.startsWith("${unresolved.project")).map((literal) => literal.replace("${cannot}", cannot));
   // The other branch of the one sentence that chooses between two.
   literals.push(...[...source.matchAll(/failedRead \? `[^`]*` : `((?:[^`\\]|\\.)*)`/g)].map((m) => m[1]));
   assert.ok(source.includes("this trigger's model could not be resolved (${unresolved.reason})"));
   // Each of these went unforced when the scan skipped a literal it could not read: held by name, so a scan that loses one says so.
-  for (const said of ["On this host a job cannot use", "could not be read or used for", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here", "The worker's pickup check could not judge"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
+  for (const said of ["On this host a job cannot use", "A job on a host without", "could not be read or used for", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here", "The worker's pickup check could not judge"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
   assert.ok(literals.length >= 20, `the scan finds the planner's sentences (${literals.length})`);
   const quotes = Object.keys(WARNINGS);
   for (const literal of literals) assert.ok(quotes.some((quote) => literal.includes(quote)), `no row for: ${literal}`);
@@ -441,7 +443,7 @@ test("every refusal the planner can say is in that table or named here with why:
   const source = read("admin/src/trigger-environment-plans.mjs");
   // Not the pickup check's own sentences. The docs do not quote them or list which refuse, and say only that a preview warns about what
   // would stop this trigger's jobs on this host and refuses what the file alone decides. The check's reasons are `docs/mcp.md`'s to list.
-  // `stopped(` refuses of a job's main model, and warns of any other.
+  // `stopped(` refuses of the model a job starts on, and where the amount is known of the trigger's main model, and warns of any other.
   const literals = [...source.matchAll(/\b(?:refuse|stopped)\((?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => !/answer\.|pickup check/.test(literal));
   assert.ok(literals.length >= 20, `the scan finds the planner's sentences (${literals.length})`);
   const said = await Promise.all(Object.values(REFUSALS).map(async (meet) => (await meet()).refusal));
@@ -468,7 +470,7 @@ test("every refusal the planner can say is in that table or named here with why:
   const edit = (index) => planTriggerEdit({ params: { index, flow: "x" }, paths: stale.paths, env: {}, surface: "console" }).refusal;
   assert.match(edit(0), /is not one this can change/);
   assert.match(edit(9), /^no trigger at row 10 \(have 2\)$/);
-  assert.match((await stale.preview({ packages: false }, { index: 0 })).refusal, /^There is no trigger at row 1 any more/);
+  assert.match((await stale.preview({ packages: false }, { index: 0 })).refusal, /^There is no usable trigger at row 1\./);
   // Why a page never meets "flow must be non-empty": a blank box goes as null, and null is refused in the row the table has.
   assert.match(read("admin/src/console/script.mjs"), /out\[boxes\[i\]\.name\] = next === "" \? null : next/);
   assert.match((await plannerWorld().preview({ flow: null })).refusal, /^A trigger's flow cannot be removed/);
@@ -804,9 +806,9 @@ test("docs/costs.md's amounts are the real bound's, at the pin, and each row of 
   assert.ok(listed.plan, JSON.stringify(listed));
   const [, listedQuote] = quotes(below[1]);
   assert.ok(listed.plan.warnings.some((line) => line.endsWith(listedQuote)), listedQuote);
-  assert.match(below[1], /^Of the model a job starts on, refuses/);
+  assert.match(below[1], /^Of the trigger's main model and the model a job starts on, refuses/);
   assert.match(below[1], /Of a listed or fallback model, previews/);
-  assert.match(text, /is refused under any cap as the model a job starts on, and warned of as any other model/);
+  assert.match(text, /is refused under any cap as the main model of a trigger with no fallbacks, and warned of as any other model, a main with fallbacks included/);
   // What a change of the model or a list asks: the entry as it will be, as the cap does.
   const held = plannerWorld({ run: { ...MODEL_RUN, models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" } });
   assert.ok(!(await held.preview({ flow: "review" })).summary.some((line) => line.includes("claude-opus-5-5")), "an edit that names no model asks of none");

@@ -550,15 +550,15 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
    *
    * What stays a refusal costs more than a free refusal: a cap above the deployment's refuses the whole file at the loader, and a cap
    * the model a job starts on cannot clear refuses its every call inside a paid container, so those are stopped here
-   * (CONST-BUDGET-BEFORE-TOKENS). Which that is, is the first candidate this has nothing against, and it is never said. Any other model
-   * that cannot clear it is a warning that a job cannot use it under this cap. A list the file itself contradicts on every host is the
-   * loader's to refuse, in the funnel. One that clears only the smallest possible request is said out loud (`thin`).
+   * (CONST-BUDGET-BEFORE-TOKENS). That is the first candidate this has nothing against, which is never said, and where the amount is known
+   * the trigger's main model too, whatever this host's list says and whether or not it has fallbacks: a host whose list holds it starts
+   * on it. A main no cap can bound refuses only with no fallbacks, since selection answers `model-unpriced` and no container starts on it.
+   * Any other model that cannot clear it is a warning that a job cannot use it under this cap. A list the file itself contradicts on every
+   * host is the loader's to refuse, in the funnel. One that clears only the smallest possible request is said out loud (`thin`).
    *
-   * Of a model already said to be one a job cannot use, a bound that cannot be computed is not said: "could not be bounded, so the runner
-   * judges it when a job runs" beside "a job cannot use it" is two sentences that disagree. Any other such model gets no amount beside it.
-   * The model a job starts on is still judged where the amount is known, whatever this host's list says: the file and the catalog decide
-   * that, and another host whose list holds it starts a paid container and stops at the first call. REJECTED: skipping the bound of every
-   * model said to be unusable, which dropped that refusal to a warning about this host alone.
+   * Of a model already said to be one a job cannot use, a bound that cannot be computed is not said, and any other such model gets no
+   * amount beside it. REJECTED: skipping the bound of every model said to be unusable, which dropped the main's refusal to a warning about
+   * this host alone, so one row at one cap warned on the host without the model and refused on the host with it.
    */
   async function judgeModels({ entry, text, facts, touched }) {
     const run = entry.run;
@@ -605,7 +605,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       const fallbacks = refsOf(job.fallbackModels);
       const failover = fallbacks.length > 0;
       const unusable = new Set();
-      // The model the cap is judged by: its main one, unless the file and this host's settings hold something against that.
+      // The model a job starts on: its main one, or on a job with fallbacks the first the file and this host's settings hold nothing against.
       let startName = mainName;
       let selected = false;
       if (failover) {
@@ -622,7 +622,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
         if (selected) {
           const order = await failoverOrder(job, list, overlay);
           const start = order.find((row) => row.reason === NOTHING_AGAINST)?.model;
-          if (start !== undefined) startName = start;
+          startName = start;
           if (modelsTouched) {
             const against = order.filter((row) => row.reason !== NOTHING_AGAINST);
             for (const row of against) unusable.add(row.model);
@@ -639,18 +639,18 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
           if (sayCatalog(ref)) unusable.add(`${ref.provider}/${ref.id}`);
         }
       }
-      if (modelsTouched && !failover && Array.isArray(list)) {
-        if (list.length > 0) {
+      // Pickup's order, and its one answer: unknown, then a main off the list, then a listed model's own fallbacks. Each says only the first.
+      if (modelsTouched && !failover && Array.isArray(list) && unusable.size === 0) {
+        // A main model and a list both written in this entry that disagree never get here: the loader refuses them, in the funnel.
+        if (!modelOnList(list, main.provider, main.id)) {
+          unusable.add(mainName);
+          warnings.add(onHost("model-not-allowed", `${mainName} is not on the models they may call here. Add it to the list, or choose another model.`));
+        } else {
           const known = checkModelsKnown(refsOf(list), { readOverlay: readOverlayDoc });
           if (known?.fallbackUnlisted) {
             unusable.add(`${known.fallbackUnlisted.provider}/${known.fallbackUnlisted.id}`);
             warnings.add(onHost("model-not-allowed", `${known.fallbackUnlisted.provider}/${known.fallbackUnlisted.id} declares fallback models the allowed list does not name. Add them to the list, or remove it.`));
           }
-        }
-        // A main model and a list both written in this entry that disagree never get here: the loader refuses them, in the funnel.
-        if (!modelOnList(list, main.provider, main.id)) {
-          unusable.add(mainName);
-          warnings.add(onHost("model-not-allowed", `${mainName} is not on the models they may call here. Add it to the list, or choose another model.`));
         }
       }
       const cap = facts.capOf(job.maxCostUsd);
@@ -660,11 +660,12 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       for (const ref of new Map([main, ...refsOf(run.models), ...fallbacks].map((one) => [`${one.provider}/${one.id}`, one])).values()) {
         const name = `${ref.provider}/${ref.id}`;
         const said = unusable.has(name);
-        if (said && name !== startName) continue;
+        const amountRefuses = name === mainName || name === startName;
+        if (said && !amountRefuses) continue;
         // The model a job starts on cannot make a call, inside a container it paid for. Any other is one a job cannot use.
-        const stopped = (refusal, warning) => {
-          if (name === startName) return refuse(refusal);
-          warnings.add(warning);
+        const stopped = (refusal, warning, refuses = name === startName) => {
+          if (refuses) return refuse(refusal);
+          if (!said) warnings.add(warning);
           return null;
         };
         // An amount read without the file would be a guess, so it says what a model edit says of that file.
@@ -702,7 +703,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
         // "At least", because the bound is a lower one for any larger request: it grows with the whole of it, and a repository's
         // context files go in the system prompt before any task does (`FIRST_CALL_SHORT_TASK_BYTES` holds none).
         if (floor > cap) {
-          const refused = stopped(`${name} needs at least ${money(shortTask)} for a short task's first call, above ${room ? "this trigger's" : "the deployment's"} ${money(room ? cap : facts.ceiling)} job cap, so the runner would refuse every call to it before it is sent. ${out}`, `${name} needs at least ${money(shortTask)} for a short task's first call, so a job cannot use it under this cap.`);
+          const refused = stopped(`${name} needs at least ${money(shortTask)} for a short task's first call, above ${room ? "this trigger's" : "the deployment's"} ${money(room ? cap : facts.ceiling)} job cap, so the runner would refuse every call to it before it is sent. ${out}`, `${name} needs at least ${money(shortTask)} for a short task's first call, so a job cannot use it under this cap.`, amountRefuses);
           if (refused) return refused;
           continue;
         }
@@ -734,7 +735,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     if (newer?.newer) return refuse(`${newer.message}, so nothing was written and nothing in it was lost; change it with that release.`, 409);
     const row = rowName("trigger", body.index, "console");
     const entry = Array.isArray(doc?.triggers) ? doc.triggers[body.index] : undefined;
-    if (!plain(entry) || !plain(entry.run)) return refuse(`There is no trigger at row ${body.index + 1} any more. Reload the page.`, 409, "changed");
+    if (!plain(entry) || !plain(entry.run)) return refuse(`There is no usable trigger at row ${body.index + 1}. Reload the page; if it stays, correct that row in the file.`, 409, "changed");
     // What the Confirm's `expect` cannot cover: the minutes on the page before this preview. The entry, not the file, so another
     // trigger's edit does not send this person back (`triggerEntryDigest`).
     if (triggerEntryDigest(entry) !== body.pageDigest) return refuse("This trigger changed since the page drew it, so nothing was changed. Reload the page and make the change again.", 409, "changed");
@@ -987,7 +988,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       ...(judged.stamped ? [`Stamps the file version ${judged.need.triggersVersion}: a host reading less waits on every trigger's jobs, not only this one's.`] : []),
       ...(gate.hosts === null ? [] : [gate.hosts.length > 0 ? `${hostsNamed(gate.hosts)} ${gate.hosts.length === 1 ? "reads" : "each read"} what this change needs.` : "No host is live right now, so no host's release could be checked."]),
       ...servers.map((name) => `A job on a host without ${name}, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid.${hosts.length > 0 ? ` ${serverHosts(name, hosts)}.` : hostsUnread ? " What the hosts published could not be read, so which of them have it is unknown." : " No host has published which servers it has."}`),
-      ...(unjudged.length > 0 ? [`The first call on ${listed(unjudged)} could not be bounded here, so the runner judges it when a job runs.`] : []),
+      ...(unjudged.length > 0 ? [`The first call on ${listed(unjudged)} could not be bounded here.`] : []),
       `Written to ${basename(paths.triggersPath)} on this host and audited as trigger-edit, by ${typeof ctx.name === "string" && ctx.name !== "" ? ctx.name : "the operator"} at the console.`,
     ];
     return {

@@ -1883,7 +1883,7 @@ ${FIT_JS}
       }
     }
     var fallback = form.querySelector("[data-form-error]");
-    if (fallback) { fallback.hidden = !message || matched; fallback.textContent = message || ""; }
+    if (fallback) { fallback.hidden = !message || matched; fallback.textContent = message ? refusalLine(message) : ""; }
   }
   // What a trigger's jobs get (issue #800), one form read by the one submit handler below. A control as the server drew it is what the
   // file says, so a change is a control that differs from how it was drawn (\`defaultValue\`, \`defaultChecked\`), and that is all the

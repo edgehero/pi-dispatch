@@ -1916,6 +1916,16 @@ test("a refusal reads properly under its field and in the bar: one stop, and not
     assert.equal(await line(refusal), reads, what);
     assert.equal(refusalLine(refusal), reads, `${what}: the server's copy of the rule, which the Refusals card draws`);
   }
+  // A refusal that names no field goes on the form's own line, and reads as the field line does.
+  const formLine = async (refusal) => {
+    box.value = '{"kind":"label"}';
+    w.submit(drawn);
+    await w.fetch.open("/api/act/trigger-add/preview").answer(400, { refusal });
+    const under = drawn.querySelector("[data-form-error]");
+    assert.equal(under.hidden, false, refusal);
+    return under.textContent;
+  };
+  for (const refusal of ["that will not do", "that will not do. Nothing was changed.", "that will not do; nothing was written"]) assert.equal(await formLine(refusal), refusalLine(refusal), refusal);
   // The script takes the bar's own expression, so the two cannot come to disagree on what says nothing changed.
   assert.ok(CONSOLE_SCRIPT.includes(SAYS_NOTHING_CHANGED.source));
   const bar = String(refusalHtml({ where: "preview", sentence: real, status: 400 })).replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/\s+/g, " ");

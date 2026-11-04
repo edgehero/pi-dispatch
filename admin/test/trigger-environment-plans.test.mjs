@@ -377,7 +377,12 @@ test("a file it cannot read, a file from a newer release and a row that is gone 
 
   const gone = fixture();
   const past = await gone.service.preview({ index: 9, pageDigest: gone.digest(), packages: false }, operator);
-  assert.deepEqual(past, { refusal: "There is no trigger at row 10 any more. Reload the page.", status: 409, state: "changed" });
+  assert.deepEqual(past, { refusal: "There is no usable trigger at row 10. Reload the page; if it stays, correct that row in the file.", status: 409, state: "changed" });
+  // A row that is there and holds no usable `run`: the same sentence, because a reload alone changes nothing for it.
+  for (const row of [{ on: { type: "comment", phrase: "@pi" } }, { on: { type: "comment", phrase: "@pi" }, run: 3 }]) {
+    const held = fixture({ doc: { triggers: [cron, row] } });
+    assert.deepEqual(await held.service.preview(ask(held, { packages: false }), operator), { refusal: "There is no usable trigger at row 2. Reload the page; if it stays, correct that row in the file.", status: 409, state: "changed" });
+  }
 });
 
 test("what the trigger edit's own body refuses is said in its words, and judged against the rest of the same edit", async () => {
@@ -1088,11 +1093,16 @@ test("a bound that cannot be computed is not said of a model a job cannot use, a
   const failoverOut = await failover.service.preview(ask(failover, { model: "claude-typo", models: [TYPO, SONNET], maxCostUsd: "5" }), operator);
   assert.deepEqual(failoverOut.plan.warnings, [`On this host a job cannot use ${TYPO} (model-unknown).`]);
   assert.ok(!failoverOut.summary.join(" ").includes("could not be bounded"), failoverOut.summary.join(" | "));
-  // A main passed over for being off this host's list, on a job with a fallback it starts on instead: no amount beside that, and no refusal.
-  const passed = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [HAIKU] }, env: { PI_ALLOWED_MODELS: HAIKU } });
-  const passedOut = await passed.service.preview(ask(passed, { model: "claude-opus-5-5", maxCostUsd: "1" }), operator);
-  assert.deepEqual(passedOut.plan.warnings, [`On this host a job cannot use ${OPUS} (model-not-allowed).`]);
-  assert.ok(!passedOut.summary.join(" ").includes("$2.654295"), passedOut.summary.join(" | "));
+  // A fallback a job cannot use, under a cap it could not clear either: no amount beside that, and no refusal.
+  const fallbackOut = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] } });
+  const said = await fallbackOut.service.preview(ask(fallbackOut, { models: [HAIKU, FABLE], fallbackModels: [FABLE], maxCostUsd: "0.5" }), operator);
+  assert.deepEqual(said.plan.warnings, [`On this host a job cannot use ${FABLE} (model-not-allowed).`]);
+  // Nor between its floor and a short task's amount, where a model with nothing said of it hears "clears this".
+  const band = String(firstCallFloorMicros(builtinModel("anthropic", "claude-fable-5")) / 1_000_000);
+  const bandHost = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] } });
+  const bandOut = await bandHost.service.preview(ask(bandHost, { models: [HAIKU, FABLE], fallbackModels: [FABLE], maxCostUsd: band }), operator);
+  assert.deepEqual(bandOut.plan.warnings, [`On this host a job cannot use ${FABLE} (model-not-allowed).`]);
+  assert.ok(!bandOut.summary.join(" ").includes("clears this"), bandOut.summary.join(" | "));
   // Said as a model whose own fallbacks the list leaves out: no amount either.
   const declared = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] } });
   assert.deepEqual((await declared.service.preview(ask(declared, { models: [HAIKU, FABLE], maxCostUsd: "0.5" }), operator)).plan.warnings, [`On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${FABLE} declares fallback models the allowed list does not name. Add them to the list, or remove it.`]);
@@ -1132,16 +1142,57 @@ test("a known main off this host's list, under a cap below its first call, refus
   assert.equal(await warned(clears, { model: "claude-opus-5-5", maxCostUsd: "3" }), `On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${OPUS} is not on the models they may call here. Add it to the list, or choose another model.`);
 });
 
-test("the model the cap is judged by is the first the file and this host hold nothing against, and that is never named", async () => {
-  const env = { PI_ALLOWED_MODELS: `${HAIKU},${OPUS}` };
-  // A main with something against it that could not clear the cap stops nothing: it warns.
-  const passed = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [HAIKU] }, env: { PI_ALLOWED_MODELS: HAIKU } });
-  assert.equal(await warned(passed, { maxCostUsd: "1" }), `${SONNET} needs at least $1.327148 for a short task's first call, so a job cannot use it under this cap.`);
-  assert.equal((await realSelection({ provider: "anthropic", model: "claude-sonnet-5-5", models: [HAIKU], fallbackModels: [HAIKU] })).ref, HAIKU);
-  // A fallback the job does start on, that cannot clear it: nothing it can do is left, so that refuses, as a main does.
-  const starts = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [OPUS] }, env });
-  assert.match((await refusal(starts, { maxCostUsd: "1" })).refusal, /^anthropic\/claude-opus-5-5 needs at least \$2\.654295/);
-  assert.equal((await realSelection({ provider: "anthropic", model: "claude-sonnet-5-5", models: [HAIKU, OPUS], fallbackModels: [OPUS] })).ref, OPUS);
+test("one rule for a main, fallbacks or not: a row at one cap refuses on the host without the model on its list as on the host with it", async () => {
+  const run = { provider: "anthropic", model: "claude-opus-5-5", fallbackModels: [HAIKU] };
+  const change = { maxCostUsd: "0.5" };
+  const opusRefused = /^anthropic\/claude-opus-5-5 needs at least \$2\.654295 for a short task's first call, above this trigger's \$0\.50 job cap/;
+  assert.match((await refusal(fixture({ run, env: { PI_ALLOWED_MODELS: HAIKU } }), change)).refusal, opusRefused);
+  assert.match((await refusal(fixture({ run, env: { PI_ALLOWED_MODELS: `${HAIKU},${OPUS}` } }), change)).refusal, opusRefused);
+  // Why: on the host whose list holds it, the worker's selection starts on opus and its guard refuses that first call.
+  const real = await realSelection({ ...run, models: [HAIKU, OPUS] });
+  assert.deepEqual([real.ref, real.job.modelWhy], [OPUS, "primary"]);
+  assert.equal(admits(500_000, builtinModel("anthropic", "claude-opus-5-5"), FIRST_CALL_SHORT_TASK_BYTES), false);
+  // A model edit says the same as a cap edit does.
+  assert.match((await refusal(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: [HAIKU], maxCostUsd: "0.5" }, env: { PI_ALLOWED_MODELS: HAIKU } }), { model: "claude-opus-5-5" })).refusal, opusRefused);
+  // A main this cap clears, with a fallback it does not: that fallback warns, and the row stands.
+  assert.equal(await warned(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, OPUS], fallbackModels: [OPUS] } }), change), `${OPUS} needs at least $2.654295 for a short task's first call, so a job cannot use it under this cap.`);
+  // A main this cap clears, passed over on this host: the fallback a job starts on here cannot clear it, so that refuses.
+  assert.match((await refusal(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: [OPUS] }, env: { PI_ALLOWED_MODELS: OPUS } }), { maxCostUsd: "1" })).refusal, /^anthropic\/claude-opus-5-5 needs at least \$2\.654295/);
+  assert.equal((await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [OPUS], fallbackModels: [OPUS] })).ref, OPUS);
+});
+
+test("a main no cap can bound stays a warning with fallbacks, since selection answers model-unpriced and no container starts on it, and refuses without", async () => {
+  const overlay = { providers: { ollama: { baseUrl: "http://127.0.0.1:11434/v1", api: "openai-completions", apiKey: "x", models: [{ id: "local", cost: { input: 100000, output: 100000, cacheRead: 0, cacheWrite: 0 }, maxTokens: 100, contextWindow: 1000 }] } } };
+  for (const [ref, provider, model, opening] of [["radius/balanced", "radius", "balanced", /^radius\/balanced: Radius \(pi-messages\) has no verified local cost bound.*, so a job cannot use it under this cap\.$/], ["ollama/local", "ollama", "local", /^ollama\/local's output cap travels as max_completion_tokens to a server that may ignore it, so a job cannot use it under this cap\.$/]]) {
+    const held = { provider, model, models: [ref, HAIKU], fallbackModels: [HAIKU] };
+    // A cap edit speaks of the cap, in the sentence about the model.
+    assert.match(await warned(fixture({ overlay, run: held }), { maxCostUsd: "5" }), opening);
+    // An edit of a model field has said it already, and says it once.
+    const moved = fixture({ overlay, run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, ref], fallbackModels: [HAIKU] } });
+    const out = await moved.service.preview(ask(moved, { provider, model, models: [ref, HAIKU], maxCostUsd: "5" }), operator);
+    assert.deepEqual(out.plan.warnings, [`On this host a job cannot use ${ref} (model-unpriced).`]);
+    const real = await realSelection(held, { overlay });
+    assert.deepEqual([real.ref, real.skipped], [HAIKU, [{ model: ref, reason: "model-unpriced" }]]);
+    // With every candidate held against, still no container starts on it, and that is the worker's refusal, not this cap's.
+    const none = fixture({ overlay, run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, TYPO], fallbackModels: [TYPO] } });
+    const noneOut = await none.service.preview(ask(none, { provider, model, models: [ref, TYPO], maxCostUsd: "5" }), operator);
+    assert.deepEqual(noneOut.plan.warnings, [`On this host this trigger's jobs would be refused as model-failover-no-candidate, before they spend: a job cannot use ${ref} (model-unpriced) and ${TYPO} (model-unknown), and has no model left.`]);
+    // Without fallbacks a job starts on it, and that refuses.
+    assert.ok((await refusal(fixture({ overlay, run: { provider, model } }), { maxCostUsd: "5" })).refusal.startsWith(ref));
+  }
+});
+
+test("of pickup's refusals a job with no fallbacks is told only the first, in pickup's order", async () => {
+  const typoWords = `On this host this trigger's jobs would be refused as model-unknown, before they spend: ${TYPO} is a model this deployment does not know (not-in-catalog). Choose one from the catalog, or declare it in the overlay's models.json.`;
+  const offWords = `On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${SONNET} is not on the models they may call here. Add it to the list, or choose another model.`;
+  // A typo main off the list.
+  assert.equal(await warned(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: HAIKU } }), { model: "claude-typo" }), typoWords);
+  assert.equal(checkModelsKnown([{ provider: "anthropic", id: "claude-typo", main: true }]).why, "not-in-catalog", "what pickup asks first");
+  assert.equal(modelOnList([HAIKU], "anthropic", "claude-typo"), false, "and what it would have asked next");
+  // A known main off the list, with nothing unknown: that one.
+  assert.equal(await warned(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: HAIKU } }), { model: "claude-sonnet-5-5" }), offWords);
+  // A main off the list, on a list holding a model whose own fallbacks it leaves out: the main is asked first.
+  assert.equal(await warned(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${FABLE}` } }), { model: "claude-sonnet-5-5" }), offWords);
 });
 
 test("under the cap, a job cannot use the model: true of each shape the worker treats differently, on its own selection and its own guard", async () => {
@@ -1164,10 +1215,6 @@ test("under the cap, a job cannot use the model: true of each shape the worker t
   const listedWords = await warned(listedOnly, { maxCostUsd: "2" });
   assert.equal(listedWords, `${OPUS} needs at least $2.654295 for a short task's first call, so a job cannot use it under this cap.`);
   assert.deepEqual((await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET, OPUS], fallbackModels: [SONNET] })).job.models, [HAIKU]);
-  // A main off the list: selection passes over it, and no container is started on it.
-  const offMain = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [HAIKU] }, env: { PI_ALLOWED_MODELS: HAIKU } });
-  stillTrue(await warned(offMain, { maxCostUsd: "1" }));
-  assert.deepEqual((await realSelection({ provider: "anthropic", model: "claude-sonnet-5-5", models: [HAIKU], fallbackModels: [HAIKU] })).skipped, [{ model: SONNET, reason: "model-not-allowed" }]);
   // A fallback no cap can bound, Radius or a local server: selection answers `model-unpriced`, so no job is moved to it either.
   const radius = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, "radius/balanced"], fallbackModels: ["radius/balanced"] } });
   const radiusWords = await warned(radius, { maxCostUsd: "1" });
@@ -1344,7 +1391,12 @@ test("a first call this page cannot bound fails open and says which, on a line o
   const f = fixture({ overlay, run: { resume: true }, settings: { maxCostUsd: "5" } });
   const out = await f.service.preview(ask(f, { provider: "ollama", model: "free" }), operator);
   assert.ok(out.plan, JSON.stringify(out));
-  assert.ok(out.summary.includes("The first call on ollama/free could not be bounded here, so the runner judges it when a job runs."), out.summary.join("\n"));
+  assert.ok(out.summary.includes("The first call on ollama/free could not be bounded here."), out.summary.join("\n"));
+  // A cap edit on a row holding a typo says the same, and no runner judges a model pickup refuses.
+  const typo = fixture({ run: { provider: "anthropic", model: "claude-typo" } });
+  const typoOut = await typo.service.preview(ask(typo, { maxCostUsd: "1" }), operator);
+  assert.ok(typoOut.summary.includes("The first call on anthropic/claude-typo could not be bounded here."), typoOut.summary.join("\n"));
+  assert.ok(!typoOut.summary.join(" ").includes("runner judges"), typoOut.summary.join("\n"));
 });
 
 test("settings or a list it cannot read refuse a model or cap edit, and leave every other edit alone", async () => {
