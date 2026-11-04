@@ -335,7 +335,7 @@ The trigger page's **What its jobs get**: what a job of this trigger would start
 - **A person-only write** through the trigger edit's planner: a trigger's spend and reach fields (`run.models`, `run.fallbackModels`, `run.mcp`, `run.maxCostUsd`) stay out of every tool's reach. That is what "no tool" means here: `dispatch_trigger_edit` still sets flow, provider and model, and `dispatch_set` can still set the deployment's own dollar caps, each behind a Confirm (`admin/src/action-policy.mjs`).
 - **On TriggerDetail,** the card's fields leave *By hand* and the Edit form stops offering flow, provider and model, so no key has two editors. Image, secrets, the skills folder and the rest stay where they are.
 
-**Who sees what.** An operator changes it. A viewer reads the rows without controls, and the page holds no digest of the entry (TriggerEnvironmentChange). No tool reaches this action; `dispatch_trigger_edit` keeps today's scope. An agent's page draws no card.
+**Who sees what.** An operator changes it. A viewer reads the rows without controls, and the page holds no digest of the entry (TriggerEnvironmentChange). No tool reaches this action; `dispatch_trigger_edit` keeps today's scope. An agent's page draws no card, so it keeps these fields as read-only facts in What it runs, each as its read holds it: a name that read withholds, a server's among them, is said to be withheld and never shown.
 
 **Why it works this way.**
 - **What a job gets, not what the file says.** "packages: load" means different things on different hosts; the card says which.

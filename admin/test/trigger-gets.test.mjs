@@ -30,6 +30,7 @@ const NOW = Date.parse("2026-11-04T12:00:00Z");
 const HOUR = 3_600_000;
 const COMMENT = Object.freeze({ index: 2, type: "comment", flow: "fix", packages: true, forge: "github" });
 const lineOf = (parts) => wordsText(parts);
+const VIEWER_SESSION = Object.freeze({ name: "watcher", role: "viewer" });
 const panelOf = (page, id) => {
   const at = page.indexOf(`<section id="${id}" data-panel>`);
   assert.ok(at >= 0, `the page draws ${id}`);
@@ -532,4 +533,83 @@ test("the flow picker says it is not the whole list where it is drawn, and what 
   assert.deepEqual(editor.flows.map((entry) => entry.tier), ["repository", "overlay", "packages"]);
   const names = triggerGetsOf({ trigger: { ...COMMENT, skillsDir: "/srv/skills" }, editor, liveHosts: [] }).flow.choices.map((entry) => entry.name);
   assert.deepEqual(names, ["fix", "listed"]);
+});
+
+/** A trigger's page for this role, over the real reader of a real file, as `loadPageData` hands each its own copy. */
+async function fileShownTo(role, entry) {
+  const file = getsFile(entry);
+  const fs = fileOnlyFs(file);
+  const { readTriggers } = await import("../src/read-model.mjs");
+  const snapshot = { readAt: NOW, triggers: readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs }), runs: [], waiting: { rows: [] }, hostBudgets: [] };
+  const parsed = parsePageQuery("trigger", "index=2");
+  const data = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs, fleet: { snapshot: async () => snapshot }, hostLoads: async () => null, triggerEditor: () => ({ defaults: { backend: "docker", maxCostUsd: "no per-job dollar cap" } }) }, { role });
+  const page = String((await renderPage("trigger", { query: parsed.query, session: { name: role, role }, data })).html);
+  return { page, data, text: textOf(page).replace(/&lt;/g, "<").replace(/&gt;/g, ">") };
+}
+const FULL_ENTRY = Object.freeze({ on: { type: "comment", phrase: "@pi please" }, run: { kind: "gitlab", flow: "fix", provider: "anthropic", model: "claude-sonnet-5-5", maxCostUsd: "1.50", models: ["anthropic/claude-sonnet-5-5"], fallbackModels: ["anthropic/claude-haiku-4-5"], mcp: ["linear"], excludeTools: ["bash", "mcp__linear__*"], packages: false, progress: true, statusComment: true, image: "registry.example/secret image:1", instructions: "Standing words of the operator.", secrets: { SOME_KEY: "op://vault/item" } } });
+
+test("an agent's page has the rows no card draws for it, each as its read holds it, and claims nothing of what its read does not", async () => {
+  const { page, text, data } = await fileShownTo("agent", FULL_ENTRY);
+  const row = (key, value) => assert.ok(page.includes(`<dt>${key}</dt><dd>${value}</dd>`) || text.includes(`${key} ${value}`), `${key} ${value}`);
+  // The card's fields, which the narrowed tables would otherwise leave nowhere on this page.
+  row("run.flow", "fix");
+  row("run.provider", "anthropic");
+  row("run.model", "claude-sonnet-5-5");
+  row("run.maxCostUsd", "1.50");
+  row("run.models", '["anthropic/claude-sonnet-5-5"]');
+  row("run.fallbackModels", '["anthropic/claude-haiku-4-5"]');
+  // Set, and the names stay out: no server's name reaches an agent, and a tool pattern holds one. `[]` is what the read holds, and what the page said.
+  row("run.mcp", "set, and its names are not in an agent’s read");
+  row("run.excludeTools", "set, and its names are not in an agent’s read");
+  row("run.packages", "false");
+  // What the read withholds is said to be, and is not there. Each of these read as a fact of the file: "not set", "local" or a forge's rule.
+  assert.deepEqual(["forge", "phrase", "progress", "secrets", "instructions", "image"].filter((key) => data.snapshot.triggers.triggers[2][key] !== undefined && data.snapshot.triggers.triggers[2][key] !== null), [], "the premise: the read holds none of them");
+  for (const key of ["Forge", "Phrase or schedule", "Who may fire it", "run.kind", "run.progress", "run.secrets", "run.instructions", "run.image"]) row(key, "not in an agent’s read");
+  assert.ok(text.includes("Whether it has instructions is not in an agent’s read."));
+  for (const never of ["No instructions are set.", "This trigger has instructions.", "set (operator only)", "GitHub association", "The actor must be", "Hosts missing its required secret"]) assert.ok(!text.includes(never), never);
+  assert.ok(text.includes("Write its phrase and a flow to choose another flow"));
+  assert.doesNotMatch(text, /undefined/);
+  for (const held of ["@pi please", "secret image", "Standing words", "SOME_KEY", "op://", "linear", "bash"]) assert.ok(!text.includes(held) && !page.includes(`>${held}<`), held);
+  assert.ok(!page.includes("mcp__linear"), "a server's name in a tool pattern is a server's name");
+  // Whatever the deployment's defaults are, this read has none of them, so it says none of them.
+  assert.ok(!text.includes("deployment default:"), "the editor's defaults are withheld whole");
+  assert.ok(!text.includes("docker") && !text.includes("(deployment default)"), "nor which venue is the deployment's");
+  assert.ok(text.includes("The deployment’s default venue is not in an agent’s read."));
+  assert.ok(!text.includes("Secret profile:"), "the secret bundles are withheld whole, so what they would say is not said");
+  // A venue the file itself names is the file's to say.
+  const named = await fileShownTo("agent", { ...FULL_ENTRY, run: { ...FULL_ENTRY.run, backend: "local" } });
+  assert.ok(named.text.includes("local (trigger override)") && !named.text.includes("default venue"));
+  // A key the read does hold and the file does not set is not set, and a command it cannot read is not a flow of the deployment's.
+  const bare = await fileShownTo("agent", { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", command: "run-tests" } });
+  assert.ok(bare.text.includes("run.image not set"));
+  assert.ok(bare.text.includes("run.excludeTools not set"), "the display holds null for no list, so it is known not set");
+  assert.ok(bare.text.includes("run.command not in an agent’s read"));
+  assert.ok(bare.text.includes("→ not in an agent’s read") && !bare.text.includes("→ deployment default"));
+  // A schedule's rule holds whatever its forge, so it is still said.
+  const schedule = await fileShownTo("agent", { on: { type: "cron", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "Run it." } });
+  assert.ok(schedule.text.includes("Who may fire it This deployment's scheduler starts it"), "the facts");
+  assert.ok(schedule.text.includes("deployment's scheduler starts it on its schedule; an operator may fire it by hand. Each forge delivery"), "the trust model");
+  assert.ok(schedule.text.includes("The schedule's owning host runs a cron trigger's local folder"));
+  const pull = await fileShownTo("agent", { on: { type: "pull_request", action: ["opened"] }, run: { kind: "github", flow: "fix" } });
+  assert.ok(pull.text.includes('Phrase or schedule ["opened"]') || pull.page.includes("&quot;opened&quot;"));
+});
+
+test("a person's page keeps one editor for each key and says where the rows went, and with no card to point at it draws them", async () => {
+  const { page, text } = await fileShownTo("viewer", FULL_ENTRY);
+  assert.ok(text.includes("are in What its jobs get."));
+  assert.ok(!page.includes("<dt>run.flow</dt>") && !text.includes("run.flow fix"), "the card has it");
+  assert.ok(text.includes("Write @pi please <flow> to choose another flow"));
+  assert.ok(text.includes("deployment default: "), "this view reads the defaults, so it says them");
+  assert.ok(text.includes("docker") && text.includes("(deployment default)"));
+  assert.ok(text.includes("Secret profile:"));
+  assert.ok(!text.includes("not in an agent’s read"));
+  for (const says of ["This trigger has instructions.", "Forge gitlab", "Who may fire it The actor must be a GitLab project member", "run.kind gitlab", "run.progress true", "Hosts missing its required secret"]) assert.ok(text.includes(says), says);
+  // No card over a file the snapshot calls invalid, and the rows it would have drawn are not lost with it.
+  const fs = fileOnlyFs(getsFile(FULL_ENTRY));
+  const snapshot = { readAt: NOW, triggers: { invalid: "triggers file failed its check" }, runs: [], waiting: { rows: [] } };
+  const parsed = parsePageQuery("trigger", "index=2");
+  const data = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs, fleet: { snapshot: async () => snapshot }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role: "viewer" });
+  const invalid = textOf(String((await renderPage("trigger", { query: parsed.query, session: VIEWER_SESSION, data })).html));
+  assert.ok(!invalid.includes("are in What its jobs get."), "no card, so nothing points at one");
+  assert.ok(invalid.includes("run.flow"));
 });

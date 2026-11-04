@@ -26,12 +26,18 @@ import { fixButton, stateLine, wordsHtml } from "./loaded-parts.mjs";
 const detail = (v) => v.data?.triggerDetail ?? {};
 const fileTrigger = (v) => v.data?.triggerGets?.trigger ?? detail(v).trigger ?? null;
 
-/** The card's words for this view, from what the page read. Null for an agent: its copy of the data has none of it, by rule. */
+/**
+ * Whether this view draws the card, so the rest of the page can say where those rows are. Not for an agent: its copy of the data has none of it, by
+ * rule. Not over a file the snapshot could not read, or a newer one: "What starts it" says why, and a row read past that would claim what it cannot.
+ */
+export function triggerGetsDrawn(v) {
+  return v.role !== "agent" && fileTrigger(v) !== null && !v.data?.snapshot?.triggers?.invalid;
+}
+
+/** The card's words for this view, from what the page read. */
 function getsOf(v) {
-  if (v.role === "agent") return null;
+  if (!triggerGetsDrawn(v)) return null;
   const trigger = fileTrigger(v);
-  // A file the snapshot could not read, or a newer one: "What starts it" says why, and a row read past that would claim what it cannot.
-  if (trigger === null || v.data?.snapshot?.triggers?.invalid) return null;
   const snapshot = v.data?.snapshot ?? {};
   const budgets = Array.isArray(snapshot.hostBudgets) && snapshot.hostBudgets.length > 0;
   return { trigger, gets: triggerGetsOf({
