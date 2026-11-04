@@ -104,6 +104,38 @@ test("standing adoption previews exact scoped text and refuses stale, duplicate,
   assert.ok(planStandingAnswerAdd({ params, paths }).unchanged);
 });
 
+test("a standing answer is checked and previewed as the writer writes it: stamped, without a dropped version 1, and today's bytes with no rule", async () => {
+  // A Forgejo repository stands in for a forge a later release adds to FORGES, whose answers need a version 2 rule.
+  const versions = { blockValueTable: Object.freeze({ standingAnswers: answers => (Array.isArray(answers) && answers.some(a => String(a?.repo).startsWith("forgejo:")) ? 2 : 1) }), supported: 2 };
+  const params = { title: "Forgejo convention", text: "Use the repository's own test helper.", projects: ["api"], repo: "forgejo:acme/api" };
+  const stamped = setup();
+  const got = planStandingAnswerAdd({ params, paths: stamped.paths, now: () => AT, versions });
+  assert.ok(got.plan, JSON.stringify(got));
+  assert.ok(got.plan.afterText.startsWith('{\n  "version": 2,\n  "triggers": ['), got.plan.afterText);
+  assert.deepEqual(applyStandingAnswerAdd({ plan: got.plan, paths: stamped.paths, versions }), { ok: true });
+  assert.equal(readFileSync(stamped.paths.triggersPath, "utf8"), got.plan.afterText, "the applied file is the preview");
+  // The stamped file is read by the same rules, and the next answer keeps its stamp.
+  const next = planStandingAnswerAdd({ params: { ...params, title: "Second convention" }, paths: stamped.paths, now: () => AT, versions });
+  assert.ok(next.plan?.afterText.startsWith('{\n  "version": 2,\n  "triggers": ['), JSON.stringify(next));
+
+  // A hand-written "version": 1 is dropped by the writer, so the preview the service confirms and its digest drop it too.
+  const one = setup();
+  const raw = JSON.parse(readFileSync(one.paths.triggersPath, "utf8"));
+  writeFileSync(one.paths.triggersPath, JSON.stringify({ version: 1, ...raw }));
+  const plan = (await one.service.preview("standing-answer-add", params)).plan;
+  assert.ok(plan);
+  assert.doesNotMatch(plan.afterText, /"version"/);
+  assert.deepEqual(await one.service.apply("standing-answer-add", { payload: { params, adoptedAt: plan.answer.adoptedAt }, beforeDigest: plan.beforeDigest, afterDigest: plan.afterDigest }), { ok: true });
+  assert.equal(readFileSync(one.paths.triggersPath, "utf8"), plan.afterText);
+
+  // With every table empty the same answer is accepted unstamped, in today's exact bytes.
+  const today = setup();
+  const plain = planStandingAnswerAdd({ params, paths: today.paths, now: () => AT });
+  assert.equal(plain.plan.afterText, `${JSON.stringify({ ...raw, standingAnswers: [...raw.standingAnswers, plain.plan.answer] }, null, 2)}\n`);
+  assert.deepEqual(applyStandingAnswerAdd({ plan: plain.plan, paths: today.paths }), { ok: true });
+  assert.equal(readFileSync(today.paths.triggersPath, "utf8"), plain.plan.afterText);
+});
+
 test("drop is bound to the exact retained draft and never accepts an arbitrary model result", () => {
   const draft = fixture.privateDraft;
   const params = { runId: draft.meta.runId, draftRunId: draft.meta.draftRunId, digest: draft.digest };

@@ -43,6 +43,59 @@ test("instruction preview writes the exact sentence and safe Undo restores absen
   assert.equal(applyZeroTouchFilePlan({ plan: undo.plan, paths }).ok, true);
   assert.equal(Object.hasOwn(JSON.parse(readFileSync(paths.triggersPath)).triggers[0].run, "instructions"), false);
 });
+test("the instruction, Undo and name previews are the bytes the writer writes: stamped, without a dropped version 1, and today's with no rule", () => {
+  // A sentence naming pnpm and a named group stand in for a run value and a zeroTouch value a later release widens.
+  const versions = { runValueTable: Object.freeze({ instructions: text => (String(text).includes("pnpm") ? 2 : 1) }), blockValueTable: Object.freeze({ zeroTouch: block => (Object.keys(block?.names ?? {}).length ? 2 : 1) }), supported: 2 };
+  const { paths, doc, sourceRecord, group, binding } = fixture();
+  const text = () => readFileSync(paths.triggersPath, "utf8");
+  const params = { runId: "source", groupId, index: 0, sentence: "Use pnpm in this repository." };
+  const { plan } = planZeroTouchInstruction({ params, paths, sourceRecord, group, binding, versions });
+  assert.ok(plan);
+  assert.ok(plan.afterText.startsWith('{\n  "version": 2,\n  "triggers": ['), plan.afterText);
+  assert.equal(applyZeroTouchFilePlan({ plan, paths, versions }).ok, true);
+  assert.equal(text(), plan.afterText, "the applied file is the preview");
+  // The stamped file is read by the same rules; removing the sentence removes the stamp, in the preview as on disk.
+  const undo = planZeroTouchInstructionUndo({ params: { fixId: groupId }, paths, fix: { id: groupId, kind: "instructions", undo: plan.privateUndo }, versions });
+  assert.ok(undo.plan);
+  assert.doesNotMatch(undo.plan.afterText, /"version"/);
+  assert.equal(applyZeroTouchFilePlan({ plan: undo.plan, paths, versions }).ok, true);
+  assert.equal(text(), undo.plan.afterText);
+  const named = planZeroTouchName({ params: { groupId, name: "Package manager" }, paths, versions });
+  assert.ok(named.plan?.afterText.startsWith('{\n  "version": 2,\n  "triggers": ['), JSON.stringify(named));
+  assert.equal(applyZeroTouchFilePlan({ plan: named.plan, paths, versions }).ok, true);
+  assert.equal(text(), named.plan.afterText);
+  // With the group named, the file stays at version 2 after an Undo, so the Undo's preview is stamped by the same rules.
+  const again = planZeroTouchInstruction({ params, paths, sourceRecord, group, binding, versions }).plan;
+  assert.equal(applyZeroTouchFilePlan({ plan: again, paths, versions }).ok, true);
+  const kept = planZeroTouchInstructionUndo({ params: { fixId: groupId }, paths, fix: { id: groupId, kind: "instructions", undo: again.privateUndo }, versions });
+  assert.ok(kept.plan?.afterText.startsWith('{\n  "version": 2,\n  "triggers": ['), JSON.stringify(kept));
+  assert.equal(applyZeroTouchFilePlan({ plan: kept.plan, paths, versions }).ok, true);
+  assert.equal(text(), kept.plan.afterText);
+
+  // A hand-written "version": 1 is dropped by the writer, so every preview drops it too.
+  for (const build of [
+    () => planZeroTouchInstruction({ params, paths, sourceRecord, group, binding }),
+    () => planZeroTouchName({ params: { groupId, name: "Package manager" }, paths }),
+  ]) {
+    writeFileSync(paths.triggersPath, JSON.stringify({ version: 1, ...doc }));
+    const built = build().plan;
+    assert.doesNotMatch(built.afterText, /"version"/);
+    assert.equal(applyZeroTouchFilePlan({ plan: built, paths }).ok, true);
+    assert.equal(text(), built.afterText);
+  }
+  writeFileSync(paths.triggersPath, JSON.stringify({ version: 1, ...doc, triggers: [{ ...doc.triggers[0], run: { ...doc.triggers[0].run, instructions: params.sentence } }] }));
+  const undone = planZeroTouchInstructionUndo({ params: { fixId: groupId }, paths, fix: { id: groupId, kind: "instructions", undo: plan.privateUndo } }).plan;
+  assert.doesNotMatch(undone.afterText, /"version"/);
+  assert.equal(applyZeroTouchFilePlan({ plan: undone, paths }).ok, true);
+  assert.equal(text(), undone.afterText);
+
+  // With every table empty: unstamped, in today's exact bytes.
+  writeFileSync(paths.triggersPath, JSON.stringify(doc));
+  const plain = planZeroTouchInstruction({ params, paths, sourceRecord, group, binding }).plan;
+  assert.equal(plain.afterText, `${JSON.stringify({ ...doc, triggers: [{ ...doc.triggers[0], run: { ...doc.triggers[0].run, instructions: params.sentence } }] }, null, 2)}\n`);
+  assert.equal(applyZeroTouchFilePlan({ plan: plain, paths }).ok, true);
+  assert.equal(text(), plain.afterText);
+});
 test("a replacement trigger with the same instruction sentence is not an Undo target", () => {
   const { paths, sourceRecord, group, binding } = fixture();
   const { plan } = planZeroTouchInstruction({ params: { runId: "source", groupId, index: 0, sentence: "Use pnpm." }, paths, sourceRecord, group, binding });

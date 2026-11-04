@@ -163,6 +163,19 @@ function serialize(triggersArray, doc = null, { version = null } = {}) {
 	return `${JSON.stringify(next, null, 2)}\n`;
 }
 
+/**
+ * The exact text `writeTriggers` writes for the entries `next` over the document `nextDocument`: `serialize`, with the
+ * `version` the result needs under `versions` (the five tables of `triggersFileVersionFor`; `supported` is ignored).
+ * Exported for the console's pre-checks (issue #823), which preview a change and parse it before the operator confirms
+ * it: a document they serialized themselves carries no stamp, so under a version rule it reads as a version 1 file
+ * holding a version 2 value and is refused although this writer would write it correctly, and its preview keeps a
+ * hand-written `"version": 1` that this writer drops. One function for both, so the preview cannot drift from the write.
+ */
+export function triggersFileText(next, nextDocument, versions = {}) {
+	const rest = nextDocument !== null && typeof nextDocument === "object" && !Array.isArray(nextDocument) ? nextDocument : {};
+	return serialize(next, nextDocument, { version: triggersFileVersionFor({ ...rest, triggers: next }, versions) });
+}
+
 /** tmp + rename with writeOverlay's single EPERM retry (a Windows AV/indexer briefly holding the
  * destination); a second EPERM, and every other fs failure, propagates to the caller's contract. */
 function renameIntoPlace(fs, tmp, dest) {
@@ -229,8 +242,9 @@ function discardTmp(fs, tmp) {
  * writer's own stamp (the lowest version the content needs) would otherwise LOWER the version under content it does
  * not understand, after which the final validation would pass. Judged on the RAW `version` only, never the full
  * parser, so a file with one bad entry can still be fixed; a broken `version` is repaired like any broken file. Then
- * the writer owns `version`: it writes `triggersFileVersionFor` of the result (`serialize`). `supported`, `runTable`,
- * `blockTable`, `entryValueTable`, `runValueTable` and `blockValueTable` are the version rules, injectable for tests.
+ * the writer owns `version`: it writes `triggersFileVersionFor` of the result (`triggersFileText`). `supported`,
+ * `runTable`, `blockTable`, `entryValueTable`, `runValueTable` and `blockValueTable` are the version rules, injectable
+ * for tests.
  */
 export function writeTriggers({ triggersPath, mutate, mutateDocument = null, expect = null, fs = nodeFs, log = () => {}, now = () => Date.now(), supported = undefined, runTable = undefined, blockTable = undefined, entryValueTable = undefined, runValueTable = undefined, blockValueTable = undefined }) {
 	const versions = { supported, runTable, blockTable, entryValueTable, runValueTable, blockValueTable };
@@ -284,8 +298,7 @@ export function writeTriggers({ triggersPath, mutate, mutateDocument = null, exp
 		if (newer?.newer) return { invalid: `${newer.message}, so nothing was written and nothing in it was lost; change it with that release: ${triggersPath}`, newer: true };
 		const next = mutate(current.map((t) => ({ ...t })));
 		const nextDocument = typeof mutateDocument === "function" ? mutateDocument(JSON.parse(JSON.stringify(doc ?? { triggers: current }))) : doc;
-		const rest = nextDocument !== null && typeof nextDocument === "object" && !Array.isArray(nextDocument) ? nextDocument : {};
-		const text = serialize(next, nextDocument, { version: triggersFileVersionFor({ ...rest, triggers: next }, versions) });
+		const text = triggersFileText(next, nextDocument, versions);
 		try {
 			parseTriggers(text, triggersPath, versions); // the loaders' own validator -- never write a file they would reject
 		} catch (e) {
