@@ -5084,7 +5084,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   not checkable from this session renders the **`skill-not-at-head`** state — amber, naming the
   unchecked tiers, never the red missing claim — and the red `no-skill` flag fires **only** when
   every applicable tier was checked and missed, its detail naming the tiers checked (a trigger's own
-  `run.packages: false` withholds the staged tier as a known miss and the detail says so);
+  `run.packages: false` withholds the staged tier as a known miss and the detail says so, and a package its own
+  `run.excludeExtensions` names holds nothing for it, which that detail says too);
   (b) a cron trigger's run count and last outcome are **exact** over the stated window (the jobId
   join), and a forge trigger's come **only** from the persisted `triggerIndex` **and**
   `triggerType`, both of which must agree with the entry now at that index — a record whose index is
@@ -5152,7 +5153,7 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   the existing `injected:<dir>:<name>` node, no `no-skill` flag is minted, no second node appears
   for the name, and the tip still says never AI-reachable; given a flow that resolves only in the
   overlay `skills/` or only in a staged package, then the edge lands on that tier's node likewise,
-  a staged resolution naming the first manifest-order package (the loader's own shadowing order);
+  a staged resolution naming the first manifest-order package this trigger keeps (the loader's own shadowing order);
   given a session whose `PI_GLOBAL_PI_DIR` is not visible (the deployment pointer cannot carry it),
   an unreadable tier listing, a truncated one, or a pattern-manifest package, then a flow missing
   from the checkable tiers renders `skill-not-at-head` naming the unchecked tiers, never the red
@@ -8955,3 +8956,4 @@ instead of drifting.
 | 2026-11-04 (#800, a role child's tools) | **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` CORRECTED** in Scope: a role child (`DES-MODEL-ROLES`) loses the tools its job's trigger removes, whatever its agent lists. It kept them all, an agent's `tools: [read, bash]` included, while the requirement said a job's sessions shall not have them and named no exception. UNCHANGED, checked: `REQ-MODEL-POLICY`, which reads none of this list. |
 | 2026-11-04 (#800, what a trigger leaves out) | **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED** in Scope: `run.excludeExtensionTools` and `run.excludeExtensions`, with what each promises and the boundary it does not cross. UNCHANGED, checked: `REQ-GLOBAL-PI-OVERLAY`'s two switches, which still say what they say, and `REQ-OPERATOR-CONSOLE-SCREENS`' sentence that turning off one extension is not built, which holds until the trigger's page takes these fields. |
 | 2026-11-04 (#800, what a person leaves out) | **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**: `CARD_FIELDS` gains `run.excludeExtensions` and `run.excludeExtensionTools`, and a new bullet says what a preview refuses and warns of for them, what it reads to say so, and what it says of the file's stamp. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED** in "Spend and reach on a trigger's page": both are tool-proof, so a person changes all eight. **`REQ-OPERATOR-CONSOLE-SCREENS` CORRECTED** in (g1): a switch per extension and a chip per extension tool are built, and the clause that said otherwise is replaced. UNCHANGED, checked: `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, which already said what each field promises; `dispatch_trigger_edit`'s nine fields; the tool enumeration. |
+| 2026-11-04 (#800, a package a trigger leaves out, in the graph) | **`REQ-TOPOLOGY-GRAPH` AMENDED** in Acceptance: a package a trigger's `run.excludeExtensions` names is not its staged tier's answer. UNCHANGED, checked: the red and amber states and what each says otherwise. |

@@ -391,12 +391,14 @@ export async function flowTierOf({ flow, folder = null, skillsDir = null, packag
 		} else {
 			// A package this trigger leaves out by name (issue #800) brings it no skill, so such a package is no answer here.
 			const hit = staged.skills.find((skill) => skill.name === flow && !excludeExtensions.includes(skill.package));
+			// And no such package is a doubt either: what its globs might hold, the job does not load.
+			const unenumerable = staged.unenumerable.filter((name) => !excludeExtensions.includes(name));
 			if (hit) {
 				tier = "package";
 				pkg = hit.package;
 				resolved = `staged package ${hit.package}`;
-			} else if (staged.unenumerable.length > 0) {
-				unknown.push(`staged package(s) ${staged.unenumerable.join(", ")} (manifest patterns, not enumerable here)`);
+			} else if (unenumerable.length > 0) {
+				unknown.push(`staged package(s) ${unenumerable.join(", ")} (manifest patterns, not enumerable here)`);
 			} else {
 				checked.push("staged packages");
 			}

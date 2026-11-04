@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { readTriggers } from "../src/read-model.mjs";
+import { buildGraphModel } from "../src/graph-model.mjs";
 import { readGraphTriggers } from "../src/graph-triggers.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -20,6 +21,23 @@ test("a valid real file keeps the display reader's shape and indices", () => {
   const triggersPath = file(valid);
   assert.deepEqual(readGraphTriggers({ triggersPath }), readTriggers({ triggersPath }));
   assert.equal(readGraphTriggers({ triggersPath }).triggers[0].index, 0);
+});
+
+test("the graph reads a trigger's excludeExtensions off the real file: a flow only that package holds dangles, and a trigger keeping it lands on it", () => {
+  const cron = (id, run = {}) => ({ on: { type: "cron", id, pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/site", flow: "packflow", task: "t", ...run } });
+  const triggersPath = file({ version: 2, triggers: [cron("keeps"), cron("leaves", { excludeExtensions: ["@a/one"] })] });
+  const m = buildGraphModel({
+    triggers: readGraphTriggers({ triggersPath }),
+    folderSkills: { "/srv/site": { head: "abc", truncated: false, unreachable: null, skills: [] } },
+    injectedSkills: {},
+    overlaySkills: { skills: [], truncated: false, unreachable: null },
+    stagedSkills: { skills: [{ name: "packflow", package: "@a/one", dir: "one" }], unenumerable: [], truncated: false },
+    nowMs: 1770000000000,
+  });
+  const edge = (index) => m.edges.find((e) => e.kind === "config" && e.from === `trigger:${index}`).to;
+  assert.equal(edge(0), "staged:one:packflow");
+  assert.notEqual(edge(1), "staged:one:packflow");
+  assert.deepEqual(m.flags.filter((f) => f.flag === "no-skill").map((f) => f.nodeId), ["trigger:1"]);
 });
 
 test("a malformed trigger in valid JSON refuses the whole graph in the loader's words", () => {

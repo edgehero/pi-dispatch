@@ -286,6 +286,22 @@ test("doctor's flow tier: a package a trigger leaves out by name brings it no sk
 	assert.equal((await flowTierOf({ flow: "fix", folder: "/srv", excludeExtensions: ["pi-lint"] }, world)).tier, "none");
 });
 
+test("doctor's flow tier: a package with glob entries a trigger leaves out is no doubt, and one it keeps still is", async () => {
+	const world = { fileExists: () => false, overlay: "/overlay", staged: { skills: [], unenumerable: ["@acme/glob", "@acme/other"] }, repoFlowAtHead: async () => "absent" };
+	const kept = await flowTierOf({ flow: "fix", folder: "/srv" }, world);
+	assert.equal(kept.tier, "unknown", "the premise: its globs might hold the flow");
+	assert.deepEqual(kept.unknown, ["staged package(s) @acme/glob, @acme/other (manifest patterns, not enumerable here)"]);
+	const one = await flowTierOf({ flow: "fix", folder: "/srv", excludeExtensions: ["@acme/glob"] }, world);
+	assert.equal(one.tier, "unknown");
+	assert.deepEqual(one.unknown, ["staged package(s) @acme/other (manifest patterns, not enumerable here)"], "only the one it keeps");
+	const both = await flowTierOf({ flow: "fix", folder: "/srv", excludeExtensions: ["@acme/glob", "@acme/other"] }, world);
+	assert.equal(both.tier, "none", "a flow nothing this trigger loads can hold is found in no tier, as a staged skill it leaves out is");
+	assert.deepEqual(both.unknown, []);
+	assert.ok(both.checked.includes("staged packages"));
+	const hit = await flowTierOf({ flow: "fix", folder: "/srv", excludeExtensions: ["@acme/glob"] }, { ...world, staged: { skills: [{ name: "fix", package: "pi-lint" }], unenumerable: ["@acme/glob"] } });
+	assert.deepEqual([hit.tier, hit.package], ["package", "pi-lint"]);
+});
+
 /** The seams a doctor run needs and this suite says nothing of. */
 const doctorSeams = (dir) => ({ cwd: dir, home: tempDir("pi-800-doctor-home-"), out: () => {}, spawn: planSpawn(), probeValkey: async () => true, readHosts: async () => ({ hosts: [] }), dollarKeysExist: async () => false, fileExists: existsSync, readEnvFile: (path) => readFileSync(path), nodeVersion: "22.19.0" });
 function planSpawn() {

@@ -346,7 +346,7 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
       model.nodes.push({ id, kind: "overlay", name: skill.name });
     }
   }
-  const stagedNodeId = new Map(); // name -> FIRST matching node id: manifest order is loader order
+  const stagedRows = []; // { name, package, id }, in manifest order, which is loader order: a trigger's flow lands on the first its job loads
   if (staged) {
     const seenStagedIds = new Set();
     for (const skill of staged.skills) {
@@ -356,7 +356,7 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
         seenStagedIds.add(id);
         model.nodes.push({ id, kind: "staged", name: skill.name, package: typeof skill.package === "string" && skill.package !== "" ? skill.package : skill.dir });
       }
-      if (!stagedNodeId.has(skill.name)) stagedNodeId.set(skill.name, id);
+      stagedRows.push({ name: skill.name, package: skill.package, id });
     }
   }
 
@@ -521,8 +521,15 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
             // staged tier could not have saved it.
             probes.push({ tier: `${TIER_STAGED} (withheld: run.packages false)`, state: "miss" });
           } else if (staged === null) probes.push({ tier: TIER_STAGED, state: "unknown" });
-          else if (stagedNodeId.has(t.flow)) probes.push({ tier: TIER_STAGED, state: "hit", nodeId: stagedNodeId.get(t.flow) });
-          else probes.push({ tier: TIER_STAGED, state: staged.unenumerable.length > 0 || staged.truncated === true ? "unknown" : "miss" });
+          else {
+            // A package this trigger leaves out by name brings it no skill, and what its globs might hold is no doubt: doctor's own reading (`flowTierOf`), so the
+            // graph and doctor cannot disagree on whether a flow resolves. A cut list could still hold a package this trigger keeps, so `truncated` stays a doubt.
+            const leftOut = Array.isArray(t.excludeExtensions) ? t.excludeExtensions : [];
+            const hit = stagedRows.find((row) => row.name === t.flow && !leftOut.includes(row.package));
+            const onlyLeftOut = !hit && stagedRows.some((row) => row.name === t.flow);
+            if (hit) probes.push({ tier: TIER_STAGED, state: "hit", nodeId: hit.id });
+            else probes.push({ tier: onlyLeftOut ? `${TIER_STAGED} (left out: run.excludeExtensions)` : TIER_STAGED, state: staged.unenumerable.some((name) => !leftOut.includes(name)) || staged.truncated === true ? "unknown" : "miss" });
+          }
 
           let target = null;
           let blocked = false;

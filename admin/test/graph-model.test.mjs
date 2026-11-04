@@ -493,6 +493,46 @@ test("run.packages: false withholds the staged tier as a KNOWN miss, and the red
   assert.equal(m.edges.find((e) => e.kind === "config" && e.from === "trigger:2").to, "skill:folder:/srv/site:deleted-flow");
 });
 
+test("a flow only a package this trigger leaves out holds: no edge to that package, a known miss, and the red detail says so", () => {
+  const inputs = CANNED();
+  inputs.stagedSkills = { skills: [{ name: "deleted-flow", package: "@a/one", dir: "one" }], unenumerable: [], truncated: false };
+  const before = buildGraphModel(inputs);
+  assert.equal(before.edges.find((e) => e.kind === "config" && e.from === "trigger:2").to, "staged:one:deleted-flow", "the premise: kept, it lands on the package");
+  inputs.triggers.triggers[2].excludeExtensions = ["@a/one"];
+  const m = buildGraphModel(inputs);
+  const flag = m.flags.find((f) => f.flag === "no-skill" && f.nodeId === "trigger:2");
+  assert.ok(flag, "the job would not load it, so it dangles, as doctor and the trigger's page say");
+  assert.ok(flag.detail.includes("left out: run.excludeExtensions"), "and it says why a package holding the name did not save it");
+  assert.equal(m.edges.find((e) => e.kind === "config" && e.from === "trigger:2").to, "skill:folder:/srv/site:deleted-flow");
+  assert.ok(m.nodes.some((n) => n.id === "staged:one:deleted-flow" && n.kind === "staged"), "the package's skill still enumerates: it is the deployment's, and another trigger may keep it");
+});
+
+test("a flow two packages hold lands on the first this trigger keeps, and another trigger's list is not this one's", () => {
+  const inputs = CANNED();
+  inputs.stagedSkills = { skills: [{ name: "deleted-flow", package: "@a/one", dir: "one" }, { name: "deleted-flow", package: "@b/two", dir: "two" }], unenumerable: [], truncated: false };
+  inputs.triggers.triggers[2].excludeExtensions = ["@a/one"];
+  const m = buildGraphModel(inputs);
+  assert.equal(m.edges.find((e) => e.kind === "config" && e.from === "trigger:2").to, "staged:two:deleted-flow");
+  assert.deepEqual(m.flags.filter((f) => f.nodeId === "trigger:2"), []);
+  inputs.triggers.triggers[2].excludeExtensions = ["@c/three"];
+  assert.equal(buildGraphModel(inputs).edges.find((e) => e.kind === "config" && e.from === "trigger:2").to, "staged:one:deleted-flow", "a name that is no package's changes nothing");
+});
+
+test("a package with glob entries this trigger leaves out is no doubt, one it keeps still softens, and a cut list always does", () => {
+  const softened = (stagedSkills, excludeExtensions) => {
+    const inputs = CANNED();
+    inputs.stagedSkills = stagedSkills;
+    if (excludeExtensions) inputs.triggers.triggers[2].excludeExtensions = excludeExtensions;
+    const m = buildGraphModel(inputs);
+    return { soft: m.nodes.some((n) => n.kind === "skill-not-at-head" && n.name === "deleted-flow"), red: m.flags.some((f) => f.flag === "no-skill" && f.nodeId === "trigger:2") };
+  };
+  const globs = { skills: [], unenumerable: ["@glob/a", "@glob/b"], truncated: false };
+  assert.deepEqual(softened(globs), { soft: true, red: false }, "the premise");
+  assert.deepEqual(softened(globs, ["@glob/a"]), { soft: true, red: false }, "it keeps the other");
+  assert.deepEqual(softened(globs, ["@glob/a", "@glob/b"]), { soft: false, red: true }, "what those globs might hold, its job does not load");
+  assert.deepEqual(softened({ ...globs, unenumerable: [], truncated: true }, ["@glob/a"]), { soft: true, red: false }, "a cut list may hold a package it keeps");
+});
+
 test("tiers this session cannot check soften the claim: skill-not-at-head, no flag, tiers named", () => {
   const inputs = CANNED();
   // The deployment pointer cannot carry PI_GLOBAL_PI_DIR, so a wizard-launched session reads both
