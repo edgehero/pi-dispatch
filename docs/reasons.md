@@ -346,7 +346,7 @@ The image does not declare command support, so its runner would not dispatch `ru
 
 ### job-image-load-exclusions-unsupported
 
-The job image does not declare support for leaving out an extension or an extension's tool, so its runner would ignore `run.excludeExtensions` and `run.excludeExtensionTools`. No container started and nothing was spent.
+The job image does not declare support for leaving out an extension or an extension's tool, so its runner would ignore `run.excludeExtensions` and `run.excludeExtensionTools`, and would start a role child without `run.excludeTools`. No container started and nothing was spent.
 
 What to do: rebuild the job image from this release. See [exclude-tools.md](exclude-tools.md#versions-and-older-hosts).
 

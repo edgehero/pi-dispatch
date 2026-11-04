@@ -2175,10 +2175,11 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     `PI_EXCLUDE_TOOLS`, and a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a "read-only"
     trigger with every tool the file says to remove: a permission quietly not enforced. `loadExclusions` (issue #800) declares that
-    it reads `PI_EXCLUDE_EXTENSIONS` and `PI_EXCLUDE_EXTENSION_TOOLS` and stops a strict job on a name that matched nothing; a job
-    carrying either field on an image without it is refused pre-spend (`job-image-load-exclusions-unsupported`), and its evidence is a
+    it reads `PI_EXCLUDE_EXTENSIONS` and `PI_EXCLUDE_EXTENSION_TOOLS`, stops a strict job on a name that matched nothing and hands a role child the
+    trigger's exclusions on its command line; a job carrying either field on an image without it, or `run.excludeTools` beside a role map (`job.modelRoles`,
+    so a child can start), is refused pre-spend (`job-image-load-exclusions-unsupported`), and its evidence is a
     real offline job at a cap of 0: an excluded overlay module never runs beside a control that does, a strict typo exits 2 by name, and
-    a strict name that matched goes on. `verify-image.sh` fails on any
+    a strict name that matched goes on, and a grep of the baked runner for the child's flag. `verify-image.sh` fails on any
     UNKNOWN token and checks each claimed one (a grep of the baked runner, or for `anyUid` runs as uid 4242), so a new
     capability cannot ship its label without shipping its evidence. `costCap` (issue #501) declares that the baked
     runner reads `PI_MAX_COST_MICROS` and stops a job before any provider call whose bound could take it past that cap
@@ -14024,3 +14025,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-04 (#800, a chained child's packages) | **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits the parent's `packages` off job data, as it does `excludeExtensions`. A `"packages": false` parent chained a child with every staged package, because `addLocalJob`'s list had no such field. UNCHANGED, checked: `INT-TRIGGERS-FILE-CONTRACT`'s `run.packages` bullet, and no `JOB_DATA_FIELD_VERSIONS` row, since a worker at the tag reads `job.packages` at its container start and so honours such a child. |
 | 2026-11-04 (#800, a tool name's case) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED** in the `run.excludeExtensionTools` bullet: what it refuses as pi's, a server's or a job's own it refuses in any case. UNCHANGED, checked: `LOADED_TOOL_NAME_RE`, which still takes an upper-case letter in an extension's own tool name. |
 | 2026-11-04 (#800, a key that nearly names either) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED** in the `run.excludeExtensions` bullet: what a near miss of either key is. Five spellings and their kind were dropped at load. UNCHANGED, checked: the `run.excludeTools` bullet, whose sweep answers as it did. |
+| 2026-11-04 (#800, a role child on an older image) | **`INT-CONTAINER-RUNTIME-CONTRACT`**: `loadExclusions` also declares that a role child is handed the trigger's exclusions, and a job with `run.excludeTools` beside a role map needs it. UNCHANGED, checked: `job-image-load-exclusions-unsupported` as the reason, and the `excludeTools` token. |

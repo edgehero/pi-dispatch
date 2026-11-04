@@ -449,9 +449,10 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # verify-image.sh exercises receipt rejection, deadline checks and final-payload cost refusal offline.
 # `loadExclusions` (issue #800) tells the worker this runner reads PI_EXCLUDE_EXTENSIONS, filters the overlay's entries
 # before any factory runs, reads PI_EXCLUDE_EXTENSION_TOOLS into the session's exclusions and stops a strict job on a name
-# that matched nothing. An older runner handed the variables would ignore them and run the job with what the trigger takes
-# away, on a clean exit, so the worker refuses that pairing pre-spend (its `loadExclusions` capability row, reason
-# job-image-load-exclusions-unsupported). verify-image.sh runs a real offline job at a cap of 0 for each half.
+# that matched nothing, and that it hands a role child the trigger's exclusions on its command line. An older runner handed the
+# variables would ignore them and run the job with what the trigger takes away, on a clean exit, and would start a role child
+# with what run.excludeTools removed, so the worker refuses each pairing pre-spend (its `loadExclusions` capability row, reason
+# job-image-load-exclusions-unsupported). verify-image.sh runs a real offline job at a cap of 0 for the first half, and greps the baked runner for the second.
 LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy

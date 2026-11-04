@@ -869,6 +869,10 @@ LEGONE
 					|| fail "the image declares loadExclusions but a strict job with a tool name that matched nothing did not stop as exclude-tool-not-loaded (exit $le_typo_code): $le_typo"
 				! echo "$le_kept" | grep -q '"reason":"exclude-tool-not-loaded"' \
 					|| fail "the image declares loadExclusions but a strict job naming a tool an extension registered was stopped: $le_kept"
+				# The token's other half, in 'excludeTools' evidence style: a role child reads no job setting, so the runner has to put the list on its command line.
+				# The worker refuses a tool exclusion beside a role map on an image without this token, so this claim is what lets such a job run.
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q -- "--exclude-tools" /app/image/runner/src/model-roles.mjs 2>/dev/null \
+					|| fail "the image declares loadExclusions but its baked runner never hands a role child the trigger's exclusions"
 				;;
 			questionGrouping)
 				# The dedicated classifier mode must reach the cost guard before any executable discovery.

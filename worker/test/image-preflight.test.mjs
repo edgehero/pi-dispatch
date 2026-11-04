@@ -363,6 +363,33 @@ test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502
 	}
 });
 
+test("loadExclusions (#800): either field needs it, and so does a tool exclusion a role child could keep, on no other job", async () => {
+	const label = (caps) => `sha256:abc${FIELD_SEP}1.5.0${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
+	const row = CAPABILITY_GATES.find((gate) => gate.token === "loadExclusions");
+	const roles = { modelRoles: { editor: "anthropic/m" } };
+	const declared = ["excludeTools", "modelPolicy", "modelRoles"];
+	const older = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
+	for (const job of [{ excludeExtensions: ["a"] }, { excludeExtensionTools: ["t"] }, { excludeTools: ["bash"], ...roles }, { excludeTools: ["mcp__linear__*"], ...roles }]) {
+		assert.equal(row.needed(job), true, JSON.stringify(job));
+		assert.deepEqual(await older({ kind: "local", ...job }), { loadExclusionsUnsupported: "i", declared }, JSON.stringify(job));
+	}
+	for (const job of [{ excludeTools: ["bash"] }, roles, {}]) {
+		assert.equal(row.needed(job), false, JSON.stringify(job));
+		assert.equal((await older({ kind: "local", ...job })).ok, true, `${JSON.stringify(job)}: no child can start, or none has a tool to keep, so this image runs it as it did`);
+	}
+	// An image with no role machinery answers the row that names what it lacks, which stands above this one, and not this row's words.
+	const noRoles = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("excludeTools,modelPolicy")) });
+	assert.deepEqual(await noRoles({ kind: "local", excludeTools: ["bash"], ...roles }), { modelRolesUnsupported: "i", declared: ["excludeTools", "modelPolicy"] });
+	assert.equal((await noRoles({ kind: "local", excludeTools: ["bash"] })).ok, true, "and with no map it runs");
+	const tokens = CAPABILITY_GATES.map((gate) => gate.token);
+	assert.ok(tokens.indexOf("excludeTools") < tokens.indexOf("modelRoles") && tokens.indexOf("modelRoles") < tokens.indexOf("loadExclusions"), "what the two reasons above rest on");
+	const fresh = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label([...declared, "loadExclusions"].join(","))) });
+	assert.equal((await fresh({ kind: "local", excludeTools: ["bash"], ...roles })).ok, true);
+	// Each sentence of the row's words holds of each job that reaches it, the one with neither of the first two fields among them.
+	const said = row.comment("img", "is absent");
+	for (const field of ["`run.excludeExtensions`", "`run.excludeExtensionTools`", "`run.excludeTools`", "role child"]) assert.ok(said.includes(field), field);
+});
+
 test("reportProgress (#644): a job armed with run.progress needs it; an unarmed one never does", async () => {
 	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
 	const declared = ["replicas", "commands", "excludeTools", "anyUid", "costCap", "modelPolicy", "exitAuth", "mcp", "forgeMcp", "awaitInput"];
