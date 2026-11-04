@@ -232,7 +232,7 @@ One command puts a live terminal view over the whole deployment:
   turning existing run flags off, cancellation, failed-job removal and bounded priorities. Scope, size,
   minimums, inherited limits and mixed widening requests stay confirmed. The deployment file and pointer
   cannot grant this authority. Answers, draft decisions, standing-answer adoption and forge reruns remain person actions, and no
-  `dispatch_*` tool can set a trigger's job cap, allowed models, fallbacks, MCP servers, tool exclusions or staged packages. A pi process's own `bash`, `write` and
+  `dispatch_*` tool can set a trigger's job cap, allowed models, fallbacks, MCP servers, tool exclusions or staged packages, while `dispatch_trigger_edit` can still move its flow, provider and model behind a confirm. A pi process's own `bash`, `write` and
   `edit` tools are outside this policy, so an unattended one must run with them disabled
   ([`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md)). Tool writes are audited as agents; human-confirmed intervention is tracked separately.
 - **Paid starts stay bounded.** `dispatch_run`, Fire now and local or cron reruns need explicit valid

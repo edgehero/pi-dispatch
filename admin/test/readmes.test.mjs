@@ -181,7 +181,10 @@ test("both READMEs say what no tool can set as the six fields it cannot, and nei
   const said = /The commands pi-dispatch gives an AI cannot set a trigger's (.*?): one that tries is refused before you are asked/.exec(section)?.[1];
   assert.ok(said, "the root README's sentence");
   assert.doesNotMatch(section, /No AI tool/);
-  const plain = { maxCostUsd: "job cap", models: "the models its jobs may use", fallbackModels: "fallback models", mcp: "outside systems", excludeTools: "which tools its jobs lose", packages: "load your packages" };
+  // What those commands can still do, as `docs/triggers.md` says: without it the list reads as ruling out a one-confirm change of the model.
+  assert.match(section, /They can still move a trigger's flow, provider and model, and only after you confirm/);
+  assert.match(read("docs/triggers.md").replace(/\s+/g, " "), /`dispatch_trigger_edit` can still set the first three/);
+  const plain = { maxCostUsd: "job cap", models: "the list of models its jobs may use", fallbackModels: "fallback models", mcp: "outside systems", excludeTools: "which tools its jobs lose", packages: "load your packages" };
   assert.deepEqual(Object.keys(plain).sort(), fields, "one plain name per field");
   for (const [field, name] of Object.entries(plain)) assert.ok(said.includes(name), `${field} is said as ${name}`);
   const admin = read("admin/README.md").replace(/\s+/g, " ");
@@ -191,6 +194,7 @@ test("both READMEs say what no tool can set as the six fields it cannot, and nei
   assert.ok(list, "the admin README's sentence, and what it does not cover");
   for (const [field, name] of Object.entries(adminPlain)) assert.ok(list.includes(name), `${field} is said as ${name}`);
   assert.doesNotMatch(admin, /never by a tool/);
+  assert.match(admin, /`dispatch_trigger_edit` can still move its flow, provider and model behind a confirm/);
   // `dispatch_set` and `dispatch_trigger_edit` each move a job's spend behind a confirm, so neither README may say no tool can.
   for (const [path, text] of [["README.md", ROOT], ["admin/README.md", read("admin/README.md")]]) assert.doesNotMatch(text.replace(/\s+/g, " "), /(?:change|what) (?:what )?a (?:trigger's )?jobs? may spend or reach/, path);
 });

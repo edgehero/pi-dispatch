@@ -314,9 +314,10 @@ machine the console runs on, and says how to undo it. One
 expensive for even one request under its cap, the page refuses the change and names the amount a short task needs, rather than letting a job start and fail.
 If the page is out of date, it asks you to reload rather than write over someone else's change.
 
-**Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the models its jobs may use, its fallback models,
+**Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models,
 its outside systems, which tools its jobs lose or whether they load your packages: one that tries is refused before you are asked. You set those on the page,
 or your technical person sets them in the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
+They can still move a trigger's flow, provider and model, and only after you confirm.
 
 ## How to use it
 
