@@ -23,6 +23,7 @@ import {
 	unknownModelChecks,
 } from "../src/doctor.mjs";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
+import * as catalog from "../src/model-catalog.mjs";
 import { builtinModel, checkModelsKnown } from "../src/model-catalog.mjs";
 import { loadPiModelLoader } from "../src/pi-model-loader.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
@@ -127,8 +128,16 @@ test("a peer that predates fpUsd is named only when dollar caps are in use somew
 
 // ── doctor: a cap below one full-output call ─────────────────────────────────────────────────────────────
 
+test("the first-call bound lives in the catalog, and doctor's exports are the same functions and constants, so one rule answers both", () => {
+	assert.equal(firstCallFloorMicros, catalog.firstCallFloorMicros);
+	assert.equal(boundModelOf, catalog.boundModelOf);
+	assert.equal(serviceTierMultiplier, catalog.serviceTierMultiplier);
+	assert.equal(FIRST_CALL_OVERHEAD_TOKENS, catalog.FIRST_CALL_OVERHEAD_TOKENS);
+	assert.equal(FIRST_CALL_MIN_CONTEXT_BYTES, catalog.FIRST_CALL_MIN_CONTEXT_BYTES);
+});
+
 test("the doctor floor keeps the runner's overhead, and stays a lower bound of the runner's own bound for every builtin chat model", () => {
-	assert.equal(FIRST_CALL_OVERHEAD_TOKENS, BOUND_OVERHEAD_TOKENS, "the copy in doctor.mjs follows the runner's constant");
+	assert.equal(FIRST_CALL_OVERHEAD_TOKENS, BOUND_OVERHEAD_TOKENS, "the copy in model-catalog.mjs follows the runner's constant");
 	// A request of exactly FIRST_CALL_MIN_CONTEXT_BYTES serialised: the floor may never exceed what the guard reserves for it.
 	const context = { systemPrompt: "x".repeat(FIRST_CALL_MIN_CONTEXT_BYTES - JSON.stringify({ systemPrompt: "" }).length) };
 	assert.equal(Buffer.byteLength(JSON.stringify(context)), FIRST_CALL_MIN_CONTEXT_BYTES);

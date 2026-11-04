@@ -65,7 +65,7 @@ import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quo
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
-import { isTransientOverlayRead, overlayProviderProblem } from "./model-catalog.mjs";
+import { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_OVERHEAD_TOKENS, boundModelOf, firstCallFloorMicros, isTransientOverlayRead, overlayProviderProblem, serviceTierMultiplier } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs, RADIUS_COST_CAP_LABEL, RADIUS_COST_CAP_FIX } from "./model-observation.mjs";
@@ -6134,72 +6134,9 @@ export function fleetProjectsChecks(mine, peers) {
 	return checks;
 }
 
-/**
- * The runner's own input overhead (`BOUND_OVERHEAD_TOKENS`, image/runner/src/usage-meter.mjs), which its bound adds to
- * every call. Copied, because the worker package does not ship the runner; `doctor.test.mjs` holds the two equal.
- */
-export const FIRST_CALL_OVERHEAD_TOKENS = 8192;
-/**
- * The least a job's FIRST call carries before its task, in bytes: pi 0.99.1's default system prompt (1,753 bytes) and
- * the schemas of its four default tools (2,712 bytes) serialise to 4,465 bytes, and PR #542's lab measured 10,667 for
- * a short task. 4,096 is below both, so the bound below stays a lower bound for a job that adds nothing.
- */
-export const FIRST_CALL_MIN_CONTEXT_BYTES = 4096;
-
-/**
- * A LOWER BOUND, in integer micro-dollars, on what the runner's cost guard (`callCostBound`) reserves for a job's
- * first call on `model`, or null when this cannot say. The guard refuses a call when its bound would pass the cap, so
- * a per-job cap below this number can never admit a call on the model: with the main model, the job makes no call at
- * all (PR #542's lab: the default model's first call was bounded at $1.03 under a $1 cap).
- *
- * The guard's bound is (request bytes + 8,192) x the dearest input rate + the output limit x the dearest output rate,
- * times a service-tier multiplier, over the model's table, its tiers and its fallbacks. This takes the parts of that
- * which cannot be smaller: the model's own table (not its tiers or fallbacks, which only raise the bound), the output
- * limit `model.maxTokens` (pi sends none of its own, so the guard uses the model's), an input of the overhead plus
- * `FIRST_CALL_MIN_CONTEXT_BYTES`, and the runner's own service-tier multiplier (`serviceTierMultiplier`). The input
- * rate is the guard's: the highest of input, cache read and cache write (not the 1h write, which needs long
- * retention). Null for a table or limit it cannot read.
- */
-export function firstCallFloorMicros(model) {
-	const cost = model?.cost;
-	const usable = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
-	if (!cost || !["input", "output", "cacheRead", "cacheWrite"].every((field) => usable(cost[field]))) return null;
-	const maxTokens = model.maxTokens;
-	if (!(typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0)) return null;
-	const inputRate = Math.max(cost.input, cost.cacheRead, cost.cacheWrite);
-	return Math.ceil(((FIRST_CALL_OVERHEAD_TOKENS + FIRST_CALL_MIN_CONTEXT_BYTES) * inputRate + maxTokens * cost.output) * serviceTierMultiplier(model));
-}
-
-/**
- * The runner's service-tier multiplier (`callCostBound` step 7, image/runner/src/usage-meter.mjs), copied like the
- * overhead above: pi multiplies a settled cost by the tier the RESPONSE reports on these two apis, which can be the
- * account's default rather than the request's, so the runner always bounds at the dearest tier. Leaving it out
- * (PR #551's review) let doctor stay silent on a cap the runner refuses every call under: openai/gpt-5.5 under $5.
- * `fleet-dollars.test.mjs` derives the runner's multiplier from its own bound for every priced api and holds this
- * equal to it.
- */
-export function serviceTierMultiplier(model) {
-	if (model?.api !== "openai-responses" && model?.api !== "openai-codex-responses") return 1;
-	return model.id === "gpt-5.5" ? 2.5 : 2;
-}
-
-/**
- * The model object the floor above is computed from: the builtin catalog's (`builtinModel`, model-catalog.mjs), or a
- * CUSTOM model the overlay `models.json` defines (its own `cost` and `maxTokens`). Null, so the model is not judged,
- * when the overlay redefines or overrides a builtin model: pi composes the two, and this does not copy that rule.
- */
-export function boundModelOf({ provider, id }, { builtinModel, overlay = null }) {
-	const providers = overlay?.providers;
-	const entry = providers !== null && typeof providers === "object" && !Array.isArray(providers) && Object.hasOwn(providers, provider) ? providers[provider] : null;
-	const builtin = builtinModel(provider, id);
-	if (entry !== null && typeof entry === "object") {
-		const overrides = entry.modelOverrides;
-		if (overrides !== null && typeof overrides === "object" && Object.hasOwn(overrides, id)) return null;
-		const definition = Array.isArray(entry.models) ? entry.models.find((m) => m !== null && typeof m === "object" && m.id === id) : undefined;
-		if (definition !== undefined) return builtin ? null : definition;
-	}
-	return builtin;
-}
+// The first-call bound moved to model-catalog.mjs (issue #800), where the console's preview can read it without loading this
+// module. Re-exported so every caller and test of doctor's own lines reads the one rule as before.
+export { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_OVERHEAD_TOKENS, boundModelOf, firstCallFloorMicros, serviceTierMultiplier };
 
 export { resolveConfiguredModelRuns as resolveDoctorModelRuns } from "./model-observation.mjs";
 
