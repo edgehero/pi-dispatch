@@ -100,7 +100,7 @@ Two consequences worth internalising before you design anything:
   (`DES-OPERATOR-CONSOLE`, "The visual system").
 - **Render to look, not only to pin.** A golden holds bytes, not whether a page looks right. `node launch/render-images.mjs
   --console --only <golden>` draws any state, and `--console` re-renders the READMEs' images, which no test can tell are
-  stale, so re-render them in the pull request that changes the look.
+  stale, so re-render them in the pull request that changes the look. `--explain` draws the READMEs' explaining pictures from `launch/explainers.mjs` (animated PNGs in both themes, each with a still for reduced motion): edit the picture there, never a PNG, and look at it, since a test cannot say whether a loop reads.
 - **A card's design status is a claim about this repository.** When a pull request builds a planned screen, move its
   card to *Built* in `STATUS` (`design/tools/fix_markers.py`) in the same pull request.
 
@@ -186,7 +186,7 @@ Two consequences worth internalising before you design anything:
   and the requirements, and the root README's What a job gets against the card's lines; and what a run loaded: `INT-RUNNER-EXIT-CODE-PROTOCOL`'s `loaded` table and clamps (`image/runner/test/loaded.test.mjs`), `INT-RUN-HISTORY-FILE-CONTRACT`'s `loaded` table and `docs/global-pi-overlay.md`'s by-tier list (`worker/test/loaded-record.test.mjs`), and `INT-DOCTOR-RESULTS-KEY`'s lists and worst size (`worker/test/host-loads.test.mjs`); and each ledger's panels and words against its design card (`console-ledger.test.mjs`,
   `onCard` for a fragment a test keeps), so a rebuilt card fails until its ledger is re-read; and the READMEs: the docs
   index against `docs/`, the worker's commands against the CLI, every image and cache tag, links to the root README's
-  headings, and `launch/console-picks.mjs` against `docs/images/console/` and what shows them (`readmes.test.mjs`); and the record shape each release's `buildRecord` makes from the
+  headings, and `launch/console-picks.mjs` against `docs/images/console/` and what shows them (`readmes.test.mjs`); and the explaining pictures in `launch/explainers.mjs`: their words against the README's plain-word rules, each claim against the sentence that makes it true, every colour against the design tokens, and each PNG against the SVG it was shot from (`explainers.test.mjs`); and the record shape each release's `buildRecord` makes from the
   shared cases, `worker/test/fixtures/run-records/` (`INT-RUN-HISTORY-FILE-CONTRACT`), which `buildRecord` must equal
   for every case (`worker/test/run-record-fixtures.test.mjs`): when `buildRecord` changes, run
   `node .github/scripts/run-record-fixtures.mjs --next-only` and commit the `next.*` files with the change, and after a
