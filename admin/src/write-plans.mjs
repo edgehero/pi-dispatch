@@ -262,7 +262,8 @@ function unknownTriggerField(params, kind) {
  * reviewed triggers file or by a person on the trigger's page (`trigger-environment-plans.mjs`), and never by a model's call,
  * even behind a confirm. Neither tool's schema names them, and
  * that alone is not the guard: a schema does not refuse extra keys, and a field silently dropped would let the model
- * report a narrowing that never landed, which is what `planTriggerEdit` did with the last two until issue #800. So a call
+ * report a narrowing that never landed. Until issue #800 `planTriggerEdit` read neither of the last two, and only the tool
+ * adapter's field check stood behind it, once it had planned, with no reason named. So a call
  * that carries one is REFUSED, loudly, before any confirm, and so is
  * a NEAR MISS of any of them (`MaxCostUsd`, `max_cost_usd`, `allowedModels`, a homoglyph), at the top level and
  * under a `run` or `on` object the model may have nested: the loader's own sweeps (`runModelFieldNearMiss`,
