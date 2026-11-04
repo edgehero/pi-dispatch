@@ -539,6 +539,10 @@ test("a raise above the deployment's cap refuses in words that say a trigger can
   assert.equal(out.refusal, "A trigger's job cap can only lower the deployment's: $7.00 is above its $5.00. Set $5.00 or less here, or remove this trigger's cap to run under the deployment's. The deployment's own cap belongs to its settings, not to this page.");
   assert.doesNotMatch(out.refusal, /raise/i);
   assert.ok((await f.service.preview(ask(f, { maxCostUsd: "5" }), operator)).plan, "exactly the deployment's is not above it");
+  // What the specs promise: it may offer this trigger's own cap, below the deployment's, and never to move the deployment's.
+  const below = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", maxCostUsd: "1" }, settings: { maxCostUsd: "5" } });
+  assert.match((await refusal(below, { maxCostUsd: "0.5" })).refusal, /a job cap of at least \$2\.654295/);
+
 });
 
 test("the env's cap counts too: a file above it stops at the worker's load, whatever the overlay says", async () => {
