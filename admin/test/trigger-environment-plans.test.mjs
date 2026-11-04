@@ -4,7 +4,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import * as nodeFs from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeMcpCheck } from "@edgehero/pi-dispatch/mcp-preflight";
@@ -830,7 +831,7 @@ const envFile = (f, text, platform = "darwin") => {
     // One loader's reading, whichever machine runs this: a line can be a hazard to one service's loader and plain to another's.
     const read = deploymentServiceEnv({ env: {}, dir: f.dir, keys, fs: nodeFs, platform });
     if (read.unreadable || read.untrusted) throw new Error("no");
-    return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null };
+    return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.shellRunsLine ?? (read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null) };
   };
 };
 const withEnvFile = (run, text, env = {}, platform = "darwin") => {
@@ -889,6 +890,54 @@ test("why a plain line is not believed beside one a sourcing shell runs: each of
   const quoted = "OTHER='ab\nPI_MAX_COST_USD=2\nMORE=cd'\n";
   assert.equal(sourced(quoted), "unset");
   assert.deepEqual([read(quoted).plain, read(quoted).value, read(quoted).vouched], [false, null, false]);
+});
+
+/** What the shipped wrapper hands a worker, run the way a rendered unit runs it: the deployment folder as its directory, the command as its arguments. */
+const WRAPPER = join(dirname(fileURLToPath(import.meta.url)), "../../deploy/worker-env-wrapper.sh");
+const wrapperReads = (dir) => execFileSync("/bin/sh", [WRAPPER, process.execPath, "-e", 'process.stdout.write(process.env.PI_MAX_COST_USD ?? "unset")'], { cwd: dir, encoding: "utf8", env: { PATH: process.env.PATH }, stdio: ["ignore", "pipe", "ignore"] });
+
+for (const [what, line, reads] of [
+  ["a file it sources with a dot", ". ./more.env", ["2"]],
+  ["a file it sources by name", "source ./more.env", ["2", "unset"]], // `source` is bash's: /bin/sh on macOS has it, dash does not, and that is its own way to differ
+  ["an eval", 'eval "$(cat more.env)"', ["2"]],
+  ["a command", "true", ["unset"]],
+]) {
+  test(`a line of a sourced .env that spells no key, ${what}: it is named, because the wrapper may read a cap this preview cannot`, async (t) => {
+    if (!nodeFs.existsSync("/bin/sh")) return t.skip("no /bin/sh here");
+    const f = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, `OTHER=one\n${line}\n`);
+    nodeFs.writeFileSync(join(f.dir, "more.env"), "PI_MAX_COST_USD=2\n");
+    const read = wrapperReads(f.dir);
+    assert.ok(reads.includes(read), read);
+    const out = await f.service.preview(ask(f, { maxCostUsd: "5" }), operator);
+    assert.deepEqual(out.plan.warnings, ["Line 2 of this host's .env could not be read as the worker reads it, so the deployment's job cap and its list of models could not be judged here. A trigger's cap above what the worker reads makes it refuse the whole file."]);
+    assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+    if (read === "2") assert.throws(() => loadSchedules({ triggersFile: f.paths.triggersPath, maxCostUsd: read }), /run\.maxCostUsd is above this deployment's PI_MAX_COST_USD/);
+  });
+}
+
+for (const [what, text] of [
+  ["an export", "export PI_MAX_COST_USD=2\n"],
+  ["an export beside a plain line", "PI_MAX_COST_USD=2\nexport OTHER=a\n"],
+  ["a comment and a blank line", "# the deployment's cap\n\nexport PI_MAX_COST_USD=2\n"],
+  ["a quoted value", 'PI_MAX_COST_USD="2"\nOTHER=\'a b\'\n'],
+]) {
+  test(`${what} in a sourced .env is an assignment like any other: nothing warns, and the cap is judged at what the wrapper reads`, async (t) => {
+    if (!nodeFs.existsSync("/bin/sh")) return t.skip("no /bin/sh here");
+    const f = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, text);
+    assert.equal(wrapperReads(f.dir), "2");
+    assert.match((await refusal(f, { maxCostUsd: "5" })).refusal, /^A trigger's job cap can only lower the deployment's: \$5\.00 is above its \$2\.00\./);
+    await quiet(f, { maxCostUsd: "1" });
+  });
+}
+
+test("a carriage return on a comment line is no line a shell runs, so a file that spells no key there says nothing", async () => {
+  const f = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "# a note\r\nOTHER=a\n");
+  await quiet(f, { maxCostUsd: "1" });
+});
+
+test("to systemd a line it cannot parse is inert, so the same file spelling no key is read and judged as it is", async () => {
+  const f = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "OTHER=one\n. ./more.env\n", {}, "linux");
+  await quiet(f, { maxCostUsd: "5" });
 });
 
 test("a deployment's file it cannot vouch for leaves the cap unjudged, says so, and stops nobody", async () => {

@@ -45,7 +45,7 @@ export function serviceEnvFileOf(raw, path, loader) {
 	let hazard = null;
 	if (h !== null) {
 		const shape = h.shape !== undefined ? SYSTEMD_HAZARD_SHAPES[h.shape] : null;
-		hazard = shape ? { line: h.line, what: `has ${shape.what}${h.detail ? ` (${h.detail})` : ""}`, fix: shape.fix } : { line: h.line, what: "is one this command cannot read the way the service's loader will (an open quote, a continuation, or a line that runs)", fix: "fix that line, then re-run doctor" };
+		hazard = shape ? { line: h.line, shape: h.shape, what: `has ${shape.what}${h.detail ? ` (${h.detail})` : ""}`, fix: shape.fix } : { line: h.line, what: "is one this command cannot read the way the service's loader will (an open quote, a continuation, or a line that runs)", fix: "fix that line, then re-run doctor" };
 	}
 	return { text, raw, path, loader, hazard };
 }
@@ -238,14 +238,18 @@ export function readDeploymentEnv({ dir, fs, uid = process.geteuid?.(), names = 
  * The `.env` of the deployment in `dir`, read the way doctor reads it (a regular file only, as bytes, one read) and
  * resolved for `keys` (`resolveServiceEnv`). For a caller that has no file of its own in hand (the admin panel).
  * Returns the resolution plus `path`, `unreadable` (a reason, when something is at the path and could not be read) and
- * `untrusted` (`envFileTrust`'s reason); in either case nothing was taken from it.
+ * `untrusted` (`envFileTrust`'s reason); in either case nothing was taken from it. `shellRunsLine` is the line a sourcing shell does
+ * not read as an assignment, whatever keys were asked for: it can set any of them without spelling one (`. ./more.env`, `eval`), so
+ * `hazardSkipped`, which needs the key spelled, says nothing of it. Only for that loader: systemd ignores such a line and the cmd wrapper
+ * splits it on its `=`. A CR on a comment line is left out, since the shell reads past it and only a writer of this file minds.
  */
 export function deploymentServiceEnv({ env, dir, keys, platform = process.platform, fs, uid = process.geteuid?.() }) {
 	// Issue #471 (gate rounds 1 and 2): one descriptor, and nothing taken from a file another account can change.
 	const { path, bytes, unreadable, untrusted } = readDeploymentEnv({ dir, fs, uid });
 	const raw = untrusted ? null : bytes;
 	const file = raw === null ? null : serviceEnvFileOf(raw, path, serviceEnvLoader(platform));
-	return { ...resolveServiceEnv({ env, file, keys }), path, unreadable, untrusted, hazard: file?.hazard ?? null };
+	const shellRunsLine = file?.loader === "shell" && file.hazard !== null && file.hazard.shape !== "shell-crlf-comment" ? file.hazard.line : null;
+	return { ...resolveServiceEnv({ env, file, keys }), path, unreadable, untrusted, hazard: file?.hazard ?? null, shellRunsLine };
 }
 
 /**

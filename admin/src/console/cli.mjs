@@ -693,11 +693,12 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       // overrides would refuse one the worker runs. A line the reader cannot vouch for comes back by name, never as absent, and
       // a file another account can change gives nothing: the check then says it could not run. A line the service's loader reads
       // differently stops the reader taking any value the file spells, so `hazardLine` says which line it was: those keys were not on it.
+      // A line a sourcing shell runs is said whatever was asked for: `. ./more.env` spells no key and can set every one.
       deploymentDir: config.dir,
       readHostEnv: (keys) => {
         const read = m.serviceEnv.deploymentServiceEnv({ env: {}, dir: config.dir, keys, fs, platform: io.platform ?? process.platform, uid });
         if (read.unreadable || read.untrusted) throw new Error("the deployment's .env cannot be read");
-        return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null };
+        return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.shellRunsLine ?? (read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null) };
       },
       readEndpoints: () => endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.()?.endpoints ?? [],
     });

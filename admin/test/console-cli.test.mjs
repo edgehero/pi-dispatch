@@ -1034,7 +1034,12 @@ test("the console's own command is what wires a person's trigger change, each re
   modules.serviceEnv = { deploymentServiceEnv: (args) => realEnv.deploymentServiceEnv({ ...args, platform: "darwin" }) };
   writeFileSync(join(dep.dir, ".env"), "PI_EGRESS=0\nPI_FORWARD_ENV=LINEAR_API_KEY\nLINEAR_API_KEY=ab cd\n", { mode: 0o600 });
   assert.deepEqual(options.readHostEnv(["PI_FORWARD_ENV", "PI_EGRESS", "GITLAB_URL"]), { env: {}, unread: ["PI_FORWARD_ENV", "PI_EGRESS"], hazardLine: 3 });
-  assert.deepEqual(options.readHostEnv(["GITLAB_URL"]), { env: {}, unread: [], hazardLine: null }, "a key the file does not spell is absent, whatever a line says");
+  // A key the file does not spell is still absent, and that is no answer here: such a line can set it without spelling it (`. ./more.env`).
+  assert.deepEqual(options.readHostEnv(["GITLAB_URL"]), { env: {}, unread: [], hazardLine: 3 });
+  // The other loaders do not run a line, so a hazard there speaks only of the keys it stopped.
+  modules.serviceEnv = { deploymentServiceEnv: (args) => realEnv.deploymentServiceEnv({ ...args, platform: "linux" }) };
+  writeFileSync(join(dep.dir, ".env"), "PI_EGRESS=0\n. ./more.env\n", { mode: 0o600 });
+  assert.deepEqual(options.readHostEnv(["GITLAB_URL"]), { env: {}, unread: [], hazardLine: null });
   for (const key of shellHolds) delete dep.env[key];
   modules.modelEndpoints = { loadModelEndpoints: () => [{ id: "e", host: "h", port: 443 }], readOverlayModels: () => null };
   assert.deepEqual(options.readEndpoints(), [{ id: "e", host: "h", port: 443 }]);
