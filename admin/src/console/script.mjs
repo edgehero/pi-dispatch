@@ -1905,6 +1905,16 @@ ${FIT_JS}
     }
     return lists;
   }
+  // Whether a text box differs from what the page drew. A box marked as an amount is one value however it is written, so 1.5 over the file's "1.50"
+  // is no change, as the server would answer. Only two plain decimals are compared by value, and it goes no further: what fits and what a word
+  // typed there means are the server's, so anything else moved and is sent as typed.
+  var GETS_PLAIN_AMOUNT = /^\\d+(\\.\\d+)?$/;
+  function getsTextMoved(box) {
+    var now = box.value.trim();
+    var was = box.defaultValue.trim();
+    if (box.hasAttribute("data-gets-amount") && GETS_PLAIN_AMOUNT.test(now) && GETS_PLAIN_AMOUNT.test(was)) return Number(now) !== Number(was);
+    return now !== was;
+  }
   function getsBody(form) {
     var out = {};
     var hidden = form.querySelectorAll("input[type=hidden]");
@@ -1912,10 +1922,11 @@ ${FIT_JS}
     var boxes = form.querySelectorAll("input[name][data-gets-word]");
     for (var i = 0; i < boxes.length; i++) {
       var next = boxes[i].value.trim();
-      if (next !== boxes[i].defaultValue.trim()) out[boxes[i].name] = next === "" ? null : next;
+      if (getsTextMoved(boxes[i])) out[boxes[i].name] = next === "" ? null : next;
     }
     var flags = form.querySelectorAll("[data-gets-flag]");
-    for (var f = 0; f < flags.length; f++) if (flags[f].checked !== flags[f].defaultChecked) out[flags[f].getAttribute("data-gets-flag")] = flags[f].checked;
+    // On is the key's default, so on from a drawn off takes the file's false away. REJECTED: writing true over it, which leaves a line in the file saying what no key would.
+    for (var f = 0; f < flags.length; f++) if (flags[f].checked !== flags[f].defaultChecked) out[flags[f].getAttribute("data-gets-flag")] = flags[f].checked ? null : false;
     var lists = getsLists(form);
     for (var key in lists) if (JSON.stringify(lists[key].now) !== JSON.stringify(lists[key].was)) out[key] = lists[key].now.length > 0 ? lists[key].now : null;
     return out;
@@ -1928,7 +1939,7 @@ ${FIT_JS}
     for (var i = 0; i < boxes.length; i++) {
       // An add box is a change only for a name not on its list already: the same name again is what the file says.
       var addsTo = boxes[i].getAttribute("data-gets-add");
-      if (addsTo ? lists[addsTo].added : boxes[i].value.trim() !== boxes[i].defaultValue.trim()) words.push(boxes[i].getAttribute("data-gets-word"));
+      if (addsTo ? lists[addsTo].added : getsTextMoved(boxes[i])) words.push(boxes[i].getAttribute("data-gets-word"));
     }
     var ticks = form.querySelectorAll("[data-gets-list], [data-gets-flag]");
     for (var t = 0; t < ticks.length; t++) {

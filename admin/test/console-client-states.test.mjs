@@ -164,7 +164,7 @@ stateTest(T.getsBody, async () => {
   const packages = form.querySelector('[data-gets-flag="packages"]');
   packages.checked = false;
   moved(packages);
-  assert.deepEqual(sentBy(w, form), { ...base, packages: false }, "the switch is a boolean");
+  assert.deepEqual(sentBy(w, form), { ...base, packages: false }, "off is written: it is the one value of the key that is not the default");
   packages.checked = true;
   moved(packages);
   typeIn(w, form.querySelector('input[name="maxCostUsd"]'), " 1.50 ");
@@ -191,7 +191,56 @@ stateTest(T.getsBody, async () => {
   const off = held.querySelector('[data-gets-flag="packages"]');
   off.checked = true;
   moved(off);
-  assert.deepEqual(sentBy(set, held), { ...heldBase, provider: null, model: null, maxCostUsd: null, models: null, fallbackModels: null, mcp: null, excludeTools: null, packages: true });
+  assert.deepEqual(sentBy(set, held), { ...heldBase, provider: null, model: null, maxCostUsd: null, models: null, fallbackModels: null, mcp: null, excludeTools: null, packages: null }, "the file's false goes by removing the key, not by writing the default over it");
+
+  // A file that says true draws the switch on. Standing as drawn sends nothing, and only off is a change.
+  const said = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, packages: true } } }));
+  const saidForm = formOf(said, GETS);
+  const saidBase = { index: 2, pageDigest: saidForm.querySelector('input[name="pageDigest"]').value };
+  const on = saidForm.querySelector('[data-gets-flag="packages"]');
+  on.checked = true;
+  moved(on);
+  assert.deepEqual(sentBy(said, saidForm), saidBase, "turning on what the file has on is no change");
+  on.checked = false;
+  moved(on);
+  assert.deepEqual(sentBy(said, saidForm), { ...saidBase, packages: false });
+  on.checked = true;
+  moved(on);
+  assert.deepEqual(sentBy(said, saidForm), saidBase, "and back, nothing");
+
+  // The cap is one amount however it is written, and only the cap: the bar and the body each ask the same question, so they cannot disagree.
+  const capped = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, maxCostUsd: "1.50" } } }));
+  const cappedForm = formOf(capped, GETS);
+  const cappedBase = { index: 2, pageDigest: cappedForm.querySelector('input[name="pageDigest"]').value };
+  const cap = cappedForm.querySelector('input[name="maxCostUsd"]');
+  const collected = cappedForm.querySelector("[data-gets-bar]");
+  for (const same of ["1.5", " 1.5 ", "1.500", "01.50", "1.50"]) {
+    typeIn(capped, cap, same);
+    assert.equal(shown(collected), false, `${JSON.stringify(same)} is what the file says, so nothing is collected`);
+    assert.deepEqual(sentBy(capped, cappedForm), cappedBase, `${JSON.stringify(same)} is what the file says, so nothing is sent`);
+  }
+  // What a person typed goes as they typed it: the server judges it, and this says only whether it moved.
+  for (const moves of ["1.6", "1.5000001", "2", "abc", "1.5e0", "-1.5", ".5", "0x1"]) {
+    typeIn(capped, cap, moves);
+    assert.equal(shown(collected), true, `${JSON.stringify(moves)} moved`);
+    assert.equal(text(collected.querySelector("[data-gets-words]")), "job cap changed.", moves);
+    assert.deepEqual(sentBy(capped, cappedForm), { ...cappedBase, maxCostUsd: moves }, moves);
+  }
+  typeIn(capped, cap, "");
+  assert.deepEqual(sentBy(capped, cappedForm), { ...cappedBase, maxCostUsd: null }, "a blank box still takes the key away");
+  // A file's value that is no plain amount has nothing to be equal to by value.
+  const written = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, maxCostUsd: "1.5e0" } } }));
+  const writtenForm = formOf(written, GETS);
+  typeIn(written, writtenForm.querySelector('input[name="maxCostUsd"]'), "1.5");
+  assert.equal(sentBy(written, writtenForm).maxCostUsd, "1.5");
+  const typedOver = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, flow: "1.50" } } }));
+  const typedForm = formOf(typedOver, GETS);
+  typeIn(typedOver, typedForm.querySelector('input[name="flow"]'), "1.5");
+  assert.equal(sentBy(typedOver, typedForm).flow, "1.5", "another field's text is text, whatever it looks like");
+  const none = boot(await triggerGetsPage());
+  const noneForm = formOf(none, GETS);
+  typeIn(none, noneForm.querySelector('input[name="maxCostUsd"]'), "0");
+  assert.equal(sentBy(none, noneForm).maxCostUsd, "0", "where the file sets no cap, any amount is a change");
 });
 
 stateTest(T.getsDiscard, async () => {

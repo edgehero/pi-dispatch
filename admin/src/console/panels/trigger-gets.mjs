@@ -59,8 +59,8 @@ function sec(icon, title, hint, body, last, problem = null, action = null) {
 /** What only a person's form draws: `control` when the form is drawn, else the same fact as text. */
 const readLine = (text) => html`<p class="te-read">${text}</p>`;
 
-function textField({ id, name, label, value, hint = null, placeholder = null, list = null, word, input = "text" }) {
-  return html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" name="${name}" type="${input}" value="${value}" maxlength="256" autocomplete="off" spellcheck="false"${placeholder === null ? null : html` placeholder="${placeholder}"`}${list === null ? null : html` list="${list}"`} data-gets-word="${word}">${hint === null ? null : html`<p class="field__hint">${hint}</p>`}</div>`;
+function textField({ id, name, label, value, hint = null, placeholder = null, list = null, word, input = "text", amount = false }) {
+  return html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" name="${name}" type="${input}" value="${value}" maxlength="256" autocomplete="off" spellcheck="false"${placeholder === null ? null : html` placeholder="${placeholder}"`}${list === null ? null : html` list="${list}"`}${amount ? html` data-gets-amount` : null} data-gets-word="${word}">${hint === null ? null : html`<p class="field__hint">${hint}</p>`}</div>`;
 }
 
 const datalist = (id, options) => html`<datalist id="${id}">${options.map((option) => (typeof option === "string" ? html`<option value="${option}"></option>` : html`<option value="${option.value}" label="${option.label}"></option>`))}</datalist>`;
@@ -87,7 +87,7 @@ function modelBody(gets, form) {
   return html`<div class="te-grid">
 ${textField({ id: "te-provider", name: "provider", label: "Provider", value: m.provider, hint: deployed("provider", m.deployment.provider), list: "te-providers", word: "provider changed" })}
 ${textField({ id: "te-model", name: "model", label: "Model", value: m.model, hint: deployed("model", m.deployment.model), list: "te-models", word: "model changed" })}
-${textField({ id: "te-cap", name: "maxCostUsd", label: "Job cap, in dollars", value: m.cap, hint: m.capHint, word: "job cap changed" })}
+${textField({ id: "te-cap", name: "maxCostUsd", label: "Job cap, in dollars", value: m.cap, hint: m.capHint, word: "job cap changed", amount: true })}
 </div>${datalist("te-providers", m.providers)}${datalist("te-models", m.models)}${datalist("te-model-refs", m.refs)}
 <div>${sub("Allowed models")}${m.allowed.length > 0 ? chips(listed("models", m.allowed, "the allowed list")) : html`<p class="te-note">${m.allowedNone}</p>`}${add("models", "te-models-add", m.allowed.length > 0 ? "Add a model" : "Limit to a list", "allowed models changed")}</div>
 <div>${sub("If it is rate limited")}${m.fallbacks.length > 0 ? chips(listed("fallbackModels", m.fallbacks, "the fallbacks")) : html`<p class="te-note">No fallback.</p>`}${add("fallbackModels", "te-fallbacks-add", "Add a fallback", "fallbacks changed")}</div>`;
