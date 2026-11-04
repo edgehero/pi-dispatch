@@ -2040,8 +2040,10 @@ export function validateExcludeExtensions(on, run, at, path) {
  * and this one cannot be, since an extension's tools are known only once it runs. The runner stops a job on a name that matched
  * nothing where it can tell (`exclude-tool-not-loaded`). Refused here is what has a better key or no extension behind it: pi's own
  * tools and a server's are `run.excludeTools`', and a job's own tool (`LOADED_JOB_TOOLS`) is what a trigger's other fields arm, so
- * taking it away would leave `run.progress` or `run.awaitInput` armed with nothing to call. REJECTED: a `*` pattern, which pi takes
- * and which would match tools no person named.
+ * taking it away would leave `run.progress` or `run.awaitInput` armed with nothing to call. Each compared with the name's case folded:
+ * `run.excludeTools` refuses `Bash` by membership, and here it would load, match nothing and read as though the shell were gone. An
+ * extension's real tool that differs from one of those only in case is reached by excluding its extension. REJECTED: a `*` pattern,
+ * which pi takes and which would match tools no person named.
  */
 export function validateExcludeExtensionTools(on, run, at, path) {
 	return validateNameList({
@@ -2050,8 +2052,9 @@ export function validateExcludeExtensionTools(on, run, at, path) {
 		what: "tool names",
 		check: (name) => {
 			if (!LOADED_TOOL_NAME_RE.test(name)) return "is not a tool's name (a letter, then letters, digits, _ or -, at most 48, and no pattern)";
-			if (EXCLUDABLE_TOOL_NAMES.has(name) || MCP_EXCLUDABLE_TOOL_NAMES.has(name) || name.startsWith("mcp__")) return "is not an extension's tool: it belongs on run.excludeTools";
-			if (LOADED_JOB_TOOLS.includes(name)) return "is a tool the job itself offers, which another run field arms; turn that field off, or to remove another extension's tool of that name exclude its extension in run.excludeExtensions";
+			const folded = name.toLowerCase();
+			if (EXCLUDABLE_TOOL_NAMES.has(folded) || MCP_EXCLUDABLE_TOOL_NAMES.has(folded) || folded.startsWith("mcp__")) return "is not an extension's tool: it belongs on run.excludeTools";
+			if (LOADED_JOB_TOOLS.includes(folded)) return "is a tool the job itself offers, which another run field arms; turn that field off, or to remove another extension's tool of that name exclude its extension in run.excludeExtensions";
 			return null;
 		},
 	}, on, run, at, path);

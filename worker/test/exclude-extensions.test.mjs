@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { enqueueForgeJob, enqueueLateForgeJob, enqueueLocalJob } from "../src/queue.mjs";
 import { JOB_DATA_FIELD_VERSIONS, jobDataNewer, jobDataVersionFor, withJobDataVersion } from "../src/job-data-version.mjs";
-import { extensionsNotHere, LEFT_OUT_NAMES_MAX, leftOutOf, overlayEntryNamed, recordedLoaded, leavesOut } from "../src/loaded-record.mjs";
+import { extensionsNotHere, LEFT_OUT_NAMES_MAX, LOADED_JOB_TOOLS, leftOutOf, overlayEntryNamed, recordedLoaded, leavesOut } from "../src/loaded-record.mjs";
 import { TERMINAL_COMMENTS } from "../src/comment-tables.mjs";
 import { dollarSettlement, FLOOR_COUNTERS } from "../src/dollar-budget.mjs";
 import { flowTierOf } from "../src/host-loads.mjs";
@@ -14,7 +14,7 @@ import { parseAuthConnections } from "../src/auth-policy.mjs";
 import { COMMUNITY_AUTH_ADAPTERS } from "../src/community-auth-metadata.mjs";
 import { makeSubscriptionRuntime } from "../src/subscription-runtime.mjs";
 import { isSubscriptionAdapter } from "../src/updates-subscription-adapters.mjs";
-import { TRIGGER_RUN_FIELD_VERSIONS, TRIGGERS_FILE_VERSION, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, parseTriggers, triggersFileVersionFor, withoutMcpExclusions } from "../src/triggers.mjs";
+import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, TRIGGER_RUN_FIELD_VERSIONS, TRIGGERS_FILE_VERSION, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, parseTriggers, triggersFileVersionFor, withoutMcpExclusions } from "../src/triggers.mjs";
 import { AUTHORED_NARROWING_FIELDS, makeCheckWaitSkew, writeTriggers } from "../src/triggers-file.mjs";
 import { overlayEntryNamed as runnerNamed } from "../../image/runner/src/loaded.mjs";
 import { secretValuesOf } from "../src/redact-secrets.mjs";
@@ -72,7 +72,13 @@ test("a tool with another key or no extension behind it refuses, saying where it
 	const load = (name) => () => parse([KINDS[1][1]({ excludeExtensionTools: [name] })]);
 	for (const name of ["bash", "read", "powershell", "codemode", "tool_search", "list_mcp_resources", "mcp__linear__search", "mcp__x"]) assert.throws(load(name), /belongs on run\.excludeTools/, name);
 	for (const name of ["report_progress", "await_human_input", "request_approval", "subagent", "query_logs"]) assert.throws(load(name), /tool the job itself offers/, name);
-	assert.deepEqual(parse([KINDS[1][1]({ excludeExtensionTools: ["lint_run", "Search-Web"] })])[0].run.excludeExtensionTools, ["lint_run", "Search-Web"]);
+	// A name that differs only in case: pi compares exactly, so it would match nothing and read as though the tool were gone. run.excludeTools refuses `Bash` by membership, and this list has none to refuse it by.
+	assert.throws(() => parse([KINDS[1][1]({ excludeTools: ["Bash"] })]), /is not a tool the pinned pi knows/, "the premise");
+	for (const name of ["Bash", "BASH", "Write", "bAsH", "Read", "Powershell", "Codemode", "Tool_Search", "LIST_MCP_RESOURCES", "MCP__linear__search", "Mcp__x"]) assert.throws(load(name), /belongs on run\.excludeTools/, name);
+	for (const name of ["Report_Progress", "REPORT_PROGRESS", "Await_Human_Input", "Subagent", "Query_Logs", "SUBMIT_ANSWER_DRAFT"]) assert.throws(load(name), /tool the job itself offers/, name);
+	for (const tool of [...EXCLUDABLE_TOOL_NAMES, ...MCP_EXCLUDABLE_TOOL_NAMES]) assert.throws(load(tool.toUpperCase()), /belongs on run\.excludeTools/, `${tool}, in any case`);
+	for (const tool of LOADED_JOB_TOOLS.filter((name) => !MCP_EXCLUDABLE_TOOL_NAMES.has(name))) assert.throws(load(tool.toUpperCase()), /tool the job itself offers/, `${tool}, in any case`);
+	assert.deepEqual(parse([KINDS[1][1]({ excludeExtensionTools: ["lint_run", "Search-Web", "Bashful", "read_all"] })])[0].run.excludeExtensionTools, ["lint_run", "Search-Web", "Bashful", "read_all"], "a name of its own, in any case, is an extension's");
 });
 
 test("a near miss of either key refuses under run, every spelling refuses under on, and neither reads as a near miss of the other or of run.excludeTools", () => {
