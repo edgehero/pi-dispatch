@@ -259,7 +259,7 @@ def preview_card():
     # would promise a reservation this does not make and this change has its Undo, so the plain ring stays and the line says it.
     c = confirm("safe", "Change trigger row 3",
                 ["<b>MCP: linear on.</b>",
-                 f"<span class=\"te-widen\">{ic('attention', 'ic ic--sm')}</span>This widens what its jobs reach: jobs queued from this file connect to mcp.example.com, with LINEAR_API_KEY by name.",
+                 f"<span class=\"te-widen\">{ic('attention', 'ic ic--sm')}</span>This widens what its jobs reach: a job that reaches its container connects to mcp.example.com, with LINEAR_API_KEY by name.",
                  "<b>Tools: bash off.</b>",
                  "The services reading this file use it from their next reload, for the jobs they queue after that.",
                  "A job already in line keeps what it was queued with and runs without this change, unless it is named below as refused. A running job is not touched.",
@@ -354,7 +354,7 @@ The preview and Confirm of a change to what a trigger's jobs get, what the card 
 
 **How a person uses it.**
 - **Preview** shows the triggers file's row as it would be written, then the Confirm:
-  - each change in words, never an arrow, a widening said as one (*connect to mcp.example.com, with LINEAR_API_KEY by name*);
+  - each change in words, never an arrow, a widening said as one (*a job that reaches its container connects to mcp.example.com, with LINEAR_API_KEY by name*);
   - when it takes effect, each only as far as is true of this file on this host: the services reading this file use it from their next reload, for the jobs they queue after that; a job in line keeps what it was queued with and runs without this change, unless it is named as refused; a host with its own copy keeps what it has until that copy changes. On a schedule: *While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree.*
   - the jobs it affects: *With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: gh-c9e1 as trigger-skew (run.mcp)*;
   - what a host without the server does: refuses the job as `mcp-server-unknown`, before it spends. A host with no overlay, or no `mcp.json`, refuses it as `mcp-config-invalid`;
@@ -371,7 +371,7 @@ The preview and Confirm of a change to what a trigger's jobs get, what the card 
 
 **Why it works this way.**
 - **The boundary stays where it is.** `TOOL_PROOF_FIELDS` exist because which systems a job reaches and what it spends is the operator's to write. A person at the console is the operator; a model's call is not.
-- **Refuse what the file alone decides, and warn of the rest.** A first call above the cap refuses later, inside a paid container (`image/runner/src/usage-meter.mjs`), and a cap above the deployment's refuses the whole file at the loader, so the preview refuses both first. For an edit of the servers or the exclusions it runs the worker's own pickup check, with what this host holds (`makeMcpCheck`), and speaks only of what the edit touches. What depends on this host is a warning, in the worker's own reason, and the person can still Confirm: another host may run the job, and pickup's own refusal is free and names its reason. Where a warning stands, no sentence says jobs connect.
+- **Refuse what the file alone decides, and warn of the rest.** A first call above the cap refuses later, inside a paid container (`image/runner/src/usage-meter.mjs`), and a cap above the deployment's refuses the whole file at the loader, so the preview refuses both first. For an edit of the servers or the exclusions it runs the worker's own pickup check, with what this host holds (`makeMcpCheck`), and speaks only of what the edit touches. What depends on this host is a warning, in the worker's own reason, and the person can still Confirm: another host may run the job, and pickup's own refusal is free and names its reason. What a job connects to is said of a job that reaches its container, so it holds beside any warning.
 - **The cap's refusal says who can move it.** A trigger's `run.maxCostUsd` only lowers the deployment's cap, so the sentence names the deployment's settings as the place, and offers no way to do it here. It says *needs at least*, because the bound is a lower one.
 - **The plain ring on a widening.** The console's Confirm is plain, paid or destructive (`previewBarHtml`), and it has no ring for a widening: a setting on a cap is plain today, and deleting a limit is destructive for having no way back. This change has its Undo, so the widening is said in words, with an attention glyph on its line.
 

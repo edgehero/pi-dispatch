@@ -15,6 +15,7 @@ import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { createCostGuard } from "../../image/runner/src/usage-meter.mjs";
 import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { createFleetReader, readTriggerSkew } from "../src/read-model.mjs";
+import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
 import { CARD_FIELDS, triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
@@ -822,7 +823,8 @@ test("an overlay models.json that cannot be read stays unread for every model th
 const envFile = (f, text) => {
   nodeFs.writeFileSync(join(f.dir, ".env"), text, { mode: 0o600 });
   return (keys) => {
-    const read = deploymentServiceEnv({ env: {}, dir: f.dir, keys, fs: nodeFs });
+    // One loader's reading, whichever machine runs this: a line can be a hazard to one service's loader and plain to another's.
+    const read = deploymentServiceEnv({ env: {}, dir: f.dir, keys, fs: nodeFs, platform: "darwin" });
     if (read.unreadable || read.untrusted) throw new Error("no");
     return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null };
   };
@@ -975,7 +977,6 @@ const HELD = { secrets: { LINEAR_API_KEY: "op://vault/linear" } };
 const pickup = (f, job, { egress = false, forwardEnv = [], hostEnv = {} } = {}) => makeMcpCheck({ globalPiDir: f.paths.globalPiDir, forwardEnv, hostEnv, egress })({ kind: "github", provider: "anthropic", ...job });
 
 const TAIL = "This reads this host's .env and overlay; what the worker's own service environment sets cannot be seen from here.";
-const CONNECTS = /\bconnect/;
 
 test("a server whose key this host does not hold warns, in the worker's own reason, says what to do, and can still be confirmed", async () => {
   const f = fixture({ env: { PI_FORWARD_ENV: "" } });
@@ -985,8 +986,7 @@ test("a server whose key this host does not hold warns, in the worker's own reas
     "On this host this trigger's jobs would be refused as mcp-secret-unmapped, before they spend. linear: it references LINEAR_API_KEY, which the trigger does not pass (run.secrets, or a PI_FORWARD_ENV name the worker holds a value for). Pass the credential the server needs in the trigger's `run.secrets`. `run.secrets` is set in the triggers file, not on this page.",
     TAIL,
   ]);
-  assert.ok(!out.summary.some((line) => CONNECTS.test(line)), "where a warning stands, no sentence says jobs connect");
-  assert.equal(out.plan.changes[0].widening, "This widens what its jobs may reach: linear.");
+  assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to linear.", "true beside a warning: this one stops at pickup, and so does not reach one");
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   assert.deepEqual(f.entry().run.mcp, ["linear"]);
 });
@@ -996,13 +996,11 @@ test("a server this host does not offer warns, and the host that has it is named
   const out = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
   assert.match(out.plan.warnings[0], /^On this host this trigger's jobs would be refused as mcp-server-unknown, before they spend\. docs: the overlay's mcp\.json does not offer it\./);
   assert.ok(out.summary.some((line) => line.endsWith("mini2 has it.")), out.summary.join(" | "));
-  assert.ok(!out.summary.some((line) => CONNECTS.test(line)));
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
 });
 
 test("what passes the real check is quiet: a key the trigger passes, or one forwarded with a value on this host", async () => {
-  const held = await quiet(fixture({ run: HELD, env: { PI_FORWARD_ENV: "" } }), { mcp: ["linear"] });
-  assert.ok(held.summary.some((line) => CONNECTS.test(line)), "nothing stands against it, so this one may say it");
+  await quiet(fixture({ run: HELD, env: { PI_FORWARD_ENV: "" } }), { mcp: ["linear"] });
   await quiet(fixture({ env: { PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "a value" } }), { mcp: ["linear"] });
   // Named in PI_FORWARD_ENV with no value here: the worker's rule, since `buildContainerEnv` forwards only what it holds.
   assert.match(await warned(fixture({ env: { PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "" } }), { mcp: ["linear"] }), /refused as mcp-secret-unmapped/);
@@ -1069,7 +1067,7 @@ test("the egress rules are this host's: its PI_EGRESS, its allowlist file and it
   assert.match(await warned(runner, { mcp: ["r"] }), /refused as mcp-package-runner.*r: it fetches its server from /);
 });
 
-test("what could not be read says which, and what follows from that: never a refusal, never a sentence about jobs connecting", async () => {
+test("what could not be read says which, and what follows from that: never a refusal", async () => {
   const notRead = "This host's .env could not be read as the worker reads it, so the worker's pickup check could not be run.";
   const cases = [
     [{ deps: { readHostEnv: () => { throw new Error("untrusted"); } } }, notRead],
@@ -1082,7 +1080,6 @@ test("what could not be read says which, and what follows from that: never a ref
     const f = fixture(options);
     const out = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
     assert.deepEqual(out.plan?.warnings, [sentence, TAIL], JSON.stringify(out));
-    assert.ok(!out.summary.some((line) => CONNECTS.test(line)), sentence);
     assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   }
   // The allowlist, by its own name: the worker's own check turns an unreadable list into a refusal of its own.
@@ -1096,7 +1093,6 @@ test("a key's .env line the reader cannot vouch for is unknown: neither absent n
   const f = fixture({ deps: { readHostEnv: hostEnv } });
   const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
   assert.deepEqual(out.plan.warnings, ["LINEAR_API_KEY is forwarded by this host, and its line in the .env could not be read as the worker reads it, so whether linear gets that key could not be judged here.", TAIL]);
-  assert.ok(!out.summary.some((line) => CONNECTS.test(line)));
   // A key the trigger passes itself needs no line: nothing to say.
   await quiet(fixture({ run: HELD, deps: { readHostEnv: hostEnv } }), { mcp: ["linear"] });
   // A server that reads no such key is not told about it.
@@ -1354,7 +1350,7 @@ const LOADS = {
 test("a server turned on is a widening that names where it connects and with which key, and what a host without it does", async () => {
   const f = fixture({ deps: { readHostLoads: async () => LOADS } });
   const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
-  assert.deepEqual(out.plan.changes[0], { key: "mcp", line: "MCP: linear on.", widening: "This widens what its jobs reach: jobs queued from this file connect to mcp.example.com, with LINEAR_API_KEY by name." });
+  assert.deepEqual(out.plan.changes[0], { key: "mcp", line: "MCP: linear on.", widening: "This widens what its jobs reach: a job that reaches its container connects to mcp.example.com, with LINEAR_API_KEY by name." });
   assert.ok(out.summary.includes("A job on a host without linear, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid. mini1 has it; bare does not; build3, cut, mini2 and unread read unknown."), out.summary.join("\n"));
 });
 
@@ -1363,43 +1359,131 @@ test("a server off on a host reads as lacking, and a server hosts disagree about
   const out = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
   assert.match(out.summary.find((line) => line.startsWith("A job on a host")), /bare and mini1 do not; build3, cut, mini2 and unread read unknown\.$/);
   // No host has docs on, so where it connects is known to none.
-  assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to docs.");
+  assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to docs.");
 
   const differ = fixture({ deps: { readHostLoads: async () => ({ hosts: [{ name: "a", state: "current", mcp: [{ name: "x", enabled: true, where: "one.example", keys: [] }], unread: [], more: {} }, { name: "b", state: "current", mcp: [{ name: "x", enabled: true, where: "two.example", keys: [] }], unread: [], more: {} }] }) } });
   const two = await differ.service.preview(ask(differ, { mcp: ["x"] }), operator);
-  assert.equal(two.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to x.");
+  assert.equal(two.plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to x.");
   const bare = fixture({ deps: { readHostLoads: async () => ({ hosts: [{ name: "a", state: "current", mcp: [{ name: "x", enabled: true, where: "one.example", keys: [] }], unread: [], more: {} }] }) } });
-  assert.equal((await bare.service.preview(ask(bare, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to one.example.");
+  assert.equal((await bare.service.preview(ask(bare, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to one.example.");
   const noWhere = fixture({ deps: { readHostLoads: async () => ({ hosts: [{ name: "a", state: "current", mcp: [{ name: "x", enabled: true, where: null, keys: [] }], unread: [], more: {} }] }) } });
-  assert.equal((await noWhere.service.preview(ask(noWhere, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to x.");
+  assert.equal((await noWhere.service.preview(ask(noWhere, { mcp: ["x"] }), operator)).plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to x.");
 });
 
 test("an old publication says nothing of where a server connects, as it says nothing of whether a host has it", async () => {
   const held = fixture({ run: HELD, deps: { readHostLoads: async () => ({ hosts: [{ name: "old1", state: "old", mcp: [{ name: "linear", enabled: true, where: "stale.example", keys: ["K"] }], unread: [], more: {} }] }) } });
   const said = await held.service.preview(ask(held, { mcp: ["linear"] }), operator);
-  assert.equal(said.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to linear.");
+  assert.equal(said.plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to linear.");
   assert.ok(said.summary.some((line) => line.endsWith("old1 reads unknown.")), said.summary.join("\n"));
   assert.ok(!said.summary.join(" ").includes("old1 has it"));
 });
 
-test("no host's publication, or one that cannot be read, says so and is never read as lacking the server", async () => {
-  for (const readHostLoads of [async () => ({ hosts: [] }), async () => ({ unreachable: true }), async () => { throw new Error("down"); }, async () => null]) {
+test("no host's publication says that, and is never read as lacking the server", async () => {
+  const f = fixture({ deps: { readHostLoads: async () => ({ hosts: [] }) } });
+  const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
+  assert.ok(out.summary.some((line) => line.endsWith("No host has published which servers it has.")), out.summary.join("\n"));
+  assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to linear.");
+});
+
+test("a read of the publications that failed says that it failed, and not that no host has published", async () => {
+  const failed = " What the hosts published could not be read, so which of them have it is unknown.";
+  // Valkey down, through the real view, as the console reads it.
+  const down = () => readHostLoadsView({}, { readHosts: async () => { throw new Error("down"); }, readLoads: async () => { throw new Error("down"); } });
+  for (const readHostLoads of [down, async () => ({ unreachable: true }), async () => ({ unreachable: true, hosts: [] }), async () => { throw new Error("down"); }, async () => null]) {
     const f = fixture({ deps: { readHostLoads } });
     const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
-    assert.ok(out.summary.some((line) => line.endsWith("No host has published which servers it has.")), out.summary.join("\n"));
-    assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to linear.");
+    const line = out.summary.find((one) => one.startsWith("A job on a host"));
+    assert.ok(line.endsWith(failed), line);
+    assert.ok(!out.summary.join(" ").includes("No host has published"));
+    assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to linear.");
   }
+  // Live hosts it can name, whose publications it could not read: each reads unknown, by name.
+  const named = fixture({ deps: { readHostLoads: () => readHostLoadsView({}, { readHosts: async () => ({ hosts: [{ name: "mini1" }, { name: "build3" }] }), readLoads: async () => { throw new Error("down"); } }) } });
+  const out = await named.service.preview(ask(named, { mcp: ["linear"] }), operator);
+  assert.ok(out.summary.some((line) => line.endsWith("build3 and mini1 read unknown.")), out.summary.join("\n"));
+});
+
+test("the one sentence on where a job connects is true beside every warning: it stays, and says it of a job that gets that far", async () => {
+  const hosts = { readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", mcp: [{ name: "linear", enabled: true, where: "mcp.example.com", keys: ["LINEAR_API_KEY"] }], unread: [], more: {} }] }) };
+  const sentence = "This widens what its jobs reach: a job that reaches its container connects to mcp.example.com, with LINEAR_API_KEY by name.";
+  for (const [what, run, env, change, warning] of [
+    ["an unknown model", {}, {}, { model: "no-such-model-9" }, /model-unknown/],
+    ["no failover candidate", { provider: "anthropic", model: "claude-haiku-4-5" }, {}, { fallbackModels: [SONNET] }, /model-failover-no-candidate/],
+    ["a key this host does not hold", {}, { PI_FORWARD_ENV: "" }, {}, /mcp-secret-unmapped/],
+    ["nothing at all", { secrets: { LINEAR_API_KEY: "op://v/l" } }, {}, {}, null],
+  ]) {
+    const f = fixture({ run, env, deps: hosts });
+    const out = await f.service.preview(ask(f, { mcp: ["linear"], ...change }), operator);
+    assert.ok(out.plan, JSON.stringify([what, out]));
+    assert.equal(out.plan.changes.find((one) => one.key === "mcp").widening, sentence, what);
+    if (warning) assert.match(out.plan.warnings.join(" "), warning, what);
+  }
+  // A thin cap, the third way a job may stop before it connects.
+  const thin = fixture({ run: HELD, deps: hosts });
+  const out = await thin.service.preview(ask(thin, { mcp: ["linear"], provider: "anthropic", model: "claude-opus-5-5", maxCostUsd: "2.62144" }), operator);
+  assert.ok(out.summary.some((line) => line.includes("clears this $2.62144 job cap")), out.summary.join("\n"));
+  assert.equal(out.plan.changes.find((one) => one.key === "mcp").widening, sentence);
+});
+
+const LOADED_HOST = (name, over = {}) => ({ name, state: "current", at: NOW, skills: ["triage"], extensions: [], mcp: [], packages: [], flows: [], unread: [], more: {}, ...over });
+const flowFixture = (hosts, run = {}) => fixture({ run, deps: { readHostLoads: async () => (Array.isArray(hosts) ? { hosts } : hosts) } });
+
+test("a flow the hosts that answered do not hold warns, names them, and leaves the Confirm: a repository can gain it", async () => {
+  const f = flowFixture([LOADED_HOST("mini1"), LOADED_HOST("build3")]);
+  const out = await f.service.preview(ask(f, { flow: "no-such-flow" }), operator);
+  assert.deepEqual(out.plan.warnings, ["build3 and mini1 have no skill named no-such-flow in their overlay. A job there finds it only in its repository, the trigger's skills folder or a staged package, and runs without its flow if none holds it."]);
+  assert.ok(out.summary.includes(out.plan.warnings[0]));
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+  assert.equal(f.entry().run.flow, "no-such-flow");
+  assert.equal(await warned(flowFixture([LOADED_HOST("mini1")]), { flow: "no-such-flow" }), "mini1 has no skill named no-such-flow in its overlay. A job there finds it only in its repository, the trigger's skills folder or a staged package, and runs without its flow if none holds it.");
+});
+
+test("a flow says nothing of a host that holds it, and only the hosts without it are named", async () => {
+  await quiet(flowFixture([LOADED_HOST("mini1", { skills: ["review"] })]), { flow: "review" });
+  await quiet(flowFixture([LOADED_HOST("mini1", { flows: [{ trigger: 0, flow: "review", tier: "overlay", package: null, repo: "absent" }] })]), { flow: "review" });
+  await quiet(flowFixture([LOADED_HOST("mini1", { flows: [{ trigger: 0, flow: "review", tier: "package", package: "pkg", repo: "absent" }] })]), { flow: "review" });
+  assert.match(await warned(flowFixture([LOADED_HOST("mini1", { skills: ["review"] }), LOADED_HOST("build3")]), { flow: "review" }), /^build3 has no skill named review/);
+  // A package this trigger withholds is no skill it gets, and another trigger's repository or skills folder is not its own.
+  assert.match(await warned(flowFixture([LOADED_HOST("mini1", { flows: [{ trigger: 0, flow: "review", tier: "package", package: "pkg", repo: "absent" }] })], { packages: false }), { flow: "review" }), /^mini1 has no skill named review/);
+  for (const tier of ["repository", "trigger"]) assert.match(await warned(flowFixture([LOADED_HOST("mini1", { flows: [{ trigger: 0, flow: "review", tier, package: null, repo: "present" }] })]), { flow: "review" }), /^mini1 has no skill named review/);
+});
+
+test("a flow claims no host's answer when none answered: no publication, an old one, a cut or unread list, or a read that failed", async () => {
+  for (const hosts of [
+    [],
+    [LOADED_HOST("mini1", { state: "old" })],
+    [{ name: "mini1", state: "unknown", why: "absent" }],
+    [LOADED_HOST("mini1", { unread: ["skills"] })],
+    [LOADED_HOST("mini1", { more: { skills: 3 } })],
+    { unreachable: true, hosts: [] },
+  ]) await quiet(flowFixture(hosts), { flow: "no-such-flow" });
+  await quiet(fixture({ deps: { readHostLoads: async () => { throw new Error("down"); } } }), { flow: "no-such-flow" });
+  // A flow it did not touch reads no host at all.
+  let reads = 0;
+  const f = fixture({ deps: { readHostLoads: async () => { reads += 1; return { hosts: [LOADED_HOST("mini1")] }; } } });
+  await quiet(f, { packages: false });
+  assert.deepEqual(await f.service.preview(ask(f, { flow: "fix" }), operator), { unchanged: "trigger row 2 already says this." });
+  assert.equal(reads, 0);
+});
+
+test("a .env line the worker's loader reads differently is named by its line, and the keys it hides are not blamed for it", async () => {
+  const f = withEnvFile({}, "PI_EGRESS=0\nPI_FORWARD_ENV=LINEAR_API_KEY\nLINEAR_API_KEY=ab cd\n");
+  const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
+  assert.deepEqual(out.plan.warnings, ["Line 3 of this host's .env could not be read as the worker reads it, so the worker's pickup check could not be run.", TAIL]);
+  assert.doesNotMatch(out.summary.join(" "), /PI_FORWARD_ENV/);
+  const cap = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "PI_MAX_COST_USD=2\nOTHER=ab cd\n");
+  assert.equal(await warned(cap, { maxCostUsd: "5" }), "Line 2 of this host's .env could not be read as the worker reads it, so the deployment's job cap and its list of models could not be judged here.");
 });
 
 test("the forge server is no host's to lack, and a server taken away reads no host at all", async () => {
   let reads = 0;
   const f = fixture({ deps: { readHostLoads: async () => { reads++; return LOADS; } } });
   const forge = await f.service.preview(ask(f, { mcp: ["forge"] }), operator);
-  assert.equal(forge.plan.changes[0].widening, "This widens what its jobs reach: jobs queued from this file connect to the job's own forge server.");
+  assert.equal(forge.plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to the job's own forge server.");
   assert.ok(!forge.summary.some((line) => line.startsWith("A job on a host")));
   assert.equal(reads, 0);
   const both = await f.service.preview(ask(f, { mcp: ["linear", "forge"] }), operator);
-  assert.match(both.plan.changes[0].widening, /connect to mcp\.example\.com, with LINEAR_API_KEY by name and connect to the job's own forge server\.$/);
+  assert.match(both.plan.changes[0].widening, /connects to mcp\.example\.com, with LINEAR_API_KEY by name and the job's own forge server\.$/);
   assert.equal(reads, 1);
   const off = fixture({ run: { mcp: ["linear"] }, deps: { readHostLoads: async () => { reads++; return LOADS; } } });
   assert.equal((await off.service.preview(ask(off, { mcp: null }), operator)).plan.changes[0].widening, undefined);

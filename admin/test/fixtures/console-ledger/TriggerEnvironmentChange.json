@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironmentChange",
   "pr": 800,
-  "words": "412360aa218f0a2c83b3e8897c3f5e0fc42e4a135b7c7f9f5ba0b7d971e1ea94",
+  "words": "4d815e85583c24246c4abc72a83f8ac1c22252055274084b657c2cdebc353b10",
   "elements": [
     {
       "el": "p-trigger-gets-preview",
@@ -54,7 +54,7 @@
       "shows": [
         "MCP: linear on.",
         "Tools: bash off.",
-        "This widens what its jobs reach: jobs queued from this file connect to mcp.example.com, with LINEAR_API_KEY by name."
+        "This widens what its jobs reach: a job that reaches its container connects to mcp.example.com, with LINEAR_API_KEY by name."
       ]
     },
     {

@@ -691,12 +691,13 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       // What the worker's pickup check reads on this host: the deployment's file alone, each key by the service's own rule. The
       // console's shell is not the service's, so a value only it holds would pass a job the worker refuses, and a value it
       // overrides would refuse one the worker runs. A line the reader cannot vouch for comes back by name, never as absent, and
-      // a file another account can change gives nothing: the check then says it could not run.
+      // a file another account can change gives nothing: the check then says it could not run. A line the service's loader reads
+      // differently stops the reader taking any value the file spells, so `hazardLine` says which line it was: those keys were not on it.
       deploymentDir: config.dir,
       readHostEnv: (keys) => {
         const read = m.serviceEnv.deploymentServiceEnv({ env: {}, dir: config.dir, keys, fs, platform: io.platform ?? process.platform, uid });
         if (read.unreadable || read.untrusted) throw new Error("the deployment's .env cannot be read");
-        return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped] };
+        return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null };
       },
       readEndpoints: () => endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.()?.endpoints ?? [],
     });

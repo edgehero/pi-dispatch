@@ -226,10 +226,22 @@ function callableWidening(before, after, envList) {
 /** A server's where and key, when every host that has it agrees; a sentence must be true of each host a job can land on. */
 function serverReach(name, hosts) {
   const rows = hosts.flatMap((host) => (host?.state === "current" && Array.isArray(host.mcp) ? host.mcp.filter((row) => row?.name === name && row.enabled === true) : []));
-  if (rows.length === 0 || new Set(rows.map((row) => JSON.stringify([row.where, row.keys]))).size !== 1) return `connect to ${name}`;
+  if (rows.length === 0 || new Set(rows.map((row) => JSON.stringify([row.where, row.keys]))).size !== 1) return name;
   const [{ where, keys }] = rows;
-  if (typeof where !== "string") return `connect to ${name}`;
-  return `connect to ${where}${Array.isArray(keys) && keys.length > 0 ? `, with ${listed(keys)} by name` : ""}`;
+  if (typeof where !== "string") return name;
+  return `${where}${Array.isArray(keys) && keys.length > 0 ? `, with ${listed(keys)} by name` : ""}`;
+}
+
+/**
+ * The hosts whose publication says a flow is not theirs to give (`doctor:loads:<name>`), read as `serverHosts` reads them: a host that
+ * has not published, or whose publication is old or whose skills were cut or unread, says nothing. What is published is a host's
+ * overlay skills and a staged package only where a trigger already resolved one, so this is no claim about a repository, a
+ * trigger's skills folder or a package's other skills: the warning names those, and a repository can gain the flow at any commit.
+ */
+function hostsWithoutFlow(flow, hosts, loadsPackages) {
+  const answers = (host) => host?.state === "current" && Array.isArray(host.skills) && !(host.unread ?? []).includes("skills") && !(host.more?.skills > 0);
+  const holds = (host) => host.skills.includes(flow) || (host.flows ?? []).some((row) => row?.flow === flow && (row.tier === "overlay" || (row.tier === "package" && loadsPackages)));
+  return hosts.filter((host) => answers(host) && !holds(host)).map((host) => host.name);
 }
 
 /**
@@ -270,6 +282,7 @@ function modelEnv(readHostEnv) {
   } catch {
     return { env: {}, note: `This host's .env could not be read as the worker reads it, ${cannot}` };
   }
+  if (read.hazardLine) return { env: read.env, note: `Line ${read.hazardLine} of this host's .env could not be read as the worker reads it, ${cannot}` };
   if (read.unread.length > 0) return { env: read.env, note: `This host's .env holds ${listed(read.unread)} in a line that could not be read as the worker reads it, ${cannot}` };
   return { env: read.env, note: null };
 }
@@ -379,6 +392,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     } catch {
       return could(notRead);
     }
+    if (host.hazardLine) return could(`Line ${host.hazardLine} of this host's .env could not be read as the worker reads it, so the worker's pickup check could not be run.`);
     if (host.unread.length > 0) return could(`This host's .env holds ${listed(host.unread)} in a line that could not be read as the worker reads it, so the worker's pickup check could not be run.`);
     let egress;
     let forwardEnv;
@@ -712,12 +726,10 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     }
     // Only an edit of the servers or the exclusions: a model edit would be told about a server nobody touched.
     const reachesPickup = touched.some((key) => MCP_CHECK_FIELDS.includes(key));
-    let pickupWarned = false;
     if (reachesPickup) {
       facts ??= modelFacts({ paths, readHostEnv, fs });
       const judged = judgeMcp({ was: wasRun, run: nowRun, entry: nextEntry, text: afterText, facts });
       if (judged.refusal) return judged;
-      pickupWarned = judged.warnings.length > 0;
       warnings = [...warnings, ...judged.warnings];
     }
 
@@ -773,7 +785,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       jobDataVersion: parseTriggers(afterText, paths.triggersPath, triggersTables).reduce((most, trigger) => Math.max(most, jobDataVersionFor(trigger?.run, jobDataTables)), 1),
     };
     const stamped = need.triggersVersion > (Number.isSafeInteger(doc.version) ? doc.version : 1);
-    return { body, expect, row, type: entry.on?.type, beforeText, afterText, mutate, dry, changes, unjudged, thin, warnings, pickupWarned, keepsLayout, undo, inverse, need, stamped };
+    return { body, expect, row, type: entry.on?.type, beforeText, afterText, mutate, dry, changes, unjudged, thin, warnings, keepsLayout, undo, inverse, need, stamped, nextRun: nowRun };
   }
 
   /**
@@ -836,21 +848,30 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     if (judged.refusal || judged.unchanged) return judged;
     const gate = await versionGate(judged.need);
     if (gate.refusal) return gate;
-    const { row, changes, undo, inverse, unjudged, thin, warnings, pickupWarned } = judged;
+    const { row, changes, undo, inverse, unjudged, thin } = judged;
     const added = changes.flatMap((change) => change.addedServers ?? []);
     // `forge` is the job's own forge and its own token (DES-FORGE-MCP), in no overlay, so no host lacks it and no host publishes it.
     const servers = added.filter((name) => name !== "forge");
+    const flowChange = changes.some((change) => change.key === "flow");
     let hosts = [];
-    if (servers.length > 0) {
+    let hostsUnread = false;
+    if (servers.length > 0 || flowChange) {
       try {
-        hosts = (await readHostLoads())?.hosts ?? [];
+        const read = await readHostLoads();
+        hosts = read?.hosts ?? [];
+        // No row for a read that failed is no statement about any host, and "no host has published" would be one.
+        hostsUnread = !read || read.unreachable === true;
       } catch {
-        hosts = [];
+        hostsUnread = true;
       }
     }
-    const reach = [...servers.map((name) => serverReach(name, hosts)), ...(added.includes("forge") ? ["connect to the job's own forge server"] : [])];
-    // "Connect" only where nothing below says a job may be refused first: a warning here is about the whole job, not one server.
-    const said = changes.map((change) => (change.addedServers?.length > 0 ? { ...change, widening: pickupWarned ? `This widens what its jobs may reach: ${listed(added)}.` : `This widens what its jobs reach: jobs queued from this file ${reach.join(" and ")}.` } : change));
+    const reach = [...servers.map((name) => serverReach(name, hosts)), ...(added.includes("forge") ? ["the job's own forge server"] : [])];
+    // True of every shape, so no branch has to know what else this preview says: a warning, a model, a cap or a host may stop a job
+    // at pickup, and one that gets past them all connects. REJECTED: leaving "connect" out where a warning stands, which one source
+    // of warnings could not know about another's.
+    const said = changes.map((change) => (change.addedServers?.length > 0 ? { ...change, widening: `This widens what its jobs reach: a job that reaches its container connects to ${listed(reach)}.` } : change));
+    const lacking = flowChange ? hostsWithoutFlow(judged.body.flow, hosts, judged.nextRun?.packages !== false) : [];
+    const warnings = [...judged.warnings, ...(lacking.length > 0 ? [`${hostsNamed(lacking)} ${lacking.length === 1 ? "has" : "have"} no skill named ${judged.body.flow} in ${lacking.length === 1 ? "its" : "their"} overlay. A job there finds it only in its repository, the trigger's skills folder or a staged package, and runs without its flow if none holds it.`] : [])];
     // A schedule's and a watch rule's jobs carry no matched index, so the skew check has nothing to compare them with: it answers
     // `ok` for every one (`makeCheckWaitSkew`). Nothing to read, and nothing to say about what could not be read.
     const noSkew = judged.type === "cron" || judged.type === "watch";
@@ -870,7 +891,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       ...skewLines(skew),
       ...(judged.stamped ? [`Stamps the file version ${judged.need.triggersVersion}: a host reading less waits on every trigger's jobs, not only this one's.`] : []),
       ...(gate.hosts === null ? [] : [gate.hosts.length > 0 ? `${hostsNamed(gate.hosts)} ${gate.hosts.length === 1 ? "reads" : "each read"} what this change needs.` : "No host is live right now, so no host's release could be checked."]),
-      ...servers.map((name) => `A job on a host without ${name}, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid.${hosts.length > 0 ? ` ${serverHosts(name, hosts)}.` : " No host has published which servers it has."}`),
+      ...servers.map((name) => `A job on a host without ${name}, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid.${hosts.length > 0 ? ` ${serverHosts(name, hosts)}.` : hostsUnread ? " What the hosts published could not be read, so which of them have it is unknown." : " No host has published which servers it has."}`),
       ...(unjudged.length > 0 ? [`The first call on ${listed(unjudged)} could not be bounded here, so the runner judges it when a job runs.`] : []),
       `Written to ${basename(paths.triggersPath)} on this host and audited as trigger-edit, by ${typeof ctx.name === "string" && ctx.name !== "" ? ctx.name : "the operator"} at the console.`,
     ];

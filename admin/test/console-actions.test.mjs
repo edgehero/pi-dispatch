@@ -3561,7 +3561,7 @@ test("a person's change to what a trigger's jobs get: the real pipeline, audited
   assert.equal(preview.danger, false);
   assert.equal(preview.confirmLabel, "Confirm: change trigger row 1");
   assert.equal(preview.undo, "Put trigger row 1 back as it was");
-  assert.deepEqual(preview.summary.slice(0, 5), ["Change trigger row 1", "MCP: linear on.", "This widens what its jobs reach: jobs queued from this file connect to linear.", "Staged packages: on.", "This widens what its jobs load: every package staged on the host that runs them."]);
+  assert.deepEqual(preview.summary.slice(0, 5), ["Change trigger row 1", "MCP: linear on.", "This widens what its jobs reach: a job that reaches its container connects to linear.", "Staged packages: on.", "This widens what its jobs load: every package staged on the host that runs them."]);
   assert.match(preview.html, /Person only/);
   assert.match(preview.html, /class="diff/, "the file before and after, in the bar");
   assert.match(preview.html, /&quot;mcp&quot;: \[|"mcp": \[/, "the diff shows the key it adds");
