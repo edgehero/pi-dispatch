@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileS
 import { join } from "node:path";
 import { test } from "node:test";
 import { DOCTOR_RESULTS_TTL_MS } from "../src/doctor-results.mjs";
-import { buildHostLoads, flowProbes, flowTierOf, HOST_LOADS_CAPS, HOST_LOADS_MAX_BYTES, HOST_LOADS_OLD_INTERVALS, hostLoadsKey, hostsAgree, LOADS_IGNORE_FILES, loadsFreshness, mcpRowsOf, parseHostLoads, pathIsThere, publishHostLoads, readHostLoads, readOverlayExtensionRows, readOverlaySkillNames } from "../src/host-loads.mjs";
+import { buildHostLoads, flowProbes, flowTierOf, HOST_LOADS_CAPS, HOST_LOADS_MAX_BYTES, HOST_LOADS_OLD_INTERVALS, HOST_LOADS_PARTS, HOST_LOADS_VERSION, hostLoadsKey, hostsAgree, LOADS_EXTENSION_KINDS, LOADS_FLOW_TIERS, LOADS_IGNORE_FILES, LOADS_REPO_STATES, loadsFreshness, mcpRowsOf, parseHostLoads, pathIsThere, publishHostLoads, readHostLoads, readOverlayExtensionRows, readOverlaySkillNames } from "../src/host-loads.mjs";
 import { ABSENT_CODES, parseOverlayMcp } from "../src/mcp-config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -146,7 +146,37 @@ test("each list has its cap, the rest counted in `more`, and the whole record it
 	assert.deepEqual([worst.flows.length, worst.more.flows, worst.packages.length, worst.more.packages], [FLOWS_KEPT, 128 - FLOWS_KEPT, 64, undefined], "measured: the flows go first");
 	assert.equal(bytes, WORST_BYTES);
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
-	assert.ok(spec.includes(`${WORST_BYTES.toLocaleString("en-US")} bytes`), `INT-DOCTOR-RESULTS-KEY says the measured worst case (${bytes} bytes)`);
+	// With its citation, which only the contract's own sentence has: a revision row quoting the number kept this green while the
+	// sentence said something else (the same fix as the run record's bolt in loaded-record.test.mjs).
+	assert.ok(spec.includes(`Worst case measured: ${WORST_BYTES.toLocaleString("en-US")} bytes, with ${FLOWS_KEPT} flow rows kept (\`worker/test/host-loads.test.mjs\`)`), `INT-DOCTOR-RESULTS-KEY says the measured worst case (${bytes} bytes)`);
+});
+
+test("INT-DOCTOR-RESULTS-KEY's lists say what this module holds: the caps, what `more` counts, each closed word, the expiry and the bound", () => {
+	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const start = spec.indexOf("**What a host's jobs can load** (issue #800");
+	const section = spec.slice(start, spec.indexOf("- **Acceptance**", start)).replace(/\s+/g, " ");
+	assert.ok(start > 0 && section.length > 0);
+	const quoted = (words) => words.map((word) => `\`${word}\``);
+	const inProse = (words, last = " or ") => `${quoted(words).slice(0, -1).join(", ")}${last}${quoted(words).at(-1)}`;
+	const { extensions, skills, mcp, keys, packages, flows } = HOST_LOADS_CAPS;
+	assert.ok(section.includes(`**Bounded**: ${extensions} extensions, ${skills} skills, ${mcp} servers with ${keys} keys each, ${packages} packages, ${flows} flows, each counted past its cap in \`more\``), "every cap");
+	assert.ok(section.includes(`\`more\` (${quoted(Object.keys(HOST_LOADS_CAPS)).join(", ")}, a key only when above 0)`), "`more` counts each list and the keys");
+	assert.ok(section.includes(`${HOST_LOADS_MAX_BYTES / 1024} KiB in all (\`HOST_LOADS_MAX_BYTES\`)`), "the whole record's bound");
+	assert.ok(section.includes(`\`tier\`, one of ${quoted(LOADS_FLOW_TIERS).join(", ")};`), "every flow tier, in the module's order");
+	assert.ok(section.includes(`\`repo\` what that tier answered, ${inProse(LOADS_REPO_STATES)}`), "what the repository tier answers");
+	assert.ok(section.includes(`each a first path segment and ${inProse(LOADS_EXTENSION_KINDS)}`), "an extension's two kinds");
+	assert.ok(section.includes(`SET <key> <json> PX ${DOCTOR_RESULTS_TTL_MS} (7 days)`), "the expiry");
+	assert.equal(DOCTOR_RESULTS_TTL_MS, 7 * 24 * HOUR);
+	assert.ok(section.includes(`{"v":${HOST_LOADS_VERSION},"at":0,`), "the version in the record's example");
+	const unread = section.slice(section.indexOf("**`unread`**"), section.indexOf("Only `ENOENT`"));
+	for (const part of HOST_LOADS_PARTS) assert.ok(unread.includes(`\`${part}\``), `\`unread\` does not name ${part}`);
+	assert.ok(section.includes("Past two of its host's own intervals a record is `old`"));
+	assert.equal(HOST_LOADS_OLD_INTERVALS, 2);
+	// The record's example holds every list, and a row of each kind, by the keys the builder writes.
+	const example = JSON.parse(spec.slice(spec.indexOf('{"v":1,"at":0,"every":24,'), spec.indexOf('"more":{}}', spec.indexOf('{"v":1,"at":0,"every":24,')) + '"more":{}}'.length).replace(/\n\s*/g, ""));
+	const built = record();
+	assert.deepEqual(Object.keys(example).filter((key) => key !== "unread"), Object.keys(built));
+	for (const list of ["extensions", "mcp", "packages", "flows"]) assert.deepEqual(Object.keys(example[list][0]), Object.keys(built[list][0]), list);
 });
 
 test("the parser is an allowlist: an unknown key is not read, and a row that fails is dropped and counted", () => {

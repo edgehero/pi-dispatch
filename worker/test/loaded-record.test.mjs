@@ -729,6 +729,78 @@ test("past the bound it reads as `cut` and keeps the worker's facts: a key that 
 	assert.equal(recordedLoaded(filled(LOADED_RECORD_MAX_BYTES + 1)).runner, "cut", "one byte past it");
 });
 
+test("the record's key table names every key the field holds, a row of its own for each that has anything in it, and what is inside", () => {
+	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	const start = spec.indexOf("**`loaded` (issue #800, `worker/src/loaded-record.mjs`)");
+	const section = spec.slice(start, spec.indexOf("**The signature does not vouch for the content", start));
+	assert.ok(start > 0 && section.length > 0);
+	const rows = section.split("\n").filter((text) => text.startsWith("  | `")).map((text) => {
+		const [, head, body] = /^ {2}\| (.+?) \| (.*) \|$/.exec(text);
+		return { keys: [...head.matchAll(/`([A-Za-z]+)`/g)].map((match) => match[1]), body };
+	});
+	const loaded = recordedLoaded(loadedWithBase(loadedWithImage(rebuildLoaded(line(), KNOWN), { image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0" }), "a".repeat(40)));
+	// Not `v`, the field's own version, which the JSON above the table shows.
+	assert.deepEqual(rows.flatMap((row) => row.keys).filter((key, i, all) => all.indexOf(key) === i).sort(), Object.keys(loaded).filter((key) => key !== "v").sort(), "every key of the field, and no other");
+	// `at`, `cut` and `pi` read in the runner's table (INT-RUNNER-EXIT-CODE-PROTOCOL) and the image's three in one row of their own, so they
+	// have no separate rows. Everything else is this contract's to explain, and the row that lists all the runner's part says only when
+	// each is null. So a row of its own, or deleting one would stay green on that list. A hand-kept list because the relation is a choice of how to
+	// write the table, which nothing derives.
+	const OWN_ROW = ["runner", "flow", "sources", "mcp", "tools", "problems", "baseSha", "leftOut"];
+	const rowOf = (key) => rows.find((row) => row.keys.length === 1 && row.keys[0] === key);
+	for (const key of OWN_ROW) assert.ok(rowOf(key), `the table has no row of its own for \`${key}\``);
+	assert.deepEqual(rows.filter((row) => row.keys.length === 1).map((row) => row.keys[0]).sort(), [...OWN_ROW].sort());
+	assert.deepEqual(rows.filter((row) => row.keys.length > 1).map((row) => row.keys).sort(), [["at", "cut", "pi", "flow", "sources", "mcp", "tools", "problems"], ["image", "imageDigest", "imagePi"]]);
+	const mentions = (key, words) => {
+		const found = [...rowOf(key).body.matchAll(/`([A-Za-z]+)`/g)].map((match) => match[1]);
+		for (const word of words) assert.ok(found.includes(word), `\`${key}\`'s row does not name \`${word}\``);
+	};
+	mentions("tools", Object.keys(loaded.tools));
+	mentions("problems", Object.keys(loaded.problems));
+	mentions("leftOut", Object.keys(loaded.leftOut));
+	mentions("sources", ["toolNames", "names", "failedNames", "namedTools"]);
+	assert.ok(Object.hasOwn(source(loaded, "package"), "toolNames") && ["names", "failedNames", "namedTools"].every((key) => Object.hasOwn(source(loaded, "overlay"), key)), "as the rows are built");
+	assert.deepEqual(Object.keys(loaded.flow), ["tier", "package"]);
+	assert.ok(rowOf("flow").body.includes("`{ tier, package }`"));
+	assert.deepEqual(Object.keys(loaded.mcp[0]), ["name", "state", "tools"]);
+	assert.match(rowOf("mcp").body, /Each server, named from the trigger's own `run\.mcp` by position, with its state and tool count/);
+	assert.ok(rowOf("baseSha").body.includes(`\`${LOADED_BASE_SHA_RE.source}\``), "the commit's pattern");
+});
+
+test("docs/global-pi-overlay.md says what a record holds for each tier, and what the bullets beyond the tiers say", () => {
+	const doc = readFileSync(new URL("../../docs/global-pi-overlay.md", import.meta.url), "utf8");
+	const section = doc.slice(doc.indexOf("The record holds, by tier:"), doc.indexOf("A tool's name that holds one of the job's own values"));
+	assert.ok(section.length > 0);
+	const heads = [...section.matchAll(/^- \*\*(.+?):\*\*/gm)].map((match) => match[1]);
+	const TIER_BULLETS = { package: "Staged packages", overlay: "The overlay", trigger: "A trigger's `run.skillsDir`", repository: "The repository's `.pi/`" };
+	// `other` has no bullet, and that is no gap: it is a path no root holds, nothing an operator staged or can read a list of, and it
+	// is on a run's page as "elsewhere" by count. Every other tier has one, so a tier added to the record has to say here whether it does.
+	assert.deepEqual([...Object.keys(TIER_BULLETS), "other"].sort(), [...record.LOADED_TIERS].sort());
+	assert.deepEqual(heads, [...Object.values(TIER_BULLETS), "The flow", "What was left out on purpose"]);
+	const bullet = (head) => section.slice(section.indexOf(`- **${head}:**`)).split(/\n- \*\*/)[0].replace(/\s+/g, " ");
+
+	// What each bullet says the record keeps, from the record.
+	const loaded = rebuildLoaded(line(), KNOWN);
+	const countsOnly = ["tier", ...record.LOADED_ROW].sort();
+	assert.ok(["name", "version", "toolNames", ...record.LOADED_ROW].every((key) => Object.hasOwn(source(loaded, "package"), key)));
+	assert.match(bullet(TIER_BULLETS.package), /each by name and version.*its counts of extensions, skills, prompts, themes and tools, and the names of those tools/);
+	assert.ok(["names", "failedNames", "namedTools"].every((key) => Object.hasOwn(source(loaded, "overlay"), key)));
+	assert.match(bullet(TIER_BULLETS.overlay), /each extension by its first path segment, each that failed, and the tools each brought/);
+	assert.deepEqual(Object.keys(source(loaded, "trigger")).sort(), countsOnly);
+	assert.match(bullet(TIER_BULLETS.trigger), /counts\./);
+	assert.deepEqual(Object.keys(source(loaded, "repository")).sort(), countsOnly);
+	assert.match(bullet(TIER_BULLETS.repository), /counts, and nothing else/);
+	assert.match(bullet("The flow"), /the tier it was found in, or that none held it/);
+	assert.ok(record.LOADED_FLOW_WORDS.includes("none"));
+	// One clause per key `leftOut` has. They are the doc's words and not the keys', so the pairing is written out.
+	const LEFT_OUT_WORDS = { tools: "`run.excludeTools`", packages: '`"packages": false`', overlayExtensions: "`PI_GLOBAL_ALLOW_EXTENSIONS=0`", restricted: "a kind of job that never gets the overlay" };
+	assert.deepEqual(Object.keys(LEFT_OUT_WORDS).sort(), Object.keys(leftOutOf({})).sort());
+	for (const [key, said] of Object.entries(LEFT_OUT_WORDS)) assert.ok(bullet("What was left out on purpose").includes(said), `${key}: ${said}`);
+	// And the one the issue's table lists and `leftOut` does not have, which the page says it cannot say.
+	const cannot = doc.slice(doc.indexOf("**What the record cannot say.**"), doc.indexOf("**What the host's publication says.**"));
+	assert.match(cannot, /An extension you turned off in pi on the host/);
+	assert.ok(!Object.keys(leftOutOf({})).some((key) => /host|disabled|off$/i.test(key)), "no key claims to know it");
+});
+
 test("the record's line and its table name every word `runner` has", () => {
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
 	const [line_] = spec.match(/"loaded"\?: \{ "v": 1, "runner": [^\n]*/);

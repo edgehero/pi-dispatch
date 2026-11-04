@@ -8,10 +8,13 @@ import {
 	fitLoaded,
 	LOADED_FLOW_WORDS,
 	LOADED_JOB_TOOLS,
+	LOADED_MAX_COUNT,
 	LOADED_MAX_EXT_TOOLS,
 	LOADED_MAX_OVERLAY_NAMES,
 	LOADED_MAX_PACKAGES,
+	LOADED_MAX_PROBLEM_COUNT,
 	LOADED_MAX_SERVERS,
+	LOADED_MAX_TOOL_COUNT,
 	LOADED_MCP_STATES,
 	LOADED_OVERLAY_NAME_RE,
 	LOADED_ROW,
@@ -475,4 +478,34 @@ test("INT-RUNNER-EXIT-CODE-PROTOCOL's table says what this module holds: the clo
 	const [full, compact, minimal] = fitLoaded(maximalLoaded());
 	for (const form of [full, compact, minimal]) assert.ok(section.includes(JSON.stringify(form).length.toLocaleString("en-US")), `${form.cut.form}'s size is not the spec's`);
 	assert.match(rowOf("extTools"), new RegExp(LOADED_TOOL_NAME_RE.source.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")));
+
+	// The table's rows are the line's keys, both ways. Not `v`, the field's own version, which the JSON above the table shows, or
+	// `flowPackage`, which only ever rides beside `flow` and which `flow`'s row names.
+	const rows = section.split("\n").map((text) => /^\s*\| `([A-Za-z]+)` \|/.exec(text)?.[1]).filter(Boolean);
+	const line = maximalLoaded();
+	assert.deepEqual([...rows].sort(), Object.keys(line).filter((key) => key !== "v" && key !== "flowPackage").sort(), "a row per key of the line");
+	assert.match(rowOf("flow"), /`flowPackage` is its row/);
+	assert.match(section, /"loaded":\{"v":1,/);
+	// What each row with keys inside it says it holds. `packages`, `tiers` and `mcp` are rows of counts, held above.
+	for (const key of ["overlay", "tools", "extTools", "cut"]) contains(rowOf(key), Object.keys(line[key]), key);
+
+	// `pi`'s row against what buildLoaded does with each case it names.
+	const piOf = (pi) => buildLoaded({ at: "start", pi }).pi;
+	assert.equal(piOf("1.5.0"), "1.5.0");
+	assert.equal(piOf("0.0.0"), null);
+	assert.match(rowOf("pi"), /or null for its `0\.0\.0` fallback/);
+	assert.equal(piOf("1.6.0-rc.1"), null);
+	assert.match(rowOf("pi"), /anything but three dotted numbers, a pre-release included/);
+
+	// The clamps. Which count is which comes from the row's own positions, so a new position moves the sentence too.
+	const flat = section.replace(/\s+/g, " ");
+	const NUMBER_WORDS = { 3: "three", 5: "five" };
+	const firstProblem = LOADED_ROW.indexOf("failed");
+	assert.ok(flat.includes(`A row's first ${NUMBER_WORDS[firstProblem]} counts clamp at ${LOADED_MAX_COUNT} and its last ${NUMBER_WORDS[LOADED_ROW.length - firstProblem]} at ${LOADED_MAX_PROBLEM_COUNT}, \`active\` and a server's tools at ${LOADED_MAX_TOOL_COUNT}.`), "the spec's clamps are the module's");
+	const noisy = (value) => Array.from({ length: value }, (_, i) => `/opt/pi-global/packages/lint/p${i}`);
+	const over = buildLoaded({ at: "ready", pi: "1.5.0", roots: { ...BASE_ROOTS, packages: ["/opt/pi-global/packages/lint"] }, extensions: noisy(LOADED_MAX_COUNT + 1), failures: noisy(LOADED_MAX_PROBLEM_COUNT + 1).map((root) => ({ root })), tools: [], active: noisy(LOADED_MAX_TOOL_COUNT + 1), mcp: [["connected", LOADED_MAX_TOOL_COUNT + 1]] });
+	assert.equal(over.packages[0][LOADED_ROW.indexOf("extensions")], LOADED_MAX_COUNT, "a row's resource count clamps there");
+	assert.equal(over.packages[0][firstProblem], LOADED_MAX_PROBLEM_COUNT, "a row's problem count clamps there");
+	assert.equal(over.tools.active, LOADED_MAX_TOOL_COUNT, "and `active`");
+	assert.equal(over.mcp[0][1], LOADED_MAX_TOOL_COUNT, "and a server's tools");
 });
