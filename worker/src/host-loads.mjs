@@ -32,7 +32,8 @@ import { join, resolve, sep } from "node:path";
 import { DOCTOR_HOSTS, DOCTOR_HOSTS_MAX, DOCTOR_RESULTS_TTL_MS } from "./doctor-results.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { ABSENT_CODES, MCP_EXPOSURES, MCP_SERVER_NAME_RE, mcpServerWhere } from "./mcp-config.mjs";
-import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
+import { parsePackageCanary } from "./package-canary-record.mjs";
+import { isPackageName } from "./package-names.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 
 /** One host's record, beside `doctor:h:<name>` and under the same `doctor:hosts` index. */
@@ -70,20 +71,17 @@ const EXTENSION_NAME_RE = /^[A-Za-z0-9._-]{1,48}$/;
 const KEY_NAME_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 /** A url's host and port, or a command's base name. No separator, so never a path; no space, so never prose. */
 const WHERE_RE = /^[A-Za-z0-9._:[\]-]{1,255}$/;
-const PACKAGE_NAME_MAX = 214;
-const PACKAGE_VERSION_MAX = 128;
 const INDEX_MAX = 1_000_000;
 
 /** A first path segment: the shape a run's record holds, less the two a folder listing never returns and a path could. */
 const extensionOf = (row) => (isObject(row) && typeof row.name === "string" && EXTENSION_NAME_RE.test(row.name) && row.name !== "." && row.name !== ".." && LOADS_EXTENSION_KINDS.includes(row.kind) ? { name: row.name, kind: row.kind } : null);
 const skillOf = (name) => (typeof name === "string" && SKILL_NAME_RE.test(name) ? name : null);
-const packageOf = (row) => (isObject(row) && typeof row.name === "string" && row.name.length <= PACKAGE_NAME_MAX && NPM_NAME_RE.test(row.name) && typeof row.version === "string" && row.version.length <= PACKAGE_VERSION_MAX && EXACT_VERSION_RE.test(row.version) ? { name: row.name, version: row.version } : null);
 const flowOf = (row) => {
 	if (!isObject(row) || !Number.isSafeInteger(row.trigger) || row.trigger < 0 || row.trigger > INDEX_MAX) return null;
 	if (!LOADS_FLOW_TIERS.includes(row.tier) || !LOADS_REPO_STATES.includes(row.repo)) return null;
 	const flow = row.flow === null ? null : skillOf(row.flow);
 	if (flow === null && row.flow !== null) return null;
-	const pkg = row.package === null ? null : typeof row.package === "string" && row.package.length <= PACKAGE_NAME_MAX && NPM_NAME_RE.test(row.package) ? row.package : undefined;
+	const pkg = row.package === null ? null : isPackageName(row.package) ? row.package : undefined;
 	if (pkg === undefined || (pkg !== null && row.tier !== "package")) return null;
 	return { trigger: row.trigger, flow, tier: row.tier, package: pkg, repo: row.repo };
 };
@@ -151,7 +149,7 @@ export function buildHostLoads({ at, every = null, by = null, overlayExtensionsA
 	const parts = {
 		extensions: within(extensions, extensionOf, HOST_LOADS_CAPS.extensions),
 		skills: within(skills, skillOf, HOST_LOADS_CAPS.skills),
-		packages: within(packages, packageOf, HOST_LOADS_CAPS.packages),
+		packages: within(packages, parsePackageCanary, HOST_LOADS_CAPS.packages),
 		flows: within(flows, flowOf, HOST_LOADS_CAPS.flows),
 	};
 	const servers = serversWithin(mcp, HOST_LOADS_CAPS.mcp);
@@ -213,7 +211,7 @@ export function parseHostLoads(text) {
 	const parts = {
 		extensions: within(doc.extensions, extensionOf, HOST_LOADS_CAPS.extensions),
 		skills: within(doc.skills, skillOf, HOST_LOADS_CAPS.skills),
-		packages: within(doc.packages, packageOf, HOST_LOADS_CAPS.packages),
+		packages: within(doc.packages, parsePackageCanary, HOST_LOADS_CAPS.packages),
 		flows: within(doc.flows, flowOf, HOST_LOADS_CAPS.flows),
 	};
 	const servers = serversWithin(doc.mcp, HOST_LOADS_CAPS.mcp);

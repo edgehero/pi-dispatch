@@ -1,6 +1,7 @@
 import { imageRefProblem } from "./image-ref.mjs";
 import { MCP_SERVER_NAME_RE } from "./mcp-config.mjs";
-import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
+import { parsePackageCanary } from "./package-canary-record.mjs";
+import { isPackageName } from "./package-names.mjs";
 
 /**
  * What a run loaded, on its record (issue #800, INT-RUN-HISTORY-FILE-CONTRACT's `loaded`). The one place in the worker that
@@ -98,9 +99,6 @@ const IMAGE_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
  */
 export const LOADED_BASE_SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const PI_VERSION_MAX = 32;
-/** A package's name and version as `parsePackageCanary` bounds them. */
-const PACKAGE_NAME_MAX = 214;
-const PACKAGE_VERSION_MAX = 128;
 /** An `excludeTools` entry: a tool's name, or a server's pattern (`mcp__<server>__*`, triggers.mjs `mcpServerToolPattern`). */
 const LEFT_OUT_TOOL_RE = /^[A-Za-z][A-Za-z0-9_-]{0,47}\*?$/;
 /** Pi's own, the MCP tools and a pattern per server of a trigger's at most eight (triggers.mjs): far under this. */
@@ -118,15 +116,6 @@ const isOverlayName = (value) => typeof value === "string" && LOADED_OVERLAY_NAM
 /** A package row's slot held to its clamp: a resource count, then a problem count. */
 const slotMax = (slot) => (slot < FIRST_PROBLEM_SLOT ? LOADED_MAX_COUNT : LOADED_MAX_PROBLEM_COUNT);
 const rowFields = (row) => Object.fromEntries(LOADED_ROW.map((name, slot) => [name, row[slot]]));
-
-/** A package as the worker knows it, or null: the two facts it joins onto a positional row. */
-function knownPackage(value) {
-	if (!isObject(value)) return null;
-	const { name, version } = value;
-	if (typeof name !== "string" || name.length > PACKAGE_NAME_MAX || !NPM_NAME_RE.test(name)) return null;
-	if (typeof version !== "string" || version.length > PACKAGE_VERSION_MAX || !EXACT_VERSION_RE.test(version)) return null;
-	return { name, version };
-}
 
 /**
  * What the worker itself left out of this job, in its own words, because the runner cannot tell: it reads no `run.packages`
@@ -294,7 +283,8 @@ function readLine(raw, known) {
 	// A numeric token passes the shape: digits are all it has, and the job's own value is still the one thing it may not be.
 	if (raw.pi !== null && holdsSecret(raw.pi, known?.redact)) refuse("pi-secret");
 	const cut = readCut(raw.cut);
-	const packages = (Array.isArray(known?.packages) ? known.packages : []).map(knownPackage);
+	// Each a package as the worker knows it, or null: the two facts it joins onto a positional row.
+	const packages = (Array.isArray(known?.packages) ? known.packages : []).map(parsePackageCanary);
 	const servers = Array.isArray(known?.servers) ? known.servers : [];
 	const early = raw.at === "start" || raw.at === "none";
 	const live = raw.at === "session" || raw.at === "ready";
@@ -440,7 +430,7 @@ function recordedSource(source) {
 	if (counts === undefined) return null;
 	if (source.tier === "package") {
 		// Null is a package the worker could not name, and the unnamed row of a form that keeps only the totals.
-		const named = source.name === null && source.version === null ? { name: null, version: null } : knownPackage(source);
+		const named = source.name === null && source.version === null ? { name: null, version: null } : parsePackageCanary(source);
 		if (named === null) return null;
 		if (source.toolNames !== null && !namesWithin(source.toolNames, LOADED_MAX_EXT_TOOLS, isToolName)) return null;
 		return { tier: "package", ...named, ...counts, toolNames: source.toolNames };
@@ -488,7 +478,7 @@ function recordedRunnerPart(value) {
 	if (value.flow !== null) {
 		if (!isObject(value.flow) || !LOADED_FLOW_WORDS.includes(value.flow.tier)) return undefined;
 		const named = value.flow.package;
-		if (named !== null && (value.flow.tier !== "package" || typeof named !== "string" || named.length > PACKAGE_NAME_MAX || !NPM_NAME_RE.test(named))) return undefined;
+		if (named !== null && (value.flow.tier !== "package" || !isPackageName(named))) return undefined;
 		flow = { tier: value.flow.tier, package: named };
 	}
 	if (!Array.isArray(value.sources) || value.sources.length > LOADED_MAX_PACKAGES + LOADED_TIERS.length - 1) return undefined;
