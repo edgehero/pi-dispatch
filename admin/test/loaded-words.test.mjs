@@ -1254,10 +1254,10 @@ test("what a trigger's page quotes: the newest run able to say what it loaded, a
   assert.deepEqual(named.tools.map((row) => row.from), ["pi-lint", "pi-test-runner"]);
   assert.deepEqual(named.tools[0].names, ["lint_file", "lint_fix"]);
   assert.ok(named.sources.some((row) => row.name === "git-guard" && row.version === null), "an overlay entry has no version");
-  assert.deepEqual(named.jobTools, ["report_progress"]);
+  assert.deepEqual(named.tools[0].kind, "package");
   const toolsOfOverlay = loadedRecord({ jobId: "gh-t1", host: "build3", loaded: loadedField({ sources: [source("overlay", { names: ["git-guard"], extensions: 1, tools: 1, namedTools: [{ name: "git-guard", tools: ["guard_push"] }] }), source("repository"), source("trigger"), source("other")] }) });
   const overlay = triggerLastRun([toolsOfOverlay]).quoted;
-  assert.deepEqual(overlay.tools, [{ from: "git-guard, build3’s overlay", names: ["guard_push"] }]);
+  assert.deepEqual(overlay.tools, [{ kind: "overlay", from: "git-guard", names: ["guard_push"] }]);
   assert.equal(overlay.sources.find((row) => row.name === "git-guard").tools, 1);
   // A problem goes under the row it belongs to, the first as well as the rest.
   assert.deepEqual(Object.keys(triggerLastRun([S.bothLacked()]).quoted.problems), ["Skills", "Extensions"]);

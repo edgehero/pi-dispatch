@@ -91,7 +91,7 @@ none in view.
 <div class="te-item te-item--ro"><span><b>Staged packages: on</b><small>Its jobs load what is staged on the host that runs them.</small></span><span class="te-tag"></span></div>
 
 <div class="te-item te-item--ro"><span><b>The repository’s own</b><small>.pi/extensions at the base commit, merge-gated. Changed in the repository, not here.</small></span><span class="te-tag"></span></div>
-</div><p class="te-note">No host has published a staged package or an overlay extension.</p>
+</div><p class="te-note">No host’s doctor run can say which extensions it has.</p>
 <p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>One extension cannot be turned off on its own yet: a trigger takes all the staged packages, or none. A new extension, or another version, is staged first, for every trigger. <a class="link" href="/config/updates">Open Updates</a></span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>No run in the available history.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"></use></svg><span>MCP servers<small>outside systems it reaches</small></span></p><div class="te-sec__v"><div class="te-items"><div class="te-item te-item--ro"><span><b>forge: off</b><small>the job’s own forge, with its own token; in no overlay</small></span><span class="te-tag"></span></div></div><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>A job on a host without a server it names, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid. A key a server uses must reach the job, through run.secrets in the file or a host’s PI_FORWARD_ENV, or the job is refused as mcp-secret-unmapped. <a class="link" href="/config/connections">Open Connections</a></span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>No run in the available history.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"></use></svg><span>Tools<small>what the agent may use</small></span></p><div class="te-sec__v"><div><p class="te-sub">pi’s own</p><div class="te-chips"><span class="te-chip te-chip--ro">read</span><span class="te-chip te-chip--ro">bash</span><span class="te-chip te-chip--ro">powershell</span><span class="te-chip te-chip--ro">edit</span><span class="te-chip te-chip--ro">write</span><span class="te-chip te-chip--ro">grep</span><span class="te-chip te-chip--ro">find</span><span class="te-chip te-chip--ro">ls</span></div></div>
 <p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>On means not removed. powershell, grep, find and ls stay off unless an extension turns them on, so a trigger can remove them too.</span></p>
 
@@ -122,7 +122,7 @@ keeps none.
 A one-shot never races.
 Secret profile: none. Bundle:
 no declared project bundle.
-</p></div></section><section id="p-trigger-edit" data-panel><div class="card"><div class="card__head"><h2>Edit</h2></div><form
+</p></div></section><section id="p-trigger-edit" data-panel><div class="card"><div class="card__head"><h2>Edit</h2></div><p class="muted">A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.</p><form
 class="act config-form stack"
 data-action="trigger-edit"
 

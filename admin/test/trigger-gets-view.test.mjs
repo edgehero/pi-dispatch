@@ -13,6 +13,8 @@ import { LOADED_SAMPLES as S, loadedField, loadedRecord, source } from "./helper
 const NOW = Date.parse("2026-11-04T12:00:00Z");
 const HOUR = 3_600_000;
 const COMMENT = Object.freeze({ index: 2, type: "comment", flow: "fix", packages: true, forge: "github" });
+/** The same trigger naming no flow, for a test of what else hosts differ in: a host with no answer for a flow is its own word. */
+const NO_FLOW = Object.freeze({ ...COMMENT, flow: null });
 const lineOf = (parts) => wordsText(parts);
 
 /** What the hosts published, each written by the real builder and read back by the real reader beside what its host beats out. */
@@ -33,65 +35,65 @@ function quoted(record, trigger = COMMENT) {
 
 test("a host absent, old, newer or cut reads unknown, never the same, and takes no one else's word with it", async () => {
   const known = { packages: PACKAGES };
-  const words = await pills({ mini1: known, mini2: known, absent: null, newer: JSON.stringify({ v: 99, at: NOW }), broken: "{", cut: { packages: PACKAGES, unread: ["packages"] } }, COMMENT);
+  const words = await pills({ mini1: known, mini2: known, absent: null, newer: JSON.stringify({ v: 99, at: NOW }), broken: "{", cut: { packages: PACKAGES, unread: ["packages"] } }, NO_FLOW);
   assert.equal(words.mini1, "the same");
   assert.equal(words.mini2, "the same");
   for (const name of ["absent", "newer", "broken", "cut"]) assert.equal(words[name], "unknown", name);
   // Old: past two of its own intervals.
   const old = await published({ mini1: known, stale: { ...known, at: NOW - 100 * HOUR } });
-  const oldPills = Object.fromEntries(triggerGetsOf({ trigger: COMMENT, hostLoads: old, liveHosts: ["mini1", "stale"] }).pills.map((pill) => [pill.name, pill.word]));
+  const oldPills = Object.fromEntries(triggerGetsOf({ trigger: NO_FLOW, hostLoads: old, liveHosts: ["mini1", "stale"] }).pills.map((pill) => [pill.name, pill.word]));
   assert.equal(oldPills.stale, "unknown");
   assert.equal(oldPills.mini1, "the only one known", "one host that can say has nothing to be the same as");
-  const note = lineOf(triggerGetsOf({ trigger: COMMENT, hostLoads: old, liveHosts: ["mini1", "stale"] }).hostsNote);
+  const note = lineOf(triggerGetsOf({ trigger: NO_FLOW, hostLoads: old, liveHosts: ["mini1", "stale"] }).hostsNote);
   assert.ok(note.includes("stale’s is old, so it reads unknown."), note);
   // A list past its cap cannot prove a lack, and nor can a read that failed.
   const capped = await published({ mini1: known, wide: { packages: Array.from({ length: 70 }, (_, at) => ({ name: `p${at}`, version: "1.0.0" })) } });
-  assert.equal(triggerGetsOf({ trigger: COMMENT, hostLoads: capped, liveHosts: ["mini1", "wide"] }).pills.find((pill) => pill.name === "wide").word, "unknown");
+  assert.equal(triggerGetsOf({ trigger: NO_FLOW, hostLoads: capped, liveHosts: ["mini1", "wide"] }).pills.find((pill) => pill.name === "wide").word, "unknown");
   // Each kind of silence is said in its own words, and only a part this trigger loads from makes a host silent.
   const noted = await published({ mini1: known, absent: null, newer: "{", cut: { packages: PACKAGES, unread: ["packages"] } });
-  const said = lineOf(triggerGetsOf({ trigger: COMMENT, hostLoads: { ...noted, more: 2 }, liveHosts: ["mini1", "absent", "newer", "cut"] }).hostsNote);
+  const said = lineOf(triggerGetsOf({ trigger: NO_FLOW, hostLoads: { ...noted, more: 2 }, liveHosts: ["mini1", "absent", "newer", "cut"] }).hostsNote);
   assert.ok(said.includes("absent has published none, so it reads unknown, never the same."), said);
   assert.ok(said.includes("newer’s could not be read, or a newer release wrote it, so it reads unknown."), said);
   assert.ok(said.includes("cut left out part of what it can load, so it reads unknown."), said);
   assert.ok(said.includes("2 more hosts were not read."), said);
   assert.ok(said.includes(W.repositoryPart), said);
   const partlyDown = { unreachable: false, hosts: [{ name: "mini1", state: "unknown", why: "unreachable" }], more: 0 };
-  assert.ok(lineOf(triggerGetsOf({ trigger: COMMENT, hostLoads: partlyDown, liveHosts: ["mini1"] }).hostsNote).includes("mini1 could not be read, so it reads unknown."));
+  assert.ok(lineOf(triggerGetsOf({ trigger: NO_FLOW, hostLoads: partlyDown, liveHosts: ["mini1"] }).hostsNote).includes("mini1 could not be read, so it reads unknown."));
   const down = await readHostLoadsView({ smembers: async () => { throw new Error("no"); }, mget: async () => [] }, { now: () => NOW, readHosts: async () => ({ hosts: [{ name: "mini1" }, { name: "mini2" }] }) });
-  const read = triggerGetsOf({ trigger: COMMENT, hostLoads: down, liveHosts: ["mini1", "mini2"] });
+  const read = triggerGetsOf({ trigger: NO_FLOW, hostLoads: down, liveHosts: ["mini1", "mini2"] });
   assert.deepEqual(read.pills.map((pill) => pill.word), ["unknown", "unknown"]);
   assert.deepEqual(read.hostsNote, [W.hostsUnread]);
-  assert.deepEqual(triggerGetsOf({ trigger: COMMENT, hostLoads: null, liveHosts: [] }).hostsNote, [W.noHost]);
+  assert.deepEqual(triggerGetsOf({ trigger: NO_FLOW, hostLoads: null, liveHosts: [] }).hostsNote, [W.noHost]);
 });
 
 test("a part the trigger would not load from says nothing: a host cut there is no unknown, and its differences are no difference", async () => {
-  const withheld = { ...COMMENT, packages: false };
+  const withheld = { ...NO_FLOW, packages: false };
   const a = { packages: PACKAGES, extensions: [] };
   const b = { packages: [{ name: "pi-lint", version: "1.4.3" }], extensions: [] };
-  assert.equal((await pills({ a, b }, COMMENT)).a, "also pi-lint 1.4.2; without pi-lint 1.4.3");
+  assert.equal((await pills({ a, b }, NO_FLOW)).a, "also pi-lint 1.4.2; without pi-lint 1.4.3");
   assert.deepEqual(await pills({ a, b }, withheld), { a: "the same", b: "the same" }, "a trigger that withholds the packages gets the same on both");
   assert.equal((await pills({ a, cut: { unread: ["packages"] } }, withheld)).cut, "the same", "what it cannot read is what this trigger leaves out");
   // The overlay's switch is the host's: off, its extensions do not load.
   const overlay = { extensions: [{ name: "git-guard", kind: "dir" }] };
-  assert.deepEqual(await pills({ on: overlay, off: { ...overlay, overlayExtensionsAllowed: false } }), { on: "also git-guard, from its overlay", off: "without git-guard" });
+  assert.deepEqual(await pills({ on: overlay, off: { ...overlay, overlayExtensionsAllowed: false } }, NO_FLOW), { on: "also git-guard, from its overlay", off: "without git-guard" });
   // A part only counts where this trigger would load from it.
   const shut = { overlayExtensionsAllowed: false, unread: ["extensions"] };
-  assert.equal((await pills({ a: {}, shut })).shut, "the same", "a host's overlay extensions are off, so what it could not read of them reaches no job");
-  assert.equal((await pills({ a: {}, blind: { unread: ["extensions"] } })).blind, "unknown");
-  assert.equal((await pills({ a: {}, blind: { unread: ["mcp"] } })).blind, "the same", "this trigger names no server");
-  assert.equal((await pills({ a: {}, blind: { unread: ["mcp"] } }, { ...COMMENT, mcp: ["linear"] })).blind, "unknown");
-  assert.deepEqual(await pills({ a: {}, blind: { unread: ["mcp"] } }, { ...COMMENT, mcp: ["forge"] }), { a: "the same", blind: "the same" }, "`forge` is the job's own, on no host's list");
-  assert.deepEqual(await pills({ a: { mcp: [{ name: "linear", transport: "http", where: "x.example", exposure: "codemode", enabled: false, keys: [] }] }, b: {} }, { ...COMMENT, mcp: ["linear"] }), { a: "the same", b: "the same" }, "a server off on a host is one its jobs do not get");
+  assert.equal((await pills({ a: {}, shut }, NO_FLOW)).shut, "the same", "a host's overlay extensions are off, so what it could not read of them reaches no job");
+  assert.equal((await pills({ a: {}, blind: { unread: ["extensions"] } }, NO_FLOW)).blind, "unknown");
+  assert.equal((await pills({ a: {}, blind: { unread: ["mcp"] } }, NO_FLOW)).blind, "the same", "this trigger names no server");
+  assert.equal((await pills({ a: {}, blind: { unread: ["mcp"] } }, { ...NO_FLOW, mcp: ["linear"] })).blind, "unknown");
+  assert.deepEqual(await pills({ a: {}, blind: { unread: ["mcp"] } }, { ...NO_FLOW, mcp: ["forge"] }), { a: "the same", blind: "the same" }, "`forge` is the job's own, on no host's list");
+  assert.deepEqual(await pills({ a: { mcp: [{ name: "linear", transport: "http", where: "x.example", exposure: "codemode", enabled: false, keys: [] }] }, b: {} }, { ...NO_FLOW, mcp: ["linear"] }), { a: "without linear", b: "without linear" }, "a server off on a host is one its jobs do not get");
   // A server only counts when this trigger names it.
   const server = { mcp: [{ name: "linear", transport: "http", where: "x.example", exposure: "codemode", enabled: true, keys: [] }] };
-  assert.deepEqual(await pills({ with: server, none: {} }), { with: "the same", none: "the same" }, "a server it does not name is no difference to it");
-  assert.deepEqual(await pills({ with: server, none: {} }, { ...COMMENT, mcp: ["linear"] }), { with: "also linear", none: "without linear" });
+  assert.deepEqual(await pills({ with: server, none: {} }, NO_FLOW), { with: "the same", none: "the same" }, "a server it does not name is no difference to it");
+  assert.deepEqual(await pills({ with: server, none: {} }, { ...NO_FLOW, mcp: ["linear"] }), { with: "also linear", none: "without linear" });
   // Where the flow resolved is what its jobs get too, and a host with no answer for this flow does not count.
   const flow = (tier) => ({ flows: [{ trigger: 2, flow: "fix", tier, package: null, repo: "unknown" }] });
   assert.deepEqual(await pills({ a: flow("overlay"), b: flow("unknown") }), { a: "its flow from the overlay", b: "its flow in no tier a host can see" });
-  assert.deepEqual(await pills({ a: flow("overlay"), b: {} }), { a: "the same", b: "the same" });
-  assert.deepEqual(await pills({ a: { flows: [{ trigger: 9, flow: "fix", tier: "overlay", package: null, repo: "unknown" }] }, b: flow("unknown") }), { a: "the same", b: "the same" }, "another trigger's answer, for a flow of the same name, is not this one's");
-  assert.deepEqual(await pills({ a: { flows: [{ trigger: 2, flow: "other", tier: "overlay", package: null, repo: "unknown" }] }, b: flow("unknown") }), { a: "the same", b: "the same" }, "a doctor run from before the flow changed has no answer for it");
+  assert.deepEqual(await pills({ a: flow("overlay"), b: {} }), { a: "its flow from the overlay", b: "no answer for its flow" });
+  assert.deepEqual(await pills({ a: { flows: [{ trigger: 9, flow: "fix", tier: "overlay", package: null, repo: "unknown" }] }, b: flow("unknown") }), { a: "no answer for its flow", b: "its flow in no tier a host can see" }, "another trigger's answer, for a flow of the same name, is not this one's");
+  assert.deepEqual(await pills({ a: { flows: [{ trigger: 2, flow: "other", tier: "overlay", package: null, repo: "unknown" }] }, b: flow("unknown") }), { a: "no answer for its flow", b: "its flow in no tier a host can see" }, "a doctor run from before the flow changed has no answer for it");
 });
 
 test("a record says what that run had and the file what the next job gets: no word under a row reads as today's file", async () => {
@@ -195,4 +197,96 @@ test("where each extension is: a list cut short proves what is on it and no lack
   assert.ok(!item("pi-lint 1.4.2", [record]).sub.includes("gh-r1"), "what 1.4.3 brought says nothing of 1.4.2");
   const off = await published({ a: { extensions: [{ name: "git-guard", kind: "dir" }], overlayExtensionsAllowed: false } });
   assert.equal(triggerGetsOf({ trigger: COMMENT, hostLoads: off, liveHosts: ["a"] }).extensions.items[0].sub, "in the overlay on a · its overlay extensions off on a");
+});
+
+// ---- a pill must not say what the rows beneath it contradict ------------------------------------------------------------
+
+test("hosts that differ in anything a job gets are not the same: the image, a named server's definition, overlay skills, a flow with no answer", async () => {
+  const flow = (tier = "unknown") => ({ flows: [{ trigger: 2, flow: "fix", tier, package: null, repo: "unknown" }] });
+  const both = { packages: PACKAGES, ...flow() };
+  // Two current hosts on different images: the Image row says so, so the pill does.
+  const words = (loads, names, trigger = COMMENT) => Object.fromEntries(triggerGetsOf({ trigger, hostLoads: loads, liveHosts: names }).pills.map((pill) => [pill.name, pill.word]));
+  const images = await published({ a: both, b: both });
+  images.hosts[1] = { ...images.hosts[1], image: "pi-job:4.2.0", piVersion: "1.4.0" };
+  assert.deepEqual(words(images, ["a", "b"]), { a: "runs pi-job:4.3.1 with pi 1.5.0", b: "runs pi-job:4.2.0 with pi 1.4.0" });
+  // A trigger that names its image does not run on the host's.
+  assert.deepEqual(words(images, ["a", "b"], { ...COMMENT, image: "mine:1" }), { a: "the same", b: "the same" });
+  // A host that beats no image cannot be called the same.
+  const noBeat = await published({ a: both, b: both });
+  noBeat.hosts[1] = { ...noBeat.hosts[1], image: null, piVersion: null };
+  assert.deepEqual(words(noBeat, ["a", "b"]), { a: "runs pi-job:4.3.1 with pi 1.5.0", b: "its image unknown" });
+  // A server this trigger names, defined two ways: the row says "defined differently by host", so the pill does.
+  const linear = { name: "linear", transport: "http", where: "mcp.example.com", exposure: "codemode", enabled: true, keys: ["LINEAR_API_KEY"] };
+  const differ = await pills({ a: { ...both, mcp: [linear] }, b: { ...both, mcp: [{ ...linear, where: "other.example", keys: ["OTHER_KEY"] }] } }, { ...COMMENT, mcp: ["linear"] });
+  assert.deepEqual(differ, { a: "linear defined differently", b: "linear defined differently" });
+  assert.deepEqual(await pills({ a: { ...both, mcp: [linear] }, b: { ...both, mcp: [{ ...linear, where: "other.example" }] } }), { a: "the same", b: "the same" }, "a server it does not name reaches no job of this trigger");
+  // A server it names, on no host: each goes without it, and neither reads as the same.
+  assert.deepEqual(await pills({ a: both, b: both }, { ...COMMENT, mcp: ["linear"] }), { a: "without linear", b: "without linear" });
+  // Overlay skills load for its jobs too.
+  assert.deepEqual(await pills({ a: { ...both, skills: ["review"] }, b: both }), { a: "also skill review", b: "without skill review" });
+  assert.equal((await pills({ a: both, blind: { ...both, unread: ["skills"] } })).blind, "unknown", "a host that could not read them cannot say");
+  // A host with no answer for the flow, under a Doctor line saying so.
+  assert.deepEqual(await pills({ a: both, b: { packages: PACKAGES } }), { a: "its flow in no tier a host can see", b: "no answer for its flow" });
+  const silent = triggerGetsOf({ trigger: COMMENT, hostLoads: await published({ a: { packages: PACKAGES }, b: { packages: PACKAGES } }), liveHosts: ["a", "b"] });
+  assert.deepEqual(silent.pills.map((pill) => pill.word), ["no answer for its flow", "no answer for its flow"], "neither has an answer, so neither is the same");
+  assert.deepEqual(silent.pills.map((pill) => pill.tone), ["plain", "plain"], "no difference is known");
+  assert.deepEqual(await pills({ a: both, b: both }, { ...COMMENT, flow: null }), { a: "the same", b: "the same" }, "no flow, nothing to answer");
+  // What `hostsAgree` still sees past every word here says so rather than the same: pi's load order is a difference.
+  const order = await pills({ a: { ...flow(), packages: [{ name: "p", version: "1.0.0" }, { name: "q", version: "1.0.0" }] }, b: { ...flow(), packages: [{ name: "q", version: "1.0.0" }, { name: "p", version: "1.0.0" }] } });
+  assert.deepEqual(order, { a: W.pillOrder, b: W.pillOrder });
+  // Withheld, and off, the same row reads as what its jobs get.
+  const withheld = await pills({ a: { ...flow(), packages: [{ name: "p", version: "1.0.0" }, { name: "q", version: "1.0.0" }] }, b: { ...flow(), packages: [{ name: "q", version: "1.0.0" }, { name: "p", version: "1.0.0" }] } }, { ...COMMENT, packages: false });
+  assert.deepEqual(withheld, { a: "the same", b: "the same" });
+  const otherTrigger = await pills({ a: { ...both, flows: [...both.flows, { trigger: 9, flow: "x", tier: "overlay", package: null, repo: "unknown" }] }, b: both });
+  assert.deepEqual(otherTrigger, { a: "the same", b: "the same" }, "another trigger's flow is no difference to this one's jobs");
+  assert.equal((await pills({ a: both, keys: { ...both, mcp: [{ ...linear, keys: ["A", "B", "C", "D", "E"] }] } }, { ...COMMENT, mcp: ["linear"] })).keys, "unknown", "a named server's keys cut short cannot be compared");
+  // A named server whose `where` a host would not publish: two different places read the same that way.
+  const noWhere = await published({ a: { ...both, mcp: [linear] }, b: { ...both, mcp: [linear] } });
+  noWhere.hosts[1] = { ...noWhere.hosts[1], mcp: [{ ...linear, where: null }] };
+  assert.equal(words(noWhere, ["a", "b"], { ...COMMENT, mcp: ["linear"] }).b, "unknown");
+  assert.equal(words(noWhere, ["a", "b"]).b, "the same", "not of a server it does not name");
+  // A host's overlay off: what the list says reaches no job, so it is no difference between the two.
+  assert.deepEqual(await pills({ on: both, off: { ...both, overlayExtensionsAllowed: false, extensions: [{ name: "git-guard", kind: "dir" }] } }), { on: "the same", off: "the same" });
+});
+
+// ---- what is drawn as the next job's comes from the file and the hosts -----------------------------------------------------
+
+test("the Tools row: nothing drawn as the next job's comes from a run unless it says so, by its id and host", async () => {
+  const record = S.everything();
+  const view = (trigger) => triggerGetsOf({ trigger, records: [record], liveHosts: [] }).tools;
+  // A run's own tools are headed by that run, past.
+  assert.deepEqual(view(COMMENT).fromExtensions.map((group) => group.heading), ["pi-lint, as gh-9575 loaded it on mini1", "pi-test-runner, as gh-9575 loaded it on mini1"]);
+  // The file withholds the packages now: the next job does not get what came with them.
+  assert.deepEqual(view({ ...COMMENT, packages: false }).fromExtensions, []);
+  // An overlay's stays, said as the run's, because a package switch does not reach it.
+  const overlay = loadedRecord({ jobId: "gh-t1", host: "build3", loaded: loadedField({ sources: [source("overlay", { names: ["git-guard"], extensions: 1, tools: 1, namedTools: [{ name: "git-guard", tools: ["guard_push"] }] }), source("repository"), source("trigger"), source("other")] }) });
+  assert.deepEqual(triggerGetsOf({ trigger: { ...COMMENT, packages: false }, records: [overlay], liveHosts: [] }).tools.fromExtensions, [{ heading: "git-guard in its overlay, as gh-t1 loaded it on build3", names: ["guard_push"] }]);
+  // report_progress is the file's: `run.progress`, and not that the last run had it.
+  assert.equal(view(COMMENT).jobTool, false, "the record's report_progress says nothing of the next job");
+  assert.equal(view({ ...COMMENT, progress: true }).jobTool, true);
+  assert.equal(triggerGetsOf({ trigger: { ...COMMENT, progress: true }, liveHosts: [] }).tools.jobTool, true, "with no run at all");
+});
+
+test("a record cut short says so on this card, and a list of hosts that cannot say is not a list of nothing", async () => {
+  const packages = Array.from({ length: 24 }, (_, at) => ({ name: `pkg-${String(at).padStart(2, "0")}`, version: "1.0.0" }));
+  const tools = packages.flatMap((pkg) => Array.from({ length: 8 }, (_, at) => ({ name: `tool_${pkg.name.replace(/-/g, "_")}_${at}_${"t".repeat(40)}`, path: `/opt/pi-global/packages/${pkg.name}/ext.js` })));
+  const cut = await recordThroughPipeline({ jobId: "gh-cut1", exit: { code: 0, reason: null, turns: 4 }, turnsOnLine: 4, packages, tools });
+  const quote = lineOf(triggerGetsOf({ trigger: COMMENT, records: [cut], liveHosts: [] }).quote);
+  assert.match(quote, /This record leaves out \d+ packages? and \d+ names?\./, quote);
+  const whole = lineOf(triggerGetsOf({ trigger: COMMENT, records: [S.everything()], liveHosts: [] }).quote);
+  assert.ok(!whole.includes("leaves out") && !whole.includes("Cut to fit"), whole);
+  const compact = lineOf(triggerGetsOf({ trigger: COMMENT, records: [S.cut()], liveHosts: [] }).quote);
+  assert.ok(compact.includes("Cut to fit: this record keeps the counts and leaves out package, overlay and tool names."), compact);
+  // A list that was noted before the run went on says that too.
+  const early = await recordThroughPipeline({ jobId: "gh-early2", brokenAt: ["ready"], exit: { code: 0, reason: "stop" }, turnsOnLine: 3 });
+  assert.ok(lineOf(triggerGetsOf({ trigger: COMMENT, records: [early], liveHosts: [] }).quote).includes("This record’s list was last noted before the run started"));
+
+  // Hosts that did publish, all old: they cannot say, which is not "none published".
+  const old = await published({ a: { packages: PACKAGES, at: NOW - 100 * HOUR }, b: { at: NOW - 100 * HOUR } });
+  const oldView = triggerGetsOf({ trigger: { ...COMMENT, forge: null }, hostLoads: old, liveHosts: ["a", "b"] });
+  assert.equal(oldView.extensions.noneWord, W.noExtensionsKnown);
+  assert.equal(oldView.mcp.noneWord, W.noServersKnown);
+  const empty = triggerGetsOf({ trigger: { ...COMMENT, forge: null }, hostLoads: await published({ a: {} }), liveHosts: ["a"] });
+  assert.equal(empty.extensions.noneWord, W.noExtensions);
+  assert.equal(empty.mcp.noneWord, W.noServers);
 });

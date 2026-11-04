@@ -89,6 +89,7 @@ TRIGGER_GETS_CSS = """
 .te-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: var(--space-2); padding: 12px 14px; border-radius: var(--radius-md); background: var(--running-tint); font-size: 13.5px; }
 .te-bar b { font-weight: 700; }
 .te-bar .te-bar__t { flex: 1 1 260px; min-width: 0; }
+.te-bar .te-bar__t small { display: block; margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--ink-muted); }
 .te-bar .te-bar__a { display: flex; gap: 8px; flex-wrap: wrap; }
 .te-note { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; line-height: 18px; color: var(--ink-muted); }
 .te-note .ic { flex: none; margin-top: 2px; }
@@ -149,7 +150,7 @@ def gets_card():
              f'<span class="te-host te-host--att">{ic("attention", "ic ic--sm")}<b>mini1</b> without git-guard</span>'
              f'<span class="te-host">{ic("minus", "ic ic--sm")}<b>mini2</b> unknown</span>'
              f'<span class="te-host te-host--att">{ic("attention", "ic ic--sm")}<b>build3</b> also git-guard, from its overlay</span></div>'
-             f'<p class="te-note">{ic("doctor", "ic ic--sm")}<span>What each host’s last doctor run published: mini1 at 2026-10-08 14:39 UTC, build3 at 2026-10-05 15:39 UTC. mini2 has published none, so it reads unknown, never the same. The repository’s part is decided at its base commit.</span></p>'
+             f'<p class="te-note">{ic("doctor", "ic ic--sm")}<span>What each host’s last doctor run published: build3 at 2026-10-05 15:39 UTC, mini1 at 2026-10-08 14:39 UTC. mini2 has published none, so it reads unknown, never the same. The repository’s part is decided at its base commit.</span></p>'
              f'<p class="te-note">{ic("chain", "ic ic--sm")}<span>The rows say what the next job gets, from the triggers file. Under each is what gh-9575, its newest run that says what it loaded, had on mini1. The last it started, gh-e9a0: Nothing loaded: it was refused before its container started.</span></p>')
 
     # Each field is typed or picked from a list, because a forge's repository is not on a host and a model the overlay declares is not in
@@ -164,14 +165,14 @@ def gets_card():
         "Last run on mini1, gh-9575: anthropic / claude-sonnet-5-5; 14 calls.")
 
     flow = sec("skill", "Flow and skills", "what it is told to do", f"""<div class="field"><label for="te-f">Flow</label><input id="te-f" class="input" value="fix"><p class="field__hint">Pick a skill a job can find, or name one the repository holds.</p></div>
-<p class="te-note">{ic("doctor", "ic ic--sm")}<span><b>Doctor’s answer:</b> mini1 and build3 find fix in no tier a host can see; mini2 has no answer to read. A forge’s repository is not on a host, so for that tier read the last run.</span></p>
+<p class="te-note">{ic("doctor", "ic ic--sm")}<span><b>Doctor’s answer:</b> build3 and mini1 find fix in no tier a host can see; mini2 has no answer to read. A forge’s repository is not on a host, so for that tier read the last run.</span></p>
 <p class="te-note">{ic("info", "ic ic--sm")}<span>Skills folder (<span class="code">run.skillsDir</span>): none, a folder on each host, set in the file.</span></p>""",
         "Last run on mini1, gh-9575: fix, the flow, from the repository; and 3 more: 2 from the repository, 1 from pi-test-runner.")
 
     ext = sec("layers", "Extensions", "code its jobs load", f"""<div class="te-items">
   {item(True, "Staged packages", 'Off writes "packages": false, and none load, nor their tools, skills, prompt templates or themes.')}
-  {item(True, "pi-lint 1.4.2", "staged on mini1 and build3, unknown on mini2 · 2 tools, 1 prompt template, as gh-9575 loaded it", locked=True)}
-  {item(True, "pi-test-runner 0.9.0", "staged on mini1 and build3, unknown on mini2 · 3 tools, 1 skill, as gh-9575 loaded it", locked=True)}
+  {item(True, "pi-lint 1.4.2", "staged on build3 and mini1, unknown on mini2 · 2 tools, 1 prompt template, as gh-9575 loaded it", locked=True)}
+  {item(True, "pi-test-runner 0.9.0", "staged on build3 and mini1, unknown on mini2 · 3 tools, 1 skill, as gh-9575 loaded it", locked=True)}
   {item(True, "git-guard", "in the overlay on build3, not on mini1, unknown on mini2", locked=True)}
   {item(True, "The repository’s own", ".pi/extensions at the base commit, merge-gated. Changed in the repository, not here.", locked=True)}
 </div>
@@ -179,7 +180,7 @@ def gets_card():
         "Last run on mini1, gh-9575: pi-lint 1.4.2, pi-test-runner 0.9.0; staged on mini1.")
 
     mcp = sec("plug", "MCP servers", "outside systems it reaches", f"""<div class="te-items">
-  {item(True, "linear", "http · mcp.example.com · codemode · uses LINEAR_API_KEY by name", tag="mini1 and build3; unknown on mini2", changed=True)}
+  {item(True, "linear", "http · mcp.example.com · codemode · uses LINEAR_API_KEY by name", tag="build3 and mini1; unknown on mini2", changed=True)}
   {item(False, "docs", "stdio · docs-mcp · deferred", tag="off on mini1; not on build3; unknown on mini2", lacks=True)}
 </div>
 <p class="te-note">{ic("info", "ic ic--sm")}<span>A job on a host without a server it names, or with it off, is refused as <span class="code">mcp-server-unknown</span>, before it spends; a host with no overlay or no <span class="code">mcp.json</span> refuses it as <span class="code">mcp-config-invalid</span>. A key a server uses must reach the job, through <span class="code">run.secrets</span> in the file or a host’s <span class="code">PI_FORWARD_ENV</span>, or the job is refused as <span class="code">mcp-secret-unmapped</span>. <a class="link" href="#">Open Connections</a></span></p>""", "Last run on mini1, gh-9575: none; it named no server.")
@@ -188,8 +189,8 @@ def gets_card():
     own = "".join(chip(t, on=(t != "bash")) for t in ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"])
     tools = sec("flows", "Tools", "what the agent may use", f"""<div><p class="te-sub">pi’s own</p><div class="te-chips">{own}</div></div>
 <p class="te-note">{ic("info", "ic ic--sm")}<span>On means not removed. powershell, grep, find and ls stay off unless an extension turns them on, so a trigger can remove them too.</span></p>
-<div><p class="te-sub">From pi-lint</p><div class="te-chips"><span class="te-chip te-chip--ro">lint_file</span><span class="te-chip te-chip--ro">lint_fix</span></div></div>
-<div><p class="te-sub">From pi-test-runner</p><div class="te-chips"><span class="te-chip te-chip--ro">run_tests</span><span class="te-chip te-chip--ro">test_report</span><span class="te-chip te-chip--ro">test_coverage</span></div></div>
+<div><p class="te-sub">From pi-lint, as gh-9575 loaded it on mini1</p><div class="te-chips"><span class="te-chip te-chip--ro">lint_file</span><span class="te-chip te-chip--ro">lint_fix</span></div></div>
+<div><p class="te-sub">From pi-test-runner, as gh-9575 loaded it on mini1</p><div class="te-chips"><span class="te-chip te-chip--ro">run_tests</span><span class="te-chip te-chip--ro">test_report</span><span class="te-chip te-chip--ro">test_coverage</span></div></div>
 <p class="te-note">{ic("info", "ic ic--sm")}<span>A tool an extension adds cannot be removed on its own yet. A repository’s tools stay a count, so they have no chip here.</span></p>
 <p class="te-note">{ic("info", "ic ic--sm")}<span>A server’s tools are offered once this trigger names it: turn it on and confirm first.</span></p>
 <div><p class="te-sub">The job’s own</p><div class="te-chips"><span class="te-chip te-chip--ro">report_progress</span></div></div>
@@ -201,7 +202,7 @@ def gets_card():
 <p class="te-note">{ic("info", "ic ic--sm")}<span>Set elsewhere: the image in each host’s environment or run.image in the file, secrets on the Secrets page, and the skills folder (run.skillsDir) in the file.</span></p>""",
         "Last run on mini1, gh-9575: pi 1.5.0 in pi-job:4.3.1; image sha256:7c1e0b4…, as mini1 ran it.")
 
-    bar = (f'<div class="te-bar" role="status"><span class="te-bar__t"><b>2 changes, not written yet:</b> linear on, bash off.</span>'
+    bar = (f'<div class="te-bar" role="status"><span class="te-bar__t"><b>2 changes, not written yet:</b> linear on, bash off.<small>A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.</small></span>'
            f'<span class="te-bar__a">{btn("Preview the change", "primary", sm=False)}{btn("Discard", "", sm=False)}</span></div>')
     body = hosts + model + flow + ext + mcp + tools + rest + bar
     return card("What its jobs get", body, sub="as a job of trigger 3 would start, from each host’s last doctor run", id_="p-trigger-gets")
@@ -312,16 +313,16 @@ The trigger page's **What its jobs get**: what a job of this trigger would start
 **What waits.** {WAITS} Until then each extension is shown and not switched, and the row says so.
 
 **How a person uses it.**
-- **The hosts** come first: one pill per host the trigger runs on, saying whether its jobs get the same there. Here build3's overlay adds git-guard, mini1 goes without it, and mini2 has published no doctor run, so it reads unknown, never the same. "The same" needs two hosts that can say and agree: a host alone reads *the only host*, or *the only one known* beside silent ones.
+- **The hosts** come first: one pill per host the trigger runs on, saying whether its jobs get the same there. Here build3's overlay adds git-guard, mini1 goes without it, and mini2 has published no doctor run, so it reads unknown, never the same. "The same" needs two hosts that can say and agree on everything the rows beneath say: what `hostsAgree` compares of what reaches this trigger, and the image and its pi. A host alone reads *the only host*, or *the only one known* beside silent ones, and one with no answer for the flow says so.
 - **One row per kind,** each with its control and, under it, what its last run on one host that said what it loaded had (part 1's record), naming the host because hosts differ. Here that is mini1. Triggers names gh-e9a0 as trigger 3's last, and it was refused before its container started, so the card says why it quotes gh-9575:
   - **Model:** the provider and the model, each typed or picked from the catalog's priced models for the providers in use, because a model the overlay declares is not in the catalog and the preview judges what is typed; the job cap, which a trigger can only lower: `effectiveCostCapMicros` takes the smaller, and a value above `PI_MAX_COST_USD` refuses the file; the allowed models and the fallbacks.
-  - **Flow and skills:** a skill typed or picked from what a job can find (the repository's where it is on this host, the overlay's, a staged package's), and doctor's answer on each host. A forge's repository is not on a host, so doctor cannot answer for that tier, and the card says so. A run that went without its flow says so under the row, from its record.
+  - **Flow and skills:** a skill typed or picked from what a job can find (the repository's where it is on this host, the overlay's, a staged package's), and doctor's answer on each host. A forge's repository is not on a host, so doctor cannot answer for that tier, and the card says so. A run that went without its flow says so under the row, from its record, and a record cut short says that at the top.
   - **Extensions:** the all-off switch for staged packages (`"packages": false`), then each staged package and overlay extension, shown, saying where each is and what the last run had of it. The repository's own are shown too: they are merge-gated content, changed in the repository.
   - **MCP servers:** a switch per server a host publishes or the trigger names, with its transport, where it is, its exposure and the key it uses by name, and each host: which have it, which do not, in warning tone, and which are unknown.
-  - **Tools:** a chip per tool of pi's own, and for a server the trigger names, `mcp__<server>__*` as a whole and the five `MCP_EXCLUDABLE_TOOL_NAMES`. On means not removed. Each staged or overlay extension's tools are named from the last run's record, shown and not switched; a repository's stay a count. `report_progress` is shown too: it comes with `run.progress`, and no list removes it.
+  - **Tools:** a chip per tool of pi's own, and for a server the trigger names, `mcp__<server>__*` as a whole and the five `MCP_EXCLUDABLE_TOOL_NAMES`. On means not removed. No host publishes a tool's name, so each staged or overlay extension's tools are named as a run loaded them, by its id and host, shown and not switched, and not at all once the file withholds the packages they came with; a repository's stay a count. `report_progress` is shown where the file sets `run.progress`, which brings it, and no list removes it.
   - **Image and secrets:** shown, each host's image and pi with the `PI_JOB_IMAGE` they come from, and changed where they are today (the host's env or `run.image` in the file, the Secrets page).
 - **The same rows, in other states** (`p-trigger-gets-states`): allowed models and a fallback set, staged packages off, a trigger with no run in the history, and a run that went without its flow.
-- **Changes collect** in one bar (*2 changes, not written yet*) with **Preview the change** and **Discard**, a form's own reset. TriggerEnvironmentChange draws the preview.
+- **Changes collect** in one bar (*2 changes, not written yet*) with **Preview the change** and **Discard**, a form's own reset. TriggerEnvironmentChange draws the preview, and any move of a control closes it, because its Confirm no longer says what the form says. The bar says a Confirm elsewhere on the page reloads it and drops these.
 
 **Panels.** `p-trigger-gets`, `p-trigger-gets-how`, `p-trigger-gets-states`, beside TriggerDetail's panels.
 

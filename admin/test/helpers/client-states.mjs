@@ -41,6 +41,8 @@ export const T = Object.freeze({
   getsBar: "what a trigger's jobs get: each change moves the bar's count and its words, a row is marked, and a change set back as it was drawn leaves the bar hidden",
   getsBody: "what a trigger's jobs get sends the digest the page drew and only what differs from what it drew, with null for a key a blank box or an emptied list removes",
   getsDiscard: "what a trigger's jobs get: Discard is the form's reset, the bar goes, and a preview of what was discarded closes with it",
+  getsMoveCloses: "what a trigger's jobs get: any move of a control closes an open preview and takes its Confirm away, because it no longer says what the form says",
+  getsNothing: "what a trigger's jobs get: a name already on a list is no change, Enter with no change asks the server and reads its answer, and a refusal goes in the slot and under no field",
   link: "the one-time link: no code, a used link, a refusal with its notice, a rate refusal that leaves it untried, a post that reaches nothing kept waiting and retried, a new link pasted in loaded, and the drawn state kept until an answer moves it",
 });
 
@@ -81,6 +83,8 @@ export const CLIENT_STATES = Object.freeze([
   row("TriggerEnvironment", "The bar collects the changes, with Preview the change and Discard", T.getsBar),
   row("TriggerEnvironment", "Discard is the form's reset, and takes a preview of it away", T.getsDiscard),
   row("TriggerEnvironment", "Each change is sent, and nothing else", T.getsBody),
+  row("TriggerEnvironment", "Any move of a control closes a preview it no longer matches", T.getsMoveCloses),
+  row("TriggerEnvironment", "Nothing to preview, and a refusal under no field", T.getsNothing),
   // AccessStates: the link page's states are panels in its ledger (p-link-wait, -used, -nocode).
   row("AccessStates", "p-link-used", T.link),
   row("AccessStates", "p-link-nocode", T.link),

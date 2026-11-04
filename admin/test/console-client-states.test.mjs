@@ -178,7 +178,9 @@ stateTest(T.getsBody, async () => {
   const set = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, provider: "anthropic", model: "claude-sonnet-5-5", maxCostUsd: "1.5", models: ["anthropic/claude-sonnet-5-5"], fallbackModels: ["anthropic/claude-sonnet-5-5"], mcp: ["linear"], excludeTools: ["bash"], packages: false } } }));
   const held = formOf(set, GETS);
   const heldBase = { index: 2, pageDigest: held.querySelector('input[name="pageDigest"]').value };
-  assert.deepEqual(sentBy(set, held), heldBase, "a key the file holds is not sent while its control stands as drawn");
+  tick(held, "excludeTools", "edit", false);
+  assert.deepEqual(sentBy(set, held), { ...heldBase, excludeTools: ["bash", "edit"] }, "a key the file holds is not sent while its control stands as drawn");
+  tick(held, "excludeTools", "edit", true);
   typeIn(set, held.querySelector('input[name="provider"]'), "");
   typeIn(set, held.querySelector('input[name="model"]'), "   ");
   typeIn(set, held.querySelector('input[name="maxCostUsd"]'), "");
@@ -209,6 +211,83 @@ stateTest(T.getsDiscard, async () => {
   assert.equal(form.querySelector('input[name="flow"]').value, "fix");
   assert.equal(shown(collected), false);
   assert.deepEqual(sentBy(w, form), { index: 2, pageDigest: form.querySelector('input[name="pageDigest"]').value });
+});
+
+stateTest(T.getsMoveCloses, async () => {
+  const w = boot(await triggerGetsPage());
+  const form = formOf(w, GETS);
+  const open = async () => {
+    w.submit(form);
+    await w.fetch.open(`/api/act/${GETS}/preview`).answer(200, { ok: true, ticket: "tk-1", action: GETS, html: bar(), kind: "trigger-edit" });
+    assert.equal(shown(slotOf(w)), true, "the preview is open");
+  };
+  // The change is taken back: the Confirm must not stay to write it.
+  tick(form, "mcp", "linear", true);
+  await open();
+  tick(form, "mcp", "linear", false);
+  assert.equal(shown(slotOf(w)), false, "linear back off: the preview said on");
+  assert.equal(shown(form.querySelector("[data-gets-bar]")), false);
+  // Another control moved: its Confirm would drop that one.
+  tick(form, "mcp", "linear", true);
+  await open();
+  tick(form, "excludeTools", "bash", false);
+  assert.equal(shown(slotOf(w)), false, "a second control moved: the preview did not hold it");
+  assert.equal(w.fetch.calls.filter((call) => call.url.endsWith("/confirm")).length, 0, "and nothing was sent");
+  // A text box, on its first keystroke.
+  await open();
+  typeIn(w, form.querySelector('input[name="flow"]'), "r");
+  assert.equal(shown(slotOf(w)), false, "typing");
+  // An answer that arrives after the move does not reopen it.
+  w.submit(form);
+  typeIn(w, form.querySelector('input[name="flow"]'), "re");
+  await w.fetch.open(`/api/act/${GETS}/preview`).answer(200, { ok: true, ticket: "tk-2", action: GETS, html: bar(), kind: "trigger-edit" });
+  assert.equal(shown(slotOf(w)), false, "a late answer is about the form as it was");
+  // A move in the Edit form's preview's way is not this form's: another panel's slot stays.
+  const edit = formOf(w, "trigger-edit");
+  w.submit(edit);
+  await w.fetch.open("/api/act/trigger-edit/preview").answer(200, { ok: true, ticket: "tk-3", action: "trigger-edit", html: bar(), kind: "trigger-edit" });
+  assert.equal(shown(slotOf(w)), true);
+  tick(form, "excludeTools", "edit", false);
+  assert.equal(shown(slotOf(w)), true, "the Edit form's preview does not say what this form says");
+  w.document.querySelector("[data-cancel]").click();
+  // A Confirm already sent is not abandoned: its answer has to reach the person.
+  await open();
+  w.document.querySelector("[data-confirm]").click();
+  tick(form, "excludeTools", "write", false);
+  assert.equal(shown(slotOf(w)), true, "it was sent, so the slot waits for its answer");
+  assert.equal(w.fetch.calls.filter((call) => call.url === `/api/act/${GETS}/confirm`).length, 1);
+  await w.fetch.open(`/api/act/${GETS}/confirm`).answer(200, { ok: true, action: GETS, change: { summary: "Changed" } });
+  assert.equal(w.location.reloads, 1, "and its answer lands");
+});
+
+stateTest(T.getsNothing, async () => {
+  const held = { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, models: ["anthropic/claude-haiku-4-5"] } };
+  const w = boot(await triggerGetsPage({ entry: held }));
+  const form = formOf(w, GETS);
+  const collected = form.querySelector("[data-gets-bar]");
+  const add = form.querySelector("[data-gets-add=models]");
+  // Already on the list: the file would not change, so the bar does not say it would.
+  typeIn(w, add, "anthropic/claude-haiku-4-5");
+  assert.equal(shown(collected), false, "a name already on the list is no change");
+  // Enter with nothing changed: the form sends what it holds, which is no field, and the server's own answer says so.
+  const base = { index: 2, pageDigest: form.querySelector('input[name="pageDigest"]').value };
+  assert.deepEqual(sentBy(w, form), base);
+  const already = "trigger row 3 already says this.";
+  await w.fetch.open(`/api/act/${GETS}/preview`).answer(200, { ok: true, unchanged: true, action: GETS, summary: already, html: String(unchangedBarHtml({ summary: already })) });
+  assert.equal(shown(slotOf(w)), true);
+  assert.ok(text(slotOf(w)).includes("Trigger row 3 already says this."), text(slotOf(w)));
+  assert.equal(slotOf(w).querySelector("[data-confirm]"), null, "with nothing to confirm");
+  // A new name is a change.
+  typeIn(w, add, "anthropic/claude-haiku-4-5 anthropic/claude-sonnet-5-5");
+  assert.equal(shown(collected), true);
+  assert.equal(shown(slotOf(w)), false, "and the answer was about the form as it was");
+  // A refusal goes in the slot alone: its words can name another row, or a word like flow in passing.
+  w.submit(form);
+  const refused = "trigger row 11: run.flow must be a skill name; run.model is not one. Nothing was changed.";
+  await w.fetch.open(`/api/act/${GETS}/preview`).answer(400, { error: refused, html: String(refusalHtml({ where: "preview", sentence: refused, status: 400 })) });
+  assert.equal(shown(slotOf(w)), true, "the bar says it");
+  for (const name of ["flow", "provider", "model", "maxCostUsd"]) assert.equal(form.querySelector(`input[name="${name}"]`).getAttribute("aria-invalid"), null, name);
+  assert.equal(form.querySelectorAll(".field--err").length, 0);
 });
 
 // ---- the confirm slot (ConfirmStates) ------------------------------------------------------------------------------

@@ -318,6 +318,7 @@ test("tools: pi's own and a named server's are chips, an extension's are shown, 
   assert.ok(textOf(page).includes("all of linear’s tools"));
   // No extension tool is a control: it is named from the record, and removing one comes later.
   assert.ok(textOf(page).includes("lint_file"));
+  assert.ok(textOf(page).includes("From pi-lint, as gh-9575 loaded it on mini1"), "and it says whose it is");
   assert.ok(!page.includes('data-gets-value="lint_file"'));
   assert.ok(page.includes('<span class="te-chip te-chip--ro">lint_file</span>'));
   assert.ok(textOf(page).includes(W.extensionTools));
@@ -453,4 +454,53 @@ test("the cards say what the write side says: their words are the planner's, Bui
   assert.ok(cardReadme("TriggerEnvironmentChange").includes("A digest of the trigger's entry as the page read it"), "of the entry");
   assert.ok(!cardReadme("TriggerEnvironmentChange").includes("digest of the file"));
   for (const false_ of ["The preview does not check", "$2.62144 for one call", "Adding run.mcp refuses", "New deliveries use this"]) assert.ok(!straight(cardText(cardPreview("TriggerEnvironmentChange"))).includes(false_), false_);
+});
+
+test("an agent's page does not point at a card it does not draw", async () => {
+  const fs = fileOnlyFs(getsFile());
+  const { readTriggers } = await import("../src/read-model.mjs");
+  const snapshot = { readAt: NOW, triggers: readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs }), runs: [], waiting: { rows: [] } };
+  const parsed = parsePageQuery("trigger", "index=2");
+  const draw = async (role) => {
+    const data = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs, fleet: { snapshot: async () => snapshot }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role });
+    return String((await renderPage("trigger", { query: parsed.query, session: { name: role, role }, data })).html);
+  };
+  assert.ok(!(await draw("agent")).includes("are in What its jobs get"));
+  assert.ok((await draw("viewer")).includes("are in What its jobs get"));
+});
+
+test("a Confirm elsewhere on the page drops what the card holds, and the page says so before it happens", async () => {
+  const page = await triggerGetsPage();
+  assert.ok(textOf(panelOf(page, "p-trigger-edit")).includes(W.reloadDrops), "where the other Confirm is");
+  assert.ok(textOf(panelOf(page, "p-trigger-gets").slice(panelOf(page, "p-trigger-gets").indexOf("data-gets-bar"))).includes(W.reloadDrops), "and in the bar, where the changes are");
+  assert.ok(!textOf(panelOf(await triggerGetsPage({ role: "viewer" }), "p-trigger-gets")).includes(W.reloadDrops), "a viewer holds no change");
+});
+
+test("no field of the card takes a refusal: the bar says it, whichever row or word it names", async () => {
+  const panel = panelOf(await triggerGetsPage(), "p-trigger-gets");
+  assert.ok(!panel.includes("data-field-error"), "another row's refusal reads run.flow as well as this one's");
+  assert.ok(!panel.includes("data-form-error"), "nor under the form, a line above the bar that says it");
+});
+
+test("with Valkey down, the real reader's page says what is unread: the file was read, and the card offers its form", async () => {
+  const dir = tempDir("pd-800-gets-down-");
+  const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), logsDir: join(dir, "logs"), globalPiDir: join(dir, "overlay"), valkeyUrl: "redis://127.0.0.1:1/0" };
+  nodeFs.writeFileSync(paths.triggersPath, getsFile());
+  nodeFs.writeFileSync(paths.settingsFile, "{}");
+  const parsed = parsePageQuery("trigger", "index=2");
+  const data = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths, fleet: { snapshot: async () => { throw new Error("connect ECONNREFUSED"); } }, hostLoads: async () => ({ unreachable: true, hosts: [] }), triggerEditor: () => ({}) }, { role: "operator" });
+  const page = String((await renderPage("trigger", { query: parsed.query, session: { name: "ops", role: "operator" }, data })).html);
+  assert.ok(!page.includes("could not be read.</p>") || !textOf(page).includes("The triggers file could not be read"), "the file was read");
+  assert.ok(!textOf(page).includes("The triggers file could not be read"));
+  assert.ok(!textOf(page).includes("This row does not exist"));
+  assert.ok(panelOf(page, "p-trigger-gets").includes('name="pageDigest"'), "the form the file gave");
+  assert.ok(textOf(panelOf(page, "p-trigger-change")).includes(W.othersUnread));
+  assert.ok(textOf(panelOf(page, "p-trigger-runs")).includes(W.historyUnread), "and the history is unread, not empty");
+  assert.ok(!textOf(panelOf(page, "p-trigger-runs")).includes("No runs were found"));
+  assert.ok(textOf(panelOf(page, "p-trigger-on")).includes("comment"), "What starts it is the file's");
+  // A file that truly cannot be read still says so.
+  const gone = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { ...paths, triggersPath: join(dir, "nope.json") }, fleet: { snapshot: async () => { throw new Error("down"); } }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role: "operator" });
+  const gonePage = String((await renderPage("trigger", { query: parsed.query, session: { name: "ops", role: "operator" }, data: gone })).html);
+  assert.ok(textOf(gonePage).includes("The triggers file could not be read"));
+  assert.ok(!textOf(gonePage).includes(W.othersUnread), "and does not say it read it");
 });

@@ -1,6 +1,7 @@
 import { TRIGGER_RECIPES } from "../../trigger-recipes.mjs";
 /** Trigger pages keep prompt text private and use the same add/edit contracts as the tools (#750). */
 import { triggerWhoMayFire } from "../../trigger-policy.mjs";
+import { TRIGGER_GETS_WORDS } from "../../trigger-gets-view.mjs";
 import { outcomeWord, reasonWords, recordReason } from "../../words.mjs";
 import { planTriggerAdd } from "../../write-plans.mjs";
 import { triggerBundleOf } from "../../read-model.mjs";
@@ -17,8 +18,11 @@ import { canAct, shownPath, runLink, moneyHtml, timeHtml } from "./common.mjs";
 import { actForm, field, area, table, facts } from "./config-ui.mjs";
 const card = (title, body) => ui.card({ title, body });
 const detail = (v) => v.data?.triggerDetail ?? {};
+// The snapshot's, or with Valkey down the row the card read from the file itself, since nothing about that row needs Valkey.
 const trigger = (v) =>
-  detail(v).trigger ?? v.data?.snapshot?.triggers?.triggers?.[v.query?.index];
+  detail(v).trigger ?? v.data?.snapshot?.triggers?.triggers?.[v.query?.index] ?? v.data?.triggerGets?.trigger;
+// What failed, when the snapshot did: not the file, which the card has just read.
+const othersUnread = (v) => !v.data?.snapshot && Boolean(v.data?.triggerGets);
 const defaults = (v) =>
   v.data?.triggerEditor?.defaults ??
   v.data?.snapshot?.triggerEditor?.defaults ??
@@ -88,7 +92,7 @@ export function triggerRuns(v) {
               <td>${recordReason(r) ? reasonWords(recordReason(r)).sentence ?? `No explanation is available for ${recordReason(r)}.` : "No reason was recorded."}</td>
             </tr>`,
         ),
-        "No runs were found in the available history.",
+        Array.isArray(d.history) || !othersUnread(v) ? "No runs were found in the available history." : TRIGGER_GETS_WORDS.historyUnread,
       )}
       <p>
         Jobs in line now:
@@ -142,12 +146,12 @@ export function triggerRun(v) {
   const def = defaults(v);
   const backend = t.backend ?? def.backend ?? "local";
   const venue = BACKENDS[backend];
-  const hostRows = triggerSandboxHosts(t, v.data?.snapshot);
+  const hostRows = triggerSandboxHosts(t, v.data?.snapshot ?? {});
   const bundle = triggerBundleOf(t, v.data?.snapshot?.secretBundles);
   const bundleNames = (v.data?.snapshot?.secretBundles?.bundles ?? []).map(b=>`${b.project ?? "project"}: ${b.id}`).join(", ");
   return card(
     "What it runs",
-    html`<p>The flow, the model and its cap, the staged packages, the MCP servers and the tools are in What its jobs get.</p><h3>Edit here</h3>
+    html`${v.role === "agent" ? null : html`<p>The flow, the model and its cap, the staged packages, the MCP servers and the tools are in What its jobs get.</p>`}<h3>Edit here</h3>
       ${facts(
         EDIT_FIELDS.filter(
           (k) => t.type !== "cron" || !["statusComment", "recover"].includes(k),
@@ -247,11 +251,11 @@ export function triggerEdit(v) {
     ? html``
     : card(
         "Edit",
-        actForm("trigger-edit", {
+        html`<p class="muted">${TRIGGER_GETS_WORDS.reloadDrops}</p>${actForm("trigger-edit", {
           hidden: [["index", v.query.index, "int"]],
           fields: editFields(v, t),
           label: `Preview edit of row ${v.query.index + 1}`,
-        }),
+        })}`,
       );
 }
 export function triggerTrust(v) {
@@ -341,7 +345,7 @@ export function triggerChange(v) {
             "Jobs that would be refused cannot be checked here.")
           : `${detail(v).skewIncomplete ? "At least " : ""}${detail(v).skewed?.length ?? 0} jobs in view would be refused now.${detail(v).skewIncomplete ? " The queue check was incomplete." : ""}`}
       </p>
-      <p>${fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? "The triggers file loads."}</p>
+      <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? "The triggers file loads."}</p>
       ${(detail(v).skewed ?? []).map(job => html`<p>${runLink(job.jobId)}: ${job.field ?? job.conditions ?? "trigger changed"}</p>`)}
       ${t && canAct(v)
         ? actForm("trigger-delete", {

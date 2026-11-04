@@ -6,7 +6,9 @@
  * ONE FORM, AND THE SCRIPT'S ONE HANDLER. `form[data-action]` with `data-structured="trigger-gets"`, read by `script.mjs` `bodyOf`,
  * which sends only what differs from what this page drew and `null` where a key goes away. Its controls start in a `disabled`
  * fieldset, as every action form's do, and its bar starts `hidden`, so a browser with no script reads the same values and has no
- * control that does nothing. The `data-gets-*` words on a control are the server's, so the browser only repeats them.
+ * control that does nothing. The `data-gets-*` words on a control are the server's, so the browser only repeats them. Its fields hold no
+ * `data-field-error` and it has no `data-form-error`, so a refusal goes in the slot's bar alone. REJECTED: the shared field match, which
+ * reads the words of a refusal, and put another row's under this form's Flow because it said `run.flow`.
  *
  * THE DIGEST IS DRAWN ONCE. `pageDigest` is written when the page draws the form, from the read that drew its values. The trigger
  * page is not live (`PAGES.trigger.live`): no stream redraws this panel. REJECTED: reading it fresh at a redraw, which would refresh
@@ -58,7 +60,7 @@ function sec(icon, title, hint, body, last, problem = null, action = null) {
 const readLine = (text) => html`<p class="te-read">${text}</p>`;
 
 function textField({ id, name, label, value, hint = null, placeholder = null, list = null, word, input = "text" }) {
-  return html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" name="${name}" type="${input}" value="${value}" maxlength="256" autocomplete="off" spellcheck="false"${placeholder === null ? null : html` placeholder="${placeholder}"`}${list === null ? null : html` list="${list}"`} data-gets-word="${word}">${hint === null ? null : html`<p class="field__hint">${hint}</p>`}<p class="field__err" data-field-error="${name}" hidden></p></div>`;
+  return html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" name="${name}" type="${input}" value="${value}" maxlength="256" autocomplete="off" spellcheck="false"${placeholder === null ? null : html` placeholder="${placeholder}"`}${list === null ? null : html` list="${list}"`} data-gets-word="${word}">${hint === null ? null : html`<p class="field__hint">${hint}</p>`}</div>`;
 }
 
 const datalist = (id, options) => html`<datalist id="${id}">${options.map((option) => (typeof option === "string" ? html`<option value="${option}"></option>` : html`<option value="${option.value}" label="${option.label}"></option>`))}</datalist>`;
@@ -80,7 +82,7 @@ function modelBody(gets, form) {
   const m = gets.model;
   if (!form) return readLine(m.read);
   const deployed = (word, value) => (value ? `Blank uses the deployment’s, ${value}.` : `Blank uses the deployment’s ${word}.`);
-  const add = (key, id, label, word) => html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" list="te-model-refs" maxlength="512" autocomplete="off" spellcheck="false" placeholder="provider/model, separated by spaces" data-gets-add="${key}" data-gets-word="${word}"><p class="field__err" data-field-error="${key}" hidden></p></div>`;
+  const add = (key, id, label, word) => html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" list="te-model-refs" maxlength="512" autocomplete="off" spellcheck="false" placeholder="provider/model, separated by spaces" data-gets-add="${key}" data-gets-word="${word}"></div>`;
   const listed = (key, entries, what) => entries.map((ref) => chip(key, { value: ref, on: true, onWord: `${ref} back on ${what}`, offWord: `${ref} off ${what}` }));
   return html`<div class="te-grid">
 ${textField({ id: "te-provider", name: "provider", label: "Provider", value: m.provider, hint: deployed("provider", m.deployment.provider), list: "te-providers", word: "provider changed" })}
@@ -110,14 +112,14 @@ function extensionsBody(gets, form) {
 ${item({ name: form ? "Staged packages" : e.packagesOn ? "Staged packages: on" : "Staged packages: off", subText: packagesLine, control: toggle, mark: form })}
 ${e.items.map((entry) => item({ name: entry.name, subText: entry.sub }))}
 ${item({ name: "The repository’s own", subText: W.repositoryExtensions })}
-</div>${e.none ? html`<p class="te-note">${W.noExtensions}</p>` : null}${e.more > 0 ? html`<p class="te-note">And ${e.more} more past what the hosts publish.</p>` : null}
+</div>${e.none ? html`<p class="te-note">${e.noneWord}</p>` : null}${e.more > 0 ? html`<p class="te-note">And ${e.more} more past what the hosts publish.</p>` : null}
 <p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.oneExtension} ${W.newExtension} <a class="link" href="/config/updates">Open Updates</a></span></p>`;
 }
 
 function mcpBody(gets, form) {
   const m = gets.mcp;
   const box = (entry) => (form ? html`<input type="checkbox"${entry.on ? html` checked` : null} data-gets-list="mcp" data-gets-value="${entry.name}" data-gets-on="${entry.name} on" data-gets-off="${entry.name} off">` : null);
-  if (m.none) return html`<p class="te-note">${W.noServers}</p>`;
+  if (m.none) return html`<p class="te-note">${m.noneWord}</p>`;
   const onWord = (entry) => (form ? entry.name : `${entry.name}: ${entry.on ? "on" : "off"}`);
   return html`<div class="te-items">${m.items.map((entry) => item({ name: onWord(entry), subText: entry.sub, tag: entry.tag, lacks: entry.lacks, control: box(entry), mark: form }))}</div><p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.serverRefused} <a class="link" href="/config/connections">Open Connections</a></span></p>`;
 }
@@ -125,7 +127,7 @@ function mcpBody(gets, form) {
 function toolsBody(gets, form) {
   const t = gets.tools;
   const tool = (entry) => (form ? chip("excludeTools", { ...entry, onWord: `${entry.label} on`, offWord: `${entry.label} off` }, { inverse: true }) : roChip(entry.label, entry.on));
-  const fromExtensions = t.fromExtensions.map((group) => html`<div>${sub(`From ${group.from}`)}${chips(group.names.map((name) => roChip(name)))}</div>`);
+  const fromExtensions = t.fromExtensions.map((group) => html`<div>${sub(`From ${group.heading}`)}${chips(group.names.map((name) => roChip(name)))}</div>`);
   return html`<div>${sub("pi’s own")}${chips(t.own.map(tool))}</div>
 <p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.toolsOn}</span></p>
 ${fromExtensions}${fromExtensions.length > 0 ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.extensionTools}</span></p>` : null}
@@ -158,7 +160,7 @@ export function triggerGets(v) {
   // The page's banner promises a link to the refusal that sent a person here, for the actions that keep one. This one does not.
   const unlinked = form && v.query?.becauseRun ? note([W.notLinked], { icon: "attention", tone: "attention" }) : null;
   const body = form
-    ? html`<form class="act te-form" data-action="trigger-environment-edit" data-structured="trigger-gets" autocomplete="off"><fieldset data-config-controls disabled><input type="hidden" name="index" value="${String(trigger.index)}" data-type="int"><input type="hidden" name="pageDigest" value="${digest}">${rows}<div class="te-bar" role="status" data-gets-bar hidden><span class="te-bar__t"><b data-gets-count data-one="${W.barOne}" data-many="${W.barMany}"></b> <span data-gets-words></span></span><span class="te-bar__a">${ui.btn({ type: "submit", label: "Preview the change", kind: "primary" })}<button class="btn" type="reset">Discard</button></span></div></fieldset><noscript><p class="muted">${W.noScript}</p></noscript><p class="field__err" data-form-error hidden role="alert"></p></form>`
+    ? html`<form class="act te-form" data-action="trigger-environment-edit" data-structured="trigger-gets" autocomplete="off"><fieldset data-config-controls disabled><input type="hidden" name="index" value="${String(trigger.index)}" data-type="int"><input type="hidden" name="pageDigest" value="${digest}">${rows}<div class="te-bar" role="status" data-gets-bar hidden><span class="te-bar__t"><b data-gets-count data-one="${W.barOne}" data-many="${W.barMany}"></b> <span data-gets-words></span><small>${W.reloadDrops}</small></span><span class="te-bar__a">${ui.btn({ type: "submit", label: "Preview the change", kind: "primary" })}<button class="btn" type="reset">Discard</button></span></div></fieldset><noscript><p class="muted">${W.noScript}</p></noscript></form>`
     : rows;
   return ui.card({ title: W.title, sub: `as a job of trigger ${trigger.index + 1} would start, from each host’s last doctor run`, body: html`${hosts}${say}${unlinked}${body}` });
 }

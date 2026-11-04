@@ -1126,6 +1126,7 @@ ${FIT_JS}
   var slot = document.getElementById(CONFIRM_SLOT_ID);
   var skeleton = slot ? slot.innerHTML : "";
   var slotOwner = null;
+  var slotConfirming = false;
   var slotForm = null;
   // The button that opened the slot and the card that asked (slotCard), where closing it gives the focus back, and how
   // to find that button again in the card once a swap has replaced it (slotFind, from formKey).
@@ -1522,7 +1523,9 @@ ${FIT_JS}
     slotDisable("[data-confirm]", true);
     slotDisable("[data-cancel]", true);
     var confirmStarted = Date.now();
+    slotConfirming = true;
     post("/api/act/" + slotAction + "/confirm", { ticket: ticket }, true).then(function (c) {
+      slotConfirming = false;
       if (mine !== slotGen) return;
       var b = c.body || {};
       if (c.ok) {
@@ -1556,6 +1559,7 @@ ${FIT_JS}
     }, function () {
       // No answer: the change may or may not have been made, and the ticket is spent either way, so this is said and
       // nothing is sent again.
+      slotConfirming = false;
       if (mine === slotGen) slotSays(CONFIRM_NO_ANSWER);
     });
   }
@@ -1895,7 +1899,9 @@ ${FIT_JS}
     for (var j = 0; j < adds.length; j++) {
       var into = listOf(adds[j].getAttribute("data-gets-add"));
       var typed = adds[j].value.split(/[\\s,]+/);
+      var ticked = into.now.length;
       for (var k = 0; k < typed.length; k++) if (typed[k] !== "" && into.now.indexOf(typed[k]) < 0) into.now.push(typed[k]);
+      into.added = into.now.length > ticked;
     }
     return lists;
   }
@@ -1917,9 +1923,12 @@ ${FIT_JS}
   // The bar's count and words, each from the server's own text on the control that changed (\`data-gets-*\`), through \`textContent\`.
   function getsRefresh(form) {
     var words = [];
+    var lists = getsLists(form);
     var boxes = form.querySelectorAll("input[data-gets-word]");
     for (var i = 0; i < boxes.length; i++) {
-      if (boxes[i].value.trim() !== boxes[i].defaultValue.trim()) words.push(boxes[i].getAttribute("data-gets-word"));
+      // An add box is a change only for a name not on its list already: the same name again is what the file says.
+      var addsTo = boxes[i].getAttribute("data-gets-add");
+      if (addsTo ? lists[addsTo].added : boxes[i].value.trim() !== boxes[i].defaultValue.trim()) words.push(boxes[i].getAttribute("data-gets-word"));
     }
     var ticks = form.querySelectorAll("[data-gets-list], [data-gets-flag]");
     for (var t = 0; t < ticks.length; t++) {
@@ -1940,19 +1949,25 @@ ${FIT_JS}
     if (said) said.textContent = words.length > 0 ? words.join(", ") + "." : "";
   }
   var GETS_FORM = 'form[data-structured="trigger-gets"]';
+  // A preview is of the form as it stood. After any move its Confirm would write what the page no longer shows, or drop what it does, under a
+  // banner that names the row and neither, so it goes. A Confirm already sent stays: only its answer can say what happened.
+  function getsPreviewGone(form) {
+    if (slot && !slot.hidden && !slotConfirming && slotOwner === form.closest("section[data-panel]")) closeSlot();
+  }
   function getsMoved(ev) {
     var form = ev.target && typeof ev.target.closest === "function" ? ev.target.closest(GETS_FORM) : null;
-    if (form) getsRefresh(form);
+    if (!form) return;
+    getsRefresh(form);
+    getsPreviewGone(form);
   }
   document.addEventListener("input", getsMoved);
   document.addEventListener("change", getsMoved);
-  // Discard is the form's own reset. The browser resets its controls after this event, so the bar is read a tick later. A preview of what
-  // was just discarded closes with it: a Confirm left open would write a change the page no longer shows.
+  // Discard is the form's own reset. The browser resets its controls after this event, so the bar is read a tick later.
   document.addEventListener("reset", function (ev) {
     var form = ev.target;
     if (!form || typeof form.matches !== "function" || !form.matches(GETS_FORM)) return;
     later(function () { getsRefresh(form); }, 0);
-    if (slot && !slot.hidden && slotOwner === form.closest("section[data-panel]")) closeSlot();
+    getsPreviewGone(form);
   });
   function bodyOf(form) {
     if (typeof form.getAttribute === "function" && form.getAttribute("data-structured") === "trigger-gets") return getsBody(form);

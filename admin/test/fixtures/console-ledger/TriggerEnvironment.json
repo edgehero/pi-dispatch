@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "730d2378d672f0f8a6871bd391d17330374856c66eda9dd18626576255ef9bfb",
+  "words": "56d9e2822200af92831425cd63725dea2aa7277a23cb8040e773bcafdb18faa7",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -242,6 +242,31 @@
         "panels/trigger-gets.operator"
       ],
       "shows": "data-structured=\"trigger-gets\""
+    },
+    {
+      "el": "Any move of a control closes a preview it no longer matches",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/script.mjs#CONSOLE_SCRIPT",
+      "holds": "getsPreviewGone"
+    },
+    {
+      "el": "Nothing to preview, and a refusal under no field",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/script.mjs#CONSOLE_SCRIPT",
+      "holds": "lists[addsTo].added"
+    },
+    {
+      "el": "A Confirm elsewhere on the page drops what the card holds, and says so first",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
+      "golden": [
+        "panels/trigger-gets-changed.operator"
+      ],
+      "shows": "A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get."
     },
     {
       "el": "A viewer reads the same rows with no controls",

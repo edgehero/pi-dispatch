@@ -793,8 +793,8 @@ const PROBLEM_ROW = Object.freeze({ "no-flow": "Skills", "extension-failed": "Ex
  * which is not what the next job gets, so a surface says whose it is. `newest` is the last run it started, `{ id, said }`, `said` this
  * file's own sentence of what its record says. `quoted` is the newest run able to say what it loaded (`saysWhatLoaded`), which may be
  * older: a refusal before its container or a record an older release wrote has nothing to put under a row, and the page says why it
- * quotes another. `{ id, host, record, rows, problems, sources, tools, jobTools }`, `rows` being `loadedRows` by label and `problems` the
- * top line's and `also`'s by the same labels. A record a newer release wrote is its core alone, and says so.
+ * quotes another. `{ id, host, record, rows, problems, sources, tools, notes }`, `rows` being `loadedRows` by label, `problems` the top line's
+ * and `also`'s by the same labels, and `notes` what a surface must say of the list as a whole: that it was cut, or noted early. A record a newer release wrote is its core alone, and says so.
  */
 export function triggerLastRun(records, hostLoads = null) {
   const all = Array.isArray(records) ? records.filter((record) => record !== null && typeof record === "object") : [];
@@ -821,13 +821,13 @@ export function triggerLastRun(records, hostLoads = null) {
   }
   const overlay = sourcesOf(loaded, "overlay")[0];
   const tools = [
-    ...sourcesOf(loaded, "package").filter((row) => row.toolNames?.length > 0).map((row) => ({ from: row.name ?? "a staged package", names: [...row.toolNames] })),
-    ...(overlay?.namedTools ?? []).map((row) => ({ from: `${row.name}, ${facts.host ?? "this host"}’s overlay`, names: [...row.tools] })),
+    ...sourcesOf(loaded, "package").filter((row) => row.toolNames?.length > 0).map((row) => ({ kind: "package", from: row.name ?? "a staged package", names: [...row.toolNames] })),
+    ...(overlay?.namedTools ?? []).map((row) => ({ kind: "overlay", from: row.name, names: [...row.tools] })),
   ];
   const sources = [...sourcesOf(loaded, "package"), ...(overlay?.names ?? []).map((name) => ({ name, version: null, tools: overlay.namedTools?.find((row) => row.name === name)?.tools.length ?? 0, skills: 0, prompts: 0 }))];
   return {
     newest,
-    quoted: { id: runIdOf(record), host: facts.host, record, rows: Object.fromEntries(loadedRows(record, { past: true }).map((row) => [row.label, row])), problems, sources, tools, jobTools: [...(loaded.tools?.job ?? [])] },
+    quoted: { id: runIdOf(record), host: facts.host, record, rows: Object.fromEntries(loadedRows(record, { past: true }).map((row) => [row.label, row])), problems, sources, tools, notes: [...cutWords(loaded), ...(wentOn(record) && loaded.at !== "ready" ? [LOADED_WORDS.notedEarly] : [])] },
   };
 }
 
