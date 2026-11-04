@@ -36,6 +36,7 @@ import {
   spendChartsOf,
 } from "../src/insights-assembly.mjs";
 import { PAGE_CSS, pageCss } from "../src/console/page-css.mjs";
+import { valkeyEndpointTag } from "@edgehero/pi-dispatch/dollar-budget";
 import { SPEND_DRAW, spendFixture } from "./helpers/spend-goldens.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
 
@@ -805,6 +806,85 @@ test("estimated floors and real window charges retain separate labels and actual
   assert.match(dateCell(chart), /~≥\$7\.00/);
   assert.match(chart, /sp-bar--estimated/);
   assert.match(chart, /<li>2026-10-29: ~≥\$7\.00 settled/);
+});
+
+// Issue #807: a run that reserved at 23:50 UTC and ended at 00:10 has its money in yesterday's day counter for the
+// whole of today, so by its end time alone it pushed today's remainder below zero all day.
+test("a run that reserved before midnight UTC draws no counter reconciliation mismatch on today's Spend page", async () => {
+  const valkeyUrl = "redis://127.0.0.1:6379";
+  const reservedIn = (day) => ({
+    day,
+    week: "2026-10-26",
+    month: "2026-10",
+    valkey: valkeyEndpointTag(valkeyUrl),
+  });
+  const ran = (jobId, startedAt, endedAt, settledMicros, day) => ({
+    jobId,
+    startedAt,
+    endedAt,
+    outcome: "completed",
+    tokens: { cost: settledMicros / 1_000_000, metered: true },
+    dollars: {
+      reservedMicros: 5_000_000,
+      settledMicros,
+      basis: "metered",
+      reservedIn: reservedIn(day),
+    },
+  });
+  const records = [
+    ran(
+      "crossing",
+      "2026-10-28T23:50:00.000Z",
+      "2026-10-29T00:10:00.000Z",
+      3_000_000,
+      "2026-10-28",
+    ),
+    ran(
+      "morning",
+      "2026-10-29T09:00:00.000Z",
+      "2026-10-29T09:20:00.000Z",
+      1_000_000,
+      "2026-10-29",
+    ),
+  ];
+  const insights = await assembleInsightsView({ valkeyUrl }, "7d", {
+    nowMs: NOW,
+    pricing: {
+      listPricedModels: () => [],
+      piAiVersion: () => "test",
+      getPricedModel: () => null,
+      isZeroRated: () => false,
+    },
+    envFn: () => ({}),
+    reads: {
+      projects: () => ({ projects: [] }),
+      costs: () => ({ fold: null, records }),
+      budget: async () => ({
+        dollars: {
+          windows: [
+            {
+              ledger: "deployment",
+              name: "Deployment",
+              window: "day",
+              counterMicros: 1_000_000,
+              capMicros: 20_000_000,
+            },
+          ],
+        },
+      }),
+      hosts: async () => ({ hosts: [] }),
+      scan: () => records,
+      subscriptions: () => ({ subscriptions: [] }),
+      settings: () => ({ overlay: {} }),
+    },
+  });
+  const today = String(spendToday(moneyView(insights)));
+  assert.match(settledCell(today), /\$1\.00/);
+  assert.match(
+    today,
+    /<dt>Counter beyond recorded window charges and holds<\/dt>\s*<dd>\$0\.00<\/dd>/,
+  );
+  assert.doesNotMatch(today, /reconciliation mismatch/i);
 });
 
 test("a newer duplicate references the applied row and never claims that its duplicate event put the plan in force", () => {

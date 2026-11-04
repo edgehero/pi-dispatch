@@ -4,6 +4,7 @@ import { foldCosts } from "../../src/costs.mjs";
 import { buildGraphModel } from "../../src/graph-model.mjs";
 import { capacityViewOf, spendSummaryOf, spendChartsOf } from "../../src/insights-assembly.mjs";
 import { computeCapacity } from "@edgehero/pi-dispatch/capacity";
+import { deploymentWindowsAt, valkeyEndpointTag } from "@edgehero/pi-dispatch/dollar-budget";
 import { loadPageData, pagePanels, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 
 // Real renderers and pure data folds, with the same frozen clock as the deployment goldens. No network or files.
@@ -55,6 +56,21 @@ function recordMoneyState(kind) {
   const currentFold = foldCosts({ records: rs, subscriptions: [], pricing, nowMs: NOW, piAiPin: "fixture", sinceMs: NOW - 7 * DAY });
   return { ...p, budget, fold: currentFold, recent24h: currentFold, spend: { ...spendSummaryOf({ records: rs, hosts: [], budget, nowMs: NOW, jobCapMicros: 2000000 }), ...spendChartsOf({ records: rs, sinceMs: NOW - 7 * DAY, nowMs: NOW, jobCapMicros: 2000000, heldMicros: 0 }) } };
 }
+// Issue #807: a run that reserved at 23:50 UTC and ended at 00:10. Its money is in yesterday's day counter (and this
+// week's), so the fixture's day counter is unchanged and its week counter holds it; its record says so in `reservedIn`,
+// stamped with the tag of the Valkey the page reads the counters from.
+function midnightRunState() {
+  const p = spendFixture();
+  const base = records()[0];
+  const dayStart = Math.floor(NOW / DAY) * DAY;
+  const reservedAt = deploymentWindowsAt(dayStart - 10 * 60_000);
+  const valkeyTag = valkeyEndpointTag("redis://127.0.0.1:6379");
+  const crossing = { ...base, jobId: "gh-spend-midnight", startedAt: iso(dayStart - 10 * 60_000), endedAt: iso(dayStart + 10 * 60_000), queuedAt: iso(dayStart - 11 * 60_000), tokens: { ...base.tokens, cost: .4 }, dollars: { settledMicros: 400000, reservedIn: { day: reservedAt.day.bucket, week: reservedAt.week.bucket, month: reservedAt.month.bucket, valkey: valkeyTag } }, usage: { ...base.usage, models: [{ ...base.usage.models[0], cost: .4 }] } };
+  const rs = [...records(), crossing];
+  const budget = { ...p.budget, dollars: { windows: p.budget.dollars.windows.map((w) => w.window === "week" ? { ...w, counterMicros: w.counterMicros + 400000 } : w) } };
+  const fold = foldCosts({ records: rs, subscriptions: [], pricing, nowMs: NOW, piAiPin: "fixture", sinceMs: NOW - 7 * DAY });
+  return { ...p, budget, fold, recent24h: fold, spend: { ...spendSummaryOf({ records: rs, hosts: p.hosts, budget, nowMs: NOW, jobCapMicros: 2000000, valkeyTag }), ...spendChartsOf({ records: rs, sinceMs: NOW - 7 * DAY, nowMs: NOW, jobCapMicros: 2000000, heldMicros: 2000000 }) } };
+}
 const states = {
   "spend-no-dollar-window.viewer": () => drawSpend("insights", { role: "viewer", payload: recordMoneyState("paid") }),
   "spend-partial-money.viewer": () => drawSpend("insights", { role: "viewer", payload: recordMoneyState("partial") }),
@@ -66,6 +82,7 @@ const states = {
   "spend-populated.viewer": () => drawSpend("insights", { role: "viewer", query: "range=7d&paths=full" }),
   "spend-costs-unreadable.viewer": () => drawSpend("insights", { role: "viewer", payload: { ...spendFixture(), fold: null, spend: { ...spendFixture().spend, daily: null } } }),
   "spend-unknown-holds.operator": () => { const p = spendFixture(); p.spend.today.unknownHosts = ["old-worker"]; return drawSpend("insights", { payload: p }); },
+  "spend-midnight-run.operator": () => drawSpend("insights", { payload: midnightRunState() }),
   "spend-counters-unreadable.operator": () => drawSpend("insights", { payload: { ...spendFixture(), budget: { unreachable: "unavailable", settingsInvalid: true } } }),
   "spend-split.operator": () => drawSpend("insights-budget-split"),
   "spend-split.viewer": () => drawSpend("insights-budget-split", { role: "viewer" }),
