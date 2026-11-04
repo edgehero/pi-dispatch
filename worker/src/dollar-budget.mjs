@@ -441,7 +441,9 @@ export function deploymentWindowsAt(now) {
  * literal's brackets dropped, and a missing host, port or database is ioredis's and `parseConnection`'s default
  * (127.0.0.1, 6379, 0). Null for anything else (a URL that does not parse, a database that is not a number). A tag that
  * differs where the endpoint is the same (`localhost` against `127.0.0.1` on a host that pins nothing) only leaves
- * records out of the floor, which can miss a reset and never invents one.
+ * records out of the floor, which can miss a reset and never invents one. The console's Spend page tags the
+ * VALKEY_URL it reads the counters at as it holds it: its client pins the address on connect but never rewrites the
+ * URL. There a tag that differs only leaves a record counted by its end time, as the page counted before (issue #807).
  */
 export function valkeyEndpointTag(endpoint) {
 	let host;
@@ -525,7 +527,8 @@ function calendarDate(text) {
  * calendar date, `week` a real date that is a Monday, `month` a real month, at least one of them, and `valkey` a tag
  * (`VALKEY_TAG_RE`). Anything else, a member of the wrong shape included, is null as a whole: a record that carries one
  * no release wrote says nothing trustworthy about where its money is. Only OWN keys are read, so a value inherited
- * through the prototype is no member. The one rule the record writer and doctor's sum read it by.
+ * through the prototype is no member. The one rule the record writer, doctor's sum and the console's Spend page
+ * (admin `spendSummaryOf`, issue #807) read it by.
  */
 export function reservedInOf(value) {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;

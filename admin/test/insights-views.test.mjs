@@ -4,6 +4,7 @@ import { assembleInsightsView, heldMoneyOf, spendSummaryOf, spendChartsOf, recor
 import { costsSinceMs, whatIfRuns } from "../src/costs.mjs";
 import { makeWhatIfReader } from "../src/console/whatif.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { valkeyEndpointTag } from "@edgehero/pi-dispatch/dollar-budget";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
 
@@ -283,6 +284,74 @@ test("the spend view counts a newer pi-dispatch's records of the selected projec
   assert.equal((await spendOf("other")).newerSkipped, 1);
   assert.equal((await spendOf(null)).newerSkipped, 4, "no project: every one up to now");
   assert.equal(Object.hasOwn(await spendOf("absent"), "newerSkipped"), false, "a project with none has no count");
+});
+
+// Issue #807: today's dollar counter holds a run's money in the UTC day it reserved in. The page reads the counter at
+// `paths.valkeyUrl`, so a record stamped with that URL's tag says which day counter has its money.
+const VALKEY_URL = "redis://127.0.0.1:6379";
+const TAG = valkeyEndpointTag(VALKEY_URL);
+const AFTER_MIDNIGHT = Date.parse("2026-10-29T00:15:00Z");
+const reservedIn = (over = {}) => ({ day: "2026-10-28", week: "2026-10-26", month: "2026-10", valkey: TAG, ...over });
+// Reserved at 23:50 UTC, ended at 00:10: by its end time it is today's, by its reservation yesterday's.
+const crossing = (reserved = reservedIn()) => run("crossing", { startedAt: "2026-10-28T23:50:00.000Z", endedAt: "2026-10-29T00:10:00.000Z", dollars: { reservedMicros: 5_000_000, settledMicros: 3_000_000, basis: "metered", ...(reserved ? { reservedIn: reserved } : {}) } });
+const reservedToday = run("reserved-today", { startedAt: "2026-10-29T00:01:00.000Z", endedAt: "2026-10-29T00:05:00.000Z", dollars: { reservedMicros: 2_000_000, settledMicros: 1_000_000, basis: "metered", reservedIn: reservedIn({ day: "2026-10-29" }) } });
+const deploymentDay = (counterMicros) => ({ ledger: "deployment", window: "day", counterMicros, capMicros: 20_000_000 });
+async function midnightToday(records, { windows = [deploymentDay(1_000_000)], project = null, paths = { valkeyUrl: VALKEY_URL } } = {}) {
+  const { reads } = readsFixture();
+  reads.scan = () => records;
+  reads.budget = async () => ({ dollars: { windows } });
+  return (await assembleInsightsView(paths, "7d", { project, pricing, nowMs: AFTER_MIDNIGHT, envFn: () => ({}), reads })).spend.today;
+}
+
+test("a run reserved before midnight UTC and ended after it is left out of today's records, so it raises no mismatch", async () => {
+  const today = await midnightToday([crossing(), reservedToday]);
+  assert.equal(today.settledMicros, 1_000_000, "only the run that reserved today");
+  assert.equal(today.ledgerMicros, 1_000_000);
+  assert.equal(today.unattributedMicros, 0);
+  assert.equal(today.reconciliationMismatch, false);
+});
+
+test("a run whose record names today's day counts today, but never past now", async () => {
+  const today = await midnightToday([crossing(reservedIn({ day: "2026-10-29" })), reservedToday], { windows: [deploymentDay(4_000_000)] });
+  assert.equal(today.settledMicros, 4_000_000);
+  assert.equal(today.unattributedMicros, 0);
+  const later = run("later", { endedAt: new Date(AFTER_MIDNIGHT + 60_000).toISOString(), dollars: { settledMicros: 9_000_000, basis: "metered", reservedIn: reservedIn({ day: "2026-10-29" }) } });
+  assert.equal((await midnightToday([reservedToday, later])).settledMicros, 1_000_000, "a record that ends after now is in no fold");
+});
+
+for (const [name, record] of [
+  ["its reservedIn names another Valkey", crossing(reservedIn({ valkey: valkeyEndpointTag("redis://10.0.0.5:6379") }))],
+  ["its reservedIn names no day", crossing({ week: "2026-10-26", month: "2026-10", valkey: TAG })],
+  ["its reservedIn is malformed", crossing(reservedIn({ week: "2026-10-27" }))],
+  ["it was written before reservedIn", crossing(null)],
+]) test(`a midnight run keeps the end-time rule when ${name}`, async () => {
+  const today = await midnightToday([record, reservedToday]);
+  assert.equal(today.settledMicros, 4_000_000, "both runs ended today");
+  assert.equal(today.unattributedMicros, -3_000_000);
+  assert.equal(today.reconciliationMismatch, true);
+});
+
+test("a project's own day window and a deployment without a day counter keep the end-time rule", async () => {
+  const project = await midnightToday([crossing(), reservedToday], { project: "site", windows: [deploymentDay(1_000_000), { ledger: "scope", name: "project:site", window: "day", counterMicros: 4_000_000, capMicros: 20_000_000 }] });
+  assert.equal(project.basis, "project:site");
+  assert.equal(project.settledMicros, 4_000_000, "reservedIn names deployment windows only");
+  assert.equal(project.reconciliationMismatch, false);
+  const uncapped = await midnightToday([crossing(), reservedToday], { windows: [] });
+  assert.equal(uncapped.counterConfigured, false);
+  assert.equal(uncapped.settledMicros, 4_000_000, "nothing is reconciled without a counter");
+  assert.equal(uncapped.usedMicros, 4_000_000);
+});
+
+test("a counter that could not be read, or no Valkey URL to tag, keeps the end-time rule", async () => {
+  const unread = await midnightToday([crossing(), reservedToday], { windows: [deploymentDay(null)] });
+  assert.equal(unread.usedMicros, null);
+  assert.equal(unread.settledMicros, 4_000_000, "nothing is reconciled, so the settled amount stays the overview's");
+  assert.equal(unread.reconciliationMismatch, false);
+  for (const paths of [{}, { valkeyUrl: "redis://127.0.0.1:6379/x" }]) {
+    const untagged = await midnightToday([crossing(), reservedToday], { paths });
+    assert.equal(untagged.settledMicros, 4_000_000, `no tag from ${JSON.stringify(paths)} matches the record's`);
+    assert.equal(untagged.reconciliationMismatch, true);
+  }
 });
 
 

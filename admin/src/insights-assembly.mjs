@@ -43,7 +43,7 @@ import { INSIGHTS_SPLIT_REFUSALS } from "./insights-html.mjs";
 import { costsSinceMs, foldCosts, foldTriggerCosts, recordInProject, recordInRepo, matchesGlob, meteredRunMicros, repoKeyOf, projectKeyOf, refusedBeforeSpend } from "./costs.mjs";
 import { sizeBits, outsideEdit, splitTotalMicros } from "./render.mjs";
 import { escapeInterpreted } from "./panel.mjs";
-import { meteredMicros } from "@edgehero/pi-dispatch/dollar-budget";
+import { deploymentWindowsAt, meteredMicros, reservedInOf, valkeyEndpointTag } from "@edgehero/pi-dispatch/dollar-budget";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { SUGGEST_WINDOW_DAYS } from "@edgehero/pi-dispatch/size-suggest";
 import { coverageNotes, historyNotes, hostCaveats, hostFacts, noRunText, notSharedWhy } from "@edgehero/pi-dispatch/capacity-cli";
@@ -597,8 +597,26 @@ function finishSpend(sum) {
   return sum;
 }
 
-/** The named windows stay independent of the chart filter: today's counter is always today's counter. */
-export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, jobCapMicros = null, subscriptions = [], pricing }) {
+/**
+ * The named windows stay independent of the chart filter: today's counter is always today's counter.
+ *
+ * Which records are today's (issue #807). The deployment's day counter holds a run's money in the UTC day the run
+ * RESERVED in, and a run can reserve before midnight and end after it. By its end time alone it is in today's records
+ * while its money is in yesterday's counter, so the remainder drops by its amount and, below zero, the page says
+ * "reconciliation mismatch" on a deployment where nothing is wrong. So where the remainder is judged against the
+ * deployment's own day counter (the day's basis is the deployment's and its day counter is configured and read) and `valkeyTag`
+ * names the Valkey that counter is read from (`valkeyEndpointTag`), a record whose `dollars.reservedIn` (`reservedInOf`)
+ * names a day and that Valkey is today's exactly when that day is today's bucket (`deploymentWindowsAt`, the worker's
+ * own key rule), whenever it ended. Every other record keeps the end-time rule (`recordInstant`): one written before
+ * `reservedIn`; one with no day in it (its day counter held less than its settled amount, or no deployment day window
+ * held it); one tagged with another Valkey, whose day is about another counter; a malformed one; and every record under
+ * a project's own day window, which `reservedIn` never names. Without a counter, or with one that could not be read,
+ * nothing is reconciled, and the records' "used today" and settled amount keep agreeing with the overview's settled today. Holds already count by the day they reserved in
+ * (`heldMoneyOf`), so both sides of the remainder pick the day the same way. `recordInstant <= nowMs` still bounds every
+ * record, as every fold here cuts. A tag that differs where the endpoint is the same (a worker that pinned `localhost`
+ * to `127.0.0.1`) only leaves a record on the end-time rule, which is how the page counted before.
+ */
+export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, jobCapMicros = null, subscriptions = [], pricing, valkeyTag = null }) {
   const rows = budget?.dollars?.windows ?? [];
   const scoped = project ? rows.filter((r) => r.ledger === "scope" && r.name === `project:${project}`) : [];
   const deployment = rows.filter((r) => r.ledger === "deployment");
@@ -609,13 +627,21 @@ export function spendSummaryOf({ records, hosts, budget, project = null, nowMs, 
   };
   // A newer release's record carries no money this build can read (issue #761); `newerSkipped` counts it.
   const { records: all, newerSkipped } = readableRecords(records);
-  const dayStart = Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS;
-  const settled = spendAccumulator(Array.isArray(records));
-  for (const r of all) if (recordInstant(r) >= dayStart && recordInstant(r) <= nowMs) addRecordSpend(settled, r, { subscriptions, pricing });
-  finishSpend(settled);
-  const held = heldMoneyOf(hosts, { nowMs, project: scoped.some((r) => r.window === "day") ? project : null });
   const today = window("day");
   const counterConfigured = rows.some((r) => r.window === "day" && (r.ledger === "deployment" || r.ledger === "scope" && r.name === `project:${project}`));
+  const dayStart = Math.floor(nowMs / INSIGHTS_DAY_MS) * INSIGHTS_DAY_MS;
+  const reserveDay = today.basis === "deployment" && counterConfigured && today.usedMicros !== null ? deploymentWindowsAt(nowMs).day.bucket : null;
+  const isToday = (r) => {
+    const at = recordInstant(r);
+    if (!(at <= nowMs)) return false;
+    // A null `valkeyTag` (no URL, or one that does not parse) matches no record: `reservedInOf` keeps only a real tag.
+    const reserved = reserveDay === null ? null : reservedInOf(r?.dollars?.reservedIn);
+    return reserved?.day !== undefined && reserved.valkey === valkeyTag ? reserved.day === reserveDay : at >= dayStart;
+  };
+  const settled = spendAccumulator(Array.isArray(records));
+  for (const r of all) if (isToday(r)) addRecordSpend(settled, r, { subscriptions, pricing });
+  finishSpend(settled);
+  const held = heldMoneyOf(hosts, { nowMs, project: scoped.some((r) => r.window === "day") ? project : null });
   const remainder = today.usedMicros !== null && held.heldMicros !== null && settled.ledgerMicros !== null ? today.usedMicros - settled.ledgerMicros - held.heldMicros : null;
   if (!counterConfigured) today.usedMicros = settled.settledMicros !== null && held.heldMicros !== null && safeAmount(settled.settledMicros + held.heldMicros) ? settled.settledMicros + held.heldMicros : null;
   const micros = all.filter((r) => recordInstant(r) >= nowMs - INSIGHTS_DAY_MS && recordInstant(r) <= nowMs).map((r) => meteredRunMicros(r, { subscriptions, ...(pricing ? { pricing } : {}) })).filter((n) => n !== null);
@@ -724,7 +750,11 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   // deployment-wide; otherwise settled and held would describe different populations beside the same counter.
   const hasProjectWindow = project && (out.budget?.dollars?.windows ?? []).some((r) => r.ledger === "scope" && r.name === `project:${project}` && r.window === "day");
   const all = Array.isArray(scanned) ? inProject(scanned, hasProjectWindow ? project : null) : null;
-  out.spend = spendSummaryOf({ records: all, hosts: out.hosts, budget: out.budget, project, nowMs, jobCapMicros, subscriptions, pricing });
+  // The tag of the URL the counters above were read from (`assembleBudgetView` reads them at `paths.valkeyUrl`), the
+  // VALKEY_URL as the console holds it: its client pins the address on connect but never rewrites the URL, where the
+  // worker on Linux tags the URL its startup check rewrote. Null for a missing or unparsable URL, which leaves every
+  // record on the end-time rule.
+  out.spend = spendSummaryOf({ records: all, hosts: out.hosts, budget: out.budget, project, nowMs, jobCapMicros, subscriptions, pricing, valkeyTag: valkeyEndpointTag(paths.valkeyUrl) });
   // The selected project's newer records up to now, as `dollars.newerSkipped` counts them, whichever population the
   // headline falls back to: the charts and the recent fold beside it follow the project filter.
   const newerSkipped = Array.isArray(scannedAll) ? newerInScope(scannedAll, { nowMs, project: project || null }) : 0;

@@ -426,6 +426,14 @@ What can hide a reset, though never invent one (each of these only lowers the su
 Doctor staying quiet is therefore no proof that nothing was reset. A counter you lowered on purpose keeps the warning
 until its window ends. [backup.md](backup.md#what-the-valkey-volume-holds) lists every counter a reset takes.
 
+The console's Spend page reads `reservedIn` too. Where the deployment has its own daily dollar cap, its counter was
+read, and the page is not on a project's own day window, today's settled amount counts a run on the day its record
+says it reserved in, so a run that crossed midnight UTC is not set against today's counter
+([insights](insights.md#settled-held-and-caps)). The page hashes the console's own `VALKEY_URL` as it is written. On
+Linux the worker hashes the address it pins a local Valkey to, so where `VALKEY_URL` names that Valkey by a host name
+(`localhost`), or a worker names it by another host or address than the console does, the records keep the end-time
+rule, and a run that crosses midnight can still show a reconciliation mismatch.
+
 ### What the caps do not cover
 
 These are known gaps. Most are named in the specs ([DES](../specs/design.md#des-dollar-reserve-and-settle)); #544
