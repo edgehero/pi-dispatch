@@ -16,9 +16,11 @@
  * loader cannot, before anything is written, and the funnel's own parser still has the last word on the file itself: the
  * preview dry-runs `writeTriggers` and refuses in its words.
  *
- * ONE CHANGE, ONE WAY BACK. Keys that are not sent stay byte-identical in the file; `null` deletes a key. An Undo is an edit
- * like any other, previewed the same way, and puts back the bytes of the keys it touched: the old value as the file held it,
- * `null` for a key the edit added, and `keyOrder` where putting a deleted key back would otherwise leave it at the end.
+ * ONE CHANGE, ONE WAY BACK. Keys that are not sent keep their values and their places; `null` deletes a key. An Undo is an edit
+ * like any other, previewed the same way, and puts back the keys it touched: the old value as JSON reads it from the file,
+ * `null` for a key the edit added, and `keyOrder` where putting a deleted key back would otherwise leave it at the end. In a
+ * file the writer wrote those are the same bytes. In one it did not, the first write puts the whole file in its form, as every
+ * writer of this file does: its layout, a `"version": 1` written as nothing, a number as JSON reads it. No Undo restores those.
  */
 import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";

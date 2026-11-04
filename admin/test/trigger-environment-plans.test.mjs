@@ -381,15 +381,24 @@ test("an Undo of an edit that stamped the file's version takes the stamp back wi
   assert.equal(f.read(), before);
 });
 
-test("a file not in the writer's own shape comes out in it, as every writer of this file leaves it, and its values stay", async () => {
+test("a file the writer did not write comes out in its form, as every writer of this file leaves it, and no Undo restores that", async () => {
   const f = fixture();
-  const compact = JSON.stringify({ triggers: [comment({ steer: true })] });
-  nodeFs.writeFileSync(f.paths.triggersPath, compact);
-  const out = await f.service.preview({ index: 0, pageDigest: triggerEntryDigest(JSON.parse(compact).triggers[0]), packages: false }, operator);
-  assert.equal(out.beforeText, compact);
+  // A layout of its own, a `version` of 1, and a number written with its zeros: each legal, and none of them what the writer writes.
+  const hand = `{"version": 1, "triggers": [{"on": {"type": "comment", "phrase": "@pi"}, "run": {"kind": "github", "flow": "fix", "steer": true, "maxCostUsd": 2.50}}]}`;
+  nodeFs.writeFileSync(f.paths.triggersPath, hand);
+  const seen = comment({ steer: true, maxCostUsd: 2.5 });
+  const out = await f.service.preview({ index: 0, pageDigest: triggerEntryDigest(JSON.parse(hand).triggers[0]), packages: false }, operator);
+  assert.equal(out.beforeText, hand);
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
-  assert.equal(f.read(), text({ triggers: [comment({ steer: true, packages: false })] }));
-  const again = await f.service.preview({ index: 0, pageDigest: f.digest(0), packages: false }, operator);
+  const written = text({ triggers: [{ on: seen.on, run: { ...seen.run, packages: false } }] });
+  assert.equal(f.read(), written, "no version key, 2.5, and the writer's layout");
+  assert.ok(!f.read().includes("version") && f.read().includes("2.5") && !f.read().includes("2.50"));
+  // The Undo puts back what it touched, and only that: the file does not become what it was.
+  const back = await f.service.preview(out.plan.inverse.body, operator);
+  assert.deepEqual(await f.service.apply(back, operator), { ok: true });
+  assert.equal(f.read(), text({ triggers: [seen] }));
+  assert.notEqual(f.read(), hand);
+  const again = await f.service.preview({ index: 0, pageDigest: f.digest(0), excludeTools: null }, operator);
   assert.deepEqual(again, { unchanged: "trigger row 1 already says this." }, "formatting alone is not a change, so it asks no Confirm");
 });
 
