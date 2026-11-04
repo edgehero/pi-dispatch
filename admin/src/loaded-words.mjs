@@ -397,6 +397,13 @@ function cutWords(loaded) {
 }
 
 /**
+ * The names in `run.excludeExtensionTools` this run's record says took a tool out. `leftOut` holds what the job asked, so a name that matched nothing
+ * is on it, and a misspelled one keeps the real tool active: `tools.unmatched` says which. The runner asks only at `ready`, so a record from before that
+ * cannot tell a tool removed from a name that matched nothing, and says neither. REJECTED: reading the asked list as what came off, which said "deploy_previw removed", in green.
+ */
+const extensionToolsRemoved = (loaded) => (loaded.at === "ready" ? (loaded.leftOut?.extensionTools ?? []).filter((name) => !(loaded.tools?.unmatched ?? []).includes(name)) : []);
+
+/**
  * What the trigger and the host left out on purpose, each its own sentence. Green: what a trigger turns off is not a
  * problem, so it is said as chosen and never as missing.
  */
@@ -404,7 +411,7 @@ function leftOutLines(loaded) {
   const left = loaded.leftOut;
   if (left === null || left === undefined) return [];
   const lines = [];
-  const names = [...left.tools.map(toolWord), ...(left.extensionTools ?? []), ...(left.extensions ?? [])];
+  const names = [...left.tools.map(toolWord), ...extensionToolsRemoved(loaded), ...(left.extensions ?? [])];
   const asked = [...(names.length > 0 ? [listed(names)] : []), ...(left.packages ? ["the staged packages"] : [])];
   if (asked.length > 0) lines.push({ bold: "Left out, as it asks:", rest: `${commaAnd(asked)}.` });
   // Neither is a thing that went wrong in the run: a name on no host's list loads nothing, and a tool that matched nothing is not there to remove. Each is the
@@ -701,9 +708,11 @@ function toolsRow(loaded, ran) {
     fromExtensions > 0 ? `${fromExtensions} from the extensions` : null,
     Array.isArray(loaded.tools.job) && loaded.tools.job.length > 0 ? `${listed(loaded.tools.job)}, the job’s own` : null,
   ].filter(Boolean);
-  const removing = [...(loaded.leftOut?.tools ?? []).map(toolWord), ...(loaded.leftOut?.extensionTools ?? [])];
-  const removed = removing.length > 0 ? `${listed(removing)} removed` : "none removed";
-  return row(`${loaded.tools.active} active`, said.length > 0 ? `${commaAnd(said)}; ${removed}` : removed);
+  const removing = [...(loaded.leftOut?.tools ?? []).map(toolWord), ...extensionToolsRemoved(loaded)];
+  // "None removed" is a claim too, and a record from before `ready` cannot make it of a name it holds.
+  const cannotTell = loaded.at !== "ready" && (loaded.leftOut?.extensionTools?.length ?? 0) > 0;
+  const more = [said.length > 0 ? commaAnd(said) : null, removing.length > 0 ? `${listed(removing)} removed` : cannotTell ? null : "none removed", loaded.tools.unmatched?.length > 0 ? `${listed(loaded.tools.unmatched)} matched nothing` : null].filter(Boolean);
+  return row(`${loaded.tools.active} active`, more.join("; "));
 }
 
 /**
@@ -779,7 +788,7 @@ export function loadedFold(record) {
   if (repositoryTools > 0) add("Tools", String(repositoryTools), "", `the repository’s extensions; ${LOADED_WORDS.noRepositoryNames}`);
   for (const name of loaded.tools?.job ?? []) add("Tools", code(name), "", name === "report_progress" ? `the job’s own, because ${facts.subject} sets run.progress` : "the job’s own");
   for (const name of loaded.leftOut?.tools ?? []) add("Left out", code(name), "", `${facts.subject}’s run.excludeTools`);
-  for (const name of loaded.leftOut?.extensionTools ?? []) add("Left out", code(name), "", `${facts.subject}’s run.excludeExtensionTools`);
+  for (const name of extensionToolsRemoved(loaded)) add("Left out", code(name), "", `${facts.subject}’s run.excludeExtensionTools`);
   for (const name of loaded.leftOut?.extensions ?? []) add("Left out", code(name), "", `${facts.subject}’s run.excludeExtensions`);
   for (const name of loaded.leftOut?.extensionsNotHere ?? []) add("Not on this host", code(name), "", `${facts.subject}’s run.excludeExtensions names it`);
   for (const name of loaded.tools?.unmatched ?? []) add("Matched nothing", code(name), "", `${facts.subject}’s run.excludeExtensionTools names it`);

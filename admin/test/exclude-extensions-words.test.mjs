@@ -35,12 +35,45 @@ test("left out by name is said as chosen, each kind by its own field, and nothin
 	assert.match(rowValues(record).join("\n"), /read; bash and lint_run removed/);
 });
 
-test("a name that matched nothing, on a job that ran, is said beside what it left out", async () => {
-	const record = await recordThroughPipeline({ exit: FINE, jobFields: { packages: false, excludeExtensionTools: ["typo_tool"] }, unmatched: [0], packages: [] });
-	const said = loadedVerdict(record);
-	assert.equal(said.state, "left-out");
-	assert.deepEqual([said.bold, said.rest], ["Left out, as it asks:", "typo_tool, and the staged packages."]);
-	assert.deepEqual(said.then, [{ bold: "Named to remove, and no extension had registered it:", rest: "typo_tool." }]);
+const toolsLine = (record) => loadedRows(record).find((row) => row.label === "Tools").more;
+const NOTHING_MATCHED = { bold: "Named to remove, and no extension had registered it:", rest: "typo_tool." };
+
+test("a name that matched nothing took nothing out: never left out, never removed, and said as what it was, on each shape that reaches it", async () => {
+	const unmatched = (jobFields, over = {}) => recordThroughPipeline({ exit: FINE, jobFields, unmatched: [0], packages: [], ...over });
+	// Beside something it did leave out.
+	const beside = await unmatched({ packages: false, excludeExtensionTools: ["typo_tool"] });
+	assert.equal(loadedVerdict(beside).state, "left-out");
+	assert.deepEqual([loadedVerdict(beside).bold, loadedVerdict(beside).rest], ["Left out, as it asks:", "the staged packages."]);
+	assert.deepEqual(loadedVerdict(beside).then, [NOTHING_MATCHED]);
+	assert.equal(toolsLine(beside), "read; none removed; typo_tool matched nothing");
+	// With nothing else: no "Left out" at all, and the real tool of that name stays active.
+	const alone = await unmatched({ excludeExtensionTools: ["typo_tool"] });
+	assert.deepEqual([loadedVerdict(alone).bold, loadedVerdict(alone).rest, loadedVerdict(alone).then], [NOTHING_MATCHED.bold, NOTHING_MATCHED.rest, []]);
+	assert.doesNotMatch(JSON.stringify(loadedVerdict(alone)), /Left out/);
+	// One matched and one did not: each by what it did, on the line and the verdict and the fold.
+	const both = await recordThroughPipeline({ exit: FINE, jobFields: { excludeExtensionTools: ["typo_tool", "lint_run"], excludeTools: ["bash"] }, unmatched: [0], packages: [] });
+	assert.equal(toolsLine(both), "read; bash and lint_run removed; typo_tool matched nothing");
+	assert.equal(loadedVerdict(both).rest, "bash and lint_run.");
+	const fold = loadedFold(both).map((row) => [row.kind, JSON.stringify(row.name)]);
+	assert.ok(fold.some(([kind, name]) => kind === "Left out" && name.includes("lint_run")));
+	assert.ok(fold.some(([kind, name]) => kind === "Matched nothing" && name.includes("typo_tool")));
+	assert.ok(!fold.some(([kind, name]) => kind === "Left out" && name.includes("typo_tool")), "the fold says one thing of it");
+	// A stop for it reads the same on the row, under the verdict that says it stopped.
+	const stopped = await recordThroughPipeline({ exit: STOP, jobFields: { excludeExtensionTools: ["lint_run", "typo_tool"] }, unmatched: [1] });
+	assert.equal(toolsLine(stopped), "read; lint_run removed; typo_tool matched nothing");
+});
+
+test("a record from before the runner asked which names matched says neither, and no name it holds reads removed", async () => {
+	const early = await recordThroughPipeline({ exit: FINE, stages: ["start", "loader", "session"], jobFields: { excludeExtensionTools: ["lint_run"] }, packages: [] });
+	assert.equal(loadedOf(early).at, "session");
+	assert.equal(toolsLine(early), "read");
+	assert.doesNotMatch(JSON.stringify(loadedVerdict(early)), /lint_run/);
+	assert.ok(!loadedFold(early).some((row) => JSON.stringify(row.name).includes("lint_run")));
+	// pi's own are asked of the session, so those it can say at any stage.
+	const own = await recordThroughPipeline({ exit: FINE, stages: ["start", "loader", "session"], jobFields: { excludeTools: ["bash"], excludeExtensionTools: ["lint_run"] }, packages: [] });
+	assert.equal(toolsLine(own), "read; bash removed");
+	const none = await recordThroughPipeline({ exit: FINE, stages: ["start", "loader", "session"], packages: [] });
+	assert.equal(toolsLine(none), "read; none removed", "no name to be unsure of");
 });
 
 test("on an image that cannot leave either out, the run is refused and reads as refused, for free", async () => {
