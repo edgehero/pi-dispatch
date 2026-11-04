@@ -227,3 +227,26 @@ test("the specs' list of the card's fields is CARD_FIELDS, and the audit contrac
   assert.match(spec("interfaces.md"), new RegExp(`\`${ACTION}\` \\(issue #800, AMENDED 2026-11-04\\) writes \`${actionNamed(ACTION).kind}\``));
   assert.match(spec("requirements.md"), new RegExp(`\`${ACTION}\` is a free, person-only console action with no tool, audited as \`${actionNamed(ACTION).kind}\``));
 });
+
+test("the specs' list of tool-proof fields and the two counts they say are the code's", () => {
+  const spec = (name) => readFileSync(new URL(`../../specs/${name}`, import.meta.url), "utf8");
+  const requirements = spec("requirements.md");
+  const bullet = /\*\*Spend and reach on a trigger's page \(#800\)\*\*: ([^\n]*)/.exec(requirements)[1];
+  const named = [...bullet.slice(0, bullet.indexOf(". ")).matchAll(/`run\.([A-Za-z]+)`/g)].map((m) => m[1]);
+  const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(readFileSync(new URL("../src/write-plans.mjs", import.meta.url), "utf8"))[1];
+  const fields = [...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual([...named].sort(), [...fields].sort(), "the requirement names each tool-proof field");
+  const WORDS = { six: 6, nine: 9 };
+  const all = /A person changes all (\w+) on the trigger's page/.exec(bullet)[1];
+  assert.equal(WORDS[all], fields.length, "and counts them");
+  // What `dispatch_trigger_edit` may set, the row number aside: the action's fields as a tool can send them.
+  const editable = actionNamed("trigger-edit").fields.filter((key) => !["index", "becauseRun"].includes(key));
+  let counted = 0;
+  for (const text of [requirements, spec("design.md")]) {
+    for (const [, word] of text.matchAll(/`dispatch_trigger_edit`(?:'s| keeps its| also accepts `maxTurns`; its) (\w+) (?:editable )?fields/g)) {
+      counted += 1;
+      assert.equal(WORDS[word], editable.length, word);
+    }
+  }
+  assert.ok(counted >= 3, `the specs say the count (${counted})`);
+});
