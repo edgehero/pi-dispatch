@@ -232,43 +232,6 @@ export function approvalExpiryJobOpts(jobId) {
  * full boot without racing every other timer the boot arms, and a guarantee the shutdown story rests on
  * deserves a deterministic pin rather than a census.
  */
-/**
- * Closes a BullMQ Queue only after its connection's own start has settled, and never throws. BullMQ's
- * `RedisConnection.init` sends an INFO (the server's version and type) that nothing in BullMQ awaits; a queue closed
- * while that INFO is still pending on a fail-fast client (`enableOfflineQueue: false`) rejects it as an UNHANDLED
- * rejection, inside BullMQ ("Stream isn't writeable and enableOfflineQueue options is false", measured in CI on the
- * boot that refuses right after making the reconcile queue, issue #645's PR). Waiting for `waitUntilReady` (bounded
- * by the client's own connect timeout, and its failure swallowed here) lets that INFO land or fail inside the init's
- * own handling first. Exported for the test.
- */
-export async function closeQueueSettled(queue) {
-	try {
-		await queue?.waitUntilReady?.();
-	} catch {}
-	try {
-		await queue?.close?.();
-	} catch {}
-}
-
-/**
- * Routes a queue's own `close` through `closeQueueSettled`'s wait, in place, so every closer that holds the queue (the
- * closer list, the worker's shutdown) gets the settled close without a wrapper object. Idempotent, and a queue with no
- * `close` or `waitUntilReady` is left as it is.
- */
-export function settleCloseOf(queue) {
-	if (!queue || typeof queue.close !== "function" || queue.close.settled === true) return queue;
-	const close = queue.close.bind(queue);
-	const settled = async (...args) => {
-		try {
-			await queue.waitUntilReady?.();
-		} catch {}
-		return close(...args);
-	};
-	settled.settled = true;
-	queue.close = settled;
-	return queue;
-}
-
 export async function settleWithin(promise, ms, fallback) {
 	let timer = null;
 	try {
@@ -282,6 +245,134 @@ export async function settleWithin(promise, ms, fallback) {
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+/**
+ * How long a queue's close waits for each of its two steps before it stops waiting (issue #813): first for the
+ * connection's own start, then for the close itself, after which the queue is disconnected. Five seconds, the bound the
+ * backend registry refusal already gave the same handles, which reads it from here. Against a live server the start
+ * settles in milliseconds (it is the INFO below) and a queue's close in about as long, so neither bound is reached by a
+ * queue's close that would have ended. A Worker's close also waits for the job it is running, so the one Worker closed
+ * this way gets a longer close step (`SANDBOX_CONTROL_CLOSE_BOUND_MS`).
+ */
+export const QUEUE_CLOSE_BOUND_MS = 5_000;
+
+/**
+ * The sandbox control Worker's bound for its CLOSE step (issue #813); its start keeps `QUEUE_CLOSE_BOUND_MS`. A
+ * Worker's close waits for the job it is running, and nothing aborts that job first: the control Worker is not among
+ * the workers `createWorker`'s stop cancels, and a human's preparation (a clone, a checkout) is not a paid run to cut
+ * short. Under the queues' five seconds a preparation still running was cut off with Valkey up (measured: an 8 s job
+ * left `active` at 5001 ms, where the unbounded close waited 8006 ms and the job completed). Twenty seconds, so the two
+ * waits together (25 s) stay inside the 30 s that systemd (`TimeoutStopSec`) and launchd (`ExitTimeOut`) give a stop
+ * (`service.mjs`). nssm waits 15 s after its Ctrl-C (`AppStopMethodConsole 15000`), so on Windows a preparation past
+ * about 15 s is still ended by nssm's later stop methods, as it was under the unbounded wait. One that outlasts this
+ * bound is disconnected like a queue, its job left `active` for BullMQ's stalled check.
+ */
+export const SANDBOX_CONTROL_CLOSE_BOUND_MS = 20_000;
+
+const TIMED_OUT = Symbol("timed out");
+
+/**
+ * `promise`'s own outcome, `{ value }` or `{ error }`, or `TIMED_OUT` once `ms` has passed; never rejects. The timer is
+ * REF'D, unlike `settleWithin`'s fuse, and cleared whichever side settles: a queue is closed where nothing else may hold
+ * the event loop (a refused boot draining to its exit code, a test's teardown), and an unref'd timer awaited there never
+ * fires, so node would abandon the await with the queue still open. Cleared, it holds the loop no longer than the wait.
+ */
+async function outcomeWithin(promise, ms) {
+	let timer = null;
+	try {
+		return await Promise.race([
+			Promise.resolve(promise).then(
+				(value) => ({ value }),
+				(error) => ({ error }),
+			),
+			new Promise((resolve) => {
+				timer = setTimeout(() => resolve(TIMED_OUT), ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * The close `closeQueueSettled` and `settleCloseOf` share. It waits for the queue's start (`waitUntilReady`), at most
+ * `readyMs`, its failure ignored; then runs `close`, at most `closeMs`. A close that settled in time answers with its
+ * own value or rejection. One that did not is left pending and the queue is disconnected, as the backend registry
+ * refusal does: a queue whose connection came up closes by sending QUIT and awaiting the reply, which a server that
+ * stopped answering never sends. The disconnect is not awaited (BullMQ's awaits the start, which may never come), and
+ * its rejection is observed so it cannot surface as an unhandled one.
+ *
+ * After the close, whatever its outcome, each of the queue's connections gets a no-op `error` listener. BullMQ's
+ * `RedisConnection` constructor re-emits its start's rejection as an `error` on itself (`initializing.catch`), and its
+ * close strips every listener from it first (`removeAllListeners`). When the close lands during a connect attempt
+ * after a failed one, on a connection that never became ready, the start then rejects with the failed attempt's error
+ * and the emit finds no listener: an unhandled rejection (measured: now and then against a refused port, and every
+ * close after about 10 s against a host that drops packets). Attached before the close, the listener would be stripped
+ * with the rest. Each in a try: the connections are BullMQ's own objects, and nothing here may replace the close's
+ * answer.
+ */
+async function closeWithin(queue, close, { readyMs, closeMs }) {
+	await outcomeWithin(Promise.resolve().then(() => queue.waitUntilReady?.()), readyMs);
+	const closed = await outcomeWithin(Promise.resolve().then(close), closeMs);
+	for (const connection of [queue.connection, queue.blockingConnection]) {
+		try {
+			connection?.on?.("error", () => {});
+		} catch {
+			// a connection that takes no listener has none to re-emit to
+		}
+	}
+	if (closed !== TIMED_OUT) {
+		if ("error" in closed) throw closed.error;
+		return closed.value;
+	}
+	try {
+		void Promise.resolve(queue.disconnect?.()).catch(() => {});
+	} catch {
+		// a queue with nothing left to drop
+	}
+	return undefined;
+}
+
+/**
+ * Closes a BullMQ Queue only after its connection's own start has settled, and never throws. BullMQ's
+ * `RedisConnection.init` sends an INFO (the server's version and type) that nothing in BullMQ awaits; a queue closed
+ * while that INFO is still pending on a fail-fast client (`enableOfflineQueue: false`) rejects it as an UNHANDLED
+ * rejection, inside BullMQ ("Stream isn't writeable and enableOfflineQueue options is false", measured in CI on the
+ * boot that refuses right after making the reconcile queue, issue #645's PR). Waiting for `waitUntilReady` (its failure
+ * swallowed here) lets that INFO land or fail inside the init's own handling first.
+ *
+ * BOUNDED, by `QUEUE_CLOSE_BOUND_MS` (issue #813). A long-lived queue's start never ends when nothing answers
+ * VALKEY_URL: BullMQ's `waitUntilReady` resolves on `ready` and rejects only on `end`, and the client retries forever,
+ * so the unbounded wait held a stopping worker until its supervisor killed it, and the release workflow's suite for six
+ * hours. A fail-fast client's start does end, but not always inside the bound: against a host that drops packets the
+ * reconcile queue's client gives up after about 6.4 s (three 2 s connect timeouts and two 200 ms retry delays,
+ * `parseConnection`). Once the bound has passed the queue is closed anyway: BullMQ's close of a connection still
+ * starting disconnects it and swallows the start's own rejection, and the start's re-emitted `error` meets the
+ * listener `closeWithin` leaves behind. It is the hazard `receiver/src/start.mjs` avoids by releasing the raw client
+ * instead. Exported for the test, with the bound as an option for the same reason.
+ */
+export async function closeQueueSettled(queue, { boundMs = QUEUE_CLOSE_BOUND_MS } = {}) {
+	if (!queue) return;
+	try {
+		await closeWithin(queue, () => queue.close?.(), { readyMs: boundMs, closeMs: boundMs });
+	} catch {}
+}
+
+/**
+ * Routes a queue's own `close` through `closeQueueSettled`'s bounded wait, in place, so every closer that holds the
+ * queue (the closer list, the worker's shutdown) gets the settled close without a wrapper object. Unlike
+ * `closeQueueSettled` it keeps the close's own answer, a rejection included, when the close settles in time. Idempotent,
+ * and a queue with no `close` is left as it is. `closeBoundMs` bounds the close step alone, `boundMs` by default: a
+ * Worker whose close waits for a job it must let finish passes a longer one (`SANDBOX_CONTROL_CLOSE_BOUND_MS`).
+ */
+export function settleCloseOf(queue, { boundMs = QUEUE_CLOSE_BOUND_MS, closeBoundMs = boundMs } = {}) {
+	if (!queue || typeof queue.close !== "function" || queue.close.settled === true) return queue;
+	const close = queue.close.bind(queue);
+	const settled = (...args) => closeWithin(queue, () => close(...args), { readyMs: boundMs, closeMs: closeBoundMs });
+	settled.settled = true;
+	queue.close = settled;
+	return queue;
 }
 
 /**
@@ -2610,8 +2701,9 @@ export async function startWorker(
 		const opened = [registry, runtimeQueue, ...(cronQueue !== runtimeQueue ? [cronQueue] : [])];
 		// Bounded, then forced: a queue whose connection came up closes by sending QUIT and awaiting the reply, and against a
 		// server that stopped answering that wait never ends (measured through a stalling proxy), so the refusal itself would
-		// never travel. Five seconds covers the host registry's own bounded close; whatever is still open is disconnected.
-		await settleWithin(Promise.allSettled(opened.map((handle) => Promise.resolve().then(() => handle?.close?.()))), 5_000);
+		// never travel. `QUEUE_CLOSE_BOUND_MS` (five seconds) covers the host registry's own bounded close, and is the bound
+		// each queue's own close waits for each of its steps; whatever is still open is disconnected.
+		await settleWithin(Promise.allSettled(opened.map((handle) => Promise.resolve().then(() => handle?.close?.()))), QUEUE_CLOSE_BOUND_MS);
 		for (const handle of opened) {
 			try {
 				// BullMQ's disconnect awaits initialization and can reject asynchronously when that start failed.
@@ -3278,7 +3370,8 @@ export async function startWorker(
 		// Human preparation uses its own bounded control worker, outside the paid processor and its slot ledgers.
 		const prepareSandbox = createSandboxPreparerFn({ config, env, forgeFor, readTriggers: () => readFileSync(onceTriggersFile, "utf8"), projects: () => projects.current, limits: () => scopedLimits.current, now });
 		const sandboxControl = startSandboxPrepareWorkerFn({ connection: valkeyConn(), host: config.workerName, config, prepare: prepareSandbox, now, log });
-		settleCloseOf(sandboxControl);
+		// Its close waits for the preparation it is running, which nothing aborts first, so that step gets the longer bound.
+		settleCloseOf(sandboxControl, { closeBoundMs: SANDBOX_CONTROL_CLOSE_BOUND_MS });
 		extraClosers.push(sandboxControl);
 		const sandboxInventory = makeSandboxInventoryFn({ redis, host: config.workerName, read: retainedNow, settings: { image: config.jobImage, defaultBackend: config.defaultBackend, backends: config.backends, egress: config.egress, egressProxy: config.egressProxy, sandboxRetentionHours: config.sandboxRetentionHours, sandboxPinDays: config.sandboxPinDays, jobMemory: env.PI_JOB_MEMORY, jobCpus: env.PI_JOB_CPUS }, now, log });
 		sandboxInventory.start();
