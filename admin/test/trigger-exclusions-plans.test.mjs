@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { parseAuthConnections } from "../../worker/src/auth-policy.mjs";
 import { COMMUNITY_AUTH_ADAPTERS } from "../../worker/src/community-auth-metadata.mjs";
+import { CAPABILITIES_LABEL, CAPABILITY_GATES } from "../../worker/src/image-preflight.mjs";
 import { flowTierOf } from "@edgehero/pi-dispatch/host-loads";
 import { extensionsNotHere, overlayEntryNamed } from "@edgehero/pi-dispatch/loaded-record";
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
@@ -15,6 +17,7 @@ import { agentReadProjection } from "../src/agent-read.mjs";
 import { createFleetReader, normalizeTriggerForDisplay, readTriggerSkew } from "../src/read-model.mjs";
 import { triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
+import { recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
 import { LOADED_SAMPLES as S } from "./helpers/loaded-samples.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -58,6 +61,9 @@ function world({ text = null, doc = null, entry = comment(), loads = [host("mini
   return { paths, service, read, raw, ask, preview, write, undo };
 }
 const lineOf = (out, start) => out.summary.find((line) => line.startsWith(start));
+/** What a change warns of, less the one line every change that first gives a job either list says, which has a test of its own below. */
+const besideImage = (lines) => lines.filter((line) => !line.includes("job-image-load-exclusions-unsupported"));
+const NO_LIVE_HOST = (names) => `No host is live right now, so no running host says whether it holds ${names}; the card's rows read what each one last published.`;
 
 // ---- what a change says ------------------------------------------------------------------------------------------------
 
@@ -77,6 +83,31 @@ test("an extension coming back is said as a widening, and under the file's false
   assert.equal(off.plan.changes[0].widening, `This widens what its jobs load: pi-lint back on each host that holds it, as an overlay extension, since the file's "packages": false keeps staged packages out.`);
   const two = await world({ entry: comment({ excludeExtensions: ["pi-lint", "git-guard"] }) }).preview({ excludeExtensions: null });
   assert.equal(two.plan.changes[0].widening, "This widens what its jobs load: pi-lint and git-guard back on each host that holds them.");
+});
+
+test("a name taken off beside another that means one of its entries: never \"back on\" alone, and the runner's rule says what stays out", async () => {
+  const held = [host("mini1", { extensions: [FILE_GUARD] }), host("mini2", { extensions: [FILE_GUARD, { name: "git-guard.js", kind: "file" }] })];
+  const both = () => world({ entry: comment({ excludeExtensions: ["git-guard", "git-guard.ts"] }), loads: held, live: ["mini1", "mini2"] });
+  const short = await both().preview({ excludeExtensions: ["git-guard.ts"] });
+  assert.deepEqual(short.plan.changes, [{ key: "excludeExtensions", line: "Extensions: git-guard off the list.", widening: "This widens what its jobs load: git-guard back on each host that holds it, less what git-guard.ts still leaves out." }]);
+  // What a job does with the list as it will be: on mini1 nothing comes back, and on mini2 the entry only the first name meant does.
+  assert.deepEqual(short.plan.inverse.body.excludeExtensions, ["git-guard", "git-guard.ts"], "the way back is the list as it was");
+  const out = (list, segment) => list.some((name) => overlayEntryNamed(name, segment));
+  assert.equal(out(["git-guard.ts"], "git-guard.ts"), true, "still out");
+  assert.equal(out(["git-guard.ts"], "git-guard.js"), false, "back");
+  const long = await both().preview({ excludeExtensions: ["git-guard"] });
+  assert.deepEqual(long.plan.changes, [{ key: "excludeExtensions", line: "Extensions: git-guard.ts off the list.", widening: "This widens what its jobs load: git-guard.ts back on each host that holds it, less what git-guard still leaves out." }]);
+  // Both taken off: nothing is left to take them, so the plain words are true again.
+  const gone = await both().preview({ excludeExtensions: null });
+  assert.deepEqual(gone.plan.changes, [{ key: "excludeExtensions", line: "Extensions: git-guard back on, git-guard.ts back on.", widening: "This widens what its jobs load: git-guard and git-guard.ts back on each host that holds them." }]);
+  // Under the file's false, both clauses, each still true.
+  const off = await world({ entry: comment({ packages: false, excludeExtensions: ["git-guard", "git-guard.ts"] }), loads: held, live: ["mini1", "mini2"] }).preview({ excludeExtensions: ["git-guard.ts"] });
+  assert.equal(off.plan.changes[0].widening, `This widens what its jobs load: git-guard back on each host that holds it, as an overlay extension, since the file's "packages": false keeps staged packages out, less what git-guard.ts still leaves out.`);
+  // Three names, two of them left: each said once, and in the plural.
+  const three = await world({ entry: comment({ excludeExtensions: ["a", "a.ts", "a.js"] }), loads: [host("mini1", { extensions: [{ name: "a.ts", kind: "file" }, { name: "a.js", kind: "file" }] })] }).preview({ excludeExtensions: ["a.ts", "a.js"] });
+  assert.equal(three.plan.changes[0].widening, "This widens what its jobs load: a back on each host that holds it, less what a.ts and a.js still leave out.");
+  const twoOff = await world({ entry: comment({ excludeExtensions: ["a", "a.ts", "a.js"] }), loads: [host("mini1", { extensions: [{ name: "a.ts", kind: "file" }, { name: "a.js", kind: "file" }] })] }).preview({ excludeExtensions: ["a"] });
+  assert.equal(twoOff.plan.changes[0].widening, "This widens what its jobs load: a.ts and a.js back on each host that holds them, less what a still leaves out.", "the one name that stays, said once");
 });
 
 test("staged packages back on over a list of names says the list still holds", async () => {
@@ -167,12 +198,12 @@ test("a package missing on one host: nothing to refuse, and nothing loads for it
   const loads = [host("a", { packages: [PI_LINT] }), host("b")];
   const left = await world({ loads, live: ["a", "b"] }).preview({ excludeExtensions: ["pi-lint"] });
   assert.ok(left.plan, JSON.stringify(left));
-  assert.deepEqual(left.plan.warnings, [], "held on one host: no question of the name");
+  assert.deepEqual(besideImage(left.plan.warnings), [], "held on one host: no question of the name");
   assert.deepEqual(extensionsNotHere(["pi-lint"], { packages: [PI_LINT], overlay: [] }), [], "a");
   assert.deepEqual(extensionsNotHere(["pi-lint"], { packages: [], overlay: [] }), ["pi-lint"], "b: the worker's record says so, and the job runs");
   // The tool's half: its sentence is of whichever host a job lands on, and it names no host, since the page cannot see which brings it.
   const tool = await world({ loads, live: ["a", "b"], records: [S.everything()] }).preview({ excludeExtensionTools: ["lint_file"] });
-  assert.deepEqual(tool.plan.warnings, ["A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no extension registered lint_file when it loaded."]);
+  assert.deepEqual(besideImage(tool.plan.warnings), ["A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no extension registered lint_file when it loaded."]);
 });
 
 test("an old record is no proof a host holds a name, as it is no proof it lacks one", async () => {
@@ -186,7 +217,7 @@ test("a live host with no row at all cannot say, a stopped host's row does not c
   const stopped = await world({ loads: [host("mini1"), host("stopped", { packages: [{ name: "pi-linter", version: "1.0.0" }] })], live: ["mini1"] }).preview({ excludeExtensions: ["pi-linter"] });
   assert.match(stopped.refusal, /^No live host holds pi-linter/, "the hosts that can run its jobs are the question");
   const none = await world({ loads: [], live: [] }).preview({ excludeExtensions: ["pi-linter"] });
-  assert.ok(none.plan.warnings.includes("No host is live right now, so nothing says which hosts hold pi-linter."));
+  assert.ok(none.plan.warnings.includes(NO_LIVE_HOST("pi-linter")));
   for (const readHostLoads of [async () => ({ unreachable: true, hosts: [{ name: "mini1", state: "unknown", why: "unreachable" }] }), async () => { throw new Error("down"); }, async () => null]) {
     const unread = await world({ deps: { readHostLoads } }).preview({ excludeExtensions: ["pi-linter"] });
     assert.ok(unread.plan, JSON.stringify(unread));
@@ -251,7 +282,7 @@ test("a tool chip off: the sentence says what a job that held nothing back does,
   const records = [S.everything()];
   const strict = "A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no extension registered lint_file when it loaded.";
   const reported = "A name in run.excludeExtensionTools that matches nothing stops no job of this trigger while it holds extensions back: the job runs, and its log and record name it, so a misspelled name removes nothing.";
-  const asked = async (entry, change) => (await world({ entry, records }).preview(change)).plan.warnings;
+  const asked = async (entry, change) => besideImage((await world({ entry, records }).preview(change)).plan.warnings);
   assert.deepEqual(await asked(comment(), { excludeExtensionTools: ["lint_file"] }), [strict]);
   assert.deepEqual(await asked(comment({ packages: false }), { excludeExtensionTools: ["lint_file"] }), [], "a name a run shows, and a trigger that cannot stop over it");
   assert.deepEqual(await asked(comment({ excludeExtensions: ["other"] }), { excludeExtensionTools: ["lint_file"] }), []);
@@ -283,6 +314,56 @@ test("a run's record is what confirms a name, and a read that cannot say confirm
   let asked = 0;
   await world({ entry: comment({ excludeExtensionTools: ["lint_file"] }), deps: { readRunRecords: async () => { asked += 1; return []; } } }).preview({ packages: false });
   assert.equal(asked, 0);
+});
+
+test("what a preview says of an adapter is of the name a job leaves out, read through the real policy parser: the package, never the policy's key", async () => {
+  // Every reviewed community adapter: a connection on it parses, and the name that keeps its package out of a job is the one the sentence is said of.
+  const community = Object.entries(COMMUNITY_AUTH_ADAPTERS).filter(([, row]) => row.community === true);
+  assert.ok(community.length >= 2, "the reviewed adapters");
+  for (const [key, row] of community) {
+    const policy = parseAuthConnections({ version: 1, connections: [{ id: "sub", provider: row.provider, adapter: key, ownerHost: "mini1", root: "/srv/auth", digest: "a".repeat(64) }], bindings: { [row.provider]: "sub" } });
+    const name = COMMUNITY_AUTH_ADAPTERS[policy.connections[0].adapter].package;
+    assert.equal(name, row.package, key);
+    assert.notEqual(name, key, "the policy's key is not a name a file leaves out");
+    const said = `${name} is a subscription connection's adapter, so a job on that connection is refused as auth-adapter-disabled, before it spends.`;
+    const out = await world({ loads: [host("mini1", { packages: [{ name, version: row.version }] })] }).preview({ excludeExtensions: [name] });
+    assert.ok(out.plan.warnings.includes(said), JSON.stringify(out.plan.warnings));
+    // The key, with its version in it, is no name a file can hold, so the sentence cannot be said of it.
+    assert.match((await world().preview({ excludeExtensions: [key] })).refusal, /is neither a package's manifest name nor an overlay extension's/, key);
+  }
+  // An adapter with no package of its own has nothing a file could leave out.
+  const own = Object.entries(COMMUNITY_AUTH_ADAPTERS).filter(([, row]) => row.community !== true);
+  assert.ok(own.every(([, row]) => row.package === undefined), "the built-in adapters have no package");
+});
+
+test("an image: said once, where this change starts asking it of a job, and of no host in particular, and what it says is what the real gate does", async () => {
+  const said = (out) => out.plan.warnings.filter((line) => line.includes("job-image-load-exclusions-unsupported"));
+  const SENTENCE = "A job of this trigger on an image whose dev.pi-dispatch.capabilities label does not list loadExclusions is refused as job-image-load-exclusions-unsupported, before it spends. The Image row says which image each host runs.";
+  assert.deepEqual(said(await world().preview({ excludeExtensions: ["pi-lint"] })), [SENTENCE], "either field");
+  assert.deepEqual(said(await world().preview({ excludeExtensionTools: ["lint_file"] })), [SENTENCE]);
+  assert.deepEqual(said(await world({ entry: comment({ excludeExtensionTools: ["lint_file"] }) }).preview({ excludeExtensions: ["pi-lint"] })), [], "a job that had one already met this");
+  assert.deepEqual(said(await world({ entry: comment({ excludeExtensions: ["pi-lint"] }) }).preview({ excludeExtensions: ["pi-lint", "git-guard"] })), []);
+  assert.deepEqual(said(await world({ entry: comment({ excludeExtensions: ["pi-lint"] }) }).preview({ excludeExtensions: null })), [], "taking it off needs nothing of an image");
+  assert.deepEqual(said(await world().preview({ flow: "review" })), [], "neither field");
+  // No live host, and a host's name nowhere in it.
+  assert.deepEqual(said(await world({ live: [], loads: [] }).preview({ excludeExtensions: ["pi-lint"] })), [SENTENCE]);
+  // The sentence's words are the gate's: its token, its reason, its label, and when the worker asks.
+  const gate = CAPABILITY_GATES.find((row) => row.token === "loadExclusions");
+  assert.ok(SENTENCE.includes(gate.reason) && SENTENCE.includes(gate.token) && SENTENCE.includes(CAPABILITIES_LABEL));
+  for (const job of [{}, { excludeTools: ["bash"] }, { excludeExtensions: ["a"] }, { excludeExtensionTools: ["b"] }, { excludeExtensions: ["a"], excludeExtensionTools: ["b"] }]) {
+    const out = await world({ entry: comment(job) }).preview({ flow: "review" });
+    assert.ok(out.plan, JSON.stringify(out));
+    const carries = job.excludeExtensions !== undefined || job.excludeExtensionTools !== undefined;
+    assert.equal(gate.needed(job), carries, JSON.stringify(job));
+  }
+  // And what the worker does with such an image, through the real gate and the real record.
+  for (const jobFields of [{ excludeExtensions: ["pi-lint"] }, { excludeExtensionTools: ["lint_run"] }]) {
+    const refused = await recordThroughPipeline({ exit: { code: 0, reason: "stop" }, hostImage: "pi-job:old", jobFields });
+    assert.equal(refused.reason, gate.reason);
+    assert.equal(refused.budgetReserved, false, "before it spends");
+    const fine = await recordThroughPipeline({ exit: { code: 0, reason: "stop" }, hostImage: "pi-job:new", imageCapabilities: gate.token, jobFields });
+    assert.equal(fine.outcome, "completed");
+  }
 });
 
 test("a subscription's adapter left out says what the worker refuses, and a canary's package on a schedule says the same, each free", async () => {
@@ -399,14 +480,101 @@ test("planTriggerEditCore reads the real file at version 2: a flow and a list in
   assert.equal(w.read(), before, "byte for byte, a key it added gone and a list back as it was");
 });
 
+test("no host is live: the sentence holds beside rows that read last publications, whichever they say", async () => {
+  const lint = [host("mini1", { packages: [PI_LINT] }), host("mini2", { packages: [PI_LINT] })];
+  for (const [what, loads, name] of [["published as held", lint, "pi-lint"], ["published as not held", lint, "pi-linter"], ["nothing published", [], "pi-lint"]]) {
+    const out = await world({ loads, live: [] }).preview({ excludeExtensions: [name] });
+    assert.ok(out.plan, `${what}: ${JSON.stringify(out)}`);
+    assert.ok(out.plan.warnings.includes(NO_LIVE_HOST(name)), `${what}: ${JSON.stringify(out.plan.warnings)}`);
+    assert.ok(out.summary.includes("No host is live right now, so no host's release could be checked."), what);
+    assert.doesNotMatch(out.plan.warnings.join(" "), /nothing says/, what);
+  }
+});
+
+// What the writer does to a file in its own layout, each shape on the real writer: a stamp's line is the only one that moves, so nothing says the whole file does.
+const LAYOUT_LINE = "This file is not in the writer's layout";
+const VALUES_BACK = "Put trigger row 1's values back; the file stays in the form the writer gives it";
+const AS_IT_WAS = "Put trigger row 1 back as it was";
+const stampSaid = (out) => out.summary.filter((line) => /^(Stamps the file|The file (no longer needs|stays at)|This write also takes)/.test(line));
+
+test("a file in the writer's layout whose stamp says more or less than it needs: no line says the whole file moves, and one says what the stamp does", async () => {
+  // A stamp nothing needs: a flow edit takes it off, and the Undo has no way to put it back.
+  const over = writerText({ version: 2, triggers: [comment()] });
+  const a = world({ text: over, deps: { readHosts: async () => assert.fail("nothing needs a host read") } });
+  const off = await a.write({ flow: "review" }, 0);
+  assert.equal(lineOf(off, LAYOUT_LINE), undefined, off.summary.join("\n"));
+  assert.deepEqual(stampSaid(off), ["The file no longer needs version 2, so this write takes the stamp off."]);
+  assert.equal(off.plan.undo, VALUES_BACK);
+  await a.undo(off);
+  assert.equal(a.read(), writerText({ triggers: [comment()] }), "the row back, and no stamp");
+  // The same stamp, and a change that does need it: it stays, and the Undo takes it off.
+  const b = world({ text: over });
+  const needs = await b.write({ excludeExtensions: ["pi-lint"] }, 0);
+  assert.equal(lineOf(needs, LAYOUT_LINE), undefined, needs.summary.join("\n"));
+  assert.deepEqual(stampSaid(needs), ["The file stays at version 2."]);
+  assert.equal(needs.plan.undo, VALUES_BACK);
+  await b.undo(needs);
+  assert.equal(b.read(), writerText({ triggers: [comment()] }));
+  // A field with no stamp: the loader refuses it, and either way this page writes it right, with no line about a layout it already has.
+  const under = writerText({ triggers: [comment({ excludeExtensions: ["pi-lint"] })] });
+  assert.throws(() => parseTriggers(under, "t"), /needs triggers file version 2/);
+  const stamps = await world({ text: under }).preview({ flow: "review" }, 0);
+  assert.equal(lineOf(stamps, LAYOUT_LINE), undefined, stamps.summary.join("\n"));
+  assert.deepEqual(stampSaid(stamps), ["Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."]);
+  const clears = await world({ text: under }).preview({ excludeExtensions: null }, 0);
+  assert.equal(lineOf(clears, LAYOUT_LINE), undefined, clears.summary.join("\n"));
+  assert.deepEqual(stampSaid(clears), []);
+  // A "version": 1, and one the loader cannot read: only that line goes, and it is said, since no sentence of a version above 1 speaks of either.
+  for (const version of [1, "two"]) {
+    const text = writerText({ version, triggers: [comment()] });
+    const c = world({ text });
+    const out = await c.preview({ flow: "review" }, 0);
+    assert.equal(lineOf(out, LAYOUT_LINE), undefined, `${version}: ${out.summary.join("\n")}`);
+    assert.deepEqual(stampSaid(out), ["This write also takes the file's \"version\" line off: a file that needs no more than version 1 is written without one."], String(version));
+    assert.deepEqual(await c.service.apply(out, operator), { ok: true });
+    assert.deepEqual(Object.keys(JSON.parse(c.read())), ["triggers"], "the line it said goes");
+    assert.notEqual(out.plan.undo, AS_IT_WAS, String(version));
+  }
+  // And spacing is still spacing, with the stamp the same.
+  const spaced = world({ text: `${JSON.stringify({ version: 2, triggers: [comment({ excludeExtensions: ["pi-lint"] })] })}\n` });
+  assert.ok(lineOf(await spaced.preview({ flow: "review" }, 0), LAYOUT_LINE));
+});
+
+test("a stamp placed by hand: the Undo says as it was only where it writes the bytes it found", async () => {
+  const atEnd = writerText({ triggers: [comment({ excludeExtensions: ["pi-lint"] })], version: 2 });
+  // The stamp goes with the last field and comes back first, so the row is back and the bytes are not.
+  const moved = world({ text: atEnd });
+  const off = await moved.write({ excludeExtensions: null }, 0);
+  assert.equal(lineOf(off, LAYOUT_LINE), undefined, off.summary.join("\n"));
+  assert.equal(off.plan.undo, VALUES_BACK);
+  const back = await moved.undo(off);
+  assert.deepEqual(stampSaid(back), ["Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."]);
+  assert.deepEqual(JSON.parse(moved.read()), JSON.parse(atEnd), "every value back");
+  assert.notEqual(moved.read(), atEnd, "and not the bytes, as the page said");
+  assert.deepEqual(Object.keys(JSON.parse(moved.read())), ["version", "triggers"]);
+  // An edit the stamp stays under: it does not move, and those are the bytes.
+  const kept = world({ text: atEnd });
+  const flow = await kept.write({ flow: "review" }, 0);
+  assert.equal(flow.plan.undo, AS_IT_WAS);
+  await kept.undo(flow);
+  assert.equal(kept.read(), atEnd);
+  // The writer's own stamp, first: as it was, byte for byte, both ways.
+  const first = writerText({ version: 2, triggers: [comment({ excludeExtensions: ["pi-lint"] })] });
+  const own = world({ text: first });
+  const cleared = await own.write({ excludeExtensions: null }, 0);
+  assert.equal(cleared.plan.undo, AS_IT_WAS);
+  await own.undo(cleared);
+  assert.equal(own.read(), first);
+});
+
 test("a hand-written file: the stamp and the layout move together, and each sentence says so of what it moved", async () => {
   // Not the writer's layout, with `"version": 1` and a version the fields do not need.
   const handWritten = `{"version":1,\n  "triggers":[${JSON.stringify(comment())}]}\n`;
   const w = world({ text: handWritten });
   const out = await w.preview({ excludeExtensions: ["pi-lint"] }, 0);
-  assert.equal(out.plan.undo, "Put trigger row 1's values back; the file keeps the layout this write gave it");
+  assert.equal(out.plan.undo, "Put trigger row 1's values back; the file stays in the form the writer gives it");
   assert.ok(lineOf(out, "This file is not in the writer's layout"), out.summary.join("\n"));
-  assert.ok(lineOf(out, "Stamps the file version 2"));
+  assert.deepEqual(stampSaid(out), ["Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."], "one sentence for the one thing it does");
   assert.deepEqual(await w.service.apply(out, operator), { ok: true });
   assert.deepEqual(Object.keys(JSON.parse(w.read())), ["version", "triggers"], "in place");
   assert.equal(JSON.parse(w.read()).version, 2);

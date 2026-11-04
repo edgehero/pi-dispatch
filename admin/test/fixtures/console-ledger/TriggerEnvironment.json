@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "ab52407c181a40c66ee4c4822b17845ef7c84ff733733ba6d689806ad02d341e",
+  "words": "562a26d0825caee1ccb77eb750166f09d3a2e392ee0481faa33e935c22a71e39",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -392,6 +392,46 @@
       "panel": "p-trigger-gets",
       "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
       "holds": "off with them"
+    },
+    {
+      "el": "Two names in the file that mean one entry: a row each, each saying the file also names the other",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#alsoNaming",
+      "holds": "overlayEntryNamed"
+    },
+    {
+      "el": "A watch rule's job loads nothing a host publishes: no pills, its model and flow, one sentence for what it can use, its image",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
+      "holds": "watchLoads",
+      "golden": [
+        "panels/trigger-gets-watch.operator"
+      ],
+      "shows": "loads no staged package, no extension of the overlay"
+    },
+    {
+      "el": "A rule that only files an issue starts no job, and says that",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
+      "holds": "files an issue without an agent"
+    },
+    {
+      "el": "A file the worker's own parser refuses keeps the form, so the row can be fixed, and every pill reads unknown",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
+      "holds": "fileRefused",
+      "golden": [
+        "panels/trigger-gets-file-refused.operator"
+      ],
+      "shows": "The worker refuses this file as it stands"
     },
     {
       "el": "Trigger 3, its hosts, gh-9575, gh-e9a0, gh-03a9, linear, docs, git-guard, pi-lint and pi-test-runner",

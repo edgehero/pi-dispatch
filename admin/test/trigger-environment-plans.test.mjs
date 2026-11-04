@@ -2094,7 +2094,7 @@ test("a hand-written file: the first write rewrites all of it, the Confirm says 
   const out = await hand.service.preview(ask(hand, { packages: false }), operator);
   const sentence = "This file is not in the writer's layout, so this write also rewrites all of it: spacing and line breaks move in lines this change does not touch, and what each key says does not. Undo puts the values back, not that layout.";
   assert.ok(out.summary.includes(sentence), out.summary.join("\n"));
-  assert.equal(out.plan.undo, "Put trigger row 2's values back; the file keeps the layout this write gave it");
+  assert.equal(out.plan.undo, "Put trigger row 2's values back; the file stays in the form the writer gives it");
   assert.deepEqual(await hand.service.apply(out, operator), { ok: true });
   const undone = await hand.service.preview(undoBody(out.plan.inverse), operator);
   assert.ok(undone.plan, JSON.stringify(undone));

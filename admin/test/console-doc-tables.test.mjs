@@ -204,10 +204,10 @@ const CRON = Object.freeze({ on: { type: "cron", id: "daily", pattern: "0 6 * * 
 const COMMENT_ON = Object.freeze({ type: "comment", phrase: "@pi" });
 
 /** The real planner over a real triggers file and overlay, with the entry at row 2. `failing` makes a read of one file name fail as a disk would. */
-function plannerWorld({ run = {}, doc = null, settings = "{}", env = {}, overlay = null, failing = null, failingCode = "EIO", projects = null, deps = {} } = {}) {
+function plannerWorld({ run = {}, doc = null, text = null, settings = "{}", env = {}, overlay = null, failing = null, failingCode = "EIO", projects = null, deps = {} } = {}) {
   const dir = tempDir("pd-800-docs-");
   const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), projectsFile: projects === null ? null : join(dir, "projects.json"), globalPiDir: join(dir, "overlay") };
-  nodeFs.writeFileSync(paths.triggersPath, `${JSON.stringify(doc ?? { triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", ...run } }] }, null, 2)}\n`);
+  nodeFs.writeFileSync(paths.triggersPath, text ?? `${JSON.stringify(doc ?? { triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", ...run } }] }, null, 2)}\n`);
   nodeFs.writeFileSync(paths.settingsFile, settings);
   if (projects !== null) nodeFs.writeFileSync(paths.projectsFile, projects);
   nodeFs.mkdirSync(paths.globalPiDir);
@@ -283,7 +283,8 @@ const WARNINGS = Object.freeze({
   "no skill named": () => plannerWorld({ deps: { readHostLoads: () => published({ mini1: {} }) } }).preview({ flow: "review" }),
   "What the hosts published could not be read": () => plannerWorld({ deps: { readHostLoads: async () => { throw new Error("down"); } } }).preview({ flow: "review" }),
   "No host that can say holds": () => exclusionWorld({ loads: [{ name: "mini1", state: "unknown", why: "absent" }] }).preview({ excludeExtensions: ["pi-linter"] }),
-  "No host is live right now, so nothing says": () => exclusionWorld({ live: [], loads: [] }).preview({ excludeExtensions: ["pi-linter"] }),
+  "is refused as job-image-load-exclusions-unsupported": () => exclusionWorld().preview({ excludeExtensions: ["pi-lint"] }),
+  "No host is live right now, so no running host says": () => exclusionWorld({ live: [], loads: [] }).preview({ excludeExtensions: ["pi-linter"] }),
   "which this change leaves out": () => exclusionWorld({ loads: [exclusionHost({ flows: [{ trigger: 1, flow: "fix", tier: "package", package: "pi-lint", repo: "unknown" }] })] }).preview({ excludeExtensions: ["pi-lint"] }),
   "is a subscription connection's adapter": () => exclusionWorld({ loads: [exclusionHost({ packages: [{ name: "pi-anthropic-oauth", version: "0.3.6" }] })] }).preview({ excludeExtensions: ["pi-anthropic-oauth"] }),
   "is refused as package-canary-excluded": () => exclusionWorld({ doc: { triggers: [{ on: COMMENT_ON, run: { kind: "github", flow: "fix" } }, CRON] } }).preview({ excludeExtensions: ["pi-lint"] }),
@@ -372,7 +373,8 @@ const WARNING_TODO = Object.freeze({
   "no skill named": { says: /Check the flow's name/ },
   "What the hosts published could not be read": { says: /Doctor's run on each host/ },
   "No host that can say holds": { says: /Check the name, or run `pi-dispatch doctor`/ },
-  "No host is live right now, so nothing says": { says: /Check the name/ },
+  "is refused as job-image-load-exclusions-unsupported": { says: /Rebuild the job image/ },
+  "No host is live right now, so no running host says": { says: /Check the name/ },
   "which this change leaves out": { says: /Keep the package, or choose a flow/ },
   "is a subscription connection's adapter": { says: /Keep it, on a trigger whose jobs use that connection/ },
   "is refused as package-canary-excluded": { says: /Run the canary as a trigger that loads it/ },
@@ -447,8 +449,8 @@ test("docs/console.md's table of what the preview warns of: each quote is in wha
 test("every warning the planner can say is in that table: a new sentence has to choose", async () => {
   const source = read("admin/src/trigger-environment-plans.mjs");
   // A template inside a template ends the match early, so the one sentence that opens with a choice of words is held by its own words below.
-  // Not read here, on purpose: `denied`, the answer to a tool or a viewer, which no person at an operator's form meets; and the summary's two lines
-  // of a host's release ("Stamps the file version", "reads what this change needs"), which wait on a file needing a version above 1, a paragraph of its own.
+  // Not read here, on purpose: `denied`, the answer to a tool or a viewer, which no person at an operator's form meets; and the summary's lines of a host's
+  // release and of the file's stamp, which are not warnings: the paragraph after the table quotes each, and the test of what the docs quote holds it to the real preview.
   const cannot = /const cannot = "([^"]+)"/.exec(source)[1];
   const literals = [...source.matchAll(/(?:\b(?:warnings|toolWords|exclusionWords)\.(?:push|add)\((?:\[|failedRead \? )?|\bservers\.map\(\(name\) => |\bthin\.add\(|\bcould\(|\bnotRead = |\bonHost\("[^"]+", |\bnote: |\blacking\.length > 0 \? \[|\bunjudged\.length > 0 \? \[)(?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => literal !== "" && !literal.startsWith("${unresolved.project")).map((literal) => literal.replace("${cannot}", cannot));
   // The other branch of the one sentence that chooses between two.
@@ -498,7 +500,7 @@ test("every refusal the planner can say is in that table or named here with why:
   assert.match((await plannerWorld().preview({ flow: null })).refusal, /^A trigger's flow cannot be removed/);
 });
 
-test("the sentences the docs quote of the preview are the real preview's, and no field on the card makes it read a host", async () => {
+test("the sentences the docs quote of the preview are the real preview's, and a file that needs no more than version 1 reads no host", async () => {
   let reads = 0;
   const w = plannerWorld({ deps: { readHosts: async () => { reads += 1; return { hosts: [] }; } } });
   const out = await w.preview({ flow: "review", provider: "anthropic", model: "claude-haiku-4-5", maxCostUsd: "1", models: [HAIKU], fallbackModels: [HAIKU], mcp: ["docs"], packages: false, excludeTools: ["bash"] });
@@ -507,15 +509,32 @@ test("the sentences the docs quote of the preview are the real preview's, and no
   assert.equal(reads, 0);
   const consoleDoc = flat(read("docs/console.md"));
   assert.ok(consoleDoc.includes("A file that needs no more than version 1 asks no host, and any change to it keeps every other key's bytes."));
-  // And the three things the section says a write does to the stamp, each off the real preview of a real file.
+  // And the four things the section says a write does to the stamp, each off the real preview of a real file.
   const needing = (run, doc = null) => plannerWorld({ run, doc, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "3" }] }), readHostLoads: async () => ({ hosts: [exclusionHost()] }) } });
   const stamps = await needing({}).preview({ excludeExtensions: ["pi-lint"] });
   const stays = await needing({}, { version: 2, triggers: [{ ...CRON, run: { ...CRON.run, excludeExtensions: ["pi-lint"] } }, { on: COMMENT_ON, run: { kind: "github", flow: "fix" } }] }).preview({ flow: "review" });
   const leaves = await needing({}, { version: 2, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", excludeExtensions: ["pi-lint"] } }] }).preview({ excludeExtensions: null });
-  for (const [said, start] of [[stamps, "Stamps the file version 2"], [stays, "The file stays at version 2"], [leaves, "The file no longer needs version 2"]]) {
+  // A `"version": 1` needs nothing of a host, so it reads none: this one's world says so if it does.
+  const literal = await plannerWorld({ doc: { version: 1, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix" } }] }, deps: { readHosts: async () => assert.fail("a file at version 1 reads no host") } }).preview({ flow: "review" });
+  for (const [said, start] of [[stamps, "Stamps the file version 2"], [stays, "The file stays at version 2"], [leaves, "The file no longer needs version 2"], [literal, "This write also takes the file's"]]) {
     const line = said.summary.find((one) => one.startsWith(start));
     assert.ok(line && consoleDoc.includes(`"${line}`), `${start}: ${JSON.stringify(said.summary ?? said)}`);
   }
+  // And the two it says of a host's release, each off a preview that reads one, with the name it reads.
+  const release = stamps.summary.find((one) => one.endsWith("reads what this change needs."));
+  assert.equal(release, "mini1 reads what this change needs.");
+  const twoHosts = await plannerWorld({ deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "2" }, { name: "mini2", triggersVersion: "2", jobDataVersion: "2" }] }), readHostLoads: async () => ({ hosts: [exclusionHost()] }) } }).preview({ excludeExtensions: ["pi-lint"] });
+  const each = twoHosts.summary.find((one) => one.endsWith("each read what this change needs."));
+  assert.ok(each && consoleDoc.includes(`"${each}"`), `${JSON.stringify(twoHosts.summary ?? twoHosts)}`);
+  const noHosts = await plannerWorld({ deps: { readHosts: async () => ({ hosts: [] }), readHostLoads: async () => ({ hosts: [] }) } }).preview({ excludeExtensions: ["pi-lint"] });
+  const none = noHosts.summary.find((one) => one.startsWith("No host is live right now, so no host's release"));
+  assert.ok(none && consoleDoc.includes(`"${none}"`), `${JSON.stringify(noHosts.summary ?? noHosts)}`);
+  // What an Undo says of the bytes, each from the real preview that says it.
+  const handFile = await plannerWorld({ text: `${JSON.stringify({ triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix" } }] })}\n` }).preview({ flow: "review" });
+  assert.equal(handFile.plan.undo, "Put trigger row 2's values back; the file stays in the form the writer gives it");
+  assert.ok(consoleDoc.includes(`"${handFile.plan.undo}"`));
+  assert.equal(out.plan.undo, "Put trigger row 2 back as it was");
+  assert.ok(consoleDoc.includes('reads "back as it was" only where it writes the very bytes it found'));
   const effect = out.summary.filter((one) => /^(The services reading|A host with its own copy)/.test(one));
   assert.equal(effect.length, 2, "the two lines the section quotes");
   for (const line of effect) assert.ok(consoleDoc.includes(`"${line}"`), line);
@@ -742,7 +761,13 @@ test("docs/console.md's table of who reads what: each row is what the real page 
   const downWhole = String((await renderPage("trigger", { query: downParsed.query, session: { name: "someone", role: "operator" }, data: downData })).html);
   expectRow("A page whose Valkey read failed", { whole: downWhole, card: panelOf(downWhole, "p-trigger-gets"), how: panelOf(downWhole, "p-trigger-gets-how") }, { form: true, word: `${W.fileSays} ${W.historyUnread}` });
   assert.ok(textOf(panelOf(downWhole, "p-trigger-change")).includes(straight(W.othersUnread)), "Before you change it says what is unread");
-  assert.equal(rows.size, 9, "and no state the table names goes untried");
+  // A file the worker refuses, and the page can still read: the card stays, so the row can be fixed, and the pills are unknown.
+  const refused = await trigger({ fs: fileOnlyFs(getsFile({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", maxTurns: "many" } })) });
+  expectRow("A triggers file the worker refuses that the page can still read: a key with no stamp, a row that is no trigger, a value the loader refuses", refused, { form: true, word: W.fileRefused });
+  assert.ok(textOf(panelOf(refused.whole, "p-trigger-change")).includes("The triggers file does not load; run pi-dispatch doctor for the reason."), "Before you change it says so");
+  const refusedAgent = await trigger({ role: "agent", fs: fileOnlyFs(getsFile({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", maxTurns: "many" } })) });
+  assert.ok(textOf(panelOf(refusedAgent.whole, "p-trigger-change")).includes("The triggers file does not load; run pi-dispatch doctor for the reason."), "and to an agent, whose copy holds that yes or no");
+  assert.equal(rows.size, 10, "and no state the table names goes untried");
 });
 
 test("docs/console.md says what a tool cannot reach, and names the fields a tool may not set and how many it keeps", () => {

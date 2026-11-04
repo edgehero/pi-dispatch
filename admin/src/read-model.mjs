@@ -48,7 +48,7 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 import { PROJECT_ID_RE, parseProjects, projectOf, projectsVersionFor } from "@edgehero/pi-dispatch/projects";
 import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
 import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, effectiveWord, meets, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
-import { parseTriggersDocument, triggersFileNewer, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
+import { parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
 // `revert`, so the ladder, the step and the compare-and-set are one implementation.
@@ -2833,7 +2833,9 @@ export function readSettingsView({ settingsFile, fs = nodeFs }) {
  * fatal.
  *
  * Custom: fail-soft display normalizer, not the shared fail-loud `parseTriggers`; a viewer degrades and
- * shows what it can rather than throwing on one bad entry.
+ * shows what it can rather than throwing on one bad entry. Those same bytes are also asked of `parseTriggers`, so what is
+ * shown can say the loaders refuse it (`doesNotLoad`): a key only then, and never its message, which names this host's path.
+ * REJECTED: `invalid` for such a file, which draws no rows, so a person could not reach the row that needs fixing.
  */
 export function readTriggers({ triggersPath, fs = nodeFs }) {
   // Only ENOENT is missing. A file that could not be read has rows nobody can see: read as absent, a page said the file does
@@ -2880,7 +2882,17 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
   // The project secret bundles (issue #704), read as leniently as the entries: a key only when the file has the block,
   // so every other read is key-identical to before. Never a bundle's `ref` (`normalizeSecretBundlesForDisplay`).
   const bundles = normalizeSecretBundlesForDisplay(parsed?.secretBundles);
-  return { triggers, count: entries.length, ...(bundles !== null && { secretBundles: bundles }) };
+  return { triggers, count: entries.length, ...(bundles !== null && { secretBundles: bundles }), ...(loaderRefuses(text, triggersPath) && { doesNotLoad: true }) };
+}
+
+/** Whether the loaders' own parser refuses these bytes. Pure: `parseTriggers` reads no file and no network, so asking it of text already read is no new read. */
+export function loaderRefuses(text, path) {
+  try {
+    parseTriggers(text, path);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 /** File locations for either role: only the final folder, with the account's home replaced before projection. */
@@ -3207,7 +3219,8 @@ export function normalizeTriggerForDisplay(entry) {
   };
   switch (on.type) {
     case "watch":
-      return { type: "watch", id: typeof on.id === "string" ? on.id : null, source: typeof on.source === "string" ? on.source : null, mode: typeof run.mode === "string" ? run.mode : "investigate", maxPerDay: Number.isSafeInteger(on.maxPerDay) ? on.maxPerDay : null, cooldownMs: (() => { try { return watchDurationMs(on.cooldown); } catch { return null; } })(), folder: typeof run.folder === "string" ? run.folder : null, flow, command, ...modelRef, packages, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, forge: null };
+      // `packages: false` whatever the file says, as the loader and the watch's dispatch both write it: a watch rule's job loads no staged package, and the file takes no such key.
+      return { type: "watch", id: typeof on.id === "string" ? on.id : null, source: typeof on.source === "string" ? on.source : null, mode: typeof run.mode === "string" ? run.mode : "investigate", maxPerDay: Number.isSafeInteger(on.maxPerDay) ? on.maxPerDay : null, cooldownMs: (() => { try { return watchDurationMs(on.cooldown); } catch { return null; } })(), folder: typeof run.folder === "string" ? run.folder : null, flow, command, ...modelRef, packages: false, image, backend, excludeTools, skillsDir, instructions, resume, secrets, secretsProfile, forge: null };
     case "cron":
       return {
         type: "cron",

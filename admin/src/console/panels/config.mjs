@@ -53,6 +53,9 @@ export function fileTrouble(v, what, s = null) {
   return null;
 }
 
+/** The sentence for a file this page can draw and the worker's own parser refuses, or null where it does not (`readTriggers`' `doesNotLoad`). */
+export const fileRefused = (v, what, s = null) => (v?.doesNotLoad === true ? doctorReason(s, what) : null);
+
 /** A trigger's selector, in the triggers file's own words. */
 function triggerOn(t) {
   const list = (name, v) =>

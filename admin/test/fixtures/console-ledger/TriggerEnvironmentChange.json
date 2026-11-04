@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironmentChange",
   "pr": 800,
-  "words": "571daa871d440c69c39b15d9b540e1fc7a9bc4302ad2b6fc9b8d8d0eb4c6227d",
+  "words": "cf402b0f6539b738f55e1307a4a7553dae3e9e04b80edb26555fcfc9c3c527ce",
   "elements": [
     {
       "el": "p-trigger-gets-preview",
@@ -222,6 +222,17 @@
       "status": "new",
       "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
       "holds": "package-canary-excluded"
+    },
+    {
+      "el": "An image that does not declare loadExclusions refuses the first list a job would carry, free, said of no host in particular",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "job-image-load-exclusions-unsupported",
+      "golden": [
+        "panels/trigger-gets-one-extension-off-preview.operator"
+      ],
+      "shows": "is refused as job-image-load-exclusions-unsupported, before it spends."
     },
     {
       "el": "gh-c9e1, the amounts and the host names",

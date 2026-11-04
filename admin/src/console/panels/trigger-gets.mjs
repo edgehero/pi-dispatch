@@ -20,6 +20,7 @@ import * as ui from "../kit.mjs";
 import { forgeBaseLinkOf } from "../../read-model.mjs";
 import { TRIGGER_GETS_WORDS as W, triggerGetsOf } from "../../trigger-gets-view.mjs";
 import { triggerSandboxHosts } from "../trigger-sandbox.mjs";
+import { listed } from "../../words.mjs";
 import { canAct, shownPath } from "./common.mjs";
 import { fixButton, stateLine, wordsHtml } from "./loaded-parts.mjs";
 
@@ -51,6 +52,7 @@ function getsOf(v) {
     editor: v.data?.triggerEditor ?? null,
     modelChoices: v.data?.modelChoices ?? [],
     overlayServers: snapshot.overlayMcp?.servers ?? [],
+    fileRefused: (v.data?.triggerGets?.fileRefused ?? snapshot.triggers?.doesNotLoad) === true,
   }) };
 }
 
@@ -119,7 +121,7 @@ function extensionsBody(gets, form) {
 ${item({ name: form ? "Staged packages" : e.packagesOn ? "Staged packages: on" : "Staged packages: off", subText: packagesLine, control: toggle, mark: form })}
 ${e.items.map((entry) => {
     // A moot row the file names keeps its box, disabled: what it says stays in the list an edit of the rest sends (`getsLists`).
-    const box = !form || (entry.moot && entry.on) ? null : html`<input type="checkbox"${entry.on ? html` checked` : null}${entry.moot ? html` disabled` : null} data-gets-list="excludeExtensions" data-gets-value="${entry.value}" data-gets-inverse data-gets-on="${entry.value} back on" data-gets-off="${entry.value} left out">`;
+    const box = !form || (entry.moot && entry.on) ? null : html`<input type="checkbox"${entry.on ? html` checked` : null}${entry.moot ? html` disabled` : null} data-gets-list="excludeExtensions" data-gets-value="${entry.value}" data-gets-inverse data-gets-on="${entry.backOn}" data-gets-off="${entry.value} left out">`;
     return item({ name: form ? entry.name : `${entry.name}: ${entry.on && !entry.moot ? "on" : "off"}`, subText: entry.sub, control: box, mark: form && !entry.moot });
   })}
 ${item({ name: "The repository’s own", subText: W.repositoryExtensions })}
@@ -156,8 +158,19 @@ function imageBody(gets) {
 }
 
 /**
+ * A watch rule's job loads nothing a host's publication lists and reaches no server, so the card reads less: its model, its flow, one sentence for the rest, its image. REJECTED: the usual rows with a
+ * branch in each, which said a switch's words of a rule with no switch ("Staged packages: on", a package "on"), and a row per host-published name no such job can load. One that only files an issue has no job at all.
+ */
+function watchRows(gets, trigger, fix) {
+  if (trigger.mode === "issue") return note([W.watchIssue]);
+  const removes = trigger.excludeTools ?? [];
+  const can = html`<p class="te-read">${W.watchLoads}</p>${removes.length > 0 ? html`<p class="te-read">The file removes ${listed(removes)}.</p>` : null}`;
+  return html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, false), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, false), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("flows", "What it can use", "whichever host runs it", can, gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets), gets.last.pi)}`;
+}
+
+/**
  * The card. `form` is drawn for an operator on a console that takes changes, on a row the page read whole. A watch rule's `run` takes
- * only some of these fields, so it gets the same rows with no form; a row the file did not give back gets no digest, so no form either.
+ * only some of these fields, so it gets `watchRows` with no form; a row the file did not give back gets no digest, so no form either.
  */
 export function triggerGets(v) {
   const got = getsOf(v);
@@ -167,15 +180,16 @@ export function triggerGets(v) {
   const form = canAct(v) && typeof digest === "string" && trigger.type !== "watch";
   const repositoryHref = gets.record === null ? null : forgeBaseLinkOf(gets.record, v.env);
   const fix = (problem) => (problem && v.role === "operator" ? problem.fixes.filter((one) => one.kind !== "trigger").map((one) => fixButton(one, { repositoryHref })) : null);
-  const hosts = html`<div class="te-hosts" role="list" aria-label="Where its jobs run">${gets.pills.map((pill) => html`<span role="listitem" class="${pill.tone === "ok" ? "te-host te-host--ok" : pill.tone === "attention" ? "te-host te-host--att" : "te-host"}">${ui.icon(pill.icon, { size: "sm" })}<b>${pill.name}</b> ${pill.word}</span>`)}</div>${note(gets.hostsNote, { icon: "doctor" })}${note(gets.quote, { icon: "chain" })}`;
-  const rows = html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, form), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, form), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("layers", "Extensions", "code its jobs load", extensionsBody(gets, form), gets.last.Extensions, gets.problems.Extensions ?? null, fix(gets.problems.Extensions))}${sec("plug", "MCP servers", "outside systems it reaches", mcpBody(gets, form), gets.last.MCP, gets.problems.MCP ?? null, fix(gets.problems.MCP))}${sec("flows", "Tools", "what the agent may use", toolsBody(gets, form), gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets), gets.last.pi)}`;
-  const say = !canAct(v) && v.role === "operator" ? note([W.readOnly]) : trigger.type === "watch" ? note([W.watch]) : canAct(v) && !form ? note([W.unreadRow], { icon: "attention", tone: "attention" }) : null;
+  const watch = trigger.type === "watch";
+  const hosts = watch ? (trigger.mode === "issue" ? null : note(gets.quote, { icon: "chain" })) : html`<div class="te-hosts" role="list" aria-label="Where its jobs run">${gets.pills.map((pill) => html`<span role="listitem" class="${pill.tone === "ok" ? "te-host te-host--ok" : pill.tone === "attention" ? "te-host te-host--att" : "te-host"}">${ui.icon(pill.icon, { size: "sm" })}<b>${pill.name}</b> ${pill.word}</span>`)}</div>${note(gets.hostsNote, { icon: "doctor" })}${note(gets.quote, { icon: "chain" })}`;
+  const rows = watch ? watchRows(gets, trigger, fix) : html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, form), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, form), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("layers", "Extensions", "code its jobs load", extensionsBody(gets, form), gets.last.Extensions, gets.problems.Extensions ?? null, fix(gets.problems.Extensions))}${sec("plug", "MCP servers", "outside systems it reaches", mcpBody(gets, form), gets.last.MCP, gets.problems.MCP ?? null, fix(gets.problems.MCP))}${sec("flows", "Tools", "what the agent may use", toolsBody(gets, form), gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets), gets.last.pi)}`;
+  const say = !canAct(v) && v.role === "operator" ? note([W.readOnly]) : watch ? note([W.watch]) : canAct(v) && !form ? note([W.unreadRow], { icon: "attention", tone: "attention" }) : null;
   // The page's banner promises a link to the refusal that sent a person here, for the actions that keep one. This one does not.
   const unlinked = form && v.query?.becauseRun ? note([W.notLinked], { icon: "attention", tone: "attention" }) : null;
   const body = form
     ? html`<form class="act te-form" data-action="trigger-environment-edit" data-structured="trigger-gets" autocomplete="off"><fieldset data-config-controls disabled><input type="hidden" name="index" value="${String(trigger.index)}" data-type="int"><input type="hidden" name="pageDigest" value="${digest}">${rows}<div class="te-bar" role="status" data-gets-bar hidden><span class="te-bar__t"><b data-gets-count data-one="${W.barOne}" data-many="${W.barMany}"></b> <span data-gets-words></span><small>${W.reloadDrops}</small></span><span class="te-bar__a">${ui.btn({ type: "submit", label: "Preview the change", kind: "primary" })}<button class="btn" type="reset">Discard</button></span></div></fieldset><noscript><p class="muted">${W.noScript}</p></noscript></form>`
     : rows;
-  return ui.card({ title: W.title, sub: `as a job of trigger ${trigger.index + 1} would start, from each host’s last doctor run`, body: html`${hosts}${say}${unlinked}${body}` });
+  return ui.card({ title: W.title, ...(watch || gets.fileRefused ? {} : { sub: `as a job of trigger ${trigger.index + 1} would start, from each host’s last doctor run` }), body: html`${hosts}${say}${unlinked}${body}` });
 }
 
 /** How a change applies, for whoever reads the card. */
@@ -183,6 +197,7 @@ export function triggerGetsHow(v) {
   if (getsOf(v) === null) return null;
   const line = (icon, bold, rest) => html`<li>${ui.icon(icon)}<span><b>${bold}</b> ${rest}</span></li>`;
   const noTool = line("shield", "A person, at the console.", W.noTool);
-  if (!canAct(v)) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", "Read only here.", v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
+  const watch = fileTrigger(v).type === "watch";
+  if (!canAct(v) || watch) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", "Read only here.", watch ? W.watch : v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
   return ui.card({ title: W.how, body: html`<ul class="te-list">${line("edit", "Change it in place.", "A switch for the staged packages, each extension and each MCP server, a chip for each tool, a picker for the model and the flow.")}${line("skill", "The flow picker is not the whole list.", W.flowPicker)}${line("eye", "Nothing is written", "until you preview the change and confirm it.")}${noTool}${line("rerun", "Undo", "puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.")}</ul>` });
 }

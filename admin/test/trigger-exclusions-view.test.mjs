@@ -4,21 +4,25 @@ import assert from "node:assert/strict";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { overlayEntryNamed as runnerEntryNamed } from "../../image/runner/src/loaded.mjs";
 import { buildHostLoads, hostLoadsKey } from "@edgehero/pi-dispatch/host-loads";
-import { overlayEntryNamed } from "@edgehero/pi-dispatch/loaded-record";
+import { extensionsNotHere, leftOutOf, overlayEntryNamed } from "@edgehero/pi-dispatch/loaded-record";
+import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
+import { agentReadProjection } from "../src/agent-read.mjs";
+import { WATCH_READ_TOOLS, watchToolOptions } from "../../image/runner/src/watch.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { sandboxFreshLine, toolNamesOfRuns, triggerLastRun, wordsText } from "../src/loaded-words.mjs";
-import { readTriggerEditor, normalizeTriggerForDisplay } from "../src/read-model.mjs";
+import { readTriggerEditor, readTriggers, normalizeTriggerForDisplay } from "../src/read-model.mjs";
 import { triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
-import { TRIGGER_GETS_WORDS as W, triggerGetsOf } from "../src/trigger-gets-view.mjs";
+import { TRIGGER_GETS_WORDS as W, alsoNaming, overlayStem, readTriggerGetsEntry, triggerGetsOf } from "../src/trigger-gets-view.mjs";
 import { canaryTriggersFor, readUpdates } from "../src/updates-view.mjs";
 import { recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
 import { LOADED_SAMPLES as S, loadedField, loadedRecord, source } from "./helpers/loaded-samples.mjs";
 import { Event, runConsoleScript } from "./helpers/script-dom.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { GETS_ENTRY, getsFile, getsHostLoads, triggerGetsPage } from "./helpers/trigger-gets-goldens.mjs";
+import { GETS_ENTRY, TRIGGER_GETS_DRAW, TRIGGER_GETS_PATH, WATCH_INVESTIGATE, fileOnlyFs, getsFile, getsHostLoads, triggerGetsPage, watchRuleFile } from "./helpers/trigger-gets-goldens.mjs";
 
 const NOW = Date.parse("2026-11-04T12:00:00Z");
 const HOUR = 3_600_000;
@@ -87,6 +91,41 @@ test("one row per name: a package and an overlay entry of one name share it, two
   assert.match(triggerGetsOf({ trigger: COMMENT, records: [S.everything()], hostLoads: await published({ a: { packages: [PI_LINT] } }), liveHosts: ["a"] }).extensions.items[0].sub, /as gh-9575 loaded it/);
 });
 
+test("two names in the file that mean one entry: a row each, each says where it is as the worker reads it, and that the file also names the other", async () => {
+  const names = ["git-guard", "git-guard.ts"];
+  assert.deepEqual(extensionsNotHere(names, { packages: [], overlay: [GUARD.name] }), [], "the worker: both are on this host");
+  const out = await view({ mini1: { extensions: [GUARD] }, mini2: { extensions: [GUARD] } }, { ...COMMENT, excludeExtensions: names });
+  assert.deepEqual(out.extensions.items.map((row) => [row.value, row.name, row.on, row.sub, row.backOn]), [
+    ["git-guard", "git-guard", false, "in the overlay on mini1 and mini2 · the file also names git-guard.ts", "git-guard off the list"],
+    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1 and mini2 · the file also names git-guard", "git-guard.ts off the list"],
+  ]);
+  // Beside a host that lists whole and holds neither, and one that cannot say, the same words any other row reads.
+  const beside = await view({ mini1: { extensions: [GUARD] }, bare: {}, blind: { unread: ["extensions"] } }, { ...COMMENT, excludeExtensions: names });
+  assert.equal(beside.extensions.items[1].sub, "in the overlay on mini1, not on bare, unknown on blind · the file also names git-guard");
+  // One name stays one row, in its own words, and an entry of another stem is its own row whatever the file spells.
+  const one = await view({ mini1: { extensions: [GUARD, { name: "git-guard.js", kind: "file" }] } }, { ...COMMENT, excludeExtensions: ["git-guard.ts"] });
+  assert.deepEqual(one.extensions.items.map((row) => [row.value, row.name, row.on, row.sub, row.backOn]), [
+    ["git-guard", "git-guard.js", true, "in the overlay on mini1", "git-guard back on"],
+    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1", "git-guard.ts back on"],
+  ]);
+  // On the page: the word the bar repeats is the row's.
+  const panel = await card({ excludeExtensions: names });
+  assert.ok(panel.includes('data-gets-value="git-guard" data-gets-inverse data-gets-on="git-guard off the list"'), panel.slice(0, 400));
+  assert.ok(panel.includes('data-gets-value="git-guard.ts" data-gets-inverse data-gets-on="git-guard.ts off the list"'));
+  assert.ok((await card({ excludeExtensions: ["git-guard"] })).includes('data-gets-value="git-guard" data-gets-inverse data-gets-on="git-guard back on"'));
+});
+
+test("the name a row switches is the shortest the worker's and the runner's own rule read as that entry: there is no second regex here", () => {
+  const shortest = (rule, segment) => { for (let end = 1; end <= segment.length; end += 1) if (rule(segment.slice(0, end), segment)) return segment.slice(0, end); return null; };
+  for (const [segment, stem] of [["guard.ts", "guard"], ["guard.js", "guard"], ["guard", "guard"], ["a.b.ts", "a.b"], ["x.ts.ts", "x.ts"], [".ts", ".ts"], ["guard.mjs", "guard.mjs"], ["guard.tsx", "guard.tsx"]]) {
+    assert.equal(overlayStem(segment), stem, segment);
+    for (const rule of [overlayEntryNamed, runnerEntryNamed]) assert.equal(shortest(rule, segment), stem, `${segment}, by ${rule === overlayEntryNamed ? "the worker's" : "the runner's"} rule`);
+  }
+  assert.deepEqual(alsoNaming(["a", "a.ts", "a.js", "b"], "a"), ["a.ts", "a.js"]);
+  assert.deepEqual(alsoNaming(["a", "a.ts", "a.js", "b"], "a.ts"), ["a"], "a.ts and a.js share no entry");
+  assert.deepEqual(alsoNaming(["a", "a.ts", "a.js", "b"], "b"), []);
+});
+
 test("under the file's false a package has no switch of its own, an overlay entry keeps one, and a name in the file keeps its place in the list", async () => {
   const off = await card({ packages: false, excludeExtensions: ["pi-lint"] });
   assert.ok(off.includes('<input type="checkbox" disabled data-gets-list="excludeExtensions" data-gets-value="pi-lint"'), "named and moot: its box stays, disabled and off");
@@ -98,6 +137,73 @@ test("under the file's false a package has no switch of its own, an overlay entr
   assert.ok(seen.includes("pi-lint 1.4.2: off"), seen.slice(0, 2500));
   assert.ok(!seen.includes(W.extensionsMoot), "a viewer can turn nothing on");
   assert.ok(seen.includes("git-guard: on"));
+});
+
+// ---- a file the worker refuses ---------------------------------------------------------------------------------------------
+
+/** Two hosts that publish one thing: over a file that loads these pills say the same, so anything else they say is the file's doing. */
+const SAME_HOSTS = () => {
+  const row = (name) => ({ name, state: "current", at: NOW - HOUR, ageMs: HOUR, every: 24, by: { uid: 1000, worker: true }, overlayExtensionsAllowed: true, packages: [PI_LINT], extensions: [GUARD], skills: [], flows: [{ trigger: 2, flow: "fix", tier: "package", package: "pi-lint", repo: "unknown" }], mcp: [], unread: [], more: {}, image: "pi-job:4.3.1", piVersion: "1.5.0" });
+  return { more: 0, hosts: [row("mini1"), row("mini2")] };
+};
+const SAME_LIVE = [{ name: "mini1" }, { name: "mini2" }];
+const LABEL_ROW = { on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } };
+const REFUSED_FILES = [
+  ["a field with no stamp", getsFile({ ...GETS_ENTRY, run: { ...GETS_ENTRY.run, excludeExtensions: ["pi-lint"] } }), /needs triggers file version 2/],
+  ["a row that is no trigger", `${JSON.stringify({ triggers: [null, LABEL_ROW, GETS_ENTRY] }, null, 2)}\n`, /trigger at index 0: must be an object/],
+  ["a value it refuses", getsFile({ ...GETS_ENTRY, run: { ...GETS_ENTRY.run, maxTurns: "many" } }), /run\.maxTurns must be a positive integer/],
+  ["a duplicate key", getsFile().replace('"triggers"', '"version": 1,\n  "version": 1,\n  "triggers"'), /duplicate key/],
+];
+const LOADS = "The triggers file loads.";
+const REFUSED = "The triggers file does not load; run pi-dispatch doctor for the reason.";
+
+test("a file the worker's own parser refuses: the page says so, each pill reads unknown and never the same, and the form stays, so it can be fixed here", async () => {
+  // The control: the same hosts over a file that loads.
+  const good = await triggerGetsPage({ loads: SAME_HOSTS(), live: SAME_LIVE, records: [] });
+  assert.ok(textOf(panelOf(good, "p-trigger-change")).includes(LOADS));
+  assert.match(textOf(panelOf(good, "p-trigger-gets")), /mini1 the same .*mini2 the same/);
+  assert.ok(textOf(panelOf(good, "p-trigger-gets")).includes(W.fileSays));
+  for (const [what, text, says] of REFUSED_FILES) {
+    assert.throws(() => parseTriggers(text, TRIGGER_GETS_PATH), says, what);
+    for (const options of [{}, { role: "viewer" }, { readOnly: true }]) {
+      const page = await triggerGetsPage({ text, loads: SAME_HOSTS(), live: SAME_LIVE, records: [], ...options });
+      const change = textOf(panelOf(page, "p-trigger-change"));
+      assert.ok(change.includes(REFUSED), `${what}: ${change}`);
+      assert.ok(!change.includes(LOADS), what);
+      const gets = textOf(panelOf(page, "p-trigger-gets"));
+      assert.match(gets, /mini1 unknown .*mini2 unknown/, what);
+      assert.doesNotMatch(gets, /the same \S|\bthe only\b/, what);
+      assert.ok(gets.includes(W.fileRefused), `${what}: ${gets.slice(0, 900)}`);
+      assert.ok(!gets.includes(W.fileSays), what);
+      assert.ok(!gets.includes("as a job of trigger"), `${what}: the card's own heading does not say it either`);
+    }
+    const operator = panelOf(await triggerGetsPage({ text, loads: SAME_HOSTS(), live: SAME_LIVE, records: [] }), "p-trigger-gets");
+    assert.ok(operator.includes('data-action="trigger-environment-edit"'), `${what}: the row that needs fixing can be reached`);
+  }
+});
+
+test("the card asks of its one read, so a file the worker refuses says so with the rest of the page unread, and a good file adds no key anywhere", () => {
+  const [[, refused]] = REFUSED_FILES;
+  assert.equal(readTriggerGetsEntry({ triggersPath: TRIGGER_GETS_PATH, index: 2, fs: fileOnlyFs(refused) }).fileRefused, true);
+  assert.equal(Object.hasOwn(readTriggerGetsEntry({ triggersPath: TRIGGER_GETS_PATH, index: 2, fs: fileOnlyFs(getsFile()) }), "fileRefused"), false);
+  assert.equal(readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs: fileOnlyFs(refused) }).doesNotLoad, true);
+  assert.deepEqual(Object.keys(readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs: fileOnlyFs(getsFile()) })), ["triggers", "count"], "every other read stays key-identical");
+  // What an agent's copy holds of it is that yes or no, and what the page draws for an agent is the same sentence.
+  assert.equal(agentReadProjection(readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs: fileOnlyFs(refused) })).doesNotLoad, true);
+});
+
+test("a file the worker refuses reads so with Valkey down, where only the card's read speaks, and with the card's read gone, where only the snapshot's does", async () => {
+  const [[, refused]] = REFUSED_FILES;
+  const down = panelOf(await triggerGetsPage({ text: refused, deps: { fleet: { snapshot: async () => { throw new Error("down"); }, parkedCount: async () => 0 } } }), "p-trigger-gets");
+  assert.ok(textOf(down).includes(W.fileRefused), textOf(down).slice(0, 400));
+  assert.ok(!textOf(down).includes(W.fileSays));
+  const raced = panelOf(await triggerGetsPage({ text: refused, loads: SAME_HOSTS(), live: SAME_LIVE, deps: { fs: { readFileSync: () => { throw new Error("gone"); } } } }), "p-trigger-gets");
+  assert.ok(textOf(raced).includes(W.fileRefused), textOf(raced).slice(0, 400));
+  assert.match(textOf(raced), /mini1 unknown .*mini2 unknown/);
+});
+
+test("each golden of this card is drawn over a file the worker loads, or its pills and its sentences say nothing of a real file", async () => {
+  for (const [state, draw] of Object.entries(TRIGGER_GETS_DRAW)) assert.ok(textOf(panelOf(await draw(), "p-trigger-change")).includes(state === "trigger-gets-file-refused.operator" ? REFUSED : LOADS), state);
 });
 
 test("a viewer and a read-only console read the same rows, no control, and each extension and tool says which it is", async () => {
@@ -114,14 +220,72 @@ test("a viewer and a read-only console read the same rows, no control, and each 
   assert.ok(textOf(await card({}, { role: "viewer" })).includes(W.packagesLoad));
 });
 
-test("a watch rule's card has no form, and a row the file did not give back draws no switch", async () => {
-  const watch = panelOf(await triggerGetsPage({ entry: { on: { type: "watch", id: "w", source: "s" }, run: { kind: "local", folder: "/x", flow: "fix", task: "T", mode: "investigate" } } }), "p-trigger-gets");
-  assert.doesNotMatch(watch, /data-gets-list/);
+// ---- a watch rule -----------------------------------------------------------------------------------------------------------
+
+const watchFile = watchRuleFile;
+const INVESTIGATE = WATCH_INVESTIGATE;
+const ISSUE = Object.freeze({ kind: "local", mode: "issue", issue: { kind: "github", repo: "acme/shop" } });
+const GOT = ["pi-lint", "git-guard", "linear", "Staged packages", "the same", "the only", "Open Updates", "Doctor’s answer", "as a job of trigger"];
+
+test("a watch rule's job loads nothing a host publishes, so its card names none of it, for whoever reads it, and what it does say is the worker's and the runner's", async () => {
+  // A real rule, in a file the worker loads, on hosts that publish a package, an overlay entry, a server and an answer for its flow.
+  const text = watchFile(INVESTIGATE);
+  const [, , rule] = parseTriggers(text, TRIGGER_GETS_PATH);
+  assert.equal(rule.run.packages, false, "the loader's own word");
+  const loads = SAME_HOSTS();
+  for (const row of loads.hosts) Object.assign(row, { flows: [{ trigger: 2, flow: "triage", tier: "overlay", package: null, repo: "unknown" }], skills: ["triage"], mcp: [{ name: "linear", transport: "http", where: "mcp.example.com", exposure: "codemode", enabled: true, keys: ["LINEAR_API_KEY"] }] });
+  for (const options of [{}, { role: "viewer" }, { readOnly: true }]) {
+    const page = await triggerGetsPage({ text, loads, live: SAME_LIVE, records: [], ...options });
+    const panel = panelOf(page, "p-trigger-gets");
+    const words = textOf(panel);
+    for (const never of GOT) assert.ok(!words.includes(never), `${JSON.stringify(options)}: ${never}: ${words}`);
+    assert.ok(words.includes(W.watchLoads), words);
+    assert.ok(words.includes("triage"), "its flow");
+    assert.ok(words.includes("pi-job:4.3.1"), "its image");
+    assert.doesNotMatch(panel, /<form\b|data-gets-list|te-hosts/);
+    assert.ok(textOf(panelOf(page, "p-trigger-gets-how")).includes(W.watch), "and How a change applies does not offer one");
+    assert.ok(!textOf(panelOf(page, "p-trigger-gets-how")).includes("Change it in place"));
+    assert.ok(textOf(panelOf(page, "p-trigger-change")).includes("The triggers file loads."));
+  }
+  // A doctor's answer that the flow is nowhere is an answer about tiers this job does not read: no warning from it either.
+  const nowhere = SAME_HOSTS();
+  for (const row of nowhere.hosts) row.flows = [{ trigger: 2, flow: "triage", tier: "none", package: null, repo: "absent" }];
+  assert.ok(!textOf(panelOf(await triggerGetsPage({ text, loads: nowhere, live: SAME_LIVE, records: [] }), "p-trigger-gets")).includes("would not find"));
+  // What the sentence says, of what a job of it is given, by each side's own function.
+  assert.ok(W.watchLoads.includes(`Its tools are ${WATCH_READ_TOOLS.slice(0, -1).join(", ")} and ${WATCH_READ_TOOLS.at(-1)}, less what the file removes`));
+  assert.deepEqual(watchToolOptions(["read"], ["read", "bash"], ["query_logs"]), { tools: [...WATCH_READ_TOOLS, "query_logs"], excludeTools: ["read", "bash", "codemode"] }, "what the file removes comes off, and the watch's own stay");
+  assert.equal(leftOutOf({ watch: { findingId: "f" }, packages: false }).packages, true);
+  assert.equal(leftOutOf({ watch: { findingId: "f" }, packages: false }).restricted, true);
+  // What the file removes is its own line, with the loader's four it cannot add back left to the sentence.
+  const removes = textOf(panelOf(await triggerGetsPage({ text: watchFile({ ...INVESTIGATE, excludeTools: ["grep"] }), loads, live: SAME_LIVE, records: [] }), "p-trigger-gets"));
+  assert.ok(removes.includes("The file removes grep."), removes);
+  assert.equal(parseTriggers(watchFile({ ...INVESTIGATE, excludeTools: ["grep"] }), TRIGGER_GETS_PATH)[2].run.excludeTools.includes("grep"), true);
+  // The display says the same wherever a trigger's reach is read.
+  assert.equal(normalizeTriggerForDisplay(JSON.parse(text).triggers[2]).packages, false);
+});
+
+test("a watch rule that only files an issue starts no job, so it has none of the rows", async () => {
+  const text = watchFile(ISSUE);
+  assert.equal(parseTriggers(text, TRIGGER_GETS_PATH)[2].run.mode, "issue");
+  const page = await triggerGetsPage({ text, loads: SAME_HOSTS(), live: SAME_LIVE, records: [] });
+  const words = textOf(panelOf(page, "p-trigger-gets"));
+  assert.ok(words.includes(W.watchIssue), words);
+  for (const never of [...GOT, "Model", "Image and secrets", "What it can use", W.fileSays]) assert.ok(!words.includes(never), `${never}: ${words}`);
+});
+
+test("a row the file did not give back draws no switch", async () => {
   const gone = panelOf(await triggerGetsPage({ deps: { fs: { readFileSync: () => { throw new Error("gone"); } } } }), "p-trigger-gets");
   assert.doesNotMatch(gone, /data-gets-list/);
 });
 
 // ---- the Tools row --------------------------------------------------------------------------------------------------------
+
+test("a tool an extension registers under a name of pi's own goes with run.excludeTools, by the name pi matches", async () => {
+  const record = await recordThroughPipeline({ jobId: "gh-grep", exit: { code: 0, reason: "stop" }, tools: [{ name: "grep", path: "/opt/pi-global/packages/pi-lint/ext.js" }] });
+  const chips = (trigger) => triggerGetsOf({ trigger, records: [record], liveHosts: [] }).tools.fromExtensions.flatMap((group) => group.chips);
+  assert.deepEqual(chips(COMMENT).map((chip) => [chip.name, chip.on, chip.switched]), [["grep", true, false]], "pi's name: shown, and not this chip's to switch");
+  assert.deepEqual(chips({ ...COMMENT, excludeTools: ["grep"] }).map((chip) => [chip.name, chip.on, chip.switched]), [["grep", false, false]]);
+});
 
 test("a chip is from what a run recorded, by its id and host, and goes where what brought it goes", async () => {
   const tools = (trigger) => triggerGetsOf({ trigger, records: [S.everything()], liveHosts: [] }).tools;
@@ -173,7 +337,12 @@ test("a run through the real pipeline that left a tool out reads as such, and th
   const record = await recordThroughPipeline({ exit: { code: 0, reason: "stop" }, turnsOnLine: 3, jobFields: { excludeExtensionTools: ["lint_run"] } });
   const out = triggerGetsOf({ trigger: { ...COMMENT, excludeExtensionTools: ["lint_run"] }, records: [record], liveHosts: [] });
   assert.deepEqual(out.tools.otherTools.map((chip) => chip.name), ["lint_run"]);
-  assert.ok(wordsText(out.last.Tools).includes("lint_run"), wordsText(out.last.Tools));
+  assert.ok(wordsText(out.last.Tools).includes("lint_run removed"), wordsText(out.last.Tools));
+  // A name that matched nothing, under the row: the run's words, and the chip stays, since the file still holds it.
+  const typo = await recordThroughPipeline({ exit: { code: 0, reason: "stop" }, jobFields: { packages: false, excludeExtensionTools: ["deploy_previw"] }, unmatched: [0], packages: [] });
+  const quoted = triggerGetsOf({ trigger: { ...COMMENT, excludeExtensionTools: ["deploy_previw"] }, records: [typo], liveHosts: [] });
+  assert.ok(wordsText(quoted.last.Tools).endsWith("read; none removed; deploy_previw matched nothing."), wordsText(quoted.last.Tools));
+  assert.deepEqual(quoted.tools.otherTools.map((chip) => [chip.name, chip.on]), [["deploy_previw", false]]);
 });
 
 // ---- the form, through the real script and the real planner ------------------------------------------------------------------

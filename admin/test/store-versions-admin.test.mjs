@@ -103,11 +103,11 @@ test("readTriggers reads a triggers file a newer pi-dispatch wrote as invalid, n
   const triggersPath = join(dir, "triggers.json");
   writeFileSync(triggersPath, text({ version: 3, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix" } }] }));
   assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 3; this build understands 2)", newer: true });
-  // A version this build reads, written by hand, is read as before; the display stays lenient on a broken one.
+  // A version this build reads, written by hand, is read as before; the display stays lenient on a broken one, and says the loaders refuse it.
   writeFileSync(triggersPath, text({ version: 1, triggers: [] }));
   assert.deepEqual(readTriggers({ triggersPath }), { triggers: [], count: 0 });
   writeFileSync(triggersPath, text({ version: "x", triggers: [] }));
-  assert.deepEqual(readTriggers({ triggersPath }), { triggers: [], count: 0 });
+  assert.deepEqual(readTriggers({ triggersPath }), { triggers: [], count: 0, doesNotLoad: true });
 });
 
 test("readTriggers reads a file whose version is written twice as broken, never newer, as the loaders and triggersFileNewer do (#761)", () => {
