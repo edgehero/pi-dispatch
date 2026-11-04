@@ -9537,9 +9537,10 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   - **`run.noTools` passthrough** -- also refused by name: it is pi's other tool switch, "notools"
     shares no subsequence with "excludetools" so the near-miss sweep can never catch it, and a silently
     dropped tool switch is this field's whole refusal class.
-  - **Free-string exclusions (extension/custom tool names)** -- they register at container start, so
+  - **Free strings on this list (extension/custom tool names)** -- they register at container start, so
     the loader cannot know them, and admitting them re-opens the exact silent no-op the validation
-    closes. The bound is stated in the docs instead: extension and custom tools are not excludable.
+    closes. CORRECTED 2026-11-04 (#800): such names have a key of their own with the runner's check behind it
+    (`DES-PER-TRIGGER-LOAD-EXCLUSIONS`), and this list stays closed.
   - **A panel key or model-callable setter** -- `run.image`'s question ("is it a capability the model
     would GAIN?") at its sharpest: an exclusion list a model can write is a permission surface whose
     widening direction (a name quietly dropped) reads as harmless in any confirm prompt. Pinned
@@ -12412,7 +12413,7 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
     from that same read. REJECTED: a state and a line of its own, for a run this deployment cannot have.
   - **A host's fact comes from the newest of its runs able to show that fact.** A project's page compares hosts, and within its window a host can have run 1.4.2 and then
     1.4.3. So pi and its image come from its newest run on the host's own image, its packages from its newest run that did not withhold them, was no canary and kept their whole list, and its overlay from its newest
-    run with the overlay open and its whole list kept. Packages and the overlay are the host's: a trigger chooses only all or nothing, which `leftOut` says. A trigger does choose its image, so `loaded.imageFromJob` marks a run on an image its job named, and such a run shows nothing of the host's: two healthy hosts read "differs" by whichever trigger ran last on each until this. The worker says so because only `makeImagePreflight` holds both images. REJECTED: reading it from the trigger as it stands now, which may have changed since the run, and a CLI job has no trigger. A pi version is the fact of the image it was seen on, so a newest image with no version leaves the version unknown, and an older image's is not carried over. A list past its cap is short of what the run had, so it cannot show that kind: `cut.packages` says so directly, and `cut.names` also counts tool names, so the overlay's list is cut only where the row also counts more extensions than it names (a folder of two entries under one name beside a cut tool name reads as cut, the side that claims nothing). A fact no run could show is unknown, never empty, and differs from nothing. REJECTED: the union of a host's
+    run with the overlay open and its whole list kept. Packages and the overlay are the host's, except what a run's trigger left out, all of them or one by name, which `leftOut` says, and a run that left one out by name speaks for neither (#800, `DES-PER-TRIGGER-LOAD-EXCLUSIONS`). A trigger does choose its image, so `loaded.imageFromJob` marks a run on an image its job named, and such a run shows nothing of the host's: two healthy hosts read "differs" by whichever trigger ran last on each until this. The worker says so because only `makeImagePreflight` holds both images. REJECTED: reading it from the trigger as it stands now, which may have changed since the run, and a CLI job has no trigger. A pi version is the fact of the image it was seen on, so a newest image with no version leaves the version unknown, and an older image's is not carried over. A list past its cap is short of what the run had, so it cannot show that kind: `cut.packages` says so directly, and `cut.names` also counts tool names, so the overlay's list is cut only where the row also counts more extensions than it names (a folder of two entries under one name beside a cut tool name reads as cut, the side that claims nothing). A fact no run could show is unknown, never empty, and differs from nothing. REJECTED: the union of a host's
     runs, and its newest run per trigger, each of which calls a routine Adopt a difference until the old run leaves the window or a rare trigger runs again. A host still behind differs however few runs show it. What a flow or a server did belongs to a trigger, and the card counts those by run, so it compares neither. The Extensions row claims only what these facts hold, so a run unable to show one needs no excuse by name. A model canary (`record.canary`) has the overlay shut by its kind and is handed no staged
     package, so it says nothing of either; a package canary (`record.packageCanary`) is an ordinary job on its host's overlay switch, so only its candidate stays out. A card left unsure only by such a choice, with every run read, stays unsure without a warning: a warning that never clears gets skipped.
   - **`loadedOf` answers once per record, frozen.** A project's page asks it of each record from a couple of dozen places, and the rebuild checks every string.
@@ -16849,6 +16850,57 @@ is introduced. The design generator owns the published card before the console u
 - **Code evidence**: `worker/src/model-failover.mjs`, `worker/src/model-failover-protocol.mjs`, `worker/src/index.mjs`, `image/runner/src/provider-failure.mjs`, `image/runner/run-job.mjs`; the attempt key's life in `worker/src/model-attempts.mjs`, `worker/src/retention.mjs`, `worker/src/start.mjs`, `worker/src/cancel-state.mjs`, `worker/src/recovery-queue.mjs` and `admin/src/job-actions.mjs`; `worker/test/model-failover.test.mjs`, `worker/test/model-attempts.test.mjs`, `worker/test/model-failover.integration.test.mjs`, `admin/test/job-actions.test.mjs`, `image/runner/test/provider-failure.test.mjs` and `image/verify-image.sh`.
 - **Traces to**: `REQ-MODEL-POLICY`, `INT-MODEL-COOLDOWN-KEY`, `INT-RUNNER-EXIT-CODE-PROTOCOL`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`.
 
+## DES-PER-TRIGGER-LOAD-EXCLUSIONS
+
+- **Decision** (issue #800): a trigger may name what its jobs do not load (`run.excludeExtensions`) and which tools an extension brings they
+  lose (`run.excludeExtensionTools`). A name in the first is a staged package's manifest name or an overlay entry's file stem, whole file name
+  or folder, and means every extension of that name. The worker omits a package's path at `run-container.mjs`, by `packagePaths.rowOf`,
+  and the runner takes an overlay entry off its list before pi imports it. The second joins the session's `excludeTools`.
+- **Why the omission is in those two places.** `getPackagePaths` has no job, so the resolver cannot be asked; and pi's `extensionsOverride`
+  hands over what already ran, so the overlay has to be filtered on its paths, as `DES-WATCH-DETERMINISTIC-PRODUCER` says of a watch job. A test
+  shows neither a module nor a factory ran. A path the worker cannot name is refused as config, for free: loading what the file takes away
+  is the one answer this must never give.
+- **A name not on a host is not a refusal.** Each host has its own overlay and stage and the file is shared, so one host's absence is no fault of
+  the file. The record says so (`leftOut.extensionsNotHere`) and doctor warns, against what it could read, for a typo keeps nothing out where
+  the real name lives. The split in `leftOut` is the point: a name no host holds left nothing out, so that run still speaks for its host.
+- **A tool name is judged by the runner, and only where it can be.** A name is applied whatever it matched, since an unmatched one widens
+  nothing. It is compared with `extensionRunner.getAllRegisteredTools()` after the servers connect and before the prompt (`getAllTools()` has
+  already lost a name the exclusion matched). It stops the job as `exclude-tool-not-loaded` only when the worker set
+  `PI_EXCLUDE_TOOLS_STRICT`, for a job that withheld no package, names no extension to leave out, has its host's overlay open, has no parent and
+  is not restricted, and only when nothing failed or was dropped at load. Everywhere else the tool may be in what did not load, so the name may
+  be right: it is logged and recorded and the job runs. **Costs, said in the docs**: a typo on a `packages: false` trigger is only reported; a
+  correct name for a tool registered after load refuses a strict job; a package missing on one host refuses that host's strict jobs. A
+  stop comes after load: a call an extension made while it loaded is metered and stays spent, dollars reach $0 only on a trusted line with no
+  calls and a cost cap (`dollarSettlement`), the job-count slot stays held, a comment and a page fire (`RUNNER_POLICY_REASONS`, `HOOK_POLICY_REASONS`).
+- **A role child and a chained child.** A role child runs pi's CLI and reads no job setting: it gets `run.excludeExtensionTools` on its command line
+  beside `run.excludeTools` (`DES-PER-TRIGGER-TOOL-EXCLUSIONS`), and it never loads the overlay or stage by itself, so `run.excludeExtensions`
+  has nothing to do there. A chained child gets both whole, off job data: a child connects no server, so `withoutMcpExclusions` is right for
+  `run.excludeTools`, and it does load extensions, so the same stripping here would widen it. It is never strict, since it may load less than the
+  parent its list was written for.
+- **Free refusals, before spend** (`CONST-BUDGET-BEFORE-TOKENS`). A job on a subscription connection whose adapter is excluded would stop at its load
+  inside a started container, so the pickup refuses it `auth-adapter-disabled`, as it does `packages: false`. A package canary of an excluded package
+  would have its candidate put back by `withCanaryPath`, in a job its trigger keeps it out of, for a run that says nothing: `package-canary-excluded`.
+- **An older image, and an older worker.** An older runner reads neither variable, so the `loadExclusions` capability row refuses for free. Each field
+  is a row of `TRIGGER_RUN_FIELD_VERSIONS`, `JOB_DATA_FIELD_VERSIONS` and `AUTHORED_NARROWING_FIELDS`, so a worker that reads less defers and one
+  reading a dead inode refuses `trigger-skew`, each `DES-STORE-VERSION-WHEN-NEEDED`'s.
+- **What the project card now reads.** It took packages and the overlay as a host's facts, because a trigger chose all or nothing. A run that left
+  one out by name is short of what its host holds on purpose, so it speaks for neither (`leftOutByName`) and says so, and an excluded extension is
+  no difference between hosts.
+- **Rejected**:
+  - **`run.excludeTools` taking these names.** Its closure is what makes a typo a refusal at load.
+  - **`withoutMcpExclusions` for a child's list.** A child connects no server, and does load extensions, so stripping would widen it.
+  - **Refusing a name not on this host.** It would refuse a shared file on every host but one.
+  - **A pattern in `run.excludeExtensionTools`.** pi takes one, and it would match tools no person named.
+  - **Excluding a job's own tool by this key.** `run.progress` or `run.awaitInput` would stay armed with nothing to call. Another extension's tool of
+    that name goes with its extension.
+  - **A name on the exit line.** Positions in the worker's own list, as a package's row is, so a line can only pick from what the operator wrote.
+  - **Comparing hosts less what either run left out.** A second reading of each list, for a card that says the same from a run that shows them whole.
+- **Residuals**: exclusion stops auto-load, not access. An agent with a shell can write `~/.pi/agent/settings.json`, and a later role child loads an
+  excluded overlay extension or package, or the repository's, the boundary `run.packages: false` has. A trigger's page lists an excluded package as its
+  jobs' until that page takes these fields. A package canary on a strict trigger stops if the candidate no longer brings the tool, which is what it found.
+- **Traces to**: `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `DES-STORE-VERSION-WHEN-NEEDED`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`.
+
 ## DES-MODEL-ROLES
 
 - **Reviewed console map (#773)**: the Models page is an additional person's editor for the same `triggers.json.modelRoles`, not a second policy store. It validates known models and effective policy over every affected context before preview/confirm, preserves unrelated document fields through `writeTriggers({mutateDocument, expect})`, and restores exact prior role entries through a freshly checked inverse. Scope/role identity is fixed for an existing row. Default fallback after override removal is legitimate; dangling references and expanded-list overflow are not. Agent definitions are not fetched to populate usage. No read, adoption-prefill or edit enqueues work; recovery keeps its checkpoint model.
@@ -17163,7 +17215,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   for byte what it was, and an older reader is turned away only by content it would misread. The store's own
   `*_VERSION` constant is the highest version this build reads and equals its table's largest value (or 1); a test
   holds every store to that (`versionTableProblems`). At #761 every table was empty and every version was 1, so that
-  change wrote nothing new into any of these stores (since #796 queued job data is at 2, for `packageCanary` alone: an older worker would otherwise run a plain paid job in a canary's place, and a job with no canary still carries no stamp) (run records gain `v`, below) and only teaches every reader and
+  change wrote nothing new into any of these stores (since #796 queued job data is at 2, for `packageCanary`: an older worker would otherwise run a plain paid job in a canary's place, and a job with no canary still carries no stamp; since #800 the triggers file is at 2 too, and job data's table grows, for `run.excludeExtensions` and `run.excludeExtensionTools`: an older loader or worker drops either and runs the job with what the file takes away, and a file or job with neither stays what it was) (run records gain `v`, below) and only teaches every reader and
   writer what a newer one means. The stores: the settings overlay (`SETTINGS_VERSION`, `SETTINGS_KEY_VERSIONS`, and
   `SETTINGS_VALUE_VERSIONS` for a value a later release allows where this one refuses), the pause windows file
   (`PAUSE_WINDOWS_VERSION`, `PAUSE_WINDOW_FIELD_VERSIONS`), the triggers file (`TRIGGERS_FILE_VERSION`,
@@ -17222,8 +17274,9 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   overlay, the pause windows file or the triggers file was an unknown key, which every reader ignored. One an operator
   wrote by hand (a revision number of their own) now meets the rule: a value that is not an integer of 1 or more makes a
   pause windows or triggers file refuse a service's start (a live edit keeps the last good copy, as for any file that
-  does not load) and makes the overlay invalid, so every job is refused `settings-overlay-invalid`; an integer above 1
-  reads as a newer release's file, so every job defers. No release writes one yet, so the fix is to remove it: doctor's
+  does not load) and makes the overlay invalid, so every job is refused `settings-overlay-invalid`; an integer above what
+  the build reads (1, and since #800 2 for the triggers file) reads as a newer release's file, so every job defers. Until #800 no release wrote one, and since then only a triggers file using its two fields
+  holds one, so the fix for one nobody's release wrote is to remove it: doctor's
   fix for a newer file (`newerFileFix`, one sentence for the three files) says so, and so do the upgrade notes in
   `docs/backup.md`, `docs/pause-windows.md` and `docs/triggers.md`.
 - **What each writer carries that it does not know.** A version only protects what an older reader would otherwise
@@ -17330,7 +17383,10 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   tables, field or value, must not ship until every host, and every panel and console that writes the store, runs
   issue #761's release or later. Each worker publishes the highest version it reads of four stores
   (`INT-HOST-REGISTRY-CONTRACT`), and doctor's `fleet.store-versions` names a peer that publishes a lower one or none
-  while this host's file needs more than 1. It is a warning; nothing refuses on it. The other way round, a release that
+  while this host's file needs more than 1. It is a warning; nothing refuses on it. So the change that adds `run.excludeExtensions` and
+  `run.excludeExtensionTools` (#800) holds until a tag with #761 is out and every host runs it: a 4.3.1 worker reads no version, drops both and runs wider,
+  and a 4.3.1 panel, console or disarm writes `triggers` alone, dropping the stamp. The console's `trigger-environment-edit` refuses a file a live host cannot
+  read, and only a host the registry names can be asked. The other way round, a release that
   raises the triggers file's version keeps accepting `on.disarmed` as `{ at, jobId? }`: an older build's disarm writes
   that shape into the newer file (`DES-ONE-SHOT-DISARM-IN-THE-FILE`), so a newer loader that refused it would refuse
   the whole file over a disarm.
@@ -17889,3 +17945,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-04 (#800, part 2, a refusal the catalog decides) | **`DES-ADMIN-VIA-PI-EXTENSION` CORRECTED** in "What that preview judges": "A model said to be one a job cannot use has no bound asked of it", in the bullet and in the row above, was wider than the disagreement it was for, a typo said to be unknown and also said to be unbounded. It dropped the refusal of a known main off this host's list under a cap below its first call, and where that row says it, this one stands. **`CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**: this restores what it asks. **`DES-MODEL-FAILOVER` UNCHANGED, checked**. **Code evidence**: admin/src/trigger-environment-plans.mjs -> judgeModels. |
 | 2026-11-04 (#800, part 2, one rule for a main) | **`DES-ADMIN-VIA-PI-EXTENSION` CORRECTED** in "What that preview judges", where the rows above say otherwise: the main model is judged whenever its amount is known, whatever this host's list says and whether or not it has fallbacks, since judging it by this host's selection warned on one host and refused the same row on another. A Radius or unboundable main refuses only with no fallbacks. **AMENDED**: only the first of pickup's refusals is said; "could not be bounded here" no longer says the runner judges it. **`DES-MODEL-FAILOVER` and `CONST-BUDGET-BEFORE-TOKENS` UNCHANGED, checked**. **Code evidence**: admin/src/trigger-environment-plans.mjs -> judgeModels. |
 | 2026-11-04 (#800, a role child's tools) | **`DES-PER-TRIGGER-TOOL-EXCLUSIONS` CORRECTED** in Decision: a role child gets the trigger's exclusions on its own command line. It ignored `run.excludeTools`, an agent's `tools: [read, bash]` included: it runs pi's CLI, and PI_EXCLUDE_TOOLS is read by the runner alone. **Rejected**: `injectChildMeter`, since pi's flag is last-wins and that injection reaches children no job's list belongs to. UNCHANGED, checked: `DES-MODEL-ROLES`, whose Runner bullet names models, tokens and dollars and is true as it stands. Residual: the runner builds the command line, so a role child on an image from before this keeps every tool until the image is rebuilt. No capability row says so here, because its token would have to be new and would refuse every job with exclusions and role agents on an image that holds both features. |
+| 2026-11-04 (#800, what a trigger leaves out) | **NEW `DES-PER-TRIGGER-LOAD-EXCLUSIONS`**: `run.excludeExtensions` and `run.excludeExtensionTools`, where each is enforced and why, when a tool name stops a job and what that stop costs, the free refusals, and what is rejected. **`DES-PER-TRIGGER-TOOL-EXCLUSIONS` CORRECTED** in Rejected: free strings stay off `run.excludeTools`, and extension tools have a key of their own, where it said they are not excludable. **`DES-STORE-VERSION-WHEN-NEEDED` AMENDED**: the triggers file is at 2, the first row of its table, and job data's table grows; the release rule names what this change holds for; "no release writes one yet" is no longer true of the triggers file. UNCHANGED, checked: the `on.disarmed` shape a newer loader keeps accepting, which a disarm into a version 2 file still writes and this build still reads; the value tables, since neither field widens an existing one. **`DES-OPERATOR-CONSOLE` CORRECTED** in one sentence of "What a run loaded": a trigger now chooses more than all or nothing. |

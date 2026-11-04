@@ -43,7 +43,8 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			if (ref.provider === "openai" && (job.watchDecisionModel?.provider === "openai" || job.questionGroupModel?.provider === "openai" || job.answerDecisionModel?.provider === "openai")) return { ok: false, managed: true, reason: "auth-capability-unsupported" };
 			if (["openshell", "openshell-bind"].includes(job.backend ?? defaultBackend) || job.canary === true) return { ok: false, managed: true, reason: "auth-venue-unsupported" };
 			if (ref.provider === "anthropic") {
-				if (job.packages === false) return { ok: false, managed: true, reason: "auth-adapter-disabled" };
+				// Excluded by name too (issue #800): the adapter is a staged package, and left out of PI_PACKAGES it would stop the job at its load, inside a started container with its budget held.
+				if (job.packages === false || (Array.isArray(job.excludeExtensions) && job.excludeExtensions.includes(row.adapter))) return { ok: false, managed: true, reason: "auth-adapter-disabled" };
 				const staged = packageRootFor(row.adapter);
 				if (!staged) return { ok: false, managed: true, reason: "auth-adapter-unavailable" };
 				if (staged.refused) return { ok: false, managed: true, reason: staged.refused };

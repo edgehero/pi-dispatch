@@ -172,6 +172,9 @@ const AFTER_READY_EXIT_2 = Object.freeze([
   { name: "a command no extension registers", exit: { code: 2, reason: "command-unregistered", message: "no such command" }, record: { reason: "runner-policy", turns: null }, wentOn: false },
   // The same, after a call an extension made while it loaded, which that line carries so the spend is not hidden (`meteredExitFields`).
   { name: "a command no extension registers, after a call at load", exit: { code: 2, reason: "command-unregistered", message: "no such command", tokens: meterSnapshot(1, 300) }, record: { reason: "runner-policy", turns: null }, wentOn: false },
+  // A tool name a strict job's trigger names that nothing registered (issue #800), with and after a call at load. Its reason is its own, so its comment is too.
+  { name: "a tool name that matched nothing", exit: { code: 2, reason: "exclude-tool-not-loaded", message: "no such tool" }, record: { reason: "exclude-tool-not-loaded", turns: null }, wentOn: false },
+  { name: "a tool name that matched nothing, after a call at load", exit: { code: 2, reason: "exclude-tool-not-loaded", message: "no such tool", tokens: meterSnapshot(1, 300) }, record: { reason: "exclude-tool-not-loaded", turns: null }, wentOn: false },
   // A stop made by a call an extension made while it loaded: the prompt is never sent (`decideExit`'s meterStop, with no turn taken).
   { name: "a cost cap at load", exit: { code: 2, reason: "cost-cap", message: "over", tokens: meterSnapshot(1, 300) }, turnsOnLine: 0, record: { reason: "cost-cap", turns: 0 }, wentOn: false },
   { name: "a model refused at load", exit: { code: 2, reason: "model-not-allowed", message: "no", tokens: meterSnapshot(1, 0) }, turnsOnLine: 0, record: { reason: "model-not-allowed", turns: 0 }, wentOn: false },
@@ -189,7 +192,7 @@ test("every exit-2 path after ready, as a real record: only a run that took a tu
   const promptAt = runner.indexOf("await session.prompt(prompt);");
   assert.ok(readyAt > 0 && readyAt < promptAt, "the runner's notes are where this test reads them");
   // A new refusal after `ready` fails here, until it is added to the paths above and read through the pipeline.
-  assert.deepEqual([...runner.slice(readyAt, promptAt).matchAll(/configError\(\s*(?:`[^`]*`|"[^"]*"),\s*"([a-z-]+)",?\s*\)/g)].map((match) => match[1]), ["command-unregistered"]);
+  assert.deepEqual([...runner.slice(readyAt, promptAt).matchAll(/configError\(\s*(?:`[^`]*`|"[^"]*"),\s*"([a-z-]+)",?\s*\)/g)].map((match) => match[1]), ["exclude-tool-not-loaded", "command-unregistered"]);
   for (const path of AFTER_READY_EXIT_2) {
     const record = await recordThroughPipeline({ exit: path.exit, turnsOnLine: path.turnsOnLine });
     assert.equal(record.outcome, "policy", path.name);

@@ -117,10 +117,12 @@ test("every free refusal is a closed reason, before npm is asked anything that c
 	const check = (job, over = {}) => runtime({ exec: fake.exec, ...over }).check(job);
 	assert.deepEqual(await check({ packageCanary: { name: "<b>", version: "1.0.0" } }), { refused: "package-canary-invalid" });
 	assert.deepEqual(await check({ packageCanary: CANARY, packages: false }), { refused: "package-canary-packages-off" });
+	assert.deepEqual(await check({ packageCanary: CANARY, excludeExtensions: ["@a/b"] }), { refused: "package-canary-excluded" }, "issue #800: `withCanaryPath` would put back what the trigger leaves out");
 	assert.deepEqual(await check({ packageCanary: { name: "pi-anthropic-oauth", version: "0.3.7" } }), { refused: "package-canary-adapter" });
 	assert.deepEqual(await check({ packageCanary: CANARY, resume: true }), { refused: "package-canary-resume" }, "its next run would continue the candidate's work");
 	assert.deepEqual(await check({ packageCanary: { name: "absent", version: "1.0.0" } }), { refused: "package-canary-not-staged" });
 	assert.deepEqual(await check({ packageCanary: CANARY }, { globalPiDir: undefined }), { refused: "package-canary-not-staged" });
+	assert.deepEqual(await check({ packageCanary: { name: "absent", version: "1.0.0" }, excludeExtensions: ["other"] }), { refused: "package-canary-not-staged" }, "another name is not this package");
 	assert.equal(fake.calls.length, 0, "none of these needed the registry");
 });
 

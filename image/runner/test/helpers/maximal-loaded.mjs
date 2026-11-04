@@ -31,6 +31,8 @@ export function longestNames() {
 		active: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls", ...LOADED_JOB_TOOLS],
 		ownNames: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"],
 		mcp: Array.from({ length: LOADED_MAX_SERVERS }, () => ["connected", LOADED_MAX_TOOL_COUNT]),
+		// Every name of the longest list `run.excludeExtensionTools` takes matched nothing (the loader's cap, held to this by exclude-extensions.test.mjs).
+		unmatched: Array.from({ length: 16 }, (_, i) => i),
 	});
 }
 

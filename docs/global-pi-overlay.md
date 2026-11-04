@@ -280,9 +280,14 @@ place, because two of them are easy to forget and #58 originally called the thir
 
 | Source | Where it comes from | How to withhold it |
 |---|---|---|
-| the overlay's `extensions/` | your own host setup, staged here by `import-pi` | `PI_GLOBAL_ALLOW_EXTENSIONS=0` |
-| a staged package's extensions | pinned third-party code under `packages/` | `"packages": false` on the trigger |
+| the overlay's `extensions/` | your own host setup, staged here by `import-pi` | `PI_GLOBAL_ALLOW_EXTENSIONS=0` on the host, or one entry by name in the trigger's `"excludeExtensions"` |
+| a staged package's extensions | pinned third-party code under `packages/` | `"packages": false` on the trigger for all of them, or one by its manifest name in `"excludeExtensions"` |
 | the serviced repo's `.pi/extensions` | the repo being worked on, discovered natively by pi | nothing here: it is the repo's own tree |
+
+`"excludeExtensions"` stops what a job loads on its own. An overlay entry it names is taken off the runner's list before pi imports
+anything, and a package it names is left out whole, with its skills, prompts and themes. A name not on this host is no refusal: the
+run's record says so and doctor warns. Neither it nor `"packages": false` is a wall: an agent with a shell can write
+`~/.pi/agent/settings.json`, and a later role child then loads what was left out ([exclusions](exclude-tools.md#what-exclusion-does-not-stop)).
 
 The third one surprises people, and it is deliberate. pi's normal discovery posture is on
 (`noExtensions: false`), and `/workspace` holds the **base repo's default-branch sha**, so what loads is

@@ -110,6 +110,17 @@ export function tierOf(path, { packages = [], jobPi, triggerSkills, overlay, wor
 	return owner === null ? "other" : ordered.find(([root]) => root === owner)[1];
 }
 
+/**
+ * Whether `name` in `run.excludeExtensions` means this first path segment of the overlay's `extensions/`: a folder's name, a file's
+ * stem, or a file's whole name, which is how a record and a host's publication spell it, so a name copied from either is no silent
+ * no-op. Blind to whether the segment is a file, so the worker, which holds a folder listing, answers as this does
+ * (worker/src/loaded-record.mjs holds the same rule, and a test holds the two equal). REJECTED: the stem alone, since a folder named
+ * `tool.js` would answer to `tool` and not to its own name.
+ */
+export function overlayEntryNamed(name, segment) {
+	return name === segment || name === segment.replace(/\.(?:ts|js)$/, "");
+}
+
 /** The folder under the overlay its extensions load from, as the loader's own constant builds it. */
 const overlayExtensionsOf = (roots) => `${roots.overlay}/extensions`;
 
@@ -167,7 +178,7 @@ const emptyRow = () => LOADED_ROW.map(() => 0);
  * `flow` is absent when the job names none, and `none` when it names one that loaded in no tier. Those two read
  * differently because the second is the failure this field exists to surface.
  */
-export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skills = [], prompts = [], themes = [], failures = [], drops = [], shadowed = [], tools = null, active = [], ownNames = [], mcp = null }) {
+export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skills = [], prompts = [], themes = [], failures = [], drops = [], shadowed = [], tools = null, active = [], ownNames = [], mcp = null, unmatched = [] }) {
 	const cut = { form: "full", packages: 0, servers: 0, names: 0, counts: 0 };
 	const out = { v: LOADED_VERSION, at, pi: typeof pi === "string" && pi !== PI_VERSION_UNKNOWN && pi.length <= PI_VERSION_MAX && PI_VERSION_RE.test(pi) ? pi : null };
 	if (roots === undefined) return { ...out, cut };
@@ -235,7 +246,8 @@ export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skill
 		const own = new Set(ownNames);
 		// By name AND by source, as `own` is: another extension's tool of a job tool's name is not the job's.
 		const job = new Set(toolRows.filter((tool) => tool.path.startsWith(INLINE_PATH_PREFIX) && LOADED_JOB_TOOLS.includes(tool.name)).map((tool) => tool.name));
-		out.tools = { active: clamp(active.length, LOADED_MAX_TOOL_COUNT), own: active.filter((name) => own.has(name) && builtin.has(name)), job: active.filter((name) => job.has(name)) };
+		// `unmatched`: which of PI_EXCLUDE_EXTENSION_TOOLS' names matched nothing, by position, as rows are, so no name goes on the line.
+		out.tools = { active: clamp(active.length, LOADED_MAX_TOOL_COUNT), own: active.filter((name) => own.has(name) && builtin.has(name)), job: active.filter((name) => job.has(name)), ...(unmatched.length > 0 ? { unmatched } : {}) };
 		out.extTools = extensionTools({ tools: toolRows, roots, overlayNames: keptLoaded, cut });
 	}
 	out.cut = cut;
@@ -292,13 +304,13 @@ function extensionTools({ tools, roots, overlayNames, cut }) {
  * The field's three forms, largest first, for the writer to pick from by measuring the line (exit-line.mjs). Tool names
  * go first: compact keeps what a person needs to know whether the run was fine and loses what names things.
  *   - full: everything;
- *   - compact: no package rows, no overlay names, no own or job tools, no extension tools;
+ *   - compact: no package rows, no overlay names, no own or job tools, no extension tools (which exclusions matched nothing stays: positions, and few);
  *   - minimal: v, at, pi, flow, the failed and dropped totals, and how many servers failed or timed out.
  * Each says which it is in `cut.form`.
  */
 export function fitLoaded(loaded) {
 	const { packages: _packages, overlay: _overlay, extTools: _extTools, tools, cut, ...kept } = loaded;
-	const compact = { ...kept, ...(tools ? { tools: { active: tools.active } } : {}), cut: { ...cut, form: "compact" } };
+	const compact = { ...kept, ...(tools ? { tools: { active: tools.active, ...(tools.unmatched ? { unmatched: tools.unmatched } : {}) } } : {}), cut: { ...cut, form: "compact" } };
 	const total = (slot) => Object.values(loaded.tiers).reduce((sum, row) => sum + row[slot], 0);
 	const minimal = {
 		v: loaded.v,

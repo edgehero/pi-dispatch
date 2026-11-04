@@ -132,3 +132,26 @@ test("a whole job: the real runner hands PI_EXCLUDE_TOOLS to its role child, and
 		await server.close();
 	}
 });
+
+test("a whole job: an extension tool the trigger names is out of the child too, and a child is no strict job", { skip }, async () => {
+	const server = await scriptedServer();
+	try {
+		const root = jobTree({ base: server.base });
+		const ref = `${JOB_PROVIDER}/${JOB_MODEL}`;
+		put(root, "/job/model-roles.json", JSON.stringify({ version: 1, roles: {}, parent: ref, models: [ref] }));
+		put(root, "/job/agents.json", JSON.stringify({ version: 1, agents: [{ name: "scout", description: "probe", content: "Probe." }] }));
+		mkdirSync(join(root, "home", ".pi", "agent", "extensions"), { recursive: true });
+		writeFileSync(join(root, "home", ".pi", "agent", "models.json"), readFileSync(join(root, "opt", "pi-global", "models.json")));
+		// In the child's own agent dir, as an agent with a shell could leave one: what its CLI loads, and a tool the trigger names.
+		const tool = (name) => `pi.registerTool({ name: ${JSON.stringify(name)}, label: "t", description: "t", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [] }) });`;
+		writeFileSync(join(root, "home", ".pi", "agent", "extensions", "child-tools.js"), `export default function (pi) { ${tool("child_keep")} ${tool("child_gone")} }\n`);
+		const { exit, stderr } = await runRealJob(root, { PI_MODEL_ROLES_FILE: "/job/model-roles.json", PI_AGENTS_FILE: "/job/agents.json", PI_EXCLUDE_EXTENSION_TOOLS: "child_gone", PI_ALLOWED_MODELS: ref, PI_OFFLINE: "1" });
+		assert.equal(exit?.code, 0, `${JSON.stringify(exit)}\n${stderr}`);
+		const childCall = server.offered.find((names) => !names.includes("subagent"));
+		assert.ok(childCall, "the child reached the model");
+		assert.ok(childCall.includes("child_keep"), "the premise: the child loads that extension");
+		assert.ok(!childCall.includes("child_gone"), JSON.stringify(childCall));
+	} finally {
+		await server.close();
+	}
+});

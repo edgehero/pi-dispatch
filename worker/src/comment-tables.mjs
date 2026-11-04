@@ -69,6 +69,9 @@ export const TERMINAL_COMMENTS = {
 	"await-input-without-session": "Stopped: this run may stop to wait for an answer but had nowhere to keep its work, so it ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",
 	// Issue #644. The runner's refusal of a job armed with run.progress, before the prompt.
 	"report-progress-shadowed": "Stopped: another extension in this job registers the tool a run uses to report its progress, so the run ended before the agent started. The operator needs to remove that extension or this trigger's run.progress. Not retried.",
+	// Issue #800. The runner's refusal of a name in run.excludeExtensionTools that matched nothing, before the prompt. An extension may have made calls
+	// while it loaded, so nothing here says nothing was spent, and the sentence names each cause a person can act on: no run of it can tell them apart.
+	"exclude-tool-not-loaded": "Stopped: run.excludeExtensionTools names a tool no extension in this job registered when it loaded, so the run ended before the agent started. The name may be misspelled, the package that brings the tool may be missing on this host, or the extension may register it later. The operator needs to fix the name, stage the package, or exclude that extension. Not retried.",
 	// Issue #646. The runner's two refusals of a job armed with run.steer, each before the prompt. Both are a worker and
 	// image mismatch (the worker arms steering only with the inbox mount and an exit key), so both name that fix.
 	"steer-inbox-missing": "Stopped: this run may receive messages while it works but could not read where they arrive, so it ended before the agent started. The operator needs to run a worker and a job image of the same release. Not retried.",

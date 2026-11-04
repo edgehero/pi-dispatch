@@ -215,8 +215,8 @@ test("run-job wires run.excludeTools: membership pre-spend, a conditional spread
 		src.indexOf("assertExcludeToolsKnown(") < src.indexOf("readPrompt(PROMPT_PATH)"),
 		"and before the job inputs are even read, beside the mount asserts",
 	);
-	assert.match(src, /\.\.\.\(cfg\.excludeTools\.length > 0 && \{ excludeTools: cfg\.excludeTools \}\)/, "the option must ride a conditional spread -- unconditional would hand pi an empty-but-present denylist");
-	assert.match(src, /log\("tools_excluded", \{ excludeTools: cfg\.excludeTools, active: session\.getActiveToolNames\(\) \}\)/, "the read-back log line is gone -- the exclusion would be unobservable in the job log");
+	assert.match(src, /\.\.\.\(sessionExclusions\.length > 0 && \{ excludeTools: sessionExclusions \}\)/, "the option must ride a conditional spread -- unconditional would hand pi an empty-but-present denylist");
+	assert.match(src, /log\("tools_excluded", \{ excludeTools: cfg\.excludeTools, [^\n]*active: session\.getActiveToolNames\(\) \}\)/, "the read-back log line is gone -- the exclusion would be unobservable in the job log");
 	assert.ok(
 		src.indexOf("createAgentSession(") < src.indexOf('log("tools_excluded"'),
 		"the read-back can only be logged post-session",

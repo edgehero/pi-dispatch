@@ -76,6 +76,7 @@ const ROWS = [
 	["question-group-unanswered", TERMINAL_COMMENTS["question-group-unanswered"], "Check the Zero touch grouping status and reviewed configuration before trying again."],
 	["question-group-output-invalid", "The grouping result did not satisfy the closed result contract.", "Check the Zero touch grouping status and reviewed configuration before trying again."],
 	["job-image-question-grouping-unsupported", "The job image does not declare isolated question grouping.", "Check the Zero touch grouping status and reviewed configuration before trying again."],
+	["job-image-load-exclusions-unsupported", "The job image does not declare support for leaving out an extension or an extension's tool, so its runner would ignore `run.excludeExtensions` and `run.excludeExtensionTools`. No container started and nothing was spent.", "Rebuild the job image from this release."],
 	["job-image-package-canary-unsupported", "The job image does not declare package canaries, so it could not report whether the candidate loaded. No container started and nothing was spent.", "Rebuild the job image from this release."],
 	["job-image-answer-draft-unsupported", "The job image does not declare restricted, authenticated answer drafting. No draft job started.", "Rebuild the image before enabling answer rules."],
 	["decide-unanswered", "The decision did not produce a usable answer; its reviewed human fallback applies.", "Inspect the decision trace and the fallback issue."],
@@ -245,6 +246,7 @@ const ROWS = [
 	["pi-path-collision", "Refused: the repository's `.pi/` holds two paths that differ only in letter case, which a host that ignores case would write as one. Not run.", "Rename one of the two paths in `.pi/` on the default branch."],
 	["package-canary-invalid", "Refused: this canary does not name one package at one exact version. No container started and nothing was spent.", "Start the canary again from the Updates page."],
 	["package-canary-packages-off", "Refused: this trigger sets `run.packages: false`, so it has no staged copy for a candidate to replace, and the run would say nothing about the jobs this package goes into. Nothing was spent.", "Run the canary as a trigger that loads staged packages."],
+	["package-canary-excluded", "Refused: this trigger leaves this package out in `run.excludeExtensions`, so the run would say nothing about the jobs this package goes into. Nothing was spent.", "Run the canary as a trigger that loads this package."],
 	["package-canary-resume", "Refused: this trigger resumes its transcript, so its next run would continue the candidate's work, and a canary is for one job. Nothing was spent.", "Run the canary as a trigger that does not resume."],
 	["package-canary-not-staged", "Refused: this package is not staged on the host that took the canary, so there is nothing for the candidate to replace. Nothing was spent.", "Stage the package on that host, or run the canary as a trigger served where it is staged."],
 	["package-canary-adapter", "Refused: this package is a reviewed subscription adapter, whose identity depends on its exact tree. Nothing was spent.", "Update an adapter with a reviewed pi-dispatch release."],
@@ -285,6 +287,7 @@ const ROWS = [
 	["await-input-shadowed", TERMINAL_COMMENTS["await-input-shadowed"], "Remove the extension that registers the wait tool, or the trigger's `run.awaitInput`."],
 	["await-input-without-session", TERMINAL_COMMENTS["await-input-without-session"], "Run a worker and a job image of the same release."],
 	["report-progress-shadowed", TERMINAL_COMMENTS["report-progress-shadowed"], "Remove the extension that registers the progress tool, or the trigger's `run.progress`."],
+	["exclude-tool-not-loaded", TERMINAL_COMMENTS["exclude-tool-not-loaded"], "Fix the name in `run.excludeExtensionTools`, stage the package that brings the tool on this host, or if the extension registers the tool after it loads, exclude that extension in `run.excludeExtensions`."],
 	["steer-inbox-missing", TERMINAL_COMMENTS["steer-inbox-missing"], "Run a worker and a job image of the same release."],
 	["steer-no-exit-key", TERMINAL_COMMENTS["steer-no-exit-key"], "Run a worker and a job image of the same release."],
 	// ── Durable runs ────────────────────────────────────────────────────────────────────────────────────────────────

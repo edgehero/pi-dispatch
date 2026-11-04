@@ -216,13 +216,18 @@ export const AWAIT_INPUT_RUNNER_REASONS = Object.freeze(["await-input-shadowed",
  */
 export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"]);
 /**
+ * The runner's exit-2 refusal of a job whose `run.excludeExtensionTools` names a tool nothing registered (issue #800), before the prompt, on a job
+ * the worker marked strict. Named for MCP_RUNNER_REASONS' reason: the operator's fix is a name, a stage or the extension, and not a budget.
+ */
+export const EXCLUDE_RUNNER_REASONS = Object.freeze(["exclude-tool-not-loaded"]);
+/**
  * The runner's exit-2 refusals of a job armed with `run.steer` (issue #646), before the prompt: PI_STEER is set but
  * `/inbox` is not a readable directory (`steer-inbox-missing`), or no exit key arrived to sign the delivery acks with
  * (`steer-no-exit-key`). Both are a worker regression or a hand-run container, since the worker arms steering only
  * with the mount and a key; named for MCP_RUNNER_REASONS' reason, the operator's fix is not a budget.
  */
 export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer-no-exit-key"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so

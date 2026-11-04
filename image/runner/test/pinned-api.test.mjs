@@ -895,6 +895,22 @@ test("CreateAgentSessionOptions declares the tools trio, and INT-SDK-SESSION-OPT
 	assert.match(sessionDts, /setActiveToolsByName\(toolNames: string\[\]\): void;/, "AgentSession.setActiveToolsByName moved -- the loader acceptance proves exclusion survives it");
 });
 
+test("run.excludeExtensionTools reads what the extensions registered off a list the exclusion does not filter (issue #800)", { skip }, () => {
+	// Asked of the runner, because `session.getAllTools()` has already lost an excluded name: a name that matched and a typo would read alike there.
+	const runner = agentDistFile("core", "extensions", "runner.js");
+	assert.match(piMethod(runner, "getAllRegisteredTools"), /for \(const ext of this\.extensions\) \{\n\s*for \(const tool of ext\.tools\.values\(\)\) \{\n\s*if \(!toolsByName\.has\(tool\.definition\.name\)\) \{\n\s*toolsByName\.set\(tool\.definition\.name, tool\);/, "getAllRegisteredTools moved: run-job reads `tool.definition.name` off every extension's registrations, and would refuse a name it no longer finds");
+	assert.match(agentDistFile("core", "extensions", "runner.d.ts"), /getAllRegisteredTools\(\): RegisteredTool\[\];/);
+	const session = agentDistFile("core", "agent-session.js");
+	// The exclusion filters a copy of that list, so what the runner reads keeps the name, and a tool registered later is filtered the same way.
+	const refresh = piMethod(session, "_refreshToolRegistry");
+	assert.match(refresh, /const registeredTools = this\._extensionRunner\.getAllRegisteredTools\(\);/);
+	assert.match(refresh, /\]\.filter\(\(tool\) => this\._isAllowedTool\(tool\.definition\.name\)\);/);
+	assert.match(piMethod(session, "_isAllowedTool"), /if \(this\._excludedTools\?\.\(name\)\)\n\s*return false;/, "the exclusion no longer comes first, so `--tools` or an allowlist could keep what a trigger removes");
+	assert.match(session, /\n {4}get extensionRunner\(\) \{\n {8}return this\._extensionRunner;\n {4}\}/);
+	// A role child's half: the flag is pi's own, and a second one replaces the first.
+	assert.match(agentDistFile("cli", "args.js"), /\(arg === "--exclude-tools" \|\| arg === "-xt"\) && i \+ 1 < args\.length\) \{\n\s*result\.excludeTools = args\[\+\+i\]/);
+});
+
 test("the record of what a job loaded reads these off pi (issue #800): each is a silent zero or a wrong tier if it moves", { skip }, () => {
 	// VERSION is pi's own constant, the field's `pi`. "0.0.0" is its fallback when it cannot read its package, which the
 	// record reads as null, so it must still be that fallback and not what the pin reports.

@@ -51,6 +51,10 @@ export const CONTAINER_ENV_NAMES = new Set([
 	"PI_FLOW",
 	"PI_COMMAND",
 	"PI_EXCLUDE_TOOLS",
+	// Issue #800: a trigger binding one through run.secrets could name what its own exclusions leave out, or stop a job.
+	"PI_EXCLUDE_EXTENSIONS",
+	"PI_EXCLUDE_EXTENSION_TOOLS",
+	"PI_EXCLUDE_TOOLS_STRICT",
 	"PI_AWAIT_INPUT", "PI_APPROVAL_GATES", "PI_APPROVAL_DECISION",
 	// Issue #644: a trigger binding it through run.secrets would offer itself a tool the operator did not arm.
 	"PI_REPORT_PROGRESS",

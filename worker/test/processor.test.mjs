@@ -1995,7 +1995,7 @@ const canaryRuntime = ({ check = { ok: true, canary: CANARY, replaces: "a__b" },
 });
 
 test("a canary refused for free stops before the mint, the clone and the budget, and is not retried", async () => {
-	for (const reason of ["package-canary-invalid", "package-canary-packages-off", "package-canary-not-staged", "package-canary-adapter", "package-canary-version-missing"]) {
+	for (const reason of ["package-canary-invalid", "package-canary-packages-off", "package-canary-excluded", "package-canary-not-staged", "package-canary-adapter", "package-canary-version-missing"]) {
 		const redis = fakeRedis();
 		const { deps: d, calls } = deps({ redis, packageCanary: canaryRuntime({ check: { refused: reason } }) });
 		const r = await runJob({ ...ghJob, packageCanary: CANARY }, d);
