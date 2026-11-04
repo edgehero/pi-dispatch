@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { makeReceiverObservations, makeReceiverPublisher, parseReceiverStatus, readReceiverStatus, receiverBind, receiverForgeFacts, receiverKey, receiverOutcome, RECEIVER_FORGES, RECEIVER_OUTCOMES, RECEIVER_LIVE, RECEIVER_TTL_MS } from "../src/receiver-status.mjs";
+import { makeReceiverObservations, makeReceiverPublisher, parseReceiverStatus, readReceiverStatus, receiverBind, receiverForgeFacts, receiverKey, receiverOutcome, RECEIVER_FORGES, RECEIVER_FORGES_MAX, RECEIVER_MAX_BYTES, RECEIVER_OUTCOMES, RECEIVER_LIVE, RECEIVER_TTL_MS } from "../src/receiver-status.mjs";
+import { FORGE_KINDS } from "../src/forges.mjs";
+import { DEFER_TIME_MAX_MS } from "../src/defer-reasons.mjs";
 
 const AT = Date.UTC(2026, 10, 1, 12, 30);
 const HOUR = 3_600_000;
@@ -68,8 +70,79 @@ test("the record reader rebuilds all fields and refuses newer versions, bad date
 	const r = record();
 	const parsed = parseReceiverStatus(JSON.stringify({ ...r, address: "PRIVATE_ADDRESS", body: "PRIVATE_BODY" }));
 	assert.deepEqual(parsed, r);
-	for (const bad of [{ ...r, v: 2 }, { ...r, version: 1 }, { ...r, at: Number.MAX_SAFE_INTEGER }, { ...r, name: "a/b" }, { ...r, forges: ["github", "github"] }, { ...r, deliveries: {} }]) assert.equal(parseReceiverStatus(JSON.stringify(bad)), null);
+	for (const bad of [{ ...r, v: 2 }, { ...r, version: 1 }, { ...r, at: Number.MAX_SAFE_INTEGER }, { ...r, name: "a/b" }, { ...r, deliveries: {} }]) assert.equal(parseReceiverStatus(JSON.stringify(bad)), null);
 	assert.equal(parseReceiverStatus(" ".repeat(65537)), null);
+});
+
+// Issue #824: the record's forges are the forge table's, and a record of another release is read across a forge one of
+// the two does not know. A widened list stands in for that release: `[...FORGE_KINDS, "bitbucket"]` is a newer one.
+// `n` deliveries of every word in the newest hour, or in each of the 24 with `every`.
+const HOURS = (at, n = 0, every = false) => Array.from({ length: 24 }, (_, i) => [Math.floor(at / HOUR) * HOUR - (23 - i) * HOUR, every || i === 23 ? n : 0]);
+const written = (forges, at = AT, n = 0, every = false) => ({ v: 1, name: "mini1", version: "9.0.0", startedAt: at - 60_000, at, port: 3000, bind: "all", forges, deliveries: Object.fromEntries(forges.map((forge) => [forge, Object.fromEntries(RECEIVER_OUTCOMES.map((word) => [word, { lastAt: n ? at : null, hours: HOURS(at, n, every) }]))])) });
+const reparsed = (parsed) => parseReceiverStatus(JSON.stringify(parsed));
+
+test("the record's forges are FORGE_KINDS itself, and each is observed, published and read on its own (#824)", () => {
+	assert.equal(RECEIVER_FORGES, FORGE_KINDS, "the forge table's own list, not a copy of it");
+	for (const kind of FORGE_KINDS) {
+		const observations = makeReceiverObservations({ now: () => AT });
+		observations.observe(kind, 202, "queued");
+		const parsed = parseReceiverStatus(JSON.stringify({ ...record(), forges: [kind], deliveries: observations.snapshot() }));
+		assert.deepEqual(parsed?.forges, [kind], `${kind}: a record serving it is read`);
+		for (const forge of FORGE_KINDS) assert.equal(receiverForgeFacts(parsed, forge, AT).counts.queued, forge === kind ? 1 : 0, `${kind}: ${forge}`);
+	}
+	assert.deepEqual(parseReceiverStatus(JSON.stringify(written(FORGE_KINDS)))?.forges, [...FORGE_KINDS]);
+});
+
+test("a newer record naming a forge this build does not know is read, that forge and its counts dropped (#824)", () => {
+	const newer = written([...FORGE_KINDS, "bitbucket"], AT, 2);
+	const parsed = parseReceiverStatus(JSON.stringify(newer));
+	assert.ok(parsed, "a forge added in a later release does not make its record unreadable here");
+	assert.deepEqual(parsed.forges, [...FORGE_KINDS]);
+	assert.deepEqual(Object.keys(parsed.deliveries), [...FORGE_KINDS]);
+	for (const forge of FORGE_KINDS) assert.equal(receiverForgeFacts(parsed, forge, AT).counts.queued, 2, forge);
+	assert.deepEqual(reparsed(parsed), parsed, "the console parses a rebuilt record again");
+	// The bound on the raw list is fixed, so a newer receiver may name more forges than this build has.
+	const many = Array.from({ length: RECEIVER_FORGES_MAX - FORGE_KINDS.length }, (_, i) => `forge${i}`);
+	assert.deepEqual(parseReceiverStatus(JSON.stringify({ ...written(FORGE_KINDS), forges: [...FORGE_KINDS, ...many] }))?.forges, [...FORGE_KINDS]);
+	assert.equal(parseReceiverStatus(JSON.stringify({ ...written(FORGE_KINDS), forges: [...FORGE_KINDS, ...many, "one-more"] })), null, "past the fixed bound");
+	// An entry that is no forge name is dropped like an unknown forge, and a repeat is read once.
+	assert.deepEqual(parseReceiverStatus(JSON.stringify({ ...written(FORGE_KINDS), forges: [FORGE_KINDS[1], 7, null, FORGE_KINDS[1], { x: 1 }, FORGE_KINDS[0]] }))?.forges, [FORGE_KINDS[1], FORGE_KINDS[0]]);
+	// Six forges fit the byte bound at their largest values and seven do not, so a release that brings the table to seven
+	// forges must keep its record within the bound or raise `v`.
+	const largest = (n) => ({ ...written([...FORGE_KINDS, "forge-a", "forge-b", "forge-c", "forge-d", "forge-e", "forge-f", "forge-g"].slice(0, n), DEFER_TIME_MAX_MS, Number.MAX_SAFE_INTEGER, true), name: "a".repeat(64), version: "1".repeat(32), port: 65535, bind: "loopback" });
+	assert.ok(Buffer.byteLength(JSON.stringify(largest(6))) <= RECEIVER_MAX_BYTES, "six forges at their largest fit");
+	assert.ok(parseReceiverStatus(JSON.stringify(largest(6))));
+	assert.ok(Buffer.byteLength(JSON.stringify(largest(7))) > RECEIVER_MAX_BYTES, "seven do not");
+});
+
+test("an older record that leaves out a forge this build knows reads it as zero counts, never observed, and a served one left out is refused (#824)", () => {
+	for (const missing of FORGE_KINDS) {
+		const known = FORGE_KINDS.filter((kind) => kind !== missing);
+		const parsed = parseReceiverStatus(JSON.stringify(written(known, AT, 3)));
+		assert.ok(parsed, `${missing}: a record of a release without it is read`);
+		assert.deepEqual(parsed.forges, known);
+		assert.deepEqual(Object.keys(parsed.deliveries), [...FORGE_KINDS], `${missing}: every forge this build knows has counts`);
+		const facts = receiverForgeFacts(parsed, missing, AT);
+		assert.ok(Object.values(facts.counts).every((n) => n === 0), `${missing}: zero counts`);
+		assert.equal(facts.lastTaken, null); assert.equal(facts.lastRefused, null);
+		for (const kind of known) assert.equal(receiverForgeFacts(parsed, kind, AT).counts.queued, 3, `${missing}: ${kind} keeps its counts`);
+		assert.deepEqual(reparsed(parsed), parsed, `${missing}: the console parses a rebuilt record again`);
+	}
+	// Near the epoch the zero hours still start at it, so the rebuilt record parses again.
+	const early = parseReceiverStatus(JSON.stringify({ ...written([], HOUR), startedAt: 0 }));
+	assert.ok(early && reparsed(early), "a record from the epoch's first day");
+	// No release writes a forge as served and leaves out its counts, so that, a malformed entry of a known forge and
+	// deliveries that is no object are still refused.
+	const r = written(FORGE_KINDS);
+	const without = (forge) => ({ ...r, deliveries: Object.fromEntries(Object.entries(r.deliveries).filter(([f]) => f !== forge)) });
+	for (const forge of FORGE_KINDS) assert.equal(parseReceiverStatus(JSON.stringify(without(forge))), null, `${forge}: served, so its counts were written`);
+	const word = RECEIVER_OUTCOMES[0];
+	for (const entry of [null, [], "x", {}, { ...r.deliveries[FORGE_KINDS[0]], [word]: { lastAt: null, hours: HOURS(AT).slice(1) } }, { ...r.deliveries[FORGE_KINDS[0]], [word]: { lastAt: -1, hours: HOURS(AT) } }]) {
+		assert.equal(parseReceiverStatus(JSON.stringify({ ...r, forges: [], deliveries: { ...r.deliveries, [FORGE_KINDS[0]]: entry } })), null, JSON.stringify(entry)?.slice(0, 60));
+	}
+	for (const deliveries of [undefined, null, [], "x", 7]) assert.equal(parseReceiverStatus(JSON.stringify({ ...r, forges: [], deliveries })), null, String(deliveries));
+	// A newer forge's entry is never read, so its shape is that release's business.
+	assert.ok(parseReceiverStatus(JSON.stringify({ ...r, deliveries: { ...r.deliveries, bitbucket: "any shape" } })));
 });
 
 test("only a closed bind word leaves the listening socket (#775)", () => {
@@ -135,8 +208,8 @@ test("expiry is authoritative across clock skew; nonexpiring/corrupt data and fa
 	redis.mget = async () => []; view = await readReceiverStatus(redis, { names: ["mini1"], now: () => AT }); assert.equal(view.complete, false); assert.equal(view.hosts[0].unreadable, true);
 });
 
-test("the complete vocabulary is fixed at four forges and eleven words (#775)", () => {
-	assert.equal(RECEIVER_FORGES.length, 4); assert.equal(RECEIVER_OUTCOMES.length, 11); assert.equal(RECEIVER_LIVE, "receiver:live"); assert.equal(RECEIVER_TTL_MS, 90_000);
+test("the complete vocabulary is the forge table's forges and eleven words (#775, #824)", () => {
+	assert.equal(RECEIVER_FORGES, FORGE_KINDS); assert.equal(RECEIVER_OUTCOMES.length, 11); assert.equal(RECEIVER_LIVE, "receiver:live"); assert.equal(RECEIVER_TTL_MS, 90_000);
 });
 
 test("the interface outcome table is pinned both ways to the exported closed vocabulary (#775)", async () => {

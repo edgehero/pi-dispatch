@@ -33,7 +33,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { groupTriggers } from "./trigger-groups.mjs";
 import { configError, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
-import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { FORGE_KINDS, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 
 // Cwd-relative, matching what `pi-dispatch init` scaffolds (and the admin's default): the receiver's
 // default must be the file init just told the operator it created, not a demo buried in the repo.
@@ -99,6 +99,19 @@ export function loadReceiverConfig(env = process.env, { readFile = readFileSync,
 		forgejo: loadForgejoConfig(env),
 		azure: loadAzureConfig(env),
 	};
+}
+
+/**
+ * The forges this receiver serves, in `FORGE_KINDS` order, for its status record (`INT-RECEIVER-STATUS-KEY`, issue
+ * #824): GitHub by `servesGithub` (`cfg.github` is its auth block, present whether GitHub is served or not), and every
+ * other forge by its own block, which the loader sets to null when nothing names the forge and which `startReceiver`
+ * arms a route for exactly when it is set. A kind with no block at all is a forge added to the table that this loader
+ * does not read yet, so nothing arms a route for it, and it is unserved. Throwing instead would cost the receiver its
+ * whole record, every forge's counts, at boot, for a gap the operator cannot close. The developer who adds the forge
+ * learns it from receiver/test/receiver-status-start.test.mjs, which requires a block for every `FORGE_KINDS` member.
+ */
+export function servedForges(cfg, kinds = FORGE_KINDS) {
+	return kinds.filter((kind) => kind === "github" ? cfg.servesGithub === true : Object.hasOwn(cfg, kind) && Boolean(cfg[kind]));
 }
 
 /**

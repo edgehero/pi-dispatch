@@ -3,6 +3,7 @@ import { makeSandboxPrepareQueue, enqueueSandboxPreparation, readSandboxPreparat
 import * as nodeFs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { planSandboxPreparation } from "@edgehero/pi-dispatch/sandbox-prepare";
 import { readSandboxHosts, planSandboxHost, sandboxHostsPath, writeSandboxHost } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
@@ -40,7 +41,7 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
   function optionsOf(cfg) {
     return cfg.triggers.flatMap((trigger, index) => {
       const run = trigger.run ?? {};
-      return ["github", "gitlab", "forgejo", "azure"].includes(run.kind) ? [{ index, repository: run.repository ?? null, label: `trigger ${index + 1}, ${trigger.on.type}, ${run.kind}, flow ${run.flow ?? "not named"}` }] : [];
+      return isForgeKind(run.kind) ? [{ index, repository: run.repository ?? null, label: `trigger ${index + 1}, ${trigger.on.type}, ${run.kind}, flow ${run.flow ?? "not named"}` }] : [];
     });
   }
   function preparation(params, inv, cfg) {
@@ -80,7 +81,7 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       if (query.fromRun) {
         try {
           const got = await fleet.runById(query.fromRun), r = got?.record;
-          if (r?.jobId === query.fromRun && ["github", "gitlab", "forgejo", "azure"].includes(r.kind)) {
+          if (r?.jobId === query.fromRun && isForgeKind(r.kind)) {
             const repo = repoOfTarget(r.target);
             sourceRun = { id: r.jobId, repo: typeof repo === "string" && /^[A-Za-z0-9._/-]{1,200}$/.test(repo) && !repo.split("/").some((part) => !part || part === "." || part === "..") ? repo : null, historicalIndex: Number.isSafeInteger(r.triggerIndex) && r.triggerIndex >= 0 ? r.triggerIndex : null, backend: r.backend ?? null, host: inv.hosts.some((h) => h.name === r.host && !h.stale && !h.unreadable) ? r.host : null };
           }

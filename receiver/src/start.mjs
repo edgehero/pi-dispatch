@@ -34,7 +34,7 @@ import { workerName } from "@edgehero/pi-dispatch/config";
 import { makeReceiverPublisher, receiverBind } from "@edgehero/pi-dispatch/receiver-status";
 import { readFileSync, watch } from "node:fs";
 import { dirname, basename } from "node:path";
-import { loadReceiverConfig, triggersFilePath, reloadTriggers } from "./config.mjs";
+import { loadReceiverConfig, servedForges, triggersFilePath, reloadTriggers } from "./config.mjs";
 import { makeReceiver } from "./receiver.mjs";
 import { entryExitCode } from "./cli.mjs";
 import { installRejectionPrinter } from "@edgehero/pi-dispatch/exit-code";
@@ -257,7 +257,7 @@ export async function startReceiver(
 				const socket = server.address?.();
 				if (!socket || typeof socket !== "object" || !Number.isInteger(socket.port) || socket.port < 1 || socket.port > 65535) throw new Error("socket");
 				const name = workerName(env);
-				const publisher = makeReceiverPublisherFn({ client: () => queue.client, name, version: RECEIVER_VERSION, port: socket?.port, bind: receiverBind(socket?.address), forges: [cfg.servesGithub && "github", gitlab && "gitlab", forgejo && "forgejo", azure && "azure"].filter(Boolean), observations: handler.observations, now, log: (event, fields) => log({ event, ...fields }) });
+				const publisher = makeReceiverPublisherFn({ client: () => queue.client, name, version: RECEIVER_VERSION, port: socket?.port, bind: receiverBind(socket?.address), forges: servedForges(cfg), observations: handler.observations, now, log: (event, fields) => log({ event, ...fields }) });
 				receiverPublisher = publisher;
 				closers.push(publisher);
 				publisher.start();

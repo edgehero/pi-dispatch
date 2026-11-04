@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { FORGE_KINDS } from "@edgehero/pi-dispatch/forges";
 import { layoutProjectSizingChart, projectSizing, projectSizingChart, projectSpend, projectRuns, projectSize, projectTriggers, projectMembers, projectDelete, projectBundle, projectRecent, projectLimits, projectAllocation } from "../src/console/panels/project.mjs";
 import { projectSizeAction } from "../src/project-view.mjs";
 import { reasonWords } from "../src/words.mjs";
@@ -169,6 +171,17 @@ test("project badges reuse the Runs vocabulary, trigger kinds name their forge, 
   assert.doesNotMatch(String(projectSize(view(p))), /Memory from.*CPUs from/);
   p.size.cpuSource = "deployment settings";
   assert.match(String(projectSize(view(p))), /Memory from project row; CPUs from deployment settings/);
+});
+
+test("a trigger row names every FORGE_KINDS forge it ran on and nothing else, and the panel writes no forge list out (#824)", () => {
+  const p = fixture();
+  const others = ["local", "bitbucket", "constructor", undefined];
+  p.triggers = [...FORGE_KINDS, ...others].map((forge, index) => ({ index, type: "pull_request", ...(forge === undefined ? {} : { forge }), flow: "review", count: 1 }));
+  const rows = [...parseDocument(String(projectTriggers(view(p)))).querySelectorAll(".proj-trigger-desc")].map((row) => row.textContent);
+  assert.deepEqual(rows, [...FORGE_KINDS.map((forge) => `pull request on ${forge} → review`), ...others.map(() => "pull request → review")]);
+  // Two forge names side by side are a copy of the list, which a forge added to FORGES would not reach.
+  const names = FORGE_KINDS.join("|");
+  assert.doesNotMatch(readFileSync(new URL("../src/console/panels/project.mjs", import.meta.url), "utf8"), new RegExp(`\\b(?:${names})\\b\\W+\\b(?:${names})\\b`));
 });
 
 test("trigger rows keep the full linked identity, human forge description and count in separately wrapping fields", () => {

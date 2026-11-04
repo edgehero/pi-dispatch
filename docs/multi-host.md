@@ -576,7 +576,9 @@ closed outcomes and the host/version/socket facts, never delivery identifiers or
 current UTC hour and the preceding 23. Last taken/refused times remain separate. A request updates memory only;
 Valkey outages can remove this display but cannot change an answer or delay enqueueing. Polling publishes none.
 Deleting `receiver:*` changes no routing, authentication or queue behavior. An absent observation is not proof that
-a receiver stopped; the page says what was reported and preserves unknown reads.
+a receiver stopped; the page says what was reported and preserves unknown reads. A console still reads the record of
+a receiver of another release when one of them knows a forge the other does not: it shows the forges it knows, and a
+forge the receiver's release does not know reads as no deliveries.
 
 ## Failure hook history
 

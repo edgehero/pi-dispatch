@@ -13,14 +13,100 @@ const bounded = (v, n) => typeof v === "string" && Buffer.byteLength(v) <= n && 
 const CATEGORY = ["convention", "how-to", "decided"];
 const COMMENT = /^(?:[1-9][0-9]{0,19}|[a-fA-F0-9-]{36})$/;
 const bad = () => configError("invalid answer draft inputs", "answer-draft-refused");
+const nativeId = v => (typeof v === "number" && Number.isSafeInteger(v) || typeof v === "string") && COMMENT.test(String(v)) ? String(v) : null;
+
+// GitHub's and Forgejo's comment reads are one shape: they differ by the API prefix, and the replies page by the name
+// of its size parameter (Forgejo's `limit`, GitHub's `per_page`).
+function issueComment(prefix) {
+	return async ({ root, repo, get }, number, id) => {
+		const c = await get(`${prefix}/repos/${repo}/issues/comments/${encodeURIComponent(id)}`);
+		// issue_url is server evidence. A comment's id alone does not establish which issue it belongs to.
+		const expected = `${root}${prefix}/repos/${repo}/issues/${number}`;
+		if (nativeId(c.id) !== id || c.issue_url !== expected && c.pull_request_url !== expected) throw new Error("source-unavailable");
+		return { id, text: c.body, author: c.user?.id, login: c.user?.login, association: c.author_association, at: Date.parse(c.created_at), updated: Date.parse(c.updated_at ?? c.created_at) };
+	};
+}
+const issueComments = (prefix, pageSize) => ({ repo, get }, number) => get(`${prefix}/repos/${repo}/issues/${number}/comments?${pageSize}=20&page=1`);
+
+/**
+ * What differs per forge for an answer draft's reads, one row per kind this runner accepts: the read of the token the
+ * worker's scoped mint writes, the header that carries it, the origin a draft's `apiUrl` must have (null where the
+ * operator configures the root: GitLab's and Forgejo's instance, and Azure DevOps's organization URL, which varies by
+ * organization), and the three reads, a comment by id, whether its author is admitted, and the newest replies.
+ * A kind is accepted exactly when it has a row (`validateAnswerInput`), so a kind this table does not name is refused
+ * `answer-draft-refused` before any request, never read with another forge's token, header or paths.
+ *
+ * The forge table (`FORGES`) is the worker's, which the job image does not carry, so this row set is a copy:
+ * worker/test/runner-answer-forges.test.mjs holds its keys to `FORGE_KINDS` and each token read to the forge's first
+ * `tokenVars`. Each token is read by name, `env.NAME`, rather than through a name in the row, so the environment scan
+ * (worker/test/env-docs.test.mjs) sees the read.
+ * env-internal GITHUB_TOKEN, AZURE_DEVOPS_EXT_PAT: only the worker's scoped job mint. GITLAB_TOKEN and FORGEJO_TOKEN
+ * are documented deployment keys, forwarded here only after scoped selection.
+ */
+export const ANSWER_FORGES = Object.freeze({
+	github: Object.freeze({
+		token: env => env.GITHUB_TOKEN,
+		origin: "https://api.github.com",
+		headers: token => ({ Authorization: `token ${token}` }),
+		comment: issueComment(""),
+		admitted: async (_ctx, c) => ["OWNER", "MEMBER", "COLLABORATOR"].includes(c.association),
+		replies: issueComments("", "per_page"),
+	}),
+	gitlab: Object.freeze({
+		token: env => env.GITLAB_TOKEN,
+		origin: null,
+		headers: token => ({ "PRIVATE-TOKEN": token }),
+		async comment({ s, get }, number, id) {
+			const c = await get(`/api/v4/projects/${encodeURIComponent(s.projectId ?? s.repo)}/issues/${number}/notes/${encodeURIComponent(id)}`);
+			if (nativeId(c.id) !== id || c.system === true) throw new Error("source-unavailable");
+			return { id, text: c.body, author: c.author?.id, at: Date.parse(c.created_at), updated: Date.parse(c.updated_at ?? c.created_at) };
+		},
+		async admitted({ s, get }, c) { const member = await get(`/api/v4/projects/${encodeURIComponent(s.projectId ?? s.repo)}/members/all/${encodeURIComponent(c.author)}`); return Number.isSafeInteger(member.access_level) && member.access_level >= 30; },
+		replies: ({ s, get }, number) => get(`/api/v4/projects/${encodeURIComponent(s.projectId ?? s.repo)}/issues/${number}/notes?per_page=20&page=1&sort=desc`),
+	}),
+	forgejo: Object.freeze({
+		token: env => env.FORGEJO_TOKEN,
+		origin: null,
+		headers: token => ({ Authorization: `token ${token}` }),
+		comment: issueComment("/api/v1"),
+		async admitted({ repo, get }, c) {
+			if (typeof c.login !== "string" || !/^[A-Za-z0-9_.-]{1,100}$/.test(c.login)) return false;
+			const p = await get(`/api/v1/repos/${repo}/collaborators/${encodeURIComponent(c.login)}/permission`);
+			return ["write", "admin", "owner"].includes(p.permission);
+		},
+		replies: issueComments("/api/v1", "limit"),
+	}),
+	azure: Object.freeze({
+		token: env => env.AZURE_DEVOPS_EXT_PAT,
+		origin: null,
+		headers: token => ({ Authorization: `Basic ${Buffer.from(`:${token}`).toString("base64")}` }),
+		async comment({ s, get }, number, id) {
+			if (!s.azure?.project || !s.azure?.projectId) throw new Error("source-unavailable");
+			const c = await get(`/${encodeURIComponent(s.azure.project)}/_apis/wit/workItems/${number}/comments/${encodeURIComponent(id)}?api-version=7.1-preview.4`);
+			if (nativeId(c.id) !== id || Number(c.workItemId) !== number || c.isDeleted) throw new Error("source-unavailable");
+			return { id, text: c.text, author: c.createdBy?.id, at: Date.parse(c.createdDate), updated: Date.parse(c.modifiedDate ?? c.createdDate) };
+		},
+		// The graph (descriptors, memberships) is served from the organization's vssps origin, not dev.azure.com.
+		async admitted({ s, root, get }, c) {
+			if (!COMMENT.test(c.author ?? "")) return false;
+			const graph = root.replace("https://dev.azure.com", "https://vssps.dev.azure.com");
+			const user = await get(`/_apis/graph/descriptors/${encodeURIComponent(c.author)}?api-version=7.1-preview.1`, graph);
+			const scope = await get(`/_apis/graph/descriptors/${encodeURIComponent(s.azure.projectId)}?api-version=7.1-preview.1`, graph);
+			if (typeof user.value !== "string" || typeof scope.value !== "string") return false;
+			const groups = await get(`/_apis/graph/memberships/${encodeURIComponent(user.value)}?direction=up&api-version=7.1-preview.1`, graph);
+			return Array.isArray(groups.value) && groups.value.some(m => m.containerDescriptor === scope.value);
+		},
+		replies: async ({ s, get }, number) => (await get(`/${encodeURIComponent(s.azure.project)}/_apis/wit/workItems/${number}/comments?$top=20&api-version=7.1-preview.4`)).comments,
+	}),
+});
 
 export function validateAnswerInput(input) {
 	if (!only(input, ["version", "rule", "source", "standing", "baseSha", "flow"]) || input.version !== 1 || !only(input.rule, ["id", "categories", "confidence", "mode", "decisionModel"]) || !Array.isArray(input.rule.categories) || !input.rule.categories.length || input.rule.categories.some(c => !CATEGORY.includes(c)) || !["classify", "draft"].includes(input.rule.mode) || typeof input.rule.confidence !== "number" || input.rule.confidence <= 0.5 || input.rule.confidence > 1 || !only(input.rule.decisionModel, ["provider", "id"]) || typeof input.rule.decisionModel.provider !== "string" || typeof input.rule.decisionModel.id !== "string") throw bad();
 	if (!only(input.flow, ["name", "revision", "text"]) || !/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(input.flow.name ?? "") || input.flow.revision !== input.baseSha || !bounded(input.flow.text, 16384) || !input.flow.text.trim()) throw bad();
 	const s = input.source;
-	if (!only(s, ["kind", "repo", "target", "projectId", "azure", "selfId", "apiUrl", "questionCommentId", "startedAt", "parkedAt"]) || !["github", "gitlab", "forgejo", "azure"].includes(s.kind) || typeof s.repo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+$/.test(s.repo) || !only(s.target, ["type", "number"]) || s.target.type !== "issue" || !Number.isSafeInteger(s.target.number) || s.target.number <= 0 || !COMMENT.test(s.questionCommentId ?? "") || !["string", "number"].includes(typeof s.selfId) || !String(s.selfId) || !Number.isSafeInteger(s.startedAt) || !Number.isSafeInteger(s.parkedAt) || s.startedAt > s.parkedAt || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(input.baseSha ?? "")) throw bad();
+	if (!only(s, ["kind", "repo", "target", "projectId", "azure", "selfId", "apiUrl", "questionCommentId", "startedAt", "parkedAt"]) || typeof s.kind !== "string" || !Object.hasOwn(ANSWER_FORGES, s.kind) || typeof s.repo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+$/.test(s.repo) || !only(s.target, ["type", "number"]) || s.target.type !== "issue" || !Number.isSafeInteger(s.target.number) || s.target.number <= 0 || !COMMENT.test(s.questionCommentId ?? "") || !["string", "number"].includes(typeof s.selfId) || !String(s.selfId) || !Number.isSafeInteger(s.startedAt) || !Number.isSafeInteger(s.parkedAt) || s.startedAt > s.parkedAt || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(input.baseSha ?? "")) throw bad();
 	let url; try { url = new URL(s.apiUrl); } catch { throw bad(); }
-	if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || s.kind === "github" && url.origin !== "https://api.github.com") throw bad();
+	if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || ANSWER_FORGES[s.kind].origin !== null && url.origin !== ANSWER_FORGES[s.kind].origin) throw bad();
 	if (!Array.isArray(input.standing) || input.standing.length > 1000 || input.standing.some(a => !only(a, ["id", "title", "text", "revision"]) || !bounded(a.title, 160) || !bounded(a.text, 8192) || !/^[a-f0-9]{64}$/.test(a.revision ?? ""))) throw bad();
 	if (Buffer.byteLength(JSON.stringify(input)) > 300000) throw bad();
 	return input;
@@ -37,56 +123,28 @@ export function createAnswerSourceReader(input, { env = process.env, fetch: fetc
 	input = validateAnswerInput(input);
 	const containsSecret = knownAnswerSecretMatcher(env);
 	const s = input.source, root = s.apiUrl.replace(/\/+$/, ""), repo = s.repo.split("/").map(encodeURIComponent).join("/");
-	// env-internal GITHUB_TOKEN, AZURE_DEVOPS_EXT_PAT: only the worker’s scoped job mint.
-	// GITLAB_TOKEN and FORGEJO_TOKEN are documented deployment keys, forwarded here only after scoped selection.
-	const token = s.kind === "github" ? env.GITHUB_TOKEN : s.kind === "gitlab" ? env.GITLAB_TOKEN : s.kind === "forgejo" ? env.FORGEJO_TOKEN : env.AZURE_DEVOPS_EXT_PAT;
+	// The input check admitted the kind only with a row, so every choice below is that row's.
+	const forge = ANSWER_FORGES[s.kind];
+	const token = forge.token(env);
 	if (typeof token !== "string" || !token) throw bad();
-	const headers = s.kind === "gitlab" ? { "PRIVATE-TOKEN": token } : { Authorization: s.kind === "azure" ? `Basic ${Buffer.from(`:${token}`).toString("base64")}` : `token ${token}` };
+	const headers = forge.headers(token);
 	let requests = 0;
-	async function get(path, graph = false) {
+	async function get(path, origin = root) {
 		if (++requests > 64) throw new Error("source-limit");
-		const origin = graph && s.kind === "azure" ? root.replace("https://dev.azure.com", "https://vssps.dev.azure.com") : root;
 		const response = await fetchImpl(`${origin}${path}`, { method: "GET", headers: { ...headers, accept: "application/json" }, redirect: "error", signal: AbortSignal.timeout(10000) });
 		if (!response.ok || !response.body) throw new Error("source-unavailable");
 		const chunks = []; let bytes = 0;
 		for await (const chunk of response.body) { bytes += chunk.byteLength; if (bytes > 65536) throw new Error("source-oversize"); chunks.push(Buffer.from(chunk)); }
 		return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 	}
-	const nativeId = v => (typeof v === "number" && Number.isSafeInteger(v) || typeof v === "string") && COMMENT.test(String(v)) ? String(v) : null;
+	const ctx = { s, root, repo, get };
 	async function comment(number, id) {
 		if (!Number.isSafeInteger(number) || number <= 0 || !COMMENT.test(id)) throw new Error("source-unavailable");
-		if (s.kind === "github" || s.kind === "forgejo") {
-			const c = await get(`${s.kind === "forgejo" ? "/api/v1" : ""}/repos/${repo}/issues/comments/${encodeURIComponent(id)}`);
-			// issue_url is server evidence. A comment's id alone does not establish which issue it belongs to.
-			const expected = `${root}${s.kind === "forgejo" ? "/api/v1" : ""}/repos/${repo}/issues/${number}`;
-			if (nativeId(c.id) !== id || c.issue_url !== expected && c.pull_request_url !== expected) throw new Error("source-unavailable");
-			return { id, text: c.body, author: c.user?.id, login: c.user?.login, association: c.author_association, at: Date.parse(c.created_at), updated: Date.parse(c.updated_at ?? c.created_at) };
-		}
-		if (s.kind === "gitlab") {
-			const c = await get(`/api/v4/projects/${encodeURIComponent(s.projectId ?? s.repo)}/issues/${number}/notes/${encodeURIComponent(id)}`);
-			if (nativeId(c.id) !== id || c.system === true) throw new Error("source-unavailable");
-			return { id, text: c.body, author: c.author?.id, at: Date.parse(c.created_at), updated: Date.parse(c.updated_at ?? c.created_at) };
-		}
-		if (!s.azure?.project || !s.azure?.projectId) throw new Error("source-unavailable");
-		const c = await get(`/${encodeURIComponent(s.azure.project)}/_apis/wit/workItems/${number}/comments/${encodeURIComponent(id)}?api-version=7.1-preview.4`);
-		if (nativeId(c.id) !== id || Number(c.workItemId) !== number || c.isDeleted) throw new Error("source-unavailable");
-		return { id, text: c.text, author: c.createdBy?.id, at: Date.parse(c.createdDate), updated: Date.parse(c.modifiedDate ?? c.createdDate) };
+		return forge.comment(ctx, number, id);
 	}
 	async function admitted(c) {
 		if (String(c.author) === String(s.selfId)) return false;
-		if (s.kind === "github") return ["OWNER", "MEMBER", "COLLABORATOR"].includes(c.association);
-		if (s.kind === "gitlab") { const member = await get(`/api/v4/projects/${encodeURIComponent(s.projectId ?? s.repo)}/members/all/${encodeURIComponent(c.author)}`); return Number.isSafeInteger(member.access_level) && member.access_level >= 30; }
-		if (s.kind === "forgejo") {
-			if (typeof c.login !== "string" || !/^[A-Za-z0-9_.-]{1,100}$/.test(c.login)) return false;
-			const p = await get(`/api/v1/repos/${repo}/collaborators/${encodeURIComponent(c.login)}/permission`);
-			return ["write", "admin", "owner"].includes(p.permission);
-		}
-		if (!COMMENT.test(c.author ?? "")) return false;
-		const user = await get(`/_apis/graph/descriptors/${encodeURIComponent(c.author)}?api-version=7.1-preview.1`, true);
-		const scope = await get(`/_apis/graph/descriptors/${encodeURIComponent(s.azure.projectId)}?api-version=7.1-preview.1`, true);
-		if (typeof user.value !== "string" || typeof scope.value !== "string") return false;
-		const groups = await get(`/_apis/graph/memberships/${encodeURIComponent(user.value)}?direction=up&api-version=7.1-preview.1`, true);
-		return Array.isArray(groups.value) && groups.value.some(m => m.containerDescriptor === scope.value);
+		return forge.admitted(ctx, c);
 	}
 	function checkedText(text) { if (!bounded(text, 16384) || !text.trim()) throw new Error("source-oversize"); if (containsSecret(text)) throw new Error("source-unavailable"); return text; }
 	const sources = new Map();
@@ -136,10 +194,7 @@ export function createAnswerSourceReader(input, { env = process.env, fetch: fetc
 		},
 		async replies(number) {
 			if (!Number.isSafeInteger(number) || number <= 0) throw new Error("source-unavailable");
-			let rows;
-			if (s.kind === "github" || s.kind === "forgejo") rows = await get(`${s.kind === "forgejo" ? "/api/v1" : ""}/repos/${repo}/issues/${number}/comments?${s.kind === "github" ? "per_page" : "limit"}=20&page=1`);
-			else if (s.kind === "gitlab") rows = await get(`/api/v4/projects/${encodeURIComponent(s.projectId ?? s.repo)}/issues/${number}/notes?per_page=20&page=1&sort=desc`);
-			else rows = (await get(`/${encodeURIComponent(s.azure.project)}/_apis/wit/workItems/${number}/comments?$top=20&api-version=7.1-preview.4`)).comments;
+			const rows = await forge.replies(ctx, number);
 			if (!Array.isArray(rows)) throw new Error("source-unavailable");
 			const references = [];
 			for (const row of rows.slice(0, 20)) {

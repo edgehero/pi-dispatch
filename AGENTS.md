@@ -163,7 +163,9 @@ Two consequences worth internalising before you design anything:
   model-callable tool list in `REQ-`/`DES-ADMIN-VIA-PI-EXTENSION` against the registrations, and
   `INT-TRIGGERS-FILE-CONTRACT`'s forge vocabularies against `PR_ACTIONS` (two of the tests that read a spec
   file); the admin's forge, action and settings vocabularies against `worker/src/triggers.mjs` and
-  `runtime-settings.mjs`; `EXIT_POLICY`'s copies in the runner and the `deploy/` units; the receiver
+  `runtime-settings.mjs`; `EXIT_POLICY`'s copies in the runner and the `deploy/` units; the runner's answer forge
+  table, `ANSWER_FORGES`, against `FORGE_KINDS` and each forge's first `tokenVars`
+  (`worker/test/runner-answer-forges.test.mjs`); the receiver
   filters' action sets as the loader's set minus their own named exclusions; the git hardening flags,
   which live in `worker/src/git-hardening.mjs` because seven files carried them by hand and one had
   quietly lost a flag; the pi tables that can be derived (`.github/scripts/pi-derived.mjs`, each checked-in

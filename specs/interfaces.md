@@ -1377,7 +1377,7 @@ refactor apart.
 
 - **Reviewed draft flow (#772)**: Staged answer input additionally holds `flow: {name, revision, text}` from `.pi/skills/<rule.flow>/SKILL.md` in the freshly prepared default-branch workspace. Its revision must equal baseSha; text is at most 16 KiB, valid UTF-8, with no symlink parents/file or forbidden controls. The full reviewed text enters the fixed prompt, but no script, extension, context file or package can execute. Staged input is bounded at 300000 bytes including the scoped standing corpus; the private captured reference record is separately bounded at 16 KiB.
 
-- **Draft profile (#772)**: `/job/answer-draft.json` is an immutable host-written bounded input with the closed rule, actual question reference, admitted standing corpus and default-branch SHA. No question body is taken from queued delivery text. Forge draft jobs alone additionally receive the existing `/outbox` writable path (ordinary forge jobs still do not), with `/workspace` read only. Only `answer-draft.json` structured output is imported; ordinary chain/plan collectors never run for this purpose. A draft gets a fresh disposable session and cannot mount/promote the parent’s canonical transcript.
+- **Draft profile (#772)**: `/job/answer-draft.json` is an immutable host-written bounded input with the closed rule, actual question reference, admitted standing corpus and default-branch SHA. No question body is taken from queued delivery text. Forge draft jobs alone additionally receive the existing `/outbox` writable path (ordinary forge jobs still do not), with `/workspace` read only. Only `answer-draft.json` structured output is imported; ordinary chain/plan collectors never run for this purpose. A draft gets a fresh disposable session and cannot mount/promote the parent’s canonical transcript. The runner takes a source kind only where its own table, `ANSWER_FORGES` (`image/runner/src/answerer.mjs`, #824), has a row: the row holds that forge's token read, header, fixed API origin (GitHub's `https://api.github.com`; none for GitLab and Forgejo, whose instance the operator configures, or for Azure DevOps, whose organization URL varies by organization) and its comment, admitted-author and replies reads, and any other kind, a prototype name or a non-string included, refuses `answer-draft-refused` before a token is read. The job image cannot import `FORGES`, so `worker/test/runner-answer-forges.test.mjs` holds the table's keys to `FORGE_KINDS` and each token variable to the forge's first `tokenVars`, and pins the method, URL and token header each forge's question, reply and replies reads send. The `apiUrl` it is given is the forge table's raw API root (`forgeApiRoot`).
 
 **Extension (#770):** `INT-QUESTION-GROUPS` defines the classifier-only private `question-grouping.json` input and guarded execution mode. It is never copied into the public event or queue envelope.
 
@@ -10983,7 +10983,7 @@ The unref'd timer joins `closers`, and its close runs before the shared queue cl
 reindexes after close; its already-issued SET may finish and expires naturally.
 
 Version 1 is rebuilt by field name; another version, an oversized value (64 KiB), non-renderable instant, malformed
-bucket, unknown forge or bind, or invalid count is unreadable. The value contains:
+bucket, unknown bind, or invalid count is unreadable. The value contains:
 
 ```
 { v: 1, name, version, startedAt, at, port, bind, forges: [<served forge>],
@@ -10991,8 +10991,12 @@ bucket, unknown forge or bind, or invalid count is unreadable. The value contain
     hours: [[<UTC hour epoch ms>, <nonnegative safe count>], ...24] } } } }
 ```
 
-The four forges are `github`, `gitlab`, `forgejo`, `azure`; every record includes all four, including refusals on
-unserved routes. Served forges describe the handlers mounted at boot. A `lastAt` of zero denotes the Unix epoch;
+The forges are `FORGE_KINDS` itself (`RECEIVER_FORGES`, #824), today `github`, `gitlab`, `forgejo`, `azure`; a
+writer's record includes every forge it knows, including refusals on unserved routes. Served forges describe the
+handlers mounted at boot: `servedForges` (`receiver/src/config.mjs`) walks `FORGE_KINDS`, GitHub by `servesGithub` and
+every other forge by its own config block. A forge the config has no block for, one the loader does not read yet, arms
+no route and is unserved, so the record keeps every other forge; receiver-status-start.test.mjs requires a block for
+every `FORGE_KINDS` member, so such a forge fails there first. A `lastAt` of zero denotes the Unix epoch;
 only `null` means no observation. Last taken/refused projections preserve that distinction after window counts expire.
 The closed outcome vocabulary follows:
 
@@ -11011,6 +11015,24 @@ The closed outcome vocabulary follows:
 | malformed | 400, 405, 413 or 415 |
 | error | 500 |
 <!-- receiver-outcomes:end -->
+
+**Across releases (#824).** A forge added to `FORGES` is observed, published and read with no other edit, and does not
+raise `v`: the read is tolerant on forges both ways, and another `v` still means a shape a reader cannot read.
+- A newer record may name a forge this build does not know. Its `forges` may hold up to `RECEIVER_FORGES_MAX` (64)
+  entries, a fixed bound and never this build's forge count (more is unreadable), and is kept to the forges this build
+  knows, each once, in the record's order; an entry that is no forge name is dropped the same way. An unknown forge's
+  `deliveries` are never read, whatever their shape.
+- An older record may leave out a forge this build knows. The release that wrote it did not know that forge, so served
+  none, and it reads as zero counts with `lastAt` null in 24 hourly buckets, the newest the UTC hour that holds the
+  record's own `at`. For an `at` under 23 hours past the epoch the newest bucket is clamped to hour 23 (`82800000`),
+  so the buckets are the epoch's first 24 hours, ending after `at`, and none falls before the epoch: the rebuilt
+  record parses again at the console's model boundary.
+- Still unreadable: a forge the record names as served whose `deliveries` it leaves out (no release writes one),
+  `deliveries` that is no object, and a malformed entry of a known forge.
+- The byte bound is a reader's: six forges' counts fit 64 KiB at their largest values and seven do not, so a release
+  that brings the table to seven forges keeps its record within the bound or raises `v`.
+
+No released console reads the record (4.3.1 has none), so this rule holds from the first release that publishes it.
 
 `makeReceiver` observes after `res.end` returns. Only the response status and the server's own closed result tags
 are inspected; no delivery identifier, repository, login, header, body field or request value enters these records.
@@ -11040,9 +11062,11 @@ beyond the row cap; `moreUnknown` marks incomplete discovery, so a nonzero omitt
 traffic, a healthy receiver or definite receiver absence from an incomplete read. There is no snapshot or
 `/api/state` projection. `dispatch_connections` rebuilds a safe counts/times projection at its own boundary.
 
-**Acceptance**: worker/test/receiver-status.test.mjs and receiver-status.integration.test.mjs;
-receiver/test/receiver-status.test.mjs and receiver-status-start.test.mjs; actual held/steered-response regressions
-in receiver/test/held.test.mjs and steer.test.mjs; admin/test/connections-receiver.test.mjs; actual-CSP browser lane.
+**Acceptance**: worker/test/receiver-status.test.mjs (with both directions across releases) and
+receiver-status.integration.test.mjs; receiver/test/receiver-status.test.mjs and receiver-status-start.test.mjs (the
+served forges walked over `FORGE_KINDS`, and no forge list written out in `receiver/src/start.mjs`); actual
+held/steered-response regressions in receiver/test/held.test.mjs and steer.test.mjs;
+admin/test/connections-receiver.test.mjs; actual-CSP browser lane.
 The outcome table is pinned to the exported vocabulary. `CONST-HMAC-OVER-RAW-BODY` and existing routing are
 **UNCHANGED, checked**.
 
@@ -13484,6 +13508,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-04 (#824) | The forge list in one place: the job image's answer draft reads, the receiver status record and the console follow `FORGE_KINDS`. **`INT-RECEIVER-STATUS-KEY` AMENDED**: its forges are `FORGE_KINDS` itself (`RECEIVER_FORGES`), where the four were written out, and an unknown forge no longer makes a record unreadable. A new paragraph, Across releases, sets the rule before any release publishes the record: `forges` may hold up to a fixed 64 entries (`RECEIVER_FORGES_MAX`, where a cap of four refused a newer record before anything was dropped) and is kept to the forges this build knows, each once, and an unknown forge's `deliveries` are never read; a known forge an older record leaves out reads as zero counts with `lastAt` null; a forge named as served with no `deliveries`, `deliveries` that is no object, and a malformed entry of a known forge stay unreadable; `v` stays 1 when a forge is added; and the 64 KiB bound holds six forges at their largest values, not seven, so a release that brings the table to seven keeps its record within it or raises `v`. The served forges come from `servedForges`, which walks `FORGE_KINDS` over the config's own block per forge and reports a forge with none unserved, where the writer listed the four arms; a receiver test requires a block for every `FORGE_KINDS` member and fails if `receiver/src/start.mjs` writes a forge list out. The acceptance names the tests of both directions and the walk. **`INT-CONTAINER-JOB-INPUTS` AMENDED**, the draft profile bullet: the runner takes an answer draft's source kind only where `ANSWER_FORGES` has a row, which names its token variable, header, fixed origin and three reads; any other kind refuses `answer-draft-refused`, where a kind the runner did not name would have been read with Azure's token, header and paths had the kind check grown; and a worker test holds the table to `FORGE_KINDS` and each token to the forge's first `tokenVars`, since the image cannot import `FORGES`, and pins the method, URL and token header each forge's three reads send. Behaviour for the four forges is unchanged. **`INT-ANSWER-DRAFT-STORE` UNCHANGED, checked**: the configured forge root the console's offer and send and the worker's pickup check is now the forge table's `apiRoot`, through `forgeApiRoot`, for both, and has the same value for each forge. **Code evidence**: image/runner/src/answerer.mjs -> ANSWER_FORGES, validateAnswerInput, createAnswerSourceReader; worker/src/receiver-status.mjs -> RECEIVER_FORGES, RECEIVER_FORGES_MAX, parseReceiverStatus; receiver/src/config.mjs -> servedForges; receiver/src/start.mjs (the publisher's forges); worker/src/forges.mjs -> FORGES (apiRoot), forgeApiRoot; worker/src/start.mjs (the answer draft identity); admin/src/answerer-data.mjs -> configuredApiRoot; worker/test/runner-answer-forges.test.mjs; worker/test/receiver-status.test.mjs; receiver/test/receiver-status-start.test.mjs. |
 | 2026-11-04 (#823) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the `version` bullet: the writer's text is one export of `./triggers-file`, `triggersFileText(next, nextDocument, versions)` (`serialize` with the stamp `triggersFileVersionFor` gives the result), which `writeTriggers` calls and the console's pre-checks call too, over the change each plan hands the writer: the standing answer, model role, zero-touch group name, instruction sentence and Undo previews are the bytes the confirm writes, and the current file, and the standing answer, model role and instruction previews, are parsed with the writer's version rules (`supported` and the five tables, injectable in each planner and passed by its apply; a group name and an Undo are judged by the write's own parse). Before, the pre-checks parsed and showed the document without the stamp, so the first rule in a table would have refused a change the writer makes, and a file declaring `"version": 1` previewed a line the writer drops. A model role's diff still shows the `modelRoles` block alone; its after digest is now the whole written file's. The write protocol, the newer-file refusal and every byte written with the tables empty UNCHANGED, checked. **Code evidence**: worker/src/triggers-file.mjs -> triggersFileText, writeTriggers; admin/src/answerer-actions.mjs -> planStandingAnswerAdd, applyStandingAnswerAdd; admin/src/model-role-plans.mjs -> createModelRoleActions; admin/src/zero-touch-actions.mjs -> planZeroTouchName, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan. |
 | 2026-11-04 (#809) | What a 503 means for each forge. **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED and AMENDED**, the `run.replicas` acceptance. AMENDED: a failure enqueueing replica *k* answers **503** with `1..k-1` queued and an `enqueue_failed` line that now carries `queued` (*k-1*, created or swallowed by the semantic window) and `replicas` (*n*), the unreplicated line unchanged as `{event, delivery, reason}` (a thrown value with no `message` still leaves `reason` out). CORRECTED: it said the retry converges on exactly *n*, a retry GitHub, GitLab and Forgejo never make. What a partial failure leaves is now stated: *k-1* while nobody sends the delivery again, *n* after a GitHub or GitLab hand redelivery or Azure's resend (the same id), and after a Forgejo replay (a new id) *n* inside the 10-minute window and *n* more after it. **`INT-RECEIVER-STATUS-KEY` UNCHANGED, checked**: the outcome table, `lookup-failed` and `enqueue-failed` among them, is what the new Connections banner reads; no field, bound or version changed. **Code evidence**: receiver/src/receiver.mjs -> fanout, answerEnqueueFailed; worker/src/receiver-status.mjs -> RECEIVER_OUTCOMES, receiverOutcome. |
 | 2026-11-04 (#807) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the `dollars.reservedIn` paragraph: the field has a second reader, the console's Spend page (`spendSummaryOf`, `DES-COST-FOLD-BY-SCAN`), which reads `day` to set a run against the day counter it reserved in, whenever it ended, through the same `reservedInOf`; it tags the console's raw `VALKEY_URL`, the URL it reads that counter at, never a pinned address, so on Linux, where the worker tags the address it pinned a local Valkey to, a `VALKEY_URL` that names it by a host name gives another tag, and such a record is counted by its end time, as before. The shape, the writer, the absent cases and `RUN_RECORD_VERSION` are unchanged. **Code evidence**: admin/src/insights-assembly.mjs -> spendSummaryOf, assembleInsightsView; worker/src/dollar-budget.mjs -> reservedInOf, valkeyEndpointTag; worker/src/podman-stack.mjs -> resolveWorkerValkey, pinnedValkeyUrl. |
