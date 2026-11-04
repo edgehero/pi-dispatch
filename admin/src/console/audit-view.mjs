@@ -64,8 +64,17 @@ export const AUDIT_Q_MAX = 64;
 /** A `seq` to open the page at: a row number, 1 or more, as many digits as a cursor's line may have. */
 export const AUDIT_SEQ_RE = /^[1-9]\d{0,15}$/;
 
+/**
+ * A `role` filter: the roles a row's actor is written with, exactly the roles of INT-CONSOLE-AUDIT-LOG's "The roles
+ * written are" list, in the filter's own order (a worker test holds this list to that one and to the code that writes
+ * them). `none` is the role of a row written without a session (`server.mjs` `ANONYMOUS`: a failed sign-in, a refused
+ * code or request, a rate-limit row, a sign-out with no session held), the word the row shows under its name. The list
+ * offered `anonymous`, that actor's name, which no row carries as its role, so the filter for failed sign-ins found
+ * nothing (issue #808); the name is still found by `who=anonymous`.
+ */
+export const AUDIT_ACTOR_ROLES = Object.freeze(["agent", "operator", "viewer", "panel", "shell", "none"]);
+
 /** The parameters the audit page takes, in the order `auditQueryString` writes them. */
-export const AUDIT_ACTOR_ROLES = Object.freeze(["agent", "operator", "viewer", "panel", "shell", "anonymous"]);
 export const AUDIT_PARAMS = Object.freeze(["before", "who", "role", "action", "outcome", "q", "seq"]);
 
 /** The rows a page shows when the caller names no other count (`pages.mjs` `AUDIT_PER_PAGE` is the same 50). */
@@ -120,10 +129,12 @@ function asParams(params) {
 
 /**
  * Judge the audit page's query: `{ query }` (frozen: `before`, `who`, `action`, `outcome` and `q` a string or null,
- * `seq` a number or null) or `{ refusal }`, a sentence that names the parameter and its rule and never its value.
+ * `seq` a number or null, `role` a string and present only when given) or `{ refusal }`, a sentence that names the
+ * parameter and its rule and never its value.
  *
  *   - `before`: a place in the files, `YYYY-MM:<line>` (`readConsoleAudit`'s cursor, its own pattern);
- *   - `who`: a token name (`AUDIT_WHO_RE`); `action` and `outcome`: one of the worker's closed lists;
+ *   - `who`: a token name (`AUDIT_WHO_RE`); `role`: one of `AUDIT_ACTOR_ROLES`; `action` and `outcome`: one of the
+ *     worker's closed lists;
  *   - `q`: what to find in a row's target or reason, printable, at most `AUDIT_Q_MAX` characters;
  *   - `seq`: a row number, which opens the page holding that row, so it cannot be given with `before` (both say where
  *     the page starts).
@@ -179,7 +190,7 @@ export function auditQueryString(query, over = {}) {
   return out.toString();
 }
 
-/** Whether the query filters rows (a search, or who, action or outcome): the reads then look further than one page. */
+/** Whether the query filters rows (a search, or who, role, action or outcome): the reads then look past one page. */
 export function auditFiltered(query) {
   return Boolean(query?.who || query?.role || query?.action || query?.outcome || query?.q);
 }

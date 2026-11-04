@@ -345,17 +345,25 @@ export function auditChain(view) {
 }
 
 /**
- * The filters (the AuditScreen card): a search over targets and reasons and a closed list each for who, action and
- * outcome, as a plain GET form to the page itself, so a filtered view is a link like any other and needs no script.
- * Who lists the names the rows read so far hold (and the one chosen); action and outcome the worker's closed lists.
+ * What the role filter says for a role whose word alone would mislead: a bare "Role: none" beside "Role: all" reads as
+ * no filter at all. The value stays the role as written (`AUDIT_ACTOR_ROLES`), so a link reads the same.
+ */
+const ROLE_WORDS = new Map([["none", "none (no session)"]]);
+
+/**
+ * The filters (the AuditScreen card): a search over targets and reasons and a closed list each for who, role, action
+ * and outcome, as a plain GET form to the page itself, so a filtered view is a link like any other and needs no script.
+ * Who lists the names the rows read so far hold (and the one chosen); role the roles a row's actor is written with
+ * (`AUDIT_ACTOR_ROLES`, `none` the role of a row written without a session); action and outcome the worker's closed
+ * lists.
  */
 export function auditFilter(view) {
   if (view.role !== "operator") return html``;
   const q = view.query ?? {};
   const names = Array.isArray(view.data?.audit?.who) ? view.data.audit.who : [];
-  const pick = (id, name, label, values, value) => html`<label class="sr" for="${id}">${label}</label>${ui.select({ id, name, value: value ?? "", options: [{ value: "", label: `${label}: all` }, ...values.map((v) => ({ value: v, label: `${label}: ${v}` }))] })}`;
+  const pick = (id, name, label, values, value, wordOf = (v) => v) => html`<label class="sr" for="${id}">${label}</label>${ui.select({ id, name, value: value ?? "", options: [{ value: "", label: `${label}: all` }, ...values.map((v) => ({ value: v, label: `${label}: ${wordOf(v)}` }))] })}`;
   const reset = auditFiltered(q) || (typeof q.before === "string" && q.before !== "") || Number.isSafeInteger(q.seq) ? ui.btn({ kind: "ghost", label: "Clear", href: "/audit" }) : null;
-  return html`<form class="filterbar" method="get" action="/audit" role="search" aria-label="Filter the audit log"><label class="search">${ui.icon("search")}<input type="search" name="q" value="${q.q ?? ""}" maxlength="${AUDIT_Q_MAX}" placeholder="Search targets and reasons" aria-label="Search targets and reasons" autocomplete="off" spellcheck="false"></label>${pick("au-who", "who", "Who", names, q.who)}${pick("au-role", "role", "Role", AUDIT_ACTOR_ROLES, q.role)}${pick("au-action", "action", "Action", CONSOLE_AUDIT_ACTIONS, q.action)}${pick("au-outcome", "outcome", "Outcome", CONSOLE_AUDIT_OUTCOMES, q.outcome)}${ui.btn({ label: "Filter", type: "submit" })}${reset}</form>`;
+  return html`<form class="filterbar" method="get" action="/audit" role="search" aria-label="Filter the audit log"><label class="search">${ui.icon("search")}<input type="search" name="q" value="${q.q ?? ""}" maxlength="${AUDIT_Q_MAX}" placeholder="Search targets and reasons" aria-label="Search targets and reasons" autocomplete="off" spellcheck="false"></label>${pick("au-who", "who", "Who", names, q.who)}${pick("au-role", "role", "Role", AUDIT_ACTOR_ROLES, q.role, (v) => ROLE_WORDS.get(v) ?? v)}${pick("au-action", "action", "Action", CONSOLE_AUDIT_ACTIONS, q.action)}${pick("au-outcome", "outcome", "Outcome", CONSOLE_AUDIT_OUTCOMES, q.outcome)}${ui.btn({ label: "Filter", type: "submit" })}${reset}</form>`;
 }
 
 /** What the log is (the AuditScreen card's side card): the verified range, the damage, the last check, who sees it. */

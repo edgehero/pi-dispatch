@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { ACTIONS } from "../src/console/actions.mjs";
+import { AUDIT_ACTOR_ROLES } from "../src/console/audit-view.mjs";
+import { auditFilter } from "../src/console/panels/audit.mjs";
 import { PAGES } from "../src/console/pages.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { ENDED_REASONS, endedNotices } from "../src/console/session-ends.mjs";
@@ -60,6 +62,18 @@ test("docs/console.md's table of runs filters: one row per RUN_FILTER_FIELDS mem
   // The outcome row names every value the filter takes, in the code's order, and no other: its code spans are the list.
   const [, outcome] = rows.find(([field]) => field === "`outcome`");
   assert.deepEqual([...outcome.matchAll(/`([^`]+)`/g)].map((m) => m[1]), [...RUN_OUTCOME_VALUES]);
+});
+
+test("docs/console.md's audit role list is AUDIT_ACTOR_ROLES, in order, none shown in the filter's own words (issue #808)", () => {
+  // Read between the sentence's own fixed words, so a role named elsewhere in the paragraph is not taken for a member.
+  const text = flat(read("docs/console.md"));
+  const start = "The role list holds the roles a row is written with, ";
+  const a = text.indexOf(start);
+  assert.ok(a >= 0, `docs/console.md says ${JSON.stringify(start)}`);
+  const list = text.slice(a + start.length, text.indexOf(":", a + start.length));
+  assert.deepEqual([...list.matchAll(/`([^`]+)`/g)].map((m) => m[1]), [...AUDIT_ACTOR_ROLES]);
+  const filter = String(auditFilter({ role: "operator", query: {}, data: {} }));
+  assert.ok(filter.includes('<option value="none">Role: none (no session)</option>') && text.includes('`none`, shown as "Role: none (no session)"'), "the docs quote the option the filter draws");
 });
 
 test("the requirements' list of destructive actions is exactly the actions whose write rules set danger", () => {

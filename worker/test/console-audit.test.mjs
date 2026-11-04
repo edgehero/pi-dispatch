@@ -95,6 +95,10 @@ test("INT-CONSOLE-AUDIT-LOG lists exactly the actions, outcomes and actor roles 
 	const user = () => ({ username: "rob" });
 	const written = new Set([...TOKEN_ROLES, panelActor(user).role, agentActor(user).role, constantRole("cli.mjs", "SHELL"), constantRole("server.mjs", "ANONYMOUS")]);
 	assert.deepEqual(between("The roles written are", ":").sort(), [...written].sort());
+	// The audit page's role filter offers the same list, so each role it offers is one some row can carry: it offered
+	// `anonymous`, the name of the actor without a session, whose role is `none` (issue #808).
+	const { AUDIT_ACTOR_ROLES } = await import("../../admin/src/console/audit-view.mjs");
+	assert.deepEqual([...AUDIT_ACTOR_ROLES].sort(), [...written].sort(), "the audit page's role filter offers exactly the roles written");
 });
 
 test("append stamps at, seq and prev (sha256 of the previous raw line), into a 0700 dir and a 0600 month file", () => {

@@ -1,7 +1,7 @@
 {
   "card": "AuditScreen",
   "pr": 2,
-  "words": "93642cc24bf6fa996cf882407f6da4a43ba6bb91a48edd683b007fee0c483b67",
+  "words": "3babad583d1dcc4519957a59b4cc9d502c38de75c418023b06d2024c85b62b9b",
   "elements": [
     {"el":"p-audit","kind":"panel","status":"real","source":"admin/src/console/panels/audit.mjs#auditLog","golden":["audit.operator"],"reason":"the log is PR 1's panel, converted to the Pulse markup in PR 2"},
     {"el":"p-audit-about","kind":"panel","status":"new","source":"admin/src/console/panels/audit.mjs#auditAbout","golden":["audit.operator"],"reason":"beside the log from 1600 px, under it below (page-css.mjs AUDIT_LAYOUT.sideMin): the card stands them side by side at 1440 with its short sample rows, where the widest rows the console writes leave the log's reason column too narrow to read"},
@@ -26,6 +26,7 @@
     {"el":"Rows 7 (damaged) and 8 (not verified)","kind":"sample","status":"illustrative","reason":"sample data (the card's note); the damaged and not-verified states are panel goldens"},
     {"el":"Rows 1 to 6","kind":"sample","status":"illustrative","reason":"the card's fixture; the console's audit golden is seeded by its own harness"},
     {"el":"Agent role finds applied, refused and compensated attempts without hiding damage","kind":"readme","status":"new","source":"admin/src/console/audit-view.mjs#readAuditView","reason":"Native GET role filtering and pagination retain the actor role; damaged rows remain visible and verification stays independent of the filter."},
+    {"el":"The role none (no session) finds the rows written without a session, which show none under the name anonymous","kind":"readme","status":"new","panel":"p-audit-filter","source":"admin/src/console/audit-view.mjs#AUDIT_ACTOR_ROLES","holds":"\"none\"","golden":["audit.operator"],"shows":"<option value=\"none\">Role: none (no session)</option>","reason":"issue #808: the list offered anonymous, the name of the actor without a session, which no row carries as its role; none is the role the server writes and the row shows"},
     {"el":"The About card beside the log, with a row count","kind":"readme","status":"illustrative","reason":"the page puts it under the log, where the narrow column does not squeeze the table"},
     {"el":"Filter pills","kind":"readme","status":"illustrative","reason":"the page uses labelled selects and Filter, which work without the script"}
   ]

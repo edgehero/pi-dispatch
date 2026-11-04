@@ -354,9 +354,9 @@ function asParams(searchParams) {
  *   - overview (issue #737): the timeline's grouping, `rows`, one of `TIMELINE_ROWS`; its window, `zoom`, a key of
  *     `TIMELINE_ZOOMS`; and its project filter, `project`, a project id (`PROJECT_ID_RE`); `{ rows, zoom, project }`,
  *     each absent one null (the timeline's default). Closed values, so the timeline is never handed one it refuses.
- *   - audit: `before` (an audit position, `YYYY-MM:<line>`, `readConsoleAudit`'s cursor), `who`, `action`, `outcome`,
- *     `q` and `seq` (not with `before`), each judged by `audit-view.mjs` `parseAuditQuery`; `{ before, who, action,
- *     outcome, q, seq }`, each absent one null.
+ *   - audit: `before` (an audit position, `YYYY-MM:<line>`, `readConsoleAudit`'s cursor), `who`, `role`, `action`,
+ *     `outcome`, `q` and `seq` (not with `before`), each judged by `audit-view.mjs` `parseAuditQuery`; `{ before, who,
+ *     role, action, outcome, q, seq }`, each absent one null.
  *   - every other screen: no parameter at all; `{}`.
  *
  * Bounded first: at most `QUERY_LIMITS.params` parameters, each value at most `QUERY_LIMITS.valueLength` characters,

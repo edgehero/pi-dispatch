@@ -172,9 +172,10 @@ Two consequences worth internalising before you design anything:
   could not see four spellings and could go false red on a comment); and every spec revision row, which
   must split into exactly two cells on unescaped pipes, because such a row is CUT on the rendered page
   while looking whole in the diff, and four had silently lost between 1,100 and 2,800 characters each; and the
-  console's five hand-written lists in `admin/test/console-doc-tables.test.mjs`: `docs/console.md`'s `ended` table
+  console's six hand-written lists in `admin/test/console-doc-tables.test.mjs`: `docs/console.md`'s `ended` table
   against `ENDED_REASONS` and the sign-in page's titles, its error-page table against `ERROR_KINDS` and their statuses,
-  its runs filter table against `RUN_FILTER_FIELDS` and `RUN_OUTCOME_VALUES`, the requirements' destructive actions
+  its runs filter table against `RUN_FILTER_FIELDS` and `RUN_OUTCOME_VALUES`, its audit role list against
+  `AUDIT_ACTOR_ROLES`, the requirements' destructive actions
   against the actions whose write rules set `danger`, and `docs/triggers.md`'s
   `pull_request` fields against the trigger add's `TRIGGER_ADD_FIELDS.pull_request`; and `INT-DEFER-REASON-KEY`'s
   reason table, fields block and bucket lists against `worker/src/defer-reasons.mjs`, both ways, in
@@ -214,7 +215,8 @@ Two consequences worth internalising before you design anything:
   row in any of those tables, field or value, ships only once every host and every panel and console runs issue #761's
   release or later. The tolerant readers, the retention module and the upgrade path of the same issue add these:
   - `INT-CONSOLE-AUDIT-LOG`'s action, outcome and actor role lists against `CONSOLE_AUDIT_ACTIONS`,
-    `CONSOLE_AUDIT_OUTCOMES` and the roles the console writes, and every member of both code lists against
+    `CONSOLE_AUDIT_OUTCOMES` and the roles the console writes (which the audit page's role filter, `AUDIT_ACTOR_ROLES`,
+    offers exactly), and every member of both code lists against
     `CONSOLE_AUDIT_ACTION_RE` and `CONSOLE_AUDIT_OUTCOME_RE` (`worker/test/console-audit.test.mjs`). The writer stays
     closed and only the verifier reads the shape: a value a release adds outside it would make every older verifier
     call an intact chain broken, so that release fails its own build. `TOKEN_ROLES` is held to `TOKEN_ROLE_RE` the
