@@ -3,7 +3,7 @@
 // and reader, because a shape written by hand can hide the defect it stands in for.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildHostLoads, hostLoadsKey } from "@edgehero/pi-dispatch/host-loads";
+import { buildHostLoads, flowTierOf, hostLoadsKey } from "@edgehero/pi-dispatch/host-loads";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { readTriggerEditor } from "../src/read-model.mjs";
 import { triggerLastRun, wordsText } from "../src/loaded-words.mjs";
@@ -17,6 +17,9 @@ const COMMENT = Object.freeze({ index: 2, type: "comment", flow: "fix", packages
 /** The same trigger naming no flow, for a test of what else hosts differ in: a host with no answer for a flow is its own word. */
 const NO_FLOW = Object.freeze({ ...COMMENT, flow: null });
 const lineOf = (parts) => wordsText(parts);
+/** A cron trigger's flow on a host, as doctor publishes it: its folder is on the host, so the repository's answer is its own. */
+const LOCAL = Object.freeze({ index: 2, type: "cron", flow: "fix", packages: true, folder: "/srv/web" });
+const flowFound = (tier, repo, pkg = null) => ({ flows: [{ trigger: 2, flow: "fix", tier, package: pkg, repo }] });
 
 /** What the hosts published, each written by the real builder and read back by the real reader beside what its host beats out. */
 async function published(hosts, { live = Object.keys(hosts) } = {}) {
@@ -317,4 +320,43 @@ test("the deployment's cap is quoted only where it is an amount, through the rea
   }
   // The trigger's own says itself, whatever the deployment's is.
   assert.ok(model(none, { ...COMMENT, maxCostUsd: "1.50" }).read.endsWith(" · $1.50 cap"));
+});
+
+test("a flow doctor found nowhere is said on its row and each pill, before a paid run shows it, and nothing else is", async () => {
+  // What a real host publishes for a repository without the flow.
+  const real = await flowTierOf({ flow: "fix", folder: "/srv/web" }, { repoFlowAtHead: async () => "absent", fileExists: () => false, overlay: "/overlay" });
+  assert.deepEqual([real.tier, real.repo], ["none", "absent"]);
+  const lacks = flowFound(real.tier, real.repo);
+  const flowOf = async (hosts, options = {}) => triggerGetsOf({ trigger: LOCAL, hostLoads: await published(hosts, options), liveHosts: options.live ?? Object.keys(hosts) }).flow;
+  const sentence = (names) => `As doctor last read it, a job on ${names} would not find fix: it is not at the repository’s HEAD, nor in any other tier this trigger loads from.`;
+  // Hosts that all lack it agree, and agreeing is no reason to say nothing.
+  const both = { mini1: lacks, mini2: lacks };
+  assert.deepEqual(await pills(both, LOCAL), { mini1: "its flow in no tier", mini2: "its flow in no tier" });
+  const tones = triggerGetsOf({ trigger: LOCAL, hostLoads: await published(both), liveHosts: ["mini1", "mini2"] }).pills;
+  assert.deepEqual(tones.map((pill) => [pill.tone, pill.icon]), [["attention", "attention"], ["attention", "attention"]]);
+  assert.equal((await flowOf(both)).lacking, sentence("mini1 and mini2"));
+  // Alone it has nothing to be the same as, and still lacks it, in place of the words a lone host has otherwise.
+  assert.deepEqual(await pills({ mini1: lacks }, LOCAL), { mini1: "its flow in no tier" });
+  assert.equal((await flowOf({ mini1: lacks })).lacking, sentence("mini1"));
+  // Each silent host stays unknown beside it: no publication, a newer release's, a broken one and an old one.
+  const silent = await published({ mini1: lacks, absent: null, newer: JSON.stringify({ v: 99, at: NOW }), broken: "{", stale: { ...lacks, at: NOW - 100 * HOUR } });
+  const beside = triggerGetsOf({ trigger: LOCAL, hostLoads: silent, liveHosts: ["mini1", "absent", "newer", "broken", "stale"] });
+  assert.deepEqual(Object.fromEntries(beside.pills.map((pill) => [pill.name, pill.word])), { mini1: "its flow in no tier", absent: "unknown", newer: "unknown", broken: "unknown", stale: "unknown" });
+  assert.equal(beside.flow.lacking, sentence("mini1"), "an old host's answer is no answer, whatever it says");
+  // Beside a host that finds it, one has it and one does not, once each. Beside one with no answer for the flow, it says so once.
+  assert.deepEqual(await pills({ mini1: lacks, mini2: flowFound("overlay", "absent") }, LOCAL), { mini1: "its flow in no tier", mini2: "its flow from the overlay" });
+  assert.equal((await flowOf({ mini1: lacks, mini2: flowFound("overlay", "absent") })).lacking, sentence("mini1"));
+  assert.deepEqual(await pills({ mini1: lacks, mini2: {} }, LOCAL), { mini1: "its flow in no tier", mini2: "no answer for its flow" });
+  // Found, or not known to be missing, is no warning: the repository lacking it says nothing while another tier holds it, nor does a tier no host could read.
+  for (const [what, answer] of [["in the repository", flowFound("repository", "present")], ["in the overlay", flowFound("overlay", "absent")], ["in a package", flowFound("package", "absent", "pi-lint")], ["in a skills folder", flowFound("trigger", "absent")], ["a tier unread", flowFound("unknown", "absent")], ["a forge's", flowFound("unknown", "unknown")], ["none, with the repository unknown", flowFound("none", "unknown")]]) {
+    assert.equal((await flowOf({ mini1: answer, mini2: answer })).lacking, null, what);
+    assert.deepEqual(await pills({ mini1: answer, mini2: answer }, LOCAL), { mini1: "the same", mini2: "the same" }, what);
+    assert.deepEqual(await pills({ mini1: answer }, LOCAL), { mini1: "the only host" }, what);
+  }
+  // A row for another flow, or another trigger, is not this one's, and a trigger naming no flow lacks none.
+  assert.equal((await flowOf({ mini1: { flows: [{ trigger: 2, flow: "other", tier: "none", package: null, repo: "absent" }] } })).lacking, null);
+  assert.equal((await flowOf({ mini1: { flows: [{ trigger: 1, flow: "fix", tier: "none", package: null, repo: "absent" }] } })).lacking, null);
+  const noFlow = { flows: [{ trigger: 2, flow: null, tier: "none", package: null, repo: "absent" }] };
+  assert.equal(triggerGetsOf({ trigger: { ...LOCAL, flow: null }, hostLoads: await published({ mini1: noFlow }), liveHosts: ["mini1"] }).flow.lacking, null);
+  assert.deepEqual(await pills({ mini1: noFlow }, { ...LOCAL, flow: null }), { mini1: "the only host" });
 });

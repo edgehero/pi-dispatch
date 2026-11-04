@@ -20,7 +20,7 @@ import { createTriggerEnvironmentActions } from "../src/trigger-environment-plan
 import { TRIGGER_GETS_WORDS as W, readTriggerGetsEntry, triggerGetsOf } from "../src/trigger-gets-view.mjs";
 import { cardPreview, cardReadme, cardText } from "./helpers/card-structure.mjs";
 import { recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
-import { LOADED_SAMPLES as S } from "./helpers/loaded-samples.mjs";
+import { HOST_LOADS, LOADED_SAMPLES as S } from "./helpers/loaded-samples.mjs";
 import { Event, runConsoleScript } from "./helpers/script-dom.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { GETS_ENTRY, GETS_HOST_ENV, GETS_MCP_JSON, TRIGGER_GETS_PATH, fileOnlyFs, getsFile, getsHostLoads, triggerGetsPage } from "./helpers/trigger-gets-goldens.mjs";
@@ -503,4 +503,17 @@ test("with Valkey down, the real reader's page says what is unread: the file was
   const gonePage = String((await renderPage("trigger", { query: parsed.query, session: { name: "ops", role: "operator" }, data: gone })).html);
   assert.ok(textOf(gonePage).includes("The triggers file could not be read"));
   assert.ok(!textOf(gonePage).includes(W.othersUnread), "and does not say it read it");
+});
+
+test("a flow doctor found nowhere is drawn with attention, for whoever reads the card, and the page holds no such note otherwise", async () => {
+  const entry = { on: { type: "cron", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "Run it." } };
+  const answer = (tier, repo) => ({ flows: [{ trigger: 2, flow: "fix", tier, package: null, repo }] });
+  const loads = (one) => ({ more: 0, hosts: HOST_LOADS.hosts.map((row) => (row.state === "current" ? { ...row, ...one } : row)) });
+  const line = "As doctor last read it, a job on build3 and mini1 would not find fix: it is not at the repository’s HEAD, nor in any other tier this trigger loads from.";
+  for (const role of ["operator", "viewer"]) {
+    const panel = panelOf(await triggerGetsPage({ role, entry, records: [], loads: loads(answer("none", "absent")) }), "p-trigger-gets");
+    const note = panel.indexOf('<p class="te-note tone-attention">');
+    assert.ok(note >= 0 && textOf(panel.slice(note)).includes(line), role);
+  }
+  assert.ok(!textOf(panelOf(await triggerGetsPage({ entry, records: [], loads: loads(answer("overlay", "absent")) }), "p-trigger-gets")).includes("would not find"));
 });

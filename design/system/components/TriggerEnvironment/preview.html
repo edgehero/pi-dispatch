@@ -250,6 +250,7 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
     <div class="te-item"><span><b>Staged packages off</b><small>The file says "packages": false, so these jobs load none of them, nor their tools, skills, prompt templates or themes.</small></span></div>
     <div class="te-item"><span><b>No run in the history</b><small>A new trigger, or one whose runs have aged out, has no record to quote. Under each row: No run in the available history. The hosts and each row’s control read the same.</small></span></div>
     <div class="te-item"><span><b>Its flow found nowhere</b><small>Last run on mini2, gh-03a9: Ran without its flow. pi found no skill named fix: not in acme/api at its base commit, nor in a skills folder, the overlay or a staged package.</small></span></div>
+    <div class="te-item"><span><b>A schedule whose repository lacks its flow</b><small>Before any run: its pill says its flow in no tier, and under the flow, As doctor last read it, a job on mini1 would not find fix: it is not at the repository’s HEAD, nor in any other tier this trigger loads from.</small></span></div>
   </div></div>
 </div>
 </section></div></div>

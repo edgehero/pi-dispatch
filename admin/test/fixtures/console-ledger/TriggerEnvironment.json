@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "56d9e2822200af92831425cd63725dea2aa7277a23cb8040e773bcafdb18faa7",
+  "words": "eb42ef235fcc62aeb5b570be9206867ebe2891a78575ebbfd6d05e5087986d6b",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -133,6 +133,20 @@
         "panels/trigger-gets-no-flow.operator"
       ],
       "shows": "Ran without its flow."
+    },
+    {
+      "el": "A warning when doctor found the flow nowhere, before a run has paid to show it",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#triggerGetsOf",
+      "golden": [
+        "panels/trigger-gets-flow-absent.operator"
+      ],
+      "shows": [
+        "its flow in no tier",
+        "would not find fix: it is not at the repository’s HEAD, nor in any other tier this trigger loads from."
+      ]
     },
     {
       "el": "Extensions: the all-off switch for staged packages, each extension shown, the repository's own shown",

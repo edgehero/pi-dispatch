@@ -127,6 +127,13 @@ function longNames() {
 
 const UNKNOWN_ALL = Object.freeze({ more: 0, hosts: [{ name: "build3", state: "unknown", why: "absent" }, { name: "mini1", state: "unknown", why: "unreadable" }, { name: "mini2", state: "old", at: NOW - 30 * 24 * HOUR, ageMs: 30 * 24 * HOUR, every: 24, by: { uid: 1000, worker: true }, overlayExtensionsAllowed: true, extensions: [], skills: [], mcp: [], packages: [], flows: [], unread: [], more: {} }] });
 
+/** A schedule whose folder is on each host and holds no such flow: what doctor publishes when no tier does, before any run has paid to show it. */
+const FLOW_ABSENT = Object.freeze({
+  entry: { on: { type: "cron", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "Run it." } },
+  records: [],
+  loads: hostLoads({ mini1: { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] }, build3: { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] } }),
+});
+
 export const TRIGGER_GETS_DRAW = Object.freeze({
   "trigger-gets.operator": () => triggerGetsPage(),
   "trigger-gets.viewer": () => triggerGetsPage({ role: "viewer" }),
@@ -134,6 +141,7 @@ export const TRIGGER_GETS_DRAW = Object.freeze({
   "trigger-gets-host-lacks.operator": () => triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, mcp: ["docs"] } } }),
   "trigger-gets-no-flow.operator": () => triggerGetsPage({ records: [S.noFlow()], loads: hostLoads({ mini1: { ...FLOW_ROW("unknown") }, build3: { ...FLOW_ROW("unknown") } }) }),
   "trigger-gets-no-run.operator": () => triggerGetsPage({ records: [] }),
+  "trigger-gets-flow-absent.operator": () => triggerGetsPage(FLOW_ABSENT),
   "trigger-gets-unknown-host.operator": () => triggerGetsPage({ loads: UNKNOWN_ALL }),
   "trigger-gets-read-only.operator": () => triggerGetsPage({ readOnly: true }),
   "trigger-gets-long-names.operator": () => triggerGetsPage(longNames()),

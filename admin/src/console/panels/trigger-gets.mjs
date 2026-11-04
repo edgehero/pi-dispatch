@@ -97,11 +97,12 @@ function flowBody(gets, form) {
   const f = gets.flow;
   const skills = html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>Skills folder (<span class="code">run.skillsDir</span>): ${f.skillsDir === null ? "none" : html`<span class="code">${shownPath(f.skillsDir)}</span>`}, a folder on each host, set in the file.</span></p>`;
   const doctor = f.doctor === null ? null : html`<p class="te-note">${ui.icon("doctor", { size: "sm" })}<span><b>Doctor’s answer:</b> ${f.doctor}${f.forge ? " A forge’s repository is not on a host, so for that tier read the last run." : ""}</span></p>`;
+  const lacking = f.lacking === null ? null : note([f.lacking], { icon: "attention", tone: "attention" });
   if (f.command !== null) return html`${readLine(html`<span class="code">${f.command}</span>, ${W.command}`)}${skills}`;
   const control = form
     ? html`${textField({ id: "te-flow", name: "flow", label: "Flow", value: f.flow, list: "te-flows", word: "flow changed", hint: "Pick a skill a job can find, or name one the repository holds." })}${datalist("te-flows", f.choices.map((entry) => ({ value: entry.name, label: entry.from })))}`
     : readLine(f.flow === "" ? "No flow named." : html`<span class="code">${f.flow}</span>`);
-  return html`${control}${doctor}${skills}`;
+  return html`${control}${doctor}${lacking}${skills}`;
 }
 
 function extensionsBody(gets, form) {

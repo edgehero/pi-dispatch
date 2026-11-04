@@ -158,15 +158,28 @@ function flowAnswer(row, trigger) {
 }
 
 /**
+ * Whether doctor looked everywhere a job of this trigger would and found this flow nowhere: `none` with the repository's own answer `absent`,
+ * so its folder is on this host and said so (`flowTierOf`). A forge's repository is not on a host, so its row is `unknown`, and a host that
+ * could not read a tier demotes `none` to `unknown` before it publishes: each of those may still find it, and neither is said to lack it.
+ * REJECTED: `none` alone, which trusts the one word to imply the other when the reader's parse takes any pair of them.
+ */
+function lacksFlow(row, trigger) {
+  const found = trigger.flow === null ? null : (row.flows ?? []).find((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow);
+  return found?.tier === "none" && found.repo === "absent";
+}
+
+/**
  * One pill per host: `{ name, tone, icon, word }`. A pill must not say what the rows beneath it contradict, so "the same" needs two or more
  * hosts that can say, `hostsAgree` true of what reaches this trigger's jobs (`agreeRow`), and what it does not compare, the image and its pi,
  * alike too. A host alone has nothing to be the same as, and REJECTED is "the same" there: it would read a one-host deployment and a host
  * beside three silent ones as proof. Each difference is said by what a host has over another, what it goes without, what it runs and how it
- * defines a server. A host with no answer for the flow, or no image to read, is said as that: not known to differ, and not the same.
+ * defines a server. A host with no answer for the flow, or no image to read, is said as that: not known to differ, and not the same. A host
+ * whose doctor found the flow nowhere says so whoever agrees with it, and alone or beside silent hosts as much as beside others: hosts that all
+ * lack it do agree, and REJECTED is "the same" there, over jobs that would not find what they are told to run.
  */
 function hostPills(rows, trigger) {
   const named = overlayServersOf(trigger);
-  const known = rows.filter((row) => cannotSay(row, trigger) === null).map((row) => ({ row, facts: hostFacts(row, trigger), flow: trigger.flow === null ? null : flowAnswer(row, trigger) }));
+  const known = rows.filter((row) => cannotSay(row, trigger) === null).map((row) => ({ row, facts: hostFacts(row, trigger), flow: trigger.flow === null ? null : flowAnswer(row, trigger), lacksFlow: lacksFlow(row, trigger) }));
   // A server it names is what its jobs ask for, so going without one is said even where every host does.
   const everything = new Map([...named.map((name) => [`m:${name}`, name]), ...known.flatMap(({ facts }) => [...facts])]);
   const flows = unique(known.map(({ flow }) => flow).filter((flow) => flow !== null));
@@ -177,20 +190,21 @@ function hostPills(rows, trigger) {
   return rows.map((row) => {
     const mine = known.find((entry) => entry.row === row);
     if (!mine) return { name: row.name, tone: "unknown", icon: "minus", word: "unknown" };
-    if (known.length === 1) return { name: row.name, tone: "plain", icon: "info", word: rows.length === 1 ? "the only host" : "the only one known" };
+    if (known.length === 1 && !mine.lacksFlow) return { name: row.name, tone: "plain", icon: "info", word: rows.length === 1 ? "the only host" : "the only one known" };
     const also = [...mine.facts.entries()].filter(([key]) => known.some(({ facts }) => !facts.has(key))).map(([, word]) => word);
     const without = [...everything.entries()].filter(([key]) => !mine.facts.has(key)).map(([, word]) => word.replace(", from its overlay", ""));
     const redefined = named.filter((name) => definitions.get(name).length > 1 && (row.mcp ?? []).some((server) => server.name === name && server.enabled === true));
     const image = trigger.image ? null : imageOf(row);
+    const flowSays = flows.length > 1 || mine.lacksFlow;
     const differs = [
       also.length > 0 ? `also ${listed(also)}` : null,
       without.length > 0 ? `without ${listed(without)}` : null,
       ...redefined.map((name) => `${name} defined differently`),
-      flows.length > 1 && mine.flow !== null ? `its flow ${mine.flow}` : null,
+      flowSays && mine.flow !== null ? `its flow ${mine.flow}` : null,
       images.length > 1 && image !== null ? `runs ${image}` : null,
     ].filter(Boolean);
     // Beside a host with no answer, one with an answer says what it is and claims nothing of the other.
-    const flowSaid = trigger.flow === null ? null : mine.flow === null ? "no answer for its flow" : flows.length === 1 && known.some(({ flow }) => flow === null) ? `its flow ${mine.flow}` : null;
+    const flowSaid = trigger.flow === null ? null : mine.flow === null ? "no answer for its flow" : !flowSays && known.some(({ flow }) => flow === null) ? `its flow ${mine.flow}` : null;
     const unsaid = [flowSaid, !trigger.image && image === null ? "its image unknown" : null].filter(Boolean);
     if (differs.length > 0) return { name: row.name, tone: "attention", icon: "attention", word: [...differs, ...unsaid].join("; ") };
     if (unsaid.length > 0) return { name: row.name, tone: "plain", icon: "minus", word: unsaid.join("; ") };
@@ -278,6 +292,7 @@ function flowRow({ trigger, rows, editor }) {
     else groups.set(word, [...(groups.get(word) ?? []), row.name]);
   }
   const unknown = rows.filter((row) => row.state !== "current").map((row) => row.name);
+  const lacking = rows.filter((row) => row.state === "current" && lacksFlow(row, trigger)).map((row) => row.name);
   const said = [
     ...[...groups].map(([word, names]) => `${listed(names)} ${names.length === 1 ? "finds" : "find"} ${trigger.flow} ${word}`),
     silent.length > 0 ? `${listed(silent)} ${silent.length === 1 ? "has" : "have"} no answer for it yet` : null,
@@ -288,6 +303,7 @@ function flowRow({ trigger, rows, editor }) {
     flow: trigger.flow ?? "",
     choices,
     doctor: said.length > 0 ? `${said.join("; ")}.` : null,
+    lacking: lacking.length > 0 ? `As doctor last read it, a job on ${listed(lacking)} would not find ${trigger.flow}: it is not at the repository’s HEAD, nor in any other tier this trigger loads from.` : null,
     forge: Boolean(trigger.forge),
     skillsDir: trigger.skillsDir ?? null,
   };
