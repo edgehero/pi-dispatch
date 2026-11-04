@@ -287,7 +287,7 @@ const ROWS = [
 	["await-input-shadowed", TERMINAL_COMMENTS["await-input-shadowed"], "Remove the extension that registers the wait tool, or the trigger's `run.awaitInput`."],
 	["await-input-without-session", TERMINAL_COMMENTS["await-input-without-session"], "Run a worker and a job image of the same release."],
 	["report-progress-shadowed", TERMINAL_COMMENTS["report-progress-shadowed"], "Remove the extension that registers the progress tool, or the trigger's `run.progress`."],
-	["exclude-tool-not-loaded", TERMINAL_COMMENTS["exclude-tool-not-loaded"], "Fix the name in `run.excludeExtensionTools`, stage the package that brings the tool on this host, or if the extension registers the tool after it loads, exclude that extension in `run.excludeExtensions`."],
+	["exclude-tool-not-loaded", TERMINAL_COMMENTS["exclude-tool-not-loaded"], "Fix the name in `run.excludeExtensionTools`, stage the package that brings the tool on this host, or if the extension registers the tool after it loads, exclude that extension in `run.excludeExtensions`. If only a repository registers the tool, take the name off the key, since a job on every repository stops the same way."],
 	["steer-inbox-missing", TERMINAL_COMMENTS["steer-inbox-missing"], "Run a worker and a job image of the same release."],
 	["steer-no-exit-key", TERMINAL_COMMENTS["steer-no-exit-key"], "Run a worker and a job image of the same release."],
 	// ── Durable runs ────────────────────────────────────────────────────────────────────────────────────────────────

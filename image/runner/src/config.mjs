@@ -70,7 +70,7 @@ export function parseRunnerEnv(env, { steerFrames = false } = {}) {
 		excludeTools: parseExcludeTools(env, "PI_EXCLUDE_TOOLS"),
 		// INT-CONTAINER-JOB-INPUTS (issue #800): the trigger's run.excludeExtensions, whose overlay names the loader leaves out
 		// before any factory runs (the worker already left out the packages), its run.excludeExtensionTools, which join the list
-		// above in the session and are not held to pi's own names, and whether a name of the second that matched nothing stops the
+		// above in the session and are not held to pi's own names, and whether a name of the second that no staged package or overlay extension brought stops the
 		// job. `[]`, `[]` and `false` (the overwhelmingly common state) are byte-identical to every job before the feature.
 		excludeExtensions: parseExcludeTools(env, "PI_EXCLUDE_EXTENSIONS"),
 		excludeExtensionTools: parseExcludeTools(env, "PI_EXCLUDE_EXTENSION_TOOLS"),
@@ -427,7 +427,7 @@ function parseExcludeToolsStrict(env, name) {
 	const raw = env[name];
 	if (raw === undefined || raw === "") return false;
 	if (raw === "1") return true;
-	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to stop a job on a tool name that matched nothing, or leave it unset)`);
+	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to stop a job on a tool name no staged package or overlay extension brought, or leave it unset)`);
 }
 
 /**

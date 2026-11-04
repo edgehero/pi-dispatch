@@ -216,7 +216,7 @@ export const AWAIT_INPUT_RUNNER_REASONS = Object.freeze(["await-input-shadowed",
  */
 export const PROGRESS_RUNNER_REASONS = Object.freeze(["report-progress-shadowed"]);
 /**
- * The runner's exit-2 refusal of a job whose `run.excludeExtensionTools` names a tool nothing registered (issue #800), before the prompt, on a job
+ * The runner's exit-2 refusal of a job whose `run.excludeExtensionTools` names a tool no staged package or overlay extension registered (issue #800), before the prompt, on a job
  * the worker marked strict. Named for MCP_RUNNER_REASONS' reason: the operator's fix is a name, a stage or the extension, and not a budget.
  */
 export const EXCLUDE_RUNNER_REASONS = Object.freeze(["exclude-tool-not-loaded"]);

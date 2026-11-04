@@ -896,7 +896,15 @@ test("CreateAgentSessionOptions declares the tools trio, and INT-SDK-SESSION-OPT
 });
 
 test("run.excludeExtensionTools reads what the extensions registered off a list the exclusion does not filter (issue #800)", { skip }, () => {
-	// Asked of the runner, because `session.getAllTools()` has already lost an excluded name: a name that matched and a typo would read alike there.
+	// Asked of each extension, because `session.getAllTools()` has already lost an excluded name: a name that matched and a typo would read alike there.
+	// And not of `getAllRegisteredTools()`, which keeps the first of a name, so a name two extensions hold would be answered by pi's load order.
+	const loader = agentDistFile("core", "extensions", "loader.js");
+	assert.match(loader, /extension\.tools\.set\(tool\.name, \{\n\s*definition: tool,\n\s*sourceInfo: extension\.sourceInfo,/, "a tool lives on the extension that registered it, under its name");
+	assert.match(loader, /return \{\n\s*path: extensionPath,\n\s*resolvedPath,/, "and the extension's `path` is the path it was loaded from, which `tierOf` reads");
+	const resources = agentDistFile("core", "resource-loader.js");
+	assert.match(piMethod(resources, "getExtensions"), /return this\.extensionsResult;/, "the one list, what the runner below is built from");
+	assert.match(agentDistFile("core", "agent-session.js"), /const extensionsResult = this\._resourceLoader\.getExtensions\(\);[\s\S]{0,400}this\._extensionRunner = new ExtensionRunner\(extensionsResult\.extensions,/);
+	assert.match(resources, /Keep all extensions loaded\. Conflicts are reported as diagnostics/, "two of a tool's name both stay, each on its own extension, and the conflict is a load failure, which no strict stop runs on");
 	const runner = agentDistFile("core", "extensions", "runner.js");
 	assert.match(piMethod(runner, "getAllRegisteredTools"), /for \(const ext of this\.extensions\) \{\n\s*for \(const tool of ext\.tools\.values\(\)\) \{\n\s*if \(!toolsByName\.has\(tool\.definition\.name\)\) \{\n\s*toolsByName\.set\(tool\.definition\.name, tool\);/, "getAllRegisteredTools moved: run-job reads `tool.definition.name` off every extension's registrations, and would refuse a name it no longer finds");
 	assert.match(agentDistFile("core", "extensions", "runner.d.ts"), /getAllRegisteredTools\(\): RegisteredTool\[\];/);

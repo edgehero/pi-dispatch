@@ -2054,8 +2054,8 @@ export function validateExcludeExtensions(on, run, at, path) {
 /**
  * `run.excludeExtensionTools` (issue #800): tools an extension brings, which this trigger's sessions must not have. Its own key, and
  * `run.excludeTools` stays closed: that list is checked against the pinned pi, which is what makes a typo in it a refusal at load,
- * and this one cannot be, since an extension's tools are known only once it runs. The runner stops a job on a name that matched
- * nothing where it can tell (`exclude-tool-not-loaded`). Refused here is what has a better key or no extension behind it: pi's own
+ * and this one cannot be, since an extension's tools are known only once it runs. The runner stops a job on a name no staged package
+ * or overlay extension registered, where it can tell (`exclude-tool-not-loaded`). Refused here is what has a better key or no extension behind it: pi's own
  * tools and a server's are `run.excludeTools`', and a job's own tool (`LOADED_JOB_TOOLS`) is what a trigger's other fields arm, so
  * taking it away would leave `run.progress` or `run.awaitInput` armed with nothing to call. Each compared with the name's case folded:
  * `run.excludeTools` refuses `Bash` by membership, and here it would load, match nothing and read as though the shell were gone. An

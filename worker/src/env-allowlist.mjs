@@ -453,7 +453,7 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 		// The trigger's run.excludeExtensions and run.excludeExtensionTools (issue #800): the overlay names the runner leaves out
 		// before any factory runs, and the tools it adds to the list above. Comma-safe for that list's reason (the loader's grammar
 		// holds no comma). Absent means none, never an empty string, for PI_PACKAGES' reason. PI_EXCLUDE_TOOLS_STRICT is "1" only
-		// where a name of the second list that matched nothing can only be wrong (run-container.mjs says when).
+		// where a name of the second list that no staged package or overlay extension brought can only be wrong (run-container.mjs says when).
 		PI_EXCLUDE_EXTENSIONS: excludeExtensions.length > 0 ? excludeExtensions.join(",") : undefined,
 		PI_EXCLUDE_EXTENSION_TOOLS: excludeExtensionTools.length > 0 ? excludeExtensionTools.join(",") : undefined,
 		PI_EXCLUDE_TOOLS_STRICT: excludeToolsStrict === true ? "1" : undefined,

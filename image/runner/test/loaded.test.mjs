@@ -22,6 +22,7 @@ import {
 	LOADED_TIERS,
 	LOADED_TOOL_NAME_RE,
 	tierOf,
+	toolsBroughtByHost,
 } from "../src/loaded.mjs";
 import { maximalLoaded, ROOTS as BASE_ROOTS } from "./helpers/maximal-loaded.mjs";
 
@@ -37,6 +38,26 @@ const OVERLAY_EXT = "/opt/pi-global/extensions";
 const slot = Object.fromEntries(LOADED_ROW.map((name, index) => [name, index]));
 const at = (over = {}) => buildLoaded({ at: "loader", pi: "1.5.0", roots: ROOTS, ...over });
 const session = (over = {}) => at({ at: "session", tools: [], active: [], mcp: [], ...over });
+
+test("what a host brought is a staged package's or the overlay's extensions, by the path it loaded from, and not a repository's or the job's own", () => {
+	const of = (path, ...names) => ({ path, tools: new Map(names.map((name) => [name, { definition: { name } }])) });
+	const brought = toolsBroughtByHost([
+		of(`${LINT}/ext.js`, "lint_run"),
+		of("/opt/pi-global/extensions/guard.ts", "guard_check"),
+		of("/opt/pi-global/extensions/folder/index.js", "folder_tool"),
+		of("/workspace/.pi/extensions/repo.js", "repo_tool", "lint_run"),
+		of("/job/pi/extensions/copied.js", "copied_tool"),
+		of("/opt/pi-global/skills/odd.js", "beside_the_extensions"),
+		of("/opt/pi-global/extensions/../../../workspace/climbed.js", "climbed_tool"),
+		of("<inline:job>", "report_progress"),
+		of("/home/pi/.pi/agent/extensions/written.js", "written_tool"),
+		of("builtin:mcp", "mcp_tool"),
+		{ path: `${LINT}/no-tools.js` },
+	], ROOTS);
+	assert.deepEqual([...brought].sort(), ["folder_tool", "guard_check", "lint_run"], "a name a repository also registers is still the package's");
+	assert.deepEqual([...toolsBroughtByHost(undefined, ROOTS)], []);
+	assert.deepEqual([...toolsBroughtByHost([of("/workspace/.pi/extensions/repo.js", "lint_run"), of(`${LINT}/ext.js`, "lint_run")], ROOTS)], ["lint_run"], "whichever extension loaded first, which is what reading pi's own list would rest on");
+});
 
 test("tierOf names each root's tier, most specific first, by whole path segments", () => {
 	assert.equal(tierOf(`${LINT}/skills/x/SKILL.md`, ROOTS), "package", "a package sits under the overlay, and is the package's");

@@ -168,6 +168,23 @@ export function createLoadTee(log, { overlayExtensions } = {}) {
 	};
 }
 
+/**
+ * The names of the tools a staged package or an overlay extension registered, which is what `run.excludeExtensionTools` names: a tool only a repository
+ * registers is no answer to it, or a trigger serving two repositories would stop one of them over a name that repository can neither fix nor exclude.
+ * Off each extension's own `tools`, and not pi's `getAllRegisteredTools()`, which keeps the first of a name, so its answer for a name two extensions hold would
+ * rest on pi's load order, host paths first at the pin and held by nothing here. Read by the path pi loaded it from, as `extensionTools` below reads it, and of
+ * the overlay only its `extensions/`.
+ */
+export function toolsBroughtByHost(extensions, roots) {
+	const names = new Set();
+	for (const extension of extensions ?? []) {
+		const tier = tierOf(extension?.path, roots);
+		if (tier !== "package" && !(tier === "overlay" && firstSegmentUnder(extension.path, overlayExtensionsOf(roots)) !== null)) continue;
+		for (const name of extension.tools?.keys?.() ?? []) names.add(name);
+	}
+	return names;
+}
+
 const emptyRow = () => LOADED_ROW.map(() => 0);
 
 /**
@@ -246,7 +263,7 @@ export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skill
 		const own = new Set(ownNames);
 		// By name AND by source, as `own` is: another extension's tool of a job tool's name is not the job's.
 		const job = new Set(toolRows.filter((tool) => tool.path.startsWith(INLINE_PATH_PREFIX) && LOADED_JOB_TOOLS.includes(tool.name)).map((tool) => tool.name));
-		// `unmatched`: which of PI_EXCLUDE_EXTENSION_TOOLS' names matched nothing, by position, as rows are, so no name goes on the line.
+		// `unmatched`: which of PI_EXCLUDE_EXTENSION_TOOLS' names no staged package or overlay extension registered, by position, as rows are, so no name goes on the line.
 		out.tools = { active: clamp(active.length, LOADED_MAX_TOOL_COUNT), own: active.filter((name) => own.has(name) && builtin.has(name)), job: active.filter((name) => job.has(name)), ...(unmatched.length > 0 ? { unmatched } : {}) };
 		out.extTools = extensionTools({ tools: toolRows, roots, overlayNames: keptLoaded, cut });
 	}
@@ -304,7 +321,7 @@ function extensionTools({ tools, roots, overlayNames, cut }) {
  * The field's three forms, largest first, for the writer to pick from by measuring the line (exit-line.mjs). Tool names
  * go first: compact keeps what a person needs to know whether the run was fine and loses what names things.
  *   - full: everything;
- *   - compact: no package rows, no overlay names, no own or job tools, no extension tools (which exclusions matched nothing stays: positions, and few);
+ *   - compact: no package rows, no overlay names, no own or job tools, no extension tools (which exclusions no package or overlay extension brought stays: positions, and few);
  *   - minimal: v, at, pi, flow, the failed and dropped totals, and how many servers failed or timed out.
  * Each says which it is in `cut.form`.
  */

@@ -362,7 +362,7 @@ export function makeRunContainer({
 		// withheld never reads the stage, and a folder that could not be listed holds nothing this can vouch for, so neither says a name is absent.
 		const excludedNotHere = job.packages !== false && overlayListed ? extensionsNotHere(excludedNames, { packages: everyStaged.map(stagedRowOf), overlay: overlayExtensions }) : [];
 		const excludedTools = Array.isArray(job.excludeExtensionTools) ? job.excludeExtensionTools : [];
-		// Whether a name in run.excludeExtensionTools that matched nothing stops this job (`exclude-tool-not-loaded`): only one that should have
+		// Whether a name in run.excludeExtensionTools that no staged package or overlay extension brought stops this job (`exclude-tool-not-loaded`): only one that should have
 		// held every extension it could. A trigger withholding packages or leaving one out, a host with the overlay shut, a chained child (its
 		// parent's list, for a job that may load less) and a restricted run may each lack the tool with the name right, so there it is only said.
 		const excludeToolsStrict = excludedTools.length > 0 && job.packages !== false && excludedNames.length === 0 && allowGlobalExtensions !== false && job.parentJobId === undefined && !(job.watch || job.answerDraft || job.questionGrouping);

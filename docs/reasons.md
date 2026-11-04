@@ -1052,11 +1052,11 @@ What to do: remove that extension, or the trigger's `run.progress`. See [trigger
 
 ### exclude-tool-not-loaded
 
-Stopped: run.excludeExtensionTools names a tool no extension in this job registered when it loaded, so the run ended before the agent started. The name may be misspelled, the package that brings the tool may be missing on this host, or the extension may register it later. The operator needs to fix the name, stage the package, or exclude that extension. Not retried.
+Stopped: run.excludeExtensionTools names a tool no staged package or overlay extension in this job registered when it loaded, so the run ended before the agent started. That key names what those bring: a repository's own tool of that name does not count, though the key still removes it from the session. The name may be misspelled, the package that brings the tool may be missing on this host, or the extension may register it later. The operator needs to fix the name, stage the package, exclude that extension, or take off a tool only a repository registers. Not retried.
 
 The run's record names the tool, and the job log's `exclude_tools_unmatched` line says it too. An extension that called a model while it loaded is metered, so this stop may have cost that much: [what a stop costs](exclude-tools.md#an-extensions-tools-runexcludeextensiontools).
 
-What to do: fix the name in `run.excludeExtensionTools`, stage the package that brings the tool on this host, or if the extension registers the tool after it loads, exclude that extension in `run.excludeExtensions`. See [exclude-tools.md](exclude-tools.md).
+What to do: fix the name in `run.excludeExtensionTools`, stage the package that brings the tool on this host, or if the extension registers the tool after it loads, exclude that extension in `run.excludeExtensions`. If only a repository registers the tool, take the name off the key, since a job on every repository stops the same way. See [exclude-tools.md](exclude-tools.md).
 
 ### steer-inbox-missing
 

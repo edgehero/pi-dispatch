@@ -291,7 +291,7 @@ function readMcp(raw, servers) {
 }
 
 /**
- * Which of the job's `run.excludeExtensionTools` matched nothing: positions on the line, as a package's row is, and the worker's own list
+ * Which of the job's `run.excludeExtensionTools` no staged package or overlay extension registered: positions on the line, as a package's row is, and the worker's own list
  * names them, so a forged line can only pick from what the operator wrote. Conditional, so no other job's record changes by a byte.
  */
 function readUnmatched(raw, excludeExtensionTools) {
@@ -402,7 +402,7 @@ function readLine(raw, known) {
  *   known.servers            the trigger's server names, in PI_MCP_SERVERS order
  *   known.ownTools           pi's own tool names (`EXCLUDABLE_TOOL_NAMES`)
  *   known.leftOut            `leftOutOf`, which the worker alone can say
- *   known.excludeExtensionTools  the list in PI_EXCLUDE_EXTENSION_TOOLS, in that order, which names what the line says matched nothing
+ *   known.excludeExtensionTools  the list in PI_EXCLUDE_EXTENSION_TOOLS, in that order, which names what the line says no package or overlay extension registered
  *   known.redact             this job's own redactor (`makeRedactor`): a tool's name kept comes through it unchanged
  *   known.onViolation        hears the fixed word of a check that failed, for the worker's log. Never line text
  *   known.onWithheld         hears how many tool names `redact` kept off the record, for the worker's log. Never a name

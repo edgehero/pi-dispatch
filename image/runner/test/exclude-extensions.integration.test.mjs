@@ -9,7 +9,7 @@ import { chatServer, jobTree, put, runRealJob } from "./helpers/real-job.mjs";
 
 /**
  * Issue #800, end to end: the real run-job.mjs and the real pi, with its mounts moved under a temp directory. `PI_EXCLUDE_EXTENSIONS`
- * has to act before a module is imported, which only a real load can show, and what a tool name matched is read off pi's own runner.
+ * has to act before a module is imported, which only a real load can show, and what a tool name matched is read off the extensions pi loaded.
  *
  * Gated like loader.test.mjs: a skip is NOT a pass, and CI sets PI_DISPATCH_REQUIRE_LOADER_TESTS=1.
  */
@@ -255,14 +255,59 @@ test("a tool an extension registers after it loads refuses a strict job, whose w
 	}
 });
 
-test("a repository's extension is what a job holds too: a tool it registers counts as loaded, and the exclusion takes it", { skip }, async () => {
+test("a name only a repository registers answers alike on every repository: a strict job stops on the one that holds it and the one that does not, and it is out of the session either way", { skip }, async () => {
 	const server = await chatServer();
 	try {
-		const root = jobTree({ base: server.base });
-		put(root, "/workspace/.pi/extensions/repo-tool.js", marked("repo", ["repo_tool"]));
-		const { exit, lines, stderr } = await run(root, { PI_EXCLUDE_EXTENSION_TOOLS: "repo_tool", PI_EXCLUDE_TOOLS_STRICT: STRICT });
-		assert.equal(exit?.code, 0, stderr);
-		assert.ok(!lines.find((line) => line.event === "tools_excluded").active.includes("repo_tool"));
+		const withIt = jobTree({ base: server.base });
+		put(withIt, "/workspace/.pi/extensions/repo-tool.js", marked("repo", ["repo_tool"]));
+		const without = jobTree({ base: server.base });
+		const strict = { PI_EXCLUDE_EXTENSION_TOOLS: "repo_tool", PI_EXCLUDE_TOOLS_STRICT: STRICT };
+		const [a, b] = [await run(withIt, strict), await run(without, strict)];
+		for (const [label, result] of [["repo A", a], ["repo B", b]]) {
+			assert.equal(result.code, 2, `${label}: ${result.stderr}`);
+			assert.equal(result.exit.reason, "exclude-tool-not-loaded", label);
+			assert.deepEqual(result.exit.loaded.tools.unmatched, [0], label);
+			assert.equal(result.lines.find((line) => line.event === "exclude_tools_unmatched").strict, true, label);
+		}
+		assert.equal(server.calls(), 0, "neither sent a prompt");
+		assert.ok(!a.lines.find((line) => line.event === "tools_excluded").active.includes("repo_tool"), "the key takes a repository's tool of that name out of the session, which is what the job that does not stop relies on");
+		// Not strict, the same job runs without the tool, and says the name is none a package or the overlay brought.
+		const open = jobTree({ base: server.base });
+		put(open, "/workspace/.pi/extensions/repo-tool.js", marked("repo", ["repo_tool", "repo_other"]));
+		const { exit, lines, stderr, code } = await run(open, { PI_EXCLUDE_EXTENSION_TOOLS: "repo_tool" });
+		assert.equal(code, 0, stderr);
+		const read = lines.find((line) => line.event === "tools_excluded");
+		assert.ok(!read.active.includes("repo_tool") && read.active.includes("repo_other"), JSON.stringify(read));
+		assert.deepEqual(exit.loaded.tools.unmatched, [0]);
+		assert.equal(lines.find((line) => line.event === "exclude_tools_unmatched").strict, false);
+	} finally {
+		await server.close();
+	}
+});
+
+test("a name a staged package or an overlay extension brings answers a strict job, in a folder or a file, and beside a repository's tool of the same name", { skip }, async () => {
+	const server = await chatServer();
+	const stage = (root) => {
+		put(root, "/opt/pi-global/packages/lint/package.json", JSON.stringify({ name: "lint", version: "1.0.0", pi: { extensions: ["ext.js"] } }));
+		put(root, "/opt/pi-global/packages/lint/ext.js", marked("lint", ["lint_run"]));
+	};
+	const asked = { PI_PACKAGES: "/opt/pi-global/packages/lint", PI_EXCLUDE_EXTENSION_TOOLS: "lint_run,guard_check,folder_tool", PI_EXCLUDE_TOOLS_STRICT: STRICT };
+	try {
+		const clean = jobTree({ base: server.base });
+		overlay(clean);
+		stage(clean);
+		const fine = await run(clean, asked);
+		assert.equal(fine.code, 0, fine.stderr);
+		assert.equal(fine.exit.loaded.tools.unmatched, undefined, "each is the host's, so nothing on the line");
+		// A repository's tool of a package's name is a conflict pi reports, so it is a failed load, which a strict job does not stop on, and it must not read as unmatched either way round.
+		const shared = jobTree({ base: server.base });
+		overlay(shared);
+		stage(shared);
+		put(shared, "/workspace/.pi/extensions/repo-lint.js", marked("repo", ["lint_run", "guard_check"]));
+		const both = await run(shared, asked);
+		assert.equal(both.code, 0, both.stderr);
+		assert.equal(both.exit.loaded.tools.unmatched, undefined, "the package and the overlay still brought them, whichever extension pi's own list would keep");
+		assert.ok(!both.lines.find((line) => line.event === "tools_excluded").active.includes("lint_run"));
 	} finally {
 		await server.close();
 	}
