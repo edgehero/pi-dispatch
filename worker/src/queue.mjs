@@ -257,7 +257,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, maxCostUsd, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -290,6 +290,9 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		...(fallbackModels !== undefined && { fallbackModels }),
 		// Issue #501: the per-job dollar cap, passed through for the outbox child that inherits its parent's.
 		...(maxCostUsd !== undefined && { maxCostUsd }),
+		// Issue #800: the outbox child's `"packages": false`, off its parent's data. Not in this function's list before, so the collector could not have
+		// passed it. A key every worker already reads, so it asks for no `dataVersion`. Conditional like `image`, so no other job's data moves.
+		...(packages !== undefined && { packages }),
 		...(image !== undefined && { image }),
 		// #227. WHERE this job's container is built. Conditional like `image`, so a trigger that named no
 		// venue produces byte-identical job data -- and at JOB level, never inside `trigger`, for the reason

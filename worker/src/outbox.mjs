@@ -220,6 +220,11 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// parent (`PI_EXCLUDE_TOOLS_STRICT`, run-container.mjs).
 					excludeExtensions: job.data?.excludeExtensions,
 					excludeExtensionTools: job.data?.excludeExtensionTools,
+					// `"packages": false`, by the same inverted direction, and the line those two left a hole beside: with only them, a trigger
+					// that withheld every staged package chained a child holding all of them, while one that named a package kept it out. `image`'s
+					// toolchain argument does not stand against it: a child's flow is its repository's, which is what the gate above reads, so a child
+					// without the packages is a child with what its parent had. Off `job.data`, so the request file cannot set it.
+					packages: job.data?.packages,
 					// `secrets`/`secretsProfile` are deliberately ABSENT, and the two lines above are exactly why
 					// this comment exists: their reasoning reads as though it should apply here too, and it must
 					// not. An image and a skills directory are toolchain; a resolved credential is a capability.

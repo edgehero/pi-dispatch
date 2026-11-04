@@ -8,6 +8,7 @@ import * as runnerLoaded from "../../image/runner/src/loaded.mjs";
 import { createExitWriter } from "../../image/runner/src/exit-line.mjs";
 import { maximalLoaded } from "../../image/runner/test/helpers/maximal-loaded.mjs";
 import * as record from "../src/loaded-record.mjs";
+import { makeCollectChain } from "../src/outbox.mjs";
 import { makeRedactor, secretValuesOf } from "../src/redact-secrets.mjs";
 import { buildRecord, makeLogSink } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -1035,6 +1036,29 @@ test('run-container: `"packages": false` is said as such, with no rows and no re
 	assert.equal(result.loaded.runner, "reported");
 	assert.equal(result.loaded.leftOut.packages, true);
 	assert.deepEqual(result.loaded.sources.filter((row) => row.tier === "package"), []);
+});
+
+test("a chained child of a job that withheld its packages gets none: the real collector, the real builder, the real command line", { skip }, async () => {
+	const childOf = async (parentData) => {
+		const jobDir = tempDir("loaded-chain-");
+		mkdirSync(join(jobDir, "outbox"), { recursive: true });
+		writeFileSync(join(jobDir, "outbox", "request-1.json"), JSON.stringify({ flow: "next", task: "go on", packages: true }));
+		const adds = [];
+		const queue = { add: async (_name, data, opts) => (adds.push(data), { id: opts.jobId }) };
+		const collect = makeCollectChain({ queue, readFlowGate: async () => ({ gate: "allow" }), config: { chainMaxPerJob: 2, chainDepthMax: 1 } });
+		const parent = { kind: "local", folder: "/host/w", flow: "first", task: "start", provider: "anthropic", model: "m", ...parentData };
+		assert.deepEqual(await collect({ job: { id: "parent-1", data: parent }, prepared: { jobDir, workspace: "/host/w", sha: "a".repeat(40) } }), { enqueued: 1, refused: 0 });
+		return adds[0];
+	};
+	const packagePaths = resolver({ [LINT]: KNOWN.packages[0] });
+	const onCommandLine = async (job) => (await runWith({ known: { packagePaths }, job: { ...job, maxTurns: 5 }, spawnOptions: {} })).recorder.args.filter((a) => String(a).startsWith("PI_PACKAGES"));
+	const withheld = await childOf({ packages: false });
+	assert.equal(withheld.packages, false);
+	assert.equal(Object.hasOwn(withheld, "dataVersion"), false, "a key every worker reads asks for no version");
+	assert.deepEqual(await onCommandLine(withheld), [], "and it gets no staged package, whatever the request file said");
+	const plain = await childOf({});
+	assert.equal(Object.hasOwn(plain, "packages"), false, "a parent that said nothing chains a child that says nothing");
+	assert.deepEqual(await onCommandLine(plain), [`PI_PACKAGES=${LINT}`], "the premise: this child does get them");
 });
 
 test("run-container: left out reads the host's switch and the job's own fields, and a restricted job's forced overlay stays `restricted`", { skip }, async () => {

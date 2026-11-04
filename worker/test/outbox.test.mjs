@@ -514,6 +514,19 @@ test("a chained child inherits both load exclusions whole, off the parent's job 
 	assert.equal(args.parentJobId, parent.id, "which is what keeps the child from being strict");
 });
 
+test("a chained child inherits the parent's packages flag off its job data, and the request file cannot set it (#800)", async () => {
+	const child = async (parentData) => {
+		const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", packages: true }) } } });
+		const cap = makeCapture();
+		const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+		await collect({ job: localJob(parentData), prepared: PREPARED });
+		return cap.enqueued[0].args;
+	};
+	assert.equal((await child({ packages: false })).packages, false, "a request of true does not widen it");
+	assert.equal((await child({ packages: true })).packages, true);
+	assert.equal((await child({})).packages, undefined, "the request file sets nothing");
+});
+
 test("a parent with no excludeTools chains a child whose data carries none either (#291)", async () => {
 	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it" }) } } });
 	const cap = makeCapture();
