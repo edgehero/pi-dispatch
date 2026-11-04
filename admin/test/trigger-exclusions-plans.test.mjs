@@ -203,7 +203,7 @@ test("a package missing on one host: nothing to refuse, and nothing loads for it
   assert.deepEqual(extensionsNotHere(["pi-lint"], { packages: [], overlay: [] }), ["pi-lint"], "b: the worker's record says so, and the job runs");
   // The tool's half: its sentence is of whichever host a job lands on, and it names no host, since the page cannot see which brings it.
   const tool = await world({ loads, live: ["a", "b"], records: [S.everything()] }).preview({ excludeExtensionTools: ["lint_file"] });
-  assert.deepEqual(besideImage(tool.plan.warnings), ["A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no extension registered lint_file when it loaded."]);
+  assert.deepEqual(besideImage(tool.plan.warnings), ["A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no staged package or overlay extension registered lint_file when it loaded."]);
 });
 
 test("an old record is no proof a host holds a name, as it is no proof it lacks one", async () => {
@@ -280,8 +280,8 @@ test("a new flow only an excluded package holds reads as a host without it, whic
 
 test("a tool chip off: the sentence says what a job that held nothing back does, and only such a job, and how that reads on the file's own shapes", async () => {
   const records = [S.everything()];
-  const strict = "A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no extension registered lint_file when it loaded.";
-  const reported = "A name in run.excludeExtensionTools that matches nothing stops no job of this trigger while it holds extensions back: the job runs, and its log and record name it, so a misspelled name removes nothing.";
+  const strict = "A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no staged package or overlay extension registered lint_file when it loaded.";
+  const reported = "A name in run.excludeExtensionTools that no staged package or overlay extension brought stops no job of this trigger while it holds extensions back: the job runs, and its log and record name it, so a misspelled name removes nothing.";
   const asked = async (entry, change) => besideImage((await world({ entry, records }).preview(change)).plan.warnings);
   assert.deepEqual(await asked(comment(), { excludeExtensionTools: ["lint_file"] }), [strict]);
   assert.deepEqual(await asked(comment({ packages: false }), { excludeExtensionTools: ["lint_file"] }), [], "a name a run shows, and a trigger that cannot stop over it");
@@ -292,7 +292,7 @@ test("a tool chip off: the sentence says what a job that held nothing back does,
   assert.deepEqual(await asked(comment({ packages: false }), { excludeExtensionTools: ["lint_typo"] }), [cannot, reported]);
   assert.deepEqual(await asked(comment({ excludeExtensions: ["other"] }), { excludeExtensionTools: ["lint_typo"] }), [cannot, reported]);
   // The change is what moves the stop: on, for every name it holds, and off.
-  assert.deepEqual(await asked(comment({ packages: false, excludeExtensionTools: ["lint_file", "lint_fix"] }), { packages: null }), ["A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no extension registered one of lint_file and lint_fix when it loaded."]);
+  assert.deepEqual(await asked(comment({ packages: false, excludeExtensionTools: ["lint_file", "lint_fix"] }), { packages: null }), ["A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no staged package or overlay extension registered one of lint_file and lint_fix when it loaded."]);
   assert.deepEqual(await asked(comment({ excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_file"] }), { excludeExtensions: null }), [strict]);
   assert.deepEqual(await asked(comment({ excludeExtensionTools: ["lint_file"] }), { packages: false }), [reported]);
   assert.deepEqual((await asked(comment({ excludeExtensionTools: ["lint_file"] }), { excludeExtensions: ["pi-lint"] })).filter((line) => line.includes("run.excludeExtensionTools")), [reported]);
@@ -301,7 +301,7 @@ test("a tool chip off: the sentence says what a job that held nothing back does,
   assert.deepEqual(await asked(comment({ excludeExtensionTools: ["lint_file"] }), { excludeExtensionTools: null }), [], "a name off the list stops nothing");
   assert.deepEqual(await asked(comment({ excludeExtensionTools: ["lint_file", "lint_fix"] }), { excludeExtensionTools: ["lint_file"] }), []);
   // Two names, in the sentence that is true of either.
-  assert.deepEqual(await asked(comment(), { excludeExtensionTools: ["lint_file", "lint_fix"] }), ["A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no extension registered one of lint_file and lint_fix when it loaded."]);
+  assert.deepEqual(await asked(comment(), { excludeExtensionTools: ["lint_file", "lint_fix"] }), ["A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no staged package or overlay extension registered one of lint_file and lint_fix when it loaded."]);
 });
 
 test("a run's record is what confirms a name, and a read that cannot say confirms nothing and costs no preview", async () => {

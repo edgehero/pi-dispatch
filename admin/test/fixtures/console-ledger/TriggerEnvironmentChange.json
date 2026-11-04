@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironmentChange",
   "pr": 800,
-  "words": "cf402b0f6539b738f55e1307a4a7553dae3e9e04b80edb26555fcfc9c3c527ce",
+  "words": "692d2f5d4ac46f245cfae64a70fb18d151b9d2e99c21225b7a6bfb7ac5930fc4",
   "elements": [
     {
       "el": "p-trigger-gets-preview",
@@ -203,7 +203,7 @@
       ]
     },
     {
-      "el": "A tool chip off: what a job does if the name matches nothing",
+      "el": "A tool chip off: what a job does if no staged package or overlay extension brought the name",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
@@ -213,7 +213,7 @@
       ],
       "shows": [
         "Extension tools: lint_file off.",
-        "stops before its prompt as exclude-tool-not-loaded if no extension registered lint_file when it loaded."
+        "stops before its prompt as exclude-tool-not-loaded if no staged package or overlay extension registered lint_file when it loaded."
       ]
     },
     {

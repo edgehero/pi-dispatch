@@ -338,10 +338,10 @@ test("a run through the real pipeline that left a tool out reads as such, and th
   const out = triggerGetsOf({ trigger: { ...COMMENT, excludeExtensionTools: ["lint_run"] }, records: [record], liveHosts: [] });
   assert.deepEqual(out.tools.otherTools.map((chip) => chip.name), ["lint_run"]);
   assert.ok(wordsText(out.last.Tools).includes("lint_run removed"), wordsText(out.last.Tools));
-  // A name that matched nothing, under the row: the run's words, and the chip stays, since the file still holds it.
+  // A name no package or overlay extension brought, under the row: the run's words, and the chip stays, since the file still holds it.
   const typo = await recordThroughPipeline({ exit: { code: 0, reason: "stop" }, jobFields: { packages: false, excludeExtensionTools: ["deploy_previw"] }, unmatched: [0], packages: [] });
   const quoted = triggerGetsOf({ trigger: { ...COMMENT, excludeExtensionTools: ["deploy_previw"] }, records: [typo], liveHosts: [] });
-  assert.ok(wordsText(quoted.last.Tools).endsWith("read; none removed; deploy_previw matched nothing."), wordsText(quoted.last.Tools));
+  assert.ok(wordsText(quoted.last.Tools).endsWith("read; deploy_previw: no package or overlay extension brought it."), wordsText(quoted.last.Tools));
   assert.deepEqual(quoted.tools.otherTools.map((chip) => [chip.name, chip.on]), [["deploy_previw", false]]);
 });
 

@@ -397,9 +397,10 @@ function cutWords(loaded) {
 }
 
 /**
- * The names in `run.excludeExtensionTools` this run's record says took a tool out. `leftOut` holds what the job asked, so a name that matched nothing
- * is on it, and a misspelled one keeps the real tool active: `tools.unmatched` says which. The runner asks only at `ready`, so a record from before that
- * cannot tell a tool removed from a name that matched nothing, and says neither. REJECTED: reading the asked list as what came off, which said "deploy_previw removed", in green.
+ * The names in `run.excludeExtensionTools` this run's record says took a tool out. `leftOut` holds what the job asked, so a name no staged package or overlay
+ * extension brought is on it, and a misspelled one keeps the real tool active: `tools.unmatched` says which. Such a name is not "matched nothing" either: a repository's
+ * tool of that name did leave the session, and the record cannot say so, so it says only what it knows. The runner asks only at `ready`, so a record from before that
+ * cannot tell a tool removed from such a name, and says neither. REJECTED: reading the asked list as what came off, which said "deploy_previw removed", in green.
  */
 const extensionToolsRemoved = (loaded) => (loaded.at === "ready" ? (loaded.leftOut?.extensionTools ?? []).filter((name) => !(loaded.tools?.unmatched ?? []).includes(name)) : []);
 
@@ -414,10 +415,10 @@ function leftOutLines(loaded) {
   const names = [...left.tools.map(toolWord), ...extensionToolsRemoved(loaded), ...(left.extensions ?? [])];
   const asked = [...(names.length > 0 ? [listed(names)] : []), ...(left.packages ? ["the staged packages"] : [])];
   if (asked.length > 0) lines.push({ bold: "Left out, as it asks:", rest: `${commaAnd(asked)}.` });
-  // Neither is a thing that went wrong in the run: a name on no host's list loads nothing, and a tool that matched nothing is not there to remove. Each is the
+  // Neither is a thing that went wrong in the run: a name on no host's list loads nothing, and a tool no package or overlay extension brought is theirs to bring. Each is the
   // operator's to read, since a misspelled name keeps nothing out where the real one exists.
   if (left.extensionsNotHere?.length > 0) lines.push({ bold: "Named to leave out, and not on this host:", rest: `${listed(left.extensionsNotHere)}.` });
-  if (loaded.tools?.unmatched?.length > 0) lines.push({ bold: "Named to remove, and no extension had registered it:", rest: `${listed(loaded.tools.unmatched)}.` });
+  if (loaded.tools?.unmatched?.length > 0) lines.push({ bold: "Named to remove, and no staged package or overlay extension brought it:", rest: `${listed(loaded.tools.unmatched)}.` });
   // One line for the one thing: a restricted run's switch is closed too, and its own reason is the more exact.
   if (left.restricted) lines.push({ bold: "Left out, as this kind of run asks:", rest: "the overlay’s extensions." });
   else if (left.overlayExtensions) lines.push({ bold: "Left out for this job:", rest: "the overlay’s extensions." });
@@ -709,9 +710,10 @@ function toolsRow(loaded, ran) {
     Array.isArray(loaded.tools.job) && loaded.tools.job.length > 0 ? `${listed(loaded.tools.job)}, the job’s own` : null,
   ].filter(Boolean);
   const removing = [...(loaded.leftOut?.tools ?? []).map(toolWord), ...extensionToolsRemoved(loaded)];
-  // "None removed" is a claim too, and a record from before `ready` cannot make it of a name it holds.
-  const cannotTell = loaded.at !== "ready" && (loaded.leftOut?.extensionTools?.length ?? 0) > 0;
-  const more = [said.length > 0 ? commaAnd(said) : null, removing.length > 0 ? `${listed(removing)} removed` : cannotTell ? null : "none removed", loaded.tools.unmatched?.length > 0 ? `${listed(loaded.tools.unmatched)} matched nothing` : null].filter(Boolean);
+  const unbrought = loaded.tools.unmatched ?? [];
+  // "None removed" is a claim too. A record from before `ready` cannot make it of a name it holds, and a name no package or overlay extension brought may have taken a repository's tool of that name out, which no record holds.
+  const cannotTell = unbrought.length > 0 || (loaded.at !== "ready" && (loaded.leftOut?.extensionTools?.length ?? 0) > 0);
+  const more = [said.length > 0 ? commaAnd(said) : null, removing.length > 0 ? `${listed(removing)} removed` : cannotTell ? null : "none removed", unbrought.length > 0 ? `${listed(unbrought)}: no package or overlay extension brought ${unbrought.length === 1 ? "it" : "them"}` : null].filter(Boolean);
   return row(`${loaded.tools.active} active`, more.join("; "));
 }
 
@@ -791,7 +793,7 @@ export function loadedFold(record) {
   for (const name of extensionToolsRemoved(loaded)) add("Left out", code(name), "", `${facts.subject}’s run.excludeExtensionTools`);
   for (const name of loaded.leftOut?.extensions ?? []) add("Left out", code(name), "", `${facts.subject}’s run.excludeExtensions`);
   for (const name of loaded.leftOut?.extensionsNotHere ?? []) add("Not on this host", code(name), "", `${facts.subject}’s run.excludeExtensions names it`);
-  for (const name of loaded.tools?.unmatched ?? []) add("Matched nothing", code(name), "", `${facts.subject}’s run.excludeExtensionTools names it`);
+  for (const name of loaded.tools?.unmatched ?? []) add("Not brought", code(name), "", `${facts.subject}’s run.excludeExtensionTools names it, and no staged package or overlay extension brought it`);
   if (loaded.leftOut?.packages) add("Left out", "the staged packages", "", `${facts.subject}’s run.packages false`);
   if (loaded.leftOut?.restricted) add("Left out", "the overlay’s extensions", "", "this kind of run");
   else if (loaded.leftOut?.overlayExtensions) add("Left out", "the overlay’s extensions", "", "this job’s overlay switch: off on its host (PI_GLOBAL_ALLOW_EXTENSIONS=0), or for a model canary’s replay");

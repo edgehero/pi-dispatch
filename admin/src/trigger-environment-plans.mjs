@@ -307,12 +307,12 @@ function namesOnNoHost(names, rows) {
 const onNoHostRefusal = (names) => `No live host holds ${listed(names)}, as each one's last doctor run published it, so leaving ${names.length === 1 ? "it" : "them"} out would keep nothing out. Check the name, or run pi-dispatch doctor on the host that has it.`;
 
 /**
- * Whether a job of this run needs its image to declare `loadExclusions`: the worker's gate of that token, restated because it does not export it, and held to it by a test. A host publishes no image's
+ * Whether a job of this run needs its image to declare `loadExclusions`: the half of the worker's gate that a trigger's file decides, restated because the gate is not exported, and held to it by a test. The other half is a `run.excludeTools` beside a role map, set at the job's pickup, which this sentence does not speak of. A host publishes no image's
  * capabilities to this page, and `run.image` can name any image, so a sentence says what such an image does and where to look. REJECTED: reading the hosts' images to predict one, from a label nothing here reads.
  */
 const needsLoadExclusions = (run) => run?.excludeExtensions !== undefined || run?.excludeExtensionTools !== undefined;
 
-/** Whether the file leaves a job able to stop over a name that matched nothing: the file's half of `excludeToolsStrict` (run-container.mjs). The host's and the job's halves are in the sentence. */
+/** Whether the file leaves a job able to stop over a name no staged package or overlay extension brought: the file's half of `excludeToolsStrict` (run-container.mjs). The host's and the job's halves are in the sentence. */
 const holdsNothingBack = (run) => run?.packages !== false && !(Array.isArray(run?.excludeExtensions) && run.excludeExtensions.length > 0);
 
 /** What `run.excludeExtensionTools` does to a job, as far as the file decides it, each line true of every host a job can land on. */
@@ -326,9 +326,9 @@ function extensionToolLines({ was, now, seen }) {
   if (holdsNothingBack(now)) {
     // Every name when the change itself is what turns the stop on: a name that has only ever been reported may be a typo.
     const asked = holdsNothingBack(was) ? added : after;
-    if (asked.length > 0) toolWords.push(`A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no extension registered ${asked.length === 1 ? asked[0] : `one of ${listed(asked)}`} when it loaded.`);
+    if (asked.length > 0) toolWords.push(`A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no staged package or overlay extension registered ${asked.length === 1 ? asked[0] : `one of ${listed(asked)}`} when it loaded.`);
   } else if (after.length > 0 && (holdsNothingBack(was) || unconfirmed.length > 0)) {
-    toolWords.push("A name in run.excludeExtensionTools that matches nothing stops no job of this trigger while it holds extensions back: the job runs, and its log and record name it, so a misspelled name removes nothing.");
+    toolWords.push("A name in run.excludeExtensionTools that no staged package or overlay extension brought stops no job of this trigger while it holds extensions back: the job runs, and its log and record name it, so a misspelled name removes nothing.");
   }
   return toolWords;
 }

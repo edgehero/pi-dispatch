@@ -11,7 +11,7 @@ const STOP = { code: 2, reason: "exclude-tool-not-loaded", message: "run.exclude
 const FINE = { code: 0, reason: "stop" };
 const rowValues = (record) => loadedRows(record).map((row) => JSON.stringify(row));
 
-test("a stop for a name that matched nothing keeps its reason, and reads as what it was", async () => {
+test("a stop for a name no package or overlay extension brought keeps its reason, and reads as what it was", async () => {
 	const record = await recordThroughPipeline({ exit: STOP, jobFields: { excludeExtensionTools: ["lint_run", "typo_tool"] }, unmatched: [1] });
 	assert.equal(record.reason, "exclude-tool-not-loaded", "not folded into runner-policy");
 	assert.equal(record.outcome, "policy");
@@ -36,31 +36,33 @@ test("left out by name is said as chosen, each kind by its own field, and nothin
 });
 
 const toolsLine = (record) => loadedRows(record).find((row) => row.label === "Tools").more;
-const NOTHING_MATCHED = { bold: "Named to remove, and no extension had registered it:", rest: "typo_tool." };
+const NOTHING_MATCHED = { bold: "Named to remove, and no staged package or overlay extension brought it:", rest: "typo_tool." };
+const NOT_BROUGHT = "typo_tool: no package or overlay extension brought it";
 
-test("a name that matched nothing took nothing out: never left out, never removed, and said as what it was, on each shape that reaches it", async () => {
+test("a name no package or overlay extension brought is said as that: never left out, never removed, never matching nothing, since a repository's tool of that name may have gone, on each shape that reaches it", async () => {
 	const unmatched = (jobFields, over = {}) => recordThroughPipeline({ exit: FINE, jobFields, unmatched: [0], packages: [], ...over });
 	// Beside something it did leave out.
 	const beside = await unmatched({ packages: false, excludeExtensionTools: ["typo_tool"] });
 	assert.equal(loadedVerdict(beside).state, "left-out");
 	assert.deepEqual([loadedVerdict(beside).bold, loadedVerdict(beside).rest], ["Left out, as it asks:", "the staged packages."]);
 	assert.deepEqual(loadedVerdict(beside).then, [NOTHING_MATCHED]);
-	assert.equal(toolsLine(beside), "read; none removed; typo_tool matched nothing");
+	// "None removed" is no claim to make here: a repository's tool of that name may have left the session, and no record holds that.
+	assert.equal(toolsLine(beside), `read; ${NOT_BROUGHT}`);
 	// With nothing else: no "Left out" at all, and the real tool of that name stays active.
 	const alone = await unmatched({ excludeExtensionTools: ["typo_tool"] });
 	assert.deepEqual([loadedVerdict(alone).bold, loadedVerdict(alone).rest, loadedVerdict(alone).then], [NOTHING_MATCHED.bold, NOTHING_MATCHED.rest, []]);
 	assert.doesNotMatch(JSON.stringify(loadedVerdict(alone)), /Left out/);
 	// One matched and one did not: each by what it did, on the line and the verdict and the fold.
 	const both = await recordThroughPipeline({ exit: FINE, jobFields: { excludeExtensionTools: ["typo_tool", "lint_run"], excludeTools: ["bash"] }, unmatched: [0], packages: [] });
-	assert.equal(toolsLine(both), "read; bash and lint_run removed; typo_tool matched nothing");
+	assert.equal(toolsLine(both), `read; bash and lint_run removed; ${NOT_BROUGHT}`);
 	assert.equal(loadedVerdict(both).rest, "bash and lint_run.");
 	const fold = loadedFold(both).map((row) => [row.kind, JSON.stringify(row.name)]);
 	assert.ok(fold.some(([kind, name]) => kind === "Left out" && name.includes("lint_run")));
-	assert.ok(fold.some(([kind, name]) => kind === "Matched nothing" && name.includes("typo_tool")));
+	assert.ok(fold.some(([kind, name]) => kind === "Not brought" && name.includes("typo_tool")));
 	assert.ok(!fold.some(([kind, name]) => kind === "Left out" && name.includes("typo_tool")), "the fold says one thing of it");
 	// A stop for it reads the same on the row, under the verdict that says it stopped.
 	const stopped = await recordThroughPipeline({ exit: STOP, jobFields: { excludeExtensionTools: ["lint_run", "typo_tool"] }, unmatched: [1] });
-	assert.equal(toolsLine(stopped), "read; lint_run removed; typo_tool matched nothing");
+	assert.equal(toolsLine(stopped), `read; lint_run removed; ${NOT_BROUGHT}`);
 });
 
 test("a record from before the runner asked which names matched says neither, and no name it holds reads removed", async () => {
@@ -94,7 +96,7 @@ test("the fold names each, under the field that asked for it", async () => {
 	assert.ok(row("Left out", "pi-lint", "run.excludeExtensions"), rows.join("\n"));
 	assert.ok(row("Left out", "lint_run", "run.excludeExtensionTools"));
 	assert.ok(row("Not on this host", "typo", "run.excludeExtensions names it"));
-	assert.ok(row("Matched nothing", "typo_tool", "run.excludeExtensionTools names it"));
+	assert.ok(row("Not brought", "typo_tool", "run.excludeExtensionTools names it, and no staged package or overlay extension brought it"));
 	assert.ok(!rows.some((line) => line.includes("Left out") && line.includes("\"typo\"")), "a name this host holds neither way was not left out");
 });
 
