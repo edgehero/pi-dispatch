@@ -58,7 +58,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
+  const [updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, triggerEnvironmentPlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
     import("../updates-view.mjs"),
     import("@edgehero/pi-dispatch/updates"),
     import("@edgehero/pi-dispatch/console-tokens"),
@@ -93,11 +93,12 @@ export async function loadModules() {
     import("../host-loads-view.mjs"),
     import("../models-view.mjs"),
     import("../model-role-plans.mjs"),
+    import("../trigger-environment-plans.mjs"),
     import("../setup-actions.mjs"),
     import("../setup-host-client.mjs"),
     import("./actions.mjs"),
   ]);
-  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
+  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, triggerEnvironmentPlans, setupActions, setupHostClient, consoleActions };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -681,9 +682,17 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       now,
       log,
     });
+    // Here and nowhere a tool's context is built, so a person's page is the only way to it (DES-ADMIN-VIA-PI-EXTENSION).
+    const triggerEnvironment = m.triggerEnvironmentPlans?.createTriggerEnvironmentActions({
+      paths: side.paths, env: side.env, fs, now,
+      readHosts: () => m.readModel.readHosts({ url: side.paths.valkeyUrl, now }),
+      readHostLoads: () => pageDeps.hostLoads(),
+      readSkew: async (index, proposedFs) => fleet.triggerSkew(index, (await fleet.snapshot({ waiting: true }))?.waiting, { fs: proposedFs }),
+    });
     actionDeps = {
       updates: { read: readUpdatesFacts, setDesired: (row) => m.updates.setDesired(redis, row) },
     modelRoles,
+    triggerEnvironment,
     watch: fleet.watch,
     zeroTouch,
     sandboxes,

@@ -979,6 +979,37 @@ test("host setup authority comes only from the serve flag, and production wiring
   }
 });
 
+test("the console's own command is what wires a person's trigger change, each read to the fleet it answers from", async () => {
+  const dep = deployment();
+  const modules = fakeModules();
+  const asks = [];
+  const fleet = {
+    snapshot: async (opts) => (asks.push(["snapshot", opts]), { waiting: { rows: ["in-line"] } }),
+    triggerSkew: async (index, waiting, opts) => (asks.push(["skew", index, waiting, opts]), { rows: [], incomplete: false }),
+    dispose: async () => {},
+  };
+  modules.readModel.createFleetReader = () => fleet;
+  modules.readModel.readHosts = async (args) => (asks.push(["hosts", args.url]), { hosts: [] });
+  let options;
+  const service = { preview() {}, apply() {} };
+  modules.triggerEnvironmentPlans = { createTriggerEnvironmentActions: (opts) => { options = opts; return service; } };
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  const r = await cli(["serve"], { dir: dep.dir, env: dep.env, modules, platform: "linux", until: Promise.resolve() });
+  assert.equal(r.code, 0, r.err.join(" "));
+  assert.equal(captured.actionDeps.triggerEnvironment, service, "the action reaches it through ctx.a, and a tool's ctx.a carries none");
+  assert.ok(options.paths.triggersPath.endsWith("triggers.json"));
+  assert.equal(options.env, captured.actionDeps.env);
+  const proposed = { proposed: true };
+  await options.readSkew(3, proposed);
+  assert.deepEqual(asks.slice(0, 2), [["snapshot", { waiting: true }], ["skew", 3, { rows: ["in-line"] }, { fs: proposed }]], "the jobs in line, judged on the proposed file");
+  await options.readHosts();
+  assert.deepEqual(asks.at(-1), ["hosts", captured.actionDeps.paths.valkeyUrl]);
+  assert.equal(await options.readHostLoads(), await captured.pageDeps.hostLoads(), "the page's own read of what each host published");
+  const real = await loadModules();
+  assert.equal(typeof real.triggerEnvironmentPlans.createTriggerEnvironmentActions, "function");
+});
+
 test("CLI setup destinations and grants reject misuse before any token or code write", async () => {
   const linked = await cli(["link", "--name", "alice", "--next", "/setup"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env });
   assert.equal(linked.code, 0);

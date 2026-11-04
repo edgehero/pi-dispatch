@@ -33,6 +33,8 @@ import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
 import { createModelRoleActions, MODEL_ROLE_EDIT_FIELDS } from "../src/model-role-plans.mjs";
+import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
+import { triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 
 // The console's action table over HTTP (issue #642, REQ-OPERATOR-CONSOLE-ACTIONS): every action through its GENERATED
 // route, preview then confirm, against the read model's real funnels and the tools' real planners. File actions run on
@@ -319,6 +321,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "run-enqueue": "run-enqueue",
     "standing-answer-add": "standing-answer-add", "answer-draft-drop": "answer-draft-drop",
     "model-role-edit": "model-role-edit",
+    "trigger-environment-edit": "trigger-edit",
     "cancel-held": "cancel-held",
     "cancel-all-held": "held-cancel-all",
     "cancel-queued": "cancel-queued",
@@ -374,6 +377,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
   const FIELDS = {
     "run-enqueue": ["folder", "flow", "task"], "standing-answer-add": ["title", "text", "projects", "repo", "runId"], "answer-draft-drop": ["runId", "draftRunId", "digest"],
     "model-role-edit": [...MODEL_ROLE_EDIT_FIELDS],
+    "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "keyOrder"],
     "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
@@ -393,7 +397,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
   Object.assign(FIELDS, Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, name.startsWith("setup-provider-key") ? ["provider", "value"] : name === "setup-viewer-add" ? ["name"] : name === "setup-viewer-revoke" ? ["name", "identity"] : []])));
-  assert.equal(ACTIONS.length, 60 + SETUP_ACTION_NAMES.length);
+  assert.equal(ACTIONS.length, 61 + SETUP_ACTION_NAMES.length);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -458,6 +462,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["setup-viewer-add", {}, twice("Revoke the exact viewer entry through a fresh confirmation, or use pi-dispatch-console token revoke on the host."), null, "Create viewer invitation", "Created a viewer invitation"],
     ["setup-viewer-revoke", {}, twice("Create a new viewer invitation to restore access. The old entry and its sessions cannot be restored."), null, "Revoke viewer", "Revoked the created viewer entry"],
     ["model-role-edit", { plan: { scope: "default", role: "editor", inverseBody: { scope: "default", role: "editor", entry: "openai/old", expectedEntry: "openai/new" } }, payload: { body: { scope: "default", role: "editor" } } }, twice("Restore the previous mapping for default/editor; another role edit is refused if this mapping has changed"), { action: "model-role-edit", body: { scope: "default", role: "editor", entry: "openai/old", expectedEntry: "openai/new" } }, "Save role mapping", "Changed model role default/editor; no run was started"],
+    ["trigger-environment-edit", { plan: { row: "trigger row 3", undo: "Put trigger row 3 back as it was", inverse: { action: "trigger-environment-edit", body: { index: 2, pageDigest: "a".repeat(64), mcp: null } } } }, twice("Put trigger row 3 back as it was"), { action: "trigger-environment-edit", body: { index: 2, pageDigest: "a".repeat(64), mcp: null } }, "Confirm: change trigger row 3", "Changed trigger row 3; new deliveries use it, and no run was started"],
+    ["trigger-environment-edit", { plan: { row: "trigger row 3", undo: "Edit trigger row 3 back by hand: the file held run.model as null, which this page cannot write", inverse: null } }, twice("Edit trigger row 3 back by hand: the file held run.model as null, which this page cannot write"), null, "Confirm: change trigger row 3", "Changed trigger row 3; new deliveries use it, and no run was started"],
     ["run-enqueue", { reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Start run for up to $2.00", "Queued the local run"],
     ["standing-answer-add", {}, twice("Remove the standing answer by hand from triggers.json after reviewing any draft that cited it."), null, "Adopt standing answer", "Adopted the standing answer"],
     ["answer-draft-drop", {}, twice("Write your own answer on the run page. Dropping a draft never changes the parked question."), null, "Drop draft", "Dropped the draft; the question still waits for you"],
@@ -3430,6 +3436,85 @@ test("a role edit uses the actual ticket/audit/CAS pipeline, exact Undo and pers
   const before = previews;
   assert.equal((await readOnly.act("model-role-edit", params)).status, 403);
   assert.equal(previews, before);
+});
+
+test("a person's change to what a trigger's jobs get: the real pipeline, audited as trigger-edit by that person, with its Undo", async () => {
+  const { paths } = deployment();
+  const original = { triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", steer: true, packages: false, secrets: { LINEAR_API_KEY: "op://vault/linear" }, progress: true } }] };
+  writeFileSync(paths.triggersPath, `${JSON.stringify(original, null, 2)}\n`);
+  const bytes = read(paths.triggersPath);
+  let previews = 0;
+  const real = createTriggerEnvironmentActions({ paths, env: {}, now: () => T0 });
+  const triggerEnvironment = { preview: (...args) => { previews++; return real.preview(...args); }, apply: (...args) => real.apply(...args) };
+  const c = await start({ paths, a: { triggerEnvironment } });
+  const seen = triggerEntryDigest(original.triggers[0]);
+  const params = { index: 0, pageDigest: seen, packages: null, mcp: ["linear"] };
+  // A viewer and an agent are stopped before any private read, a read-only console too.
+  for (const token of [VIEW_TOKEN, AGENT_TOKEN]) {
+    const before = previews;
+    assert.equal((await c.act("trigger-environment-edit", params, await c.cookieFor(token))).status, 403);
+    assert.equal(previews, before);
+  }
+  const readOnly = await start({ paths, readOnly: true, a: { triggerEnvironment } });
+  const readBefore = previews;
+  assert.equal((await readOnly.act("trigger-environment-edit", params)).status, 403);
+  assert.equal(previews, readBefore);
+
+  const p = await c.act("trigger-environment-edit", params);
+  assert.equal(p.status, 200, p.text);
+  assert.equal(read(paths.triggersPath), bytes, "the preview writes nothing");
+  const preview = p.json();
+  assert.equal(preview.kind, "trigger-edit");
+  assert.equal(preview.action, "trigger-environment-edit");
+  assert.equal(preview.paid, false);
+  assert.equal(preview.danger, false);
+  assert.equal(preview.confirmLabel, "Confirm: change trigger row 1");
+  assert.equal(preview.undo, "Put trigger row 1 back as it was");
+  assert.deepEqual(preview.summary.slice(0, 5), ["Change trigger row 1", "MCP: linear on.", "This widens what its jobs reach: those that start after this connect to linear.", "Staged packages: on.", "This widens what its jobs load: every package staged on the host that runs them."]);
+  assert.match(preview.html, /Person only/);
+  assert.match(preview.html, /class="diff/, "the file before and after, in the bar");
+  assert.match(preview.html, /&quot;mcp&quot;: \[|"mcp": \[/, "the diff shows the key it adds");
+  assert.doesNotMatch(preview.html, /op:\/\/vault\/linear/, "a secret reference is no page's business, the diff's rule");
+  assert.match(preview.summary.at(-1), /audited as trigger-edit, by /);
+  assert.doesNotMatch(preview.html, /->|\u2192/, "a confirm uses words, never an arrow");
+
+  // An audit log that cannot take the row writes nothing.
+  c.audit.failNext = 1;
+  assert.equal((await c.confirm("trigger-environment-edit", preview.ticket)).status, 500);
+  assert.equal(read(paths.triggersPath), bytes);
+
+  const done = await c.both("trigger-environment-edit", params);
+  assert.equal(done.confirm.status, 200, done.confirm.text);
+  assert.equal(lastWrite(c).kind, "trigger-edit");
+  assert.equal(lastWrite(c).outcome, "ok");
+  assert.equal(lastWrite(c).target, paths.triggersPath);
+  assert.equal((await c.confirm("trigger-environment-edit", done.preview.ticket)).status, 409, "a ticket is single-use");
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)).triggers[0].run, { kind: "github", flow: "fix", steer: true, secrets: { LINEAR_API_KEY: "op://vault/linear" }, progress: true, mcp: ["linear"] });
+
+  // The banner's Undo is a preview like any other, and puts the file back byte for byte.
+  const change = done.confirm.json().change;
+  assert.equal(change.inverse.action, "trigger-environment-edit");
+  assert.deepEqual(change.inverse.body.keyOrder, ["kind", "flow", "steer", "packages", "secrets", "progress"]);
+  assert.equal(change.inverse.body.mcp, null);
+  const stale = await c.act("trigger-environment-edit", params);
+  assert.equal(stale.status, 409, "the page's digest is the entry before the write, so the page is stale now");
+  assert.match(stale.json().html, /Look again/);
+  const back = await c.both(change.inverse.action, change.inverse.body);
+  assert.equal(back.confirm.status, 200, back.confirm.text);
+  assert.equal(read(paths.triggersPath), bytes);
+});
+
+test("the action refuses a key it does not take by name, and a console started without the planner says so", async () => {
+  const { paths } = deployment();
+  writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } }] }, null, 2)}\n`);
+  const c = await start({ paths, a: { triggerEnvironment: createTriggerEnvironmentActions({ paths, env: {}, now: () => T0 }) } });
+  const extra = await c.act("trigger-environment-edit", { index: 0, pageDigest: "a".repeat(64), image: "evil:latest" });
+  assert.equal(extra.status, 400);
+  assert.match(extra.json().error, /image is not one of them/);
+  const none = await start({ paths });
+  const unwired = await none.act("trigger-environment-edit", { index: 0, pageDigest: "a".repeat(64), packages: false });
+  assert.equal(unwired.status, 503);
+  assert.match(unwired.json().error, /without what the trigger-environment-edit action needs \(triggerEnvironment\)/);
 });
 
 test("each setup registration uses the generated HTTP preview and confirmed apply with its own audit kind", async () => {

@@ -4648,8 +4648,9 @@ export function createFleetReader(
     // (and `opts.queue`, a one-queue preview's, wherever it stands), and says so beside them: `switchTotal`, how many the
     // switch flips; `switchTruncated`, true when `queueCounts` holds fewer; `switchIncomplete`, `SWITCH_SCAN_INCOMPLETE`
     // when the keyspace scan behind the set did not finish, else null.
-    async triggerSkew(index, waiting) {
-      return readTriggerSkew({ index, waiting, triggersPath: paths.triggersPath, fs, lookupJob: async (name, id) => {
+    // `viaFs` (issue #800): a preview asks what the PROPOSED file would refuse, by handing in the dry run's file system.
+    async triggerSkew(index, waiting, { fs: viaFs = fs } = {}) {
+      return readTriggerSkew({ index, waiting, triggersPath: paths.triggersPath, fs: viaFs, lookupJob: async (name, id) => {
         const queues = await fleetQueues();
         const q = queues.find((q) => q.name === name) ?? pool.get(name);
         return q ? q.getJob(id) : null;

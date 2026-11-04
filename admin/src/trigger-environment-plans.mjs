@@ -1,0 +1,539 @@
+/**
+ * A person's change to what a trigger's jobs get (issue #800, `trigger-environment-edit`, `CARD_FIELDS`), with one preview
+ * and one Confirm: which flow and model they run on, what each may spend, which servers and tools they reach, and whether
+ * they load the staged packages.
+ *
+ * DELIBERATELY OUTSIDE `write-plans.mjs`, and that is the boundary, not a tidiness. `tool-actions.mjs` hands a tool
+ * `{ ...writePlans }`, every export, so a planner there is a planner a model's call can reach. `TOOL_PROOF_FIELDS` exist
+ * because what a job can spend or reach is the operator's to write, and a person at the console is the operator while a
+ * model's call is not, even behind a confirm. This module is loaded by the console's `cli.mjs` alone and handed to the action
+ * through `ctx.a`, which a tool's context does not carry. `trigger-environment-boundary.test.mjs` walks the import graph of
+ * `tool-actions.mjs` and of the extension to hold that, so the action table takes the field names from `trigger-edit-core.mjs`
+ * and never imports this file. REJECTED: a parameter on `planTriggerEdit`, which any call that reaches it could pass.
+ *
+ * WHY THE PREVIEW JUDGES MORE THAN THE FILE. The file's parser cannot know a deployment's cap, a model's first call or the
+ * jobs in line, and each of those fails later, for free or nearly (CONST-BUDGET-BEFORE-TOKENS). So the preview says what the
+ * loader cannot, before anything is written, and the funnel's own parser still has the last word on the file itself: the
+ * preview dry-runs `writeTriggers` and refuses in its words.
+ *
+ * ONE CHANGE, ONE WAY BACK. Keys that are not sent stay byte-identical in the file; `null` deletes a key. An Undo is an edit
+ * like any other, previewed the same way, and puts back the bytes of the keys it touched: the old value as the file held it,
+ * `null` for a key the edit added, and `keyOrder` where putting a deleted key back would otherwise leave it at the end.
+ */
+import { createHash } from "node:crypto";
+import * as nodeFs from "node:fs";
+import { basename } from "node:path";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
+import { jobDataVersionFor } from "@edgehero/pi-dispatch/job-data-version";
+import { boundModelOf, builtinChatModels as catalogChatModels, builtinModel as catalogModel, checkModelsKnown as catalogCheck, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
+import { readOverlayModels } from "@edgehero/pi-dispatch/model-endpoints";
+import { RADIUS_COST_CAP_FIX, RADIUS_COST_CAP_LABEL } from "@edgehero/pi-dispatch/model-observation";
+import { modelOnList, splitModelEntry } from "@edgehero/pi-dispatch/model-ref";
+import { effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
+import { outputCapView, outputUnboundable } from "@edgehero/pi-dispatch/output-cap";
+import { parseProjects } from "@edgehero/pi-dispatch/projects";
+import { readOverlay } from "@edgehero/pi-dispatch/runtime-settings";
+import { parseTriggers, parseTriggersDocument, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
+import { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
+import { dryRunFs } from "./console/actions.mjs";
+import { collectModelPolicies } from "./models-view.mjs";
+import { writeInputs } from "./read-model.mjs";
+import { CARD_FIELDS, TRIGGER_ENVIRONMENT_EDIT_FIELDS, planTriggerEditCore, rowName, triggerEntryDigest } from "./trigger-edit-core.mjs";
+import { fieldNamed } from "./words.mjs";
+
+const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const refuse = (refusal, status = 400, state = null) => ({ refusal, status, ...(state ? { state } : {}) });
+const denied = { refusal: "Only a person in the operator console can change what a trigger's jobs get.", status: 403 };
+const authority = (ctx) => ctx?.surface === "console" && ctx?.role === "operator";
+const money = (micros) => `$${formatMicros(micros)}`;
+const sha = (text) => createHash("sha256").update(text).digest("hex");
+const STRING_FIELDS = Object.freeze(["provider", "model"]);
+const LIST_FIELDS = Object.freeze(["models", "fallbackModels", "mcp", "excludeTools"]);
+/** The fields whose change is judged against what a job may call and spend (`judgeModels`), and only then. */
+const MODEL_OR_CAP = Object.freeze(["provider", "model", "models", "fallbackModels", "maxCostUsd"]);
+/** The most job ids a preview names. A queue can hold 200 in view, and the sentence stays a sentence. */
+const SKEW_NAMED_MAX = 5;
+/** How long the preview waits for the jobs in line, `SNAPSHOT_TIMEOUT_MS`'s bound and for its reason. */
+const JOBS_READ_MS = 10_000;
+
+/** "a", "a and b", "a, b and c". */
+function listed(names) {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/** Why this body is not one the form could send, or null: nothing is read until it is. */
+function shapeProblem(body) {
+  if (!plain(body)) return "The change must be an object of the trigger's fields.";
+  const unknown = Object.keys(body).find((key) => body[key] !== undefined && !TRIGGER_ENVIRONMENT_EDIT_FIELDS.includes(key));
+  if (unknown !== undefined) return `This form takes ${TRIGGER_ENVIRONMENT_EDIT_FIELDS.join(", ")} only; ${fieldNamed(unknown)} is not one of them.`;
+  if (!Number.isSafeInteger(body.index) || body.index < 0) return "index must be a whole number, 0 or more.";
+  if (typeof body.pageDigest !== "string" || !/^[a-f0-9]{64}$/.test(body.pageDigest)) return "The page did not say what it saw (pageDigest). Reload it and make the change again.";
+  if (body.flow === null) return "A trigger's flow cannot be removed: choose another flow.";
+  if (body.flow !== undefined && typeof body.flow !== "string") return "flow must be a string.";
+  // Blank is what a text box sends for "no value", and the shared body reads blank as not sent: here that would be a change
+  // that silently is not one, so removing a key says so with null.
+  for (const key of STRING_FIELDS) if (body[key] !== undefined && body[key] !== null && (typeof body[key] !== "string" || body[key].trim() === "")) return `${key} must be a non-empty string, or null to remove it.`;
+  for (const key of LIST_FIELDS) if (body[key] !== undefined && body[key] !== null && (!Array.isArray(body[key]) || body[key].some((entry) => typeof entry !== "string"))) return `${key} must be a list of names, or null to remove it.`;
+  if (body.keyOrder !== undefined && (!Array.isArray(body.keyOrder) || body.keyOrder.some((key) => typeof key !== "string"))) return "keyOrder must be a list of the entry's run keys.";
+  return null;
+}
+
+/** A dollar value as the page says it; a value the parser refuses is the funnel's to name, so this never throws. */
+function dollars(value) {
+  try {
+    return money(parseUsdMicros(value, "run.maxCostUsd"));
+  } catch {
+    return String(value);
+  }
+}
+
+/** What a list gained and lost, and whether only its order moved. */
+function delta(before, after) {
+  const was = Array.isArray(before) ? before : [];
+  const now = Array.isArray(after) ? after : [];
+  const added = now.filter((name) => !was.includes(name));
+  const removed = was.filter((name) => !now.includes(name));
+  return { added, removed, reordered: added.length === 0 && removed.length === 0 && !same(was, now) };
+}
+
+/**
+ * Each change in words (`write-plans.mjs` `planTriggerDelete`, #737: a confirm says what it does in words and never an arrow),
+ * with a widening said as one, on a line of its own. `facts` is what the spend judgement read (`judgeModels`), there whenever
+ * a model field or the cap was sent, and those are the only changes that read it.
+ *
+ * The lists differ on purpose. `run.models` REPLACES the deployment's list (`effectiveJobOf`), so whether a change widens is
+ * read against what its jobs may call now, not against the trigger's own list. A fallback must already be on that list
+ * (`model-ref.mjs`, `selectFailoverJob`), so adding one reaches no new model and is not said as a widening: a person who
+ * reads "widens" on every list edit stops reading it.
+ */
+function changeWords(key, before, after, facts) {
+  const removedKey = after === undefined;
+  const addedKey = before === undefined;
+  const has = (value) => value !== undefined && value !== null;
+  switch (key) {
+    case "flow":
+      return { line: `Flow: ${has(before) ? before : "none"} to ${after}.` };
+    case "provider":
+    case "model": {
+      const word = key === "provider" ? "Provider" : "Model";
+      if (removedKey) return { line: `${word}: ${before} removed, so its jobs use the deployment's.` };
+      return { line: `${word}: ${has(before) ? before : "the deployment's"} to ${after}.` };
+    }
+    case "maxCostUsd": {
+      const was = facts.capOf(before);
+      const will = facts.capOf(after);
+      const widened = (was !== null && will === null) || (was !== null && will !== null && will > was);
+      const under = facts.deploymentCap === null ? "the deployment sets none, so its jobs have no cap" : `its jobs run under the deployment's ${money(facts.deploymentCap)}`;
+      return {
+        line: removedKey ? `Job cap: ${dollars(before)} removed; ${under}.` : addedKey ? `Job cap: ${dollars(after)}, where this trigger set none.` : `Job cap: ${dollars(before)} to ${dollars(after)}.`,
+        ...(widened ? { widening: `This widens what each job may spend: ${will === null ? "no cap at all" : `up to ${money(will)}`}.` } : {}),
+      };
+    }
+    case "models": {
+      const was = before ?? facts.envList;
+      const will = after ?? facts.envList;
+      const fresh = Array.isArray(will) && Array.isArray(was) ? will.filter((ref) => !was.includes(ref)) : [];
+      const widened = (Array.isArray(was) && !Array.isArray(will)) || fresh.length > 0;
+      const d = delta(before, after);
+      const line = removedKey
+        ? `Allowed models: the list removed, so ${Array.isArray(facts.envList) ? "PI_ALLOWED_MODELS applies" : "any model is allowed"}.`
+        : addedKey
+          ? `Allowed models: ${after.join(", ")}, where this trigger listed none.`
+          : d.reordered ? "Allowed models: the same models in a new order." : `Allowed models: ${[d.added.length ? `${d.added.join(", ")} added` : "", d.removed.length ? `${d.removed.join(", ")} removed` : ""].filter(Boolean).join(", ")}.`;
+      return { line, ...(widened ? { widening: `This widens which models its jobs may call: ${fresh.length > 0 ? fresh.join(", ") : "any model"}.` } : {}) };
+    }
+    case "fallbackModels": {
+      const d = delta(before, after);
+      if (removedKey) return { line: "Fallback models: the list removed." };
+      if (addedKey) return { line: `Fallback models: ${after.join(", ")}, where this trigger listed none.` };
+      return { line: d.reordered ? "Fallback models: the same models in a new order." : `Fallback models: ${[d.added.length ? `${d.added.join(", ")} added` : "", d.removed.length ? `${d.removed.join(", ")} removed` : ""].filter(Boolean).join(", ")}.` };
+    }
+    case "mcp": {
+      const d = delta(before, after);
+      return { line: d.reordered ? "MCP: the same servers in a new order." : `MCP: ${[...d.added.map((name) => `${name} on`), ...d.removed.map((name) => `${name} off`)].join(", ")}.`, addedServers: d.added };
+    }
+    case "packages": {
+      const was = before !== false;
+      const will = after !== false;
+      if (was === will) return { line: `Staged packages: stay ${will ? "on" : "off"}; only what the file says changes.` };
+      return { line: `Staged packages: ${will ? "on" : "off"}.`, ...(will ? { widening: "This widens what its jobs load: every package staged on the host that runs them." } : {}) };
+    }
+    case "excludeTools": {
+      const d = delta(before, after);
+      return {
+        line: d.reordered ? "Tools: the same removals in a new order." : `Tools: ${[...d.added.map((name) => `${name} off`), ...d.removed.map((name) => `${name} on`)].join(", ")}.`,
+        ...(d.removed.length > 0 ? { widening: `This widens what its jobs can do: ${d.removed.join(", ")} back on.` } : {}),
+      };
+    }
+    default:
+      throw new RangeError(`no words for ${key}`);
+  }
+}
+
+/** A server's where and key, when every host that has it agrees; a sentence must be true of each host a job can land on. */
+function serverReach(name, hosts) {
+  const rows = hosts.flatMap((host) => (Array.isArray(host?.mcp) ? host.mcp.filter((row) => row?.name === name && row.enabled === true) : []));
+  if (rows.length === 0 || new Set(rows.map((row) => JSON.stringify([row.where, row.keys]))).size !== 1) return `connect to ${name}`;
+  const [{ where, keys }] = rows;
+  if (typeof where !== "string") return `connect to ${name}`;
+  return `connect to ${where}${Array.isArray(keys) && keys.length > 0 ? `, with ${listed(keys)} by name` : ""}`;
+}
+
+/**
+ * Which hosts have a server, by what each published (`doctor:loads:<name>`). A host that has not published, or whose list of
+ * servers was cut or unread, is unknown and never reads as lacking it (`hostsAgree`'s rule).
+ */
+function serverHosts(name, hosts) {
+  const has = [];
+  const lacks = [];
+  const unknown = [];
+  for (const host of hosts) {
+    const row = Array.isArray(host?.mcp) ? host.mcp.find((entry) => entry?.name === name) : undefined;
+    const answers = Array.isArray(host?.mcp) && !(host?.unread ?? []).includes("mcp");
+    if (row?.enabled === true && answers) has.push(host.name);
+    else if (answers && (row !== undefined || !(host?.more?.mcp > 0))) lacks.push(host.name);
+    else unknown.push(host.name);
+  }
+  const parts = [has.length ? `${listed(has)} ${has.length === 1 ? "has" : "have"} it` : "", lacks.length ? `${listed(lacks)} ${lacks.length === 1 ? "does" : "do"} not` : "", unknown.length ? `${listed(unknown)} ${unknown.length === 1 ? "has" : "have"} not said` : ""].filter(Boolean);
+  return parts.join("; ");
+}
+
+/**
+ * What the deployment says of a job's models and cap, read fresh for each judgement, or the refusal that it cannot say:
+ * `deployment` as a job resolves it (overlay over env), `deploymentCap` the merged cap, `ceiling` the most a trigger's may be.
+ */
+function modelFacts({ paths, env, fs }) {
+  let settings;
+  try {
+    settings = paths.settingsFile ? readOverlay(paths.settingsFile, { fs }) : { overlay: {} };
+  } catch {
+    return refuse("The deployment's settings could not be read, so this change could not be judged.", 409);
+  }
+  if (settings.invalid) return refuse("The deployment's settings file is invalid; correct it before changing a trigger's model or cap.", 409);
+  let envList;
+  try {
+    envList = allowedModelsFrom(env);
+  } catch {
+    return refuse("PI_ALLOWED_MODELS is invalid; correct it before changing a trigger's model or cap.", 409);
+  }
+  const set = (value) => (value === undefined || value === null || value === "" ? null : value);
+  const deployment = { provider: settings.overlay.provider ?? env.PI_PROVIDER ?? DEFAULT_PROVIDER, model: settings.overlay.model ?? env.PI_MODEL ?? DEFAULT_MODEL, maxCostUsd: set(settings.overlay.maxCostUsd) ?? set(env.PI_MAX_COST_USD) };
+  let deploymentCap;
+  let ceiling;
+  try {
+    deploymentCap = optionalUsdMicros(deployment.maxCostUsd, "maxCostUsd");
+    // The lower of the two the worker reads. A job runs under the merged cap (`effectiveJobOf`), and `loadSchedules` refuses
+    // the whole file over one above the env's, whichever way an overlay moved the merged one.
+    const envCap = optionalUsdMicros(set(env.PI_MAX_COST_USD), "PI_MAX_COST_USD");
+    ceiling = [deploymentCap, envCap].filter((cap) => cap !== null).reduce((low, cap) => (low === null ? cap : Math.min(low, cap)), null);
+  } catch {
+    return refuse("The deployment's job cap could not be read; correct it before changing a trigger's model or cap.", 409);
+  }
+  return { deployment, deploymentCap, ceiling, envList, capOf: (value) => effectiveCostCapMicros(value, deployment.maxCostUsd) };
+}
+
+export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, builtinModel = catalogModel, builtinChatModels = catalogChatModels, readHosts = async () => ({ unreachable: "the live hosts are not wired" }), readHostLoads = async () => ({ hosts: [] }), readSkew = async () => ({ rows: [], incomplete: true }), versionTables = {}, jobsReadMs = JOBS_READ_MS } = {}) {
+  const triggersTables = versionTables.triggers ?? {};
+  const jobDataTables = versionTables.jobData ?? {};
+
+  /**
+   * What a job of this entry would call under the deployment's cap (issue #800): judged only when the edit sends a model field
+   * or the cap, so an edit of the flow is never refused over a pairing the person did not touch. A cap below what a call needs
+   * would refuse every call before it is sent, inside a paid container, so it is refused here for free. `facts` is read once.
+   */
+  function judgeModels({ entry, text, facts }) {
+    const run = entry.run;
+    if (run.maxCostUsd !== undefined && run.maxCostUsd !== null && facts.ceiling !== null) {
+      let asked;
+      try {
+        asked = parseUsdMicros(run.maxCostUsd, "run.maxCostUsd");
+      } catch (error) {
+        return refuse(String(error?.message ?? error));
+      }
+      // Never "raise the cap": a trigger cannot, so the sentence says who can move it. The worker runs the smaller of the two,
+      // so a value above reads as allowing more than it does, and above the env's it refuses the whole file at load.
+      if (asked > facts.ceiling) return refuse(`A trigger's job cap can only lower the deployment's: ${money(asked)} is above its ${money(facts.ceiling)}. Set ${money(facts.ceiling)} or less here, or remove this trigger's cap to run under the deployment's. The deployment's own cap belongs to its settings, not to this page.`);
+    }
+    let overlayRead = false;
+    let overlay = null;
+    const readOverlayDoc = () => {
+      if (!overlayRead) {
+        overlayRead = true;
+        overlay = readOverlayModels(paths.globalPiDir, { readFileSync: (...args) => fs.readFileSync(...args), lstatSync: (...args) => fs.lstatSync(...args) });
+      }
+      return overlay;
+    };
+    let roles;
+    let projects;
+    try {
+      roles = parseTriggersDocument(text, paths.triggersPath, triggersTables).modelRoles;
+      projects = paths.projectsFile ? parseProjects(fs.readFileSync(paths.projectsFile, "utf8"), paths.projectsFile) : [];
+    } catch {
+      return refuse("The trigger's project or role policy could not be read; correct those files before changing its model or cap.", 409);
+    }
+    const resolved = collectModelPolicies({ entries: [entry], modelRoles: roles, projects, deployment: facts.deployment, envList: facts.envList, resolveFolder: (path) => fs.realpathSync(path) });
+    if (resolved.checks.length > 0) return refuse(`This trigger's model could not be resolved (${resolved.checks[0].reason}): every job would be refused before it spends. Correct its model or its role.`);
+    const unjudged = new Set();
+    for (const job of resolved.runs) {
+      const main = { provider: job.provider, id: job.model };
+      const mainName = `${main.provider}/${main.id}`;
+      const list = job.models ?? facts.envList ?? null;
+      const refsOf = (entries) => (Array.isArray(entries) ? entries : []).map(splitModelEntry).filter((ref) => ref !== null).map((ref) => ({ provider: ref.provider, id: ref.model }));
+      const known = checkModelsKnown([{ ...main, main: true }, ...refsOf(list)], { readOverlay: readOverlayDoc });
+      if (known?.unavailable) return refuse("The overlay's models.json could not be read just now, so this change could not be judged; try again.", 409);
+      if (known?.unknown) return refuse(`${known.unknown.provider}/${known.unknown.id} is a model this deployment does not know (${known.why}), so every job would be refused as model-unknown. Choose one from the catalog, or declare it in the overlay's models.json.`);
+      if (known?.fallbackUnlisted) return refuse(`${known.fallbackUnlisted.provider}/${known.fallbackUnlisted.id} declares fallback models the allowed list does not name, so every job would be refused as model-not-allowed. Add them to the list, or remove it.`);
+      if (known?.ok !== true) return refuse("The model catalog did not judge this change; nothing was written.", 409);
+      if (Array.isArray(list) && !modelOnList(list, main.provider, main.id)) return refuse(`${mainName} is not on the models this trigger's jobs may call, so every job would be refused as model-not-allowed. Add it to the list, or choose another model.`);
+      const fallbacks = refsOf(job.fallbackModels);
+      const offList = fallbacks.find((ref) => !Array.isArray(list) || !modelOnList(list, ref.provider, ref.id));
+      if (offList) return refuse(`Every fallback must be on the allowed list (run.models, or PI_ALLOWED_MODELS when the trigger has none), and ${offList.provider}/${offList.id} is not, so every job would be refused as model-failover-no-candidate.`);
+      const cap = facts.capOf(job.maxCostUsd);
+      if (cap === null) continue;
+      // The main model and what the trigger itself names. Not the deployment's list or a role map's every model: a job under a
+      // cap simply cannot call one it does not fit, and lowering this trigger's cap is no fault of a model it never asked for.
+      const named = [main, ...refsOf(run.models), ...fallbacks];
+      for (const ref of new Map(named.map((one) => [`${one.provider}/${one.id}`, one])).values()) {
+        const name = `${ref.provider}/${ref.id}`;
+        const view = outputCapView({ models: readOverlayDoc(), provider: ref.provider, modelId: ref.id, builtinModel, builtinChatModels });
+        if (view?.api === "pi-messages" || (view?.api === undefined && ref.provider === "radius")) return refuse(`${name}: ${RADIUS_COST_CAP_LABEL}. ${RADIUS_COST_CAP_FIX}.`);
+        if (outputUnboundable(view)) return refuse(`${name}'s output cap travels as max_completion_tokens to a server that may ignore it, so the runner counts every call to it unboundable and refuses it under a job cap. Set "compat": { "maxTokensField": "max_tokens" } on it in models.json, or choose another model: docs/egress.md, "Local model servers".`);
+        const floor = firstCallFloorMicros(boundModelOf(ref, { builtinModel, overlay: readOverlayDoc() }));
+        if (floor === null) {
+          unjudged.add(name);
+          continue;
+        }
+        if (floor <= cap) continue;
+        // "At least", because the bound is a lower one: the runner's own adds the whole request (`firstCallFloorMicros`).
+        const common = `${name} needs at least ${money(floor)} for one call`;
+        const refused = "so the runner would refuse every call to it before it is sent";
+        if (facts.ceiling !== null && floor > facts.ceiling) return refuse(`${common}, above the deployment's ${money(facts.ceiling)} job cap, ${refused}. A trigger can only lower that cap: choose another model. The deployment's own cap belongs to its settings, not to this page.`);
+        return refuse(`${common}, above this trigger's ${money(cap)} job cap, ${refused}. Choose another model, or a job cap of at least that amount.`);
+      }
+    }
+    return { unjudged: [...unjudged] };
+  }
+
+  /**
+   * Everything the file and the settings say, with no queue or registry read: the preview's and the apply's one judgement. The
+   * apply runs it again because a deployment's cap can move between the two, and `expect` covers only the triggers file.
+   */
+  function judge(rawBody) {
+    const body = plain(rawBody) && typeof rawBody.index === "string" && /^\d{1,6}$/.test(rawBody.index) ? { ...rawBody, index: Number(rawBody.index) } : rawBody;
+    const problem = shapeProblem(body);
+    if (problem) return refuse(problem);
+    if (!paths?.triggersPath) return refuse("This console does not name its triggers file.", 409);
+    const sent = CARD_FIELDS.filter((key) => body[key] !== undefined);
+    if (sent.length === 0) return refuse("Send at least one field to change.");
+    const expect = writeInputs({ paths: [paths.triggersPath], fs });
+    let doc;
+    let beforeText;
+    try {
+      beforeText = fs.readFileSync(paths.triggersPath, "utf8");
+      doc = JSON.parse(beforeText);
+    } catch {
+      return refuse("The triggers file could not be read, so this change could not be judged. Nothing is written over a file this page cannot read.", 409, "changed");
+    }
+    const newer = triggersFileVersionProblem(doc, { supported: triggersTables.supported });
+    if (newer?.newer) return refuse(`${newer.message}, so nothing was written and nothing in it was lost; change it with that release.`, 409);
+    const row = rowName("trigger", body.index, "console");
+    const entry = Array.isArray(doc?.triggers) ? doc.triggers[body.index] : undefined;
+    if (!plain(entry) || !plain(entry.run)) return refuse(`There is no trigger at row ${body.index + 1} any more. Reload the page.`, 409, "changed");
+    // What the Confirm's `expect` cannot cover: the minutes on the page before this preview. The entry, not the file, so another
+    // trigger's edit does not send this person back (`triggerEntryDigest`).
+    if (triggerEntryDigest(entry) !== body.pageDigest) return refuse("This trigger changed since the page drew it, so nothing was changed. Reload the page and make the change again.", 409, "changed");
+
+    // What the trigger edit's own body judges: a value, by the loader's words. The rest, and a null, this planner applies.
+    const coreKeys = ["flow", "provider", "model"].filter((key) => typeof body[key] === "string");
+    const restKeys = sent.filter((key) => !coreKeys.includes(key));
+    const withRest = (run) => {
+      const next = { ...run };
+      for (const key of restKeys) {
+        if (body[key] === null) delete next[key];
+        else next[key] = body[key];
+      }
+      return next;
+    };
+    let core = null;
+    if (coreKeys.length > 0) {
+      const planned = planTriggerEditCore({ params: { index: body.index, ...Object.fromEntries(coreKeys.map((key) => [key, body[key]])) }, paths, env, surface: "console", fs, baseRun: withRest });
+      if (planned.refusal) return refuse(planned.refusal);
+      core = planned.plan;
+    }
+    const finish = (run) => {
+      const next = withRest(run);
+      if (body.keyOrder === undefined) return next;
+      if (!same([...body.keyOrder].sort(), Object.keys(next).sort())) return null;
+      return Object.fromEntries(body.keyOrder.map((key) => [key, next[key]]));
+    };
+    const mutate = (raw) => (core ? core.mutate(raw) : raw).map((tr, i) => (i === body.index ? { ...tr, run: finish(tr.run) } : tr));
+    if (finish(core ? core.mutate(doc.triggers)[body.index].run : entry.run) === null) return refuse("This trigger's keys changed since the edit being undone. Reload the page and make the change again.", 409, "changed");
+
+    // The funnel itself, against a file system that keeps every write in memory: the bytes the Confirm will write, or its own
+    // words for why not. What it stamps as the file's version is the file's need.
+    const dry = dryRunFs(fs);
+    let result;
+    try {
+      result = writeTriggers({ triggersPath: paths.triggersPath, mutate, expect, fs: dry, now, ...triggersTables });
+    } catch (error) {
+      return refuse(`the change could not be checked (${typeof error?.code === "string" ? error.code : "error"}); nothing was changed`);
+    }
+    if (result?.invalid) return refuse(`rejected: ${result.invalid}`, result.newer ? 409 : 400);
+    const afterText = dry.files.get(paths.triggersPath);
+    const afterDoc = JSON.parse(afterText);
+    const nextEntry = afterDoc.triggers[body.index];
+    // By value, key by key: a reorder alone moves nothing a job reads, and the writer's own formatting is not a change.
+    const touched = CARD_FIELDS.filter((key) => !same(entry.run[key], nextEntry.run[key]));
+    if (touched.length === 0) return { unchanged: `${row} already says this.` };
+
+    let facts = null;
+    let unjudged = [];
+    if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
+      facts = modelFacts({ paths, env, fs });
+      if (facts.refusal) return facts;
+      const judged = judgeModels({ entry: nextEntry, text: afterText, facts });
+      if (judged.refusal) return judged;
+      unjudged = judged.unjudged;
+    }
+
+    // Undo: the keys it touched, as the file held them. A key the file held as null is the one value `null` cannot say (it
+    // means delete), and a trigger the same judgement would refuse today is one this page would refuse to put back, so each of
+    // those is said by hand rather than offered as a button that refuses.
+    const afterDigest = triggerEntryDigest(nextEntry);
+    const heldNull = touched.find((key) => entry.run[key] === null);
+    const backRefused = heldNull === undefined && touched.some((key) => MODEL_OR_CAP.includes(key)) ? judgeModels({ entry, text: beforeText, facts }).refusal ?? null : null;
+    let inverse = null;
+    if (heldNull === undefined && backRefused === null) {
+      const fields = Object.fromEntries(touched.map((key) => [key, entry.run[key] ?? null]));
+      const replayed = { ...nextEntry.run };
+      for (const [key, value] of Object.entries(fields)) {
+        if (value === null) delete replayed[key];
+        else replayed[key] = value;
+      }
+      inverse = { action: "trigger-environment-edit", body: { index: body.index, pageDigest: afterDigest, ...fields, ...(same(Object.keys(replayed), Object.keys(entry.run)) ? {} : { keyOrder: Object.keys(entry.run) }) } };
+    }
+    const undo = inverse !== null ? `Put ${row} back as it was` : heldNull !== undefined ? `Edit ${row} back by hand: the file held run.${heldNull} as null, which this page cannot write` : `Edit ${row} back by hand: this page would refuse what it said before. ${backRefused}`;
+
+    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key], nextEntry.run[key], facts) }));
+    const need = {
+      triggersVersion: Number.isSafeInteger(afterDoc.version) ? afterDoc.version : 1,
+      // Over what the loader keeps of each trigger, doctor's count: a `run` key it drops reaches no job, so it needs nothing.
+      jobDataVersion: parseTriggers(afterText, paths.triggersPath, triggersTables).reduce((most, trigger) => Math.max(most, jobDataVersionFor(trigger?.run, jobDataTables)), 1),
+    };
+    const stamped = need.triggersVersion > (Number.isSafeInteger(doc.version) ? doc.version : 1);
+    return { body, expect, row, beforeText, afterText, mutate, dry, changes, unjudged, undo, inverse, need, stamped };
+  }
+
+  /**
+   * Each live host against the proposed file's need (#761, `INT-HOST-REGISTRY-CONTRACT`). Refuses on a lower version, on none
+   * (a worker from before the field drops a key it does not know, which for a narrowing runs the job wider on a clean record),
+   * and on a registry it cannot read, since "unknown" is not "every host reads it". Nothing is read while the need is 1: every
+   * release reads that, and a Valkey blink must not refuse an edit that needs nothing of it.
+   */
+  async function versionGate(need) {
+    const wanted = Object.entries(need).filter(([, version]) => version > 1);
+    if (wanted.length === 0) return { hosts: null };
+    let read;
+    try {
+      read = await readHosts();
+    } catch {
+      read = null;
+    }
+    if (!Array.isArray(read?.hosts)) return refuse("The live hosts could not be read, so nothing says each reads what this change needs. Nothing was written; try again.", 503);
+    const hosts = read.hosts.filter((host) => typeof host?.name === "string");
+    const silent = hosts.filter((host) => wanted.some(([field]) => host[field] === undefined || host[field] === null || host[field] === ""));
+    const older = hosts.filter((host) => !silent.includes(host) && wanted.some(([field, version]) => !(Number.isSafeInteger(Number(host[field])) && Number(host[field]) >= version)));
+    if (silent.length > 0 || older.length > 0) {
+      const what = wanted.map(([field, version]) => `${field === "triggersVersion" ? "the triggers file" : "the job data"} at version ${version}`).join(" and ");
+      const parts = [older.length ? `${listed(older.map((host) => host.name))} ${older.length === 1 ? "reads" : "read"} less, and would hold every job this file touches` : "", silent.length ? `${listed(silent.map((host) => host.name))} ${silent.length === 1 ? "publishes" : "publish"} no version, and would drop what ${silent.length === 1 ? "it does" : "they do"} not know, which can run a job wider on a clean record` : ""].filter(Boolean);
+      return refuse(`This change needs ${what}. ${parts.join("; ")}. Upgrade ${silent.length + older.length === 1 ? "that host" : "those hosts"} first.`, 409);
+    }
+    return { hosts: hosts.map((host) => host.name) };
+  }
+
+  /** The jobs in line this file would refuse, on the proposed entry. A slow queue costs the sentence, never the preview. */
+  async function jobsRefused(index, dry) {
+    let timer;
+    try {
+      const late = new Promise((resolve) => {
+        timer = setTimeout(resolve, jobsReadMs, { rows: [], incomplete: true });
+      });
+      return (await Promise.race([Promise.resolve().then(() => readSkew(index, dry)), late])) ?? { rows: [], incomplete: true };
+    } catch {
+      return { rows: [], incomplete: true };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function skewLines({ rows = [], incomplete = false }) {
+    const lines = [];
+    if (rows.length > 0) {
+      const said = rows.slice(0, SKEW_NAMED_MAX).map((row) => (row.conditions ? `${row.jobId} as wait-skew (its wait conditions)` : `${row.jobId} as trigger-skew (run.${row.field})`));
+      const more = rows.length - said.length;
+      lines.push(`With this change, ${rows.length} of this trigger's jobs in line ${rows.length === 1 ? "is" : "are"} refused before ${rows.length === 1 ? "it spends" : "they spend"}: ${said.join(", ")}${more > 0 ? ` and ${more} more` : ""}. Re-run ${rows.length === 1 ? "it" : "each"} from its page.`);
+    }
+    if (incomplete) lines.push("The jobs in line could not all be read, so any of them may also be refused as trigger-skew.");
+    return lines;
+  }
+
+  async function preview(body, ctx) {
+    if (!authority(ctx)) return denied;
+    const judged = judge(body);
+    if (judged.refusal || judged.unchanged) return judged;
+    const gate = await versionGate(judged.need);
+    if (gate.refusal) return gate;
+    const { row, changes, undo, inverse, unjudged } = judged;
+    const added = changes.flatMap((change) => change.addedServers ?? []);
+    // `forge` is the job's own forge and its own token (DES-FORGE-MCP), in no overlay, so no host lacks it and no host publishes it.
+    const servers = added.filter((name) => name !== "forge");
+    let hosts = [];
+    if (servers.length > 0) {
+      try {
+        hosts = (await readHostLoads())?.hosts ?? [];
+      } catch {
+        hosts = [];
+      }
+    }
+    const reach = [...servers.map((name) => serverReach(name, hosts)), ...(added.includes("forge") ? ["connect to the job's own forge server"] : [])];
+    const said = changes.map((change) => (change.addedServers?.length > 0 ? { ...change, widening: `This widens what its jobs reach: those that start after this ${reach.join(" and ")}.` } : change));
+    const skew = await jobsRefused(judged.body.index, judged.dry);
+    const lines = [
+      ...said.flatMap((change) => [change.line, ...(change.widening ? [change.widening] : [])]),
+      "New deliveries use this. Jobs already in line keep what they were queued with.",
+      ...skewLines(skew),
+      ...(judged.stamped ? [`Stamps the file version ${judged.need.triggersVersion}: a host reading less waits on every trigger's jobs, not only this one's.`] : []),
+      ...(gate.hosts === null ? [] : [gate.hosts.length > 0 ? `${listed(gate.hosts)} ${gate.hosts.length === 1 ? "reads" : "each read"} what this change needs.` : "No host is live right now, so no host's release could be checked."]),
+      ...servers.map((name) => `A job on a host without ${name}, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid.${hosts.length > 0 ? ` ${serverHosts(name, hosts)}.` : " No host has published which servers it has."}`),
+      ...(unjudged.length > 0 ? [`The first call on ${listed(unjudged)} could not be bounded here, so the runner judges it when a job runs.`] : []),
+      `Written to ${basename(paths.triggersPath)} and audited as trigger-edit, by ${typeof ctx.name === "string" && ctx.name !== "" ? ctx.name : "the operator"} at the console.`,
+    ];
+    return {
+      target: paths.triggersPath,
+      expect: judged.expect,
+      beforeText: judged.beforeText,
+      afterText: judged.afterText,
+      summary: [`Change ${row}`, ...lines],
+      plan: { index: judged.body.index, row, changes: said.map(({ key, line, widening }) => ({ key, line, ...(widening ? { widening } : {}) })), skew: { rows: skew.rows ?? [], incomplete: skew.incomplete === true }, need: judged.need, undo, inverse },
+      payload: { body: structuredClone(judged.body) },
+      // The file's, for the audit row (INT-CONSOLE-AUDIT-LOG): not `triggerEntryDigest`, which is one entry's.
+      beforeDigest: sha(judged.beforeText),
+      afterDigest: sha(judged.afterText),
+    };
+  }
+
+  async function apply(entry, ctx) {
+    if (!authority(ctx)) return { invalid: denied.refusal };
+    if (!entry?.payload?.body) return { invalid: "This confirmation holds no change; preview it again." };
+    const judged = judge(entry.payload.body);
+    if (judged.refusal) return { invalid: judged.refusal };
+    if (judged.unchanged) return { invalid: judged.unchanged };
+    const gate = await versionGate(judged.need);
+    if (gate.refusal) return { invalid: gate.refusal };
+    // The preview's snapshot, not this judgement's: `expect` is what says nothing moved between the two.
+    return writeTriggers({ triggersPath: paths.triggersPath, mutate: judged.mutate, expect: Array.isArray(entry.expect) ? entry.expect : judged.expect, fs, now, ...triggersTables });
+  }
+
+  return { preview, apply };
+}

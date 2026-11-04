@@ -10,9 +10,44 @@
  * PI-FREE, `write-plans.mjs`' rule, and held by the same walk: the console is a separate process that never loads pi.
  */
 import * as nodeFs from "node:fs";
+import { createHash } from "node:crypto";
 import { parseBackendList } from "@edgehero/pi-dispatch/backends";
 import { recoverVenueProblem, validateModelRef, validateProgressFlags, validateRecoverFlag, validateSteerFlag } from "@edgehero/pi-dispatch/triggers";
 import { readTriggers, triggerVenue, writeInputs } from "./read-model.mjs";
+
+/**
+ * The fields of a trigger's `run` a person edits on its page, named once: the action's `fields`, the planner's sweep and the
+ * card's form all read this list. It lives here rather than beside the planner so the action table, which tools reach, can
+ * name them without importing the planner. Image, secrets and `skillsDir` are not here: they change where they do today.
+ */
+export const CARD_FIELDS = Object.freeze(["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools"]);
+
+/**
+ * Every key `trigger-environment-edit` takes: which row, what the page saw (`pageDigest`), the fields, and the key order an
+ * Undo puts back (`keyOrder`, which only an Undo sends).
+ */
+export const TRIGGER_ENVIRONMENT_EDIT_FIELDS = Object.freeze(["index", "pageDigest", ...CARD_FIELDS, "keyOrder"]);
+
+/**
+ * What a page proves it saw: the sha256 of one raw entry as the file holds it. Captured when the page draws its form and
+ * compared at the preview, because the Confirm's own `expect` starts at the preview and says nothing of the minutes a person
+ * spent on the page before it. Of the ENTRY, not the file: an edit of another trigger, or the worker's disarm of another
+ * one-shot, is no reason to send a person back. It covers the entry's prompt and secret references, so a page draws it only
+ * into an operator's form.
+ */
+export function triggerEntryDigest(entry) {
+  return createHash("sha256").update(JSON.stringify(entry)).digest("hex");
+}
+
+/** The digest of the entry at `index` as the file holds it now, or null when there is none, for a page to draw. */
+export function readTriggerEntryDigest({ triggersPath, index, fs = nodeFs }) {
+  try {
+    const entry = JSON.parse(fs.readFileSync(triggersPath, "utf8"))?.triggers?.[index];
+    return entry === undefined ? null : triggerEntryDigest(entry);
+  } catch {
+    return null;
+  }
+}
 
 /** A trimmed non-empty string, or undefined (so a blank optional field drops out of the written JSON). */
 export function optStr(x) {
