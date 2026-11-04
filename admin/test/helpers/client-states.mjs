@@ -39,7 +39,7 @@ export const T = Object.freeze({
   signIn: "sign-in: what needs the script is revealed, a refusal shows its one notice, the ended notice gives way, an older attempt's answer does nothing, and a post that reaches nothing keeps the page and retries every 2 s",
   signInStops: "a sign-in or a link that reaches nothing stops after 30 posts or 60 s, judged before each post goes out: nothing more is sent, the token or code is dropped, and the stop notice says so",
   getsBar: "what a trigger's jobs get: each change moves the bar's count and its words, a row is marked, and a change set back as it was drawn leaves the bar hidden",
-  getsBody: "what a trigger's jobs get sends the digest the page drew and only what differs from what it drew, with null for a key a blank box or an emptied list removes",
+  getsBody: "what a trigger's jobs get sends the digest the page drew and only what differs from what it drew, with null for a key a blank box, an emptied list or the packages switch turned back on removes",
   getsDiscard: "what a trigger's jobs get: Discard is the form's reset, the bar goes, and a preview of what was discarded closes with it",
   getsMoveCloses: "what a trigger's jobs get: any move of a control closes an open preview and takes its Confirm away, because it no longer says what the form says",
   getsNothing: "what a trigger's jobs get: a name already on a list is no change, Enter with no change asks the server and reads its answer, and a refusal goes in the slot and under no field",

@@ -613,3 +613,32 @@ test("a person's page keeps one editor for each key and says where the rows went
   assert.ok(!invalid.includes("are in What its jobs get."), "no card, so nothing points at one");
   assert.ok(invalid.includes("run.flow"));
 });
+
+test("turning the staged packages on over a file's false is planned, takes the key away, and its Undo puts the file back", async () => {
+  const entry = { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, packages: false } };
+  const dir = tempDir("pd-800-gets-");
+  const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), projectsFile: null, globalPiDir: join(dir, "overlay") };
+  nodeFs.writeFileSync(paths.triggersPath, getsFile(entry));
+  nodeFs.writeFileSync(paths.settingsFile, "{}");
+  nodeFs.mkdirSync(paths.globalPiDir);
+  const service = createTriggerEnvironmentActions({ paths, env: { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-5-5", ...GETS_HOST_ENV }, now: () => NOW, deploymentDir: dir });
+  const before = nodeFs.readFileSync(paths.triggersPath, "utf8");
+  const w = runConsoleScript(CONSOLE_SCRIPT, await triggerGetsPage({ entry }));
+  const form = w.document.querySelector('form[data-action="trigger-environment-edit"]');
+  const packages = form.querySelector('[data-gets-flag="packages"]');
+  assert.equal(packages.checked, false, "the file says false");
+  packages.checked = true;
+  packages.dispatchEvent(new Event("change", { bubbles: true }));
+  w.submit(form);
+  const body = w.fetch.calls.at(-1).body;
+  assert.equal(body.packages, null);
+  const operator = { surface: "console", role: "operator", name: "ops" };
+  const planned = await service.preview(body, operator);
+  assert.ok(planned.plan, JSON.stringify(planned));
+  assert.deepEqual(planned.plan.changes.map((change) => change.key), ["packages"]);
+  assert.deepEqual(await service.apply(planned, operator), { ok: true });
+  assert.equal(Object.hasOwn(JSON.parse(nodeFs.readFileSync(paths.triggersPath, "utf8")).triggers[2].run, "packages"), false, "the key is gone, not written true");
+  const undone = await service.preview(planned.plan.inverse.body, operator);
+  assert.deepEqual(await service.apply(undone, operator), { ok: true });
+  assert.equal(nodeFs.readFileSync(paths.triggersPath, "utf8"), before, "byte for byte");
+});
