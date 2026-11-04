@@ -67,7 +67,7 @@ Every page, panel, state and write of the console has a place here.
 | `/run`: what the run loaded, from its record: pi and its image, the model, extensions, skills and where each came from, MCP servers, tools, and what failed to load (#800, part 1; a trigger's last run comes with part 2) | Run loaded, Loaded states |
 | `/run` for durable runs: continues as, recovery facts, checkpoints, replayed, interrupted and not started calls, earlier attempts, replicas, stalled re-pick | Run recovered |
 | `/run` on OpenShell: sandbox policy, rule hosts, secret bundle variables, shadowed names, bundle skipped, cost floor and settled basis, per-model usage, resources, chain | Run in a sandbox |
-| `/run` for a viewer: numbers and tool names only, the operator-only sentences | Run as a viewer, Access states |
+| `/run` for a viewer: numbers, tool names, and what the run loaded (package names, versions and the image), with the operator-only sentences held back | Run as a viewer, Access states |
 | `/parked`: waiting, being answered, unknown, the answer and its reserve | Run parked, Parked on a phone, Approval request, Parked with an answer rule |
 | `/runs/sandboxes` (#771, #754): operator-only kept workspaces and live shells, native terminal handoff, fresh preparation, pin and End with preview/Confirm, Fleet target settings, and separately enrolled browser attachment | Sandboxes |
 | Separate gateway `/s/<intent>` and console `/sandbox/gateway/authorize` (#754): fresh same-session sign-in, existing-container attachment, phone/no-script fallback and exceptional states | Sandbox terminal, Sandbox gateway sign-in, Sandbox gateway states, Sandbox terminal for a run (proposed) |

@@ -201,7 +201,7 @@ updates by itself ([updates](docs/console.md#updates)).
 **Projects:** group your repositories into a project, with its own limits, share of the budget and history, and see
 [what its runs loaded](#what-a-job-gets) on each machine ([projects](docs/projects.md), [budget split](docs/allocation.md)).
 
-![One project: what it has spent, its runs of the last day, what its runs loaded on each machine and where they differ, its members and its limits](docs/images/console/console-project.png?v=2026-11-04-800)
+![One project: what it has spent, its runs of the last day, what its runs loaded on each machine and where they differ, its members and its limits](docs/images/console/console-project.png?v=2026-11-04-800b)
 
 **A trigger:** what starts it, what it runs and what it has cost. A schedule also gets a button that fires it now
 ([triggers](docs/triggers.md)).
@@ -258,9 +258,9 @@ can check a job you did not watch before you accept its work.
 its flow**, and one with an extension that failed to load reads **Completed, with a failed extension**. The Runs list says the
 same, so it does not read as fine. A project's page says when its runs differ from machine to machine.
 
-**What the list holds:** the names of what you set up, the tools those brought, and counts. It keeps no text from an issue, which a
+**What the list holds:** the names of what you set up, the tools those brought, and how many of everything else. It keeps no text from an issue, which a
 stranger may have written, and a repository's own skills and extensions are only counted: to see them, open the repository. A run that
-ended before it could report, or one from an older release, says its list was not recorded ([what its top line can say, and what to do](docs/console.md#what-a-run-loaded)).
+ended before it could report, or one from an older release, says its list was not recorded ([what the card can say, and what to do](docs/console.md#what-a-run-loaded)).
 
 ## How to use it
 
@@ -306,6 +306,8 @@ happening ends it sooner. After that, you need your token or a new link, which `
 | **Container** | The sealed box a job runs in, thrown away afterwards |
 | **Forge** | The place your code lives: GitHub, GitLab, Forgejo or Azure DevOps |
 | **Repository** | A project's code and its history, on a forge or in a folder (a "git repository") |
+| **Base commit** | The version of a repository a job started from |
+| **Staged** | Set up on a machine, ready for its jobs to load |
 | **Pull request** | A proposed change to a repository, for a person to review |
 | **Merge** | Accepting a pull request into the project. pi-dispatch never does this |
 | **Issue**, **label** | A note about work to do on a forge, and a tag you can put on it |

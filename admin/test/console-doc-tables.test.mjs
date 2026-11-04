@@ -120,6 +120,7 @@ test("each row of that table says what to do on the page its line's own buttons 
   const failed = rows.get("extension-failed");
   assert.doesNotMatch(`${failed.says} ${failed.todo}`.replace("pi's error text is not", ""), /error/i);
   assert.match(failed.says, /`load`, `conflict` or `manifest-dir`/);
+  assert.match(failed.says, /`overlay_extensions_withheld` with a `reason` and a `root`/, "the failure that logs neither a path nor a kind");
   // A difference's fix is on the host behind, so the row says the line offers it, and the line does: a button per host, each by name.
   assert.match(rows.get("host-differs").todo, /A button opens each: the host that has it and each that lacks it, by name/);
   assert.deepEqual(loadedVerdict(S.hostDiffers(), HOST_LOADS).fixes.map((fix) => fix.label), ["Open build3", "Open mini1"]);
