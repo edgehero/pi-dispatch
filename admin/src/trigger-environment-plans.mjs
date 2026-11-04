@@ -25,7 +25,7 @@ import * as nodeFs from "node:fs";
 import { basename } from "node:path";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
 import { jobDataVersionFor } from "@edgehero/pi-dispatch/job-data-version";
-import { boundModelOf, builtinChatModels as catalogChatModels, builtinModel as catalogModel, checkModelsKnown as catalogCheck, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
+import { FIRST_CALL_SHORT_TASK_BYTES, boundModelOf, builtinChatModels as catalogChatModels, builtinModel as catalogModel, checkModelsKnown as catalogCheck, firstCallBoundMicros, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
 import { readOverlayModels } from "@edgehero/pi-dispatch/model-endpoints";
 import { RADIUS_COST_CAP_FIX, RADIUS_COST_CAP_LABEL } from "@edgehero/pi-dispatch/model-observation";
 import { modelOnList, splitModelEntry } from "@edgehero/pi-dispatch/model-ref";
@@ -239,8 +239,9 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
 
   /**
    * What a job of this entry would call under the deployment's cap (issue #800): judged only when the edit sends a model field
-   * or the cap, so an edit of the flow is never refused over a pairing the person did not touch. A cap below what a call needs
-   * would refuse every call before it is sent, inside a paid container, so it is refused here for free. `facts` is read once.
+   * or the cap, so an edit of the flow is never refused over a pairing the person did not touch. A cap below what any call needs
+   * would refuse every call before it is sent, inside a paid container, so it is refused here for free, and one that clears
+   * only the smallest possible request is said out loud (`thin`). `facts` is read once.
    */
   function judgeModels({ entry, text, facts }) {
     const run = entry.run;
@@ -251,7 +252,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       } catch (error) {
         return refuse(String(error?.message ?? error));
       }
-      // Never "raise the cap": a trigger cannot, so the sentence says who can move it. The worker runs the smaller of the two,
+      // Never "raise the deployment's cap": a trigger cannot, so the sentence says who can move it. The worker runs the smaller of the two,
       // so a value above reads as allowing more than it does, and above the env's it refuses the whole file at load.
       if (asked > facts.ceiling) return refuse(`A trigger's job cap can only lower the deployment's: ${money(asked)} is above its ${money(facts.ceiling)}. Set ${money(facts.ceiling)} or less here, or remove this trigger's cap to run under the deployment's. The deployment's own cap belongs to its settings, not to this page.`);
     }
@@ -275,6 +276,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const resolved = collectModelPolicies({ entries: [entry], modelRoles: roles, projects, deployment: facts.deployment, envList: facts.envList, resolveFolder: (path) => fs.realpathSync(path) });
     if (resolved.checks.length > 0) return refuse(`This trigger's model could not be resolved (${resolved.checks[0].reason}): every job would be refused before it spends. Correct its model or its role.`);
     const unjudged = new Set();
+    const thin = new Set();
     for (const job of resolved.runs) {
       const main = { provider: job.provider, id: job.model };
       const mainName = `${main.provider}/${main.id}`;
@@ -299,20 +301,25 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
         const view = outputCapView({ models: readOverlayDoc(), provider: ref.provider, modelId: ref.id, builtinModel, builtinChatModels });
         if (view?.api === "pi-messages" || (view?.api === undefined && ref.provider === "radius")) return refuse(`${name}: ${RADIUS_COST_CAP_LABEL}. ${RADIUS_COST_CAP_FIX}.`);
         if (outputUnboundable(view)) return refuse(`${name}'s output cap travels as max_completion_tokens to a server that may ignore it, so the runner counts every call to it unboundable and refuses it under a job cap. Set "compat": { "maxTokensField": "max_tokens" } on it in models.json, or choose another model: docs/egress.md, "Local model servers".`);
-        const floor = firstCallFloorMicros(boundModelOf(ref, { builtinModel, overlay: readOverlayDoc() }));
+        const priced = boundModelOf(ref, { builtinModel, overlay: readOverlayDoc() });
+        const floor = firstCallFloorMicros(priced);
         if (floor === null) {
           unjudged.add(name);
           continue;
         }
-        if (floor <= cap) continue;
-        // "At least", because the bound is a lower one: the runner's own adds the whole request (`firstCallFloorMicros`).
-        const common = `${name} needs at least ${money(floor)} for one call`;
-        const refused = "so the runner would refuse every call to it before it is sent";
-        if (facts.ceiling !== null && floor > facts.ceiling) return refuse(`${common}, above the deployment's ${money(facts.ceiling)} job cap, ${refused}. A trigger can only lower that cap: choose another model. The deployment's own cap belongs to its settings, not to this page.`);
-        return refuse(`${common}, above this trigger's ${money(cap)} job cap, ${refused}. Choose another model, or a job cap of at least that amount.`);
+        // The amount a person is told is a short task's, never the floor's: a cap at the floor admits a request no job sends,
+        // so it would read as the answer and refuse every real job. The floor only decides which of the two this is: below
+        // it nothing can be sent at all, and between the two a job small enough might be.
+        const shortTask = firstCallBoundMicros(priced, FIRST_CALL_SHORT_TASK_BYTES);
+        if (shortTask <= cap) continue;
+        const room = facts.ceiling === null || shortTask <= facts.ceiling;
+        const out = room ? `Choose another model, or a job cap of at least ${money(shortTask)}; a longer task needs more.` : "A trigger can only lower the deployment's job cap: choose another model. The deployment's own cap belongs to its settings, not to this page.";
+        // "At least", because the bound is a lower one for any task longer than that: it grows with the whole request.
+        if (floor > cap) return refuse(`${name} needs at least ${money(shortTask)} for a short task's first call, above ${room ? "this trigger's" : "the deployment's"} ${money(room ? cap : facts.ceiling)} job cap, so the runner would refuse every call to it before it is sent. ${out}`);
+        thin.add(`${name} clears this ${money(cap)} job cap only for the smallest first call: a short task's needs ${money(shortTask)}, so most jobs that call it would be refused before they spend. ${out}`);
       }
     }
-    return { unjudged: [...unjudged] };
+    return { unjudged: [...unjudged], thin: [...thin] };
   }
 
   /**
@@ -389,12 +396,14 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
 
     let facts = null;
     let unjudged = [];
+    let thin = [];
     if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
       facts = modelFacts({ paths, env, fs });
       if (facts.refusal) return facts;
       const judged = judgeModels({ entry: nextEntry, text: afterText, facts });
       if (judged.refusal) return judged;
       unjudged = judged.unjudged;
+      thin = judged.thin;
     }
 
     // Undo: the keys it touched, as the file held them. A key the file held as null is the one value `null` cannot say (it
@@ -422,7 +431,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       jobDataVersion: parseTriggers(afterText, paths.triggersPath, triggersTables).reduce((most, trigger) => Math.max(most, jobDataVersionFor(trigger?.run, jobDataTables)), 1),
     };
     const stamped = need.triggersVersion > (Number.isSafeInteger(doc.version) ? doc.version : 1);
-    return { body, expect, row, beforeText, afterText, mutate, dry, changes, unjudged, undo, inverse, need, stamped };
+    return { body, expect, row, beforeText, afterText, mutate, dry, changes, unjudged, thin, undo, inverse, need, stamped };
   }
 
   /**
@@ -484,7 +493,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     if (judged.refusal || judged.unchanged) return judged;
     const gate = await versionGate(judged.need);
     if (gate.refusal) return gate;
-    const { row, changes, undo, inverse, unjudged } = judged;
+    const { row, changes, undo, inverse, unjudged, thin } = judged;
     const added = changes.flatMap((change) => change.addedServers ?? []);
     // `forge` is the job's own forge and its own token (DES-FORGE-MCP), in no overlay, so no host lacks it and no host publishes it.
     const servers = added.filter((name) => name !== "forge");
@@ -501,6 +510,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const skew = await jobsRefused(judged.body.index, judged.dry);
     const lines = [
       ...said.flatMap((change) => [change.line, ...(change.widening ? [change.widening] : [])]),
+      ...thin,
       "New deliveries use this. Jobs already in line keep what they were queued with.",
       ...skewLines(skew),
       ...(judged.stamped ? [`Stamps the file version ${judged.need.triggersVersion}: a host reading less waits on every trigger's jobs, not only this one's.`] : []),

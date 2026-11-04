@@ -7,6 +7,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
+import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
+import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
+import { createCostGuard } from "../../image/runner/src/usage-meter.mjs";
 import { createFleetReader, readTriggerSkew } from "../src/read-model.mjs";
 import { CARD_FIELDS, readTriggerEntryDigest, triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
@@ -14,9 +17,9 @@ import { doneBannerHtml } from "../src/console/confirm-view.mjs";
 
 const NOW = Date.parse("2026-11-04T12:00:00Z");
 const operator = { surface: "console", role: "operator", name: "ops" };
-const HAIKU = "anthropic/claude-haiku-4-5"; // first call $0.33536 at the pin
-const SONNET = "anthropic/claude-sonnet-5-5"; // $1.31072
-const OPUS = "anthropic/claude-opus-5-5"; // $2.62144
+const HAIKU = "anthropic/claude-haiku-4-5"; // a short task's first call: $0.343574 at the pin
+const SONNET = "anthropic/claude-sonnet-5-5"; // $1.327148
+const OPUS = "anthropic/claude-opus-5-5"; // $2.654295, and its floor $2.62144
 
 const comment = (run = {}) => ({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", ...run } });
 const cron = { on: { type: "cron", id: "daily", pattern: "0 6 * * *" }, run: { kind: "local", folder: "/nowhere", flow: "tidy", task: "PRIVATE TASK" } };
@@ -308,7 +311,7 @@ test("the Confirm re-judges a cap the deployment moved after the preview", async
   nodeFs.writeFileSync(f.paths.settingsFile, JSON.stringify({ maxCostUsd: "2" }));
   const before = f.read();
   const res = await f.service.apply(out, operator);
-  assert.match(res.invalid, /claude-opus-5-5 needs at least \$2\.62144/);
+  assert.match(res.invalid, /claude-opus-5-5 needs at least \$2\.654295/);
   assert.equal(f.read(), before);
 });
 
@@ -446,7 +449,7 @@ test("a trigger this page would refuse today has no button back: its Undo says w
   const f = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", maxCostUsd: "2" } });
   const out = await write(f, { model: "claude-haiku-4-5" });
   assert.equal(out.plan.inverse, null);
-  assert.match(out.plan.undo, /^Edit trigger row 2 back by hand: this page would refuse what it said before\. anthropic\/claude-opus-5-5 needs at least \$2\.62144/);
+  assert.match(out.plan.undo, /^Edit trigger row 2 back by hand: this page would refuse what it said before\. anthropic\/claude-opus-5-5 needs at least \$2\.654295/);
 });
 
 test("an edit no change would not judge the state it leaves behind: an Undo of the flow keeps its button", async () => {
@@ -464,11 +467,11 @@ test("the widest undo a person can make still fits the session's flash, so its b
 
 // ---- the first call ---------------------------------------------------------------------------------------------------
 
-test("a cap below what the first call needs refuses with the amount the console prints, naming the trigger's own cap", async () => {
+test("a cap below what any call needs refuses with a short task's amount, naming the trigger's own cap", async () => {
   const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "5" } });
   const before = f.read();
   const out = await refusal(f, { model: "claude-opus-5-5", maxCostUsd: "2" });
-  assert.equal(out.refusal, "anthropic/claude-opus-5-5 needs at least $2.62144 for one call, above this trigger's $2.00 job cap, so the runner would refuse every call to it before it is sent. Choose another model, or a job cap of at least that amount.");
+  assert.equal(out.refusal, "anthropic/claude-opus-5-5 needs at least $2.654295 for a short task's first call, above this trigger's $2.00 job cap, so the runner would refuse every call to it before it is sent. Choose another model, or a job cap of at least $2.654295; a longer task needs more.");
   assert.equal(out.status, 400);
   assert.equal(f.read(), before);
 });
@@ -476,11 +479,51 @@ test("a cap below what the first call needs refuses with the amount the console 
 test("under the deployment's cap the way out is another model or its settings, never this page, and never raising it here", async () => {
   const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "2" } });
   const out = await refusal(f, { model: "claude-opus-5-5" });
-  assert.equal(out.refusal, "anthropic/claude-opus-5-5 needs at least $2.62144 for one call, above the deployment's $2.00 job cap, so the runner would refuse every call to it before it is sent. A trigger can only lower that cap: choose another model. The deployment's own cap belongs to its settings, not to this page.");
+  assert.equal(out.refusal, "anthropic/claude-opus-5-5 needs at least $2.654295 for a short task's first call, above the deployment's $2.00 job cap, so the runner would refuse every call to it before it is sent. A trigger can only lower the deployment's job cap: choose another model. The deployment's own cap belongs to its settings, not to this page.");
   assert.doesNotMatch(out.refusal, /raise/i);
   // A trigger cap below that deployment cap reads the same, since no cap this trigger could set would let the call through.
   const lower = await refusal(f, { model: "claude-opus-5-5", maxCostUsd: "1" });
   assert.match(lower.refusal, /above the deployment's \$2\.00 job cap/);
+});
+
+const contextOf = (bytes) => ({ systemPrompt: "x".repeat(bytes - JSON.stringify({ systemPrompt: "" }).length) });
+const admits = (capMicros, model, bytes) => createCostGuard({ capMicros, env: {}, log: () => {} }).admit({ method: "streamSimple", model, args: [contextOf(bytes), {}] }) === null;
+
+for (const [provider, id] of [["anthropic", "claude-opus-5-5"], ["anthropic", "claude-sonnet-5-5"], ["anthropic", "claude-haiku-4-5"], ["openai", "gpt-5.5"]]) {
+  test(`the amount offered for ${provider}/${id} admits a short task's first call on the real guard, and a cap at it reads clean`, async () => {
+    const f = fixture();
+    const out = await refusal(f, { provider, model: id, maxCostUsd: "0.01" });
+    const printed = /a job cap of at least \$([0-9.]+);/.exec(out.refusal)[1];
+    const model = builtinModel(provider, id);
+    const cap = parseUsdMicros(printed, "printed");
+    assert.equal(admits(cap, model, FIRST_CALL_SHORT_TASK_BYTES), true, "the amount a person is told admits the request");
+    assert.equal(admits(cap, model, 4465), true);
+    assert.equal(admits(cap - 1, model, FIRST_CALL_SHORT_TASK_BYTES), false, "and it is the least that does");
+    const clean = await f.service.preview(ask(f, { provider, model: id, maxCostUsd: printed }), operator);
+    assert.ok(clean.plan, JSON.stringify(clean));
+    assert.ok(!clean.summary.some((line) => line.includes("only for the smallest first call")), clean.summary.join("\n"));
+    // Why the floor is no answer: it admits a request smaller than any job sends, and neither of the two a job does.
+    const floor = firstCallFloorMicros(model);
+    assert.equal(admits(floor, model, 4096), true);
+    assert.equal(admits(floor, model, 4465), false, "a job's smallest first call");
+    assert.equal(admits(floor, model, FIRST_CALL_SHORT_TASK_BYTES), false, "a short task's");
+  });
+}
+
+test("a cap that clears the floor and not a short task previews, with a warning that most jobs would be refused before they spend", async () => {
+  const f = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5" } });
+  const out = await f.service.preview(ask(f, { maxCostUsd: "2.62144" }), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.ok(out.summary.includes("anthropic/claude-opus-5-5 clears this $2.62144 job cap only for the smallest first call: a short task's needs $2.654295, so most jobs that call it would be refused before they spend. Choose another model, or a job cap of at least $2.654295; a longer task needs more."), out.summary.join("\n"));
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true }, "a warning, not a refusal: the person has read it");
+  // Under a deployment's cap no value here clears it, and the warning says so instead of offering one.
+  const held = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5" }, settings: { maxCostUsd: "2.63" } });
+  const said = await held.service.preview(ask(held, { flow: "review", model: "claude-opus-5-5", provider: "anthropic" }), operator);
+  assert.ok(said.summary.includes("anthropic/claude-opus-5-5 clears this $2.63 job cap only for the smallest first call: a short task's needs $2.654295, so most jobs that call it would be refused before they spend. A trigger can only lower the deployment's job cap: choose another model. The deployment's own cap belongs to its settings, not to this page."), said.summary.join("\n"));
+  // A listed model that only just fits is said too, and one that fits is not.
+  const listed = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } });
+  const both = await listed.service.preview(ask(listed, { models: [HAIKU, OPUS], maxCostUsd: "2.63" }), operator);
+  assert.deepEqual(both.summary.filter((line) => line.includes("only for the smallest first call")).map((line) => line.split(" ")[0]), [OPUS]);
 });
 
 test("a raise above the deployment's cap refuses in words that say a trigger can only lower it", async () => {
@@ -510,8 +553,8 @@ test("a cap set only in the env is the deployment's cap for a job's first call a
 test("with no deployment cap a trigger's is a narrowing of nothing: any amount is taken, and the first call is judged against it", async () => {
   const f = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5" } });
   assert.ok((await f.service.preview(ask(f, { maxCostUsd: "900" }), operator)).plan);
-  assert.ok((await f.service.preview(ask(f, { maxCostUsd: "2.62144" }), operator)).plan, "exactly the bound fits");
-  assert.match((await refusal(f, { maxCostUsd: "2.62143" })).refusal, /needs at least \$2\.62144/);
+  assert.ok((await f.service.preview(ask(f, { maxCostUsd: "2.62144" }), operator)).plan, "exactly the floor is not refused");
+  assert.match((await refusal(f, { maxCostUsd: "2.62143" })).refusal, /needs at least \$2\.654295/, "a micro-dollar under it is");
 });
 
 test("the bound is judged only when the edit sends a model field or the cap", async () => {
@@ -524,7 +567,7 @@ test("the bound is judged only when the edit sends a model field or the cap", as
   for (const change of [{ model: "claude-opus-5-5", maxCostUsd: "1" }, { maxCostUsd: "1" }, { models: [OPUS] }, { fallbackModels: [OPUS], models: [OPUS, HAIKU] }, { provider: "anthropic", model: "claude-opus-5-5" }]) {
     const f = fixture({ run: { ...run, maxCostUsd: "1" } });
     const out = await f.service.preview(ask(f, change), operator);
-    assert.match(out.refusal ?? out.unchanged ?? "", /needs at least \$2\.62144|already says this/, JSON.stringify(change));
+    assert.match(out.refusal ?? out.unchanged ?? "", /needs at least \$2\.654295|already says this/, JSON.stringify(change));
   }
   const bad = fixture({ run: { model: "claude-opus-5-5", maxCostUsd: "2" } });
   assert.match((await refusal(bad, { provider: "anthropic" })).refusal, /needs at least/, "the provider alone is a model field");

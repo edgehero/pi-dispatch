@@ -309,6 +309,12 @@ export const FIRST_CALL_OVERHEAD_TOKENS = 8192;
  * a short task. 4,096 is below both, so the bound below stays a lower bound for a job that adds nothing.
  */
 export const FIRST_CALL_MIN_CONTEXT_BYTES = 4096;
+/**
+ * What PR #542's lab measured a short task's first request at, in bytes. A cap at the floor above admits a request nobody
+ * sends: the same default prompt and tools alone come to 4,465 bytes. So this, not the floor, is the least a person can be
+ * told to set. A job that loads more, or a longer task, needs more still.
+ */
+export const FIRST_CALL_SHORT_TASK_BYTES = 10_667;
 
 /**
  * A LOWER BOUND, in integer micro-dollars, on what the runner's cost guard (`callCostBound`) reserves for a job's
@@ -325,13 +331,22 @@ export const FIRST_CALL_MIN_CONTEXT_BYTES = 4096;
  * retention). Null for a table or limit it cannot read.
  */
 export function firstCallFloorMicros(model) {
+	return firstCallBoundMicros(model, FIRST_CALL_MIN_CONTEXT_BYTES);
+}
+
+/**
+ * The bound `firstCallFloorMicros` describes, for a request of `contextBytes` serialised, or null when this cannot say. At
+ * `FIRST_CALL_SHORT_TASK_BYTES` it is what a short task's first call needs from the guard. Held equal to the runner's own bound
+ * at that size, for every builtin chat model, by `fleet-dollars.test.mjs`.
+ */
+export function firstCallBoundMicros(model, contextBytes) {
 	const cost = model?.cost;
 	const usable = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 	if (!cost || !["input", "output", "cacheRead", "cacheWrite"].every((field) => usable(cost[field]))) return null;
 	const maxTokens = model.maxTokens;
 	if (!(typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0)) return null;
 	const inputRate = Math.max(cost.input, cost.cacheRead, cost.cacheWrite);
-	return Math.ceil(((FIRST_CALL_OVERHEAD_TOKENS + FIRST_CALL_MIN_CONTEXT_BYTES) * inputRate + maxTokens * cost.output) * serviceTierMultiplier(model));
+	return Math.ceil(((FIRST_CALL_OVERHEAD_TOKENS + contextBytes) * inputRate + maxTokens * cost.output) * serviceTierMultiplier(model));
 }
 
 /**

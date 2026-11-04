@@ -136,6 +136,24 @@ test("the first-call bound lives in the catalog, and doctor's exports are the sa
 	assert.equal(FIRST_CALL_MIN_CONTEXT_BYTES, catalog.FIRST_CALL_MIN_CONTEXT_BYTES);
 });
 
+test("a short task's first-call bound is the runner's own at that size, for every builtin chat model it can bound", () => {
+	const bytes = catalog.FIRST_CALL_SHORT_TASK_BYTES;
+	const context = { systemPrompt: "x".repeat(bytes - JSON.stringify({ systemPrompt: "" }).length) };
+	assert.equal(Buffer.byteLength(JSON.stringify(context)), bytes);
+	let judged = 0;
+	for (const provider of getBuiltinProviders()) {
+		for (const model of getBuiltinModels(provider)) {
+			const said = catalog.firstCallBoundMicros(model, bytes);
+			const bound = callCostBound("streamSimple", model, context, {}, {});
+			if (said === null || bound === Infinity) continue;
+			judged += 1;
+			assert.equal(said, bound, `${provider}/${model.id}`);
+		}
+	}
+	assert.ok(judged > 100, `the walk reached the catalog (${judged})`);
+	assert.equal(firstCallFloorMicros({ cost: { input: 5, output: 20, cacheRead: 1, cacheWrite: 1 }, maxTokens: 10 }), catalog.firstCallBoundMicros({ cost: { input: 5, output: 20, cacheRead: 1, cacheWrite: 1 }, maxTokens: 10 }, FIRST_CALL_MIN_CONTEXT_BYTES));
+});
+
 test("the doctor floor keeps the runner's overhead, and stays a lower bound of the runner's own bound for every builtin chat model", () => {
 	assert.equal(FIRST_CALL_OVERHEAD_TOKENS, BOUND_OVERHEAD_TOKENS, "the copy in model-catalog.mjs follows the runner's constant");
 	// A request of exactly FIRST_CALL_MIN_CONTEXT_BYTES serialised: the floor may never exceed what the guard reserves for it.
