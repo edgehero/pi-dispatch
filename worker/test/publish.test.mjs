@@ -131,6 +131,15 @@ test("receiver package.json: scoped name, publishable (no private), files list, 
 	assert.ok(pkg.repository?.directory === "receiver" && pkg.license === "MIT" && pkg.description && pkg.keywords?.length, "registry metadata present");
 });
 
+test("admin package.json: scoped name, publishable (no private)", () => {
+	// Issue #813: release.yml skips a private package's publish and release, and only the gateway's group reads the flag.
+	// Set here, it would skip nothing: npm would refuse the publish and fail the run. Forbidden all the same, as for the
+	// worker and the receiver, so the flag can mean "held back" in one workspace only.
+	const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "admin", "package.json"), "utf8"));
+	assert.equal(pkg.name, "@edgehero/pi-dispatch-admin");
+	assert.ok(!("private" in pkg), "private:true would make npm publish refuse");
+});
+
 test("receiver's caret worker range actually SATISFIES the in-repo worker version", () => {
 	// The test above pins the range's SHAPE and nothing else, which is how this nearly shipped broken:
 	// on a 0.x version `^0.1.0` means `>=0.1.0 <0.2.0`, so bumping the worker to 0.2.0 and leaving the

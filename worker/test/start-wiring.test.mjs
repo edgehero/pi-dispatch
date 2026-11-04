@@ -11,6 +11,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs";
 import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inventory.mjs";
 import { hookRunsKey, HOOK_HOSTS } from "../src/hook-runs.mjs";
+import { makeTouchStore } from "../src/touch-state.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -35,6 +36,11 @@ const skip = !mod
 	: process.env.VALKEY_TEST_URL
 		? false
 		: "needs VALKEY_TEST_URL (startWorker connects for real; a dead URL hangs rather than fails)";
+// The same rule, ENFORCED rather than only written (issue #813): `runStart` refuses to boot without VALKEY_TEST_URL, so
+// a booting test gated only on the module (`skipNoModule`) fails at once with these words. Written only, the rule was
+// missed by thirteen tests, and each run of the suite without a Valkey hung in them (the release workflow's, six hours
+// a run, until the job limit cancelled it).
+const NO_VALKEY_BOOT = "this test boots startWorker, which needs VALKEY_TEST_URL: gate it with { skip }, never skipNoModule alone (start-wiring.test.mjs's header, issue #813)";
 
 // The Valkey these tests actually reach. `startWorker` connects for real here -- the fakes stop at docker,
 // not at the queue -- so a URL pointing at nothing does not fail, it HANGS: BullMQ's connections carry
@@ -328,6 +334,18 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 			// Issue #645: the durable-run seams (makeWorkspaceCheckpointer, loadRunCheckpoint, makeRunBudgetLedger,
 			// makeRecoveryEnqueuer, sweepOrphanJobDirs), handed through whole.
 			...durable,
+			// THE GATE, ENFORCED (issue #813). Here, because every refusal a refusal-only test drives comes before this
+			// factory, and it is the first one after them that no try surrounds (the reapers between are caught and logged,
+			// and the boot goes on). A boot without VALKEY_TEST_URL stops here, before any queue exists. The shared client is
+			// built by then, so the guard disconnects it itself: nothing has reached `createWorkerFn` yet, and the teardown
+			// below has no client to release. After `...durable`, so a test's own makeTouchStore is wrapped too.
+			makeTouchStore: (options) => {
+				if (!process.env.VALKEY_TEST_URL) {
+					options.redis.disconnect();
+					throw new Error(NO_VALKEY_BOOT);
+				}
+				return (durable.makeTouchStore ?? makeTouchStore)(options);
+			},
 			...(listRunningSandboxes ? { listRunningSandboxes } : {}),
 			...(extraBackends ? { extraBackends } : {}),
 			...(loadConfig ? { loadConfig } : {}),
@@ -397,7 +415,9 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 		// Production deliberately keeps the durable inventory after shutdown. This fixture must remove only its
 		// own publication, after its publisher closes, or repeated boots fill the bounded fleet's first 64 hosts.
 		// The resolved name matters here: an undeclared worker still publishes under its default host name.
-		if (env.PI_WORKER_NAME || captured?.name) {
+		// Only with VALKEY_TEST_URL: without it nothing reached a Valkey (the refusal above), and a sweep against a URL
+		// nothing answers would hang the teardown the refusal exists to end.
+		if (process.env.VALKEY_TEST_URL && (env.PI_WORKER_NAME || captured?.name)) {
 			const { makeRedisClient } = await import("../src/connection.mjs");
 			// Copy the judged client's pinned URL, connector and context, auth, database and TLS options. The
 			// ambient name may intentionally not resolve: boot already replaced it with the verified endpoint.
@@ -2764,7 +2784,7 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 
 // ── issue #712: the worker's own doctor runs ─────────────────────────────────────────────────────────
 
-test("the look stays off until PI_UPDATES_LOOK=1, and the reconcile asks a free question before it starts anything (issue #796)", async () => {
+test("the look stays off until PI_UPDATES_LOOK=1, and the reconcile asks a free question before it starts anything (issue #796)", { skip }, async () => {
 	const seen = [];
 	const runner = (args) => {
 		const handle = { args, started: false, start() { handle.started = true; }, runOnce: async () => {}, close: async () => {} };
@@ -3580,7 +3600,7 @@ test("with a floor, a context switched AFTER boot refuses the next job before it
 const DOCKER_FACTS = (over = {}) => async () => ({ answered: true, facts: { shape: "docker", podman: false, os: "Test Linux", rootless: false, userns: false, bounds: { pids: true, memory: true }, serviceIsRemote: null, remoteSocketPath: null, ...over } });
 const LINUX_ID = (euid, egid = euid) => ({ platform: "linux", release: "6.8.0-test", euid, egid });
 
-test("a rootless daemon or a root worker refuses to BOOT when local is the default venue, tagged, before anything is built", { skip: skipNoModule }, async () => {
+test("a rootless daemon or a root worker refuses to BOOT when local is the default venue, tagged, before anything is built", { skip }, async () => {
 	for (const [label, readDaemonFacts, jobUserIdentity, pattern] of [
 		["rootless", DOCKER_FACTS({ rootless: true }), LINUX_ID(1234), /runs rootless/],
 		["userns-remap", DOCKER_FACTS({ userns: true }), LINUX_ID(1234), /userns-remap/],
@@ -4453,7 +4473,7 @@ test("a podman default whose image lacks anyUid is said at boot, with the venue 
 	assert.ok(!localDefault.logs.some((l) => l.event === "job_image_any_uid_unsupported" && l.backend === "podman"));
 });
 
-test("a podman default refuses to BOOT on every identity cause, tagged, before anything is built; merely blessed it boots (#354)", { skip: skipNoModule }, async () => {
+test("a podman default refuses to BOOT on every identity cause, tagged, before anything is built; merely blessed it boots (#354)", { skip }, async () => {
 	for (const [label, readPodmanInfo, jobUserIdentity, pattern] of [
 		["rootful", PODMAN_INFO({ rootless: false }), PODMAN_ID, /podman is not rootless for this account/],
 		["remote", PODMAN_INFO({ serviceIsRemote: true }), PODMAN_ID, /through a remote service/],
@@ -4496,7 +4516,7 @@ test("a podman default refuses to BOOT on every identity cause, tagged, before a
 	assert.deepEqual([slowStarted.podmanVersion, slowStarted.podmanRootless, slowStarted.podmanBoundsDelegated], [null, null, null]);
 });
 
-test("a podman default whose account's containers.conf widens a job refuses to BOOT, tagged, before anything is built; merely blessed it boots (#428)", { skip: skipNoModule }, async () => {
+test("a podman default whose account's containers.conf widens a job refuses to BOOT, tagged, before anything is built; merely blessed it boots (#428)", { skip }, async () => {
 	const widened = (_key, text) => hostFiles({ "/home/pdjob/.config/containers/mounts.conf": "", "/home/pdjob/.config/containers/containers.conf": text });
 	const auth = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
 	for (const [key, text] of [
@@ -4558,7 +4578,7 @@ const withLiveNetns = (argv) => {
 	return { ...PODMAN_FILES, readFileSync: (p) => (Object.hasOwn(proc, p) ? proc[p] : PODMAN_FILES.readFileSync(p)), readdirSync: (p) => (p === "/proc" ? ["self", "4887"] : PODMAN_FILES.readdirSync(p)) };
 };
 
-test("a podman default whose rootless network still carries a removed key's option refuses to BOOT, tagged; merely blessed each job is refused (#450)", { skip: skipNoModule }, async () => {
+test("a podman default whose rootless network still carries a removed key's option refuses to BOOT, tagged; merely blessed each job is refused (#450)", { skip }, async () => {
 	const auth = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
 	const order = [];
 	await assert.rejects(
@@ -4596,7 +4616,7 @@ test("podmanConfBootRefusal: only while podman is the default venue and its iden
 	assert.equal(mod.podmanConfBootRefusal(worker, "podman", { ...files, fs: NO_HOST_FILES }), null, "a clean account boots");
 });
 
-test("local's observation preflight retries a host file read that failed for a moment, naming the file (#428)", { skip: skipNoModule }, async () => {
+test("local's observation preflight retries a host file read that failed for a moment, naming the file (#428)", { skip }, async () => {
 	// Boots clean, then the hooks directory starts failing with EMFILE, as a host running out of descriptors would.
 	let failing = false;
 	const base = hostFiles({ "/etc/containers/mounts.conf": "" });
@@ -5078,7 +5098,7 @@ const rootfulHost = (files, errors = {}) => ({
 });
 const ROOTFUL_AUTH = { makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() };
 
-test("a local default on rootful Podman whose containers.conf sets a refused key refuses to BOOT, tagged, before anything is built (#448)", { skip: skipNoModule }, async () => {
+test("a local default on rootful Podman whose containers.conf sets a refused key refuses to BOOT, tagged, before anything is built (#448)", { skip }, async () => {
 	for (const [key, text] of [
 		["annotations", '[containers]\nannotations = ["run.oci.keep_original_groups=1"]\n'],
 		["env", '[containers]\nenv = ["PD_X=1"]\n'],
@@ -5117,7 +5137,7 @@ test("a local default on rootful Podman whose containers.conf sets a refused key
 	);
 });
 
-test("rootful Podman merely blessed: the worker boots, and each local job is refused pre-spend as podman-conf-widens-job, rootful (#448)", { skip: skipNoModule }, async () => {
+test("rootful Podman merely blessed: the worker boots, and each local job is refused pre-spend as podman-conf-widens-job, rootful (#448)", { skip }, async () => {
 	// Root's own conf, which the rootless podman venue's account does not read, so only local's check sees it.
 	const files = rootfulHost({ "/home/pdjob/.config/containers/mounts.conf": "", [PODMAN_USER_MANAGER]: "cpuset cpu io memory pids\n", "/root/.config/containers/containers.conf": '[containers]\nenv = ["PD_X=rootuser"]\n' });
 	const { logs, captured } = await runStart({ env: { PI_BACKENDS: "podman,local" }, readPodmanInfo: PODMAN_INFO(), readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: PODMAN_ID, observationFs: files, ...ROOTFUL_AUTH });
@@ -5130,7 +5150,7 @@ test("rootful Podman merely blessed: the worker boots, and each local job is ref
 	assert.equal(podmanJob.podmanConfRefused, undefined);
 });
 
-test("what the worker cannot read of rootful Podman's chain is logged by name at boot and never refused (#448)", { skip: skipNoModule }, async () => {
+test("what the worker cannot read of rootful Podman's chain is logged by name at boot and never refused (#448)", { skip }, async () => {
 	const errors = { "/root/.config/containers/containers.conf": "EACCES", "/root/.config/containers/containers.conf.d": "EACCES" };
 	const files = rootfulHost({}, errors);
 	const { logs, captured } = await runStart({ readDaemonFacts: ROOTFUL_FACTS, jobUserIdentity: LINUX_ID(1234), observationFs: files, ...ROOTFUL_AUTH });
@@ -5146,7 +5166,7 @@ test("what the worker cannot read of rootful Podman's chain is logged by name at
 	assert.deepEqual(parseLines(bootLines.slice(before)).filter((l) => l.event === "local_podman_conf_unread").map((l) => l.unread), ["/root/.config/containers/containers.conf (EACCES)"], "said again once it changes");
 });
 
-test("Docker, a remote endpoint and rootless Podman read no rootful file and never ask systemctl: byte-unchanged (#448)", { skip: skipNoModule }, async () => {
+test("Docker, a remote endpoint and rootless Podman read no rootful file and never ask systemctl: byte-unchanged (#448)", { skip }, async () => {
 	const asked = [];
 	const readPodmanService = async () => (asked.push("systemctl"), { read: true, loaded: true, running: true, startedAtMs: 0, environment: {}, environmentFiles: [], unitPaths: [] });
 	const reads = [];
@@ -5168,7 +5188,7 @@ test("Docker, a remote endpoint and rootless Podman read no rootful file and nev
 	}
 });
 
-test("podman.service is read once per boot and once per job, and that one answer judges both mountSet and the refusal (#448)", { skip: skipNoModule }, async () => {
+test("podman.service is read once per boot and once per job, and that one answer judges both mountSet and the refusal (#448)", { skip }, async () => {
 	let reads = 0;
 	// Running since t=500; /etc/containers/containers.conf changed at t=1000 (rootfulHost's change time): stale.
 	const readPodmanService = async () => (reads++, await RUNNING_PODMAN_SERVICE(500)());
@@ -5184,7 +5204,7 @@ test("podman.service is read once per boot and once per job, and that one answer
 	assert.equal(parseLines(bootLines.slice(before)).find((l) => l.event === "runtime_observed"), undefined, "and per job, the same answer, so nothing changed to say");
 });
 
-test("per job, the two rootful checks read each host path once, and the next job reads it afresh (#448)", { skip: skipNoModule }, async () => {
+test("per job, the two rootful checks read each host path once, and the next job reads it afresh (#448)", { skip }, async () => {
 	// Gate round 3 of PR #473: with 1000 drop-ins each path was stat-ed about eight times a job (onceFs, one per job).
 	const counts = new Map();
 	const base = rootfulHost({ "/etc/containers/mounts.conf": "", "/etc/containers/containers.conf": "[containers]\n" });
@@ -5202,7 +5222,7 @@ test("per job, the two rootful checks read each host path once, and the next job
 	assert.equal(counts.get("readFileSync /etc/containers/containers.conf"), 1, "the next job reads it afresh");
 });
 
-test("per job: a service older than its conf, and a chain file deleted under the running service, are retries; a 0600 drop-in refuses (#448)", { skip: skipNoModule }, async () => {
+test("per job: a service older than its conf, and a chain file deleted under the running service, are retries; a 0600 drop-in refuses (#448)", { skip }, async () => {
 	const files = { "/etc/containers/containers.conf": "[containers]\n" };
 	const host = {
 		statSync: (p) => (Object.hasOwn(files, p) ? { size: 0, ctimeMs: 100 } : (() => { throw enoent(p); })()),
@@ -6726,7 +6746,7 @@ test("issue #761: a stale record at a higher attempt on either side hides no fai
 
 // Issue #645's PR: a BullMQ queue closed while its connection's INFO is pending rejected unhandled inside BullMQ (CI,
 // the boot that refuses right after making the reconcile queue). The close now waits for the start to settle first.
-test("closeQueueSettled waits for the queue's start before closing, and never throws", { skip }, async () => {
+test("closeQueueSettled waits for the queue's start before closing, and never throws", { skip: skipNoModule }, async () => {
 	const { closeQueueSettled } = await import("../src/start.mjs");
 	const order = [];
 	await closeQueueSettled({ waitUntilReady: async () => void order.push("ready"), close: async () => void order.push("close") });
@@ -6748,7 +6768,7 @@ test("closeQueueSettled waits for the queue's start before closing, and never th
 });
 
 // Issue #664: the long-lived queues' own close waits for their start to settle, in place (the closer list names them).
-test("settleCloseOf routes a queue's close through its start, in place and once", { skip }, async () => {
+test("settleCloseOf routes a queue's close through its start, in place and once", { skip: skipNoModule }, async () => {
 	const { settleCloseOf } = await import("../src/start.mjs");
 	const order = [];
 	const q = { waitUntilReady: async () => void order.push("ready"), close: async () => void order.push("close") };
@@ -6763,6 +6783,283 @@ test("settleCloseOf routes a queue's close through its start, in place and once"
 	await failing.close();
 	assert.deepEqual(order, ["ready", "close"], "a failed start still closes");
 	assert.equal(settleCloseOf(null), null);
+});
+
+// Issue #813: both waits are bounded. A long-lived queue's start never settles when nothing answers VALKEY_URL (BullMQ's
+// waitUntilReady resolves on `ready` and rejects only on `end`), and the unbounded wait hung release.yml's suite for six
+// hours in this file's teardown. The two closes, each as its callers reach it.
+const QUEUE_CLOSES = [
+	["closeQueueSettled", (queue, options) => mod.closeQueueSettled(queue, options)],
+	["settleCloseOf", (queue, options) => mod.settleCloseOf(queue, options).close()],
+];
+/** One turn of the event loop: every microtask the last timer released has run. `setImmediate` is not mocked here. */
+const loopTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a queue whose start never settles is closed once QUEUE_CLOSE_BOUND_MS has passed, not before and not never (issue #813)", { skip: skipNoModule }, async (t) => {
+	assert.equal(mod.QUEUE_CLOSE_BOUND_MS, 5_000, "the backend registry refusal's own bound for the same handles");
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	for (const [label, closeOf] of QUEUE_CLOSES) {
+		const order = [];
+		const queue = { waitUntilReady: () => new Promise(() => {}), close: async () => void order.push("close"), disconnect: () => order.push("disconnect") };
+		void closeOf(queue).then(() => order.push("returned"));
+		await loopTurn();
+		t.mock.timers.tick(mod.QUEUE_CLOSE_BOUND_MS - 1);
+		await loopTurn();
+		assert.deepEqual(order, [], `${label}: still waiting for the start a millisecond before the bound`);
+		t.mock.timers.tick(1);
+		await loopTurn();
+		// BullMQ's close of a connection still starting is what disconnects it, so a close that ended needs no disconnect.
+		assert.deepEqual(order, ["close", "returned"], `${label}: closed once the bound passed, and the close returned`);
+	}
+});
+
+test("a start that settles inside the bound is closed after it, and neither bound's timer outlives its wait (#664's order, issue #813)", { skip: skipNoModule }, async () => {
+	// The timers are REF'D (a close may be awaited where nothing else holds the loop), so a leftover one would hold the
+	// process for the full bound after every close. Counted through async_hooks, as the settleWithin test above counts,
+	// and only timers of this test's own bound, so another test's leftover activity cannot be counted against it.
+	const { createHook } = await import("node:async_hooks");
+	const boundMs = 4_321;
+	const seen = new Set();
+	const live = new Set();
+	const hook = createHook({
+		init(asyncId, type, _trigger, resource) {
+			if (type !== "Timeout" || resource?._idleTimeout !== boundMs) return;
+			seen.add(asyncId);
+			live.add(asyncId);
+		},
+		destroy(asyncId) {
+			live.delete(asyncId);
+		},
+	});
+	hook.enable();
+	try {
+		for (const [label, closeOf] of QUEUE_CLOSES) {
+			const order = [];
+			const queue = {
+				waitUntilReady: () => new Promise((resolve) => setImmediate(() => (order.push("ready"), resolve()))),
+				close: async () => (order.push("close"), "closed"),
+				disconnect: () => order.push("disconnect"),
+			};
+			const answer = await closeOf(queue, { boundMs });
+			assert.deepEqual(order, ["ready", "close"], `${label}: the close waits for the start, then runs, and nothing is disconnected`);
+			if (label === "settleCloseOf") assert.equal(answer, "closed", "the queue's own close answers, as it did before the bound");
+		}
+		const rejecting = mod.settleCloseOf({ waitUntilReady: async () => {}, close: async () => { throw new Error("close refused"); } }, { boundMs });
+		await assert.rejects(rejecting.close(), /close refused/, "settleCloseOf keeps a close's own rejection when it settles in time");
+		await loopTurn();
+		await loopTurn();
+		assert.ok(seen.size >= 6, `each close armed a timer of its bound for each step (${seen.size} seen)`);
+		assert.deepEqual([...live], [], "every one of them was cleared when its wait settled");
+	} finally {
+		hook.disable();
+	}
+});
+
+test("the bound's timer holds a process that nothing else holds, so a close awaited there still happens (issue #813)", { skip: skipNoModule }, async () => {
+	// A refused boot drains to its exit code with nothing else holding the loop, and so does a test's teardown. An
+	// unref'd timer, as `settleWithin` arms, never fires there: node abandons the pending await (exit 13 for a module's
+	// top-level await) and the queue is never closed. A bare child process is the only place that shows the difference.
+	const { spawnSync } = await import("node:child_process");
+	const start = new URL("../src/start.mjs", import.meta.url).href;
+	const code = `const { closeQueueSettled } = await import(${JSON.stringify(start)}); await closeQueueSettled({ waitUntilReady: () => new Promise(() => {}), close: async () => console.log("closed") }, { boundMs: 20 }); console.log("returned");`;
+	const child = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", timeout: 30_000 });
+	assert.equal(child.stdout, "closed\nreturned\n", child.stderr);
+	assert.equal(child.status, 0, child.stderr);
+});
+
+test("a close that never settles ends in the queue's disconnect once the bound has passed, its rejection observed (issue #813)", { skip: skipNoModule }, async (t) => {
+	// A queue whose connection came up closes by sending QUIT and awaiting the reply, which a server that stopped
+	// answering never sends (measured through a stalling proxy, the backend registry refusal's comment). BullMQ's
+	// disconnect awaits the start, so it is not awaited, and its rejection must not surface as an unhandled one.
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	for (const [label, closeOf] of QUEUE_CLOSES) {
+		const order = [];
+		const queue = {
+			waitUntilReady: async () => void order.push("ready"),
+			close: () => (order.push("close"), new Promise(() => {})),
+			disconnect: () => (order.push("disconnect"), Promise.reject(new Error("Connection is closed."))),
+		};
+		void closeOf(queue).then(() => order.push("returned"));
+		await loopTurn();
+		assert.deepEqual(order, ["ready", "close"], `${label}: the start settled at once, so the close runs at once`);
+		t.mock.timers.tick(mod.QUEUE_CLOSE_BOUND_MS - 1);
+		await loopTurn();
+		assert.deepEqual(order, ["ready", "close"], `${label}: still waiting for the close a millisecond before the bound`);
+		t.mock.timers.tick(1);
+		await loopTurn();
+		assert.deepEqual(order, ["ready", "close", "disconnect", "returned"], `${label}: disconnected once the bound passed, and returned`);
+	}
+});
+
+test("a worker's stop() finishes when a queue it closes never starts and never closes (issue #813)", { skip: skipNoModule }, async () => {
+	// The real createWorker, against a port nothing listens on, as wiring.test.mjs drives it: its own Workers close at
+	// once (a connection still starting is disconnected), and the closer is a queue whose start and close never settle,
+	// through the same settled close start.mjs installs on the runtime queue. Unbounded, this stop never returned, and a
+	// worker told to stop with nothing answering VALKEY_URL waited for its supervisor's kill.
+	const { createWorker } = await import("../src/index.mjs");
+	const { parseConnection } = await import("../src/connection.mjs");
+	const beforeTerm = new Set(process.listeners("SIGTERM"));
+	const beforeInt = new Set(process.listeners("SIGINT"));
+	const order = [];
+	const queue = mod.settleCloseOf(
+		{ waitUntilReady: () => new Promise(() => {}), close: () => (order.push("queue.close"), new Promise(() => {})), disconnect: () => order.push("queue.disconnect") },
+		{ boundMs: 20 },
+	);
+	let worker;
+	let fuse;
+	try {
+		worker = createWorker({
+			connection: parseConnection("redis://127.0.0.1:1"),
+			concurrency: 1,
+			getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+			redis: { disconnect: () => order.push("redis") },
+			deps: {},
+			stopContainer: async () => {},
+			extraClosers: [queue],
+		});
+		worker.on("error", () => {});
+		// Raced against a generous ref'd fuse, so an unbounded close FAILS here rather than leaving the file pending.
+		const stopped = await Promise.race([worker.stop().then(() => true), new Promise((resolve) => (fuse = setTimeout(resolve, 10_000, false)))]);
+		assert.equal(stopped, true, "stop() returned");
+		assert.deepEqual(order, ["queue.close", "queue.disconnect", "redis"], "the queue was closed, then disconnected at its bound, and the shared client released last");
+	} finally {
+		clearTimeout(fuse);
+		for (const l of process.listeners("SIGTERM")) if (!beforeTerm.has(l)) process.removeListener("SIGTERM", l);
+		for (const l of process.listeners("SIGINT")) if (!beforeInt.has(l)) process.removeListener("SIGINT", l);
+	}
+});
+
+test("a close step given its own longer bound outlasts QUEUE_CLOSE_BOUND_MS, and the start still waits only that (issue #813)", { skip: skipNoModule }, async (t) => {
+	// A Worker's close waits for the job it is running. The sandbox control Worker's preparation is aborted by nothing
+	// first, so its close step gets SANDBOX_CONTROL_CLOSE_BOUND_MS, and the two waits together stay inside the 30 s
+	// systemd and launchd give a stop (service.mjs: TimeoutStopSec=30, ExitTimeOut 30).
+	assert.equal(mod.SANDBOX_CONTROL_CLOSE_BOUND_MS, 20_000);
+	assert.ok(mod.QUEUE_CLOSE_BOUND_MS + mod.SANDBOX_CONTROL_CLOSE_BOUND_MS < 30_000, "the start's wait and the close's wait fit a 30 s stop");
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const options = { closeBoundMs: mod.SANDBOX_CONTROL_CLOSE_BOUND_MS };
+	const order = [];
+	let finish;
+	const running = mod.settleCloseOf({ waitUntilReady: async () => {}, close: () => (order.push("close"), new Promise((resolve) => (finish = resolve))), disconnect: () => order.push("disconnect") }, options);
+	void running.close().then((answer) => order.push(`returned ${answer}`));
+	await loopTurn();
+	t.mock.timers.tick(mod.QUEUE_CLOSE_BOUND_MS + 3_000);
+	await loopTurn();
+	assert.deepEqual(order, ["close"], "past the queues' bound the job still runs, and nothing is disconnected");
+	finish("closed");
+	await loopTurn();
+	assert.deepEqual(order, ["close", "returned closed"], "the job finished inside the longer bound, and the close answered with its own value");
+	const cut = [];
+	const stuck = mod.settleCloseOf({ waitUntilReady: async () => {}, close: () => (cut.push("close"), new Promise(() => {})), disconnect: () => cut.push("disconnect") }, options);
+	void stuck.close().then(() => cut.push("returned"));
+	await loopTurn();
+	t.mock.timers.tick(mod.SANDBOX_CONTROL_CLOSE_BOUND_MS - 1);
+	await loopTurn();
+	assert.deepEqual(cut, ["close"], "still waiting a millisecond before its own bound");
+	t.mock.timers.tick(1);
+	await loopTurn();
+	assert.deepEqual(cut, ["close", "disconnect", "returned"], "disconnected at its own bound, as a queue is at the shorter one");
+	const started = [];
+	const unready = mod.settleCloseOf({ waitUntilReady: () => new Promise(() => {}), close: async () => void started.push("close") }, options);
+	void unready.close();
+	await loopTurn();
+	t.mock.timers.tick(mod.QUEUE_CLOSE_BOUND_MS);
+	await loopTurn();
+	assert.deepEqual(started, ["close"], "a start that never settles is still waited for QUEUE_CLOSE_BOUND_MS, no longer");
+});
+
+test("the sandbox control Worker's close waits past QUEUE_CLOSE_BOUND_MS for the preparation it is running (issue #813)", { skip }, async (t) => {
+	// Measured against a real Valkey under the queues' bound: an 8 s preparation's close returned at 5 s with its job
+	// still `active`. The fake stands in for the Worker startSandboxPrepareWorker returns, and its first close is that
+	// running job; the teardown's close after it returns at once.
+	const order = [];
+	let finish;
+	let closes = 0;
+	const control = {
+		waitUntilReady: async () => {},
+		close: () => (order.push("close"), ++closes === 1 ? new Promise((resolve) => (finish = resolve)) : Promise.resolve()),
+		disconnect: () => order.push("disconnect"),
+	};
+	await runStart({
+		env: { VALKEY_URL, PI_SWEEP_INTERVAL_HOURS: "0" },
+		durable: { startSandboxPrepareWorker: () => control },
+		whileRunning: async () => {
+			// setTimeout alone, and only for these few turns: the booted worker's own intervals keep running on real time.
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			try {
+				void control.close().then(() => order.push("returned"));
+				await loopTurn();
+				t.mock.timers.tick(mod.QUEUE_CLOSE_BOUND_MS + 3_000);
+				await loopTurn();
+				assert.deepEqual(order, ["close"], "past the queues' bound the preparation still runs, and nothing is disconnected");
+				finish();
+				await loopTurn();
+				assert.deepEqual(order, ["close", "returned"], "the close returned once the preparation finished");
+			} finally {
+				t.mock.timers.reset();
+			}
+		},
+	});
+	assert.equal(control.close.settled, true, "boot routed the control Worker's close through the settled close");
+	assert.deepEqual(order, ["close", "returned", "close"], "and the teardown closed it through the same close");
+});
+
+test("an error a queue's connection emits after its close has settled is not an unhandled rejection (issue #813)", { skip: skipNoModule }, async () => {
+	// BullMQ's RedisConnection in the two lines that matter: its constructor re-emits the start's rejection as an `error`
+	// on itself, and its close strips every listener first. A close that lands during a connect attempt after a failed
+	// one, on a connection that never became ready, makes the start reject after the close has returned (measured
+	// against a refused port and against a host that drops packets), and the emit found no listener.
+	const { EventEmitter } = await import("node:events");
+	class Connection extends EventEmitter {
+		constructor() {
+			super();
+			this.initializing = new Promise((_resolve, reject) => (this.fail = reject));
+			this.initializing.catch((error) => this.emit("error", error));
+			this.on("error", () => {});
+		}
+		close() {
+			this.removeAllListeners();
+		}
+	}
+	const unhandled = [];
+	const onUnhandled = (reason) => unhandled.push(reason?.message ?? String(reason));
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		for (const [label, closeOf] of QUEUE_CLOSES) {
+			const connection = new Connection();
+			const blockingConnection = new Connection();
+			const queue = { connection, blockingConnection, waitUntilReady: async () => {}, close: async () => (connection.close(), blockingConnection.close()) };
+			await closeOf(queue);
+			connection.fail(new Error(`${label}: connect ETIMEDOUT`));
+			blockingConnection.fail(new Error(`${label}: blocking connect ETIMEDOUT`));
+			await loopTurn();
+			await loopTurn();
+		}
+		assert.deepEqual(unhandled, [], "each start's late rejection met the listener the close left on its connection");
+	} finally {
+		process.removeListener("unhandledRejection", onUnhandled);
+	}
+});
+
+test("runStart refuses a boot without VALKEY_TEST_URL with the rule's own words, before any queue exists (issue #813)", { skip }, async () => {
+	// No lane runs this file without VALKEY_TEST_URL any more, so the guard is driven here by taking the variable away
+	// for one boot. The boot still dials this file's Valkey: VALKEY_URL was read when the file loaded.
+	const { makeQueue } = await import("../src/queue.mjs");
+	const saved = process.env.VALKEY_TEST_URL;
+	const order = [];
+	try {
+		delete process.env.VALKEY_TEST_URL;
+		await assert.rejects(
+			runStart({
+				env: { VALKEY_URL, PI_SWEEP_INTERVAL_HOURS: "0" },
+				order,
+				durable: { makeRuntimeQueue: (...args) => (order.push("queue"), makeQueue(...args)) },
+			}),
+			(error) => error.message === NO_VALKEY_BOOT,
+		);
+		assert.deepEqual(order, [], "refused before the runtime queue and the worker were made");
+	} finally {
+		process.env.VALKEY_TEST_URL = saved;
+	}
 });
 
 test("the registry's caps thunk advertises the profiles this host would resolve, overlay included (#704)", () => {

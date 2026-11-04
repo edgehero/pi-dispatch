@@ -51,6 +51,18 @@ jobs:
     # Manual dispatch may select a branch; publishing still belongs only to the protected main ref.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Issue #813: a hung test once held this job for Actions' own six-hour cap on every push, and nothing could be
+    # published meanwhile. The suite takes minutes; sixty, the contract job's own limit, ends a future hang in an hour.
+    timeout-minutes: 60
+    services:
+      # The contract job's Valkey (pi-upgrade-check.yml), so this run executes the integration tests that skip without
+      # one, as CI does, rather than a smaller suite. Its image is VALKEY_IMAGE, held there by worker/test/valkey-image.test.mjs.
+      valkey:
+        image: valkey/valkey:8.1
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping" --health-interval 10s --health-timeout 3s --health-retries 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,7 +79,16 @@ jobs:
       # The whole suite once, up front, rather than each workspace's tests just before its publish. Simpler —
       # one step instead of four — and stricter: a worker change that breaks receiver's tests should block
       # worker's publish too, and per-workspace gating would have let it through.
+      #
+      # With the contract job's Valkey and REQUIRE flags (issue #813). Without them every integration test skipped here,
+      # and from 2026-10-17 a test that booted the worker anyway hung this step against a URL nothing answered, until the
+      # job limit cancelled the run. The flags turn a skip into a failure, as they do in the contract job.
       - name: Test everything being shipped
+        env:
+          PI_DISPATCH_REQUIRE_LOADER_TESTS: "1"
+          PI_DISPATCH_REQUIRE_WORKER_TESTS: "1"
+          PI_DISPATCH_REQUIRE_RECEIVER_TESTS: "1"
+          VALKEY_TEST_URL: "redis://127.0.0.1:6379"
         run: npm test
 
       # ── @edgehero/pi-dispatch (worker/) ─────────────────────────────────────────────────────────────────
@@ -304,6 +325,12 @@ jobs:
             --notes-file /tmp/notes-admin.md
 
       # The gateway bundles shared worker facts and serves its own terminal assets; it has no console runtime authority.
+      #
+      # A gateway marked `"private": true` is held back: neither published nor released, decided before `npm view` is
+      # asked (npm itself refuses to publish a private package). Issue #813 holds the gateway, never published, this way
+      # until 5.0.0, whose bump removes the flag: otherwise the first passing run of this file would have published it
+      # as 4.3.1 from code that version does not describe. Only this group reads the flag: worker/test/publish.test.mjs
+      # forbids it in the other three, where it would skip a release in silence.
       - name: "gateway: resolve version + decide publish/release"
         id: gateway
         env:
@@ -313,6 +340,11 @@ jobs:
           NAME=$(node -p "require('./gateway/package.json').name")
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          if [ "$(node -p "require('./gateway/package.json').private === true")" = "true" ]; then
+            echo "publish=no" >> "$GITHUB_OUTPUT"; echo "release=no" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$V is private: skip publish and release"
+            exit 0
+          fi
           CODE=0; VIEW=$(npm view "$NAME@$V" version 2>&1) || CODE=$?
           if [ "$CODE" -eq 0 ]; then
             echo "publish=no" >> "$GITHUB_OUTPUT"; echo "$NAME@$V already on npm — skip publish"

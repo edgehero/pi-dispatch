@@ -2363,8 +2363,11 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 		// what a stranded loop leaks is the rest of the list: `registry.close()` is the DEL that keeps a
 		// stopped host from lingering as a ghost peer for its full TTL, and a ghost peer with a stale
 		// `fpCron` is what makes a later `reconcileGated` refuse a legitimate reconcile. The comment above
-		// promised this isolation before the code delivered it (issue #295). It bounds nothing, though: a
-		// closer that never settles still blocks exit, which no closer here does.
+		// promised this isolation before the code delivered it (issue #295). The loop itself bounds nothing:
+		// a closer that never settles still blocks exit, so each closer bounds its own wait. The queues
+		// `start.mjs` hands over did not until issue #813: each one's close waited for a start that never
+		// comes when nothing answers VALKEY_URL, so this stop waited for its supervisor's kill. They now wait
+		// a bounded time for the start and for the close, then disconnect (`closeQueueSettled`, `settleCloseOf`).
 		//
 		// Read LATE and deliberately: `start.mjs` pushes its live-edit watchers into this array AFTER handing
 		// it over, because they are armed after the boot reconcile. Anything here that snapshots or copies

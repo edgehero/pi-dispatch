@@ -68,7 +68,7 @@ test("the actual npm tarball runs standalone with only production dependencies a
 	assert.deepEqual(readdirSync(installed).sort(), ["README.md", "dist", "node_modules", "package.json"]);
 });
 
-test("gateway release gating handles existing versions, a real registry 404 and infrastructure failures without publishing", () => {
+test("gateway release gating handles existing versions, a real registry 404, infrastructure failures and a private package without publishing", () => {
 	const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
 	assert.match(workflow, /release:\n(?:[^\n]*\n)*?    if: github\.ref == 'refs\/heads\/main'/);
 	assert.doesNotMatch(workflow, /pull_request(?:_target)?:/);
@@ -76,15 +76,29 @@ test("gateway release gating handles existing versions, a real registry 404 and 
 	const code = group?.split("        run: |\n")[1]?.split("\n").map((line) => line.startsWith("          ") ? line.slice(10) : line).join("\n");
 	assert.ok(code);
 	const work = tempDir("gateway-release-"), bin = join(work, "bin"); mkdirSync(bin);
-	writeFileSync(join(bin, "npm"), '#!/bin/sh\ncase "$GATEWAY_REGISTRY_CASE" in\nexists) printf "4.3.1\\n"; exit 0;;\nmissing) printf "npm error code E404\\n" >&2; exit 1;;\n*) printf "npm error code ENETUNREACH\\n" >&2; exit 1;;\nesac\n', { mode: 0o755 });
-	writeFileSync(join(bin, "gh"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-	for (const [scenario, expected] of [["exists", "publish=no"], ["missing", "publish=yes"], ["outage", null]]) {
-		const output = join(work, `${scenario}.out`); writeFileSync(output, "");
-		const result = spawnSync("bash", ["-e", "-c", code], { cwd: root, encoding: "utf8", timeout: 10_000, env: { ...process.env, PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, GITHUB_OUTPUT: output, GATEWAY_REGISTRY_CASE: scenario } });
+	// The step reads ./gateway/package.json, so it runs in a folder of its own holding a fixture of that file, never at the
+	// repository root: the checkout's own manifest is private until 5.0.0 (issue #813), and every case would read that.
+	const checkout = join(work, "checkout"); mkdirSync(join(checkout, "gateway"), { recursive: true });
+	const calls = join(work, "calls");
+	writeFileSync(join(bin, "npm"), '#!/bin/sh\necho "npm $*" >> "$GATEWAY_CALLS"\ncase "$GATEWAY_REGISTRY_CASE" in\nexists) printf "4.3.1\\n"; exit 0;;\nmissing) printf "npm error code E404\\n" >&2; exit 1;;\n*) printf "npm error code ENETUNREACH\\n" >&2; exit 1;;\nesac\n', { mode: 0o755 });
+	writeFileSync(join(bin, "gh"), '#!/bin/sh\necho "gh $*" >> "$GATEWAY_CALLS"\nexit 1\n', { mode: 0o755 });
+	// A private package is asked of nothing: the registry case it would meet is the one that would publish. `"private":
+	// false` is not private, so it meets the same case and publishes: only `true` holds a package back.
+	for (const [scenario, expected, extra, registry = scenario] of [["exists", ["publish=no", "release=yes"]], ["missing", ["publish=yes", "release=yes"]], ["outage", null], ["private", ["publish=no", "release=no"], { private: true }, "missing"], ["public", ["publish=yes", "release=yes"], { private: false }, "missing"]]) {
+		writeFileSync(join(checkout, "gateway", "package.json"), JSON.stringify({ name: manifest.name, version: "4.3.1", ...extra }));
+		const output = join(work, `${scenario}.out`); writeFileSync(output, ""); writeFileSync(calls, "");
+		const result = spawnSync("bash", ["-e", "-c", code], { cwd: checkout, encoding: "utf8", timeout: 10_000, env: { ...process.env, PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, GITHUB_OUTPUT: output, GATEWAY_REGISTRY_CASE: registry, GATEWAY_CALLS: calls } });
 		assert.equal(result.status, expected ? 0 : 1, result.stderr);
 		const receipt = readFileSync(output, "utf8");
-		if (expected) assert.ok(receipt.includes(expected), scenario);
+		assert.ok(receipt.includes(`name=${manifest.name}\n`) && receipt.includes("version=4.3.1\n"), `${scenario}: the step reads the fixture`);
+		if (expected) for (const line of expected) assert.ok(receipt.includes(`${line}\n`), `${scenario}: ${line}`);
 		else assert.doesNotMatch(receipt, /publish=yes|release=yes/, "a registry outage is not evidence that publishing is needed");
+		if (scenario === "private") {
+			assert.equal(readFileSync(calls, "utf8"), "", "a private gateway asks neither npm nor GitHub");
+			assert.match(result.stdout, /^::notice::@edgehero\/pi-dispatch-sandbox-gateway@4\.3\.1 is private: skip publish and release$/m);
+		} else {
+			assert.match(readFileSync(calls, "utf8"), /^npm view @edgehero\/pi-dispatch-sandbox-gateway@4\.3\.1 version$/m, `${scenario}: the registry is asked`);
+		}
 	}
 });
 

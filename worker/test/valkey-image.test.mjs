@@ -65,8 +65,8 @@ test("CI's Valkey services name VALKEY_IMAGE, and the smoke script runs the imag
 		}
 	}
 	// Non-vacuous: the three services of pi-upgrade-check.yml (the suite's, the Connections lane's and the image job's
-	// gateway) and podman-conformance.yml's one.
-	assert.deepEqual(images.sort(), ["pi-upgrade-check.yml", "pi-upgrade-check.yml", "pi-upgrade-check.yml", "podman-conformance.yml"]);
+	// gateway), podman-conformance.yml's one and release.yml's suite (issue #813).
+	assert.deepEqual(images.sort(), ["pi-upgrade-check.yml", "pi-upgrade-check.yml", "pi-upgrade-check.yml", "podman-conformance.yml", "release.yml"]);
 	// The image job pulls what the smoke script then runs with --pull=never, both from the constant, in one step.
 	const step = read(".github/workflows/pi-upgrade-check.yml");
 	const pull = `docker pull "$(node --input-type=module -e 'import {VALKEY_IMAGE} from "./worker/src/valkey-auth.mjs"; console.log(VALKEY_IMAGE)')"`;
