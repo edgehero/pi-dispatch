@@ -216,3 +216,14 @@ test("the action's field list is the one field list: every key, once, and the ta
   assert.deepEqual([...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort(), [...PERSON_ONLY].sort());
   assert.equal(ACTIONS.filter((action) => action.name === ACTION).length, 1);
 });
+
+test("the specs' list of the card's fields is CARD_FIELDS, and the audit contract says which kind this action writes", () => {
+  const spec = (name) => readFileSync(new URL(`../../specs/${name}`, import.meta.url), "utf8");
+  for (const name of ["design.md", "requirements.md"]) {
+    const said = /`CARD_FIELDS`: ((?:`[A-Za-z]+`(?:, )?)+)/.exec(spec(name));
+    assert.ok(said, `${name} names the list`);
+    assert.deepEqual([...said[1].matchAll(/`([A-Za-z]+)`/g)].map((m) => m[1]), [...CARD_FIELDS], name);
+  }
+  assert.match(spec("interfaces.md"), new RegExp(`\`${ACTION}\` \\(issue #800, AMENDED 2026-11-04\\) writes \`${actionNamed(ACTION).kind}\``));
+  assert.match(spec("requirements.md"), new RegExp(`\`${ACTION}\` is a free, person-only console action with no tool, audited as \`${actionNamed(ACTION).kind}\``));
+});
