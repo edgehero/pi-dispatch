@@ -85,7 +85,8 @@ default and goes through an allowlist proxy, and the allowed hosts are yours to 
 ## Triggers: what starts a job
 
 Every trigger is one `{ on, run }` entry in a single `triggers.json`. The worker reads it live for cron,
-the receiver reads it live for forge webhooks, and the panel and the web console can edit it. **`on` is what fires it;
+the receiver reads it live for forge webhooks, and the panel and the web console can edit it. What a trigger's jobs may
+spend or reach is changed by a person, on its page in the web console or in the file, never by a tool. **`on` is what fires it;
 `run` is the skill it runs.**
 
 | `on.type` | Fires on | What the agent gets as its task |
@@ -137,7 +138,8 @@ One command puts a live terminal view over the whole deployment:
 
 - **MCP servers, read-only.** A trigger that names MCP servers says so on its row (`[mcp ...]`), and its
   drill-in shows each one as the overlay offers it now: where it runs, how its tools are reached, and the
-  variable names it is handed, or why every job of it would be refused. No tool and no key changes them.
+  variable names it is handed, or why every job of it would be refused. No tool and no panel key changes them: a person
+  switches a trigger's servers on its page in the web console, or in the file.
 - **Status and spend.** Queue and worker state, day, week and month spend meters, a daily token counter,
   and the run history with tokens and cost per job. Each running job shows where it is: its turn, steps done and
   failed, the tool running and for how long, and the phase it reported (or, when its worker has written nothing for
@@ -163,8 +165,9 @@ One command puts a live terminal view over the whole deployment:
 - **Triggers, editable live.** Add, edit and delete triggers without a restart. Drill-ins show what
   fires each one, what it runs and who may fire it. A one-shot shows armed or spent. A spent entry
   stays in the list, matches nothing, and is re-armed when you delete its `on.disarmed` mark from the file.
-  Triggers that run third party code or a custom image carry a badge. Turning either on or off stays an
-  edit to the reviewed `triggers.json`, which neither the console nor a model callable tool makes for you.
+  Triggers that run third party code or a custom image carry a badge. No panel key and no model callable tool turns
+  either on or off. The staged packages are a person's switch on the trigger's page in the web console, or an edit to
+  the reviewed `triggers.json`, and a custom image stays an edit to that file.
   A portfolio manager's cron trigger carries `[portfolio]`: its jobs write the budget split. The trigger tools can
   turn on `progress` (the job gets a `report_progress` tool to name its phases) and `statusComment` (one forge comment
   the worker edits as the run goes, numbers only), and `recover` (a run the worker loses continues from its last
@@ -229,8 +232,8 @@ One command puts a live terminal view over the whole deployment:
   actions. That includes explicit cap decreases, adding ordinary restrictive limit rows and pauses,
   turning existing run flags off, cancellation, failed-job removal and bounded priorities. Scope, size,
   minimums, inherited limits and mixed widening requests stay confirmed. The deployment file and pointer
-  cannot grant this authority. Answers, draft decisions, standing-answer adoption and forge reruns remain
-  person actions. Tool writes are audited as agents; human-confirmed intervention is tracked separately.
+  cannot grant this authority. Answers, draft decisions, standing-answer adoption, forge reruns and what a trigger's jobs may spend or
+  reach remain person actions. Tool writes are audited as agents; human-confirmed intervention is tracked separately.
 - **Paid starts stay bounded.** `dispatch_run`, Fire now and local or cron reruns need explicit valid
   `PI_DISPATCH_RUN_ROOTS` in the pi process environment. Fire now and reruns also require an explicit valid
   `PI_DISPATCH_RUN_PER_HOUR`. `dispatch_run` keeps its default of three starts per hour when that value is
@@ -253,13 +256,13 @@ whole fleet as it changes: an overview of what needs you, what waits and why, an
 deployment that has not run yet, what stands before its first job), every run with filters and what it loaded (a run that
 finished without its flow or with a failed extension says so), one search by
 repository, target or job id, the last 24 hours counted by outcome and paging, a card for each run waiting for an
-answer, spend and insights by range, queues, hosts and schedules, the configuration, what a project's runs load on each host, and its own audit
+answer, spend and insights by range, queues, hosts and schedules, the configuration, what a trigger's jobs get and what a project's runs load on each host, and its own audit
 log, plus `/api/state` as JSON for scripts. It also has Models (roles, fallbacks and canary comparisons), Updates (what jobs run and what is
 newer), Watch (findings from your alerts), Sandboxes (kept workspaces and shells, and what pi can load in one), Zero touch (how often runs needed a person) and
 Setup (a live checklist for a new deployment). It reads through the same code as the panel, so the two never disagree;
 the panel shows the waiting runs too.
-It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue
-and edit the configuration, each previewed (with how to undo it), confirmed and recorded in one audit log that holds
+It can act as well as show: cancel, retry, remove and re-run jobs, answer a parked run, pause the fleet or one queue,
+change what a trigger's jobs get and edit the configuration, each previewed (with how to undo it), confirmed and recorded in one audit log that holds
 the panel's own writes too, and after each change the page names it, who made it and its audit row, with an Undo
 where there is a way back. When `serve` starts it prints how to sign in (the commands that make a token or a one time
 link, never a token), and `pi-dispatch-console link --name <you> --port <n>` prints the link for an SSH tunnel's local
@@ -337,6 +340,12 @@ The [operator console](../docs/console.md#configuration-and-trigger-pages) inclu
 page, a page per trigger and a structured editor for five trigger kinds. Edit and Delete work from each
 row, with a diff, confirmation and Undo. Human row numbers count from 1; tool indexes remain zero-based.
 The editor and its JSON fallback preserve the add tool's secret-bundle opt-out.
+
+**What its jobs get**, on a trigger's page, says what a job of it would start with on each host, a pill per host, and under each row what
+a recent run really had. There a person changes the flow, the provider and model, the job cap, the allowed models and fallbacks, the MCP
+servers, the tools and the all-or-nothing switch for staged packages, with one preview that says each change in words, one Confirm, and
+Undo. A viewer reads the same rows with no controls, an agent's page draws no card, and no tool reaches the action. The file works as it
+always has ([`docs/console.md`](../docs/console.md#what-a-triggers-jobs-get)).
 
 `dispatch_trigger_edit` also takes `maxTurns` and the four run-option flags. `dispatch_trigger_fire(index)`
 shares the console's Fire now planner, reserve and refusals. It fires a served cron trigger after the same fresh folder, committed flow, clean tree and hourly checks
