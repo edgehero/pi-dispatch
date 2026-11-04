@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { stripAnsi } from "../src/style.mjs";
-import { DOCS_ROOT, capitalised, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../src/words.mjs";
+import { DOCS_ROOT, capitalised, listed, HELD_LABEL, NO_EXPLANATION, NO_REASON_FAILED, OUTCOME_KEYS, OUTCOME_KEY_WORDS, RECORD_REASON_RE, docsHref, fieldNamed, OUTCOME_WORDS, OUTCOME_WORD_OF, REASON_WORDS, rowNumber, SHORT_MAX, SPEND_TITLE, STATUS_KINDS, UNNAMED_FIELD, VENUE_LABEL, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../src/words.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { NESTED_REASONS, REASONS, explainReason } from "../../worker/src/reason-catalog.mjs";
 import { RECOVERY_COMMENTS } from "../../worker/src/comment-tables.mjs";
@@ -461,6 +461,13 @@ test("/dispatch runs says the console's words in its OUTCOME column and keeps th
   assert.deepEqual(cells("gh-5").slice(3, 5), ["vapour", "-"], "an outcome this release does not know prints as itself");
   assert.deepEqual(cells("gh-6").slice(3, 5), ["completed", "-"]);
   assert.doesNotMatch(table, /policy/);
+});
+
+test("listed: names in a sentence, in the caller's order, the last after an and", () => {
+  assert.equal(listed([]), "");
+  assert.equal(listed(["a"]), "a");
+  assert.equal(listed(["b", "a"]), "b and a");
+  assert.equal(listed(["c", "a", "b"]), "c, a and b");
 });
 
 test("capitalised: a sentence that opens with a word starts with a capital; one that opens with an id keeps the id as written", () => {

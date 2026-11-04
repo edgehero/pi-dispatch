@@ -112,6 +112,11 @@ export function recordReason(record) {
   return typeof r === "string" && RECORD_REASON_RE.test(r) ? r : null;
 }
 
+/** Names in a sentence: "a", "a and b", "a, b and c". The order is the caller's. */
+export function listed(names) {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
 /**
  * A sentence's first letter in capitals: the planners write theirs in lower case, as the tools' errors read. Only when
  * it opens with a plain word: one that opens with an id (a job id's `gh-2f6a`, a queue's `pi-jobs@build3`, a model's

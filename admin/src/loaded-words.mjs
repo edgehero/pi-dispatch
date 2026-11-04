@@ -52,7 +52,7 @@ import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-r
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { refusedBeforeSpend, repoOfTarget } from "./costs.mjs";
 import { NEWER_RECORD_SENTENCE, fromNewerRelease } from "./newer-release.mjs";
-import { outcomeKey } from "./words.mjs";
+import { listed, outcomeKey } from "./words.mjs";
 
 /** The panel's fixed sentences, exported so a card's ledger can cite each one. */
 export const LOADED_WORDS = Object.freeze({
@@ -130,10 +130,6 @@ export function wordsText(parts) {
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 /** "a", "a and b", "a, b and c". */
-function andList(items) {
-  if (items.length <= 1) return items.join("");
-  return `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
-}
 /** "a", "a, and b", "a, b, and c": the Tools row's own, whose parts are themselves lists. */
 function commaAnd(items) {
   if (items.length <= 1) return items.join("");
@@ -337,14 +333,14 @@ function failedLine(loaded, facts, ran = true) {
   if (rows.length === 0) return { bold: `${plural(failed, "extension")} failed to load.`, rest: joined(wentOn, "This record was cut to fit, so it does not say which."), fixes: [], banner: failedBannerWords(failed, false) };
   if (rows.length > 1) {
     const named = rows.map((source) => `${source.failed} from ${failedTierOf(source, facts).from}${heldBackOrFailed(source) ? ` (${HELD_BACK_WORDS})` : ""}`);
-    return { bold: `${failed} of this run’s extensions failed to load.`, rest: joined(`${andList(named)}.`, wentOn), fixes: fixesOf(...rows.map((source) => failedTierOf(source, facts, loaded.baseSha).fix)), banner: rows.some(heldBackOrFailed) ? `One may have been held back and not failed, and the job’s log says which. The run went on. ${LOADED_WORDS.readFirst}` : failedBannerWords(failed, false) };
+    return { bold: `${failed} of this run’s extensions failed to load.`, rest: joined(`${listed(named)}.`, wentOn), fixes: fixesOf(...rows.map((source) => failedTierOf(source, facts, loaded.baseSha).fix)), banner: rows.some(heldBackOrFailed) ? `One may have been held back and not failed, and the job’s log says which. The run went on. ${LOADED_WORDS.readFirst}` : failedBannerWords(failed, false) };
   }
   const [source] = rows;
   const { whose, from, fix } = failedTierOf(source, facts, loaded.baseSha);
   if (heldBackOrFailed(source)) {
     return { bold: `The overlay on ${facts.host ?? "this host"} failed to load or was held back, and the job’s log says which.`, rest: ran ? "The run went on without its extensions." : "", fixes: fixesOf(fix), banner: `The run went on without its extensions. ${LOADED_WORDS.readFirst}` };
   }
-  const names = source.tier === "overlay" && Array.isArray(source.failedNames) && source.failedNames.length > 0 ? `${andList(source.failedNames)}.` : "";
+  const names = source.tier === "overlay" && Array.isArray(source.failedNames) && source.failedNames.length > 0 ? `${listed(source.failedNames)}.` : "";
   const banner = failedBannerWords(source.failed, source.extensions === 0);
   const fixes = fixesOf(fix);
   if (source.extensions > 0) return { bold: `${source.failed} of ${whose} extensions failed to load.`, rest: joined(wentOn, names), fixes, banner };
@@ -377,10 +373,10 @@ function mcpStopLine(loaded, record, { jobState }) {
   const retried = retryWords(record, jobState);
   // A record's minimal form keeps how many and not which way. The run's outcome says: only the wait running out is retried.
   if ((timedOut.length > 0 && failed.length === 0) || (uncounted && record?.outcome === "failed")) {
-    const who = timedOut.length > 0 ? andList(timedOut) : plural(loaded.problems.mcp, "MCP server");
+    const who = timedOut.length > 0 ? listed(timedOut) : plural(loaded.problems.mcp, "MCP server");
     return { state: "mcp-stopped", tone: "failed", icon: "failed", bold: `${who} did not answer in time.`, rest: LOADED_WORDS.mcpStopped, small: [retried], fixes: [CONNECTIONS_FIX] };
   }
-  const who = failed.length > 0 ? andList(failed) : plural(loaded.problems.mcp, "MCP server");
+  const who = failed.length > 0 ? listed(failed) : plural(loaded.problems.mcp, "MCP server");
   return { state: "mcp-failed", tone: "refused", icon: "refused", bold: `${who} could not be used.`, rest: saysWhatLoaded(loaded) ? LOADED_WORDS.mcpStoppedLoaded : LOADED_WORDS.mcpStopped, small: [LOADED_WORDS.notRetried], fixes: [CONNECTIONS_FIX] };
 }
 
@@ -397,7 +393,7 @@ function cutWords(loaded) {
     cut.counts > 0 ? `the exact value of ${plural(cut.counts, "count")}` : null,
   ].filter(Boolean);
   // Not "cut to fit": `cut.names` also counts a tool's name withheld because the job's redactor would have changed it, which no room would have kept.
-  return parts.length > 0 ? [`This record leaves out ${andList(parts)}.`] : [];
+  return parts.length > 0 ? [`This record leaves out ${listed(parts)}.`] : [];
 }
 
 /**
@@ -408,7 +404,7 @@ function leftOutLines(loaded) {
   const left = loaded.leftOut;
   if (left === null || left === undefined) return [];
   const lines = [];
-  const asked = [...(left.tools.length > 0 ? [andList(left.tools.map(toolWord))] : []), ...(left.packages ? ["the staged packages"] : [])];
+  const asked = [...(left.tools.length > 0 ? [listed(left.tools.map(toolWord))] : []), ...(left.packages ? ["the staged packages"] : [])];
   if (asked.length > 0) lines.push({ bold: "Left out, as it asks:", rest: `${commaAnd(asked)}.` });
   // One line for the one thing: a restricted run's switch is closed too, and its own reason is the more exact.
   if (left.restricted) lines.push({ bold: "Left out, as this kind of run asks:", rest: "the overlay’s extensions." });
@@ -463,15 +459,15 @@ export const HOSTS_OFFERED = 3;
 
 /** "**Also loaded git-guard** from build3's overlay. mini1 does not have it; mini2 has published nothing." */
 function hostDifferenceLine(difference, facts) {
-  const overlay = difference.overlay.length > 0 ? andList(difference.overlay) : null;
-  const packages = difference.packages.length > 0 ? andList(difference.packages) : null;
+  const overlay = difference.overlay.length > 0 ? listed(difference.overlay) : null;
+  const packages = difference.packages.length > 0 ? listed(difference.packages) : null;
   const from = overlay !== null && packages !== null ? `from ${facts.host}’s overlay, and ${packages} from its staged packages` : `from ${facts.host}’s ${overlay !== null ? "overlay" : "staged packages"}`;
   const count = difference.overlay.length + difference.packages.length;
   const said = [
-    difference.lack.length > 0 ? `${andList(difference.lack)} ${difference.lack.length === 1 ? "does" : "do"} not have ${count === 1 ? "it" : "all of them"}` : null,
-    difference.absent.length > 0 ? `${andList(difference.absent)} ${difference.absent.length === 1 ? "has" : "have"} published nothing` : null,
-    difference.old.length > 0 ? `${andList(difference.old)}’s publication is old` : null,
-    difference.unread.length > 0 ? `${andList(difference.unread)}’s publication could not be read` : null,
+    difference.lack.length > 0 ? `${listed(difference.lack)} ${difference.lack.length === 1 ? "does" : "do"} not have ${count === 1 ? "it" : "all of them"}` : null,
+    difference.absent.length > 0 ? `${listed(difference.absent)} ${difference.absent.length === 1 ? "has" : "have"} published nothing` : null,
+    difference.old.length > 0 ? `${listed(difference.old)}’s publication is old` : null,
+    difference.unread.length > 0 ? `${listed(difference.unread)}’s publication could not be read` : null,
   ].filter(Boolean);
   return { bold: `Also loaded ${overlay ?? packages}`, rest: `${from}. ${said.join("; ")}.` };
 }
@@ -557,7 +553,7 @@ export function loadedVerdict(record, hostLoads = null, { jobState = null, past 
     return verdict({ state: "stopped", rest, small }, record);
   }
   const connected = (loaded.mcp ?? []).filter((row) => row.state === "connected");
-  const servers = connected.length > 0 ? [`MCP: ${andList(connected.map((row) => `${row.name ?? "a server"} connected, with ${plural(row.tools, "tool")}`))}.`] : [];
+  const servers = connected.length > 0 ? [`MCP: ${listed(connected.map((row) => `${row.name ?? "a server"} connected, with ${plural(row.tools, "tool")}`))}.`] : [];
   const left = leftOutLines(loaded);
   const difference = hostDifference(record, loaded, facts, hostLoads);
   if (difference !== null) {
@@ -625,7 +621,7 @@ function extensionsRow(loaded, facts, past) {
   ].filter(Boolean);
   const said = [
     named.length > 0 ? `staged on ${facts.host ?? "this host"}` : null,
-    (overlay?.names?.length ?? 0) > 0 ? `${andList(overlay.names)} from ${facts.host ?? "this host"}’s overlay` : null,
+    (overlay?.names?.length ?? 0) > 0 ? `${listed(overlay.names)} from ${facts.host ?? "this host"}’s overlay` : null,
     ...(names.length > 0 ? counted : []),
     loaded.leftOut?.packages ? (past ? "it withheld the staged packages" : `${facts.subject} withholds the staged packages`) : null,
     loaded.leftOut?.overlayExtensions ? (past ? "it left out the overlay’s extensions" : "this job left out the overlay’s extensions") : null,
@@ -696,11 +692,11 @@ function toolsRow(loaded, ran) {
   if (loaded.tools === null) return row("not kept", loaded.at !== "loader" ? "this record was cut to fit" : ran ? LOADED_WORDS.notedEarlyRow : "the run stopped before its tools were ready");
   const fromExtensions = sumOf(loaded.sources, "tools");
   const said = [
-    Array.isArray(loaded.tools.own) && loaded.tools.own.length > 0 ? andList(loaded.tools.own) : null,
+    Array.isArray(loaded.tools.own) && loaded.tools.own.length > 0 ? listed(loaded.tools.own) : null,
     fromExtensions > 0 ? `${fromExtensions} from the extensions` : null,
-    Array.isArray(loaded.tools.job) && loaded.tools.job.length > 0 ? `${andList(loaded.tools.job)}, the job’s own` : null,
+    Array.isArray(loaded.tools.job) && loaded.tools.job.length > 0 ? `${listed(loaded.tools.job)}, the job’s own` : null,
   ].filter(Boolean);
-  const removed = loaded.leftOut?.tools?.length > 0 ? `${andList(loaded.leftOut.tools.map(toolWord))} removed` : "none removed";
+  const removed = loaded.leftOut?.tools?.length > 0 ? `${listed(loaded.leftOut.tools.map(toolWord))} removed` : "none removed";
   return row(`${loaded.tools.active} active`, said.length > 0 ? `${commaAnd(said)}; ${removed}` : removed);
 }
 
@@ -872,7 +868,7 @@ export function sandboxRunLine(record, id, { pi = null, unread = false } = {}) {
   const names = namedOfRecord(loaded);
   if (names.length === 0 && sumOf(sourcesOf(loaded, "package").filter((row) => row.name === null), "extensions") > 0) return [`${first} `, run(id), "’s record was cut to fit and keeps no names."];
   if (names.length === 0) return [`${first} `, run(id), " itself loaded no staged package or overlay extension."];
-  return [`${first} `, run(id), ` itself also loaded ${andList(names)}.`];
+  return [`${first} `, run(id), ` itself also loaded ${listed(names)}.`];
 }
 
 /** Each part a host's publication can say it could not read (`HOST_LOADS_PARTS`), in a sentence's words. */
@@ -899,12 +895,12 @@ export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPacka
   // Any part this job could load from that the host could not read makes the whole answer unknown: an empty list there is
   // not none. A part this job would not load from anyway (packages it withholds, an overlay that is off) changes nothing.
   const unread = (row.unread ?? []).filter((part) => (part !== "packages" || !withholdsPackages) && (part !== "extensions" || row.overlayExtensionsAllowed));
-  if (unread.length > 0) return unknown(`its last doctor run could not read ${andList(unread.map((part) => UNREAD_PART_WORDS[part] ?? "part of what it publishes"))}`);
+  if (unread.length > 0) return unknown(`its last doctor run could not read ${listed(unread.map((part) => UNREAD_PART_WORDS[part] ?? "part of what it publishes"))}`);
   const packages = withholdsPackages ? [] : (row.packages ?? []).map((entry) => `${entry.name} ${entry.version}`);
   const extensions = row.overlayExtensionsAllowed ? (row.extensions ?? []).map((entry) => entry.name) : [];
   const past = (withholdsPackages ? 0 : row.more?.packages ?? 0) + (row.overlayExtensionsAllowed ? row.more?.extensions ?? 0 : 0);
   const named = [...packages, ...extensions, ...(past > 0 ? [`${past} more`] : [])];
-  const said = named.length > 0 ? andList(named) : "no staged package or overlay extension";
+  const said = named.length > 0 ? listed(named) : "no staged package or overlay extension";
   return [`${first} A job of trigger ${triggerIndex + 1} on this host would load ${said}, from its last doctor run at `, time(row.at), row.state === "old" ? ", which is old." : "."];
 }
 
@@ -1043,7 +1039,7 @@ function hostExtras(name, facts, others) {
     differsOn("pi") || differsOn("image") ? `runs ${runs}` : null,
     ...[["overlay", " from its overlay"], ["packages", ""]].map(([part, from]) => {
       const extra = (facts[part] ?? []).filter((value) => lacking(part, value));
-      return extra.length > 0 ? `also loads ${andList(extra)}${from}` : null;
+      return extra.length > 0 ? `also loads ${listed(extra)}${from}` : null;
     }),
   ].filter(Boolean);
   return parts.length > 0 ? `${name} ${parts.join(" and ")}` : null;
@@ -1141,7 +1137,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
   const someOnly = hosts.flatMap((host) => [...(host.facts.packages ?? []), ...(host.facts.overlay ?? [])].filter((name) => !common.includes(name)).map((name) => `${name} on ${host.name}`));
   const extensionMore = notKept ? "no run here could show them" : [
     `from ${hosts.length === 1 ? "its" : "each host’s"} newest run able to show them`,
-    ...(someOnly.length > 0 ? [`, and ${andList(someOnly)}`] : []),
+    ...(someOnly.length > 0 ? [`, and ${listed(someOnly)}`] : []),
     ...(unread.length > 0 ? [`; ${notReadCount(unread.length)}`] : []),
   ];
   const extensionsRowOf = { icon: "layers", label: "Extensions", value: common.length > 0 ? common.join(", ") : notKept ? "not kept" : nothingAnywhere ? "none" : "none on every host", more: extensionMore };
@@ -1187,7 +1183,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
   const missingRuns = [...new Set([...noFlow, ...failedExtension, ...stoppedByServer])].slice(0, 3);
   const missingRow = missingParts.length === 0
     ? { icon: "refused", label: "Missing", value: state === "incomplete" ? `nothing in the ${read.length} recorded` : "nothing", more: state === "incomplete" ? "a run with no record cannot say" : "no record says a run lacked its flow or an extension, or was stopped by an MCP server" }
-    : { icon: "refused", label: "Missing", value: andList(missingParts), more: missingRuns.flatMap((record, at) => [...(at > 0 ? [", "] : []), run(runIdOf(record))]) };
+    : { icon: "refused", label: "Missing", value: listed(missingParts), more: missingRuns.flatMap((record, at) => [...(at > 0 ? [", "] : []), run(runIdOf(record))]) };
 
   const notReadParts = () => {
     if (unread.length > 3) return `${bucketWords.join(", ")}.`;
@@ -1231,13 +1227,13 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
       unreadSentence,
       historyIncomplete ? "The run history could not be read completely." : null,
       hostless > 0 ? `${hostless === 1 ? "1 run names" : `${hostless} runs name`} no host, so ${hostless === 1 ? "it" : "they"} cannot be compared.` : null,
-      cutHosts.length > 0 ? `The records of ${andList(cutHosts)} were cut to fit, so they keep no whole list to compare.` : null,
-      stopped.length > 0 ? `${andList(stopped)} stopped before anything loaded.` : null,
-      shutHosts.length > 0 ? `The runs on ${andList(shutHosts)} had the overlay shut, as a model canary and a restricted run do, so they say nothing of its extensions.` : null,
-      withheldHosts.length > 0 ? `The runs on ${andList(withheldHosts)} withheld the staged packages or were canaries, so they say nothing of them.` : null,
-      jobImageHosts.length > 0 ? `No recorded run on ${andList(jobImageHosts)} used the host’s own image, so none says what pi or image the host runs otherwise.` : null,
-      noVersionHosts.length > 0 ? `No run on ${andList(noVersionHosts)} on the host’s own image says which pi it ran.` : null,
-      noImageHosts.length > 0 ? `No run on ${andList(noImageHosts)} says which image it ran in.` : null,
+      cutHosts.length > 0 ? `The records of ${listed(cutHosts)} were cut to fit, so they keep no whole list to compare.` : null,
+      stopped.length > 0 ? `${listed(stopped)} stopped before anything loaded.` : null,
+      shutHosts.length > 0 ? `The runs on ${listed(shutHosts)} had the overlay shut, as a model canary and a restricted run do, so they say nothing of its extensions.` : null,
+      withheldHosts.length > 0 ? `The runs on ${listed(withheldHosts)} withheld the staged packages or were canaries, so they say nothing of them.` : null,
+      jobImageHosts.length > 0 ? `No recorded run on ${listed(jobImageHosts)} used the host’s own image, so none says what pi or image the host runs otherwise.` : null,
+      noVersionHosts.length > 0 ? `No run on ${listed(noVersionHosts)} on the host’s own image says which pi it ran.` : null,
+      noImageHosts.length > 0 ? `No run on ${listed(noImageHosts)} says which image it ran in.` : null,
       ...leftOutLine,
     ].filter(Boolean);
     // Attention is for what someone could look into. A trigger that names its image, or jobs that withhold the packages, leave this open for
@@ -1247,7 +1243,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
   }
   if (state === "same") {
     const names = hosts.map(({ name }) => name);
-    const top = names.length === 1 ? `All its recorded runs ran on one host: ${names[0]}.` : `Runs load the same on each host: ${andList(names)}.`;
+    const top = names.length === 1 ? `All its recorded runs ran on one host: ${names[0]}.` : `Runs load the same on each host: ${listed(names)}.`;
     // Green is for nothing to do: hosts that agree on what stopped every run still have every run stopped.
     const missing = missingParts.length > 0;
     return { state, tone: missing ? "attention" : "ok", icon: missing ? "attention" : "done", total, read: read.length, sub, top, small: leftOutLine, rows: [piRowOf(), extensionsRowOf, ...(stoppedByServer.length > 0 ? [mcpRowOf] : []), ...(missing ? [missingRow] : []), ...(unread.length > 0 ? [notReadRow] : [])], hosts: [], links: [], foot: names.length > 1 ? LOADED_WORDS.projectCompared : null };

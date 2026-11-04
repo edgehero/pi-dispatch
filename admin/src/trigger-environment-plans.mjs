@@ -47,7 +47,7 @@ import { collectModelPolicies } from "./models-view.mjs";
 import { PROVIDER_KEY_NAMES, providerKeyNames } from "./provider-key-names.mjs";
 import { writeInputs } from "./read-model.mjs";
 import { CARD_FIELDS, TRIGGER_ENVIRONMENT_EDIT_FIELDS, planTriggerEditCore, rowName, triggerEntryDigest } from "./trigger-edit-core.mjs";
-import { fieldNamed } from "./words.mjs";
+import { fieldNamed, listed } from "./words.mjs";
 
 const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -74,11 +74,6 @@ const JOBS_READ_MS = 10_000;
 
 /** A built-in tool no job has unless an extension turns it on: `DEFAULT_ON_TOOL_NAMES`' other half. */
 const offByDefault = (name) => EXCLUDABLE_TOOL_NAMES.has(name) && !DEFAULT_ON_TOOL_NAMES.has(name);
-
-/** "a", "a and b", "a, b and c". */
-function listed(names) {
-  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-}
 
 /** Why this body is not one the form could send, or null: nothing is read until it is. */
 function shapeProblem(body) {
@@ -136,6 +131,15 @@ function delta(before, after) {
   return { added, removed, reordered: added.length === 0 && removed.length === 0 && !same(was, now) };
 }
 
+/** A model list's change in words, `models` and `fallbackModels` alike. */
+function listChange(word, before, after) {
+  if (after === undefined) return `${word}: the list removed.`;
+  if (before === undefined) return `${word}: ${after.join(", ")}, where this trigger listed none.`;
+  const d = delta(before, after);
+  if (d.reordered) return `${word}: the same models in a new order.`;
+  return `${word}: ${[d.added.length ? `${d.added.join(", ")} added` : "", d.removed.length ? `${d.removed.join(", ")} removed` : ""].filter(Boolean).join(", ")}.`;
+}
+
 /**
  * Each change in words (`write-plans.mjs` `planTriggerDelete`, #737: a confirm says what it does in words and never an arrow),
  * with a widening said as one, on a line of its own. `facts` is what the spend judgement read (`judgeModels`), there whenever
@@ -164,21 +168,10 @@ function changeWords(key, before, after, facts, effective = null) {
         ...(widened ? { widening: `This widens what each job may spend: ${will === null ? "no cap at all" : `up to ${money(will)}`}.` } : {}),
       };
     }
-    case "models": {
-      const d = delta(before, after);
-      const line = removedKey
-        ? "Allowed models: the list removed."
-        : addedKey
-          ? `Allowed models: ${after.join(", ")}, where this trigger listed none.`
-          : d.reordered ? "Allowed models: the same models in a new order." : `Allowed models: ${[d.added.length ? `${d.added.join(", ")} added` : "", d.removed.length ? `${d.removed.join(", ")} removed` : ""].filter(Boolean).join(", ")}.`;
-      return { line };
-    }
-    case "fallbackModels": {
-      const d = delta(before, after);
-      if (removedKey) return { line: "Fallback models: the list removed." };
-      if (addedKey) return { line: `Fallback models: ${after.join(", ")}, where this trigger listed none.` };
-      return { line: d.reordered ? "Fallback models: the same models in a new order." : `Fallback models: ${[d.added.length ? `${d.added.join(", ")} added` : "", d.removed.length ? `${d.removed.join(", ")} removed` : ""].filter(Boolean).join(", ")}.` };
-    }
+    case "models":
+      return { line: listChange("Allowed models", before, after) };
+    case "fallbackModels":
+      return { line: listChange("Fallback models", before, after) };
     case "mcp": {
       const d = delta(before, after);
       const moved = [...d.added.map((name) => `${name} on`), ...d.removed.map((name) => `${name} off`)];
