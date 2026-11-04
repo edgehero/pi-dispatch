@@ -334,7 +334,7 @@ export function wideningFieldRefusal(params, tool) {
     for (const key of Object.keys(source)) {
       const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key) ?? excludeToolsFieldNearMiss(key) ?? packagesFieldNearMiss(key);
       if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
-      return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${TOOL_PROOF_WORDS[meant]} is set by a person on that trigger's page or by hand in the triggers file, never by a tool`;
+      return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${TOOL_PROOF_WORDS[meant]} is set by a person on that trigger's page or by hand in the triggers file, never by a tool.`;
     }
   }
   return null;
@@ -353,7 +353,7 @@ function secretBundleFieldRefusal(params, tool) {
     if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
     for (const key of Object.keys(source)) {
       if (!/^secretbundles?$/.test(key.toLowerCase().replace(/[_\-. ]/g, ""))) continue;
-      return `${tool} cannot set run.secretBundle (sent as ${label}${key}): whether a trigger's jobs hold their project's secret bundle is set by hand in the triggers file, never by a tool. A trigger a tool adds always carries "secretBundle": false`;
+      return `${tool} cannot set run.secretBundle (sent as ${label}${key}): whether a trigger's jobs hold their project's secret bundle is set by hand in the triggers file, never by a tool. A trigger a tool adds always carries "secretBundle": false.`;
     }
   }
   return null;

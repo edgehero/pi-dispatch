@@ -7,7 +7,7 @@ import { loadPageData, parsePageQuery, renderPage } from "../src/console/pages.m
 import { planPauseWindowEdit, planLimitEdit } from "../src/write-plans.mjs";
 import { configPauseWindows, configScopedLimits } from "../src/console/panels/config.mjs";
 const NOW = Date.UTC(2026,9,30,12);
-const snap = () => ({ readAt:NOW,triggers:{triggers:[{type:"comment",forge:"github",phrase:"@pi",flow:"fix",instructions:true,task:true}]},triggerInstructions:{0:'Private instructions <script>bad()</script>'},triggerTasks:{0:"Private task text"},runs:[],waiting:{rows:[]},settings:{overlay:{}} });
+const snap = () => ({ readAt:NOW,triggers:{triggers:[{type:"comment",forge:"github",phrase:"@pi",flow:"fix",instructions:true,task:true,index:0}]},triggerInstructions:{0:'Private instructions <script>bad()</script>'},triggerTasks:{0:"Private task text"},runs:[],waiting:{rows:[]},settings:{overlay:{}} });
 async function draw(role, readOnly=false) {
  const data=await loadPageData("trigger",{index:0},{fleet:{snapshot:async()=>snap()},now:()=>NOW,triggerEditor:()=>({defaults:{},backends:[],forges:[],flows:[]})},{role,readOnly});
  return String((await renderPage("trigger",{query:{index:0},session:{name:"ops",role},readOnly,data})).html);

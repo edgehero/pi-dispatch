@@ -653,12 +653,12 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["run.recover on a venue that does not recover", plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["go"], recover: true }, paths, env: { PI_BACKENDS: "openshell" } }).refusal, { prefix: "run.recover cannot be armed on a trigger whose jobs run in the openshell venue" }],
       ["no backends", plans.backendRefusal("local", { PI_BACKENDS: "vapour" }), "this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)"],
       ["backend not blessed", plans.backendRefusal("podman", { PI_BACKENDS: "local" }), "backend 'podman' is not blessed by this deployment (PI_BACKENDS: local)"],
-      ["tool-proof dollar cap", plans.wideningFieldRefusal({ maxCostUsd: "1" }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.maxCostUsd (sent as maxCostUsd): a trigger's per-job dollar cap is set by a person on that trigger's page or by hand in the triggers file, never by a tool"],
-      ["tool-proof model list", plans.wideningFieldRefusal({ run: { models: ["a/b"] } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.models (sent as run.models): a trigger's allowed-model list is set by a person on that trigger's page or by hand in the triggers file, never by a tool"],
-      ["tool-proof mcp", plans.wideningFieldRefusal({ mcp: [] }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.mcp (sent as mcp): a trigger's list of MCP servers is set by a person on that trigger's page or by hand in the triggers file, never by a tool"],
-      ["tool-proof fallback list", plans.wideningFieldRefusal({ fallbackModels: [] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.fallbackModels (sent as fallbackModels): a trigger's fallback-model list is set by a person on that trigger's page or by hand in the triggers file, never by a tool"],
-      ["tool-proof exclusions", plans.wideningFieldRefusal({ excludeTools: ["bash"] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.excludeTools (sent as excludeTools): a trigger's list of removed tools is set by a person on that trigger's page or by hand in the triggers file, never by a tool"],
-      ["tool-proof packages", plans.wideningFieldRefusal({ run: { packages: false } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.packages (sent as run.packages): a trigger's staged-package switch is set by a person on that trigger's page or by hand in the triggers file, never by a tool"],
+      ["tool-proof dollar cap", plans.wideningFieldRefusal({ maxCostUsd: "1" }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.maxCostUsd (sent as maxCostUsd): a trigger's per-job dollar cap is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof model list", plans.wideningFieldRefusal({ run: { models: ["a/b"] } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.models (sent as run.models): a trigger's allowed-model list is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof mcp", plans.wideningFieldRefusal({ mcp: [] }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.mcp (sent as mcp): a trigger's list of MCP servers is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof fallback list", plans.wideningFieldRefusal({ fallbackModels: [] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.fallbackModels (sent as fallbackModels): a trigger's fallback-model list is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof exclusions", plans.wideningFieldRefusal({ excludeTools: ["bash"] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.excludeTools (sent as excludeTools): a trigger's list of removed tools is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof packages", plans.wideningFieldRefusal({ run: { packages: false } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.packages (sent as run.packages): a trigger's staged-package switch is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
       ["memory size", thrown(() => plans.sizeFieldsOf({ memory: "12q" })), { prefix: "memory: " }],
       ["cpus size", thrown(() => plans.sizeFieldsOf({ cpus: "lots" })), { prefix: "cpus: " }],
     ];
@@ -906,4 +906,13 @@ test("trigger edit merges maxTurns and explicit false flags, preserves omitted f
     assert.equal(unchangedTurns.run.steer, true);
     for (const maxTurns of [0, -1, 1.5, "12", NaN]) assert.match(plans.planTriggerEdit({ params: { index: 0, flow: "fix", maxTurns }, paths, env: process.env }).refusal, /maxTurns/);
   } finally { restore(); }
+});
+
+test("a tool-proof refusal carries its own stop, so a tool reads a whole sentence and a page adds none", async () => {
+  const { wideningFieldRefusal } = await import("../src/write-plans.mjs");
+  for (const [what, params] of [["a field on the card", { maxCostUsd: "1" }], ["one that is not", { secretBundle: false }]]) {
+    const said = wideningFieldRefusal(params, "this form");
+    assert.match(said, /^this form cannot set /, what);
+    assert.match(said, /[^.]\.$/, `${what}: ${said}`);
+  }
 });

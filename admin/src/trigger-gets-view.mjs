@@ -224,9 +224,9 @@ function hostsNote(rows, trigger, hostLoads, liveList) {
     liveList ? null : TRIGGER_GETS_WORDS.noLiveList,
     by("absent").length > 0 ? `${listed(by("absent"))} ${by("absent").length === 1 ? "has" : "have"} published none, so ${by("absent").length === 1 ? "it reads" : "they read"} unknown, never the same.` : null,
     by("unreachable").length > 0 ? `${listed(by("unreachable"))} could not be read, so ${by("unreachable").length === 1 ? "it reads" : "they read"} unknown.` : null,
-    by("unreadable").length > 0 ? `${listed(by("unreadable"))}’s could not be read, or a newer release wrote it, so it reads unknown.` : null,
-    by("old").length > 0 ? `${listed(by("old"))}’s is old, so it reads unknown.` : null,
-    by("partial").length > 0 ? `${listed(by("partial"))} left out part of what it can load, so it reads unknown.` : null,
+    by("unreadable").length > 0 ? `Unknown, because the doctor record could not be read, or a newer release wrote it: ${listed(by("unreadable"))}.` : null,
+    by("old").length > 0 ? `Unknown, because the doctor record is old: ${listed(by("old"))}.` : null,
+    by("partial").length > 0 ? `Unknown, because the doctor record left out part of what this trigger loads from: ${listed(by("partial"))}.` : null,
     (hostLoads?.more ?? 0) > 0 ? `${hostLoads.more} more ${hostLoads.more === 1 ? "host was" : "hosts were"} not read.` : null,
   ].filter(Boolean);
   return [...parts, ...(sentences.length > 0 ? [`${sentences.join(" ")} `] : []), TRIGGER_GETS_WORDS.repositoryPart];

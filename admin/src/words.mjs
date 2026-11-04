@@ -112,6 +112,19 @@ export function recordReason(record) {
   return typeof r === "string" && RECORD_REASON_RE.test(r) ? r : null;
 }
 
+/** A sentence with a full stop, adding none where it ends in its own. */
+export const stopped = (s) => `${s}${/[.!?]$/.test(s) ? "" : "."}`;
+
+/**
+ * The words a sentence uses to say that nothing changed. A planner's sentence is sent as it is (the `error` a tool and
+ * the console share, byte for byte), and many already say so in their own words ("nothing was written", "Nothing was
+ * sent", "nothing to cancel"); the slot adds "Nothing was changed." only to one that says none of them.
+ */
+export const SAYS_NOTHING_CHANGED = /\bnothing (?:was|is) (?:changed|done|applied|reverted|queued|sent|written)\b|\bnothing to (?:do|cancel)\b/i;
+
+/** A refusal's sentence as a person reads it anywhere but the slot's bar: stopped, and saying nothing changed once. */
+export const refusalLine = (sentence) => `${stopped(sentence)}${SAYS_NOTHING_CHANGED.test(sentence) ? "" : " Nothing was changed."}`;
+
 /** Names in a sentence: "a", "a and b", "a, b and c". The order is the caller's. */
 export function listed(names) {
   return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;

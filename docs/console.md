@@ -2241,6 +2241,8 @@ effect of a change on queued jobs. A viewer sees these facts but no write contro
 Instructions are escaped for operators.
 Runs are matched by what the row says, so where the triggers file could not be read, or has no such row, the page says nothing of
 its runs or its jobs in line. Where the file gives the row but does not load, it says it could not match runs to this row.
+A row is found by its place in the file, as a change finds it, so an entry the file holds but no trigger can use reads "The file's
+entry at this row is not a usable trigger" with no other row's facts or Delete in its place, and the lists link past it.
 A spent one-shot explains how to re-arm it. Cron health uses the configured stall threshold.
 
 Add a trigger opens a structured editor for cron, label, comment, pull request and issue triggers. Only
@@ -2344,6 +2346,7 @@ page says, which also names the model, the amount or the row:
 | `has no verified local cost bound`, `travels as max_completion_tokens` | No cap can bound a call to the model a job starts on, so the runner refuses it under any cap. A listed or fallback model warns instead (below). | Choose another model. A local server takes the `maxTokensField` the sentence names ([egress](egress.md)). |
 | `On every host this trigger's jobs would be refused as mcp-excluded` | The exclusions leave a server it names no way in, however a host routes it. | Remove the server from `run.mcp`, or keep a tool that reaches it out of `run.excludeTools`. |
 | `The deployment's settings file is invalid`, `PI_ALLOWED_MODELS is invalid`, `The deployment's job cap could not be read`, `The trigger's project or role policy could not be read` | Something the judgement of a model or a cap needs could not be read, so it could not be judged. An edit that does not need it is not refused for it. | Correct what it names. |
+| `this form cannot set` | The Add form's pasted JSON named a field that a new trigger gets on its own page once it exists, or in the file: its job cap, its allowed models or fallbacks, its servers, its removed tools or its staged packages. This card is not that form: the sentence is here because it sends a person to this card. | Leave that field out and add the trigger, then set it on that trigger's page or by hand in the triggers file. |
 
 **What it warns of.** What depends on the host (its overlay, its `.env`, its allowlist and its endpoints), and what stops a job only if
 it makes that call. Another host may run the job, and a refusal at pickup is free and names its reason, so the preview says so, in the

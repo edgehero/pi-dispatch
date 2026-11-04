@@ -685,3 +685,46 @@ test("a page that cannot match runs to a row says nothing of its runs, while the
   const queueDown = textOf(panelOf(await draw(read, { fs: fileOnlyFs(getsFile()), snapshot: { readAt: NOW, triggers: read, runs: [], waiting: { unreachable: "down" }, hostBudgets: [] } }), "p-trigger-runs"));
   assert.ok(queueDown.includes("the queue could not be read"), "the sentence stands where it is so");
 });
+
+test("a bad row reads the same on the page and to the action, first, middle and last, and the lists link past it by the file's own index", async () => {
+  const { readTriggers } = await import("../src/read-model.mjs");
+  const { planTriggerEdit, planTriggerDelete } = await import("../src/write-plans.mjs");
+  const good = (flow) => ({ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow } });
+  const drawn = (name, query, list) => {
+    const fs = fileOnlyFs(JSON.stringify({ triggers: list }));
+    const triggers = readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs });
+    const snapshot = { readAt: NOW, triggers, runs: [], waiting: { rows: [] }, hostBudgets: [], schedulers: [], parked: { rows: [] } };
+    const parsed = parsePageQuery(name, query);
+    return { fs, draw: async (role = "operator") => {
+      const data = await loadPageData(name, parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs, fleet: { snapshot: async () => snapshot, parkedCount: async () => 0 }, hostLoads: async () => null, triggerEditor: () => ({}), triggerFireCheck: async () => ({ refusal: "no" }) }, { role, readOnly: false });
+      return String((await renderPage(name, { query: parsed.query, session: { name: role, role }, data })).html);
+    } };
+  };
+  const BAD = "The file’s entry at this row is not a usable trigger, so this page has nothing to show or change. Return to Configuration.";
+  for (const [what, list, index] of [["first", [null, good("next"), good("last")], 0], ["middle", [good("first"), null, good("last")], 1], ["last", [good("first"), good("next"), null], 2]]) {
+    const { fs, draw } = drawn("trigger", `index=${index}`, list);
+    for (const role of ["operator", "viewer", "agent"]) {
+      const page = await draw(role);
+      const text = textOf(page);
+      assert.ok(text.includes(BAD), `${what}, ${role}: ${text.slice(0, 200)}`);
+      assert.ok(text.includes("Trigger unavailable"), `${what}, ${role}: the title names no other row's flow`);
+      for (const never of ["This row does not exist", `→ next`, `→ last`, `→ first`, "Delete row", "The triggers file loads.", "Edit here"]) assert.ok(!text.includes(never), `${what}, ${role}: ${never}`);
+    }
+    // The action says the same of the same row, for an edit and a delete.
+    const edit = planTriggerEdit({ params: { index, flow: "x" }, paths: { triggersPath: TRIGGER_GETS_PATH }, env: {}, surface: "console", fs });
+    assert.match(edit.refusal, /is not one this can change: the file's entry there is not a usable trigger/, what);
+    assert.match(planTriggerDelete({ index, paths: { triggersPath: TRIGGER_GETS_PATH }, surface: "console", fs }).refusal, /is not one this can change/, what);
+  }
+  // A row past the end is another thing, and the page says that one.
+  const past = textOf(await drawn("trigger", "index=7", [good("first")]).draw());
+  assert.ok(past.includes("This row does not exist. Return to Configuration.") && !past.includes(BAD), past.slice(0, 200));
+  // A good row beside a bad one is still itself, with its own Delete.
+  const beside = textOf(await drawn("trigger", "index=1", [null, good("next")]).draw());
+  assert.ok(beside.includes("→ next") && beside.includes("row 2") && beside.includes("Delete row 2"), beside.slice(0, 200));
+  // The lists link by the file's index: nothing points at the bad row, and each good row at its own.
+  for (const name of ["triggers", "config"]) {
+    const page = await drawn(name, "", [null, good("next"), good("last")]).draw();
+    const links = [...new Set([...page.matchAll(/\/config\/trigger\?index=(\d+)/g)].map((m) => Number(m[1])))].sort();
+    assert.deepEqual(links, [1, 2], name);
+  }
+});

@@ -18,7 +18,7 @@
  * It imports no worker module itself: the html builder, the kit and the page table, all console modules. The page
  * table is read inside the functions only, never at load, since `pages.mjs` reaches this module back through the shell.
  */
-import { capitalised } from "../words.mjs";
+import { capitalised, SAYS_NOTHING_CHANGED, stopped } from "../words.mjs";
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
 import { PAGES } from "./pages.mjs";
@@ -35,7 +35,6 @@ import { resolverPathShown } from "./secrets-privacy.mjs";
 export const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /** A sentence with its full stop: as it is when it already ends with one (or with ? or !), else with "." added. */
-const stopped = (s) => `${s}${/[.!?]$/.test(s) ? "" : "."}`;
 
 /** The slot's id: the one element the script moves under the section that asked. Embedded in the script as JSON. */
 export const CONFIRM_SLOT_ID = "confirm-slot";
@@ -210,13 +209,6 @@ export const REFUSAL_STATES = Object.freeze({
 
 /** What a `partial` refusal says after its sentence, where every other refusal says "Nothing was changed." */
 export const PARTIAL_NOTE = "Some of it may have been done, so this page may be out of date.";
-
-/**
- * The words a sentence uses to say that nothing changed. A planner's sentence is sent as it is (the `error` a tool and
- * the console share, byte for byte), and many already say so in their own words ("nothing was written", "Nothing was
- * sent", "nothing to cancel"); the slot adds "Nothing was changed." only to one that says none of them.
- */
-const SAYS_NOTHING_CHANGED = /\bnothing (?:was|is) (?:changed|done|applied|reverted|queued|sent|written)\b|\bnothing to (?:do|cancel)\b/i;
 
 /** The ticket store's instruction, which every `redeem` refusal ends with (`confirm.mjs` `PREVIEW_AGAIN`'s opening). */
 const TICKET_TAIL = /Preview the change again and confirm the new preview$/;

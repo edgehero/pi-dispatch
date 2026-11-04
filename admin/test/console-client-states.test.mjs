@@ -17,6 +17,8 @@ import { CONFIGURATION_DRAW } from "./helpers/configuration-goldens.mjs";
 import { CLIENT_STATES, LEDGER_CARDS, T } from "./helpers/client-states.mjs";
 import { GETS_ENTRY, triggerGetsPage } from "./helpers/trigger-gets-goldens.mjs";
 import { Event, fakeTimers, parseDocument, runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
+import { planTriggerAdd } from "../src/write-plans.mjs";
+import { SAYS_NOTHING_CHANGED, refusalLine } from "../src/words.mjs";
 
 // Issue #737, PR 2: the browser script in every state a card names, run over the server's OWN markup (the shell, the
 // sign-in pages, the confirm slot and the bars confirm-view.mjs draws), so what is checked is that the script shows the
@@ -1889,6 +1891,36 @@ test("the client-state table holds every state element of the ConfirmStates, Liv
       assert.ok(CLIENT_STATES.some((r) => r.card === card && r.state === el.el), `${card}: the state "${el.el}" is in helpers/client-states.mjs with the test that reaches it`);
     }
   }
+});
+
+test("a refusal reads properly under its field and in the bar: one stop, and nothing changed said once", async () => {
+  const real = planTriggerAdd({ params: { kind: "label", flow: "triage", labels: ["pi"], maxCostUsd: "1" }, paths: { triggersPath: "triggers.json" }, env: { PI_BACKENDS: "local" }, tool: "this form", surface: "console" }).refusal;
+  assert.ok(real.endsWith("never by a tool."), real);
+  const form = configUi.actForm("trigger-add", { fields: configUi.area("trigger", "Add tool fields (JSON)", { type: "json", required: true }), label: "Preview the JSON add" });
+  const w = boot(String(page({ title: "Configuration", name: "config", body: shellHtml("config", { session: OPERATOR, data: { now: NOW }, query: {}, theme: null }, html`<section id="cf-trigger" data-panel>${form}</section>`) })));
+  const drawn = w.document.querySelector('form[data-action="trigger-add"]');
+  const box = drawn.querySelector('[name="trigger"]');
+  const line = async (refusal) => {
+    box.value = '{"kind":"label"}';
+    w.submit(drawn);
+    await w.fetch.open("/api/act/trigger-add/preview").answer(400, { refusal });
+    return drawn.querySelector('[data-field-error="trigger"]').textContent;
+  };
+  for (const [what, refusal, reads] of [
+    ["its own stop", real, `${real} Nothing was changed.`],
+    ["a loader's sentence, which has none", "trigger row 2: run.maxTurns must be at least 1 in triggers.json", "trigger row 2: run.maxTurns must be at least 1 in triggers.json. Nothing was changed."],
+    ["its own stop and its own saying", "this trigger does not take x. Nothing was changed.", "this trigger does not take x. Nothing was changed."],
+    ["its own saying and no stop", "trigger row 1 is not one this can change; nothing was changed", "trigger row 1 is not one this can change; nothing was changed."],
+    ["another way of saying it", "trigger row 1: nothing was written", "trigger row 1: nothing was written."],
+  ]) {
+    assert.equal(await line(refusal), reads, what);
+    assert.equal(refusalLine(refusal), reads, `${what}: the server's copy of the rule, which the Refusals card draws`);
+  }
+  // The script takes the bar's own expression, so the two cannot come to disagree on what says nothing changed.
+  assert.ok(CONSOLE_SCRIPT.includes(SAYS_NOTHING_CHANGED.source));
+  const bar = String(refusalHtml({ where: "preview", sentence: real, status: 400 })).replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/\s+/g, " ");
+  assert.ok(bar.includes(`${real[0].toUpperCase()}${real.slice(1)} Nothing was changed.`), bar);
+  assert.doesNotMatch(bar, /\.\./);
 });
 
 stateTest("inline configuration errors keep unique stable associations across two row forms", async () => {

@@ -4,7 +4,7 @@ import { triggerWhoMayFire } from "../../trigger-policy.mjs";
 import { TRIGGER_GETS_WORDS } from "../../trigger-gets-view.mjs";
 import { CARD_FIELDS } from "../../trigger-edit-core.mjs";
 import { triggerGetsDrawn } from "./trigger-gets.mjs";
-import { outcomeWord, reasonWords, recordReason } from "../../words.mjs";
+import { outcomeWord, reasonWords, recordReason, refusalLine } from "../../words.mjs";
 import { planTriggerAdd } from "../../write-plans.mjs";
 import { triggerBundleOf } from "../../read-model.mjs";
 import { BACKENDS } from "@edgehero/pi-dispatch/backends";
@@ -20,9 +20,10 @@ import { canAct, shownPath, runLink, moneyHtml, timeHtml } from "./common.mjs";
 import { actForm, field, area, table, facts } from "./config-ui.mjs";
 const card = (title, body) => ui.card({ title, body });
 const detail = (v) => v.data?.triggerDetail ?? {};
-// The snapshot's, or with Valkey down the row the card read from the file itself, since nothing about that row needs Valkey.
-const trigger = (v) =>
-  detail(v).trigger ?? v.data?.snapshot?.triggers?.triggers?.[v.query?.index] ?? v.data?.triggerGets?.trigger;
+// The row at this place in the file, as the snapshot's detail found it by the index each row carries, or with Valkey down the row the card read from the
+// file itself, since nothing about that row needs Valkey. REJECTED: the display list's place, which skips an entry it cannot use: with one above it, this
+// page drew the next row's facts and its Delete under this row's number, while the action refused this row.
+const trigger = (v) => detail(v).trigger ?? v.data?.triggerGets?.trigger;
 // What failed, when the snapshot did: not the file, which the card has just read.
 const othersUnread = (v) => !v.data?.snapshot && Boolean(v.data?.triggerGets);
 const defaults = (v) =>
@@ -75,7 +76,7 @@ export function triggerOn(v) {
     return card(
       "What starts it",
       html`<p>
-        ${fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? "This row does not exist. Return to Configuration."}
+        ${fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (v.query?.index < v.data?.snapshot?.triggers?.count ? "The file’s entry at this row is not a usable trigger, so this page has nothing to show or change. Return to Configuration." : "This row does not exist. Return to Configuration.")}
       </p>`,
     );
   return card(
@@ -370,7 +371,7 @@ export function triggerChange(v) {
             "Jobs that would be refused cannot be checked here.")
           : `${detail(v).skewIncomplete ? "At least " : ""}${detail(v).skewed?.length ?? 0} jobs in view would be refused now.${detail(v).skewIncomplete ? " The queue check was incomplete." : ""}`}
       </p>
-      <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? "The triggers file loads."}</p>
+      <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (t ? "The triggers file loads." : null)}</p>
       ${(detail(v).skewed ?? []).map(job => html`<p>${runLink(job.jobId)}: ${job.field ?? job.conditions ?? "trigger changed"}</p>`)}
       ${t && canAct(v)
         ? actForm("trigger-delete", {
@@ -508,5 +509,5 @@ export function triggerRefusalExamples() {
   ].map(({field,params}) => ({field, sentence: planTriggerAdd({ ...shared, params }).refusal}));
 }
 export function triggerRefusals() {
-  return card("Refusals",html`<p>Each field below shows the shared planner's own refusal.</p>${triggerRefusalExamples().map(({field,sentence}) => html`<p><b>${field}</b>: ${sentence}${sentence?.includes("Nothing was changed") ? "." : ". Nothing was changed."}</p>`)}`);
+  return card("Refusals",html`<p>Each field below shows the shared planner's own refusal.</p>${triggerRefusalExamples().map(({field,sentence}) => html`<p><b>${field}</b>: ${refusalLine(sentence)}</p>`)}`);
 }

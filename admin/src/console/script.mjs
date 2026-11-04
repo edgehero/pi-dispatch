@@ -198,6 +198,7 @@ import { SEARCH_ID } from "./kit.mjs";
 import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF } from "./shell.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "./theme.mjs";
 import { GATEWAY_CONSOLE_SCRIPT } from "./gateway-console-script.mjs";
+import { SAYS_NOTHING_CHANGED } from "../words.mjs";
 
 /**
  * How long the page waits before it asks again, when the console did not answer (a sign-in post, a one-time link's
@@ -1835,6 +1836,10 @@ ${FIT_JS}
     if (form) triggerFields(form);
   });
   var configErrorSequence = 0;
+  // \`refusalLine\` in \`words.mjs\`, for the line under a field: the bar's rule, from the bar's own expression, so a sentence reads the same in both.
+  function refusalLine(message) {
+    return message + (/[.!?]$/.test(message) ? "" : ".") + (/${SAYS_NOTHING_CHANGED.source}/i.test(message) ? "" : " Nothing was changed.");
+  }
   function fieldErrors(form, message) {
     var slots = form.querySelectorAll("[data-field-error]");
     var matched = false;
@@ -1857,7 +1862,7 @@ ${FIT_JS}
       var control = slots[i].parentElement.querySelector("input, select, textarea");
       var active = control && !control.disabled && !(typeof control.closest === "function" && control.closest("fieldset[disabled]"));
       var applies = active && targets.indexOf(key.toLowerCase()) >= 0;
-      slots[i].textContent = applies ? message + " Nothing was changed." : "";
+      slots[i].textContent = applies ? refusalLine(message) : "";
       slots[i].hidden = !applies;
       if (slots[i].parentElement.classList) {
         if (applies) slots[i].parentElement.classList.add("field--err");

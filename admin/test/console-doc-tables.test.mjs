@@ -21,7 +21,7 @@ import { ENDED_REASONS, endedNotices } from "../src/console/session-ends.mjs";
 import { LOADED_MAX_OVERLAY_NAMES, LOADED_MAX_PACKAGES } from "../../worker/src/loaded-record.mjs";
 import { HOSTS_OFFERED, LOADED_STATES, loadedVerdict, outcomeNote, runningVerdict } from "../src/loaded-words.mjs";
 import { RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES } from "../src/run-filter.mjs";
-import { planTriggerAdd, TRIGGER_ADD_FIELDS } from "../src/write-plans.mjs";
+import { planTriggerAdd, planTriggerEdit, TRIGGER_ADD_FIELDS } from "../src/write-plans.mjs";
 import { HOST_LOADS, LOADED_SAMPLES as S, loadedField, loadedRecord, source } from "./helpers/loaded-samples.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { TRIGGER_GETS_PATH, fileOnlyFs, getsFile, triggerGetsPage } from "./helpers/trigger-gets-goldens.mjs";
@@ -254,6 +254,8 @@ const REFUSALS = Object.freeze({
   "PI_ALLOWED_MODELS is invalid": () => plannerWorld({ env: { PI_ALLOWED_MODELS: "not a list!" } }).preview({ maxCostUsd: "1" }),
   "The deployment's job cap could not be read": () => plannerWorld({ env: { PI_MAX_COST_USD: "lots" } }).preview({ maxCostUsd: "1" }),
   "The trigger's project or role policy could not be read": () => plannerWorld({ projects: "{ not json" }).preview({ maxCostUsd: "1" }),
+  // The Add form's own, in the planner it shares with a tool, and held to the page it sends a person to.
+  "this form cannot set": () => planTriggerAdd({ params: { kind: "label", flow: "triage", labels: ["pi"], maxCostUsd: "1" }, paths: { triggersPath: "triggers.json" }, env: { PI_BACKENDS: "local" }, tool: "this form", surface: "console" }),
 });
 
 /**
@@ -310,9 +312,10 @@ const NOT_IN_THE_TABLE = Object.freeze({
 const CORE_NOT_IN_THE_TABLE = Object.freeze({
   // The form trims a box and sends null for a blank (`getsBody`), which the planner's shape check answers first: "A trigger's flow cannot be removed".
   "flow must be non-empty": "unreachable",
-  // An entry the display list drops gets no digest, so no form, and the digest is compared first: the same entry reads the same to both.
-  "no trigger at row": "unreachable",
-  "${rowName(\"trigger\", index, surface)} is not one this can change": "unreachable",
+  // Not this card's: it draws its form only from a row the file gives back, and compares the digest first, which answers for a row gone or changed. A page's
+  // Edit and Delete forms do meet them, on a page drawn before the row went or went bad, in their own bar: held below, and a page drawn after draws neither form.
+  "no trigger at row": "the Edit and Delete forms', on a page drawn before",
+  "${rowName(\"trigger\", index, surface)} is not one this can change": "the Edit and Delete forms', on a page drawn before",
   // A tool's words, for its zero-based index and its call that sends no field. The form's own empty change is "already says this".
   "no trigger at index": "a tool's",
   "send at least one trigger field to edit": "a tool's",
@@ -338,6 +341,7 @@ const REFUSAL_TODO = Object.freeze({
   "has no verified local cost bound": { says: /Choose another model/ },
   "On every host this trigger's jobs would be refused as mcp-excluded": { says: /Remove the server from `run\.mcp`, or keep a tool that reaches it out of `run\.excludeTools`/, shared: true },
   "The deployment's settings file is invalid": { says: /Correct what it names/ },
+  "this form cannot set": { says: /on that trigger's page or by hand in the triggers file/, shared: true },
 });
 const WARNING_TODO = Object.freeze({
   "is a model this deployment does not know": { says: /Choose one from the catalog, or declare it in the overlay's `?models\.json`?/, shared: true },
@@ -459,6 +463,12 @@ test("every refusal the planner can say is in that table or named here with why:
     assert.ok(left || quotes.some((quote) => literal.includes(quote)), `no row and no reason for: ${literal}`);
   }
   for (const start of Object.keys(CORE_NOT_IN_THE_TABLE)) assert.ok(coreLiterals.some((literal) => literal.startsWith(start)), start);
+  // Who meets the two the card does not: the same row through the Edit form's planner, and through the card's, which says its own.
+  const stale = plannerWorld({ doc: { triggers: [null, { on: COMMENT_ON, run: { kind: "github", flow: "fix" } }] } });
+  const edit = (index) => planTriggerEdit({ params: { index, flow: "x" }, paths: stale.paths, env: {}, surface: "console" }).refusal;
+  assert.match(edit(0), /is not one this can change/);
+  assert.match(edit(9), /^no trigger at row 10 \(have 2\)$/);
+  assert.match((await stale.preview({ packages: false }, { index: 0 })).refusal, /^There is no trigger at row 1 any more/);
   // Why a page never meets "flow must be non-empty": a blank box goes as null, and null is refused in the row the table has.
   assert.match(read("admin/src/console/script.mjs"), /out\[boxes\[i\]\.name\] = next === "" \? null : next/);
   assert.match((await plannerWorld().preview({ flow: null })).refusal, /^A trigger's flow cannot be removed/);

@@ -49,7 +49,7 @@ test("a host absent, old, newer or cut reads unknown, never the same, and takes 
   assert.equal(oldPills.stale, "unknown");
   assert.equal(oldPills.mini1, "the only one known", "one host that can say has nothing to be the same as");
   const note = lineOf(triggerGetsOf({ trigger: NO_FLOW, hostLoads: old, liveHosts: ["mini1", "stale"] }).hostsNote);
-  assert.ok(note.includes("stale’s is old, so it reads unknown."), note);
+  assert.ok(note.includes("Unknown, because the doctor record is old: stale."), note);
   // A list past its cap cannot prove a lack, and nor can a read that failed.
   const capped = await published({ mini1: known, wide: { packages: Array.from({ length: 70 }, (_, at) => ({ name: `p${at}`, version: "1.0.0" })) } });
   assert.equal(triggerGetsOf({ trigger: NO_FLOW, hostLoads: capped, liveHosts: ["mini1", "wide"] }).pills.find((pill) => pill.name === "wide").word, "unknown");
@@ -57,8 +57,8 @@ test("a host absent, old, newer or cut reads unknown, never the same, and takes 
   const noted = await published({ mini1: known, absent: null, newer: "{", cut: { packages: PACKAGES, unread: ["packages"] } });
   const said = lineOf(triggerGetsOf({ trigger: NO_FLOW, hostLoads: { ...noted, more: 2 }, liveHosts: ["mini1", "absent", "newer", "cut"] }).hostsNote);
   assert.ok(said.includes("absent has published none, so it reads unknown, never the same."), said);
-  assert.ok(said.includes("newer’s could not be read, or a newer release wrote it, so it reads unknown."), said);
-  assert.ok(said.includes("cut left out part of what it can load, so it reads unknown."), said);
+  assert.ok(said.includes("Unknown, because the doctor record could not be read, or a newer release wrote it: newer."), said);
+  assert.ok(said.includes("Unknown, because the doctor record left out part of what this trigger loads from: cut."), said);
   assert.ok(said.includes("2 more hosts were not read."), said);
   assert.ok(said.includes(W.repositoryPart), said);
   const partlyDown = { unreachable: false, hosts: [{ name: "mini1", state: "unknown", why: "unreachable" }], more: 0 };
@@ -408,4 +408,15 @@ test("with no list of live hosts a pill claims no host is the only one, and the 
   assert.ok(two.note.includes(UNLISTED), two.note);
   // A flow found nowhere still says so, with no list as with one.
   assert.deepEqual(read(await published({ mini1: { ...known, flows: [] } }, { live: [] }), null).words, ["the only one known"]);
+});
+
+test("the note reads right for one silent host and for several", async () => {
+  const known = { packages: PACKAGES };
+  const noted = (hostLoads, liveHosts) => lineOf(triggerGetsOf({ trigger: NO_FLOW, hostLoads, liveHosts }).hostsNote);
+  const old = { ...known, at: NOW - 100 * HOUR };
+  const several = noted(await published({ mini1: known, old1: old, old2: old, broken1: "{", broken2: "{", cut1: { unread: ["packages"] }, cut2: { unread: ["packages"] }, gone1: null, gone2: null }), ["mini1", "old1", "old2", "broken1", "broken2", "cut1", "cut2", "gone1", "gone2"]);
+  for (const line of ["Unknown, because the doctor record is old: old1 and old2.", "Unknown, because the doctor record could not be read, or a newer release wrote it: broken1 and broken2.", "Unknown, because the doctor record left out part of what this trigger loads from: cut1 and cut2.", "gone1 and gone2 have published none, so they read unknown, never the same."]) assert.ok(several.includes(line), `${line} in: ${several}`);
+  assert.doesNotMatch(several, /’s (?:is|could)|so it reads/, "no singular for two hosts");
+  const one = noted(await published({ mini1: known, old1: old }), ["mini1", "old1"]);
+  assert.ok(one.includes("Unknown, because the doctor record is old: old1."), one);
 });
