@@ -523,7 +523,7 @@ test("the sentences the docs quote of the preview are the real preview's, and a 
   // And the two it says of a host's release, each off a preview that reads one, with the name it reads.
   const release = stamps.summary.find((one) => one.endsWith("reads what this change needs."));
   assert.equal(release, "mini1 reads what this change needs.");
-  const twoHosts = await plannerWorld({ deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "2" }, { name: "mini2", triggersVersion: "2", jobDataVersion: "2" }] }), readHostLoads: async () => ({ hosts: [exclusionHost()] }) } }).preview({ excludeExtensions: ["pi-lint"] });
+  const twoHosts = await plannerWorld({ deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "3" }, { name: "mini2", triggersVersion: "2", jobDataVersion: "3" }] }), readHostLoads: async () => ({ hosts: [exclusionHost()] }) } }).preview({ excludeExtensions: ["pi-lint"] });
   const each = twoHosts.summary.find((one) => one.endsWith("each read what this change needs."));
   assert.ok(each && consoleDoc.includes(`"${each}"`), `${JSON.stringify(twoHosts.summary ?? twoHosts)}`);
   const noHosts = await plannerWorld({ deps: { readHosts: async () => ({ hosts: [] }), readHostLoads: async () => ({ hosts: [] }) } }).preview({ excludeExtensions: ["pi-lint"] });
