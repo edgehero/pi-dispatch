@@ -5,6 +5,7 @@ import { ACTIONS } from "../src/console/actions.mjs";
 import { PAGES } from "../src/console/pages.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { ENDED_REASONS, endedNotices } from "../src/console/session-ends.mjs";
+import { LOADED_MAX_OVERLAY_NAMES, LOADED_MAX_PACKAGES } from "../../worker/src/loaded-record.mjs";
 import { HOSTS_OFFERED, LOADED_STATES, loadedVerdict, outcomeNote, runningVerdict } from "../src/loaded-words.mjs";
 import { RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES } from "../src/run-filter.mjs";
 import { planTriggerAdd, TRIGGER_ADD_FIELDS } from "../src/write-plans.mjs";
@@ -132,8 +133,11 @@ test("each row of that table says what to do on the page its line's own buttons 
   assert.match(loadedVerdict({ ...S.noFlow(), jobId: "repeat:nightly:1", kind: "local", target: "local:site", triggerIndex: null }).fixes[0].href, /^\/triggers\?/);
   // Words a state's sentences lean on that the code holds.
   assert.match(rows.get("mcp-stopped").says, /only where the queue holds the job again or the record is a later attempt/);
-  assert.match(rows.get("stopped").says, /after loading with no turn taken/);
-  assert.match(rows.get("stopped").says, /A run that completed or took a turn never reads as this/);
+  assert.match(rows.get("stopped").says, /after loading with no answered turn/);
+  assert.match(rows.get("stopped").says, /A run that completed, took a turn a provider answered, or holds metered calls on a failure that counts no turns never reads as this/);
+  assert.match(rows.get("stopped").todo, /`runner-policy`, what can stop a run this way/);
+  assert.match(rows.get("extension-failed").says, /failed to load or was held back, and the job's log says which/);
+  assert.ok(read("docs/console.md").includes(`A list past its cap (${LOADED_MAX_PACKAGES} packages, ${LOADED_MAX_OVERLAY_NAMES} overlay names)`), "the caps the card's comparison leans on");
   assert.equal(loadedVerdict({ ...S.stoppedAfterLoading() }).state, "stopped", "what it says of a real refusal's record");
   assert.equal(loadedVerdict({ ...S.stoppedAfterLoading(), turns: 3 }).state, "everything");
 });
