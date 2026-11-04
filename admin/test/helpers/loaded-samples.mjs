@@ -3,6 +3,7 @@
  * them. Shared by the goldens and the project page's fixture, which draws the same billing.
  */
 import { NOW } from "../../../launch/fixture-deployment.mjs";
+import { manualCanaryJobId } from "../../../worker/src/job-id.mjs";
 import { recordedLoaded } from "../../../worker/src/loaded-record.mjs";
 
 const MIN = 60_000;
@@ -68,6 +69,8 @@ export const LOADED_SAMPLES = Object.freeze({
   mcpTimeout: () => loadedRecord({ jobId: "gh-4b12", target: "acme/api#132", project: "api", flow: "triage", outcome: "failed", reason: "container-infra-exit", exitCode: 1, attempt: 3, triggerIndex: 6, triggerType: "label", tokens: null, loaded: loadedField({ at: "session", mcp: [{ name: "linear", state: "timeout", tools: 0 }], problems: { failed: 0, dropped: 0, mcp: 1 } }) }),
   hostDiffers: () => loadedRecord({ jobId: "gh-ebd7", target: "acme/billing#259", project: "billing", host: "build3", backend: "podman", loaded: loadedField({ sources: [...STAGED, source("overlay", { names: ["git-guard"], extensions: 1 }), source("repository", { skills: 3 }), source("trigger"), source("other")] }) }),
   stopped: () => loadedRecord({ jobId: "gh-1c3e", target: "acme/web#486", outcome: "failed", reason: "container-infra-exit", exitCode: 1, tokens: null, loaded: loadedField({ at: "loader", mcp: null, tools: null }) }),
+  // What a command no extension registers leaves on the record: the runner's `command-unregistered` is outside the reasons the worker keeps, so it reads `runner-policy`, and its line carries no turns.
+  stoppedAfterLoading: () => loadedRecord({ jobId: "gh-1c40", target: "acme/web#481", outcome: "policy", reason: "runner-policy", exitCode: 2, turns: null, tokens: null }),
   stoppedBeforeServers: () => loadedRecord({ jobId: "gh-1c3f", target: "acme/api#134", project: "api", flow: "triage", outcome: "policy", reason: "mcp-shadowed", exitCode: 2, tokens: null, triggerIndex: 6, loaded: loadedField({ at: "session", mcp: [{ name: "linear", state: "pending", tools: 0 }] }) }),
   noAgent: () => loadedRecord({ jobId: "gh-1d40", target: "acme/web#485", flow: null, tokens: null, loaded: loadedField({ at: "none", flow: null, sources: [], mcp: null, tools: null, problems: null }) }),
   absent: () => loadedRecord({ jobId: "gh-1e52", target: "acme/web#484", loaded: recordedLoaded({ v: 1, runner: "absent", image: "pi-job:4.3.1", imageDigest: DIGEST, imagePi: "1.5.0" }) }),
@@ -99,12 +102,15 @@ export function billingRecords() {
   return [refused, stopped, ...Array.from({ length: 15 }, (_, i) => build3(i)), ...Array.from({ length: 6 }, (_, i) => mini2(i)), older];
 }
 
-/** web: mini1 and mini2 load the same, but for trigger 2's, which withhold them, and the canary gh-c0a7. */
+/**
+ * web: mini1 and mini2 load the same. Trigger 2 withholds the packages on mini2, and a package canary, fired by hand from a cron trigger
+ * (`admin/src/trigger-fire.mjs`, the only way one starts), tried pi-lint 1.4.3 on mini1. Neither is able to show what its host has staged.
+ */
 export function webRecords() {
   const run = (i, host) => loadedRecord({ jobId: `gh-w${String(i).padStart(3, "0")}`, target: `acme/web#${500 + i}`, host, startedAt: at((i + 2) * HOUR), endedAt: at((i + 1) * HOUR) });
   const withheld = loadedRecord({ jobId: "gh-8251-r2", target: "acme/web#408", flow: "frontend-fix", host: "mini2", triggerIndex: 1, loaded: LOADED_SAMPLES.leftOut().loaded });
-  // A package canary is an ordinary job on its host's overlay switch, so nothing is left out of it but its candidate's older version.
-  const canary = loadedRecord({ jobId: "gh-c0a7", target: "acme/web#493", packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" }, loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.3", extensions: 1, prompts: 1, tools: 2, toolNames: ["lint_file", "lint_fix"] }), PI_TEST_RUNNER, source("overlay"), source("repository", { skills: 3 }), source("trigger"), source("other")] }) });
+  // An ordinary job on its host's overlay switch, so nothing is left out of it but its candidate's older version, with a cron run's identity.
+  const canary = loadedRecord({ jobId: manualCanaryJobId({ triggerId: "nightly", now: new Date(NOW - 3 * HOUR) }), kind: "local", target: "local:web", triggerIndex: null, triggerType: null, packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" }, loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.3", extensions: 1, prompts: 1, tools: 2, toolNames: ["lint_file", "lint_fix"] }), PI_TEST_RUNNER, source("overlay"), source("repository", { skills: 3 }), source("trigger"), source("other")] }) });
   return [...Array.from({ length: 6 }, (_, i) => run(i, i % 2 === 0 ? "mini1" : "mini2")), withheld, canary];
 }
 

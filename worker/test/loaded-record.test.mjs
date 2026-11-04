@@ -809,13 +809,13 @@ test("the record's line and its table name every word `runner` has", () => {
 	for (const word of record.LOADED_RUNNER_WORDS) assert.ok(row.includes(`\`${word}\``), word);
 });
 
-test("`overlayExtensions` is this job's overlay switch, and a canary replay is one way it is off", () => {
+test("`overlayExtensions` is this job's overlay switch, and a model canary's replay is one way it is off", () => {
 	const canary = readFileSync(new URL("../src/canary-runtime.mjs", import.meta.url), "utf8");
-	assert.match(canary, /containerFactory\(\{[^}]*allowGlobalExtensions: false/, "a canary replay shuts the overlay, whatever the host says");
+	assert.match(canary, /containerFactory\(\{[^}]*allowGlobalExtensions: false/, "a model canary's replay shuts the overlay, whatever the host says");
 	assert.deepEqual(leftOutOf({}, { allowGlobalExtensions: false }).overlayExtensions, true);
 	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
 	const row = spec.split("\n").find((text) => text.startsWith("  | `leftOut` | "));
-	assert.match(row, /`overlayExtensions` \(this job's overlay switch: this host's `PI_GLOBAL_ALLOW_EXTENSIONS=0` or a canary replay/);
+	assert.match(row, /`overlayExtensions` \(this job's overlay switch: this host's `PI_GLOBAL_ALLOW_EXTENSIONS=0` or a model canary's replay/);
 });
 
 test("`absent`, `invalid` and `cut` carry no runner part, whatever the source said", () => {
@@ -1115,4 +1115,17 @@ test("run-container: the real folder is what names are checked against", { skip 
 	});
 	assert.equal(result.loaded.runner, "reported", JSON.stringify(result.loaded));
 	assert.deepEqual(source(result.loaded, "overlay").names, ["git-guard.ts"]);
+});
+
+test("recordedLoaded keeps none of the source's lists: every list on the record is its own", () => {
+	const source = { v: 1, runner: "reported", at: "ready", cut: null, image: null, imageDigest: null, imagePi: null, pi: "1.5.0", flow: null, mcp: [], problems: { failed: 0, dropped: 0, mcp: 0 },
+		sources: [{ tier: "package", name: "pi-lint", version: "1.4.2", extensions: 1, skills: 0, prompts: 0, themes: 0, tools: 1, failed: 0, dropped: 0, shadowed: 0, toolNames: ["lint_file"] }, { tier: "overlay", names: ["a.ts"], failedNames: ["b.ts"], extensions: 1, skills: 0, prompts: 0, themes: 0, tools: 1, failed: 0, dropped: 0, shadowed: 0, namedTools: [{ name: "a.ts", tools: ["guard_check"] }] }],
+		tools: { active: 1, own: ["read"], job: ["report_progress"] }, leftOut: { tools: ["bash"], packages: false, overlayExtensions: false, restricted: false } };
+	const kept = recordedLoaded(source);
+	assert.ok(kept, "the source survives the rebuild");
+	const lists = (value) => [value.sources[0].toolNames, value.sources[1].names, value.sources[1].failedNames, value.sources[1].namedTools[0].tools, value.tools.own, value.tools.job, value.leftOut.tools];
+	lists(kept).forEach((list, at) => {
+		assert.notEqual(list, lists(source)[at], `${at}`);
+		assert.deepEqual(list, lists(source)[at], `${at}`);
+	});
 });

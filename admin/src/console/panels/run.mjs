@@ -677,17 +677,23 @@ function skipRows(r, view) {
   ];
 }
 
+/** What today's triggers file says the trigger matches, or nothing: an agent's copy keeps none of it, and an empty clause would still name the file. */
+function triggerMatchWords(view) {
+  const trigger = view.data?.trigger;
+  const said = trigger ? [trigger.phrase, trigger.label, trigger.pattern].filter(Boolean).join(", ") : "";
+  return said === "" ? "" : `: ${said} (as the triggers file says now)`;
+}
+
 /**
  * The Run card's MCP row: what today's triggers file names, and only where nothing better is on the page. A record whose `loaded.mcp`
  * says what connected is the Loaded card's, and today's file beside it could disagree. Every other record says nothing of it (older,
- * `absent`, `invalid`, `cut`, stopped at the loader), so the row stands. An agent's copy has no field at all, whatever the record holds,
- * so "the record does not say" would be false of it: the row says only where its words come from.
+ * `absent`, `invalid`, `cut`, stopped at the loader), so the row stands. An agent's page has no row: its copy has no `loaded`, so "the record
+ * does not say" would be false of it, and the projection keeps no server's name, so it would read "none" of a trigger that names one.
  */
 function triggerServersRow(view, r) {
   const trigger = view.data?.trigger;
-  if (!trigger) return null;
+  if (!trigger || view.role === "agent") return null;
   const servers = trigger.mcp?.length ? trigger.mcp.join(", ") : "none";
-  if (view.role === "agent") return `${servers} (as the triggers file says now)`;
   return Array.isArray(loadedOf(r)?.mcp) ? null : `${servers} (as the triggers file says now; the record does not say which connected)`;
 }
 
@@ -777,7 +783,7 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Provider failure", providerFailureSentence(r.providerFailure)],
     ["Provider reset", providerFailureOf(r.providerFailure)?.resetAt !== undefined ? timeHtml(r.providerFailure.resetAt) : null],
     ["Turns", `${cell(r.turns)}${Number.isSafeInteger(r.maxTurns) ? ` of ${r.maxTurns}` : ""}`],
-    ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? html`<a href="/config">row ${r.triggerIndex + 1}</a> (${cell(r.triggerType)})${view.data?.trigger ? `: ${[view.data.trigger.phrase, view.data.trigger.label, view.data.trigger.pattern].filter(Boolean).join(", ")} (as the triggers file says now)` : ""}` : "-"],
+    ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? html`<a href="/config">row ${r.triggerIndex + 1}</a> (${cell(r.triggerType)})${triggerMatchWords(view)}` : "-"],
     ["MCP", triggerServersRow(view, r)],
     ["Replica", Number.isInteger(r.replica) ? html`${r.replica} of ${cell(r.replicas)}${view.data?.siblings?.length ? html` · ${view.data.siblings.map((s) => html`${runLink(s.jobId)} ${ui.outcomeBadge(s.outcome, recordReason(s))} `)}` : null}` : null],
     ["Queued", Number.isFinite(msOf(r.queuedAt)) ? timeHtml(msOf(r.queuedAt)) : null],

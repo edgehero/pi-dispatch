@@ -87,6 +87,7 @@ export const LOADED_DRAW = Object.freeze({
   "run-loaded-not-recorded.operator": () => runPage(SAMPLES.notRecorded()),
   "run-loaded-refused.operator": () => runPage(SAMPLES.refused()),
   "run-loaded-stopped.operator": () => runPage(SAMPLES.stopped(), { chat: { state: "finished", mode: "none", jobState: "failed" } }),
+  "run-loaded-stopped-after-loading.operator": () => runPage(SAMPLES.stoppedAfterLoading(), { chat: { state: "finished", mode: "none", jobState: "completed" } }),
   "run-loaded-no-agent.operator": () => runPage(SAMPLES.noAgent()),
   "run-loaded-absent.operator": () => runPage(SAMPLES.absent()),
   "run-loaded-invalid.operator": () => runPage(SAMPLES.invalid()),

@@ -30,13 +30,11 @@
  *   - A flow pi did not find is said as that. At pi 1.5.0 (`dist/core/skills.js`) a SKILL.md with no description is not loaded and
  *     `frontmatter.name` renames one, so a repository can hold a `fix` folder that pi finds no skill named fix in, and the
  *     record knows only that pi found none. REJECTED: "has no fix skill", which claims what the repository holds.
- *   - Whether a run went on. A flow found nowhere or an extension that failed still runs, but only if the run got that far:
- *     a run stopped before the agent started did not go on without anything. `ready` does not show it got that far: the runner
- *     notes `ready`, then can refuse a command no extension registered, or skip the prompt for a stop at load, each with a clean
- *     record. So "ran" and "went on" are said only of a run known to have gone on (`wentOn`), and otherwise it says what was found
- *     and failed, and nothing of what happened next.
- *   - Whether it loaded "everything". That is said of a record that reached `ready` and was not refused for what loaded
- *     (`REFUSED_AFTER_READY`), and of no other: a green line over a run stopped at `session` would say it had all it asked for.
+ *   - Whether a run went on, which the stage does not show. The runner notes `ready`, then can refuse a command no extension
+ *     registers or skip the prompt for a stop at load, and a repository's extension that breaks its report leaves an earlier stage on a
+ *     run that carries on. So what happened is read from the outcome and the turns first (`wentOn`), and the stage only says how far a
+ *     run that did not go on got. "Ran", "went on" and "everything" are said only of a run that went on. REJECTED: a list of reasons the
+ *     runner refuses for, which the worker's vocabulary folds into `runner-policy` and a real record never holds.
  *   - A failed MCP server stops the run (`mcp.mjs` `start`: `mcp-unavailable`, exit 2, or `mcp-unreachable`, exit 1), so it is
  *     never a completed run's note and no line says the run went on.
  *   - `leftOut.overlayExtensions` is this job's switch, and not the host's: a host's PI_GLOBAL_ALLOW_EXTENSIONS=0 closes it
@@ -77,7 +75,9 @@ export const LOADED_WORDS = Object.freeze({
   stoppedServers: "It stopped while its MCP servers were connecting.",
   stoppedBeforeServers: "It stopped before its MCP servers started.",
   stoppedSession: "It stopped after its extensions and skills loaded, before the agent started.",
-  stoppedRefused: "It stopped after loading, before its prompt was sent. The outcome above says why.",
+  stoppedAfterLoading: "It stopped after loading. The outcome above says why.",
+  notedEarly: "This record’s list was last noted before the run started, so it may be out of date.",
+  notedEarlyRow: "this record’s list was last noted before that",
   running: "Shown when it ends, from its record.",
   ranWithoutFlow: "Ran without its flow.",
   flowNowhere: "Its flow was found nowhere.",
@@ -85,8 +85,8 @@ export const LOADED_WORDS = Object.freeze({
   mcpStoppedLoaded: "The run stopped before the agent started, after its extensions and skills had loaded.",
   notRetried: "Not retried: the next attempt would find it the same.",
   retried: "Retried, as any infrastructure failure.",
-  retriedLast: "Retried, as any infrastructure failure; this was its last attempt.",
-  lastAttempt: "This was its last attempt.",
+  retriedStopped: "Retried, as any infrastructure failure; the queue has stopped retrying this job.",
+  queueStopped: "The queue has stopped retrying this job.",
   retriedRule: "The queue retries an infrastructure failure while it has attempts left.",
   readFirst: "Read what it did before you trust it.",
   imageId: "The image id on this host; two local builds of one tag differ, so it never counts as a host difference.",
@@ -96,11 +96,9 @@ export const LOADED_WORDS = Object.freeze({
   sandboxFoot: "Nothing loads until you start pi in the shell.",
   freshFoot: "A fresh sandbox has no run to quote, so it says what a job would load there, from the host’s last doctor run, or unknown. The repository’s part is decided at its base commit.",
   projectTitle: "What its runs load",
-  projectFoot: "From the records of its runs in the last 7 days, comparing each host’s newest run of each trigger. The overlay and staged packages are each host’s own, so runs of one project can load different things on different hosts.",
-  projectCompared: "Compares each host’s newest run of each trigger, so an update every host took is no difference.",
-  projectNoAgent: "have no agent, so they load nothing to compare",
-  projectStopped: "stopped before anything loaded",
-  projectNone: "Nothing to read: no run of this project has a record in the last 7 days.",
+  projectFoot: "From the records of its runs in the last 7 days. A host’s pi, packages and overlay are from its newest run able to show each, and are that host’s own, so runs of one project can load different things on different hosts.",
+  projectCompared: "A host’s pi, packages and overlay are from its newest run able to show each, so an update every host took is no difference.",
+  projectNone: "Nothing to read: no run of this project recorded what it loaded in the last 7 days.",
   projectNoneWhy: "Either none ran, or an older release wrote their records.",
 });
 
@@ -346,13 +344,13 @@ const serversIn = (loaded, states) => (loaded.mcp ?? []).filter((row) => states.
 
 /**
  * What is said of a retry, for a failure the queue retries: only what the record or the queue shows. The queue holding the job again
- * (`QUEUED_STATES`, or running it) shows a retry; the queue saying it failed shows the attempts are over, and the record's `attempt`
- * whether there were others. A later attempt is itself a retry. With neither, a first attempt says what the queue does and claims nothing
- * of this run: the job may be gone from the queue either way, and "retried" over a run that was not would send a person to wait for it.
+ * (`QUEUED_STATES`, or running it) shows a retry; `failed` shows the queue has stopped retrying it, and neither it nor the record gives
+ * the total, so no attempt is called the last; a later attempt is itself a retry. With neither, a first attempt says what the queue
+ * does and claims nothing of this run: the job may be gone from the queue either way.
  */
 function retryWords(record, jobState) {
   const later = isCount(record?.attempt) && record.attempt > 1;
-  if (jobState === "failed") return later ? LOADED_WORDS.retriedLast : LOADED_WORDS.lastAttempt;
+  if (jobState === "failed") return later ? LOADED_WORDS.retriedStopped : LOADED_WORDS.queueStopped;
   if (later || jobState === "active" || QUEUED_STATES.includes(jobState)) return LOADED_WORDS.retried;
   return LOADED_WORDS.retriedRule;
 }
@@ -446,9 +444,9 @@ function hostDifference(record, loaded, facts, hostLoads) {
 
 /**
  * How many of the hosts that lack a name get a button beside the one that has it. The fix is on the host that is behind, so it gets one;
- * the sentence already names them all, and a fleet's worth of buttons is no line.
+ * the sentence already names them all, and a fleet's worth of buttons is no line. The docs say this number, and a test holds them to it.
  */
-const HOSTS_OFFERED = 3;
+export const HOSTS_OFFERED = 3;
 
 /** "**Also loaded git-guard** from build3's overlay. mini1 does not have it; mini2 has published nothing." */
 function hostDifferenceLine(difference, facts) {
@@ -469,20 +467,8 @@ function hostDifferenceLine(difference, facts) {
 
 const verdict = (fields, record = null) => ({ tone: "idle", icon: "minus", lead: null, bold: null, rest: null, then: [], small: [], outcome: outcomeNote(record), fixes: [], also: [], ...fields });
 
-/**
- * Refused after `ready`, for what loaded (`run-job.mjs`, held to it by a test): a record of everything loading, of a run that did not
- * start because of it. The refusals before `ready` need no list: `session` itself says the run never got there.
- */
-export const REFUSED_AFTER_READY = Object.freeze(["command-unregistered"]);
-
-/**
- * Whether the record shows the agent went on past what loaded. `ready` is not enough (see this file's header). A run that completed
- * went on, and so did one that took a turn; one stopped at load has neither. A server that stopped the run says it did not.
- */
-function wentOn(record, loaded, stop) {
-  if (loaded.at !== "ready" || stop !== null) return false;
-  return record.outcome === "completed" || (isCount(record.turns) && record.turns > 0);
-}
+/** Whether the record shows the agent went on past what loaded: it completed, or it took a turn. See this file's header. */
+const wentOn = (record) => record?.outcome === "completed" || (isCount(record?.turns) && record.turns > 0);
 
 /**
  * The top line of a run's Loaded card. `{ state, tone, icon, lead, bold, rest, then, small, outcome, fixes, also }`:
@@ -505,13 +491,16 @@ export function loadedVerdict(record, hostLoads = null, { jobState = null } = {}
   if (loaded.runner === "invalid") return verdict({ state: "invalid", tone: "attention", icon: "attention", rest: LOADED_WORDS.invalid }, record);
   if (loaded.runner === "cut") return verdict({ state: "cut", rest: LOADED_WORDS.noRoom }, record);
   if (loaded.at === "none") return verdict({ state: "no-agent", rest: LOADED_WORDS.noAgent }, record);
-  if (loaded.at === "start") return verdict({ state: "stopped", rest: LOADED_WORDS.stoppedStart }, record);
+  // A list that never got past `start` on a run that went on says nothing of what it had, which is what `absent` says.
+  if (loaded.at === "start") return wentOn(record) ? verdict({ state: "absent", rest: LOADED_WORDS.absent }, record) : verdict({ state: "stopped", rest: LOADED_WORDS.stoppedStart }, record);
 
   const small = cutWords(loaded);
   const problems = [];
   const stop = mcpStopLine(loaded, record, { jobState });
   if (stop !== null) problems.push(stop);
-  const ran = wentOn(record, loaded, stop);
+  const ran = stop === null && wentOn(record);
+  // It went on, and a report that broke left an earlier stage. A failed server would have stopped it, so nothing it asks for is missing.
+  if (ran && loaded.at !== "ready") small.push(LOADED_WORDS.notedEarly);
   if (flowMissing(loaded)) problems.push({ state: "no-flow", tone: "attention", icon: "attention", bold: ran ? LOADED_WORDS.ranWithoutFlow : LOADED_WORDS.flowNowhere, rest: noFlowSentence(loaded, facts), fixes: noFlowFixes(loaded, facts) });
   if (failedCountOf(loaded) > 0) {
     const line = failedLine(loaded, facts, ran);
@@ -521,13 +510,12 @@ export function loadedVerdict(record, hostLoads = null, { jobState = null } = {}
     const [first, ...others] = problems;
     return verdict({ ...first, small: [...(first.small ?? []), ...small], also: others.map(({ tone, icon, bold, rest, fixes }) => ({ tone, icon, bold, rest, fixes })) }, record);
   }
-  if (loaded.at === "loader") return verdict({ state: "stopped", rest: LOADED_WORDS.stoppedLoader, small }, record);
-  // A `-shadowed` refusal comes before the servers start (run-job.mjs), and their rows read `pending` all the same.
-  if (serversIn(loaded, ["pending"]).length > 0) return verdict({ state: "stopped", rest: /-shadowed$/.test(record.reason ?? "") ? LOADED_WORDS.stoppedBeforeServers : LOADED_WORDS.stoppedServers, small }, record);
-  // Never `ready`, so never "everything": with no server to name, a `-shadowed` refusal or a stop in between lands here.
-  if (loaded.at === "session") return verdict({ state: "stopped", rest: LOADED_WORDS.stoppedSession, small }, record);
-  if (REFUSED_AFTER_READY.includes(record.reason)) return verdict({ state: "stopped", rest: LOADED_WORDS.stoppedRefused, small }, record);
-
+  if (!ran) {
+    // A `-shadowed` refusal comes before the servers start (run-job.mjs), and their rows read `pending` all the same.
+    const pending = serversIn(loaded, ["pending"]).length > 0;
+    const rest = loaded.at === "loader" ? LOADED_WORDS.stoppedLoader : pending ? (/-shadowed$/.test(record.reason ?? "") ? LOADED_WORDS.stoppedBeforeServers : LOADED_WORDS.stoppedServers) : loaded.at === "session" ? LOADED_WORDS.stoppedSession : LOADED_WORDS.stoppedAfterLoading;
+    return verdict({ state: "stopped", rest, small }, record);
+  }
   const connected = (loaded.mcp ?? []).filter((row) => row.state === "connected");
   const servers = connected.length > 0 ? [`MCP: ${andList(connected.map((row) => `${row.name ?? "a server"} connected, with ${plural(row.tools, "tool")}`))}.`] : [];
   const left = leftOutLines(loaded);
@@ -644,22 +632,24 @@ const SERVER_STATE_WORDS = Object.freeze({
   timeout: "did not answer in time",
   pending: "had not connected",
 });
-const serverWords = (row) => `${row.name ?? "a server"} ${row.state === "connected" ? `connected, with ${plural(row.tools, "tool")}` : SERVER_STATE_WORDS[row.state]}`;
+/** A server's state. `pending` on a run that went on is an early note, since it would have stopped otherwise: it says that. */
+const stateWords = (row, ran) => (row.state === "connected" ? `connected, with ${plural(row.tools, "tool")}` : row.state === "pending" && ran ? "was still connecting when this was noted" : SERVER_STATE_WORDS[row.state]);
+const serverWords = (row, ran) => `${row.name ?? "a server"} ${stateWords(row, ran)}`;
 
-function mcpRow(loaded, facts) {
+function mcpRow(loaded, facts, ran) {
   const row = (value, more = null) => ({ icon: "plug", label: "MCP", value, more });
   if (loaded.mcp === null) {
     if (isCount(loaded.problems?.mcp) && loaded.problems.mcp > 0) return row(`${plural(loaded.problems.mcp, "server")} could not be used`, "this record was cut to fit");
-    return row("not kept", loaded.at === "loader" ? "the run stopped before its servers started" : "this record was cut to fit");
+    return row("not kept", loaded.at !== "loader" ? "this record was cut to fit" : ran ? LOADED_WORDS.notedEarlyRow : "the run stopped before its servers started");
   }
   const left = loaded.cut?.servers > 0 ? `and ${plural(loaded.cut.servers, "more server")} past this record’s bound` : null;
   if (loaded.mcp.length === 0) return row("none", left ?? `${facts.subject} names no server`);
-  return row(loaded.mcp.map(serverWords).join("; "), left);
+  return row(loaded.mcp.map((server) => serverWords(server, ran)).join("; "), left);
 }
 
-function toolsRow(loaded) {
+function toolsRow(loaded, ran) {
   const row = (value, more = null) => ({ icon: "flows", label: "Tools", value, more });
-  if (loaded.tools === null) return row("not kept", loaded.at === "loader" ? "the run stopped before its tools were ready" : "this record was cut to fit");
+  if (loaded.tools === null) return row("not kept", loaded.at !== "loader" ? "this record was cut to fit" : ran ? LOADED_WORDS.notedEarlyRow : "the run stopped before its tools were ready");
   const fromExtensions = sumOf(loaded.sources, "tools");
   const said = [
     Array.isArray(loaded.tools.own) && loaded.tools.own.length > 0 ? andList(loaded.tools.own) : null,
@@ -679,7 +669,8 @@ export function loadedRows(record) {
   if (loaded === null) return [];
   const facts = factsOf(record);
   if (loaded.runner !== "reported" || !saysWhatLoaded(loaded)) return loaded.image !== null || loaded.pi !== null ? [piRow(loaded, facts)] : [];
-  return [piRow(loaded, facts), modelRow(facts), extensionsRow(loaded, facts), skillsRow(loaded, facts), mcpRow(loaded, facts), toolsRow(loaded)];
+  const ran = wentOn(record);
+  return [piRow(loaded, facts), modelRow(facts), extensionsRow(loaded, facts), skillsRow(loaded, facts), mcpRow(loaded, facts, ran), toolsRow(loaded, ran)];
 }
 
 /** One tier's count as a row of the fold, by the words `from` gives it. */
@@ -733,7 +724,7 @@ export function loadedFold(record) {
   }
   for (const row of countRows(loaded, "prompts", "Prompt template", facts)) add(row.kind, row.name, row.version, row.from);
   for (const row of countRows(loaded, "themes", "Theme", facts)) add(row.kind, row.name, row.version, row.from);
-  for (const server of loaded.mcp ?? []) add("MCP server", code(server.name ?? "a server"), "", server.state === "connected" ? `connected, with ${plural(server.tools, "tool")}` : SERVER_STATE_WORDS[server.state]);
+  for (const server of loaded.mcp ?? []) add("MCP server", code(server.name ?? "a server"), "", stateWords(server, wentOn(record)));
   if (Array.isArray(loaded.tools?.own) && loaded.tools.own.length > 0) add("Tools", loaded.tools.own.join(", "), "", "pi");
   for (const row of sourcesOf(loaded, "package")) if (row.toolNames?.length > 0) add("Tools", row.toolNames.join(", "), "", row.name ?? "a staged package");
   for (const row of overlay?.namedTools ?? []) add("Tools", row.tools.join(", "), "", `${row.name}, ${host}’s overlay`);
@@ -858,6 +849,12 @@ const FLOWS_SHOWN = 8;
 /** A run's id as a run link can hold it, or nothing: a list drawn from records the worker wrote, held once more. */
 const runIdOf = (record) => (typeof record?.jobId === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(record.jobId) ? record.jobId : "a run");
 
+/** A run with no agent loads nothing, so a project's card leaves it out of everything but one line saying so. */
+const hasNoAgent = (record) => {
+  const loaded = loadedOf(record);
+  return loaded?.runner === "reported" && loaded.at === "none";
+};
+
 /**
  * Whether a run's overlay was shut by its kind, whatever its host's overlay holds: a model canary always replays with it shut
  * (`canary-runtime.mjs`, `record.canary`), and a restricted run is forced shut. A package canary (`record.packageCanary`) is not here:
@@ -875,89 +872,61 @@ function endOf(record) {
   return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY;
 }
 
-/** Which trigger a run was of, by what its record names. */
-function triggerOf(record) {
-  const facts = factsOf(record);
-  return facts.index !== null ? `row:${facts.index}` : facts.cron !== null ? `cron:${facts.cron}` : `flow:${facts.flow ?? ""}`;
-}
-
 /**
- * The newest of these runs for each trigger. WHAT A HOST HAS IS WHAT ITS NEWEST RUN OF EACH TRIGGER HAD. Within the window a host can
- * have run 1.4.2 and then 1.4.3, and a union of its runs would call a routine Adopt a difference for as long as the old run is
- * in the window. Per trigger, because two triggers on one host load different things and both are what that host has; and for names as
- * well as versions, because a package taken off a host is gone from its next run. A host whose runs all predate an update still
- * differs from one that has it: that is the difference this card is for, however few runs show it.
+ * WHAT A HOST HAS IS WHAT THE NEWEST OF ITS RUNS ABLE TO SHOW IT HAD, fact by fact, in one pass over its runs: pi and its image from
+ * its newest run; its staged packages from its newest run that did not withhold them, was no canary and kept their names; its overlay from
+ * its newest run with the overlay open and names kept. A host can have run 1.4.2 and then 1.4.3 inside the window, and a rare trigger may not
+ * have run since, so REJECTED: the union of a host's runs, and its newest run per trigger, each of which calls a routine Adopt a difference
+ * until the old run leaves the window. Packages and the overlay are the host's: a trigger chooses only all or nothing, which is
+ * `leftOut`. A fact no run could show stays null, which is unknown, never empty: a record cut past its names is no evidence of none.
+ * What a flow or a server did belongs to a trigger, and the card counts those by run, so it compares neither.
  */
-function newestByTrigger(records) {
-  const newest = new Map();
-  for (const record of records) {
-    const key = triggerOf(record);
-    const had = newest.get(key);
-    if (had === undefined || endOf(record) > endOf(had)) newest.set(key, record);
-  }
-  return [...newest.values()];
-}
-
-/** What one host's runs let a project page compare: names, each spelt once, with where they came from. */
 function hostFacts(records) {
-  const facts = { images: new Set(), packages: new Set(), overlay: new Set(), packagesSeen: false, overlaySeen: false, nameless: false, comparable: 0, noAgent: 0 };
-  const listed = [];
+  const facts = { image: null, packages: null, overlay: null, cut: false, shut: false, withheld: false, stopped: 0 };
+  const newest = { image: Number.NEGATIVE_INFINITY, packages: Number.NEGATIVE_INFINITY, overlay: Number.NEGATIVE_INFINITY };
+  const take = (slot, at, value) => {
+    if (facts[slot] !== null && at <= newest[slot]) return;
+    facts[slot] = value;
+    newest[slot] = at;
+  };
   for (const record of records) {
     const loaded = loadedOf(record);
-    if (loaded?.runner === "reported" && loaded.at === "none") facts.noAgent += 1;
-    if (loaded === null || loaded.runner !== "reported" || !saysWhatLoaded(loaded)) continue;
-    listed.push(record);
-    if (loaded.sources.length > 0) facts.comparable += 1;
-  }
-  for (const record of newestByTrigger(listed)) {
-    const loaded = loadedOf(record);
+    if (loaded === null) continue;
+    const at = endOf(record);
     const version = loaded.pi ?? loaded.imagePi;
-    if (version !== null || loaded.image !== null) facts.images.add(JSON.stringify([version, loaded.image]));
-  }
-  // A record cut past its names cannot say what its host has. Only the newest is asked: a list that came before it says nothing of now.
-  for (const record of newestByTrigger(listed.filter((entry) => !overlayShutByKind(entry, loadedOf(entry))))) {
-    const loaded = loadedOf(record);
-    facts.overlaySeen = true;
+    if (version !== null || loaded.image !== null) take("image", at, JSON.stringify([version, loaded.image]));
+    if (loaded.runner !== "reported") continue;
+    if (!saysWhatLoaded(loaded)) { facts.stopped += 1; continue; }
+    const kept = loaded.sources.length > 0;
     const names = sourcesOf(loaded, "overlay")[0]?.names;
-    if (loaded.sources.length === 0 || names === null) facts.nameless = true;
-    for (const name of names ?? []) facts.overlay.add(name);
-  }
-  for (const record of newestByTrigger(listed.filter((entry) => showsHostPackages(entry, loadedOf(entry))))) {
-    const loaded = loadedOf(record);
-    facts.packagesSeen = true;
+    if (overlayShutByKind(record, loaded)) facts.shut = true;
+    else if (!kept || names === null) facts.cut = true;
+    else take("overlay", at, names ?? []);
     const rows = sourcesOf(loaded, "package");
-    if (loaded.sources.length === 0 || rows.some((row) => row.name === null)) facts.nameless = true;
-    for (const row of rows) if (row.name !== null) facts.packages.add(`${row.name} ${row.version}`);
+    if (!showsHostPackages(record, loaded)) facts.withheld = true;
+    else if (!kept || rows.some((row) => row.name === null)) facts.cut = true;
+    else take("packages", at, rows.map((row) => `${row.name} ${row.version}`));
   }
   return facts;
 }
 
 /**
- * A host's facts as `hostsAgree` reads a published row. One rule decides "the same", so the unknown host that a run's page
- * must never read as the same is the same unknown host here: a host with no record that says what it loaded, or one whose
- * records were cut past their names, is `unknown` and the question has no answer. REJECTED: treating such a host as agreeing
- * because nothing differs, which is the guess a host on an older release would make true by saying nothing. `flows` stay
- * out: a flow is the repository's and the trigger's, so two hosts serving different repositories differ there for no
- * reason a host could fix. The image id stays out too: two local builds of one tag differ. `speaks` is whether this host's
- * runs say anything of the part compared, so a host whose only runs had the overlay shut leaves the overlay's answer open.
+ * A host's fact as `hostsAgree` reads a published row. One rule decides "the same", so the unknown host that a run's page must never read as
+ * the same is the same unknown host here: a fact no run could show is `unknown`, and the question has no answer. REJECTED: treating such
+ * a host as agreeing because nothing differs, which is the guess a host on an older release would make true by saying nothing.
  */
-function agreeRow(facts, list, speaks = true) {
-  const known = speaks && facts.comparable > 0 && !facts.nameless;
-  return { state: known ? "current" : "unknown", unread: [], more: {}, overlayExtensionsAllowed: true, extensions: [...list].sort().map((name) => ({ name })), skills: [], mcp: [], packages: [], flows: [] };
-}
+const agreeRow = (list) => ({ state: list !== null ? "current" : "unknown", unread: [], more: {}, overlayExtensionsAllowed: true, extensions: [...(list ?? [])].sort().map((name) => ({ name })), skills: [], mcp: [], packages: [], flows: [] });
 
-/** What one host has that some other known host does not, in a sentence's words. */
+/** What one host has that some other host, able to say, does not, in a sentence's words. */
 function hostExtras(name, facts, others) {
-  const overlay = [...facts.overlay].filter((value) => others.some((other) => other.overlaySeen && !other.overlay.has(value)));
-  const packages = facts.packagesSeen ? [...facts.packages].filter((value) => others.some((other) => other.packagesSeen && !other.packages.has(value))) : [];
-  const images = [...facts.images].filter((value) => others.some((other) => !other.images.has(value))).map((value) => {
-    const [version, image] = JSON.parse(value);
-    return `runs ${version !== null ? `pi ${version}` : "pi"}${image !== null ? ` in ${image}` : ""}`;
-  });
+  const lacking = (part, value) => others.some((other) => other[part] !== null && !other[part].includes(value));
+  const images = facts.image !== null && others.some((other) => other.image !== null && other.image !== facts.image) ? [JSON.parse(facts.image)] : [];
   const parts = [
-    ...images,
-    overlay.length > 0 ? `also loads ${andList(overlay)} from its overlay` : null,
-    packages.length > 0 ? `also loads ${andList(packages)}` : null,
+    ...images.map(([version, image]) => `runs ${version !== null ? `pi ${version}` : "pi"}${image !== null ? ` in ${image}` : ""}`),
+    ...[["overlay", " from its overlay"], ["packages", ""]].map(([part, from]) => {
+      const extra = (facts[part] ?? []).filter((value) => lacking(part, value));
+      return extra.length > 0 ? `also loads ${andList(extra)}${from}` : null;
+    }),
   ].filter(Boolean);
   return parts.length > 0 ? `${name} ${parts.join(" and ")}` : null;
 }
@@ -979,12 +948,16 @@ function tally(records, read) {
  * every Monday, when a person is most likely to ask what ran over the weekend. `{ state, tone, icon, total, read, top, small,
  * hosts, rows, links, foot }`, `state` being `differs`, `same`, `incomplete` or `none`.
  *
- * WHAT IT CLAIMS. A difference, when two hosts it can read differ by their newest run of each trigger (`newestByTrigger`): that is
- * read, whatever a third host says and however few runs it read, and it says how few under the line. "The same", only when `hostsAgree` says so of every host that ran something.
- * Otherwise neither, and it says how little it read and why.
+ * WHAT IT CLAIMS. A difference, when two hosts it can read differ by what `hostFacts` finds: that is read, whatever a third host says and
+ * however few runs it read, and it says how few under the line. "The same", only when `hostsAgree` says so of every host that ran something,
+ * on one host nothing has anything to differ from. Otherwise neither, and it says how little it read and why. Its other lines claim only
+ * what the runs able to show a thing showed, which is why a run a trigger or a kind kept from showing it needs no excuse by name.
  */
 export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
-  const runs = Array.isArray(records) ? records.filter((record) => record !== null && typeof record === "object") : [];
+  const all = Array.isArray(records) ? records.filter((record) => record !== null && typeof record === "object") : [];
+  const runs = all.filter((record) => !hasNoAgent(record));
+  const agentless = all.length - runs.length;
+  const leftOutLine = agentless > 0 ? [`Leaves out ${plural(agentless, "run")} with no agent, which ${agentless === 1 ? "loads" : "load"} nothing.`] : [];
   const total = runs.length;
   const read = runs.filter((record) => notReadWhy(record) === null);
   const unread = runs.filter((record) => notReadWhy(record) !== null);
@@ -998,8 +971,8 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
   const unreadSentence = bucketWords.length > 0 ? `${notReadCount(unread.length)}: ${bucketWords.join(", ")}.` : null;
 
   if (read.length === 0) {
-    const onlyOlder = total === 0 || (buckets.size === 1 && buckets.has("older"));
-    return { state: "none", tone: "idle", icon: "minus", total, read: 0, sub, top: LOADED_WORDS.projectNone, small: onlyOlder ? [LOADED_WORDS.projectNoneWhy] : [unreadSentence], rows: [], hosts: [], links: [], foot: null };
+    const onlyOlder = total === 0 ? agentless === 0 : buckets.size === 1 && buckets.has("older");
+    return { state: "none", tone: "idle", icon: "minus", total, read: 0, sub, top: LOADED_WORDS.projectNone, small: [...(onlyOlder ? [LOADED_WORDS.projectNoneWhy] : unreadSentence !== null ? [unreadSentence] : []), ...leftOutLine], rows: [], hosts: [], links: [], foot: null };
   }
 
   const byHost = new Map();
@@ -1009,23 +982,12 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
     byHost.set(name, [...(byHost.get(name) ?? []), record]);
   }
   const hosts = [...byHost].sort((a, b) => a[0].localeCompare(b[0])).map(([name, list]) => ({ name, list, facts: hostFacts(list), recorded: list.filter((record) => notReadWhy(record) === null).length }));
-  const imageList = (facts) => [...facts.images].map((value) => `image:${value}`);
-  const overlayList = (facts) => [...facts.overlay].map((name) => `overlay:${name}`);
-  const packageList = (facts) => [...facts.packages].map((name) => `package:${name}`);
-  const known = hosts.filter(({ facts }) => facts.comparable > 0 && !facts.nameless);
-  const withPackages = hosts.filter(({ facts }) => facts.packagesSeen || facts.comparable === 0 || facts.nameless);
-  const agree = (list, of, speaks) => (list.length === 0 ? null : hostsAgree(list.map(({ facts }) => agreeRow(facts, of(facts), speaks?.(facts)))));
-  const baseAll = agree(hosts, imageList);
-  // One host has nothing to differ from, so what its runs left unsaid is no open question.
-  const overlayAll = hosts.length === 1 ? baseAll : agree(hosts, overlayList, (facts) => facts.overlaySeen);
-  const packagesAll = withPackages.length === 0 ? true : agree(withPackages, packageList);
-  const baseKnown = agree(known, imageList);
-  const overlayKnown = agree(known.filter(({ facts }) => facts.overlaySeen), overlayList);
-  const packagesKnown = agree(known.filter(({ facts }) => facts.packagesSeen), packageList);
+  const PARTS = [["image", (value) => [value]], ["packages", (value) => value], ["overlay", (value) => value]];
   const hostless = runs.filter((record) => matched(record.host, WORKER_NAME_RE) === null).length;
-  // Any host's reading is a part of "the same", so a bounded history cannot be read as every host's.
-  const same = !historyIncomplete && baseAll === true && overlayAll === true && packagesAll === true && hostless === 0;
-  const differs = baseKnown === false || overlayKnown === false || packagesKnown === false;
+  const asRow = (host, part, list) => agreeRow(host.facts[part] === null ? null : list(host.facts[part]));
+  // Any host's reading is a part of "the same", so a bounded history cannot be read as every host's. One host has nothing to differ from.
+  const same = !historyIncomplete && hostless === 0 && (hosts.length === 1 || PARTS.every(([part, list]) => hostsAgree(hosts.map((host) => asRow(host, part, list))) === true));
+  const differs = PARTS.some(([part, list]) => hostsAgree(hosts.filter((host) => host.facts[part] !== null).map((host) => asRow(host, part, list))) === false);
   const state = differs ? "differs" : read.length * 2 < total ? "incomplete" : same ? "same" : "incomplete";
 
   const recordedWord = read.length === total ? "every recorded run" : read.length === 1 ? "the 1 recorded run" : `all ${read.length} recorded runs`;
@@ -1049,68 +1011,20 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
   });
   const modelsRow = { icon: "bolt", label: "Models", value: models.length === 0 ? "not recorded" : models.length === 1 ? models[0][0] : models.map(([value, n]) => `${value} in ${n}`).join(", "), more: models.length === 1 ? recordedWord : null };
 
-  // What every comparable run loaded, and what only some did. A trigger's withheld packages and a canary's candidate are
-  // said as such, by name, so a chosen difference never reads as a host's.
-  const comparable = read.filter((record) => {
-    const loaded = loadedOf(record);
-    return saysWhatLoaded(loaded) && loaded.sources.length > 0;
-  });
-  const showsPackages = comparable.filter((record) => showsHostPackages(record, loadedOf(record)));
-  const showsOverlay = comparable.filter((record) => !overlayShutByKind(record, loadedOf(record)));
-  // What each host has now, as the comparison reads it: the row says what those hold, so a past version is not "in every run" of nothing.
-  const currentOf = (list) => [...new Set(list.map((record) => record.host))].flatMap((host) => newestByTrigger(list.filter((record) => record.host === host)));
-  const namesOf = (record) => sourcesOf(loadedOf(record), "package").filter((row) => row.name !== null).map((row) => `${row.name} ${row.version}`);
-  const overlayOf = (record) => sourcesOf(loadedOf(record), "overlay")[0]?.names ?? [];
+  // What every host able to show it has, and what only some do, and nothing about runs: a host's facts are its newest runs', so a run from
+  // before an update or one that withheld its packages neither holds nor lacks anything here, and none needs saying by name.
+  const knownLists = (part) => hosts.map((host) => host.facts[part]).filter((list) => list !== null);
   const intersect = (lists) => (lists.length === 0 ? [] : lists.reduce((kept, list) => kept.filter((name) => list.includes(name))));
-  const commonPackages = intersect(currentOf(showsPackages).map(namesOf));
-  const commonOverlay = intersect(currentOf(showsOverlay).map(overlayOf));
-  const common = [...commonPackages, ...commonOverlay];
-  // "Every recorded run" only of what every run with a list holds: a run that stopped before its list has no list, and a run from before an update holds the old one.
-  const heldThroughout = showsPackages.every((record) => commonPackages.every((name) => namesOf(record).includes(name))) && showsOverlay.every((record) => commonOverlay.every((name) => overlayOf(record).includes(name)));
-  const listedWord = !heldThroughout ? "each host’s newest run of each trigger" : comparable.length === read.length ? recordedWord : comparable.length === 1 ? "the 1 run with a list" : `the ${comparable.length} runs with a list`;
-  const someOnly = [];
-  for (const host of hosts) {
-    const here = comparable.filter((record) => record.host === host.name);
-    const extra = [...host.facts.packages, ...host.facts.overlay].filter((name) => !common.includes(name));
-    for (const name of extra) {
-      const count = here.filter((record) => namesOf(record).includes(name) || overlayOf(record).includes(name)).length;
-      if (count > 0) someOnly.push(`${name} in the ${count} recorded on ${host.name}`);
-    }
-  }
-  // Each trigger that withholds them, by what its record names: a cron trigger keeps no row, only its id.
-  const withheldFacts = comparable.filter((record) => loadedOf(record).leftOut?.packages === true).map(factsOf);
-  const withheld = [...[...new Set(withheldFacts.map((facts) => facts.index).filter((index) => index !== null))].sort((a, b) => a - b).map((index) => `trigger ${index + 1}`), ...new Set(withheldFacts.map((facts) => facts.cron).filter((cron) => cron !== null).map((cron) => `cron trigger ${cron}`))];
-  const canaries = comparable.filter((record) => record.packageCanary && typeof record.packageCanary.name === "string" && typeof record.packageCanary.version === "string");
-  const restricted = commonOverlay.length > 0 ? comparable.filter((record) => overlayShutByKind(record, loadedOf(record))).length : 0;
-  const excuses = [
-    withheld.length > 0 ? `${andList(withheld.map((subject) => `${subject}’s`))}, which withhold them` : null,
-    ...canaries.slice(0, 3).map((record) => ["the canary ", run(runIdOf(record)), `, which tried ${record.packageCanary.name} ${record.packageCanary.version}`]),
-    restricted > 0 ? `${plural(restricted, "run")} of a kind that leaves out the overlay’s extensions` : null,
-  ].filter(Boolean);
-  const extensionMore = () => {
-    const parts = [];
-    if (state === "incomplete") {
-      // A run with no agent had nothing to load, so it is no unknown; a run that stopped before its list is.
-      const agentless = read.filter((record) => loadedOf(record).at === "none").length;
-      const other = total - comparable.length - agentless;
-      if (comparable.length === 0) parts.push("no run here recorded a list");
-      else parts.push(other > 0 ? `the ${comparable.length} recorded; unknown for the other ${other}` : `the ${comparable.length} recorded`);
-    }
-    else {
-      parts.push(listedWord);
-      if (someOnly.length > 0) parts.push(`, and ${andList(someOnly)}`);
-      if (excuses.length > 0) {
-        parts.push(", but for ");
-        excuses.forEach((excuse, at) => {
-          if (at > 0) parts.push(", and ");
-          parts.push(...(Array.isArray(excuse) ? excuse : [excuse]));
-        });
-      }
-      if (unread.length > 0) parts.push(`; ${notReadCount(unread.length)}`);
-    }
-    return parts;
-  };
-  const extensionsRowOf = { icon: "layers", label: "Extensions", value: common.length > 0 ? common.join(", ") : comparable.length > 0 ? "none in every run" : "not kept", more: extensionMore() };
+  const common = [...intersect(knownLists("packages")), ...intersect(knownLists("overlay"))];
+  const anyKnown = knownLists("packages").length + knownLists("overlay").length > 0;
+  const nothingAnywhere = [...knownLists("packages"), ...knownLists("overlay")].every((list) => list.length === 0);
+  const someOnly = hosts.flatMap((host) => [...(host.facts.packages ?? []), ...(host.facts.overlay ?? [])].filter((name) => !common.includes(name)).map((name) => `${name} on ${host.name}`));
+  const extensionMore = !anyKnown ? "no run here could show them" : [
+    `from ${hosts.length === 1 ? "its" : "each host’s"} newest run able to show them`,
+    ...(someOnly.length > 0 ? [`, and ${andList(someOnly)}`] : []),
+    ...(unread.length > 0 ? [`; ${notReadCount(unread.length)}`] : []),
+  ];
+  const extensionsRowOf = { icon: "layers", label: "Extensions", value: common.length > 0 ? common.join(", ") : !anyKnown ? "not kept" : nothingAnywhere ? "none" : "none on every host", more: extensionMore };
 
   const flows = tally(read, (record) => factsOf(record).flow !== null && loadedOf(record).flow !== null ? factsOf(record).flow : null);
   const flowFromOf = (flow) => {
@@ -1150,7 +1064,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
   ].filter(Boolean);
   const missingRuns = [...new Set([...noFlow, ...failedExtension, ...stoppedByServer])].slice(0, 3);
   const missingRow = missingParts.length === 0
-    ? { icon: "refused", label: "Missing", value: state === "incomplete" ? (comparable.length > 0 ? `nothing in the ${comparable.length} recorded` : "nothing recorded") : "nothing", more: state === "incomplete" ? "a run with no record cannot say" : `${comparable.length === read.length ? "every recorded run" : "every run with a list"} found its flow and loaded every extension, and no MCP server stopped one` }
+    ? { icon: "refused", label: "Missing", value: state === "incomplete" ? `nothing in the ${read.length} recorded` : "nothing", more: state === "incomplete" ? "a run with no record cannot say" : "no record says a run lacked its flow or an extension, or was stopped by an MCP server" }
     : { icon: "refused", label: "Missing", value: andList(missingParts), more: missingRuns.flatMap((record, at) => [...(at > 0 ? [", "] : []), run(runIdOf(record))]) };
 
   const notReadParts = () => {
@@ -1161,18 +1075,19 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
 
   const table = hosts.map((host) => {
     const newest = host.list[0];
-    const here = comparable.filter((record) => record.host === host.name);
-    const overlayNames = [...host.facts.overlay];
-    const packageNames = [...host.facts.packages];
+    const overlayNames = host.facts.overlay ?? [];
+    const packageNames = host.facts.packages ?? [];
     return {
       name: host.name,
       backend: typeof newest?.backend === "string" ? newest.backend : null,
       runs: host.list.length,
       recorded: host.recorded,
-      extensions: here.length === 0 ? [{ muted: "not recorded" }] : [
+      extensions: host.facts.packages === null && host.facts.overlay === null ? [{ muted: "not recorded" }] : [
         ...(packageNames.length > 0 ? [packageNames.join(", ")] : []),
         ...overlayNames.flatMap((name, at) => [...(packageNames.length > 0 || at > 0 ? [", "] : []), name, { muted: " (overlay)" }]),
         ...(packageNames.length === 0 && overlayNames.length === 0 ? [{ muted: "none" }] : []),
+        ...(host.facts.packages === null ? [{ muted: "; its packages not recorded" }] : []),
+        ...(host.facts.overlay === null ? [{ muted: "; its overlay not recorded" }] : []),
       ],
       flows: tally(host.list, (record) => (notReadWhy(record) === null && loadedOf(record).flow !== null ? factsOf(record).flow : null)).map(([flow]) => flow),
     };
@@ -1180,20 +1095,22 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
 
   const readFrom = `Read from ${read.length} of its ${total} runs in the last 7 days`;
   if (state === "incomplete") {
-    // Each way "the same" stays open, so a line that read every run it had still says why it will not say.
-    const cutHosts = hosts.filter(({ facts }) => facts.nameless).map(({ name }) => name);
-    const silent = hosts.filter(({ facts, recorded }) => recorded > 0 && facts.comparable === 0 && !facts.nameless);
-    const noAgentHosts = silent.filter(({ facts, recorded }) => facts.noAgent === recorded).map(({ name }) => name);
-    const stoppedHosts = silent.filter(({ facts, recorded }) => facts.noAgent !== recorded).map(({ name }) => name);
-    const shutHosts = hosts.length > 1 ? hosts.filter(({ facts }) => facts.comparable > 0 && !facts.nameless && !facts.overlaySeen).map(({ name }) => name) : [];
+    // Each way "the same" stays open, so a line that read every run it had still says why it will not say. A host names a cause only for
+    // a fact it left unknown: a cut record or a canary beside a run able to show the fact leaves nothing open.
+    const hostsWhere = (test) => hosts.filter(({ facts }) => test(facts)).map(({ name }) => name);
+    const cutHosts = hostsWhere((facts) => facts.cut && (facts.packages === null || facts.overlay === null));
+    const shutHosts = hostsWhere((facts) => facts.shut && facts.overlay === null);
+    const withheldHosts = hostsWhere((facts) => facts.withheld && facts.packages === null);
+    const stopped = hosts.filter(({ facts }) => facts.stopped > 0 && facts.packages === null && facts.overlay === null).map(({ name, facts }, at) => `${at === 0 ? plural(facts.stopped, "run") : facts.stopped} on ${name}`);
     const small = [
       unreadSentence,
       historyIncomplete ? "The run history could not be read completely." : null,
       hostless > 0 ? `${hostless === 1 ? "1 run names" : `${hostless} runs name`} no host, so ${hostless === 1 ? "it" : "they"} cannot be compared.` : null,
       cutHosts.length > 0 ? `The records of ${andList(cutHosts)} were cut to fit and keep no names to compare.` : null,
-      noAgentHosts.length > 0 ? `The runs on ${andList(noAgentHosts)} ${LOADED_WORDS.projectNoAgent}.` : null,
-      stoppedHosts.length > 0 ? `The runs on ${andList(stoppedHosts)} ${LOADED_WORDS.projectStopped}.` : null,
+      stopped.length > 0 ? `${andList(stopped)} stopped before anything loaded.` : null,
       shutHosts.length > 0 ? `The runs on ${andList(shutHosts)} had the overlay shut, as a model canary and a restricted run do, so they say nothing of its extensions.` : null,
+      withheldHosts.length > 0 ? `The runs on ${andList(withheldHosts)} withheld the staged packages or were canaries, so they say nothing of them.` : null,
+      ...leftOutLine,
     ].filter(Boolean);
     return { state, tone: "attention", icon: "attention", total, read: read.length, sub, top: `${readFrom}, so runs may differ in ways this does not show.`, small, rows: [piRowOf(), extensionsRowOf, missingRow], hosts: [], links: [], foot: null };
   }
@@ -1202,9 +1119,9 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
     const top = names.length === 1 ? `All its recorded runs ran on one host: ${names[0]}.` : `Runs load the same on each host: ${andList(names)}.`;
     // Green is for nothing to do: hosts that agree on what stopped every run still have every run stopped.
     const missing = missingParts.length > 0;
-    return { state, tone: missing ? "attention" : "ok", icon: missing ? "attention" : "done", total, read: read.length, sub, top, small: [], rows: [piRowOf(), extensionsRowOf, ...(stoppedByServer.length > 0 ? [mcpRowOf] : []), ...(missing ? [missingRow] : []), ...(unread.length > 0 ? [notReadRow] : [])], hosts: [], links: [], foot: names.length > 1 ? LOADED_WORDS.projectCompared : null };
+    return { state, tone: missing ? "attention" : "ok", icon: missing ? "attention" : "done", total, read: read.length, sub, top, small: leftOutLine, rows: [piRowOf(), extensionsRowOf, ...(stoppedByServer.length > 0 ? [mcpRowOf] : []), ...(missing ? [missingRow] : []), ...(unread.length > 0 ? [notReadRow] : [])], hosts: [], links: [], foot: names.length > 1 ? LOADED_WORDS.projectCompared : null };
   }
-  const extras = known.map(({ name, facts }) => ({ name, said: hostExtras(name, facts, known.filter((other) => other.name !== name).map((other) => other.facts)) })).filter(({ said }) => said !== null);
+  const extras = hosts.map(({ name, facts }) => ({ name, said: hostExtras(name, facts, hosts.filter((other) => other.name !== name).map((other) => other.facts)) })).filter(({ said }) => said !== null);
   const top = `Runs differ by host: ${extras.map(({ said }) => said).join("; ")}.`;
-  return { state, tone: "attention", icon: "attention", total, read: read.length, sub, top, small: read.length * 2 < total ? [`${readFrom}, so they may differ in other ways too.`] : [], rows: [piRowOf(), modelsRow, extensionsRowOf, flowsRow, mcpRowOf, missingRow, ...(unread.length > 0 ? [notReadRow] : [])], hosts: table, links: extras.map(({ name }) => hostFix(name)), foot: LOADED_WORDS.projectFoot };
+  return { state, tone: "attention", icon: "attention", total, read: read.length, sub, top, small: [...(read.length * 2 < total ? [`${readFrom}, so they may differ in other ways too.`] : []), ...leftOutLine], rows: [piRowOf(), modelsRow, extensionsRowOf, flowsRow, mcpRowOf, missingRow, ...(unread.length > 0 ? [notReadRow] : [])], hosts: table, links: extras.map(({ name }) => hostFix(name)), foot: LOADED_WORDS.projectFoot };
 }

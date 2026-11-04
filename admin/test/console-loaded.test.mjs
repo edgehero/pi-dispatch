@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { agentReadProjection } from "../src/agent-read.mjs";
 import { LOADED_CSS, LOADED_CSS_SHA256 } from "../src/console/loaded-css.mjs";
-import { parsePageQuery, renderPage } from "../src/console/pages.mjs";
+import { loadPageData, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { PAGE_CSS } from "../src/console/page-css.mjs";
 import { outcomeCell } from "../src/console/panels/common.mjs";
 import { loadedList, wordsHtml } from "../src/console/panels/loaded-parts.mjs";
@@ -12,12 +13,14 @@ import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { LOADED_STATES, LOADED_WORDS, loadedFold, loadedOf, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, projectLoadsOf, wordsText } from "../src/loaded-words.mjs";
 import { projectViewForAgent } from "../src/project-view.mjs";
 import { FORGE_KINDS } from "@edgehero/pi-dispatch/forges";
-import { FORGE_COMMIT_PATH, forgeBaseLinkOf, forgeRepoLinkOf, modelRunRecord } from "../src/read-model.mjs";
+import { FORGE_COMMIT_PATH, forgeBaseLinkOf, forgeRepoLinkOf, modelRunRecord, readRunById } from "../src/read-model.mjs";
 import { parseRunFilter, runMatches } from "../src/run-filter.mjs";
 import { runForAgent } from "../src/tool-reads.mjs";
 import { outcomeKey } from "../src/words.mjs";
 import { cardPreview, cardReadme, cardText } from "./helpers/card-structure.mjs";
 import { LOADED_DRAW, LOADED_PANEL_STATES, LOADED_STATE_GOLDENS } from "./helpers/loaded-goldens.mjs";
+import { recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { BASE_SHA, HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, LONG_LOADED, SCRIPT, billingRecords, incompleteRecords, loadedField, source, webRecords } from "./helpers/loaded-samples.mjs";
 
 // Issue #800: what the console's surfaces do with `loaded-words.mjs`: the run page's card and banner, the Runs list and its
@@ -176,14 +179,45 @@ test("the Run card's MCP row stands wherever the record does not say what connec
     assert.ok(!(await pageOf(record, "operator", { trigger })).includes(clause), record.jobId);
     assert.ok(!(await pageOf(record, "viewer", { trigger })).includes(clause), record.jobId);
   }
-  // An agent's copy has no field whatever the record holds, so "the record does not say" would be false of it. It says where its words come from.
-  const agentPage = async (record) => String((await renderPage("run", { query: { id: record.jobId }, session: { name: "agent", role: "agent" }, data: { ...agentReadProjection({ now: Date.parse(record.endedAt) + 60_000, env: {}, run: { record, source: "local" }, chat: { state: "finished", mode: "none", jobState: "completed" }, transcript: { exists: false }, children: [], childrenSearched: 50 }), trigger } })).html);
-  const agent = await agentPage(S.mcpConnected());
-  assert.ok(!agent.includes(clause));
-  assert.ok(agent.includes("linear (as the triggers file says now)"));
   const failed = await pageOf(S.hostDiffers(), "operator", { hostLoads: null });
   assert.ok(failed.includes("Everything trigger 3 asks for loaded."));
   assert.ok(!failed.includes("does not have it"));
+});
+
+test("an agent's page has no MCP row, read the way a real page reads: the projection keeps no server's name, and its copy has no field to say anything of", async () => {
+  const trigger = { mcp: ["linear"], phrase: "@pi", label: null, pattern: null };
+  const logsDir = tempDir("agent-run-");
+  // A record as production writes one, on disk, through the reader the page reads.
+  const made = await recordThroughPipeline({ jobId: "gh-agent", exit: { code: 0, reason: "stop" }, turnsOnLine: 3 });
+  writeFileSync(join(logsDir, "gh-agent.json"), JSON.stringify(made));
+  const fleet = { runById: async (id) => readRunById(null, { logsDir, jobId: id }), runTrigger: async () => trigger, transcriptMeta: async () => ({ exists: false, ended: false, outcome: null, length: 0, firstId: null, lastId: null }), childrenOf: async () => ({ children: [], searched: 50 }), parkedCount: async () => 0, runs: async () => [], snapshot: async () => null, progressOfRun: async () => ({ progress: null, continues: false, continuesAs: null }) };
+  const page = async (role) => {
+    const query = { id: "gh-agent" };
+    const data = await loadPageData("run", query, { fleet, subscriptions: () => ({ subscriptions: [] }), now: () => Date.parse(made.endedAt) + 60_000 }, { role });
+    return { data, html: String((await renderPage("run", { data, query, session: { role, name: role }, readOnly: false, env: {} })).html) };
+  };
+  const operator = await page("operator");
+  assert.equal(operator.data.trigger.mcp[0], "linear", "the premise: the trigger names a server");
+  assert.ok(!operator.html.includes("the record does not say which connected"), "this record's `loaded.mcp` is a list, so the Loaded card says it");
+  const agent = await page("agent");
+  assert.deepEqual(agent.data.trigger?.mcp ?? [], [], "the premise: no server's name reaches an agent's data");
+  const text = (html) => html.replace(/<svg[\s\S]*?<\/svg>/g, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  assert.doesNotMatch(text(agent.html), /MCP (?:none|linear)/, "no row at all, rather than none of a trigger that names one");
+  assert.doesNotMatch(text(agent.html), /: \(as the triggers file says now\)/, "no empty clause on the Trigger row either");
+  assert.equal(Object.hasOwn(agent.data.run.record, "loaded"), false);
+});
+
+test("reading a record leaves its lists alone: the rebuild copies each, and only its own copy is frozen", () => {
+  const raw = loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.2", extensions: 1, tools: 1, toolNames: ["lint_file"] }), source("overlay", { names: ["a.ts"], failedNames: ["b.ts"], extensions: 1, failed: 1, tools: 1, namedTools: [{ name: "a.ts", tools: ["guard_check"] }] }), source("repository"), source("trigger"), source("other")], tools: { active: 1, own: ["read"], job: ["report_progress"] }, leftOut: { tools: ["bash"], packages: false, overlayExtensions: false, restricted: false }, problems: { failed: 1, dropped: 0, mcp: 0 } });
+  const record = { ...S.everything(), loaded: raw };
+  const lists = (loaded) => [loaded.sources[0].toolNames, loaded.sources[1].names, loaded.sources[1].failedNames, loaded.sources[1].namedTools[0].tools, loaded.tools.own, loaded.tools.job, loaded.leftOut.tools];
+  const read = loadedOf(record);
+  lists(read).forEach((list, at) => {
+    assert.notEqual(list, lists(raw)[at], `${at}: a list of the record's own`);
+    assert.ok(Object.isFrozen(list), `${at}: the answer is frozen`);
+    assert.equal(Object.isFrozen(lists(raw)[at]), false, `${at}: the source is not`);
+    assert.doesNotThrow(() => lists(raw)[at].push("x"), `${at}`);
+  });
 });
 
 test("the fold is a details element, the card's words, and the page draws the panel after p-run for both roles", async () => {

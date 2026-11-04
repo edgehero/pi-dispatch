@@ -5,7 +5,7 @@ import { ACTIONS } from "../src/console/actions.mjs";
 import { PAGES } from "../src/console/pages.mjs";
 import { ERROR_KINDS, errorPage } from "../src/console/error-pages.mjs";
 import { ENDED_REASONS, endedNotices } from "../src/console/session-ends.mjs";
-import { LOADED_STATES, REFUSED_AFTER_READY, loadedVerdict, outcomeNote, runningVerdict } from "../src/loaded-words.mjs";
+import { HOSTS_OFFERED, LOADED_STATES, loadedVerdict, outcomeNote, runningVerdict } from "../src/loaded-words.mjs";
 import { RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES } from "../src/run-filter.mjs";
 import { planTriggerAdd, TRIGGER_ADD_FIELDS } from "../src/write-plans.mjs";
 import { HOST_LOADS, LOADED_SAMPLES as S, loadedField, loadedRecord, source } from "./helpers/loaded-samples.mjs";
@@ -120,17 +120,22 @@ test("each row of that table says what to do on the page its line's own buttons 
   const failed = rows.get("extension-failed");
   assert.doesNotMatch(`${failed.says} ${failed.todo}`.replace("pi's error text is not", ""), /error/i);
   assert.match(failed.says, /`load`, `conflict` or `manifest-dir`/);
-  assert.match(failed.says, /`overlay_extensions_withheld` with a `reason` and a `root`/, "the failure that logs neither a path nor a kind");
-  // A difference's fix is on the host behind, so the row says the line offers it, and the line does: a button per host, each by name.
-  assert.match(rows.get("host-differs").todo, /A button opens each: the host that has it and each that lacks it, by name/);
+  assert.match(failed.says, /`overlay_extensions_withheld` with the reason `ignore-matcher-unavailable` and a `root`/, "the failure that logs neither a path nor a kind");
+  // A difference's fix is on the host behind, so the row says the line offers it, and how many, wherever a person reads that.
+  const offered = `up to ${HOSTS_OFFERED} of the hosts that lack it`;
+  assert.ok(rows.get("host-differs").todo.includes(offered), offered);
+  assert.ok(read("specs/requirements.md").includes(offered), "the requirement");
+  assert.ok(read("design/system/components/LoadedStates/README.md").includes(offered), "the card");
   assert.deepEqual(loadedVerdict(S.hostDiffers(), HOST_LOADS).fixes.map((fix) => fix.label), ["Open build3", "Open mini1"]);
   // A scheduled run's way to its fix, which is not the trigger's page.
   assert.match(rows.get("no-flow").todo, /a scheduled run keeps no row, so its button opens the Triggers list, under its id/);
   assert.match(loadedVerdict({ ...S.noFlow(), jobId: "repeat:nightly:1", kind: "local", target: "local:site", triggerIndex: null }).fixes[0].href, /^\/triggers\?/);
   // Words a state's sentences lean on that the code holds.
   assert.match(rows.get("mcp-stopped").says, /only where the queue holds the job again or the record is a later attempt/);
-  assert.match(rows.get("stopped").says, /`command-unregistered`/);
-  assert.deepEqual(REFUSED_AFTER_READY, ["command-unregistered"], "a refusal this row does not name");
+  assert.match(rows.get("stopped").says, /after loading with no turn taken/);
+  assert.match(rows.get("stopped").says, /A run that completed or took a turn never reads as this/);
+  assert.equal(loadedVerdict({ ...S.stoppedAfterLoading() }).state, "stopped", "what it says of a real refusal's record");
+  assert.equal(loadedVerdict({ ...S.stoppedAfterLoading(), turns: 3 }).state, "everything");
 });
 
 // The console's other sentences are left to the card (the docs point there, and a test here would only freeze them). These

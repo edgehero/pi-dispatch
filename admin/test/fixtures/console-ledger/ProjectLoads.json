@@ -1,7 +1,7 @@
 {
   "card": "ProjectLoads",
   "pr": 800,
-  "words": "a743ce525d8561ccb4632011fdaaf750b1b77db5d89091769eec6ed97b667922",
+  "words": "9f81bc9e75e122bd4ebac11bc7f0c3c9f670896a8b18830617fb15d5ec66f6fd",
   "elements": [
     {
       "el": "p-proj-loads",
@@ -39,7 +39,7 @@
       ],
       "shows": [
         "Runs load the same on each host: mini1 and mini2.",
-        "Compares each host’s newest run of each trigger, so an update every host took is no difference."
+        "A host’s pi, packages and overlay are from its newest run able to show each, so an update every host took is no difference."
       ]
     },
     {
@@ -51,7 +51,7 @@
       "golden": [
         "panels/project-loads-none.operator"
       ],
-      "shows": "Nothing to read: no run of this project has a record in the last 7 days."
+      "shows": "Nothing to read: no run of this project recorded what it loaded in the last 7 days."
     },
     {
       "el": "p-proj-members",
@@ -98,10 +98,10 @@
         "pi 1.5.0 in",
         "all 21 recorded runs",
         "anthropic / claude-sonnet-5-5",
-        "git-guard in the 15 recorded on build3; 3 did not load or were not recorded",
+        "from each host’s newest run able to show them, and git-guard on build3; 3 did not load or were not recorded",
         "fix from acme/billing’s .pi/skills; review from the overlay",
         "no recorded run names a server",
-        "every recorded run found its flow and loaded every extension, and no MCP server stopped one",
+        "no record says a run lacked its flow or an extension, or was stopped by an MCP server",
         "3 of 24 runs",
         "was refused before its container started",
         "runner did not say what it loaded",
@@ -134,7 +134,7 @@
       ],
       "shows": [
         "15 did not load or were not recorded: 12 from an older release, 2 refused, 1 whose runner did not say.",
-        "the 9 recorded; unknown for the other 15",
+        "from its newest run able to show them; 15 did not load or were not recorded",
         "nothing in the 9 recorded",
         "a run with no record cannot say"
       ]
@@ -151,8 +151,7 @@
       "shows": [
         "Runs load the same on each host: mini1 and mini2.",
         "every recorded run",
-        "which withhold them",
-        "which tried pi-lint 1.4.3"
+        "from each host’s newest run able to show them"
       ]
     },
     {
@@ -166,7 +165,7 @@
         "panels/project-loads-none.operator"
       ],
       "shows": [
-        "Nothing to read: no run of this project has a record in the last 7 days.",
+        "Nothing to read: no run of this project recorded what it loaded in the last 7 days.",
         "Either none ran, or an older release wrote their records."
       ]
     },
@@ -191,7 +190,7 @@
       "golden": [
         "panels/project-loads.operator"
       ],
-      "shows": "From the records of its runs in the last 7 days, comparing each host’s newest run of each trigger."
+      "shows": "From the records of its runs in the last 7 days. A host’s pi, packages and overlay are from its newest run able to show each"
     },
     {
       "el": "Nothing new beyond RunLoaded's loaded field: the page groups its runs' records by host",

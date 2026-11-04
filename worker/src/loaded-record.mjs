@@ -424,6 +424,9 @@ function sourceCounts(source) {
 }
 
 /** One `sources` row, REBUILT, by its tier's own shape, or null. */
+/** A list held to its shape, as a list of the record's own: the source keeps its array, and whatever a reader does to this one. */
+const copied = (list) => (list === null ? null : [...list]);
+
 function recordedSource(source) {
 	if (!isObject(source) || !LOADED_TIERS.includes(source.tier)) return null;
 	const counts = sourceCounts(source);
@@ -433,7 +436,7 @@ function recordedSource(source) {
 		const named = source.name === null && source.version === null ? { name: null, version: null } : parsePackageCanary(source);
 		if (named === null) return null;
 		if (source.toolNames !== null && !namesWithin(source.toolNames, LOADED_MAX_EXT_TOOLS, isToolName)) return null;
-		return { tier: "package", ...named, ...counts, toolNames: source.toolNames };
+		return { tier: "package", ...named, ...counts, toolNames: copied(source.toolNames) };
 	}
 	if (source.tier === "overlay") {
 		const names = (value) => value === null || namesWithin(value, LOADED_MAX_OVERLAY_NAMES, isOverlayName);
@@ -444,10 +447,10 @@ function recordedSource(source) {
 			namedTools = [];
 			for (const row of source.namedTools) {
 				if (!isObject(row) || !isOverlayName(row.name) || !namesWithin(row.tools, LOADED_MAX_EXT_TOOLS, isToolName)) return null;
-				namedTools.push({ name: row.name, tools: row.tools });
+				namedTools.push({ name: row.name, tools: [...row.tools] });
 			}
 		}
-		return { tier: "overlay", names: source.names, failedNames: source.failedNames, ...counts, namedTools };
+		return { tier: "overlay", names: copied(source.names), failedNames: copied(source.failedNames), ...counts, namedTools };
 	}
 	return { tier: source.tier, ...counts };
 }
@@ -465,7 +468,7 @@ function recordedLeftOut(leftOut) {
 	if (leftOut === null) return null;
 	if (!isObject(leftOut) || !namesWithin(leftOut.tools, LEFT_OUT_TOOLS_MAX, (name) => typeof name === "string" && LEFT_OUT_TOOL_RE.test(name))) return undefined;
 	for (const key of ["packages", "overlayExtensions", "restricted"]) if (typeof leftOut[key] !== "boolean") return undefined;
-	return { tools: leftOut.tools, packages: leftOut.packages, overlayExtensions: leftOut.overlayExtensions, restricted: leftOut.restricted };
+	return { tools: copied(leftOut.tools), packages: leftOut.packages, overlayExtensions: leftOut.overlayExtensions, restricted: leftOut.restricted };
 }
 
 /** The runner's half of the record, REBUILT, or undefined on any violation. */
@@ -498,7 +501,7 @@ function recordedRunnerPart(value) {
 		if (!isObject(value.tools) || !isCount(value.tools.active, LOADED_MAX_TOOL_COUNT)) return undefined;
 		if (value.tools.own !== null && !namesWithin(value.tools.own, OWN_TOOLS_MAX, isToolName)) return undefined;
 		if (value.tools.job !== null && !namesWithin(value.tools.job, LOADED_JOB_TOOLS.length, (name) => LOADED_JOB_TOOLS.includes(name))) return undefined;
-		tools = { active: value.tools.active, own: value.tools.own, job: value.tools.job };
+		tools = { active: value.tools.active, own: copied(value.tools.own), job: copied(value.tools.job) };
 	}
 	let problems = null;
 	if (value.problems !== null) {

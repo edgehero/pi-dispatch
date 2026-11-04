@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "28029f5381b3750731a084b6572f70db5f65938388d96fd49cc48501285e20f7",
+  "words": "0a38468c03bdd25d53f04c9a3c8afe5cb9f21a947211f10f0ab82accc1224c27",
   "elements": [
     {
       "el": "p-loaded",
@@ -294,18 +294,18 @@
       "shows": [
         "linear did not answer in time.",
         "The run stopped before the agent started.",
-        "Retried, as any infrastructure failure; this was its last attempt.",
+        "Retried, as any infrastructure failure; the queue has stopped retrying this job.",
         "Open Connections"
       ]
     },
     {
-      "el": "This was its last attempt is said only when the queue reports the job failed",
+      "el": "The queue has stopped retrying this job is said only when the queue reports the job failed",
       "kind": "readme",
       "status": "new",
       "panel": "p-loaded",
       "source": "admin/src/loaded-words.mjs#loadedVerdict",
       "holds": "jobState",
-      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.retriedLast",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.retriedStopped",
       "golden": [
         "panels/run-loaded-mcp-stopped.operator"
       ]
@@ -351,6 +351,18 @@
         "panels/run-loaded-stopped.operator"
       ],
       "shows": "It stopped after its extensions and skills loaded, before its tools were ready."
+    },
+    {
+      "el": "Stopped after loading, with no turn taken",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.stoppedAfterLoading",
+      "golden": [
+        "panels/run-loaded-stopped-after-loading.operator"
+      ],
+      "shows": "It stopped after loading. The outcome above says why."
     },
     {
       "el": "No record (gh-c3f8)",
