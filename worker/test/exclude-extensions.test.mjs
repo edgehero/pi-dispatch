@@ -10,7 +10,10 @@ import { dollarSettlement, FLOOR_COUNTERS } from "../src/dollar-budget.mjs";
 import { flowTierOf } from "../src/host-loads.mjs";
 import { explainReason } from "../src/reason-catalog.mjs";
 import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
+import { parseAuthConnections } from "../src/auth-policy.mjs";
+import { COMMUNITY_AUTH_ADAPTERS } from "../src/community-auth-metadata.mjs";
 import { makeSubscriptionRuntime } from "../src/subscription-runtime.mjs";
+import { isSubscriptionAdapter } from "../src/updates-subscription-adapters.mjs";
 import { TRIGGER_RUN_FIELD_VERSIONS, TRIGGERS_FILE_VERSION, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, parseTriggers, triggersFileVersionFor, withoutMcpExclusions } from "../src/triggers.mjs";
 import { AUTHORED_NARROWING_FIELDS, makeCheckWaitSkew, writeTriggers } from "../src/triggers-file.mjs";
 import { overlayEntryNamed as runnerNamed } from "../../image/runner/src/loaded.mjs";
@@ -330,19 +333,35 @@ test("doctor says nothing of a name it cannot judge: an overlay folder it cannot
 	assert.deepEqual(namedLines(unread), []);
 });
 
-test("excluding the subscription adapter refuses for free at the pickup, as withholding the packages does", async () => {
-	const adapter = "pi-anthropic-oauth";
-	const row = { ok: true, managed: true, provider: "anthropic", id: "c", adapter, quotaWindows: [] };
-	const runtime = makeSubscriptionRuntime({
-		auth: { check: async () => row },
-		quota: { admit: async () => { throw new Error("nothing past this refusal may run"); } },
-		lookup: () => ({ api: "anthropic-messages", baseUrl: "https://x" }),
-		packageRootFor: () => { throw new Error("nothing past this refusal may run"); },
-	});
-	const job = { provider: "anthropic", model: "m", models: ["anthropic/m"] };
-	assert.deepEqual(await runtime.check({ ...job, packages: false }), { ok: false, managed: true, reason: "auth-adapter-disabled" }, "the premise");
-	assert.deepEqual(await runtime.check({ ...job, excludeExtensions: [adapter] }), { ok: false, managed: true, reason: "auth-adapter-disabled" });
-	await assert.rejects(runtime.check({ ...job, excludeExtensions: ["another"] }), /nothing past this refusal may run/, "another name is not this package");
+test("excluding a subscription connection's adapter refuses for free at the pickup, as withholding the packages does, read off the real policy", async () => {
+	const community = Object.entries(COMMUNITY_AUTH_ADAPTERS).filter(([, adapter]) => adapter.provider === "anthropic");
+	assert.ok(community.length >= 2, "the premise: more than one to tell apart");
+	for (const [key, adapter] of community) {
+		// What the real parser hands the auth service for a connection, so the row's `adapter` is the shape production has: the policy's key.
+		const policy = parseAuthConnections({ version: 1, connections: [{ id: "c", provider: "anthropic", adapter: key, ownerHost: "h", root: `/overlay/packages/${adapter.package}`, digest: "a".repeat(64) }], bindings: { anthropic: "c" } });
+		const [connection] = policy.connections;
+		assert.equal(connection.adapter, key);
+		const row = { ok: true, managed: true, ...connection };
+		const runtime = makeSubscriptionRuntime({
+			auth: { check: async () => row },
+			quota: { admit: async () => { throw new Error("nothing past this refusal may run"); } },
+			lookup: () => ({ api: "anthropic-messages", baseUrl: "https://x" }),
+			packageRootFor: () => { throw new Error("nothing past this refusal may run"); },
+		});
+		const job = { provider: "anthropic", model: "m", models: ["anthropic/m"] };
+		assert.deepEqual(await runtime.check({ ...job, packages: false }), { ok: false, managed: true, reason: "auth-adapter-disabled" }, "the premise");
+		// What a trigger can write: the loader takes the package's name and refuses the policy's key, so the second is no way to name it.
+		assert.deepEqual(parse([KINDS[1][1]({ excludeExtensions: [adapter.package] })])[0].run.excludeExtensions, [adapter.package]);
+		assert.throws(() => parse([KINDS[1][1]({ excludeExtensions: [key] })]), /run\.excludeExtensions/, key);
+		assert.deepEqual(await runtime.check({ ...job, excludeExtensions: ["pi-lint", adapter.package] }), { ok: false, managed: true, reason: "auth-adapter-disabled" }, adapter.package);
+		await assert.rejects(runtime.check({ ...job, excludeExtensions: ["another"] }), /nothing past this refusal may run/, "another name is not this package");
+		for (const [otherKey, other] of community) {
+			if (otherKey !== key) await assert.rejects(runtime.check({ ...job, excludeExtensions: [other.package] }), /nothing past this refusal may run/, "another connection's adapter is not this connection's");
+		}
+		await assert.rejects(runtime.check({ ...job, excludeExtensions: [] }), /nothing past this refusal may run/);
+		// The console's sentence on the same names, so the two cannot come apart: it says a job on that connection is refused, and this is the refusal.
+		assert.equal(isSubscriptionAdapter(adapter.package), true);
+	}
 });
 
 test("the docs' numbers and lists are the code's", () => {
