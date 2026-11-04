@@ -361,7 +361,8 @@ back. If a package still cannot be found, the reason names the path that was sea
 `import-pi`, and the **next** job has it.
 
 That is all it takes: once staged, packages load for **every** job. If one flow must run without them,
-withdraw them on that trigger with `"packages": false` — available on **any** of the four kinds (`cron`,
+withdraw them on that trigger with `"packages": false`, in the file or with the switch on its
+[console page](console.md#what-a-triggers-jobs-get) — available on **any** of the four kinds (`cron`,
 `label`, `comment`, `pull_request`):
 
 ```jsonc
