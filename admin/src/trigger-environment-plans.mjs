@@ -108,12 +108,8 @@ function delta(before, after) {
 /**
  * Each change in words (`write-plans.mjs` `planTriggerDelete`, #737: a confirm says what it does in words and never an arrow),
  * with a widening said as one, on a line of its own. `facts` is what the spend judgement read (`judgeModels`), there whenever
- * a model field or the cap was sent, and those are the only changes that read it.
- *
- * The lists differ on purpose. `run.models` REPLACES the deployment's list (`effectiveJobOf`), so whether a change widens is
- * read against what its jobs may call now, not against the trigger's own list. A fallback must already be on that list
- * (`model-ref.mjs`, `selectFailoverJob`), so adding one reaches no new model and is not said as a widening: a person who
- * reads "widens" on every list edit stops reading it.
+ * a model field or the cap was sent, and those are the only changes that read it. Whether a job may call more models is not
+ * said here: that is the resolver's answer, before and after (`callableWidening`), not this key's.
  */
 function changeWords(key, before, after, facts) {
   const removedKey = after === undefined;
@@ -139,17 +135,13 @@ function changeWords(key, before, after, facts) {
       };
     }
     case "models": {
-      const was = before ?? facts.envList;
-      const will = after ?? facts.envList;
-      const fresh = Array.isArray(will) && Array.isArray(was) ? will.filter((ref) => !was.includes(ref)) : [];
-      const widened = (Array.isArray(was) && !Array.isArray(will)) || fresh.length > 0;
       const d = delta(before, after);
       const line = removedKey
-        ? `Allowed models: the list removed, so ${Array.isArray(facts.envList) ? "PI_ALLOWED_MODELS applies" : "any model is allowed"}.`
+        ? "Allowed models: the list removed."
         : addedKey
           ? `Allowed models: ${after.join(", ")}, where this trigger listed none.`
           : d.reordered ? "Allowed models: the same models in a new order." : `Allowed models: ${[d.added.length ? `${d.added.join(", ")} added` : "", d.removed.length ? `${d.removed.join(", ")} removed` : ""].filter(Boolean).join(", ")}.`;
-      return { line, ...(widened ? { widening: `This widens which models its jobs may call: ${fresh.length > 0 ? fresh.join(", ") : "any model"}.` } : {}) };
+      return { line };
     }
     case "fallbackModels": {
       const d = delta(before, after);
@@ -177,6 +169,28 @@ function changeWords(key, before, after, facts) {
     default:
       throw new RangeError(`no words for ${key}`);
   }
+}
+
+/**
+ * What a job of this trigger may call that it could not before, from what the real resolver answers for the entry on each side,
+ * per project: `"any model"`, a list of names, or null. Not from whether `run.models` was there: it replaces the deployment's
+ * list (`effectiveJobOf`), and under a role map the resolver unions the main model and every role's into it, so a list added to
+ * a trigger with none can still make a model callable, and removing one can leave a real list in place. No list on the old
+ * side means any model already, so nothing can widen there.
+ */
+function callableWidening(before, after, envList) {
+  const listOf = (job) => job.models ?? envList ?? null;
+  const was = new Map(before.runs.map((job) => [job.project ?? null, listOf(job)]));
+  const fresh = new Set();
+  let any = false;
+  for (const job of after.runs) {
+    const old = was.get(job.project ?? null);
+    if (old === null || old === undefined) continue;
+    const now = listOf(job);
+    if (now === null) any = true;
+    else for (const ref of now) if (!old.includes(ref)) fresh.add(ref);
+  }
+  return any ? "any model" : fresh.size > 0 ? [...fresh].join(", ") : null;
 }
 
 /** A server's where and key, when every host that has it agrees; a sentence must be true of each host a job can land on. */
@@ -523,6 +537,13 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const undo = inverse !== null ? `Put ${row} back as it was` : heldNull !== undefined ? `Edit ${row} back by hand: the file held run.${heldNull} as null, which this page cannot write` : `Edit ${row} back by hand: this page would refuse what it said before. ${backRefused}`;
 
     const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key], nextEntry.run[key], facts) }));
+    if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
+      const before = policyOf({ entry, text: afterText, facts });
+      const after = policyOf({ entry: nextEntry, text: afterText, facts });
+      const callable = before.refusal || after.refusal ? null : callableWidening(before.resolved, after.resolved, facts.envList);
+      const named = changes.filter((change) => ["provider", "model", "models", "fallbackModels"].includes(change.key)).at(-1);
+      if (callable !== null && named) named.widening = `This widens which models its jobs may call: ${callable}.`;
+    }
     const need = {
       triggersVersion: Number.isSafeInteger(afterDoc.version) ? afterDoc.version : 1,
       // Over what the loader keeps of each trigger, doctor's count: a `run` key it drops reaches no job, so it needs nothing.

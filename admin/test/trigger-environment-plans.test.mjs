@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeMcpCheck } from "@edgehero/pi-dispatch/mcp-preflight";
+import { resolveModelRoles } from "@edgehero/pi-dispatch/model-roles";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
 import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
@@ -817,7 +818,7 @@ const WORDS = [
   ["a list member removed", { models: [HAIKU, SONNET] }, { models: [HAIKU] }, [`Allowed models: ${SONNET} removed.`]],
   ["a list swapped", { models: [HAIKU, SONNET] }, { models: [HAIKU, OPUS] }, [`Allowed models: ${OPUS} added, ${SONNET} removed.`, `This widens which models its jobs may call: ${OPUS}.`]],
   ["a list reordered", { models: [HAIKU, SONNET] }, { models: [SONNET, HAIKU] }, ["Allowed models: the same models in a new order."]],
-  ["a list removed", { models: [HAIKU] }, { models: null }, ["Allowed models: the list removed, so any model is allowed.", "This widens which models its jobs may call: any model."]],
+  ["a list removed", { models: [HAIKU] }, { models: null }, ["Allowed models: the list removed.", "This widens which models its jobs may call: any model."]],
   ["a fallback added says no widening: it must already be allowed", { models: [HAIKU, SONNET] }, { fallbackModels: [SONNET] }, [`Fallback models: ${SONNET}, where this trigger listed none.`]],
   ["a fallback changed", { models: [HAIKU, SONNET, OPUS], fallbackModels: [SONNET] }, { fallbackModels: [OPUS] }, [`Fallback models: ${OPUS} added, ${SONNET} removed.`]],
   ["fallbacks reordered", { models: [HAIKU, SONNET, OPUS], fallbackModels: [SONNET, OPUS] }, { fallbackModels: [OPUS, SONNET] }, ["Fallback models: the same models in a new order."]],
@@ -862,11 +863,56 @@ test("what a widening reads against: the job's cap and list, not the trigger's o
   assert.deepEqual(wider.plan.changes[0], { key: "models", line: `Allowed models: ${HAIKU}, ${SONNET}, where this trigger listed none.`, widening: `This widens which models its jobs may call: ${SONNET}.` });
   const narrower = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` } });
   assert.equal((await narrower.service.preview(ask(narrower, { models: [HAIKU] }), operator)).plan.changes[0].widening, undefined);
-  // Removing a list where the deployment has one: it applies, and it is said which.
+  // Removing a list where the deployment has a narrower one: nothing becomes callable.
   const back = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET] }, env: { PI_ALLOWED_MODELS: HAIKU } });
-  assert.deepEqual((await back.service.preview(ask(back, { models: null }), operator)).plan.changes[0], { key: "models", line: "Allowed models: the list removed, so PI_ALLOWED_MODELS applies." });
+  assert.deepEqual((await back.service.preview(ask(back, { models: null }), operator)).plan.changes[0], { key: "models", line: "Allowed models: the list removed." });
   const wide = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] }, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` } });
   assert.equal((await wide.service.preview(ask(wide, { models: null }), operator)).plan.changes[0].widening, `This widens which models its jobs may call: ${SONNET}.`);
+});
+
+test("a widening under a role map is the real resolver's before and after, naming what becomes callable", async () => {
+  const roles = { default: { editor: SONNET } };
+  const doc = (run) => ({ modelRoles: roles, triggers: [cron, comment({ provider: "anthropic", model: "claude-haiku-4-5", ...run })] });
+  const job = { provider: "anthropic", model: "claude-haiku-4-5" };
+  assert.deepEqual(resolveModelRoles(job, roles, null).models, [HAIKU, SONNET], "what a job may call today");
+  assert.deepEqual(resolveModelRoles({ ...job, models: [HAIKU, OPUS] }, roles, null).models, [HAIKU, OPUS, SONNET], "and with the list");
+
+  const added = fixture({ doc: doc({}) });
+  const widened = await added.service.preview(ask(added, { models: [HAIKU, OPUS] }), operator);
+  assert.deepEqual(widened.plan.changes[0], { key: "models", line: `Allowed models: ${HAIKU}, ${OPUS}, where this trigger listed none.`, widening: `This widens which models its jobs may call: ${OPUS}.` });
+
+  // The same list taken away: the real list stays, so "any model" would be false, and nothing widens.
+  assert.deepEqual(resolveModelRoles(job, roles, null).models, [HAIKU, SONNET]);
+  const removed = fixture({ doc: doc({ models: [HAIKU, OPUS] }) });
+  const narrowed = await removed.service.preview(ask(removed, { models: null }), operator);
+  assert.deepEqual(narrowed.plan.changes[0], { key: "models", line: "Allowed models: the list removed." });
+  assert.ok(!narrowed.summary.some((line) => line.includes("any model")));
+
+  // A model edit alone can widen too: the resolver unions the main model into the list, and no key named a list.
+  const moved = fixture({ doc: doc({}) });
+  const dearer = await moved.service.preview(ask(moved, { model: "claude-opus-5-5" }), operator);
+  assert.deepEqual(dearer.plan.changes.at(-1), { key: "model", line: "Model: claude-haiku-4-5 to claude-opus-5-5.", widening: `This widens which models its jobs may call: ${OPUS}.` });
+  // Back on a model a role already names: nothing new.
+  const toRole = fixture({ doc: doc({}) });
+  assert.equal((await toRole.service.preview(ask(toRole, { model: "claude-sonnet-5-5" }), operator)).plan.changes.at(-1).widening, undefined);
+  // No role map and no list on either side: a job could call anything already, so a model edit widens nothing.
+  const plain = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } });
+  assert.equal((await plain.service.preview(ask(plain, { model: "claude-opus-5-5" }), operator)).plan.changes.at(-1).widening, undefined);
+  // A cap edit moves no list, and has no model line to hang one on.
+  const capped = fixture({ doc: doc({}) });
+  assert.deepEqual((await capped.service.preview(ask(capped, { maxCostUsd: "5" }), operator)).plan.changes, [{ key: "maxCostUsd", line: "Job cap: $5.00, where this trigger set none." }]);
+});
+
+test("a role a project declares is judged per project: a model only one project's jobs gain is still said", async () => {
+  // A job in project web may already call opus through its role, and a job in no project may not: the edit widens the second.
+  const doc = { modelRoles: { default: { editor: SONNET }, web: { architect: OPUS } }, triggers: [cron, comment({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET] })] };
+  const f = fixture({ doc });
+  f.paths.projectsFile = join(f.dir, "projects.json");
+  nodeFs.writeFileSync(f.paths.projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }] }));
+  const out = await f.service.preview(ask(f, { models: [HAIKU, SONNET, OPUS] }), operator);
+  assert.equal(out.plan.changes[0].widening, `This widens which models its jobs may call: ${OPUS}.`);
+  // And a change that gives no project's jobs anything new says nothing, though one project's list holds more than another's.
+  assert.equal((await f.service.preview(ask(f, { models: [SONNET, HAIKU] }), operator)).plan.changes[0].widening, undefined);
 });
 
 const LOADS = {
