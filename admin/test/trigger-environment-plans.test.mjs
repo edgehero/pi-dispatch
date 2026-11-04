@@ -24,6 +24,8 @@ const operator = { surface: "console", role: "operator", name: "ops" };
 const HAIKU = "anthropic/claude-haiku-4-5"; // a short task's first call: $0.343574 at the pin
 const SONNET = "anthropic/claude-sonnet-5-5"; // $1.327148
 const OPUS = "anthropic/claude-opus-5-5"; // $2.654295, and its floor $2.62144
+/** pi's default prompt and tools at the pin, about: `worker/test/first-call-bytes.pinned.test.mjs` measures them. */
+const DEFAULT_CONTEXT_BYTES = 5340;
 
 const comment = (run = {}) => ({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", ...run } });
 const cron = { on: { type: "cron", id: "daily", pattern: "0 6 * * *" }, run: { kind: "local", folder: "/nowhere", flow: "tidy", task: "PRIVATE TASK" } };
@@ -644,7 +646,7 @@ for (const [provider, id] of [["anthropic", "claude-opus-5-5"], ["anthropic", "c
     const model = builtinModel(provider, id);
     const cap = parseUsdMicros(printed, "printed");
     assert.equal(admits(cap, model, FIRST_CALL_SHORT_TASK_BYTES), true, "the amount a person is told admits the request");
-    assert.equal(admits(cap, model, 4465), true);
+    assert.equal(admits(cap, model, DEFAULT_CONTEXT_BYTES), true);
     assert.equal(admits(cap - 1, model, FIRST_CALL_SHORT_TASK_BYTES), false, "and it is the least that does");
     const clean = await f.service.preview(ask(f, { provider, model: id, maxCostUsd: printed }), operator);
     assert.ok(clean.plan, JSON.stringify(clean));
@@ -652,7 +654,7 @@ for (const [provider, id] of [["anthropic", "claude-opus-5-5"], ["anthropic", "c
     // Why the floor is no answer: it admits a request smaller than any job sends, and neither of the two a job does.
     const floor = firstCallFloorMicros(model);
     assert.equal(admits(floor, model, 4096), true);
-    assert.equal(admits(floor, model, 4465), false, "a job's smallest first call");
+    assert.equal(admits(floor, model, DEFAULT_CONTEXT_BYTES), false, "a job's smallest first call");
     assert.equal(admits(floor, model, FIRST_CALL_SHORT_TASK_BYTES), false, "a short task's");
   });
 }

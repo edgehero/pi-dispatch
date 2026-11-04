@@ -304,15 +304,18 @@ export function declaredFallbacks(provider, id, overlay = null) {
  */
 export const FIRST_CALL_OVERHEAD_TOKENS = 8192;
 /**
- * The least a job's FIRST call carries before its task, in bytes: pi 0.99.1's default system prompt (1,753 bytes) and
- * the schemas of its four default tools (2,712 bytes) serialise to 4,465 bytes, and PR #542's lab measured 10,667 for
- * a short task. 4,096 is below both, so the bound below stays a lower bound for a job that adds nothing.
+ * The least a job's FIRST call carries before its task, in bytes: at the pin, pi's default system prompt (about 2,550 bytes,
+ * since it names pi's install path) and the schemas of its four default tools (2,717 bytes) serialise to about 5,340 bytes, and
+ * PR #542's lab measured 10,667 for a short task. 4,096 is below both, so the bound below stays a lower bound for a job that adds
+ * nothing. `worker/test/first-call-bytes.pinned.test.mjs` holds that order against the pinned pi, which moved the first number
+ * from 4,465 without moving the decision.
  */
 export const FIRST_CALL_MIN_CONTEXT_BYTES = 4096;
 /**
  * What PR #542's lab measured a short task's first request at, in bytes. A cap at the floor above admits a request nobody
- * sends: the same default prompt and tools alone come to 4,465 bytes. So this, not the floor, is the least a person can be
- * told to set. A job that loads more, or a longer task, needs more still.
+ * sends: the same default prompt and tools alone come to about 5,340 bytes, about 5,440 with a one-line task. So this, not the
+ * floor, is the least a person can be told to set. A repository's context files, which go in the system prompt before any task
+ * does, and a longer task, need more still.
  */
 export const FIRST_CALL_SHORT_TASK_BYTES = 10_667;
 
