@@ -373,11 +373,17 @@ row, with a diff, confirmation and Undo. Human row numbers count from 1; tool in
 The editor and its JSON fallback preserve the add tool's secret-bundle opt-out.
 
 **What its jobs get**, on a trigger's page, says what a job of it would start with on each host, with a label for each host, and under each row what
-a recent run really had. There a person changes the flow, the provider and model, the job cap, the allowed models and fallbacks, the MCP
+a recent run really had.
+
+There a person changes the flow, the provider and model, the job cap, the allowed models and fallbacks, the MCP
 servers, the tools, the all-or-nothing switch for staged packages, each extension the trigger leaves out and each extension's tool it removes, with one preview that
-says each change in words, one Confirm, and Undo. An extension left out does not load, and a tool removed leaves the rest of its extension running. Neither stops what an agent that can run commands or write files can reach
-([what exclusion does not stop](../docs/exclude-tools.md#what-exclusion-does-not-stop)), and the page refuses either while a live worker reads less than it needs
-([what a fleet needs](../docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). A viewer reads the same rows with no controls, an agent's page draws no card, and no tool reaches the action. The file works as it
+says each change in words, one Confirm, and Undo.
+
+An extension left out does not load, and a tool removed leaves the rest of its extension running. Neither stops what an agent that can run commands, write files or edit files can reach
+([what exclusion does not stop](../docs/exclude-tools.md#what-exclusion-does-not-stop)). Every running machine must run a release that can read these two settings: the
+[upgrade notes](../docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running worker cannot read them, the page refuses the change and names it.
+
+A viewer reads the same rows with no controls, an agent's page draws no card, and no tool reaches the action. The file works as it
 always has ([`docs/console.md`](../docs/console.md#what-a-triggers-jobs-get)).
 
 `dispatch_trigger_edit` also takes `maxTurns` and the four run-option flags. `dispatch_trigger_fire(index)`

@@ -405,7 +405,7 @@ A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800e" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool a recent run recorded, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
+  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800e" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool the newest run that says what it loaded lists, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
 </picture>
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
@@ -477,14 +477,15 @@ match. Under each line is what a recent run really had, so a setting and what it
 at the foot of the card, and you can discard them.
 
 **You can turn off one thing and keep the rest.** On a trigger's page you can turn off one of your packages or extensions for that trigger's jobs alone, and those
-jobs no longer load it. You can also turn off a tool one of them adds: the tool is gone, and the rest of that extension still runs. A tool gets its switch once a run has
-recorded it, or once your triggers file names it.
+jobs no longer load it. You can also turn off a tool one of them adds: the tool is gone, and the rest of that extension still runs. A tool has a switch while the newest run that says what it
+loaded lists it, or while your triggers file names it.
 
-This limits what a job starts with, not what its agent can do next. An agent that can run commands or write files can bring back what you turned off, so if code must stay
-out of reach of a trigger's agent, turn those tools off as well ([what this does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)).
+This limits what a job starts with, not what its agent can do next. An agent that can run commands, write files or edit files can bring back what you turned off. If code must stay
+out of reach of a trigger's agent, also turn off the tools that do those things: `bash` and `powershell` run commands, `write` writes files and `edit` edits them
+([what this does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)).
 
-This needs every machine on a release that knows how: one later than 5.0.0, so not 4.3.1. Until every machine runs one, the page refuses the change
-and names the machine to upgrade ([what a fleet needs](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)).
+Every running machine must run a release that can read these settings. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)
+say which release, and what to do until then.
 
 **You see it in words first, and confirm once.** **Preview the change** says each change in a sentence, and says so when it gives
 jobs more than they had. It says when the change takes effect and which jobs already in line would be refused, warns about what would stop these jobs on the
@@ -501,8 +502,8 @@ expensive for even one request under its cap, the page refuses the change and na
 If the page is out of date, it asks you to reload rather than write over someone else's change.
 
 **Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models,
-its outside systems, which tools its jobs lose, pi's own or your extensions', whether they load your packages, or which of your packages and extensions
-they leave out. A command that tries is refused before you are asked. You set those on the page,
+its outside systems, which tools its jobs lose (pi's own or those your extensions add), whether they load your packages, or which of your packages and extensions
+they leave out. A command that tries is refused, and you are never asked to confirm it. You set those on the page,
 or your technical person sets them in the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
 Those commands can still move a trigger's flow, provider and model, and only after you confirm.
 
@@ -737,10 +738,10 @@ On a trigger's page in the console, a person changes `flow`, `provider`, `model`
 so on a fleet where each host keeps its own, a host keeps what it has until its copy changes. A few others have the page's Edit form. The rest change in the file, and editing the file works as it always has.
 
 `excludeExtensions` keeps an extension's code out of a job. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs. Neither stops what an
-agent that can run commands or write files can reach ([what exclusion does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)). A file that uses either needs
-`"version": 2`, and its jobs need job data version 3, so every worker, receiver and console needs a release that reads both. The first comes after 5.0.0: 4.3.1 and earlier
-drop both keys and run the job wider than the file says, and 5.0.0 holds every job. While a live worker reads less, the page refuses the change and names it
-([what a fleet needs](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)).
+agent that can run commands, write files or edit files can reach ([what exclusion does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)). A file that uses either needs
+`"version": 2`, so every worker, receiver and console must run a release that can read both. A release that cannot may ignore them and run the job with what the file turned off,
+or hold every job. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running
+worker cannot read them, the page refuses the change and names it.
 
 A whole project can get one environment from your secrets manager, granted once and read fresh at each job start. Quiet
 hours pause a repo or folder by weekday and timezone ([`docs/pause-windows.md`](docs/pause-windows.md)). The
