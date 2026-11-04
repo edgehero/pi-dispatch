@@ -22,6 +22,7 @@ import { optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { hostLoadsRow, hostPiFor, triggerLastRun } from "./loaded-words.mjs";
 import { normalizeTriggerForDisplay } from "./read-model.mjs";
 import { triggerEntryDigest } from "./trigger-edit-core.mjs";
+import { listed } from "./words.mjs";
 
 /** The card's fixed sentences, exported so its ledger can cite each one. */
 export const TRIGGER_GETS_WORDS = Object.freeze({
@@ -72,10 +73,6 @@ const code = (text) => ({ code: text });
 const run = (id) => ({ run: id });
 const time = (ms) => ({ time: ms });
 
-/** "a", "a and b", "a, b and c". */
-function listed(names) {
-  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-}
 const unique = (items) => [...new Set(items)];
 
 /**
