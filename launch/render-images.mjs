@@ -14,10 +14,14 @@
  *   node launch/render-images.mjs --console --only <golden>   the same, for one golden, as `run-live.operator` or
  *                                                    `panels/confirm-done.operator`
  *
+ *   node launch/render-images.mjs --explain          docs/images/explain/: the READMEs' explaining pictures, drawn from
+ *                                                    `launch/explainers.mjs`, and sources.json, what each was shot from
+ *
  *   --out <dir>   write there instead of docs/images
  *   --url <url>   use this Valkey instead of starting one; its database must be empty, and is emptied again at the end
  *
- * `--console` reads the committed goldens (`launch/console-render.mjs`), so it needs Chrome and no server at all.
+ * `--console` reads the committed goldens (`launch/console-render.mjs`), so it needs Chrome and no server at all, and
+ * `--explain` draws from words alone, with the same needs.
  *
  * WHAT RUNS. A temporary `valkey-server` (or `redis-server`, whichever is on PATH) on a free port of 127.0.0.1, with no
  * persistence and its files in a temporary directory, removed with everything else when the script ends. The fixture
@@ -76,19 +80,20 @@ const SHOWN_DEPLOYMENT = "~/pi-work";
 const SVG_PNG_SCALE = 2.5;
 
 // ---- arguments and the machine's two binaries, read BEFORE the environment is emptied ------------------------------
-const USAGE = `usage: node launch/render-images.mjs [--png] [--console [--all | --only <golden>]] [--out <dir>] [--url <redis://host:port/db>]
+const USAGE = `usage: node launch/render-images.mjs [--png] [--console [--all | --only <golden>]] [--explain] [--out <dir>] [--url <redis://host:port/db>]
   --png    also write the PNGs (needs Google Chrome; set CHROME to its executable where it is not
            ${MAC_CHROME})
   --console  the operator console's images, from the committed goldens (needs Google Chrome, no server):
            the READMEs' picks into docs/images/console, or with --all every golden at 1440 and 375, light and
            dark, into docs/images/console/all, or with --only <golden> that one golden there
+  --explain  the READMEs' explaining pictures, light and dark, into docs/images/explain (needs Google Chrome, no server)
   --out    the directory to write to (default docs/images)
   --url    an existing, empty Valkey database to seed instead of starting valkey-server or redis-server
            from PATH; it is emptied again at the end`;
 
 /** The options, or `{ help }`, or `{ error }` (a sentence for the operator, never a stack). */
 function parseArgs(argv) {
-	const opts = { png: false, console: false, all: false, only: null, out: null, url: null };
+	const opts = { png: false, console: false, explain: false, all: false, only: null, out: null, url: null };
 	// A value is the next argument unless that is missing or is itself a flag, so `--out --png` is an error rather
 	// than a directory named --png.
 	const value = (i, flag) => {
@@ -101,6 +106,7 @@ function parseArgs(argv) {
 		if (a === "--help" || a === "-h") return { help: true };
 		if (a === "--png") opts.png = true;
 		else if (a === "--console") opts.console = true;
+		else if (a === "--explain") opts.explain = true;
 		else if (a === "--all") opts.all = true;
 		else if (a === "--out" || a === "--url" || a === "--only") {
 			const got = value(i, a);
@@ -113,6 +119,8 @@ function parseArgs(argv) {
 	if ((opts.all || opts.only !== null) && !opts.console) return { error: "--all and --only go with --console" };
 	if (opts.all && opts.only !== null) return { error: "--all and --only are two different lists; pick one" };
 	if (opts.console && (opts.png || opts.url !== null)) return { error: "--console takes neither --png nor --url: it reads the committed goldens" };
+	if (opts.explain && (opts.console || opts.png || opts.url !== null)) return { error: "--explain takes none of --console, --png and --url: it draws from words alone" };
+	if (opts.out === null && opts.explain) opts.out = join(REPO, "docs", "images", "explain");
 	if (opts.out === null) opts.out = opts.console ? join(REPO, "docs", "images", "console", ...(opts.all || opts.only !== null ? ["all"] : [])) : join(REPO, "docs", "images");
 	return opts;
 }
@@ -126,8 +134,8 @@ if (opts.error) {
 	console.error(`render-images: ${opts.error}\n${USAGE}`);
 	process.exit(2);
 }
-const serverBin = opts.url || opts.console ? null : findOnPath(["valkey-server", "redis-server"]);
-if (!opts.url && !opts.console && !serverBin) {
+const serverBin = opts.url || opts.console || opts.explain ? null : findOnPath(["valkey-server", "redis-server"]);
+if (!opts.url && !opts.console && !opts.explain && !serverBin) {
 	console.error("render-images: needs valkey-server or redis-server on PATH (brew install valkey, apt install valkey-server), or --url to an empty database");
 	process.exit(2);
 }
@@ -141,11 +149,11 @@ try {
 }
 const chrome = process.env.CHROME || MAC_CHROME;
 const gitPath = process.env.PATH ?? "";
-if (opts.png || opts.console) {
+if (opts.png || opts.console || opts.explain) {
 	try {
 		accessSync(chrome, constants.X_OK);
 	} catch {
-		console.error(`render-images: ${opts.console ? "--console" : "--png"} needs Google Chrome (looked for ${chrome}; set CHROME to its executable)`);
+		console.error(`render-images: ${opts.console ? "--console" : opts.explain ? "--explain" : "--png"} needs Google Chrome (looked for ${chrome}; set CHROME to its executable)`);
 		process.exit(2);
 	}
 }
@@ -530,8 +538,49 @@ async function mainConsole() {
 	for (const file of written) console.log(file);
 }
 
+/**
+ * `--explain`: the pictures `launch/explainers.mjs` draws. Each SVG's motion is paused and seeked to each frame's moment,
+ * so a loop comes out the same however busy the machine is, and closes on itself. A wall clock could do neither.
+ */
+async function mainExplain() {
+	const { EXPLAIN_FPS, EXPLAIN_SCALE, explainShots, explainSources } = await import("./explainers.mjs");
+	const { encodeApng } = await import("./apng.mjs");
+	const shots = explainShots();
+	const pipe = await openChromePipe({ chrome, work, children, Refusal, stepMs: CDP_STEP_MS, env: { HOME: process.env.HOME } });
+	browserPipe = pipe;
+	try {
+		for (const shot of shots) {
+			const source = join(work, `${shot.file}.svg`);
+			writeFileSync(source, shot.svg);
+			const { sessionId, send: s, close } = await pipe.openTarget();
+			await s("Page.enable");
+			await s("Emulation.setDeviceMetricsOverride", { width: shot.width, height: shot.height, deviceScaleFactor: EXPLAIN_SCALE, mobile: false });
+			await s("Emulation.setDefaultBackgroundColorOverride", { color: { r: 0, g: 0, b: 0, a: 0 } });
+			const loaded = pipe.event((m) => m.method === "Page.loadEventFired" && m.sessionId === sessionId, "load event");
+			await s("Page.navigate", { url: pathToFileURL(source).href });
+			await loaded;
+			const at = async (seconds) => {
+				await s("Runtime.evaluate", { expression: `document.getAnimations().forEach((a)=>{a.pause();a.currentTime=${seconds * 1000}});0` });
+				const { data } = await s("Page.captureScreenshot", { format: "png", clip: { x: 0, y: 0, width: shot.width, height: shot.height, scale: 1 } });
+				return Buffer.from(data, "base64");
+			};
+			const loop = [];
+			for (let frame = 0; frame < shot.frames; frame++) loop.push(await at(frame / EXPLAIN_FPS));
+			writeFileSync(join(opts.out, shot.file), encodeApng(loop, { fps: EXPLAIN_FPS }));
+			writeFileSync(join(opts.out, shot.still), await at(shot.stillAt * shot.seconds));
+			await close();
+			console.log(join(opts.out, shot.file));
+			console.log(join(opts.out, shot.still));
+		}
+	} finally {
+		await pipe.close();
+	}
+	writeFileSync(join(opts.out, "sources.json"), `${JSON.stringify(explainSources(shots), null, "\t")}\n`);
+}
+
 async function main() {
 	if (opts.console) return mainConsole();
+	if (opts.explain) return mainExplain();
 	const W = {
 		connection: await import("../worker/src/connection.mjs"),
 		queue: await import("../worker/src/queue.mjs"),

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { CONSOLE_PICKS } from "../../launch/console-picks.mjs";
 import { loadedRows, outcomeNote } from "../src/loaded-words.mjs";
 import { LOADED_SAMPLES as S } from "./helpers/loaded-samples.mjs";
+import { TOP_HALF_BANNED } from "./helpers/plain-words.mjs";
 
 // The READMEs are the project's front door, and several things about them are hand-written restatements of something
 // else, so each is held to it (AGENTS.md: a table that restates a derivable source is derived or pinned, never trusted).
@@ -62,7 +63,7 @@ test("the top half of the root README is for someone who does not write code", (
   assert.ok(at > 0, "a heading marks where the engineers' half starts");
   // The glossary may define its own words, and an image's address is not text a person reads.
   const top = ROOT.slice(0, at).replace(/## Words used here[\s\S]*$/, "").replace(/\]\([^)]*\)/g, "]");
-  for (const word of ["Valkey", "BullMQ", "egress", "webhooks?", "rootless", "Quadlet", "CONST-", "REQ-", "DES-", "INT-", "cron", "OCI", "forges?"]) {
+  for (const word of TOP_HALF_BANNED) {
     assert.doesNotMatch(top, new RegExp(`\\b${word}(?![a-z])`, "i"), `"${word}" belongs below "For engineers"`);
   }
   for (const stage of ["In the loop", "Near the loop", "Out of the loop"]) assert.match(top, new RegExp(`### \\d\\. ${stage}`), stage);

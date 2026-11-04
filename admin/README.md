@@ -7,10 +7,14 @@
 [pi](https://github.com/earendil-works/pi) is an open source coding agent that you normally run in a terminal. pi-dispatch runs it for you
 in the background: on a schedule, on your repo's issues and pull requests, or from the command line. Each job happens in a sealed box that is
 thrown away afterwards, stops at the spending limit you set, and shows up live on one web page. You start in the loop, watching it work. You
-move to near the loop, where it asks when it needs you, and to out of the loop, where you review what comes back. pi-dispatch never merges
+move to near the loop, where it asks when it needs you, and to out of the loop, where a second agent reviews the work and then you decide. pi-dispatch never merges
 anything, so what ships stays a person's decision. It runs on a provider key or a subscription you already have, falls back to other models you
 list, and brings your own pi setup and extensions along with `pi-dispatch import-pi`. The [main README](https://github.com/edgehero/pi-dispatch#readme)
 explains all of it.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/how-close-you-stay.png?v=2026-11-04" alt="An animation of one loop of work drawn three times, one above the other, under the headline: decide how closely you watch. In the loop, you are on the track: you watch it work and step in, and a message from you crosses to the agent. Near the loop, you stand just beside it: it works alone and stops to ask when it needs you, and it waits until you answer. Out of the loop, you are far away: it starts without you, a second agent reviews it, and only the change, reviewed by AI, travels to you, and then you decide. At every stage: a spending limit, a sealed box, and the final say stays yours." width="820">
+</p>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-overview.png?v=2026-11-03" alt="The web console's overview page: what needs you, what is waiting and why, what is running, what today has cost, and a timeline of every project's runs" width="820">
@@ -23,6 +27,10 @@ explains all of it.
 > [main repo](https://github.com/edgehero/pi-dispatch) has the job image, the docs (Docker, Podman, egress, every forge) and SECURITY.md.
 
 ## How it works
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/one-job.png?v=2026-11-04" alt="An animation of one job in five steps, under the headline: you pay for AI only while the agent works. Something starts it: a schedule, an issue, or you. It waits in line, and nothing runs yet. It is checked: over a limit, it is refused. The agent works in a sealed box, and if it needs you it stops to ask. You decide on a proposed change: you accept it, not pi-dispatch. A strip under the steps shows no AI cost in the first three and the last, and AI cost only where the agent works. A job crosses the strip and it fills only there. A second job is refused at the check." width="820">
+</p>
 
 Every trigger produces the same job, through the same path: one queue, one container, one budget.
 

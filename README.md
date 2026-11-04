@@ -15,6 +15,15 @@ decision.
 It is free and open source. You pay your AI provider for what the agent uses, or use a subscription you already have.
 
 <picture>
+  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/images/explain/one-job-dark-still.png?v=2026-11-04">
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/images/explain/one-job-still.png?v=2026-11-04">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/explain/one-job-dark.png?v=2026-11-04">
+  <img src="docs/images/explain/one-job.png?v=2026-11-04" alt="An animation of one job in five steps, under the headline: you pay for AI only while the agent works. Something starts it: a schedule, an issue, or you. It waits in line, and nothing runs yet. It is checked: over a limit, it is refused. The agent works in a sealed box, and if it needs you it stops to ask. You decide on a proposed change: you accept it, not pi-dispatch. A strip under the steps shows no AI cost in the first three and the last, and AI cost only where the agent works. A job crosses the strip and it fills only there. A second job is refused at the check.">
+</picture>
+
+<sub>On a folder on your own machine there is no proposed change: the job edits that folder directly.</sub>
+
+<picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-overview-dark.png?v=2026-11-03">
   <img src="docs/images/console/console-overview.png?v=2026-11-03" alt="The console's overview page: one question and two jobs that need you, five jobs waiting and why, four running, 15 dollars spent of a 25 dollar daily limit, and a timeline of every project's runs with the jobs in line after the now line">
 </picture>
@@ -65,6 +74,15 @@ Working with a coding agent usually means sitting next to it. You type, it works
 the right way to start, but one person can only watch so much. pi-dispatch lets you step back at your own pace, one kind
 of work at a time, and it never asks you to trust more than you have seen.
 
+<picture>
+  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/images/explain/how-close-you-stay-dark-still.png?v=2026-11-04">
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/images/explain/how-close-you-stay-still.png?v=2026-11-04">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/explain/how-close-you-stay-dark.png?v=2026-11-04">
+  <img src="docs/images/explain/how-close-you-stay.png?v=2026-11-04" alt="An animation of one loop of work drawn three times, one above the other, under the headline: decide how closely you watch. In the loop, you are on the track: you watch it work and step in, and a message from you crosses to the agent. Near the loop, you stand just beside it: it works alone and stops to ask when it needs you, and it waits until you answer. Out of the loop, you are far away: it starts without you, a second agent reviews it, and only the change, reviewed by AI, travels to you, and then you decide. At every stage: a spending limit, a sealed box, and the final say stays yours.">
+</picture>
+
+<sub>You choose this per kind of work, not once for everything.</sub>
+
 ### 1. In the loop: watch it work and step in
 
 You start a job and follow it live: what it is doing, which step of its plan it is on, what it said. If it heads the
@@ -87,7 +105,9 @@ question is the agent's own words, so your instructions decide how it asks: what
 ### 3. Out of the loop: you review what comes back
 
 Now the work starts without you: on a schedule, when someone labels an issue or comments on it, or (as a read only
-investigation) when an alert comes in. You read the results when it suits you. **Zero touch** tells you how far you have
+investigation) when an alert comes in. A second job can review a proposed change, and the first can answer what it finds, so
+what reaches you has already been read by an AI. That is a review, not an approval: the decision stays yours. You read the
+results when it suits you. **Zero touch** tells you how far you have
 come: how often runs needed a person, per project, over the last 7, 30 or 90 days.
 ([Triggers](docs/triggers.md), [watching alerts](docs/watch.md), [Zero touch](docs/zero-touch.md))
 
@@ -120,6 +140,13 @@ job over a limit is refused before it starts, and a job with its own cap is stop
 take it past that cap. Also set a spending limit at your AI provider, as a last line
 ([costs](docs/costs.md), [limits](docs/scoped-limits.md)).
 
+<picture>
+  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/images/explain/limits-inside-limits-dark-still.png?v=2026-11-04">
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/images/explain/limits-inside-limits-still.png?v=2026-11-04">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/explain/limits-inside-limits-dark.png?v=2026-11-04">
+  <img src="docs/images/explain/limits-inside-limits.png?v=2026-11-04" alt="An animation of limits drawn inside one another, under the headline: a job has to fit inside every limit. Innermost, one job with its own limit, which stops before an AI call that could pass that limit. Around it one project with its own limits, around that all your jobs per day, week and month, and outermost, dashed because you set it with them, your AI provider's limit, your last line of defence. Two jobs go in and the meters rise. A job that does not fit is refused before it starts, at no AI cost.">
+</picture>
+
 **Can it break my project?** On GitHub, GitLab, Forgejo or Azure DevOps a job works on a fresh copy and comes back with a
 pull request for you to review, and on GitHub pi-dispatch refuses a repository whose default branch is not protected. A job
 on a folder on your own machine edits that folder directly, with no undo, so it refuses a folder with uncommitted
@@ -129,6 +156,13 @@ changes unless you force it.
 internet addresses you allow. Two secrets do go in, and the agent can read them: your AI provider key and your GitHub or
 GitLab token. That is why the provider limit above matters, and why a narrow token beats your whole login
 ([`SECURITY.md`](SECURITY.md) says plainly what is and is not defended).
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/images/explain/in-and-out-of-the-box-dark-still.png?v=2026-11-04">
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/images/explain/in-and-out-of-the-box-still.png?v=2026-11-04">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/explain/in-and-out-of-the-box-dark.png?v=2026-11-04">
+  <img src="docs/images/explain/in-and-out-of-the-box.png?v=2026-11-04" alt="An animation of a sealed box with the agent inside, thrown away afterwards, a fresh one for every job. Going in: your project, and instructions that are read only. Two keys go in too, and it can read them: your AI provider key and a GitHub or GitLab key. Coming out: a proposed change, and what it did and cost. It can reach only addresses you allow, and nothing else. Your other files and your other passwords stay out. The agent can read both keys, so limit what each key can do, so a leak does less harm.">
+</picture>
 
 **What if the machine restarts or a job dies?** The queue is kept on disk, so waiting jobs are still there. A job that
 was running is lost or started over, unless its trigger opts into continuing from its last checkpoint
