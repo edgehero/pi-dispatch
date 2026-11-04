@@ -2812,7 +2812,8 @@ export function readSettingsView({ settingsFile, fs = nodeFs }) {
 
 /**
  * Read the unified committed `triggers.json` for display (OQ-008). Unlike the worker/receiver fail-loud
- * `parseTriggers` (boot semantics), a viewer degrades: an absent file is `{ missing: true }`, JSON or
+ * `parseTriggers` (boot semantics), a viewer degrades: an absent file is `{ missing: true }`, one that is there and
+ * cannot be read is `{ unreadable: <code> }` (`readProjects`' shape), JSON or
  * shape errors are `{ invalid }`, and each entry normalizes into `{ triggers: [ { type, ... } ] }`
  * discriminated on `on.type` (cron | label | comment | pull_request | issue). Missing selectors default to `[]`
  * and non-string members are dropped; an entry that is not a usable `{ on, run }` object is skipped, not
@@ -2822,12 +2823,12 @@ export function readSettingsView({ settingsFile, fs = nodeFs }) {
  * shows what it can rather than throwing on one bad entry.
  */
 export function readTriggers({ triggersPath, fs = nodeFs }) {
-  let text;
-  try {
-    text = fs.readFileSync(triggersPath, "utf8");
-  } catch {
-    return { missing: true };
-  }
+  // Only ENOENT is missing. A file that could not be read has rows nobody can see: read as absent, a page said the file does
+  // not exist, an edit said "no trigger at row 3 (have 0)" with 13 in the file, and a bundle's removal said no project's jobs
+  // depend on it, each of them a statement about a file nobody read.
+  const text = typeof triggersPath === "string" && triggersPath !== "" ? fileSnapshot(fs, triggersPath) : null;
+  if (text === null) return { missing: true };
+  if (isUnreadable(text)) return { unreadable: unreadableCode(text) };
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -2909,11 +2910,13 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   ];
   // Existing cron repositories are the only repository trees the admin knows locally. Forge repositories are not
   // cloned for a suggestion. Bound these advisory git reads, and disclose a cut alongside an unread tier.
-  const configured = readTriggers({ triggersPath: paths.triggersPath, fs }).triggers ?? [];
+  const triggersRead = readTriggers({ triggersPath: paths.triggersPath, fs });
+  const configured = triggersRead.triggers ?? [];
   const folders = [...new Set([folder, ...configured.filter((t) => t.type === "cron").map((t) => t.folder)].filter((f) => typeof f === "string" && f !== ""))];
   const repositories = folders.slice(0, 16).map((folder) => folderSkillsFn({ folder }));
   const tiers = [
-    { tier: "repository", skills: repositories.flatMap((r) => r.skills ?? []), unreachable: repositories.some((r) => r.unreachable) || folders.length === 0, truncated: folders.length > 16 || repositories.some((r) => r.truncated) },
+    // The folders come from the file: one that could not be read leaves folders nobody listed, so the tier is not whole.
+    { tier: "repository", skills: repositories.flatMap((r) => r.skills ?? []), unreachable: repositories.some((r) => r.unreachable) || folders.length === 0 || triggersRead.unreadable !== undefined, truncated: folders.length > 16 || repositories.some((r) => r.truncated) },
     { tier: "overlay", ...overlaySkillsFn({ globalPiDir: paths.globalPiDir, fs }) },
     { tier: "packages", ...stagedSkillsFn({ globalPiDir: paths.globalPiDir, fs }) },
   ];
@@ -3050,7 +3053,7 @@ export function normalizeSecretBundlesForDisplay(value) {
  *
  * ONE read of the file, captured through `readTriggers`' own `fs` seam, so the text and the view can never
  * describe two different versions of a file an operator saved between two reads. The view's shapes pass
- * through untouched (`missing`, `invalid`), with an empty map beside them.
+ * through untouched (`missing`, `unreadable`, `invalid`), with an empty map beside them.
  */
 export function readTriggersWithInstructions({ triggersPath, fs = nodeFs, includeTasks = false }) {
   let text = null;
@@ -4256,7 +4259,7 @@ export function createFleetReader(
     },
     async listRules() {
     const configured = readTriggers({ triggersPath: paths.triggersPath, fs });
-    if (configured.invalid) throw new Error("watch configuration unreadable");
+    if (configured.invalid || configured.unreadable) throw new Error("watch configuration unreadable");
     const rules = (configured.triggers ?? []).filter((t) => t.type === "watch");
     const observed = await watchStore.listRules();
     const merged = new Map(observed.map((r) => [r.id, r]));

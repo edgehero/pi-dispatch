@@ -825,6 +825,41 @@ test("secret-bundle-remove goes through the pipeline and names the bundles it st
   assert.equal((await held.act("secret-bundle-add", { name: "x", path: "/opt/b", format: "yaml" })).json().error, "the format is dotenv or json: what the resolver prints, declared, because the worker never guesses it from the output");
 });
 
+/** A real fs whose reads of `path` fail with `code` while `armed()` says so. */
+const failingReads = (path, code, armed = () => true) => ({ ...nodeFs, readFileSync: (p, ...rest) => {
+  if (p === path && armed()) throw Object.assign(new Error(code), { code });
+  return nodeFs.readFileSync(p, ...rest);
+} });
+
+test("secret-bundle-remove on a triggers file it cannot read says it cannot tell, and never that no project's jobs depend on it", async () => {
+  const { paths } = deployment();
+  writeFileSync(paths.settingsFile, `${JSON.stringify({ secretBundles: { "op-shop": { path: "/opt/b", format: "dotenv" } } }, null, 2)}\n`);
+  writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [], secretBundles: { "web-env": { profile: "op-shop", ref: "r", project: "web" } } }, null, 2)}\n`);
+  const read = await (await start({ paths })).act("secret-bundle-remove", { name: "op-shop" });
+  assert.ok(read.json().summary.join("\n").includes("The jobs of bundle web-env are refused pre-spend"), "the control: the file it can read");
+  const c = await start({ paths, fs: failingReads(paths.triggersPath, "EACCES") });
+  const p = await c.act("secret-bundle-remove", { name: "op-shop" });
+  assert.equal(p.status, 200, p.text);
+  const said = p.json().summary.join("\n");
+  assert.ok(said.includes("The triggers file could not be read, so the jobs of any bundle naming it are refused pre-spend"), said);
+  assert.ok(!said.includes("No bundle in triggers.json names it"), said);
+});
+
+for (const [name, body] of [["trigger-edit", { index: 2, flow: "review" }], ["trigger-delete", { index: 2 }]]) {
+  test(`${name} on a triggers file it cannot read says so, and never that the file has no such row`, async () => {
+    const { paths } = deployment();
+    const row = { on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "fix" } };
+    writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: Array.from({ length: 13 }, () => row) }, null, 2)}\n`);
+    const before = read(paths.triggersPath);
+    const c = await start({ paths, fs: failingReads(paths.triggersPath, "EACCES") });
+    const p = await c.act(name, body);
+    assert.notEqual(p.status, 200, p.text);
+    assert.match(p.json().error, /cannot be read \(EACCES\)|could not be read \(EACCES\)/);
+    assert.doesNotMatch(p.text, /no trigger at row|have 0/);
+    assert.equal(read(paths.triggersPath), before);
+  });
+}
+
 test("project-edit on a project a secret bundle names is refused at the preview with the planner's sentence, nothing written (#704)", async () => {
   const { paths } = deployment();
   writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [], secretBundles: { shop: { profile: "op-shop", ref: "r", project: "web" } } }, null, 2)}\n`);

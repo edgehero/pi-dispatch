@@ -2491,6 +2491,7 @@ function triggerLines(snapshot: any, selected: number, inner: number, styler: an
   const triggers = snapshot?.triggers;
   const lines: string[] = [];
   if (triggers && triggers.missing) { lines.push(styler.cell("(triggers file not found · a to add)", inner, { color: "dim" })); return { count: 0, lines }; }
+  if (triggers && triggers.unreadable) { lines.push(styler.cell(`(triggers file could not be read: ${triggers.unreadable})`, inner, { color: "error" })); return { count: 0, lines }; }
   if (triggers && triggers.invalid) { lines.push(styler.cell(`(triggers file invalid: ${triggers.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
   const list = (triggers && triggers.triggers) ?? [];
   if (list.length === 0) { lines.push(styler.cell("(no triggers · a to add)", inner, { color: "dim" })); return { count: 0, lines }; }

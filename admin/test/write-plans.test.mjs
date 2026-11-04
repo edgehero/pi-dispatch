@@ -594,6 +594,8 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["no trigger field", plans.planTriggerEdit({ params: { index: 0 }, paths, env }).refusal, "send at least one trigger field to edit"],
       ["blank flow", plans.planTriggerEdit({ params: { index: 0, flow: "  " }, paths, env }).refusal, "flow must be non-empty"],
       ["trigger delete index", plans.planTriggerDelete({ index: 9, paths }).refusal, "no trigger at index 9 (have 1)"],
+      ["triggers file unread", plans.planTriggerDelete({ index: 0, paths, fs: { readFileSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } } }).refusal, "the triggers file could not be read (EACCES); nothing was changed"],
+      ["triggers file broken", plans.planTriggerDelete({ index: 0, paths, fs: { readFileSync: () => "{ not json" } }).refusal, "the triggers file does not load (triggers file is not valid JSON); nothing was changed"],
       ["tool unknown key", plans.planSettingChange({ key: "nope", value: "1", paths, env }).refusal, `unknown key 'nope'. valid keys: ${keys}`],
       ["command unknown key (set)", plans.planSettingSet({ key: "nope", valueTokens: ["1"], paths, env, surface: "command" }).refusal, `set: unknown key 'nope'. valid keys: ${keys}`],
       ["command unknown key (unset)", plans.planSettingUnset({ key: "nope", paths, env, surface: "command" }).refusal, `unset: unknown key 'nope'. valid keys: ${keys}`],

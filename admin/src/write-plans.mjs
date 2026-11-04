@@ -443,7 +443,8 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
  */
 export function planTriggerDelete({ index, paths, surface = "tool", fs = nodeFs }) {
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
-  const list = triggerList(paths, fs);
+  const { list, refusal: unlisted } = triggerList(paths, fs);
+  if (unlisted) return { refusal: unlisted };
   const cur = list[index];
   if (!cur) return { refusal: surface === "console" ? `no trigger at row ${index + 1} (have ${list.length})` : `no trigger at index ${index} (have ${list.length})` };
   const row = rowName("trigger", index, surface);

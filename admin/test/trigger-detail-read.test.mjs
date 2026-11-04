@@ -129,6 +129,13 @@ test("repository suggestions use known local cron folders and disclose the bound
 });
 
 
+test("repository suggestions say the tier is not whole when the triggers file that names their folders could not be read", () => {
+  const failed = (code) => ({ readFileSync: (path) => { if (path === "/settings") return "{}"; throw Object.assign(new Error(code), { code }); } });
+  const read = (code) => readTriggerEditor({ paths: { settingsFile: "/settings", triggersPath: "/triggers" }, fs: failed(code), folder: "/repo/one", folderSkillsFn: () => ({ skills: [{ name: "fix" }] }), overlaySkillsFn: () => ({ skills: [] }), stagedSkillsFn: () => ({ skills: [] }), deploymentDir: null });
+  assert.deepEqual(read("EACCES").flowProblems, [{ tier: "repository", unavailable: true, truncated: false }]);
+  assert.deepEqual(read("ENOENT").flowProblems, [], "the control: no file names no other folder");
+});
+
 test("manual console editor resolves endpoint presence and deployment defaults from trusted .env without taking capability grants", () => {
   const deploymentDir = tempDir("trigger-editor-env-");
   writeFileSync(join(deploymentDir, ".env"), "WEBHOOK_SECRET=PRIVATE_GH\nFORGEJO_WEBHOOK_SECRET=PRIVATE_FJ\nPI_MAX_TURNS=17\nPI_RUN_PROGRESS=0\nPI_BACKENDS=openshell\nPI_DISPATCH_RUN_ROOTS=/untrusted/grant\nPI_DISPATCH_RUN_PER_HOUR=999\n", { mode: 0o600 });

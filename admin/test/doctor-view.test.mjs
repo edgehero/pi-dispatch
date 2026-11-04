@@ -257,6 +257,14 @@ test("first run: eight steps in doctor's order, each state a status the kit draw
   assert.deepEqual(st.doctor, { host: "build3", ageMs: 2 * M });
 });
 
+test("first run says a triggers file it could not read, and no step reads that as a deployment with no trigger", () => {
+  const step = (triggers) => firstRunState(firstRun({ triggers })).steps.find((s) => s.id === "trigger");
+  const unread = step({ unreadable: "EACCES" });
+  assert.equal(unread.state, "not-yet");
+  assert.deepEqual(unread.sentence, ["The triggers file could not be read here (EACCES), so this cannot say which triggers it holds."]);
+  assert.equal(step({ triggers: [] }).state, "to-do", "the control: a file holding none");
+});
+
 test("first run applies only on a read snapshot with no run on record and no host row or no trigger", () => {
   const applies = (snap) => firstRunState(snap).applies;
   assert.equal(applies(firstRun()), true);

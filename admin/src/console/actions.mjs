@@ -626,7 +626,7 @@ function bundleProfilesOf(ctx) {
 /** The triggers-file bundle ids that name bundle profile `name`, for the removal's confirm; null when unreadable. */
 function bundlesNaming(ctx, name) {
   const t = typeof ctx.a.paths.triggersPath === "string" ? ctx.a.rm.readTriggers({ triggersPath: ctx.a.paths.triggersPath, fs: ctx.fs }) : { missing: true };
-  if (t?.invalid) return null;
+  if (t?.invalid || t?.unreadable) return null;
   return Array.isArray(t?.secretBundles) ? t.secretBundles.filter((b) => b.profile === name).map((b) => b.id) : [];
 }
 

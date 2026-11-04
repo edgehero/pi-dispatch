@@ -23,6 +23,11 @@ function input(extra = {}) {
   return { id: "billing", paths: { projectsFile: "/private/operator/projects.json", scopedLimitsPath: "/private/operator/limits.json" }, now: NOW, snapshot: { hostBudgets: [host([])], waiting: { rows: [] } }, ...extra, reads };
 }
 
+test("a triggers file that could not be read is said beside the list, so no empty list reads as no trigger having run here", async () => {
+  assert.equal((await readProjectView(input({ reads: { triggers: () => ({ unreadable: "EACCES" }) } }))).triggersKnown, false);
+  assert.equal((await readProjectView(input({ reads: { triggers: () => ({ triggers: [] }) } }))).triggersKnown, true);
+});
+
 test("project holds use exact UTC enforcement windows, not today's holds for a weekly or monthly envelope", () => {
   const hosts = [host([
     { id: "gh-mon", p: "billing", at: NOW - 4 * DAY, h: 2_000_000, ha: NOW - 4 * DAY },

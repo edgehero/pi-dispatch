@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { resolvePaths } from "../src/read-model.mjs";
-import { assembleInsights } from "../src/insights-assembly.mjs";
+import { assembleInsights, assembleInsightsView } from "../src/insights-assembly.mjs";
 import * as html from "../src/insights-html.mjs";
 import { buildGraphScene } from "../src/graph-html.mjs";
 import * as ia from "../src/insights-assembly.mjs";
@@ -75,6 +75,23 @@ function deployment() {
   writeFileSync(join(logs, "cost-1.json"), JSON.stringify(record));
   return { env, paths: resolvePaths(env) };
 }
+
+test("a triggers file that could not be read leaves the spend by trigger not computed, and files no run under no trigger", async () => {
+  const { env, paths } = deployment();
+  const nowMs = Date.now();
+  const read = await assembleInsights(paths, "7d", { pricing: PRICING, nowMs, envFn: () => env });
+  assert.ok(Array.isArray(read.fold.byTrigger), "the control: a file it could read");
+  assert.notEqual(read.costByTrigger, null);
+  rmSync(paths.triggersPath, { force: true });
+  mkdirSync(paths.triggersPath, { recursive: true });
+  const failed = await assembleInsights(paths, "7d", { pricing: PRICING, nowMs, envFn: () => env });
+  assert.equal(failed.fold.byTrigger, null);
+  assert.equal(failed.costByTrigger, null);
+  assert.equal(failed.fold.provenance.runsTotal, read.fold.provenance.runsTotal, "the rest of the fold stands");
+  const flows = await assembleInsightsView(paths, "7d", { view: "flows", role: "operator", nowMs, pricing: PRICING, envFn: () => env, reads: { graph: async () => null } });
+  assert.equal(flows.costByTrigger, null);
+  assert.equal((await assembleInsightsView(deployment().paths, "7d", { view: "flows", role: "operator", nowMs, pricing: PRICING, envFn: () => env, reads: { graph: async () => null } })).costByTrigger === null, false, "the control");
+});
 
 test("assembleInsights runs in a process without pi, over a small deployment, and its sections render", async () => {
   const { env, paths } = deployment();

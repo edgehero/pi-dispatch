@@ -1597,3 +1597,25 @@ test("interactive priorities always require a person's confirm even when headles
     assert.equal(redis.store.has("alloc:plan"), false, "decline performs no allocation write");
   });
 });
+
+test("/dispatch secrets remove --bundle on a triggers file it cannot read says it cannot tell, and never that nothing depends on it", async () => {
+  const { runSecretsCommand } = await jiti.import("../src/secrets-command.ts");
+  const settings = JSON.stringify({ secretBundles: { "op-shop": { path: "/opt/b", format: "dotenv" } } });
+  const fsOf = (triggers) => ({
+    readFileSync: (p) => {
+      if (p === "/s/settings.json") return settings;
+      if (p === "/s/triggers.json" && typeof triggers === "string") return triggers;
+      throw Object.assign(new Error("no"), { code: triggers.code });
+    },
+    writeFileSync: () => {},
+    renameSync: () => {},
+    mkdirSync: () => {},
+  });
+  const shownFor = async (triggers) => {
+    const shown = [];
+    await runSecretsCommand({ settingsFile: "/s/settings.json", triggersPath: "/s/triggers.json" }, { ui: { input: async () => "", confirm: async (_t, m) => (shown.push(m), false), notify: () => {} } }, () => {}, ["remove", "op-shop", "--bundle"], { fs: fsOf(triggers) });
+    return shown.join("\n");
+  };
+  assert.match(await shownFor({ code: "EACCES" }), /The triggers file could not be read, so the jobs of any bundle naming it are refused pre-spend/);
+  assert.match(await shownFor({ code: "ENOENT" }), /No bundle in triggers\.json names it/, "the control: no file strands nothing");
+});

@@ -155,10 +155,16 @@ export function progressRefusal(params, onType, at, path, command = undefined) {
   );
 }
 
-/** The current triggers as a display list (empty on a missing/invalid file), for index resolution + confirm text. */
+/**
+ * The current triggers as a display list, for index resolution + confirm text: `{ list }`, empty for a missing file, or
+ * `{ refusal }` for a file that is there and gives no list. Counting those as no rows said "no trigger at row 3 (have 0)" of
+ * a file holding 13.
+ */
 export function triggerList(paths, fs = nodeFs) {
   const t = readTriggers({ triggersPath: paths.triggersPath, fs });
-  return Array.isArray(t?.triggers) ? t.triggers : [];
+  if (t?.unreadable) return { refusal: `the triggers file could not be read (${t.unreadable}); nothing was changed` };
+  if (t?.invalid) return { refusal: `the triggers file does not load (${t.invalid}); nothing was changed` };
+  return { list: Array.isArray(t?.triggers) ? t.triggers : [] };
 }
 
 /**
@@ -173,7 +179,8 @@ export function triggerList(paths, fs = nodeFs) {
  */
 export function planTriggerEditCore({ params, paths, env, surface, fs = nodeFs, baseRun = null }) {
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
-  const list = triggerList(paths, fs);
+  const { list, refusal: unlisted } = triggerList(paths, fs);
+  if (unlisted) return { refusal: unlisted };
   const cur = list[params.index];
   if (!cur) return { refusal: surface === "console" ? `no trigger at row ${params.index + 1} (have ${list.length})` : `no trigger at index ${params.index} (have ${list.length})` };
   const row = rowName("trigger", params.index, surface);

@@ -204,8 +204,25 @@ test("the panel's trigger read carries the instructions TEXT beside the view, ne
   assert.doesNotMatch(JSON.stringify(view), /full test suite/);
   assert.equal(view.triggers[0].instructions, true);
   // The degrade shapes pass through with an empty map.
-  const missing = readTriggersWithInstructions({ triggersPath: "/x", fs: { readFileSync: () => { throw new Error("ENOENT"); } } });
+  const missing = readTriggersWithInstructions({ triggersPath: "/x", fs: { readFileSync: () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); } } });
   assert.deepEqual(missing, { view: { missing: true }, instructions: {} });
+  const unread = readTriggersWithInstructions({ triggersPath: "/x", fs: { readFileSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } } });
+  assert.deepEqual(unread, { view: { unreadable: "EACCES" }, instructions: {} });
+});
+
+test("the panel's list says a triggers file could not be read, in the failure's own code, and never that it has none", async () => {
+  const lines = (await renderList([], 120)).join("\n");
+  assert.match(lines, /\(no triggers · a to add\)/, "the control: an empty file reads as empty");
+  const snap = { ...BASE, triggers: { unreadable: "EACCES" } };
+  const comp = makeDashboard({
+    paths: {}, done() {}, tui: { requestRender() {} }, intervalMs: 100000,
+    deps: { fetchSnapshot: async () => snap, pause: async () => {}, resume: async () => {}, dispose: async () => {}, now: () => AT },
+  });
+  await flush();
+  const unread = comp.render(120).join("\n");
+  await comp.dispose();
+  assert.match(unread, /triggers file could not be read: EACCES/, unread.slice(0, 400));
+  assert.doesNotMatch(unread, /no triggers · a to add|triggers file not found/);
 });
 
 async function openDetail(trigger, triggerInstructions, theme) {

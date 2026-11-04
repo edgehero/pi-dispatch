@@ -356,6 +356,8 @@ export function renderTriggers({ schedulers, triggers } = {}) {
   const out = [renderSchedulers(schedulers), "", "Triggers:"];
   if (triggers && triggers.missing) {
     out.push("  (triggers file not found)");
+  } else if (triggers && triggers.unreadable) {
+    out.push(`  (triggers file could not be read: ${triggers.unreadable})`);
   } else if (triggers && triggers.invalid) {
     out.push(`  (triggers file invalid: ${triggers.invalid})`);
   } else {
