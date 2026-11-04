@@ -192,7 +192,7 @@ every job:
 `dispatch_set` warns before the first two; `pi-dispatch doctor` names all three.
 
 A trigger may narrow the per-job cap with `run.maxCostUsd`, and limit its models with `run.models`
-([triggers](triggers.md#a-dollar-cap-per-job)). No tool sets either: a person writes them in the triggers file, or
+([triggers](triggers.md#a-dollar-cap-per-job)). No `dispatch_*` tool sets either: a person writes them in the triggers file, or
 changes them on the [trigger's page](console.md#what-a-triggers-jobs-get). The trigger tools refuse a call that carries
 them, and an edit keeps the values the entry has.
 
@@ -214,7 +214,7 @@ model's whole output limit, so a cap can be too small for any call at all. The p
 trigger names (its main model, its `run.models` and its fallbacks), from the same bound as the runner:
 
 - **The floor**, for a 4,096 byte request, the least any call can be bounded at. It is never the amount you are told to set: no job
-  sends so small a request, since the default prompt and tools alone come to about 5,340 bytes at the pinned pi.
+  sends so small a request, since the default prompt and tools alone come to about 5 KB at the pinned pi.
 - **A short task's first call**, for 10,667 bytes, which is what a short task's first request measured. This is the amount the
   preview names, as "at least", because a repository's context files and a longer task need more.
 

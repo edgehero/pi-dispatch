@@ -4,9 +4,9 @@
  * they load the staged packages.
  *
  * DELIBERATELY OUTSIDE `write-plans.mjs`, and that is the boundary, not a tidiness. `tool-actions.mjs` hands a tool
- * `{ ...writePlans }`, every export, so a planner there is a planner a model's call can reach. `TOOL_PROOF_FIELDS` exist
- * because what a job can spend or reach is the operator's to write, and a person at the console is the operator while a
- * model's call is not, even behind a confirm. This module is loaded by the console's `cli.mjs` alone and handed to the action
+ * `{ ...writePlans }`, every export, so a planner there is a planner a model's call can reach. `TOOL_PROOF_FIELDS` are
+ * the operator's to write, and a person at the console is the operator while a model's call is not, even behind a confirm.
+ * This module is loaded by the console's `cli.mjs` alone and handed to the action
  * through `ctx.a`, which a tool's context does not carry. `trigger-environment-boundary.test.mjs` walks the import graph of
  * `tool-actions.mjs` and of the extension to hold that, so the action table takes the field names from `trigger-edit-core.mjs`
  * and never imports this file. REJECTED: a parameter on `planTriggerEdit`, which any call that reaches it could pass.

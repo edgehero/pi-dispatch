@@ -27,7 +27,7 @@ const HAIKU = "anthropic/claude-haiku-4-5"; // a short task's first call: $0.343
 const SONNET = "anthropic/claude-sonnet-5-5"; // $1.327148
 const OPUS = "anthropic/claude-opus-5-5"; // $2.654295, and its floor $2.62144
 /** pi's default prompt and tools at the pin, about: `worker/test/first-call-bytes.pinned.test.mjs` measures them. */
-const DEFAULT_CONTEXT_BYTES = 5340;
+const DEFAULT_CONTEXT_BYTES = 5100;
 
 const comment = (run = {}) => ({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", ...run } });
 const cron = { on: { type: "cron", id: "daily", pattern: "0 6 * * *" }, run: { kind: "local", folder: "/nowhere", flow: "tidy", task: "PRIVATE TASK" } };

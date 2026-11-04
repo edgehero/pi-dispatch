@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_SHORT_TASK_BYTES } from "../src/model-catalog.mjs";
@@ -7,8 +7,9 @@ import { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_SHORT_TASK_BYTES } from "../sr
 /**
  * The two constants' reason, against the pinned pi. The floor (`FIRST_CALL_MIN_CONTEXT_BYTES`) stays a lower bound only while it is
  * below what pi's default prompt and tools come to, and the amount a person is told (`FIRST_CALL_SHORT_TASK_BYTES`) only while it is
- * above that with a short task. Their comments once carried pi 0.99.1's numbers past the bump that moved them, so the order is held
- * here, and the numbers themselves are not: they name pi's install path, and a path is no reason for a pin bump to go red.
+ * above that with a short task. Their comments once carried pi 0.99.1's numbers past the bump that moved them, and then a number nobody
+ * had computed, so the order is held here, and what is said of the size is as rough as "about 5 KB": it names pi's install path, and a
+ * path is no reason for a pin bump to go red.
  */
 const piRoot = new URL("../../node_modules/@earendil-works/pi-coding-agent/dist/core/", import.meta.url);
 
@@ -30,4 +31,10 @@ test("pi's default prompt and tools sit between the floor and a short task's amo
 	const oneLine = bytes([{ role: "user", content: [{ type: "text", text: "Add a line to the README saying hello." }], timestamp: 1 }]);
 	assert.ok(bare > FIRST_CALL_MIN_CONTEXT_BYTES, `${bare} bytes: the floor would no longer be a lower bound for a job that adds nothing. Re-read firstCallFloorMicros against the new pi.`);
 	assert.ok(oneLine < FIRST_CALL_SHORT_TASK_BYTES, `${oneLine} bytes: the amount a person is told would no longer cover a short task. Re-measure FIRST_CALL_SHORT_TASK_BYTES against the new pi.`);
+	// What the docs, the design and the constants' comments say of it, in the words each uses.
+	assert.equal(Math.round(bare / 1000), 5, `${bare} bytes: "about 5 KB" no longer holds. Say what does, where this reads it.`);
+	const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8").replace(/\s+/g, " ");
+	assert.ok(read("docs/costs.md").includes("alone come to about 5 KB at the pinned pi"));
+	assert.ok(read("specs/design.md").includes("the default prompt and tools alone come to about 5 KB at the pin"));
+	assert.equal(read("worker/src/model-catalog.mjs").split("about 5 KB").length - 1, 2, "the comments on both constants");
 });

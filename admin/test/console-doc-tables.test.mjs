@@ -219,6 +219,14 @@ function plannerWorld({ run = {}, doc = null, settings = "{}", env = {}, overlay
   const preview = (change, over = {}) => service.preview({ index: 1, pageDigest: over.pageDigest ?? digest(), ...change, ...over }, operator);
   return { paths, service, preview, digest };
 }
+/** A file that reads for the planner's first look and stops reading at the trigger edit's own: the file moving during one preview. */
+function readsThenFails(later) {
+  const w = plannerWorld();
+  const pageDigest = w.digest();
+  let reads = 0;
+  const fs = { ...nodeFs, readFileSync: (path, ...rest) => (String(path).endsWith("triggers.json") && ++reads > 3 ? later() : nodeFs.readFileSync(path, ...rest)) };
+  return createTriggerEnvironmentActions({ paths: w.paths, env: {}, fs, now: () => PLANNER_NOW }).preview({ index: 1, pageDigest, flow: "review" }, operator);
+}
 const LOCAL_MODEL = Object.freeze({ providers: { ollama: { baseUrl: "http://127.0.0.1:11434/v1", api: "openai-completions", apiKey: "x", models: [{ id: "local", cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, maxTokens: 100, contextWindow: 1000 }] } } });
 const MODEL_RUN = Object.freeze({ provider: "anthropic", model: "claude-haiku-4-5" });
 
@@ -230,6 +238,8 @@ const REFUSALS = Object.freeze({
   "This trigger changed since the page drew it": () => plannerWorld().preview({ packages: false }, { pageDigest: "a".repeat(64) }),
   "There is no trigger at row": () => plannerWorld().preview({ packages: false }, { index: 9 }),
   "The triggers file could not be read": () => { const w = plannerWorld(); const pageDigest = w.digest(); nodeFs.writeFileSync(w.paths.triggersPath, "{ not json"); return w.preview({ packages: false }, { pageDigest }); },
+  "the triggers file could not be read (": () => readsThenFails(() => { throw Object.assign(new Error("busy"), { code: "EIO" }); }),
+  "the triggers file does not load (": () => readsThenFails(() => "{ not json"),
   "nothing was written and nothing in it was lost; change it with that release": () => { const w = plannerWorld({ doc: { version: 999, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix" } }] } }); return w.preview({ packages: false }); },
   "A trigger's flow cannot be removed": () => plannerWorld().preview({ flow: null }),
   "trigger row": () => plannerWorld().preview({ provider: "No Spaces Allowed" }),
@@ -266,7 +276,7 @@ const WARNINGS = Object.freeze({
   "in a line that could not be read as the worker reads it, so the deployment's job cap": () => plannerWorld({ deps: { readHostEnv: () => ({ env: {}, unread: ["PI_MAX_COST_USD"] }) } }).preview({ maxCostUsd: "5" }),
   "This host's .env could not be read as the worker reads it, so the deployment's job cap": () => plannerWorld({ deps: { readHostEnv: () => { throw new Error("no"); } } }).preview({ maxCostUsd: "5" }),
   "could not be read just now": () => plannerWorld({ run: MODEL_RUN, overlay: LOCAL_MODEL, failing: "models.json" }).preview({ model: "claude-sonnet-5-5" }),
-  "the worker's pickup check could not": () => plannerWorld({ deps: { readHostEnv: () => { throw new Error("no"); } } }).preview({ mcp: ["linear"] }),
+  "pickup check could not": () => plannerWorld({ deps: { readHostEnv: () => { throw new Error("no"); } } }).preview({ mcp: ["linear"] }),
   "still reach a server could not be judged here": () => plannerWorld({ run: { mcp: ["linear"] }, failing: "mcp.json" }).preview({ excludeTools: ["write"] }),
   "its line in the .env could not be read": () => plannerWorld({ deps: { readHostEnv: (keys) => ({ env: { PI_EGRESS: "0", PI_FORWARD_ENV: "LINEAR_API_KEY" }, unread: keys.includes("LINEAR_API_KEY") ? ["LINEAR_API_KEY"] : [] }) } }).preview({ mcp: ["linear"] }),
   "The model catalog could not judge": () => plannerWorld({ run: MODEL_RUN, deps: { checkModelsKnown: () => ({}) } }).preview({ model: "claude-sonnet-5-5" }),
@@ -283,10 +293,24 @@ const NOT_IN_THE_TABLE = Object.freeze({
   "This trigger's keys changed since the edit being undone": "unreachable",
   // `readOverlay` turns a failed read into `invalid`, which has its own row.
   "The deployment's settings could not be read": "unreachable",
-  // A belt around the dry run, whose file system holds every write: a read that fails comes back as one of the table's two rows.
+  // A belt around the dry run, whose file system holds every write: a read that fails comes back as one of the table's rows.
   "the change could not be checked": "unreachable",
   "The live hosts could not be read": "version",
   "This change needs": "version",
+});
+
+/**
+ * The trigger edit's own refusals that no page meets, each with why. The body is shared with `dispatch_trigger_edit`, and its other refusals
+ * read the same file the planner has already read, so what a person meets of it is in the table.
+ */
+const CORE_NOT_IN_THE_TABLE = Object.freeze({
+  // The form trims a box and sends null for a blank (`getsBody`), which the planner's shape check answers first: "A trigger's flow cannot be removed".
+  "flow must be non-empty": "unreachable",
+  // An entry the display list drops gets no digest, so no form, and the digest is compared first: the same entry reads the same to both.
+  "no trigger at row": "unreachable",
+  // A tool's words, for its zero-based index and its call that sends no field. The form's own empty change is "already says this".
+  "no trigger at index": "a tool's",
+  "send at least one trigger field to edit": "a tool's",
 });
 
 const REFUSAL_HEADER = "| It says | Why | What to do |";
@@ -299,6 +323,7 @@ const REFUSAL_TODO = Object.freeze({
   "This trigger changed since the page drew it": { says: /Reload the page/, shared: true },
   "There is no trigger at row": { says: /Reload the page/, shared: true },
   "The triggers file could not be read": { says: /Correct the file\. `pi-dispatch doctor` names what is wrong with it/ },
+  "the triggers file could not be read (": { says: /Correct the file\. `pi-dispatch doctor` names what is wrong with it/ },
   "nothing was written and nothing in it was lost; change it with that release": { says: /with that release/, shared: true },
   "A trigger's flow cannot be removed": { says: /Choose another flow/i, shared: true },
   "trigger row": { says: /Correct the value it names, or look again and retry/ },
@@ -386,11 +411,15 @@ test("docs/console.md's table of what the preview warns of: each quote is in wha
 test("every warning the planner can say is in that table: a new sentence has to choose", async () => {
   const source = read("admin/src/trigger-environment-plans.mjs");
   // A template inside a template ends the match early, so the one sentence that opens with a choice of words is held by its own words below.
+  // Not read here, on purpose: `denied`, the answer to a tool or a viewer, which no person at an operator's form meets; and the summary's two lines
+  // of a host's release ("Stamps the file version", "reads what this change needs"), which wait on a file needing a version above 1, a paragraph of its own.
   const cannot = /const cannot = "([^"]+)"/.exec(source)[1];
   const literals = [...source.matchAll(/(?:\bwarnings\.(?:push|add)\((?:\[|failedRead \? )?|\bthin\.add\(|\bcould\(|\bnotRead = |\bonHost\("[^"]+", |\bnote: |\blacking\.length > 0 \? \[|\bunjudged\.length > 0 \? \[)(?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => literal !== "" && !literal.startsWith("${unresolved.project")).map((literal) => literal.replace("${cannot}", cannot));
+  // The other branch of the one sentence that chooses between two.
+  literals.push(...[...source.matchAll(/failedRead \? `[^`]*` : `((?:[^`\\]|\\.)*)`/g)].map((m) => m[1]));
   assert.ok(source.includes("this trigger's model could not be resolved (${unresolved.reason})"));
   // Each of these went unforced when the scan skipped a literal it could not read: held by name, so a scan that loses one says so.
-  for (const said of ["A job still starts on", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
+  for (const said of ["A job still starts on", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here", "The worker's pickup check could not judge"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
   assert.ok(literals.length >= 20, `the scan finds the planner's sentences (${literals.length})`);
   const quotes = Object.keys(WARNINGS);
   for (const literal of literals) assert.ok(quotes.some((quote) => literal.includes(quote)), `no row for: ${literal}`);
@@ -411,6 +440,20 @@ test("every refusal the planner can say is in that table or named here with why:
   }
   // And nothing here excuses a sentence the planner no longer says.
   for (const start of Object.keys(NOT_IN_THE_TABLE)) assert.ok(literals.some((literal) => literal.startsWith(start)), start);
+
+  // The trigger edit's own, which the planner hands on as they are.
+  const core = read("admin/src/trigger-edit-core.mjs");
+  const coreLiterals = [...core.matchAll(/\brefusal: (?:surface === "console" \? (?:`((?:[^`\\]|\\.)*)`) : )?(?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].flatMap((m) => [m[1], m[2] ?? m[3]]).filter((literal) => literal !== undefined);
+  assert.ok(coreLiterals.length >= 6, `the scan finds the trigger edit's sentences (${coreLiterals.length})`);
+  const quotes = Object.keys(REFUSALS);
+  for (const literal of coreLiterals) {
+    const left = Object.keys(CORE_NOT_IN_THE_TABLE).some((start) => literal.startsWith(start));
+    assert.ok(left || quotes.some((quote) => literal.includes(quote)), `no row and no reason for: ${literal}`);
+  }
+  for (const start of Object.keys(CORE_NOT_IN_THE_TABLE)) assert.ok(coreLiterals.some((literal) => literal.startsWith(start)), start);
+  // Why a page never meets "flow must be non-empty": a blank box goes as null, and null is refused in the row the table has.
+  assert.match(read("admin/src/console/script.mjs"), /out\[boxes\[i\]\.name\] = next === "" \? null : next/);
+  assert.match((await plannerWorld().preview({ flow: null })).refusal, /^A trigger's flow cannot be removed/);
 });
 
 test("the sentences the docs quote of the preview are the real preview's, and no field on the card makes it read a host", async () => {
@@ -445,14 +488,19 @@ test("the sentences the docs quote of the preview are the real preview's, and no
   const held = plannerWorld({ run: { maxCostUsd: 1.5 } });
   assert.match((await held.preview({ maxCostUsd: "1.50" })).unchanged, /already says this/);
   assert.match(consoleDoc, /`1\.5` and `"1\.50"` are one cap/);
-  // `true` and no key: a job loads the same, doctor does not, and the preview says which way a change moves that.
-  const cleared = await plannerWorld({ run: { packages: true } }).preview({ packages: null });
-  const clearedLine = cleared.plan.changes.find((change) => change.key === "packages").line;
-  assert.ok(consoleDoc.includes(`"${clearedLine}"`), clearedLine);
-  assert.match((await plannerWorld().preview({ packages: true })).plan.changes[0].line, /now says this flow needs them/);
-  assert.match(consoleDoc, /`run\.packages: true` and no key are not one value/);
+  // What the switch does: off writes `false`, on removes it, and it is drawn on over `true`. A job loads the same under `true` and no key; doctor does not.
   assert.match(read("admin/src/console/script.mjs"), /flags\[f\]\.checked \? null : false/);
-  assert.match(consoleDoc, /The switch's on removes a `false`, so a `true` stays until the switch goes off and on/);
+  assert.equal((await plannerWorld().preview({ packages: false })).plan.changes[0].line, "Staged packages: off.");
+  const on = plannerWorld({ run: { packages: false } });
+  const back = await on.preview({ packages: null });
+  assert.equal(back.plan.changes[0].line, "Staged packages: on.");
+  assert.doesNotMatch(back.afterText, /"packages"/, "on removes the key");
+  const overTrue = panelOf(await triggerGetsPage({ entry: { on: COMMENT_ON, run: { kind: "github", flow: "fix", packages: true } } }), "p-trigger-gets");
+  assert.match(overTrue, /<input type="checkbox" checked data-gets-flag="packages"/, "drawn on over true");
+  assert.match(consoleDoc, /switch writes `"packages": false` when it goes off, and removes that when it goes on\. It is drawn on over a file that says `true`/);
+  assert.match(consoleDoc, /`true` and no key are not one value: a job loads the staged packages under either, and doctor fails a host with none staged only on `true`/);
+  assert.match(read("worker/src/doctor.mjs"), /\$\{requiring\} trigger\(s\) require staged packages \(run\.packages: true\) but nothing is staged/);
+  assert.doesNotMatch(consoleDoc, /Staged packages: stay on/, "a form cannot reach that line");
 });
 
 /** What the hosts published, written by the real builder and read back by the real reader beside what its host beats out. */
@@ -660,6 +708,10 @@ test("docs/console.md says what a tool cannot reach, and names the fields a tool
   assert.match(read("admin/src/action-policy.mjs"), /"setting-set": rule\("confirm",[^\n]*"dispatch_set"\)/);
   assert.match(said, /`dispatch_set` still sets the deployment's own caps, behind a confirm wherever a cap could rise/);
   assert.match(said, /Those six are the operator's to write/);
+  assert.match(said, /pi's own `bash` is outside this, as it is outside every action/);
+  // The bar on the Confirm says what is true of this action, and claims nothing of what moves a job's spend elsewhere.
+  const reason = /"trigger-environment-edit": rule\("person", "([^"]+)"\)/.exec(read("admin/src/action-policy.mjs"))[1];
+  assert.equal(reason, "A person writes these fields here; no tool reaches this action.");
 });
 
 test("docs/triggers.md's two editors are the card's fields and the Edit form's, and its tool sentence takes what the tool does", () => {
@@ -674,7 +726,11 @@ test("docs/triggers.md's two editors are the card's fields and the Edit form's, 
   for (const key of ["flow", "backend", "provider", "model", "maxTurns", ...EDIT_FIELDS.slice(2)]) assert.ok(tool.includes(key), key);
   // Which of the card's fields a tool can still set: "the first three", and that it cannot set the rest, read from what the tool takes.
   assert.deepEqual(CARD_FIELDS.filter((key) => tool.includes(key)), CARD_FIELDS.slice(0, 3));
-  assert.match(doc, /Of those fields, `dispatch_trigger_edit` can still set the first three, and no tool can set the other six/);
+  assert.match(doc, /Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_\*` tool can set the other six/);
+  // The opening of the optional fields: most are the file's alone, and which are not is read from what the Edit form and the tool take.
+  const flags = /\. ((?:`[A-Za-z]+`(?:, | and )?)+) change how a run is followed or picked up, and that page's Edit form and `dispatch_trigger_edit` take them too/.exec(doc);
+  assert.deepEqual(spans(flags[1]), EDIT_FIELDS.slice(2));
+  for (const key of EDIT_FIELDS.slice(2)) assert.ok(tool.includes(key), key);
   const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(read("admin/src/write-plans.mjs"))[1];
   assert.deepEqual([...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort(), CARD_FIELDS.slice(3).sort());
   // Behind a confirm, but for the one thing the policy lets a headless call do alone.
@@ -746,11 +802,7 @@ test("docs/costs.md's amounts are the real bound's, at the pin, and each row of 
   assert.ok(text.includes("It offers this trigger's cap or none as the way out, and no way to move the deployment's cap, which belongs to its settings"));
   assert.match((await plannerWorld({ run: { maxCostUsd: "1" }, settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ maxCostUsd: null })).plan.changes[0].widening, /widens what each job may spend/);
   assert.ok(text.includes("Removing a trigger's cap, or raising it, is said as a widening when it lets a job spend more"));
-  // The size of pi's default prompt and tools, as the constants' own reason measures it at the pin.
-  const catalog = read("worker/src/model-catalog.mjs");
-  const measured = /serialise to about ([\d,]+) bytes/.exec(catalog)[1];
-  assert.ok(text.includes(`alone come to about ${measured} bytes at the pinned pi`), measured);
-  const bytes = Number(measured.replace(",", ""));
-  assert.ok(bytes > FIRST_CALL_MIN_CONTEXT_BYTES && bytes < FIRST_CALL_SHORT_TASK_BYTES, "and it sits between the two amounts, as first-call-bytes.pinned.test.mjs holds at the pin");
-  assert.doesNotMatch(text, /4,465/);
+  // `first-call-bytes.pinned.test.mjs` computes the size of pi's default prompt and tools, and holds what this says of it. No older figure stays.
+  assert.ok(text.includes("alone come to about 5 KB at the pinned pi"));
+  assert.doesNotMatch(text, /4,465|5,340|5,440/);
 });

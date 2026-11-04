@@ -43,7 +43,7 @@ export const ACTION_AGENT_POLICIES = Object.freeze({
   "run-enqueue": rule("unattended", "Every local start passes the current process's six admission limits.", "dispatch_run"),
   "pause-windows": rule("person", "Replacing the whole list can release a person's pauses."),
   "model-role-edit": rule("person", "A person reviews role mappings and fallback changes; tools cannot adopt a model."),
-  "trigger-environment-edit": rule("person", "What a trigger's jobs can spend or reach is the operator's to write; a person reviews each change, and no tool reaches this action."),
+  "trigger-environment-edit": rule("person", "A person writes these fields here; no tool reaches this action."),
   "secret-profile-add": rule("person", "Resolver declarations grant host execution."),
   "secret-profile-remove": rule("person", "Resolver declarations belong to the operator."),
   "secret-bundle-add": rule("person", "Bundle declarations grant credentials and host execution."),

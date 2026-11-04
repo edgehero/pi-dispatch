@@ -304,17 +304,15 @@ export function declaredFallbacks(provider, id, overlay = null) {
  */
 export const FIRST_CALL_OVERHEAD_TOKENS = 8192;
 /**
- * The least a job's FIRST call carries before its task, in bytes: at the pin, pi's default system prompt (about 2,550 bytes,
- * since it names pi's install path) and the schemas of its four default tools (2,717 bytes) serialise to about 5,340 bytes, and
- * PR #542's lab measured 10,667 for a short task. 4,096 is below both, so the bound below stays a lower bound for a job that adds
- * nothing. `worker/test/first-call-bytes.pinned.test.mjs` holds that order against the pinned pi, which moved the first number
- * from 4,465 without moving the decision.
+ * The least a job's FIRST call carries before its task, in bytes: at the pin, pi's default system prompt, which names pi's install
+ * path, and the schemas of its four default tools serialise to about 5 KB, and a short task's first request is 10,667 bytes. 4,096
+ * is below both, so the bound below stays a lower bound for a job that adds nothing. `worker/test/first-call-bytes.pinned.test.mjs`
+ * computes that against the pinned pi, and holds the order.
  */
 export const FIRST_CALL_MIN_CONTEXT_BYTES = 4096;
 /**
- * What PR #542's lab measured a short task's first request at, in bytes. A cap at the floor above admits a request nobody
- * sends: the same default prompt and tools alone come to about 5,340 bytes, about 5,440 with a one-line task. So this, not the
- * floor, is the least a person can be told to set. A repository's context files, which go in the system prompt before any task
+ * 10,667 bytes, a short task's first request. A cap at the floor above admits a request nobody sends: the same default prompt
+ * and tools alone come to about 5 KB, and a one-line task adds little. So this, not the floor, is the least a person can be told to set. A repository's context files, which go in the system prompt before any task
  * does, and a longer task, need more still.
  */
 export const FIRST_CALL_SHORT_TASK_BYTES = 10_667;
@@ -323,7 +321,7 @@ export const FIRST_CALL_SHORT_TASK_BYTES = 10_667;
  * A LOWER BOUND, in integer micro-dollars, on what the runner's cost guard (`callCostBound`) reserves for a job's
  * first call on `model`, or null when this cannot say. The guard refuses a call when its bound would pass the cap, so
  * a per-job cap below this number can never admit a call on the model: with the main model, the job makes no call at
- * all (PR #542's lab: the default model's first call was bounded at $1.03 under a $1 cap).
+ * all (the default model's first call has been bounded at $1.03 under a $1 cap).
  *
  * The guard's bound is (request bytes + 8,192) x the dearest input rate + the output limit x the dearest output rate,
  * times a service-tier multiplier, over the model's table, its tiers and its fallbacks. This takes the parts of that

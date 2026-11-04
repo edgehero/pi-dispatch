@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironmentChange",
   "pr": 800,
-  "words": "4d815e85583c24246c4abc72a83f8ac1c22252055274084b657c2cdebc353b10",
+  "words": "25478d1d32d1da52e26f9efd0080c6950bdd52b1954a27dfd25ee42f1d4b8763",
   "elements": [
     {
       "el": "p-trigger-gets-preview",
@@ -127,7 +127,7 @@
       "holds": "only for the smallest first call"
     },
     {
-      "el": "A model that cannot make one call under the cap",
+      "el": "A main model that cannot make one call under the cap",
       "kind": "state",
       "status": "new",
       "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",

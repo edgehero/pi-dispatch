@@ -2310,10 +2310,9 @@ holds, and the bar and the Edit form both say so. With no script the page reads 
   one Confirm.
 
 The Confirm judges again, because a deployment's cap can move between the two, and it is refused if the file moved. A change
-that says the same is no change, and the page says the row already says this: `1.5` and `"1.50"` are one cap. `run.packages: true`
-and no key are not one value. A job loads the staged packages under either, and doctor fails a host with none staged only on `true`,
-so the preview says which way a change moves that: "Staged packages: stay on, and the file no longer says this flow needs them, so
-doctor stops failing a host with none staged." The switch's on removes a `false`, so a `true` stays until the switch goes off and on.
+that says the same is no change, and the page says the row already says this: `1.5` and `"1.50"` are one cap. The staged packages
+switch writes `"packages": false` when it goes off, and removes that when it goes on. It is drawn on over a file that says `true`, and
+`true` and no key are not one value: a job loads the staged packages under either, and doctor fails a host with none staged only on `true`.
 
 **Undo** is an edit like any other, previewed the same way, and puts back the keys the change touched, in their places. Where this
 page could not write them (a key the file held as `null`, a file the loader refused as it was, or a trigger this page would refuse
@@ -2331,6 +2330,7 @@ page says, which also names the model, the amount or the row:
 | `This trigger changed since the page drew it` | Its entry in the file is not the one the page drew. An edit of another trigger is no reason, so nobody is sent back for that. | Reload the page and make the change again. |
 | `There is no trigger at row` | The row has gone from the file. | Reload the page. |
 | `The triggers file could not be read` | Nothing is written over a file this page cannot read. | Correct the file. `pi-dispatch doctor` names what is wrong with it. |
+| `the triggers file could not be read (`, `the triggers file does not load (` | The same, met later in the same preview by a change of the flow, the provider or the model: the file stopped reading as it did when the page drew it. | Correct the file. `pi-dispatch doctor` names what is wrong with it. |
 | `nothing was written and nothing in it was lost; change it with that release` | A newer release wrote the file. | Upgrade this console, or change it with that release. |
 | `A trigger's flow cannot be removed` | The Flow box was emptied. | Choose another flow. |
 | `trigger row`, `rejected:` | The loader's own words for a value, from the trigger edit's check or a dry run of the write: a provider with a space, an allowed model with no provider, a cap that is not an amount. Or the file moved while the preview read it. | Correct the value it names, or look again and retry. |
@@ -2359,7 +2359,7 @@ overlay; what the worker's own service environment sets cannot be seen from here
 | `clears this` | The cap is above the floor and below a short task's first call ([costs](costs.md#a-job-cap-on-a-trigger)). | Choose another model, or the amount it names. |
 | `could not be bounded here` | The first call on this model could not be bounded, so the runner judges it when a job runs. | Read it, and decide. |
 | `of this host's .env could not be read as the worker reads it, so the deployment's job cap`, `in a line that could not be read as the worker reads it, so the deployment's job cap`, `This host's .env could not be read as the worker reads it, so the deployment's job cap` | A line of this host's `.env` that its reader cannot vouch for, a key in such a line, or a `.env` it could not read at all. The cap and the list it judged by leave that out, and another host reads its own. | Correct the line it names, and preview again. |
-| `could not be read just now`, `the worker's pickup check could not`, `still reach a server could not be judged here`, `its line in the .env could not be read`, `The model catalog could not judge` | What the check reads could not be read, so it could not judge this. A pickup asks again. | Correct what it names, or try again. |
+| `could not be read just now`, `pickup check could not`, `still reach a server could not be judged here`, `its line in the .env could not be read`, `The model catalog could not judge` | What the check reads could not be read, so it could not judge this. A pickup asks again. | Correct what it names, or try again. |
 
 Any of these can stop a job at pickup, so what a preview says of an added server holds beside them: "a job that reaches its container connects to" it.
 
@@ -2383,7 +2383,7 @@ on a clean record. No field on this card needs that yet, so no host is read for 
 
 **What a tool cannot reach.** `trigger-environment-edit` is a person's action (`rule("person", ...)`): only the console's own
 process loads its planner, a test walks the tools' import graph to hold that, and no tool and no agent reaches it, behind a confirm or
-not. `dispatch_trigger_edit` keeps its nine fields, flow, provider and model among them, and `dispatch_set` still sets the deployment's own
+not. pi's own `bash` is outside this, as it is outside every action ([Delegated agent control](#delegated-agent-control)). `dispatch_trigger_edit` keeps its nine fields, flow, provider and model among them, and `dispatch_set` still sets the deployment's own
 caps, behind a confirm wherever a cap could rise. A tool call carrying `run.maxCostUsd`, `run.models`, `run.fallbackModels`,
 `run.mcp`, `run.excludeTools` or `run.packages`, or a near miss of one, is refused by name before anything is confirmed. Those
 six are the operator's to write, and a person at the console is the operator while a model's call is not.

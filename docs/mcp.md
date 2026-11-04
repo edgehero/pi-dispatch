@@ -135,7 +135,7 @@ detail (`refused_mcp`). A read of the overlay's file or the allowlist that fails
 one) is retried instead. The job gets its servers in `/job/mcp.json`, references and all, never a value.
 
 A person can also switch a server on or off on the trigger's [console page](console.md#what-a-triggers-jobs-get), whose preview warns
-about what would stop this trigger's jobs on this host, and refuses what the file alone decides, before anything is written. No tool can set `run.mcp`.
+about what would stop this trigger's jobs on this host, and refuses what the file alone decides, before anything is written. No `dispatch_*` tool can set `run.mcp`.
 
 Upgrade the receiver and the worker together ([the order](upgrading.md#the-order)). A receiver older than `run.mcp`
 drops the field, and the worker then refuses each such job as `trigger-skew` rather than running it without its
