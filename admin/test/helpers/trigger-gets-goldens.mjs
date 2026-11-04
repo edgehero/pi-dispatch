@@ -154,6 +154,8 @@ export const TRIGGER_GETS_DRAW = Object.freeze({
   "trigger-gets-no-run.operator": () => triggerGetsPage({ records: [] }),
   "trigger-gets-flow-absent.operator": () => triggerGetsPage(FLOW_ABSENT),
   "trigger-gets-unknown-host.operator": () => triggerGetsPage({ loads: UNKNOWN_ALL }),
+  // A version 2 file written by hand, on hosts as `readHostLoadsView` hands them: mini1's worker publishes that it reads 1, and mini2's nothing.
+  "trigger-gets-host-holds.operator": () => { const loads = getsHostLoads(); return triggerGetsPage({ text: `${JSON.stringify({ version: 2, ...JSON.parse(getsFile()) }, null, 2)}\n`, loads: { ...loads, hosts: loads.hosts.map((row) => ({ ...row, triggersVersion: { build3: "2", mini1: "1" }[row.name] ?? null })) } }); },
   "trigger-gets-read-only.operator": () => triggerGetsPage({ readOnly: true }),
   "trigger-gets-long-names.operator": () => triggerGetsPage(longNames()),
   "trigger-gets-watch.operator": () => triggerGetsPage({ text: watchRuleFile(WATCH_INVESTIGATE), records: [] }),

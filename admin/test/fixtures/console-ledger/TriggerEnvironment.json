@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "562a26d0825caee1ccb77eb750166f09d3a2e392ee0481faa33e935c22a71e39",
+  "words": "02462b62e09266fda1a096ca8c5cff0436417b45674ef9a3b310feafb6d53d40",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -65,6 +65,22 @@
         "panels/trigger-gets-unknown-host.operator"
       ],
       "shows": "has published none, so it reads unknown, never the same."
+    },
+    {
+      "el": "A host whose worker publishes that it reads less of the triggers file than the file says holds this file's jobs, and its pill and the note under the pills say so; on such a file, one that publishes no version reads unknown",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
+      "holds": "pillHolds",
+      "golden": [
+        "panels/trigger-gets-host-holds.operator"
+      ],
+      "shows": [
+        "holds this file’s jobs",
+        "mini1 reads this file only below version 2, so it holds this file’s jobs until it is upgraded.",
+        "Unknown, because nothing says which version of this file it reads: mini2."
+      ]
     },
     {
       "el": "Under each row, what the last run had, naming its host, and why it quotes that run",

@@ -596,7 +596,7 @@ test("docs/console.md's table of the hosts' pills: a row for every word the pill
   const rows = tableRows(read("docs/console.md"), "| The pill says | When |");
   const a = { packages: [{ name: "pi-lint", version: "1.4.2" }] };
   const b = { packages: [{ name: "pi-test", version: "0.9.0" }] };
-  assert.deepEqual(rows.map(([word]) => word), ["`the same`", "`the only host`", "`the only one known`", "`also …; without …; … defined differently; its flow …; runs …`", "`its flow in no tier`", "`no answer for its flow`, `its flow …`, `its image unknown`", `\`${W.pillOrder}\``, "`unknown`"]);
+  assert.deepEqual(rows.map(([word]) => word), ["`the same`", "`the only host`", "`the only one known`", "`also …; without …; … defined differently; its flow …; runs …`", "`its flow in no tier`", "`no answer for its flow`, `its flow …`, `its image unknown`", `\`${W.pillOrder}\``, `\`${straight(W.pillHolds)}\``, "`unknown`"]);
   const flows = (tier) => [{ trigger: 2, flow: "fix", tier, package: null, repo: "unknown" }];
   const same = { ...a, flows: flows("repository") };
   assert.deepEqual(await pillWords({ one: same, two: same }), { one: "the same", two: "the same" });
@@ -608,6 +608,14 @@ test("docs/console.md's table of the hosts' pills: a row for every word the pill
   assert.deepEqual(await pillWords({ one: same, two: a }), { one: "its flow from the repository", two: "no answer for its flow" });
   const order = await pillWords({ one: { flows: flows("repository"), packages: [...a.packages, ...b.packages] }, two: { flows: flows("repository"), packages: [...b.packages, ...a.packages] } });
   assert.deepEqual(order, { one: W.pillOrder, two: W.pillOrder });
+  // Over a file above version 1, what each worker publishes it reads: one that reads less holds the file's jobs, one that publishes nothing reads unknown, and neither is what its neighbour is the same as.
+  const reading = (versions) => ({ hosts: Object.entries(versions).map(([name, triggersVersion]) => ({ name, state: "current", overlayExtensionsAllowed: true, packages: [], extensions: [], skills: [], flows: flows("repository"), mcp: [], unread: [], more: {}, image: "pi-job:1", piVersion: "1.5.0", triggersVersion })) });
+  const overFile = (versions, fileVersion = 2) => Object.fromEntries(triggerGetsOf({ trigger: PILL_TRIGGER, hostLoads: reading(versions), liveHosts: Object.keys(versions), fileVersion }).pills.map((pill) => [pill.name, pill.word]));
+  assert.deepEqual(overFile({ one: "2", two: "2" }), { one: "the same", two: "the same" }, "the premise: both read it");
+  assert.deepEqual(overFile({ one: "2", two: "1" }), { one: "the only one known", two: W.pillHolds });
+  assert.deepEqual(overFile({ one: "2", two: "1", three: "2" }), { one: "the same", two: W.pillHolds, three: "the same" });
+  assert.deepEqual(overFile({ one: "2", two: null }), { one: "the only one known", two: "unknown" });
+  assert.deepEqual(overFile({ one: null, two: "1" }, 1), { one: "the same", two: "the same" }, "a file at 1 asks nothing: every release reads it");
   // The card has no other word: a pill's word is one of these literals, or the differences joined.
   const source = read("admin/src/trigger-gets-view.mjs");
   const body = source.slice(source.indexOf("function hostPills("), source.indexOf("/** How old each host's answer is"));

@@ -154,7 +154,7 @@ const REFUSED_FILES = [
   ["a value it refuses", getsFile({ ...GETS_ENTRY, run: { ...GETS_ENTRY.run, maxTurns: "many" } }), /run\.maxTurns must be a positive integer/],
   ["a duplicate key", getsFile().replace('"triggers"', '"version": 1,\n  "version": 1,\n  "triggers"'), /duplicate key/],
 ];
-const LOADS = "The triggers file loads.";
+const LOADS = "This console loads the triggers file.";
 const REFUSED = "The triggers file does not load; run pi-dispatch doctor for the reason.";
 
 test("a file the worker's own parser refuses: the page says so, each pill reads unknown and never the same, and the form stays, so it can be fixed here", async () => {
@@ -202,6 +202,42 @@ test("a file the worker refuses reads so with Valkey down, where only the card's
   assert.match(textOf(raced), /mini1 unknown .*mini2 unknown/);
 });
 
+test("a hand-written version 2 file beside a host that publishes it reads less: that host holds the file's jobs, its pill does not read the same, and a line says so", async () => {
+  // Through the real reader, from what each worker's registry row publishes. A worker's gate reads the same number (`start.mjs`, `TRIGGERS_FILE_VERSION`).
+  const redis = { smembers: async () => ["mini1", "mini2"], mget: async (...keys) => keys.map(() => null), pipeline: () => { throw new Error("unused"); } };
+  const beats = (mini2) => ({ hosts: [{ name: "mini1", image: "pi-job:4.3.1", piVersion: "1.5.0", triggersVersion: "2", jobDataVersion: "3" }, { name: "mini2", image: "pi-job:4.3.1", piVersion: "1.5.0", ...mini2 }] });
+  const published = async (mini2) => {
+    const read = await readHostLoadsView(redis, { now: () => NOW, readHosts: async () => beats(mini2), readLoads: async () => SAME_HOSTS() });
+    return read;
+  };
+  const stamped = `${JSON.stringify({ version: 2, ...JSON.parse(getsFile()) }, null, 2)}\n`;
+  parseTriggers(stamped, TRIGGER_GETS_PATH);
+  const draw = async (text, mini2) => textOf(panelOf(await triggerGetsPage({ text, loads: await published(mini2), live: SAME_LIVE, records: [] }), "p-trigger-gets"));
+  const SAYS = "mini2 reads this file only below version 2, so it holds this file’s jobs until it is upgraded.";
+  const older = await draw(stamped, { triggersVersion: "1", jobDataVersion: "2" });
+  assert.ok(older.includes(`mini2 ${W.pillHolds}`), older.slice(0, 500));
+  assert.ok(older.includes(SAYS), older.slice(0, 700));
+  assert.doesNotMatch(older, /mini1 the same|mini2 the same/);
+  assert.ok(older.includes("mini1 the only one known"), older.slice(0, 500));
+  // The same host once it reads the file: nothing held, and the two compare again.
+  const reads = await draw(stamped, { triggersVersion: "2", jobDataVersion: "3" });
+  assert.match(reads, /mini1 the same .*mini2 the same/);
+  assert.ok(!reads.includes(W.pillHolds) && !reads.includes(SAYS));
+  // A worker that publishes no version: unknown, by that reason, never said to hold what it may run.
+  const silent = await draw(stamped, {});
+  assert.ok(silent.includes("mini2 unknown"), silent.slice(0, 500));
+  assert.ok(silent.includes("Unknown, because nothing says which version of this file it reads: mini2."), silent.slice(0, 700));
+  assert.ok(!silent.includes(W.pillHolds));
+  // Two of each: the same sentences, of both.
+  const both = (versions) => triggerGetsOf({ trigger: { index: 2, type: "comment", flow: "fix", packages: true, forge: "github" }, hostLoads: { hosts: Object.entries(versions).map(([name, triggersVersion]) => ({ ...SAME_HOSTS().hosts[0], name, triggersVersion })) }, liveHosts: Object.keys(versions), fileVersion: 2 }).hostsNote.filter((part) => typeof part === "string").join("");
+  assert.ok(both({ a: "1", b: "1" }).includes("a and b read this file only below version 2, so they hold this file’s jobs until they are upgraded."));
+  assert.ok(both({ a: null, b: null }).includes("Unknown, because nothing says which version of this file they read: a and b."));
+  // A file at 1: every release reads it, so the same hosts ask nothing of a version.
+  for (const mini2 of [{ triggersVersion: "1" }, {}]) assert.match(await draw(getsFile(), mini2), /mini1 the same .*mini2 the same/);
+  // A file the worker refuses says what it said: its pills unknown, whatever each publishes.
+  assert.match(await draw(getsFile({ ...GETS_ENTRY, run: { ...GETS_ENTRY.run, excludeExtensions: ["pi-lint"] } }), { triggersVersion: "1" }), /mini1 unknown .*mini2 unknown/);
+});
+
 test("each golden of this card is drawn over a file the worker loads, or its pills and its sentences say nothing of a real file", async () => {
   for (const [state, draw] of Object.entries(TRIGGER_GETS_DRAW)) assert.ok(textOf(panelOf(await draw(), "p-trigger-change")).includes(state === "trigger-gets-file-refused.operator" ? REFUSED : LOADS), state);
 });
@@ -245,7 +281,16 @@ test("a watch rule's job loads nothing a host publishes, so its card names none 
     assert.doesNotMatch(panel, /<form\b|data-gets-list|te-hosts/);
     assert.ok(textOf(panelOf(page, "p-trigger-gets-how")).includes(W.watch), "and How a change applies does not offer one");
     assert.ok(!textOf(panelOf(page, "p-trigger-gets-how")).includes("Change it in place"));
-    assert.ok(textOf(panelOf(page, "p-trigger-change")).includes("The triggers file loads."));
+    assert.ok(textOf(panelOf(page, "p-trigger-change")).includes(LOADS));
+    const how = textOf(panelOf(page, "p-trigger-gets-how"));
+    assert.ok(how.includes("This card only reads."), how);
+    assert.ok(!how.includes("Read only here"), "the page's Edit form still writes what a rule takes");
+    const runs = textOf(panelOf(page, "p-trigger-run"));
+    assert.ok(runs.includes(W.holdsWatch), runs.slice(0, 300));
+    assert.ok(!runs.includes(W.holdsRows), "the card has no row for the packages, the servers or the tools");
+    // A watch job carries no `trigger`, so the worker's bundle read passes it over as manual.
+    assert.ok(words.includes("Secrets: none named on this trigger."), words);
+    assert.doesNotMatch(words, /project’s bundle|project's bundle/);
   }
   // A doctor's answer that the flow is nowhere is an answer about tiers this job does not read: no warning from it either.
   const nowhere = SAME_HOSTS();
@@ -271,6 +316,10 @@ test("a watch rule that only files an issue starts no job, so it has none of the
   const words = textOf(panelOf(page, "p-trigger-gets"));
   assert.ok(words.includes(W.watchIssue), words);
   for (const never of [...GOT, "Model", "Image and secrets", "What it can use", W.fileSays]) assert.ok(!words.includes(never), `${never}: ${words}`);
+  const runs = textOf(panelOf(page, "p-trigger-run"));
+  assert.ok(runs.includes(W.holdsIssue), runs.slice(0, 300));
+  assert.ok(!runs.includes(W.holdsWatch) && !runs.includes(W.holdsRows), "the card has none of those rows");
+  assert.ok(textOf(panelOf(page, "p-trigger-gets-how")).includes("This card only reads."));
 });
 
 test("a row the file did not give back draws no switch", async () => {

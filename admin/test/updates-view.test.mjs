@@ -171,6 +171,14 @@ test("what a canary runs as is true of the package each row is about, and of the
 	const plain = await page([keeps]);
 	assert.match(plain, /A canary runs as trigger 1, keeps, up to its \$3\.00 cap/);
 	assert.doesNotMatch(plain, /unless it leaves/);
+	// An agent's copy keeps that a trigger leaves something out and none of what, by the projection's rule, so its row says what holds without knowing.
+	const agent = await page([leaves], "agent");
+	for (const name of ["pi-lint", "pi-test-runner"]) {
+		assert.match(rowOf(agent, name), /A canary runs one job of a cron trigger that loads this package, with this version for that job only\./, name);
+		assert.doesNotMatch(rowOf(agent, name), /one job of trigger 1/, name);
+	}
+	assert.match(agent, /A canary runs as trigger 1, leaves, up to its \$2\.00 cap, unless it leaves that package out/);
+	assert.match(rowOf(await page([keeps], "agent"), "pi-lint"), /A canary runs one job of trigger 1, up to \$3\.00/, "and with nothing left out, it does know");
 	// A viewer reads the same, with no button to say why there is none.
 	const viewer = await page([leaves], "viewer");
 	assert.doesNotMatch(rowOf(viewer, "pi-lint"), /A canary runs|the trigger you choose/);

@@ -35,6 +35,12 @@ export function triggerGetsDrawn(v) {
   return v.role !== "agent" && fileTrigger(v) !== null && !v.data?.snapshot?.triggers?.invalid;
 }
 
+/** What the rest of the page says this card holds. A watch rule's has fewer rows, and one that only files an issue has none. */
+export function triggerGetsHolds(v) {
+  const trigger = fileTrigger(v);
+  return trigger.type !== "watch" ? W.holdsRows : trigger.mode === "issue" ? W.holdsIssue : W.holdsWatch;
+}
+
 /** The card's words for this view, from what the page read. */
 function getsOf(v) {
   if (!triggerGetsDrawn(v)) return null;
@@ -53,6 +59,7 @@ function getsOf(v) {
     modelChoices: v.data?.modelChoices ?? [],
     overlayServers: snapshot.overlayMcp?.servers ?? [],
     fileRefused: (v.data?.triggerGets?.fileRefused ?? snapshot.triggers?.doesNotLoad) === true,
+    ...(Number.isSafeInteger(v.data?.triggerGets?.fileVersion) ? { fileVersion: v.data.triggerGets.fileVersion } : {}),
   }) };
 }
 
@@ -151,10 +158,12 @@ ${t.other.length > 0 || t.otherTools.length > 0 ? html`<div>${sub("Also in the f
 ${t.jobTool ? html`<div>${sub("The job’s own")}${chips(roChip("report_progress"))}</div><p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.jobTool}</span></p>` : null}`;
 }
 
-function imageBody(gets) {
+function imageBody(gets, watch = false) {
   const s = gets.secrets;
   const secrets = `${s.count > 0 ? `${s.count} named on this trigger` : "none named on this trigger"}${s.profile !== null ? `; profile ${s.profile}` : ""}`;
-  return html`<p class="te-read">${wordsHtml(gets.image.words)}</p><p class="te-read">Secrets: ${secrets}${s.optedOut ? "; it opts out of its project’s bundle" : "; a job also gets its project’s bundle, if it has one"}. <a class="link" href="/config/secrets">Open Secrets</a></p><p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.elsewhere}</span></p>`;
+  // A watch job carries no `trigger`, so the worker passes over its project's bundle as it does a manual job's (`processor.mjs`, `bundleManual`), whatever the rule says of one.
+  const bundle = watch ? "" : s.optedOut ? "; it opts out of its project’s bundle" : "; a job also gets its project’s bundle, if it has one";
+  return html`<p class="te-read">${wordsHtml(gets.image.words)}</p><p class="te-read">Secrets: ${secrets}${bundle}. <a class="link" href="/config/secrets">Open Secrets</a></p><p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.elsewhere}</span></p>`;
 }
 
 /**
@@ -165,7 +174,7 @@ function watchRows(gets, trigger, fix) {
   if (trigger.mode === "issue") return note([W.watchIssue]);
   const removes = trigger.excludeTools ?? [];
   const can = html`<p class="te-read">${W.watchLoads}</p>${removes.length > 0 ? html`<p class="te-read">The file removes ${listed(removes)}.</p>` : null}`;
-  return html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, false), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, false), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("flows", "What it can use", "whichever host runs it", can, gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets), gets.last.pi)}`;
+  return html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, false), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, false), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("flows", "What it can use", "whichever host runs it", can, gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets, true), gets.last.pi)}`;
 }
 
 /**
@@ -198,6 +207,7 @@ export function triggerGetsHow(v) {
   const line = (icon, bold, rest) => html`<li>${ui.icon(icon)}<span><b>${bold}</b> ${rest}</span></li>`;
   const noTool = line("shield", "A person, at the console.", W.noTool);
   const watch = fileTrigger(v).type === "watch";
-  if (!canAct(v) || watch) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", "Read only here.", watch ? W.watch : v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
+  // Of a watch rule this card only reads, and the page does not: its Edit form still writes what a rule takes, such as `maxTurns`.
+  if (!canAct(v) || watch) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", watch ? "This card only reads." : "Read only here.", watch ? W.watch : v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
   return ui.card({ title: W.how, body: html`<ul class="te-list">${line("edit", "Change it in place.", "A switch for the staged packages, each extension and each MCP server, a chip for each tool, a picker for the model and the flow.")}${line("skill", "The flow picker is not the whole list.", W.flowPicker)}${line("eye", "Nothing is written", "until you preview the change and confirm it.")}${noTool}${line("rerun", "Undo", "puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.")}</ul>` });
 }

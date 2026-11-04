@@ -45,6 +45,8 @@ const notKnownLine = (state, view) => {
 function canaryCost(row, view) {
 	const triggers = canaryTriggersFor(data(view).triggers, row.name);
 	if (triggers.length === 0) return null;
+	// An agent's copy says that a trigger leaves something out and never what (`agentReadProjection` keeps the key and none of its names), so it cannot tell this package's trigger from another's. REJECTED: widening that copy.
+	if (view.role === "agent" && triggers.some((trigger) => trigger.excludes)) return "one job of a cron trigger that loads this package";
 	if (triggers.length > 1) return "one paid job of the trigger you choose";
 	const [only] = triggers;
 	return `one job of trigger ${only.index + 1}${only.capUsd !== null ? `, up to $${only.capUsd.toFixed(2)}` : ", up to its cap"}`;
