@@ -104,3 +104,33 @@ test("a key only this shell sets is returned as shellOnly, for a caller that kno
 	assert.deepEqual(r.shellOnly, ["A"]);
 	assert.deepEqual(resolveServiceEnv({ env: { A: "a" }, file: null, keys: ["A"] }).shellOnly, [], "no file: nothing to compare with");
 });
+
+test("a line a sourcing shell does not read as an assignment is named whatever keys were asked, and only to that loader (#800)", () => {
+	const dir = tempDir("pi-dispatch-svcenv-runs-");
+	const read = (text, platform) => {
+		writeFileSync(join(dir, ".env"), text, { mode: 0o600 });
+		return deploymentServiceEnv({ env: {}, dir, keys: ["PI_MAX_COST_USD"], fs: nodeFs, platform });
+	};
+	// `hazardSkipped` needs the key spelled, and none of these spells it, though each can set it.
+	for (const line of [". ./more.env", "source ./more.env", 'eval "$(cat more.env)"', "true", "OTHER=ab cd"]) {
+		const got = read(`OTHER=one\n${line}\n`, "darwin");
+		assert.equal(got.shellRunsLine, 2, line);
+		assert.deepEqual(got.hazardSkipped, [], `${line}: no key was spelled, so nothing here says so but the line`);
+	}
+	for (const text of ["", "# a comment\n\n", "OTHER=one\n", "export OTHER=one\n", "export PI_MAX_COST_USD=2\n", 'OTHER="a b"\n', "OTHER='a b'\n", "OTHER=$HOME/x\n"]) {
+		assert.equal(read(text, "darwin").shellRunsLine, null, JSON.stringify(text));
+	}
+	// The shell reads past a CR on a comment: the hazard is this reader's writer's, and no line runs.
+	const comment = read("# a note\r\nOTHER=one\n", "darwin");
+	assert.equal(comment.hazard.shape, "shell-crlf-comment");
+	assert.equal(comment.shellRunsLine, null);
+	assert.equal(read("OTHER=one\r\n", "darwin").shellRunsLine, 1, "a CR on a value reaches the service");
+	for (const platform of ["linux", "win32"]) assert.equal(read("OTHER=one\n. ./more.env\n", platform).shellRunsLine, null, platform);
+	// A hazard of another loader's is its own: it speaks of the keys it stopped, and it runs nothing.
+	for (const [platform, text] of [["linux", "OTHER=one\\"], ["win32", 'OTHER="one"\n']]) {
+		const got = read(text, platform);
+		assert.notEqual(got.hazard, null, platform);
+		assert.equal(got.shellRunsLine, null, platform);
+	}
+	assert.equal(deploymentServiceEnv({ env: {}, dir: join(dir, "nowhere"), keys: [], fs: nodeFs, platform: "darwin" }).shellRunsLine, null, "no file, no line");
+});

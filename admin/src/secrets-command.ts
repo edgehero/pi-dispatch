@@ -149,7 +149,7 @@ export async function runSecretsCommand(paths: any, rawCtx: any, notify: any, to
   if (action === "remove" && bundle) {
     const name = (words[1] ?? "").trim();
     // A file that names no bundle (or does not exist) strands nothing; one that cannot be read cannot say (null).
-    const readable = !triggersView?.invalid && triggersView !== null;
+    const readable = !triggersView?.invalid && !triggersView?.unreadable && triggersView !== null;
     const boundIds = !readable ? null : Array.isArray(triggersView?.secretBundles) ? triggersView.secretBundles.filter((b: any) => b.profile === name).map((b: any) => b.id) : [];
     const planned: any = planSecretBundleRemove({ name, bundles, bound: boundIds, envBundles: envBundleProfiles(env.PI_SECRET_BUNDLES).profiles, settingsFile: paths.settingsFile });
     if (planned.refusal) {

@@ -16,7 +16,7 @@
  */
 
 /** The ledgers whose "state" elements must each be reached here. */
-export const LEDGER_CARDS = Object.freeze(["ConfirmStates", "LiveStates", "SignIn", "AccessStates"]);
+export const LEDGER_CARDS = Object.freeze(["ConfirmStates", "LiveStates", "SignIn", "AccessStates", "TriggerEnvironment"]);
 
 const row = (card, state, reached) => Object.freeze({ card, state, reached });
 
@@ -38,6 +38,11 @@ export const T = Object.freeze({
   stale: "stale: the page dims under the time it was last seen, says whether the tokens file or the data failed, keeps its time through a reconnect, and fresh alone takes it back",
   signIn: "sign-in: what needs the script is revealed, a refusal shows its one notice, the ended notice gives way, an older attempt's answer does nothing, and a post that reaches nothing keeps the page and retries every 2 s",
   signInStops: "a sign-in or a link that reaches nothing stops after 30 posts or 60 s, judged before each post goes out: nothing more is sent, the token or code is dropped, and the stop notice says so",
+  getsBar: "what a trigger's jobs get: each change moves the bar's count and its words, a row is marked, and a change set back as it was drawn leaves the bar hidden",
+  getsBody: "what a trigger's jobs get sends the digest the page drew and only what differs from what it drew, with null for a key a blank box, an emptied list or the packages switch turned back on removes",
+  getsDiscard: "what a trigger's jobs get: Discard is the form's reset, the bar goes, and a preview of what was discarded closes with it",
+  getsMoveCloses: "what a trigger's jobs get: any move of a control closes an open preview and takes its Confirm away, because it no longer says what the form says",
+  getsNothing: "what a trigger's jobs get: a name already on a list is no change, Enter with no change asks the server and reads its answer, and a refusal goes in the slot and under no field",
   link: "the one-time link: no code, a used link, a refusal with its notice, a rate refusal that leaves it untried, a post that reaches nothing kept waiting and retried, a new link pasted in loaded, and the drawn state kept until an answer moves it",
 });
 
@@ -74,6 +79,12 @@ export const CLIENT_STATES = Object.freeze([
   row("SignIn", "One notice at a time above the field", T.signIn),
   // The retry's stop: the script's own notice, a copy of the server's unreachable one.
   row("SignIn", "The retry stops after 30 tries or 60 s, and asks for Sign in again", T.signInStops),
+  // TriggerEnvironment
+  row("TriggerEnvironment", "The bar collects the changes, with Preview the change and Discard", T.getsBar),
+  row("TriggerEnvironment", "Discard is the form's reset, and takes a preview of it away", T.getsDiscard),
+  row("TriggerEnvironment", "Each change is sent, and nothing else", T.getsBody),
+  row("TriggerEnvironment", "Any move of a control closes a preview it no longer matches", T.getsMoveCloses),
+  row("TriggerEnvironment", "Nothing to preview, and a refusal under no field", T.getsNothing),
   // AccessStates: the link page's states are panels in its ledger (p-link-wait, -used, -nocode).
   row("AccessStates", "p-link-used", T.link),
   row("AccessStates", "p-link-nocode", T.link),

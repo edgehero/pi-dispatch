@@ -58,7 +58,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
+  const [updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, triggerEnvironmentPlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
     import("../updates-view.mjs"),
     import("@edgehero/pi-dispatch/updates"),
     import("@edgehero/pi-dispatch/console-tokens"),
@@ -93,11 +93,12 @@ export async function loadModules() {
     import("../host-loads-view.mjs"),
     import("../models-view.mjs"),
     import("../model-role-plans.mjs"),
+    import("../trigger-environment-plans.mjs"),
     import("../setup-actions.mjs"),
     import("../setup-host-client.mjs"),
     import("./actions.mjs"),
   ]);
-  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
+  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, triggerEnvironmentPlans, setupActions, setupHostClient, consoleActions };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -681,9 +682,30 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       now,
       log,
     });
+    // Here and nowhere a tool's context is built, so a person's page is the only way to it (DES-ADMIN-VIA-PI-EXTENSION).
+    const triggerEnvironment = m.triggerEnvironmentPlans?.createTriggerEnvironmentActions({
+      paths: side.paths, env: side.env, fs, now,
+      readHosts: () => m.readModel.readHosts({ url: side.paths.valkeyUrl, now }),
+      readHostLoads: () => pageDeps.hostLoads(),
+      readSkew: async (index, proposedFs) => fleet.triggerSkew(index, await fleet.waiting(), { fs: proposedFs }),
+      // What the worker's pickup check reads on this host: the deployment's file alone, each key by the service's own rule. The
+      // console's shell is not the service's, so a value only it holds would pass a job the worker refuses, and a value it
+      // overrides would refuse one the worker runs. A line the reader cannot vouch for comes back by name, never as absent, and
+      // a file another account can change gives nothing: the check then says it could not run. A line the service's loader reads
+      // differently stops the reader taking any value the file spells, so `hazardLine` says which line it was: those keys were not on it.
+      // A line a sourcing shell runs is said whatever was asked for: `. ./more.env` spells no key and can set every one.
+      deploymentDir: config.dir,
+      readHostEnv: (keys) => {
+        const read = m.serviceEnv.deploymentServiceEnv({ env: {}, dir: config.dir, keys, fs, platform: io.platform ?? process.platform, uid });
+        if (read.unreadable || read.untrusted) throw new Error("the deployment's .env cannot be read");
+        return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.shellRunsLine ?? (read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null) };
+      },
+      readEndpoints: () => endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.()?.endpoints ?? [],
+    });
     actionDeps = {
       updates: { read: readUpdatesFacts, setDesired: (row) => m.updates.setDesired(redis, row) },
     modelRoles,
+    triggerEnvironment,
     watch: fleet.watch,
     zeroTouch,
     sandboxes,

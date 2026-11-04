@@ -84,6 +84,7 @@ import { RUNS_INDEX, RUNS_INDEX_MAX, UNREAD_RECORD, hostsIn, mergeRuns, readMirr
 import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
+import { expectRefusal } from "@edgehero/pi-dispatch/file-expect";
 import { modelFrom, providerFrom, jobImageFrom, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
 import { parseSandboxes, parseBudgetFrom, parseCpuReserve } from "@edgehero/pi-dispatch/host-telemetry";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
@@ -973,18 +974,25 @@ export function readPauseWindows({ pauseWindowsPath, fs = nodeFs }) {
  * console's whole-list action shares), so a block a later release added survives a write from this one; a file holding
  * only `windows` is written byte for byte as it always was. A file written by a NEWER pi-dispatch is refused with
  * `{ invalid, newer: true }` and nothing written, judged on its raw `version` alone: a file with one bad window is still
- * fixed here, and an unparseable one is still rebuilt from empty, the recorded posture.
+ * fixed here, and an unparseable one is still rebuilt from empty, the recorded posture. A file that is there and cannot
+ * be read is neither: it refuses with nothing written. A failed write or rename throws, after dropping this write's own
+ * tmp file, and both happen beside the file, so the old file is whole after either.
  */
 export function writePauseWindows({ pauseWindowsPath, mutate, expect = null, fs = nodeFs }) {
   let current = [];
   let doc = null;
   // The text as read, which is also the snapshot the re-check compares against when there is no `expect`.
   const read = fileSnapshot(fs, pauseWindowsPath);
+  // Only a missing file may start from nothing (`writeTriggers`' rule, and for its reason): the marker a failed read
+  // leaves does not parse, so it fell into the repair below, and with an `expect` or a read that kept failing the re-check
+  // passed and the rename replaced every window with none.
+  if (isUnreadable(read)) return { invalid: `the pause-windows file ${pauseWindowsPath} could not be read (${unreadableCode(read)}), so its windows cannot be kept; nothing was written` };
   try {
     doc = JSON.parse(read);
     if (Array.isArray(doc?.windows)) current = doc.windows;
   } catch {
-    // Missing/invalid file: start from empty; the validated atomic write below repairs it.
+    // An unparseable file: start from empty, the recorded repair; the validated atomic write below replaces it. (A missing
+    // file reads as `null`, which parses to no document at all.)
   }
   const newer = pauseWindowsNewerRefusal(doc, pauseWindowsPath);
   if (newer) return { invalid: newer, newer: true };
@@ -998,18 +1006,25 @@ export function writePauseWindows({ pauseWindowsPath, mutate, expect = null, fs 
   // A tmp name of its own, created exclusively, as `replaceFile` does: the console and the pi extension are two
   // processes writing this file, and a shared `<file>.tmp` would let one rename the other's bytes past its own re-check.
   const tmp = `${pauseWindowsPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-  fs.writeFileSync(tmp, text, { mode: 0o644, flag: "wx" });
-  for (const input of Array.isArray(expect) ? expect : [{ path: pauseWindowsPath, text: read }]) {
-    if (fileSnapshot(fs, input.path) !== input.text) {
-      try {
-        fs.unlinkSync?.(tmp);
-      } catch {
-        // nothing to drop
-      }
-      return { invalid: `${input.path} changed after this change was built from it (another session wrote it); nothing was written. Look again and retry` };
+  const drop = () => {
+    try {
+      fs.unlinkSync?.(tmp);
+    } catch {
+      // nothing to drop
     }
+  };
+  try {
+    fs.writeFileSync(tmp, text, { mode: 0o644, flag: "wx" });
+    const changed = expectRefusal(fs, Array.isArray(expect) ? expect : [{ path: pauseWindowsPath, text: read }]);
+    if (changed) {
+      drop();
+      return { invalid: changed };
+    }
+    fs.renameSync(tmp, pauseWindowsPath);
+  } catch (e) {
+    drop();
+    throw e;
   }
-  fs.renameSync(tmp, pauseWindowsPath);
   return { ok: true };
 }
 
@@ -1203,11 +1218,10 @@ function replaceFile({ path, text, inputs, expect = null, envName, fs }) {
       }
     }
   }
-  for (const input of Array.isArray(expect) ? expect : inputs) {
-    if (fileSnapshot(fs, input.path) !== input.text) {
-      drop();
-      return { invalid: `${input.path} changed after this change was built from it (another session wrote it); nothing was written. Look again and retry` };
-    }
+  const changed = expectRefusal(fs, Array.isArray(expect) ? expect : inputs);
+  if (changed) {
+    drop();
+    return { invalid: changed };
   }
   try {
     fs.renameSync(tmp, path);
@@ -2798,7 +2812,8 @@ export function readSettingsView({ settingsFile, fs = nodeFs }) {
 
 /**
  * Read the unified committed `triggers.json` for display (OQ-008). Unlike the worker/receiver fail-loud
- * `parseTriggers` (boot semantics), a viewer degrades: an absent file is `{ missing: true }`, JSON or
+ * `parseTriggers` (boot semantics), a viewer degrades: an absent file is `{ missing: true }`, one that is there and
+ * cannot be read is `{ unreadable: <code> }` (`readProjects`' shape), JSON or
  * shape errors are `{ invalid }`, and each entry normalizes into `{ triggers: [ { type, ... } ] }`
  * discriminated on `on.type` (cron | label | comment | pull_request | issue). Missing selectors default to `[]`
  * and non-string members are dropped; an entry that is not a usable `{ on, run }` object is skipped, not
@@ -2808,12 +2823,12 @@ export function readSettingsView({ settingsFile, fs = nodeFs }) {
  * shows what it can rather than throwing on one bad entry.
  */
 export function readTriggers({ triggersPath, fs = nodeFs }) {
-  let text;
-  try {
-    text = fs.readFileSync(triggersPath, "utf8");
-  } catch {
-    return { missing: true };
-  }
+  // Only ENOENT is missing. A file that could not be read has rows nobody can see: read as absent, a page said the file does
+  // not exist, an edit said "no trigger at row 3 (have 0)" with 13 in the file, and a bundle's removal said no project's jobs
+  // depend on it, each of them a statement about a file nobody read.
+  const text = typeof triggersPath === "string" && triggersPath !== "" ? fileSnapshot(fs, triggersPath) : null;
+  if (text === null) return { missing: true };
+  if (isUnreadable(text)) return { unreadable: unreadableCode(text) };
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -2895,11 +2910,13 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   ];
   // Existing cron repositories are the only repository trees the admin knows locally. Forge repositories are not
   // cloned for a suggestion. Bound these advisory git reads, and disclose a cut alongside an unread tier.
-  const configured = readTriggers({ triggersPath: paths.triggersPath, fs }).triggers ?? [];
+  const triggersRead = readTriggers({ triggersPath: paths.triggersPath, fs });
+  const configured = triggersRead.triggers ?? [];
   const folders = [...new Set([folder, ...configured.filter((t) => t.type === "cron").map((t) => t.folder)].filter((f) => typeof f === "string" && f !== ""))];
   const repositories = folders.slice(0, 16).map((folder) => folderSkillsFn({ folder }));
   const tiers = [
-    { tier: "repository", skills: repositories.flatMap((r) => r.skills ?? []), unreachable: repositories.some((r) => r.unreachable) || folders.length === 0, truncated: folders.length > 16 || repositories.some((r) => r.truncated) },
+    // The folders come from the file: one that could not be read leaves folders nobody listed, so the tier is not whole.
+    { tier: "repository", skills: repositories.flatMap((r) => r.skills ?? []), unreachable: repositories.some((r) => r.unreachable) || folders.length === 0 || triggersRead.unreadable !== undefined, truncated: folders.length > 16 || repositories.some((r) => r.truncated) },
     { tier: "overlay", ...overlaySkillsFn({ globalPiDir: paths.globalPiDir, fs }) },
     { tier: "packages", ...stagedSkillsFn({ globalPiDir: paths.globalPiDir, fs }) },
   ];
@@ -2984,7 +3001,7 @@ export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subsc
     cost24hMicros: measured.reduce((sum, n) => sum + (n ?? 0), 0),
     costIncomplete: measured.some((n) => n === null),
     historyIncomplete: Boolean(snapshot.parkedUnreachable || snapshot.failures24hFloor),
-    lastRuns: runs.slice(0, 5), queued: trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
+    lastRuns: runs.slice(0, 5), history: runs, queued: trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
     skewed: snapshot.triggerSkew?.[index]?.rows ?? null,
     skewIncomplete: snapshot.triggerSkew?.[index]?.incomplete ?? true,
     cron: trigger.type === "cron" ? { scheduler, next: scheduler?.next ?? null, overdueMs: scheduler?.overdueMs ?? null, stalls, stallLimit: (snapshot.schedulerStallMax ?? 2) + 1 } : null,
@@ -3036,7 +3053,7 @@ export function normalizeSecretBundlesForDisplay(value) {
  *
  * ONE read of the file, captured through `readTriggers`' own `fs` seam, so the text and the view can never
  * describe two different versions of a file an operator saved between two reads. The view's shapes pass
- * through untouched (`missing`, `invalid`), with an empty map beside them.
+ * through untouched (`missing`, `unreadable`, `invalid`), with an empty map beside them.
  */
 export function readTriggersWithInstructions({ triggersPath, fs = nodeFs, includeTasks = false }) {
   let text = null;
@@ -4242,7 +4259,7 @@ export function createFleetReader(
     },
     async listRules() {
     const configured = readTriggers({ triggersPath: paths.triggersPath, fs });
-    if (configured.invalid) throw new Error("watch configuration unreadable");
+    if (configured.invalid || configured.unreadable) throw new Error("watch configuration unreadable");
     const rules = (configured.triggers ?? []).filter((t) => t.type === "watch");
     const observed = await watchStore.listRules();
     const merged = new Map(observed.map((r) => [r.id, r]));
@@ -4648,8 +4665,19 @@ export function createFleetReader(
     // (and `opts.queue`, a one-queue preview's, wherever it stands), and says so beside them: `switchTotal`, how many the
     // switch flips; `switchTruncated`, true when `queueCounts` holds fewer; `switchIncomplete`, `SWITCH_SCAN_INCOMPLETE`
     // when the keyspace scan behind the set did not finish, else null.
-    async triggerSkew(index, waiting) {
-      return readTriggerSkew({ index, waiting, triggersPath: paths.triggersPath, fs, lookupJob: async (name, id) => {
+    // The waiting jobs and nothing else (issue #800), for a preview that names the ones a change would refuse. `snapshot` reads every
+    // queue's counts, the run history and the schedulers besides, and a timeout around it stops the wait for them and not the reads,
+    // so each preview of a slow Valkey left one running. This shares the snapshot's window and its one read (`waitingOf`), and a read
+    // that failed answers `{ unreachable: true }`, which `readTriggerSkew` calls incomplete: never an empty line.
+    async waiting() {
+      const queues = await fleetQueues();
+      const projects = readProjects({ projectsPath: paths.projectsFile });
+      const triggers = readTriggers({ triggersPath: paths.triggersPath, fs });
+      return waitingOf(queues, Array.isArray(projects?.projects) ? projects.projects : null, Array.isArray(triggers?.triggers) ? triggers.triggers : null);
+    },
+    // `viaFs` (issue #800): a preview asks what the PROPOSED file would refuse, by handing in the dry run's file system.
+    async triggerSkew(index, waiting, { fs: viaFs = fs } = {}) {
+      return readTriggerSkew({ index, waiting, triggersPath: paths.triggersPath, fs: viaFs, lookupJob: async (name, id) => {
         const queues = await fleetQueues();
         const q = queues.find((q) => q.name === name) ?? pool.get(name);
         return q ? q.getJob(id) : null;

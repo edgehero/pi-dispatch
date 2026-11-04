@@ -23,10 +23,9 @@
  * file changed in between.
  */
 import * as nodeFs from "node:fs";
-import { parseBackendList } from "@edgehero/pi-dispatch/backends";
 import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
-import { ISSUE_ACTIONS, isModelRolesField, isMcpNearMiss, recoverVenueProblem, runModelFieldNearMiss, validateModelRef, validateProgressFlags, validateRecoverFlag, validateSteerFlag } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, excludeToolsNearMiss, isModelRolesField, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
@@ -45,18 +44,21 @@ import {
   readProjects,
   readScopedLimits,
   readSettingsView,
-  readTriggers,
   realPathOrNull,
   renderBundleProfiles,
   resolverRootsStatus,
   settingShown,
-  triggerVenue,
   writeInputs,
   writeScopedLimits,
 } from "./read-model.mjs";
 import { escapeInterpreted } from "./panel.mjs";
 import { sizeBits } from "./render.mjs";
 import { fieldNamed } from "./words.mjs";
+import { backendRefusal, blessedBackends, changeText, confirmOf, optStr, planTriggerEditCore, progressRefusal, progressRun, recoverVenueRefusal, refusalOf, rowName, triggerAt } from "./trigger-edit-core.mjs";
+
+// Every planner here and every caller of this module reads these where they always were. `planTriggerEditCore` is not among
+// them: `tool-actions.mjs` hands a tool this module's every export.
+export { backendRefusal, blessedBackends, changeText, optStr, recoverVenueRefusal, rowName };
 
 // ---- small field readers, shared by the dialogs and the tools ----
 
@@ -74,45 +76,11 @@ export function asWords(x) {
   return splitWords(x);
 }
 
-/** A trimmed non-empty string, or undefined (so a blank optional field drops out of the written JSON). */
-export function optStr(x) {
-  const s = String(x ?? "").trim();
-  return s === "" ? undefined : s;
-}
-
 /** A finite number from a string/number, or undefined when blank/absent/non-numeric. */
 export function optInt(x) {
   if (x === undefined || x === null || String(x).trim() === "") return undefined;
   const n = Number(x);
   return Number.isFinite(n) ? n : undefined;
-}
-
-/** A plan's confirm: the title, the message, and the message as lines. */
-function confirmOf(title, message) {
-  return { title, message, summary: message.split("\n") };
-}
-
-/** Human console rows count from one; tool indexes remain zero-based machine values. */
-export function rowName(what, index, surface = "tool") {
-  return surface === "console" ? `${what} row ${index + 1}` : `${what} #${index + 1}`;
-}
-
-/**
- * A change as a confirm says it, `key: before to after` (issue #737: words, not an arrow), each pair joined by a
- * comma. The console draws the same pairs with the two values in bold (`plan.changes`), so the words are this one rule.
- */
-export function changeText(changes) {
-  return changes.map(([key, before, after]) => `${key}: ${before} to ${after}`).join(", ");
-}
-
-/** A validator that throws, as a refusal: its own message, so the tool that re-throws it says the same words. */
-function refusalOf(fn) {
-  try {
-    fn();
-    return null;
-  } catch (e) {
-    return String(e?.message ?? e);
-  }
 }
 
 // ---- triggers ----
@@ -125,78 +93,6 @@ function refusalOf(fn) {
 export const ISSUE_CLOSE_WORD = Object.fromEntries(
   Object.entries(ISSUE_ACTIONS).map(([forge, actions]) => [forge, [...actions][0]]),
 );
-
-/**
- * Which backends this deployment blessed, answered by the WORKER'S OWN parser.
- *
- * An earlier version reimplemented the comma split here and justified it by saying `backends.mjs` was not
- * in this bundle. It already is: `index.ts` imports `read-model.mjs`, which reaches `triggers.mjs`, which
- * imports `backends.mjs` -- and the built `dist/index.mjs` contains `BACKENDS_TABLE`. So the duplicate
- * bought nothing and cost the two things a duplicate always costs. It did not dedupe, and it returned `[]`
- * for an unset variable while the worker returns `["local"]`, so on the DEFAULT deployment the picker told
- * an operator "this deployment blesses no backends" about a deployment that blesses one and would have run
- * the trigger fine.
- *
- * Falls back to `[]` only when the value cannot be parsed at all. `parseBackendList` throws on an unknown
- * name, which is the worker refusing to boot -- the panel is not the place to relitigate that, and an empty
- * list makes the picker refuse every name, which is the safe direction while the deployment is broken.
- */
-export function blessedBackends(env) {
-  try {
-    return parseBackendList(env.PI_BACKENDS);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Why `backend` cannot be named on a trigger here, or null (#227). REFUSED UNDER AN EMPTY SET rather than passed
- * through: a deployment that blesses nothing has no venue to name, so a picker that accepted a name here would author a
- * trigger the worker refuses pre-spend on every delivery -- a file that reads as chosen and never runs. Checked per call
- * rather than as a schema enum because a schema is frozen at registration while PI_BACKENDS is read per call.
- */
-export function backendRefusal(backend, env) {
-  const blessed = blessedBackends(env);
-  if (blessed.length === 0) return "this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)";
-  if (!blessed.includes(backend)) return `backend '${backend}' is not blessed by this deployment (PI_BACKENDS: ${blessed.join(", ")})`;
-  return null;
-}
-
-/**
- * Why `run.recover` cannot be armed on a trigger whose jobs run in `backend` (its explicit `run.backend`), or, naming
- * none, in the deployment default `PI_BACKENDS[0]` read from `env`; or null (issue #712). The worker's own sentence
- * (`recoverVenueProblem`). The loader refuses the explicit pairing at the write too; the default one only the processor
- * can (the file does not know PI_BACKENDS), before spend on every delivery, so it is refused here, before the confirm.
- */
-export function recoverVenueRefusal({ recover, backend, env }) {
-  if (recover !== true) return null;
-  const venue = triggerVenue(backend, env);
-  return venue === null ? null : recoverVenueProblem(venue);
-}
-
-/** The #644 flags, #645's `recover` and #646's `steer` a tool call carries, each only when it is a boolean (see buildTriggerEntry). */
-function progressRun(f) {
-  return {
-    ...(typeof f.progress === "boolean" ? { progress: f.progress } : {}),
-    ...(typeof f.statusComment === "boolean" ? { statusComment: f.statusComment } : {}),
-    ...(typeof f.recover === "boolean" ? { recover: f.recover } : {}),
-    ...(typeof f.steer === "boolean" ? { steer: f.steer } : {}),
-  };
-}
-
-/**
- * The loader's own refusal of the #644 flags, #645's `recover` and #646's `steer` as sent (a non-boolean, a status
- * comment or a recovery on cron, a recovery or steering beside a command), or null. `command` is the entry's own: the
- * add tool writes none, and the edit tool passes the trigger's, so a recovery or steering armed onto a command trigger
- * is refused before the confirm.
- */
-function progressRefusal(params, onType, at, path, command = undefined) {
-  return (
-    refusalOf(() => validateProgressFlags({ progress: params.progress, statusComment: params.statusComment }, at, path, { onType })) ??
-    refusalOf(() => validateRecoverFlag({ recover: params.recover, ...(command !== undefined ? { command } : {}) }, at, path, { onType })) ??
-    refusalOf(() => validateSteerFlag({ steer: params.steer, ...(command !== undefined ? { command } : {}) }, at, path))
-  );
-}
 
 /**
  * Build one `{ on, run }` trigger entry from a kind + fields. The single source of truth for the on x run
@@ -359,19 +255,25 @@ function unknownTriggerField(params, kind) {
 
 /**
  * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap),
- * `run.models` (the models its jobs may call), `run.fallbackModels` (their reviewed retry order) and
- * `run.mcp` (the MCP servers they connect, below). Each one decides
+ * `run.models` (the models its jobs may call), `run.fallbackModels` (their reviewed retry order),
+ * `run.mcp` (the MCP servers they connect, below), and since issue #800 `run.excludeTools` (the tools they lose) and
+ * `run.packages` (whether they load the staged packages). Each one decides
  * what a trigger's jobs can spend or reach, and removing or widening it is a widening, so it is written by hand in the
- * reviewed triggers file and never by a model's call, even behind a confirm. Neither tool's schema names them, and
+ * reviewed triggers file or by a person on the trigger's page (`trigger-environment-plans.mjs`), and never by a model's call,
+ * even behind a confirm. Neither tool's schema names them, and
  * that alone is not the guard: a schema does not refuse extra keys, and a field silently dropped would let the model
- * report a narrowing that never landed. So a call that carries one is REFUSED, loudly, before any confirm, and so is
+ * report a narrowing that never landed. Until issue #800 `planTriggerEdit` read neither of the last two, and only the tool
+ * adapter's field check stood behind it, once it had planned, with no reason named. So a call
+ * that carries one is REFUSED, loudly, before any confirm, and so is
  * a NEAR MISS of any of them (`MaxCostUsd`, `max_cost_usd`, `allowedModels`, a homoglyph), at the top level and
- * under a `run` or `on` object the model may have nested: the loader's own sweeps (`runModelFieldNearMiss`, and
- * `mcpFieldNearMiss` below), so the console and the loader agree on what a near miss is. An existing value is never
- * touched: the add tool builds entries without these keys and the edit tool spreads the entry's own `run` under the
- * fields it sets.
+ * under a `run` or `on` object the model may have nested: the loader's own sweeps (`runModelFieldNearMiss`,
+ * `excludeToolsNearMiss`, and `mcpFieldNearMiss` below), so the console and the loader agree on what a near miss is. An
+ * existing value is never touched: the add tool builds entries without these keys and the edit tool spreads the entry's own
+ * `run` under the fields it sets.
  */
-const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.mcp"]);
+const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.mcp", "run.excludeTools", "run.packages"]);
+/** Each tool-proof field as its refusal says it. */
+const TOOL_PROOF_WORDS = Object.freeze({ "run.maxCostUsd": "per-job dollar cap", "run.models": "allowed-model list", "run.fallbackModels": "fallback-model list", "run.mcp": "list of MCP servers", "run.excludeTools": "list of removed tools", "run.packages": "staged-package switch" });
 /**
  * `run.mcp` (REQ-MCP-OPERATOR-SERVERS) is tool-proof for the same reason: which outside systems a trigger's jobs act
  * on, with which credentials, is the operator's to write. Its near misses are the loader's own (`isMcpNearMiss`: the
@@ -380,6 +282,25 @@ const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallback
  */
 function mcpFieldNearMiss(key) {
   return key === "mcp" || isMcpNearMiss(key) ? "run.mcp" : null;
+}
+/**
+ * `run.excludeTools` and the two names the loader refuses beside it (`run.tools`, `run.noTools`), which the sweep's targets
+ * share no letters with and which a model reaching for a tool switch is as likely to send.
+ */
+function excludeToolsFieldNearMiss(key) {
+  return excludeToolsNearMiss(key) || ["tools", "notools"].includes(key.replace(/[^a-z0-9]/gi, "").toLowerCase()) ? "run.excludeTools" : null;
+}
+/**
+ * `run.packages`, in the shape of the sweeps above. Here and not in the loader: the loader has never swept this key, a
+ * `run.package` there loads clean and means nothing, and refusing it at load would turn a working file into one that stops
+ * the service over a change this one does not need. What a model's call may carry is a stricter question than what a file may.
+ */
+function packagesFieldNearMiss(key) {
+  const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (/^[\x20-\x7E]*$/.test(key)) return ["packages", "package"].includes(normalized) ? "run.packages" : null;
+  let i = 0;
+  for (const ch of "packages") if (i < normalized.length && normalized[i] === ch) i++;
+  return normalized.length >= 4 && i === normalized.length ? "run.packages" : null;
 }
 
 /** The refusal for a call that carries a tool-proof field or a near miss of one (see `TOOL_PROOF_FIELDS`), or null. */
@@ -411,11 +332,9 @@ export function wideningFieldRefusal(params, tool) {
   for (const [label, source] of objects) {
     if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
     for (const key of Object.keys(source)) {
-      const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key);
+      const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key) ?? excludeToolsFieldNearMiss(key) ?? packagesFieldNearMiss(key);
       if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
-      const what =
-        meant === "run.fallbackModels" ? "fallback-model list" : meant === "run.models" ? "allowed-model list" : meant === "run.mcp" ? "list of MCP servers" : "per-job dollar cap";
-      return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${what} is set by hand in the triggers file, never by a tool`;
+      return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${TOOL_PROOF_WORDS[meant]} is set by a person on that trigger's page or by hand in the triggers file, never by a tool.`;
     }
   }
   return null;
@@ -434,7 +353,7 @@ function secretBundleFieldRefusal(params, tool) {
     if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
     for (const key of Object.keys(source)) {
       if (!/^secretbundles?$/.test(key.toLowerCase().replace(/[_\-. ]/g, ""))) continue;
-      return `${tool} cannot set run.secretBundle (sent as ${label}${key}): whether a trigger's jobs hold their project's secret bundle is set by hand in the triggers file, never by a tool. A trigger a tool adds always carries "secretBundle": false`;
+      return `${tool} cannot set run.secretBundle (sent as ${label}${key}): whether a trigger's jobs hold their project's secret bundle is set by hand in the triggers file, never by a tool. A trigger a tool adds always carries "secretBundle": false.`;
     }
   }
   return null;
@@ -444,12 +363,6 @@ function secretBundleFieldRefusal(params, tool) {
 export function refuseWideningFields(params, tool) {
   const refusal = wideningFieldRefusal(params, tool);
   if (refusal !== null) throw new Error(refusal);
-}
-
-/** The current triggers as a display list (empty on a missing/invalid file), for index resolution + confirm text. */
-export function triggerList(paths, fs = nodeFs) {
-  const t = readTriggers({ triggersPath: paths.triggersPath, fs });
-  return Array.isArray(t?.triggers) ? t.triggers : [];
 }
 
 /** Pure request validation: no file, environment or queue values can enter these diagnostics. */
@@ -521,82 +434,7 @@ export function planTriggerAdd({ params, paths, env, tool = "dispatch_trigger_ad
 export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_edit", surface = "tool", fs = nodeFs }) {
   const widening = wideningFieldRefusal(params, tool);
   if (widening !== null) return { refusal: widening };
-  const expect = writeInputs({ paths: [paths.triggersPath], fs });
-  const list = triggerList(paths, fs);
-  const cur = list[params.index];
-  if (!cur) return { refusal: surface === "console" ? `no trigger at row ${params.index + 1} (have ${list.length})` : `no trigger at index ${params.index} (have ${list.length})` };
-  const row = rowName("trigger", params.index, surface);
-  const flow = params.flow === undefined ? undefined : String(params.flow).trim();
-  if (flow === "") return { refusal: "flow must be non-empty" };
-  // #227, the same allowlist the add applies and for the same reason: the picker bounds what an operator
-  // can choose, and the worker bounds what actually runs (DES-PER-TRIGGER-SECRET-PROFILE -- the overlay
-  // is not the reviewed artifact).
-  const backend = optStr(params.backend);
-  if (backend !== undefined) {
-    const venue = backendRefusal(backend, env);
-    if (venue !== null) return { refusal: venue };
-  }
-  // #502. Blank means "not sent", optStr's rule for backend above. A sent value goes through the
-  // worker's validator, the one parseTriggers runs at the write, so a malformed id is refused here
-  // with the loader's own message instead of after the operator approved it.
-  let ref;
-  const alone = refusalOf(() => {
-    ref = validateModelRef({ provider: optStr(params.provider), model: optStr(params.model), ...(params.maxTurns !== undefined ? { maxTurns: params.maxTurns } : {}) }, row, paths.triggersPath);
-  });
-  if (alone !== null) return { refusal: alone };
-  // The display record carries no provider for a forge trigger, so the before half reads the raw
-  // entry; a file that cannot be read shows "-" and the write itself decides.
-  const rawRun = (() => {
-    try {
-      return JSON.parse(String(fs.readFileSync(paths.triggersPath, "utf8")))?.triggers?.[params.index]?.run ?? {};
-    } catch {
-      return {};
-    }
-  })();
-  // #502 (PR #536's review): the MERGED run, before the confirm. A new provider or model checked alone passes, and
-  // only the write's parse would then find it off the trigger's own `run.models`, after the operator approved it.
-  const merged = refusalOf(() => validateModelRef({ ...rawRun, ...ref }, row, paths.triggersPath));
-  if (merged !== null) return { refusal: merged };
-  // #644. Merged only when sent, like backend; judged against the entry's own on.type (no status comment on cron).
-  const progressFault = progressRefusal(params, cur.type, row, paths.triggersPath, rawRun.command);
-  if (progressFault !== null) return { refusal: progressFault };
-  // Issue #712: judged only when this edit sends `recover` or a venue, against the entry as it would be after it, so an
-  // edit of the flow alone is not refused over a pairing the operator did not touch (the processor refuses that one per
-  // delivery, by name, as before).
-  if (typeof params.recover === "boolean" || backend !== undefined) {
-    const recoverVenue = recoverVenueRefusal({ recover: typeof params.recover === "boolean" ? params.recover : rawRun.recover, backend: backend ?? rawRun.backend, env });
-    if (recoverVenue !== null) return { refusal: recoverVenue };
-  }
-  const flags = progressRun(params);
-  const index = params.index;
-  // What the edit changes, each as `[key, before, after]` in the order the message has always listed them: the flow,
-  // then the venue, the provider and the model it was sent, then the flags. The console bolds the two values.
-  const changes = [
-    ...(flow === undefined ? [] : [["flow", String(cur.flow ?? "-"), flow]]),
-    ...(backend === undefined ? [] : [["backend", String(cur.backend ?? "-"), backend]]),
-    ...["provider", "model", "maxTurns"].filter((k) => ref[k] !== undefined).map((k) => [k, String(rawRun[k] ?? "-"), String(ref[k])]),
-    ...Object.keys(flags).map((k) => [k, String(rawRun[k] ?? "-"), String(flags[k])]),
-  ];
-  if (changes.length === 0) return { refusal: "send at least one trigger field to edit" };
-  return {
-    plan: {
-      index,
-      flow,
-      backend,
-      ref,
-      // `backend`, `provider` and `model` are merged only when the caller sent them, so an edit that
-      // changes just the flow leaves the entry byte-identical in every other key -- including a venue
-      // or a model it already had.
-      flags,
-      row,
-      type: cur.type,
-      changes,
-      mutate: (raw) => raw.map((tr, i) => (i === index ? { ...tr, run: { ...tr.run, ...(flow !== undefined && { flow }), ...(backend !== undefined && { backend }), ...ref, ...flags } } : tr)),
-      target: paths.triggersPath,
-      expect,
-      ...confirmOf(`Edit ${row}`, `${row} (${cur.type}) ${changeText(changes)}`),
-    },
-  };
+  return planTriggerEditCore({ params, paths, env, surface, fs });
 }
 
 /**
@@ -605,9 +443,8 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
  */
 export function planTriggerDelete({ index, paths, surface = "tool", fs = nodeFs }) {
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
-  const list = triggerList(paths, fs);
-  const cur = list[index];
-  if (!cur) return { refusal: surface === "console" ? `no trigger at row ${index + 1} (have ${list.length})` : `no trigger at index ${index} (have ${list.length})` };
+  const { cur, refusal: unlisted } = triggerAt(paths, index, surface, fs);
+  if (unlisted) return { refusal: unlisted };
   const row = rowName("trigger", index, surface);
   return {
     plan: {

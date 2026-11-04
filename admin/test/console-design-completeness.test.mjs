@@ -28,8 +28,6 @@ const OUTSIDE_LEDGERS = Object.freeze({
   SandboxGatewayStates: "#754 standalone gateway states, checked by gateway/test/design.test.mjs and its element ledger; not a console route.",
   DispatchersScreen: "Proposed by #776; grew from #735, outside #751.",
   DispatcherScreen: "Proposed by #776; grew from #735, outside #751.",
-  TriggerEnvironment: "#800, part 2, proposed: the trigger page's What its jobs get. Its ledger arrives when the card is built.",
-  TriggerEnvironmentChange: "#800, part 2, proposed: the preview and Confirm of that change. Its ledger arrives when the card is built.",
 });
 
 function assertDispositionOwner(card, disposition, preview) {

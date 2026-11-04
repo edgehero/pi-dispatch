@@ -198,6 +198,7 @@ import { SEARCH_ID } from "./kit.mjs";
 import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF } from "./shell.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "./theme.mjs";
 import { GATEWAY_CONSOLE_SCRIPT } from "./gateway-console-script.mjs";
+import { SAYS_NOTHING_CHANGED } from "../words.mjs";
 
 /**
  * How long the page waits before it asks again, when the console did not answer (a sign-in post, a one-time link's
@@ -1126,6 +1127,7 @@ ${FIT_JS}
   var slot = document.getElementById(CONFIRM_SLOT_ID);
   var skeleton = slot ? slot.innerHTML : "";
   var slotOwner = null;
+  var slotConfirming = false;
   var slotForm = null;
   // The button that opened the slot and the card that asked (slotCard), where closing it gives the focus back, and how
   // to find that button again in the card once a swap has replaced it (slotFind, from formKey).
@@ -1522,7 +1524,9 @@ ${FIT_JS}
     slotDisable("[data-confirm]", true);
     slotDisable("[data-cancel]", true);
     var confirmStarted = Date.now();
+    slotConfirming = true;
     post("/api/act/" + slotAction + "/confirm", { ticket: ticket }, true).then(function (c) {
+      slotConfirming = false;
       if (mine !== slotGen) return;
       var b = c.body || {};
       if (c.ok) {
@@ -1556,6 +1560,7 @@ ${FIT_JS}
     }, function () {
       // No answer: the change may or may not have been made, and the ticket is spent either way, so this is said and
       // nothing is sent again.
+      slotConfirming = false;
       if (mine === slotGen) slotSays(CONFIRM_NO_ANSWER);
     });
   }
@@ -1831,6 +1836,10 @@ ${FIT_JS}
     if (form) triggerFields(form);
   });
   var configErrorSequence = 0;
+  // \`refusalLine\` in \`words.mjs\`, for the line under a field: the bar's rule, from the bar's own expression, so a sentence reads the same in both.
+  function refusalLine(message) {
+    return message + (/[.!?]$/.test(message) ? "" : ".") + (/${SAYS_NOTHING_CHANGED.source}/i.test(message) ? "" : " Nothing was changed.");
+  }
   function fieldErrors(form, message) {
     var slots = form.querySelectorAll("[data-field-error]");
     var matched = false;
@@ -1853,7 +1862,7 @@ ${FIT_JS}
       var control = slots[i].parentElement.querySelector("input, select, textarea");
       var active = control && !control.disabled && !(typeof control.closest === "function" && control.closest("fieldset[disabled]"));
       var applies = active && targets.indexOf(key.toLowerCase()) >= 0;
-      slots[i].textContent = applies ? message + " Nothing was changed." : "";
+      slots[i].textContent = applies ? refusalLine(message) : "";
       slots[i].hidden = !applies;
       if (slots[i].parentElement.classList) {
         if (applies) slots[i].parentElement.classList.add("field--err");
@@ -1874,9 +1883,110 @@ ${FIT_JS}
       }
     }
     var fallback = form.querySelector("[data-form-error]");
-    if (fallback) { fallback.hidden = !message || matched; fallback.textContent = message || ""; }
+    if (fallback) { fallback.hidden = !message || matched; fallback.textContent = message ? refusalLine(message) : ""; }
   }
+  // What a trigger's jobs get (issue #800), one form read by the one submit handler below. A control as the server drew it is what the
+  // file says, so a change is a control that differs from how it was drawn (\`defaultValue\`, \`defaultChecked\`), and that is all the
+  // browser works out: whether a model fits a cap, or a host reads a field, is the server's to say at the preview. A blank text box
+  // that held a value is null, which deletes the key: the planner refuses a blank rather than read it as not sent.
+  function getsLists(form) {
+    var lists = Object.create(null);
+    function listOf(key) { return lists[key] || (lists[key] = { was: [], now: [] }); }
+    var chips = form.querySelectorAll("[data-gets-list]");
+    for (var i = 0; i < chips.length; i++) {
+      var inverse = chips[i].hasAttribute("data-gets-inverse");
+      var row = listOf(chips[i].getAttribute("data-gets-list"));
+      var value = chips[i].getAttribute("data-gets-value");
+      if (chips[i].defaultChecked !== inverse) row.was.push(value);
+      if (chips[i].checked !== inverse) row.now.push(value);
+    }
+    var adds = form.querySelectorAll("[data-gets-add]");
+    for (var j = 0; j < adds.length; j++) {
+      var into = listOf(adds[j].getAttribute("data-gets-add"));
+      var typed = adds[j].value.split(/[\\s,]+/);
+      var ticked = into.now.length;
+      for (var k = 0; k < typed.length; k++) if (typed[k] !== "" && into.now.indexOf(typed[k]) < 0) into.now.push(typed[k]);
+      into.added = into.now.length > ticked;
+    }
+    return lists;
+  }
+  // Whether a text box differs from what the page drew. A box marked as an amount is one value however it is written, so 1.5 over the file's "1.50"
+  // is no change, as the server would answer. Only two plain decimals are compared by value, and it goes no further: what fits and what a word
+  // typed there means are the server's, so anything else moved and is sent as typed.
+  var GETS_PLAIN_AMOUNT = /^\\d+(\\.\\d+)?$/;
+  function getsTextMoved(box) {
+    var now = box.value.trim();
+    var was = box.defaultValue.trim();
+    if (box.hasAttribute("data-gets-amount") && GETS_PLAIN_AMOUNT.test(now) && GETS_PLAIN_AMOUNT.test(was)) return Number(now) !== Number(was);
+    return now !== was;
+  }
+  function getsBody(form) {
+    var out = {};
+    var hidden = form.querySelectorAll("input[type=hidden]");
+    for (var h = 0; h < hidden.length; h++) out[hidden[h].name] = hidden[h].getAttribute("data-type") === "int" ? Number(hidden[h].value) : hidden[h].value;
+    var boxes = form.querySelectorAll("input[name][data-gets-word]");
+    for (var i = 0; i < boxes.length; i++) {
+      var next = boxes[i].value.trim();
+      if (getsTextMoved(boxes[i])) out[boxes[i].name] = next === "" ? null : next;
+    }
+    var flags = form.querySelectorAll("[data-gets-flag]");
+    // On is the key's default, so on from a drawn off takes the file's false away. REJECTED: writing true over it, which leaves a line in the file saying what no key would.
+    for (var f = 0; f < flags.length; f++) if (flags[f].checked !== flags[f].defaultChecked) out[flags[f].getAttribute("data-gets-flag")] = flags[f].checked ? null : false;
+    var lists = getsLists(form);
+    for (var key in lists) if (JSON.stringify(lists[key].now) !== JSON.stringify(lists[key].was)) out[key] = lists[key].now.length > 0 ? lists[key].now : null;
+    return out;
+  }
+  // The bar's count and words, each from the server's own text on the control that changed (\`data-gets-*\`), through \`textContent\`.
+  function getsRefresh(form) {
+    var words = [];
+    var lists = getsLists(form);
+    var boxes = form.querySelectorAll("input[data-gets-word]");
+    for (var i = 0; i < boxes.length; i++) {
+      // An add box is a change only for a name not on its list already: the same name again is what the file says.
+      var addsTo = boxes[i].getAttribute("data-gets-add");
+      if (addsTo ? lists[addsTo].added : getsTextMoved(boxes[i])) words.push(boxes[i].getAttribute("data-gets-word"));
+    }
+    var ticks = form.querySelectorAll("[data-gets-list], [data-gets-flag]");
+    for (var t = 0; t < ticks.length; t++) {
+      var moved = ticks[t].checked !== ticks[t].defaultChecked;
+      if (moved) words.push(ticks[t].getAttribute(ticks[t].checked ? "data-gets-on" : "data-gets-off"));
+      var item = ticks[t].closest("[data-gets-item]");
+      if (!item) continue;
+      if (moved) item.classList.add("te-changed"); else item.classList.remove("te-changed");
+      var pend = item.querySelector(".te-pend");
+      if (pend) pend.hidden = !moved;
+    }
+    var bar = form.querySelector("[data-gets-bar]");
+    if (!bar) return;
+    bar.hidden = words.length === 0;
+    var count = bar.querySelector("[data-gets-count]");
+    if (count) count.textContent = String(count.getAttribute(words.length === 1 ? "data-one" : "data-many")).replace("{n}", String(words.length));
+    var said = bar.querySelector("[data-gets-words]");
+    if (said) said.textContent = words.length > 0 ? words.join(", ") + "." : "";
+  }
+  var GETS_FORM = 'form[data-structured="trigger-gets"]';
+  // A preview is of the form as it stood. After any move its Confirm would write what the page no longer shows, or drop what it does, under a
+  // banner that names the row and neither, so it goes. A Confirm already sent stays: only its answer can say what happened.
+  function getsPreviewGone(form) {
+    if (slot && !slot.hidden && !slotConfirming && slotOwner === form.closest("section[data-panel]")) closeSlot();
+  }
+  function getsMoved(ev) {
+    var form = ev.target && typeof ev.target.closest === "function" ? ev.target.closest(GETS_FORM) : null;
+    if (!form) return;
+    getsRefresh(form);
+    getsPreviewGone(form);
+  }
+  document.addEventListener("input", getsMoved);
+  document.addEventListener("change", getsMoved);
+  // Discard is the form's own reset. The browser resets its controls after this event, so the bar is read a tick later.
+  document.addEventListener("reset", function (ev) {
+    var form = ev.target;
+    if (!form || typeof form.matches !== "function" || !form.matches(GETS_FORM)) return;
+    later(function () { getsRefresh(form); }, 0);
+    getsPreviewGone(form);
+  });
   function bodyOf(form) {
+    if (typeof form.getAttribute === "function" && form.getAttribute("data-structured") === "trigger-gets") return getsBody(form);
     var out = {};
     var els = form.elements;
     for (var i = 0; i < els.length; i++) {

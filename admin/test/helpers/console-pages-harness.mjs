@@ -505,11 +505,11 @@ async function renderInChild() {
         assert.ok(data.connections.providerKeys.rows.some(row => row.provider === "kimi-coding" && row.usage.includes("trigger")));
       }
       for (const role of ROLES) {
-        pages[`${shot}.${role}`] = await draw(name, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data: ["watch-board", "zero-touch"].includes(name) ? await P.loadPageData(name, parsed.query, deps, { role }) : data, readOnly: false });
+        pages[`${shot}.${role}`] = await draw(name, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data: ["watch-board", "zero-touch", "trigger"].includes(name) ? await P.loadPageData(name, parsed.query, deps, { role }) : data, readOnly: false });
       }
       // The operator's page on a read-only console (serve's read-only mode, issue #737 review round 2): the frame draws
       // its chip and every write form is withheld, so it is a page of its own, held to the same rules but to no golden.
-      readOnly[shot] = await draw(name, { query: parsed.query, session: { name: "ops", role: "operator" }, data: ["watch-board", "zero-touch"].includes(name) ? await P.loadPageData(name, parsed.query, deps, { role: "operator", readOnly: true }) : data, readOnly: true });
+      readOnly[shot] = await draw(name, { query: parsed.query, session: { name: "ops", role: "operator" }, data: ["watch-board", "zero-touch", "trigger"].includes(name) ? await P.loadPageData(name, parsed.query, deps, { role: "operator", readOnly: true }) : data, readOnly: true });
     }
     if (hostile) {
       // The hostile run's own detail page: its id is outside the run-id charset, so the query is refused before any read.

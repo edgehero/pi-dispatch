@@ -15,7 +15,10 @@ import * as configUi from "../src/console/panels/config-ui.mjs";
 import { setupGolden } from "./helpers/setup-goldens.mjs";
 import { CONFIGURATION_DRAW } from "./helpers/configuration-goldens.mjs";
 import { CLIENT_STATES, LEDGER_CARDS, T } from "./helpers/client-states.mjs";
+import { GETS_ENTRY, triggerGetsPage } from "./helpers/trigger-gets-goldens.mjs";
 import { Event, fakeTimers, parseDocument, runConsoleScript, shown, trapGlobalFetch } from "./helpers/script-dom.mjs";
+import { planTriggerAdd } from "../src/write-plans.mjs";
+import { SAYS_NOTHING_CHANGED, refusalLine } from "../src/words.mjs";
 
 // Issue #737, PR 2: the browser script in every state a card names, run over the server's OWN markup (the shell, the
 // sign-in pages, the confirm slot and the bars confirm-view.mjs draws), so what is checked is that the script shows the
@@ -95,6 +98,248 @@ async function previewed(barOpts = {}) {
   await w.fetch.open("/api/act/retry-failed/preview").answer(200, { ok: true, ticket: "tk-1", action: "retry-failed", html: bar(barOpts) });
   return w;
 }
+
+// ---- what a trigger's jobs get (TriggerEnvironment) ---------------------------------------------------------------
+
+const GETS = "trigger-environment-edit";
+const moved = (el) => el.dispatchEvent(new Event("change", { bubbles: true }));
+const tick = (form, key, value, on) => {
+  const el = form.querySelector(`[data-gets-list="${key}"][data-gets-value="${value}"]`);
+  assert.ok(el, `${key} ${value} is drawn`);
+  el.checked = on;
+  moved(el);
+};
+const typeIn = (w, el, value) => {
+  w.type(el, value);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+};
+/** The body the one submit handler posts for this form, as it stands. */
+function sentBy(w, form) {
+  const before = w.fetch.calls.length;
+  w.submit(form);
+  const call = w.fetch.calls[before];
+  assert.equal(call.url, `/api/act/${GETS}/preview`);
+  return call.body;
+}
+
+stateTest(T.getsBar, async () => {
+  const w = boot(await triggerGetsPage());
+  const form = formOf(w, GETS);
+  const bar = form.querySelector("[data-gets-bar]");
+  assert.equal(shown(bar), false, "nothing changed, no bar");
+  tick(form, "mcp", "linear", true);
+  assert.equal(shown(bar), true);
+  assert.equal(text(bar.querySelector("[data-gets-count]")), "1 change, not written yet:", "the server's words for one");
+  assert.equal(text(bar.querySelector("[data-gets-words]")), "linear on.");
+  const row = form.querySelector('[data-gets-value="linear"]').closest("[data-gets-item]");
+  assert.ok(row.classList.contains("te-changed"), "the row is marked");
+  assert.equal(shown(row.querySelector(".te-pend")), true);
+  tick(form, "excludeTools", "bash", false);
+  assert.equal(text(bar.querySelector("[data-gets-count]")), "2 changes, not written yet:");
+  assert.equal(text(bar.querySelector("[data-gets-words]")), "linear on, bash off.");
+  typeIn(w, form.querySelector('input[name="flow"]'), "review");
+  assert.equal(text(bar.querySelector("[data-gets-words]")), "flow changed, linear on, bash off.", "a text box says which field, in the server's word");
+  // Set back as drawn, each is no change, and the bar goes: the browser compares with what the server drew, and judges nothing else.
+  typeIn(w, form.querySelector('input[name="flow"]'), "fix");
+  tick(form, "excludeTools", "bash", true);
+  tick(form, "mcp", "linear", false);
+  assert.equal(shown(bar), false);
+  assert.equal(row.classList.contains("te-changed"), false);
+  assert.equal(shown(row.querySelector(".te-pend")), false);
+});
+
+stateTest(T.getsBody, async () => {
+  const w = boot(await triggerGetsPage());
+  const form = formOf(w, GETS);
+  const digest = form.querySelector('input[name="pageDigest"]').value;
+  assert.match(digest, /^[a-f0-9]{64}$/);
+  const base = { index: 2, pageDigest: digest };
+  assert.deepEqual(sentBy(w, form), base, "nothing moved, so no field is sent, and the server says so");
+  tick(form, "mcp", "linear", true);
+  assert.deepEqual(sentBy(w, form), { ...base, mcp: ["linear"] }, "only the changed key");
+  tick(form, "excludeTools", "bash", false);
+  tick(form, "excludeTools", "edit", false);
+  assert.deepEqual(sentBy(w, form), { ...base, mcp: ["linear"], excludeTools: ["bash", "edit"] }, "a chip off is a name on the list");
+  tick(form, "mcp", "linear", false);
+  tick(form, "excludeTools", "bash", true);
+  tick(form, "excludeTools", "edit", true);
+  const packages = form.querySelector('[data-gets-flag="packages"]');
+  packages.checked = false;
+  moved(packages);
+  assert.deepEqual(sentBy(w, form), { ...base, packages: false }, "off is written: it is the one value of the key that is not the default");
+  packages.checked = true;
+  moved(packages);
+  typeIn(w, form.querySelector('input[name="maxCostUsd"]'), " 1.50 ");
+  typeIn(w, form.querySelector("[data-gets-add=models]"), "anthropic/claude-haiku-4-5, kimi-coding/kimi-for-coding");
+  assert.deepEqual(sentBy(w, form), { ...base, maxCostUsd: "1.50", models: ["anthropic/claude-haiku-4-5", "kimi-coding/kimi-for-coding"] }, "typed, trimmed, and split as the file's list");
+  typeIn(w, form.querySelector("[data-gets-add=models]"), "anthropic/claude-haiku-4-5 anthropic/claude-haiku-4-5");
+  assert.deepEqual(sentBy(w, form).models, ["anthropic/claude-haiku-4-5"], "a name typed twice is one entry: the file refuses a list that repeats one");
+  assert.equal(text(form.querySelector("[data-gets-words]")), "job cap changed, allowed models changed.", "typing in an add box is a change, and says which list");
+
+  // What a key the file holds does when it is taken away: null, which is the one way to delete a key.
+  const set = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, provider: "anthropic", model: "claude-sonnet-5-5", maxCostUsd: "1.5", models: ["anthropic/claude-sonnet-5-5"], fallbackModels: ["anthropic/claude-sonnet-5-5"], mcp: ["linear"], excludeTools: ["bash"], packages: false } } }));
+  const held = formOf(set, GETS);
+  const heldBase = { index: 2, pageDigest: held.querySelector('input[name="pageDigest"]').value };
+  tick(held, "excludeTools", "edit", false);
+  assert.deepEqual(sentBy(set, held), { ...heldBase, excludeTools: ["bash", "edit"] }, "a key the file holds is not sent while its control stands as drawn");
+  tick(held, "excludeTools", "edit", true);
+  typeIn(set, held.querySelector('input[name="provider"]'), "");
+  typeIn(set, held.querySelector('input[name="model"]'), "   ");
+  typeIn(set, held.querySelector('input[name="maxCostUsd"]'), "");
+  tick(held, "models", "anthropic/claude-sonnet-5-5", false);
+  tick(held, "fallbackModels", "anthropic/claude-sonnet-5-5", false);
+  tick(held, "mcp", "linear", false);
+  tick(held, "excludeTools", "bash", true);
+  const off = held.querySelector('[data-gets-flag="packages"]');
+  off.checked = true;
+  moved(off);
+  assert.deepEqual(sentBy(set, held), { ...heldBase, provider: null, model: null, maxCostUsd: null, models: null, fallbackModels: null, mcp: null, excludeTools: null, packages: null }, "the file's false goes by removing the key, not by writing the default over it");
+
+  // A file that says true draws the switch on. Standing as drawn sends nothing, and only off is a change.
+  const said = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, packages: true } } }));
+  const saidForm = formOf(said, GETS);
+  const saidBase = { index: 2, pageDigest: saidForm.querySelector('input[name="pageDigest"]').value };
+  const on = saidForm.querySelector('[data-gets-flag="packages"]');
+  on.checked = true;
+  moved(on);
+  assert.deepEqual(sentBy(said, saidForm), saidBase, "turning on what the file has on is no change");
+  on.checked = false;
+  moved(on);
+  assert.deepEqual(sentBy(said, saidForm), { ...saidBase, packages: false });
+  on.checked = true;
+  moved(on);
+  assert.deepEqual(sentBy(said, saidForm), saidBase, "and back, nothing");
+
+  // The cap is one amount however it is written, and only the cap: the bar and the body each ask the same question, so they cannot disagree.
+  const capped = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, maxCostUsd: "1.50" } } }));
+  const cappedForm = formOf(capped, GETS);
+  const cappedBase = { index: 2, pageDigest: cappedForm.querySelector('input[name="pageDigest"]').value };
+  const cap = cappedForm.querySelector('input[name="maxCostUsd"]');
+  const collected = cappedForm.querySelector("[data-gets-bar]");
+  for (const same of ["1.5", " 1.5 ", "1.500", "01.50", "1.50"]) {
+    typeIn(capped, cap, same);
+    assert.equal(shown(collected), false, `${JSON.stringify(same)} is what the file says, so nothing is collected`);
+    assert.deepEqual(sentBy(capped, cappedForm), cappedBase, `${JSON.stringify(same)} is what the file says, so nothing is sent`);
+  }
+  // What a person typed goes as they typed it: the server judges it, and this says only whether it moved.
+  for (const moves of ["1.6", "1.5000001", "2", "abc", "1.5e0", "-1.5", ".5", "0x1"]) {
+    typeIn(capped, cap, moves);
+    assert.equal(shown(collected), true, `${JSON.stringify(moves)} moved`);
+    assert.equal(text(collected.querySelector("[data-gets-words]")), "job cap changed.", moves);
+    assert.deepEqual(sentBy(capped, cappedForm), { ...cappedBase, maxCostUsd: moves }, moves);
+  }
+  typeIn(capped, cap, "");
+  assert.deepEqual(sentBy(capped, cappedForm), { ...cappedBase, maxCostUsd: null }, "a blank box still takes the key away");
+  // A file's value that is no plain amount has nothing to be equal to by value.
+  const written = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, maxCostUsd: "1.5e0" } } }));
+  const writtenForm = formOf(written, GETS);
+  typeIn(written, writtenForm.querySelector('input[name="maxCostUsd"]'), "1.5");
+  assert.equal(sentBy(written, writtenForm).maxCostUsd, "1.5");
+  const typedOver = boot(await triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, flow: "1.50" } } }));
+  const typedForm = formOf(typedOver, GETS);
+  typeIn(typedOver, typedForm.querySelector('input[name="flow"]'), "1.5");
+  assert.equal(sentBy(typedOver, typedForm).flow, "1.5", "another field's text is text, whatever it looks like");
+  const none = boot(await triggerGetsPage());
+  const noneForm = formOf(none, GETS);
+  typeIn(none, noneForm.querySelector('input[name="maxCostUsd"]'), "0");
+  assert.equal(sentBy(none, noneForm).maxCostUsd, "0", "where the file sets no cap, any amount is a change");
+});
+
+stateTest(T.getsDiscard, async () => {
+  const w = boot(await triggerGetsPage());
+  const form = formOf(w, GETS);
+  const collected = form.querySelector("[data-gets-bar]");
+  tick(form, "mcp", "linear", true);
+  typeIn(w, form.querySelector('input[name="flow"]'), "review");
+  w.submit(form);
+  await w.fetch.open(`/api/act/${GETS}/preview`).answer(200, { ok: true, ticket: "tk-1", action: GETS, html: bar(), kind: "trigger-edit" });
+  assert.equal(shown(slotOf(w)), true, "the preview is open");
+  form.querySelector('button[type="reset"]').click();
+  assert.equal(shown(slotOf(w)), false, "a preview of what was discarded closes: its Confirm would write a change the page no longer shows");
+  assert.equal(shown(collected), true, "the browser resets the controls after the event, so the bar is read a tick later");
+  w.tick(1);
+  assert.equal(form.querySelector('[data-gets-value="linear"]').checked, false);
+  assert.equal(form.querySelector('input[name="flow"]').value, "fix");
+  assert.equal(shown(collected), false);
+  assert.deepEqual(sentBy(w, form), { index: 2, pageDigest: form.querySelector('input[name="pageDigest"]').value });
+});
+
+stateTest(T.getsMoveCloses, async () => {
+  const w = boot(await triggerGetsPage());
+  const form = formOf(w, GETS);
+  const open = async () => {
+    w.submit(form);
+    await w.fetch.open(`/api/act/${GETS}/preview`).answer(200, { ok: true, ticket: "tk-1", action: GETS, html: bar(), kind: "trigger-edit" });
+    assert.equal(shown(slotOf(w)), true, "the preview is open");
+  };
+  // The change is taken back: the Confirm must not stay to write it.
+  tick(form, "mcp", "linear", true);
+  await open();
+  tick(form, "mcp", "linear", false);
+  assert.equal(shown(slotOf(w)), false, "linear back off: the preview said on");
+  assert.equal(shown(form.querySelector("[data-gets-bar]")), false);
+  // Another control moved: its Confirm would drop that one.
+  tick(form, "mcp", "linear", true);
+  await open();
+  tick(form, "excludeTools", "bash", false);
+  assert.equal(shown(slotOf(w)), false, "a second control moved: the preview did not hold it");
+  assert.equal(w.fetch.calls.filter((call) => call.url.endsWith("/confirm")).length, 0, "and nothing was sent");
+  // A text box, on its first keystroke.
+  await open();
+  typeIn(w, form.querySelector('input[name="flow"]'), "r");
+  assert.equal(shown(slotOf(w)), false, "typing");
+  // An answer that arrives after the move does not reopen it.
+  w.submit(form);
+  typeIn(w, form.querySelector('input[name="flow"]'), "re");
+  await w.fetch.open(`/api/act/${GETS}/preview`).answer(200, { ok: true, ticket: "tk-2", action: GETS, html: bar(), kind: "trigger-edit" });
+  assert.equal(shown(slotOf(w)), false, "a late answer is about the form as it was");
+  // A move in the Edit form's preview's way is not this form's: another panel's slot stays.
+  const edit = formOf(w, "trigger-edit");
+  w.submit(edit);
+  await w.fetch.open("/api/act/trigger-edit/preview").answer(200, { ok: true, ticket: "tk-3", action: "trigger-edit", html: bar(), kind: "trigger-edit" });
+  assert.equal(shown(slotOf(w)), true);
+  tick(form, "excludeTools", "edit", false);
+  assert.equal(shown(slotOf(w)), true, "the Edit form's preview does not say what this form says");
+  w.document.querySelector("[data-cancel]").click();
+  // A Confirm already sent is not abandoned: its answer has to reach the person.
+  await open();
+  w.document.querySelector("[data-confirm]").click();
+  tick(form, "excludeTools", "write", false);
+  assert.equal(shown(slotOf(w)), true, "it was sent, so the slot waits for its answer");
+  assert.equal(w.fetch.calls.filter((call) => call.url === `/api/act/${GETS}/confirm`).length, 1);
+  await w.fetch.open(`/api/act/${GETS}/confirm`).answer(200, { ok: true, action: GETS, change: { summary: "Changed" } });
+  assert.equal(w.location.reloads, 1, "and its answer lands");
+});
+
+stateTest(T.getsNothing, async () => {
+  const held = { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, models: ["anthropic/claude-haiku-4-5"] } };
+  const w = boot(await triggerGetsPage({ entry: held }));
+  const form = formOf(w, GETS);
+  const collected = form.querySelector("[data-gets-bar]");
+  const add = form.querySelector("[data-gets-add=models]");
+  // Already on the list: the file would not change, so the bar does not say it would.
+  typeIn(w, add, "anthropic/claude-haiku-4-5");
+  assert.equal(shown(collected), false, "a name already on the list is no change");
+  // Enter with nothing changed: the form sends what it holds, which is no field, and the server's own answer says so.
+  const base = { index: 2, pageDigest: form.querySelector('input[name="pageDigest"]').value };
+  assert.deepEqual(sentBy(w, form), base);
+  const already = "trigger row 3 already says this.";
+  await w.fetch.open(`/api/act/${GETS}/preview`).answer(200, { ok: true, unchanged: true, action: GETS, summary: already, html: String(unchangedBarHtml({ summary: already })) });
+  assert.equal(shown(slotOf(w)), true);
+  assert.ok(text(slotOf(w)).includes("Trigger row 3 already says this."), text(slotOf(w)));
+  assert.equal(slotOf(w).querySelector("[data-confirm]"), null, "with nothing to confirm");
+  // A new name is a change.
+  typeIn(w, add, "anthropic/claude-haiku-4-5 anthropic/claude-sonnet-5-5");
+  assert.equal(shown(collected), true);
+  assert.equal(shown(slotOf(w)), false, "and the answer was about the form as it was");
+  // A refusal goes in the slot alone: its words can name another row, or a word like flow in passing.
+  w.submit(form);
+  const refused = "trigger row 11: run.flow must be a skill name; run.model is not one. Nothing was changed.";
+  await w.fetch.open(`/api/act/${GETS}/preview`).answer(400, { error: refused, html: String(refusalHtml({ where: "preview", sentence: refused, status: 400 })) });
+  assert.equal(shown(slotOf(w)), true, "the bar says it");
+  for (const name of ["flow", "provider", "model", "maxCostUsd"]) assert.equal(form.querySelector(`input[name="${name}"]`).getAttribute("aria-invalid"), null, name);
+  assert.equal(form.querySelectorAll(".field--err").length, 0);
+});
 
 // ---- the confirm slot (ConfirmStates) ------------------------------------------------------------------------------
 
@@ -1646,6 +1891,46 @@ test("the client-state table holds every state element of the ConfirmStates, Liv
       assert.ok(CLIENT_STATES.some((r) => r.card === card && r.state === el.el), `${card}: the state "${el.el}" is in helpers/client-states.mjs with the test that reaches it`);
     }
   }
+});
+
+test("a refusal reads properly under its field and in the bar: one stop, and nothing changed said once", async () => {
+  const real = planTriggerAdd({ params: { kind: "label", flow: "triage", labels: ["pi"], maxCostUsd: "1" }, paths: { triggersPath: "triggers.json" }, env: { PI_BACKENDS: "local" }, tool: "this form", surface: "console" }).refusal;
+  assert.ok(real.endsWith("never by a tool."), real);
+  const form = configUi.actForm("trigger-add", { fields: configUi.area("trigger", "Add tool fields (JSON)", { type: "json", required: true }), label: "Preview the JSON add" });
+  const w = boot(String(page({ title: "Configuration", name: "config", body: shellHtml("config", { session: OPERATOR, data: { now: NOW }, query: {}, theme: null }, html`<section id="cf-trigger" data-panel>${form}</section>`) })));
+  const drawn = w.document.querySelector('form[data-action="trigger-add"]');
+  const box = drawn.querySelector('[name="trigger"]');
+  const line = async (refusal) => {
+    box.value = '{"kind":"label"}';
+    w.submit(drawn);
+    await w.fetch.open("/api/act/trigger-add/preview").answer(400, { refusal });
+    return drawn.querySelector('[data-field-error="trigger"]').textContent;
+  };
+  for (const [what, refusal, reads] of [
+    ["its own stop", real, `${real} Nothing was changed.`],
+    ["a loader's sentence, which has none", "trigger row 2: run.maxTurns must be at least 1 in triggers.json", "trigger row 2: run.maxTurns must be at least 1 in triggers.json. Nothing was changed."],
+    ["its own stop and its own saying", "this trigger does not take x. Nothing was changed.", "this trigger does not take x. Nothing was changed."],
+    ["its own saying and no stop", "trigger row 1 is not one this can change; nothing was changed", "trigger row 1 is not one this can change; nothing was changed."],
+    ["another way of saying it", "trigger row 1: nothing was written", "trigger row 1: nothing was written."],
+  ]) {
+    assert.equal(await line(refusal), reads, what);
+    assert.equal(refusalLine(refusal), reads, `${what}: the server's copy of the rule, which the Refusals card draws`);
+  }
+  // A refusal that names no field goes on the form's own line, and reads as the field line does.
+  const formLine = async (refusal) => {
+    box.value = '{"kind":"label"}';
+    w.submit(drawn);
+    await w.fetch.open("/api/act/trigger-add/preview").answer(400, { refusal });
+    const under = drawn.querySelector("[data-form-error]");
+    assert.equal(under.hidden, false, refusal);
+    return under.textContent;
+  };
+  for (const refusal of ["that will not do", "that will not do. Nothing was changed.", "that will not do; nothing was written"]) assert.equal(await formLine(refusal), refusalLine(refusal), refusal);
+  // The script takes the bar's own expression, so the two cannot come to disagree on what says nothing changed.
+  assert.ok(CONSOLE_SCRIPT.includes(SAYS_NOTHING_CHANGED.source));
+  const bar = String(refusalHtml({ where: "preview", sentence: real, status: 400 })).replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/\s+/g, " ");
+  assert.ok(bar.includes(`${real[0].toUpperCase()}${real.slice(1)} Nothing was changed.`), bar);
+  assert.doesNotMatch(bar, /\.\./);
 });
 
 stateTest("inline configuration errors keep unique stable associations across two row forms", async () => {

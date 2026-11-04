@@ -5,6 +5,7 @@ import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
 import { UPDATES_CANARY_RECORD, UPDATES_DRAW, updatesFacts } from "./updates-goldens.mjs";
 import { WORKSPACE_DRAW } from "./workspace-goldens.mjs";
 import { LOADED_DRAW } from "./loaded-goldens.mjs";
+import { GETS_CHANGES, GETS_ENTRY, GETS_HOST_ENV, GETS_MCP_JSON, TRIGGER_GETS_DRAW, asChanged, getsFile, getsHostLoads, triggerGetsPage } from "./trigger-gets-goldens.mjs";
 import { ZERO_TOUCH_DRAW } from "./zero-touch-goldens.mjs";
 import { CONFIGURATION_DRAW } from "./configuration-goldens.mjs";
 import { TRIGGER_LIST_DRAW } from "./trigger-list-goldens.mjs";
@@ -31,6 +32,8 @@ import { ENDED_REASONS } from "../../src/console/session-ends.mjs";
 import { LIVE_STATES, loginCodePage, loginPage } from "../../src/console/shell.mjs";
 import * as RM from "../../src/read-model.mjs";
 import * as WP from "../../src/write-plans.mjs";
+import { createTriggerEnvironmentActions } from "../../src/trigger-environment-plans.mjs";
+import { triggerEntryDigest } from "../../src/trigger-edit-core.mjs";
 import { tempDir } from "./temp-dir.mjs";
 
 /**
@@ -168,7 +171,7 @@ function counter() {
  * held job's cancel canned here): each key it names replaces that function, the real one or the canned one (a queued
  * job's plan and its removal's answer, a re-run's plan and its enqueue).
  */
-function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {}, updates = null } = {}) {
+function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {}, updates = null, triggerEnvironment = null } = {}) {
   let t = NOW;
   const now = () => t;
   const dir = tempDir("panel-goldens-");
@@ -198,7 +201,7 @@ function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {}, updates = null } 
     sessions: { setFlash: () => true },
     writePauseWindows: RM.writePauseWindows,
     hub: null,
-    actionDeps: { ...(updates ? { updates } : {}), rm, plans: WP, paths, fleet, env: { PI_MAX_COST_USD: "2" }, readJobsData: async ({ jobs }) => new Map(jobs.filter((j) => JOB_DATA.has(j.jobId)).map((j) => [j.jobId, JOB_DATA.get(j.jobId)])), urlShown: (u) => u, host: "mini1" },
+    actionDeps: { ...(updates ? { updates } : {}), ...(triggerEnvironment ? { triggerEnvironment } : {}), rm, plans: WP, paths, fleet, env: { PI_MAX_COST_USD: "2" }, readJobsData: async ({ jobs }) => new Map(jobs.filter((j) => JOB_DATA.has(j.jobId)).map((j) => [j.jobId, JOB_DATA.get(j.jobId)])), urlShown: (u) => u, host: "mini1" },
   };
   const ctxOf = (name, step, body) => ({
     deps,
@@ -227,6 +230,22 @@ function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {}, updates = null } 
       t += ms;
     },
   };
+}
+
+/**
+ * The person's change to what a trigger's jobs get, through the real planner and the real action table against a real triggers file,
+ * the page's own file: its Confirm, its refusals and its words are the ones a person gets. Which jobs in line it refuses is the one
+ * thing a file cannot hold, so that read answers gh-c9e1, the card's job in line.
+ */
+function getsWorld({ env = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-5-5", PI_MAX_COST_USD: "2", ...GETS_HOST_ENV } } = {}) {
+  const dir = tempDir("panel-goldens-gets-");
+  const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), projectsFile: null, globalPiDir: join(dir, "overlay") };
+  nodeFs.writeFileSync(paths.triggersPath, getsFile());
+  nodeFs.writeFileSync(paths.settingsFile, "{}");
+  nodeFs.mkdirSync(paths.globalPiDir);
+  nodeFs.writeFileSync(join(paths.globalPiDir, "mcp.json"), JSON.stringify(GETS_MCP_JSON));
+  const triggerEnvironment = createTriggerEnvironmentActions({ paths, env, now: () => NOW, deploymentDir: dir, readHostLoads: async () => getsHostLoads(), readSkew: async () => ({ rows: [{ jobId: "gh-c9e1", queue: "pi-jobs", field: "mcp" }], incomplete: false }) });
+  return { world: actionWorld({ triggerEnvironment }), body: (change) => ({ index: 2, pageDigest: triggerEntryDigest(GETS_ENTRY), ...change }) };
 }
 
 // ---- the script's steps, each asserted to apply once -----------------------------------------------------------------
@@ -728,6 +747,26 @@ const hostsWith = (name, over) => overviewSnapshot().hostBudgets.map((h) => (h.n
  * host of that length, standing in for mini2, so a confirm bar names two such queues; `cron`, a cron trigger's id
  * (`[A-Za-z0-9._-]`), the longest the triggers file takes (`CRON_ID_MAX`), with no place to break.
  */
+/** The preview and the two refusals a person meets most, in the slot, after the card that asked: the planner's own words. */
+const TRIGGER_GETS_CONFIRM = Object.freeze({
+  "trigger-gets-preview.operator": async () => {
+    const { world, body } = getsWorld();
+    const answer = await world.preview("trigger-environment-edit", body({ mcp: ["linear"], excludeTools: ["bash"] }));
+    return openSlotAfter(asChanged(await triggerGetsPage(), GETS_CHANGES), "p-trigger-gets", { inner: answerHtml(answer, 200, "the card's change") });
+  },
+  "trigger-gets-refused-cost.operator": async () => {
+    const { world, body } = getsWorld();
+    const answer = await world.preview("trigger-environment-edit", body({ model: "claude-opus-5-5" }));
+    return openSlotAfter(await triggerGetsPage(), "p-trigger-gets", { inner: answerHtml(answer, 400, "a model no call of which fits the cap") });
+  },
+  "trigger-gets-refused-stale.operator": async () => {
+    const { world, body } = getsWorld();
+    const answer = await world.preview("trigger-environment-edit", { ...body({ mcp: ["linear"] }), pageDigest: "a".repeat(64) });
+    return openSlotAfter(asChanged(await triggerGetsPage(), GETS_CHANGES.slice(0, 1)), "p-trigger-gets", { inner: answerHtml(answer, 409, "a page that drew another entry") });
+  },
+});
+export const TRIGGER_GETS_CONFIRM_STATES = Object.freeze(Object.keys(TRIGGER_GETS_CONFIRM));
+
 export const LONG_NAMES = Object.freeze({
   host: `build-${"x".repeat(51)}-gpu-03`,
   gone: `gone-${"y".repeat(51)}-node-07`,
@@ -863,6 +902,8 @@ const DRAW = {
   },
   ...WORKSPACE_DRAW,
   ...LOADED_DRAW,
+  ...TRIGGER_GETS_DRAW,
+  ...TRIGGER_GETS_CONFIRM,
   ...MODELS_DRAW,
   ...ZERO_TOUCH_DRAW,
   ...CONFIGURATION_DRAW,

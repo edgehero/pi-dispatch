@@ -127,7 +127,9 @@ export function assembleCosts(paths, window, { flow, repo, project, pricing, now
   // The trigger join over the SCOPED records (a flow-filtered fold attributes only what it folds),
   // the same file-read-plus-pure-fold path the dashboard seam takes.
   const triggersView = readTriggers({ triggersPath: paths.triggersPath });
-  const triggerJoin = attributeRunsToTriggers({ records: scoped, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
+  // No join for a file nobody could read: `byTrigger` then reads as not computed, where an empty list of triggers would file
+  // every forge run under no trigger, and a page would report that as what the runs were.
+  const triggerJoin = triggersView?.unreadable ? null : attributeRunsToTriggers({ records: scoped, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
   const fold = foldCosts({
     records: scoped,
     subscriptions: Array.isArray(subs?.subscriptions) ? subs.subscriptions : [],
@@ -455,8 +457,10 @@ export async function assembleInsights(paths, window, { pricing, fullPaths = fal
   if (Array.isArray(records)) {
     const triggersView = readTriggers({ triggersPath: paths.triggersPath });
     const subsView = readSubscriptions({ subscriptionsPath: paths.subscriptionsPath });
-    const triggerJoin = attributeRunsToTriggers({ records, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
-    costByTrigger = foldTriggerCosts({ records, subscriptions: Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [], pricing, triggerJoin });
+    if (!triggersView?.unreadable) {
+      const triggerJoin = attributeRunsToTriggers({ records, triggers: Array.isArray(triggersView?.triggers) ? triggersView.triggers : [] });
+      costByTrigger = foldTriggerCosts({ records, subscriptions: Array.isArray(subsView?.subscriptions) ? subsView.subscriptions : [], pricing, triggerJoin });
+    }
   }
   // Issue #499 part C: the projects' ids and display names for the by-project list. The page escapes and isolates a
   // name; members are not carried, the page shows spend by id.
@@ -713,8 +717,8 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   if (view === "flows") {
     out.graph = await io.graph(paths, opts);
     const records = costs?.records;
-    if (Array.isArray(records)) {
-      const triggers = readTriggers({ triggersPath: paths.triggersPath });
+    const triggers = readTriggers({ triggersPath: paths.triggersPath });
+    if (Array.isArray(records) && !triggers?.unreadable) {
       const subs = io.subscriptions({ subscriptionsPath: paths.subscriptionsPath });
       const join = attributeRunsToTriggers({ records, triggers: triggers?.triggers ?? [] });
       out.costByTrigger = foldTriggerCosts({ records, subscriptions: subs?.subscriptions ?? [], pricing, triggerJoin: join });

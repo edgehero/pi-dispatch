@@ -34,6 +34,7 @@ const expected = {
   "spend-capacity-truncated.viewer": ["Incomplete history", "Missing time is drawn as no data and is never counted as idle."],
   "spend-breakdown.viewer": ["Window spend", "Settled run records only", "Where these numbers come from"],
   "spend-breakdown-unreadable.viewer": ["Costs could not be read"],
+  "spend-breakdown-triggers-unread.viewer": ["The triggers file could not be read, so this spend is not split by trigger."],
   "spend-breakdown-empty.viewer": ["No runs in the spend window", "Try 30 days"],
   "spend-whatif-unknown.viewer": ["Unknown model", "acme/model-1"],
   "spend-whatif-seeded.viewer": ["seeded", "Seeded range, no ledgered run yet"],

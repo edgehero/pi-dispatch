@@ -131,7 +131,7 @@ For a one off task on your own machine, plain pi is enough.
 ## Common worries
 
 **Do I need to be a developer?** To use it day to day, mostly not: the web page is where you read what happened, answer
-questions, approve, add a schedule and change limits, and you describe a recurring job in plain sentences. To set it up
+questions, approve, add a schedule, change limits and choose what each kind of job may use, and you describe a recurring job in plain sentences. To set it up
 you need someone comfortable in a terminal, and now and then for a setting the page does not offer. And what it hands you
 is code, so someone should be able to judge it before it ships.
 
@@ -237,10 +237,10 @@ updates by itself ([updates](docs/console.md#updates)).
 
 ![One project: what it has spent, its runs of the last day, what its runs loaded on each machine and where they differ, its members and its limits](docs/images/console/console-project.png?v=2026-11-04-800c)
 
-**A trigger:** what starts it, what it runs and what it has cost. A schedule also gets a button that fires it now
-([triggers](docs/triggers.md)).
+**A trigger:** what starts it, what it has cost and [what its jobs get](#what-a-job-gets) on each machine, which you can change right there.
+A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
-![One trigger's page: what starts it, the flow it runs, its limits and what it has cost so far](docs/images/console/console-trigger.png?v=2026-11-03)
+![What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, the staged packages, the outside systems with linear switched on, pi's own tools with bash off, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard](docs/images/console/console-trigger.png?v=2026-11-04-800c)
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
 unless you set it up otherwise, so reaching it from a phone takes a private tunnel
@@ -269,7 +269,7 @@ PI_GLOBAL_PI_DIR=/absolute/path/to/my-dispatch/pi-global
 | Your MCP servers, with credentials as references only | Secrets of any kind: the copy is read by jobs, so it holds none |
 
 **Read the list it prints.** An extension is code, and it runs in every job, beside work that may come from a stranger's issue text. Skip
-extensions with `--no-extensions`, or keep one trigger's jobs out of your packages with `"packages": false`.
+extensions with `--no-extensions`, or keep one trigger's jobs out of your packages with the switch on its page (`"packages": false` in the triggers file).
 
 Your projects still win. A job layers your setup under the project's own `.pi/` folder, so a project's skill replaces yours of the same
 name, and a small safety floor sits under both, which neither can remove. To add a language or a system tool rather than a pi setting, build
@@ -295,6 +295,29 @@ same, so it does not read as fine. A project's page says when its runs differ fr
 **What the list holds:** the names of what you set up, the tools those brought, and how many of everything else. It keeps no text from an issue, which a
 stranger may have written, and a repository's own skills and extensions are only counted: to see them, open the repository. A run that
 ended before it could report, or one from an older release, says its list was not recorded ([what the card can say, and what to do](docs/console.md#what-a-run-loaded)).
+
+**You can change what a trigger's jobs get from its page.** The further out of the loop you go, the more this matters, because it is how you
+decide what a job may use without watching it. Its **What its jobs get** card has a line for each thing: the model and the most
+one job may spend (its job cap), the flow, your packages, the outside systems, the tools. Each machine gets a label saying whether its jobs would
+start with the same things as on your other machines, and one that has not told the console what it has is marked unknown, so silence never passes for a
+match. Under each line is what a recent run really had, so a setting and what it did sit together. Nothing is saved while you click: your changes collect
+at the foot of the card, and you can discard them.
+
+**You see it in words first, and confirm once.** **Preview the change** says each change in a sentence, and says so when it gives
+jobs more than they had. It says when the change takes effect and which jobs already in line would be refused, warns about what would stop these jobs on the
+machine the console runs on, and says how to undo it. One
+**Confirm** saves it, the console records who did, and **Undo** puts it back, or says what to edit by hand where it cannot.
+
+![The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a waiting job that would now be refused, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button](docs/images/console/console-trigger-change.png?v=2026-11-04-800d)
+
+**It stops what would only fail later, before it costs you anything.** A job cap can only lower the limit you set for all jobs. If a trigger's model is too
+expensive for even one request under its cap, the page refuses the change and names the amount a short task needs, rather than letting a job start and fail.
+If the page is out of date, it asks you to reload rather than write over someone else's change.
+
+**Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models,
+its outside systems, which tools its jobs lose or whether they load your packages: one that tries is refused before you are asked. You set those on the page,
+or your technical person sets them in the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
+They can still move a trigger's flow, provider and model, and only after you confirm.
 
 ## How to use it
 
@@ -330,18 +353,23 @@ happening ends it sooner. After that, you need your token or a new link, which `
 | **pi** | The open source coding agent that does the work here. pi-dispatch runs it, and adds no agent of its own |
 | **Job**, or **run** | One piece of work, from start to finish |
 | **Trigger** | A rule for what starts a job: a schedule, a label, a comment |
+| **Triggers file** | `triggers.json`, the file on a machine that holds your triggers. The console edits it for you |
 | **Flow** | A short text file in your project with the standing instructions for a kind of job |
 | **Skill** | A short text file that teaches the agent one kind of task. A job's flow is one of them |
 | **Extension** | An add-on for pi, which can give the agent new tools |
 | **Overlay** | The console's word for your setup on one machine, which jobs there start with |
 | **Host** | The console's word for a machine that runs jobs |
 | **MCP server** | An outside system a job can connect to |
+| **Package** | An add-on you installed with `pi install`, which can bring extensions, skills and tools |
 | **Tool** | One thing the agent can do, such as read a file |
 | **Container** | The sealed box a job runs in, thrown away afterwards |
 | **Forge** | The place your code lives: GitHub, GitLab, Forgejo or Azure DevOps |
 | **Repository** | A project's code and its history, on a forge or in a folder (a "git repository") |
 | **Base commit** | The version of a repository a job started from |
 | **Staged** | Set up on a machine, ready for its jobs to load |
+| **Job cap** | The most one job may spend, in dollars. A trigger can only lower the limit you set for all jobs |
+| **Fallback model** | The model a job tries on its next attempt when the one before it is rate limited or out of quota |
+| **Doctor** | pi-dispatch's own check of a machine's setup, which also says what that machine's jobs can load |
 | **Pull request** | A proposed change to a repository, for a person to review |
 | **Merge** | Accepting a pull request into the project. pi-dispatch never does this |
 | **Issue**, **label** | A note about work to do on a forge, and a tag you can put on it |
@@ -482,6 +510,9 @@ model is one reviewed edit ([`docs/model-roles.md`](docs/model-roles.md)).
            "fallbackModels": ["openai/gpt-4o"] } }
 ```
 
+On a trigger's page in the console, a person can change its `model`, `models` and `fallbackModels` with one preview and one Confirm. No `dispatch_*` tool
+can set the list or the fallbacks ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)).
+
 **Fallbacks** are tried in order on the job's next attempt when a provider is rate limited, out of quota or overloaded. Each is chosen at pickup,
 before a credential is minted, a repository cloned or budget reserved, and must pass the same checks as the primary: on `run.models`, in the pinned
 catalog with a cost bound and a credential, allowed by egress, with endpoint room. A failed model cools down for a while. An attempt may call only
@@ -494,7 +525,7 @@ under one cap, and the Models page shows the comparison. A person adopts it, and
 ## Triggers
 
 **A trigger is what starts a job.** All standing triggers live in one `triggers.json`, which the worker and the receiver read
-live, and which the console and the panel can edit. Each entry is an `{ on, run }` pair: **`on` says what fires it**, and
+live, and which the console and the panel can edit, or you by hand. Each entry is an `{ on, run }` pair: **`on` says what fires it**, and
 **`run` says what it runs**.
 
 ```jsonc
@@ -528,10 +559,15 @@ live, and which the console and the panel can edit. Each entry is an `{ on, run 
 - `mcp`, `forge`: MCP servers for its jobs ([MCP](docs/mcp.md)).
 - `excludeTools`: removes named built in tools ([excluded tools](docs/exclude-tools.md)).
 - `packages`: opts out of the staged pi packages ([workflows](docs/workflows.md)).
-- `models`, `maxCostUsd`: the models a job may call, and its own dollar cap ([triggers](docs/triggers.md#optional-run-fields)).
+- `provider`, `model`: the model its jobs run on ([choosing the model](docs/triggers.md#choosing-the-model-and-the-turn-limit)).
+- `models`, `fallbackModels`, `maxCostUsd`: the models a job may call, the ones to try when one is rate limited, and its own dollar cap ([limiting models](docs/triggers.md#limiting-which-models-a-job-may-call), [fallback models](docs/model-failover.md), [a dollar cap](docs/triggers.md#a-dollar-cap-per-job)).
 - `replicas`: races independent sandboxes on one event ([replicas](docs/replicas.md)).
 - `waitFor`: holds a job, unstarted and unbilled, until a time or your own check ([waiting](docs/wait-for.md)).
 - `instructions`, `skillsDir`, `github`, `portfolio`: the rest are in [`docs/triggers.md`](docs/triggers.md#optional-run-fields).
+
+On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages` and
+`excludeTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
+so on a fleet where each host keeps its own, a host keeps what it has until its copy changes. A few others have the page's Edit form. The rest change in the file, and editing the file works as it always has.
 
 A whole project can get one environment from your secrets manager, granted once and read fresh at each job start. Quiet
 hours pause a repo or folder by weekday and timezone ([`docs/pause-windows.md`](docs/pause-windows.md)). The
@@ -641,8 +677,8 @@ instructions ([`docs/global-pi-overlay.md`](docs/global-pi-overlay.md)).
   exact version, always with `--ignore-scripts` ([`docs/workflows.md`](docs/workflows.md)).
 - **A repo's own `.pi/extensions` do run**, because the checkout is the default branch and merging is the gate. Nothing installs packages because a repo asks. On a run's
   record they are counts, and a failed one's button opens the commit that ran ([what a run loaded](docs/console.md#what-a-run-loaded)).
-- **MCP servers are yours, not the repo's.** A repo's `.pi/mcp.json` is never read for a job, and a trigger names the servers its jobs connect
-  ([`docs/mcp.md`](docs/mcp.md)).
+- **MCP servers are yours, not the repo's.** A repo's `.pi/mcp.json` is never read for a job, and a trigger names the servers its jobs connect:
+  in the file, or by a person on its page in the console, never by a `dispatch_*` tool ([`docs/mcp.md`](docs/mcp.md)).
 - **Sessions save the full transcript to disk**, which is a real disclosure: read [`docs/sessions.md`](docs/sessions.md) before you turn them on.
 
 ## Run as a service

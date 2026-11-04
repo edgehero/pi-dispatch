@@ -35,7 +35,7 @@
  */
 import { allowlistEntryFor, egressRefusalFor, packageRunnerHosts } from "./egress-allowlist.mjs";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, forgeMcpEgressUrl, forgeMcpServer, gitlabUrlProblem, jobMcpDocument, MCP_SERVER_NAME_RE, readOverlayMcp } from "./mcp-config.mjs";
-import { MCP_SERVERS_MAX, mcpServerToolPattern } from "./triggers.mjs";
+import { MCP_SERVERS_MAX, RESERVED_ENV_NAMES, mcpServerToolPattern } from "./triggers.mjs";
 
 /**
  * Errnos a read of the overlay may pass on a second try. Restated from model-catalog.mjs `OVERLAY_TRANSIENT_READ_CODES`
@@ -76,6 +76,23 @@ export function jobProviders(job, { defaultProvider = null, allowedModels = null
 	const list = Array.isArray(job?.models) ? job.models : Array.isArray(allowedModels) ? allowedModels : null;
 	const listed = list === null ? everyProvider : list.map((ref) => (typeof ref === "string" ? ref.split("/")[0] : ref?.provider));
 	return [...new Set([job?.provider ?? defaultProvider, ...listed].filter((p) => typeof p === "string" && p !== ""))];
+}
+
+/**
+ * The names a job's own container holds for itself, which no server may be handed: what `makeMcpCheck`'s `reserved` answers,
+ * one function for the worker's pickup and the console's preview. `readModels` reads the overlay models.json. A read that may
+ * pass on a retry is thrown to the check, which retries the job; any other failure adds no overlay names, and the model gates,
+ * which run first, refuse every job such a file breaks.
+ */
+export function reservedJobNames(job, { readModels, defaultProvider = null, allowedModels = null, everyProvider = [], candidatesOf = () => [] }) {
+	let overlayModels = null;
+	try {
+		overlayModels = readModels();
+	} catch (error) {
+		if (MCP_TRANSIENT_READ_CODES.has(error?.code)) throw error;
+	}
+	const providers = jobProviders(job, { defaultProvider, allowedModels, everyProvider });
+	return new Set([...RESERVED_ENV_NAMES, ...providerKeyNames({ providers, candidatesOf, overlayModels })]);
 }
 
 /**
@@ -221,9 +238,10 @@ function exposuresOf(server) {
  * `autoEnableCodemode` is not false) and tool_search when some server has a deferred one; the resource tools take their
  * server's own exposure, and a `hidden` server's resources are never offered. Judged only for what the trigger's
  * exclusions take away: a server the overlay leaves no way in is the overlay's, not this trigger's to be refused for.
- * Returns `{ name, why }` for the first server the exclusions cut off, or null.
+ * Returns a `{ name, why }` for each server the exclusions cut off, in the list's order. The console says each one it did
+ * not already cut (`trigger-environment-plans.mjs`); a pickup refuses on the first, `mcpRouteProblem`.
  */
-export function mcpRouteProblem(servers, names, excluded, { autoEnableCodemode = true } = {}) {
+export function mcpRouteCuts(servers, names, excluded, { autoEnableCodemode = true } = {}) {
 	const routes = (removed) => {
 		const all = names.map((name) => exposuresOf(servers[name]));
 		const has = (kind) => all.some(({ own, tools }) => own === kind || tools.includes(kind));
@@ -242,8 +260,12 @@ export function mcpRouteProblem(servers, names, excluded, { autoEnableCodemode =
 	};
 	const before = routes(new Set());
 	const after = routes(excluded);
-	const i = names.findIndex((_, k) => before[k] && !after[k]);
-	return i < 0 ? null : { name: names[i], why: "run.excludeTools removes every tool that reaches it (its own, the discovery tools that reach them, and read_mcp_resource)" };
+	return names.filter((_, k) => before[k] && !after[k]).map((name) => ({ name, why: "run.excludeTools removes every tool that reaches it (its own, the discovery tools that reach them, and read_mcp_resource)" }));
+}
+
+/** The first server `mcpRouteCuts` finds, or null: what a pickup refuses on. */
+export function mcpRouteProblem(servers, names, excluded, options) {
+	return mcpRouteCuts(servers, names, excluded, options)[0] ?? null;
 }
 
 /**

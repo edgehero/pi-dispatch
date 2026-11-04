@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync as realReadFileSync, rmSync, statSync as realStatSync, unlinkSync as realUnlinkSync, utimesSync as realUtimesSync, writeFileSync as realWriteFileSync } from "node:fs";
+import { mkdirSync, readFileSync as realReadFileSync, rmSync, statSync as realStatSync, unlinkSync as realUnlinkSync, utimesSync as realUtimesSync, writeFileSync as realWriteFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeTriggers, disarmTrigger, makeCheckOnceSpent, makeDisarmOnce, readDisarmState } from "../src/triggers-file.mjs";
 import { parseTriggers } from "../src/triggers.mjs";
@@ -144,6 +144,74 @@ test("writeTriggers scaffolds a missing file from empty (the operator CRUD repai
 	assert.equal(written.triggers.length, 1, "a missing file plus 'add trigger' must scaffold the first entry, not refuse");
 	assert.equal(`${T_PATH}.tmp` in fs.files, false, "the tmp file is renamed away -- the write stays atomic");
 });
+
+// Only a missing file may start from nothing. A read that failed once made the file go from every trigger to none on an
+// `{ ok: true }`: the `expect` re-read after it saw the file as it was, and passed. Each row has that shape: the one read fails
+// and every other one, the re-check's included, succeeds.
+for (const code of ["EIO", "EACCES", "EISDIR", undefined]) {
+	for (const withExpect of [false, true]) {
+		test(`writeTriggers refuses when its read fails with ${code ?? "no code"} (${withExpect ? "the re-check passing" : "no re-check"}): no mutate, no write, the file whole`, () => {
+			const orig = fileOf([cronTrigger(), labelTrigger()]);
+			const fs = triggerFs({ [T_PATH]: orig });
+			if (code) fs.failNext("readFileSync", code, 1);
+			else {
+				const real = fs.readFileSync;
+				fs.readFileSync = (path) => {
+					fs.readFileSync = real;
+					throw new Error("no code at all");
+				};
+			}
+			let mutated = false;
+			const res = writeTriggers({ triggersPath: T_PATH, fs, expect: withExpect ? [{ path: T_PATH, text: orig }] : null, mutate: () => {
+				mutated = true;
+				return [];
+			} });
+			assert.equal(res.unreadable, true, JSON.stringify(res));
+			assert.equal(res.invalid, `the triggers file ${T_PATH} could not be read (${code ?? "read-error"}), so its triggers cannot be kept; nothing was written`);
+			assert.equal(mutated, false, "mutate is owed a real list, and never saw an empty one");
+			assert.equal(fs.files[T_PATH], orig);
+			assert.deepEqual(Object.keys(fs.files), [T_PATH], "neither a tmp file nor the lock is left");
+		});
+	}
+}
+
+test("writeTriggers refuses a read that keeps failing too, on a real directory where the file should be", () => {
+	const dir = tempDir("pd-eio-dir-");
+	const path = join(dir, "triggers.json");
+	mkdirSync(path);
+	const res = writeTriggers({ triggersPath: path, mutate: () => [labelTrigger()] });
+	assert.match(res.invalid, /could not be read \(EISDIR\), so its triggers cannot be kept; nothing was written/);
+	assert.equal(realStatSync(path).isDirectory(), true);
+});
+
+test("a file that does not parse is still rebuilt from empty: the recorded repair, a different thing from a failed read", () => {
+	const fs = triggerFs({ [T_PATH]: "{ this is not json" });
+	assert.deepEqual(writeTriggers({ triggersPath: T_PATH, fs, mutate: (list) => [...list, labelTrigger()] }), { ok: true });
+	assert.equal(JSON.parse(fs.files[T_PATH]).triggers.length, 1);
+});
+
+for (const [what, method, code] of [["the tmp file's write", "writeFileSync", "ENOSPC"], ["the rename", "renameSync", "EIO"], ["the rename, twice with EPERM", "renameSync", "EPERM"]]) {
+	test(`writeTriggers: a failure of ${what} throws with the old file whole, and leaves neither a tmp file nor the lock`, () => {
+		const orig = fileOf([cronTrigger(), labelTrigger()]);
+		const fs = triggerFs({ [T_PATH]: orig });
+		fs.failNext(method, code, 2);
+		assert.throws(() => writeTriggers({ triggersPath: T_PATH, fs, mutate: () => [labelTrigger()] }), (err) => err.code === code);
+		assert.equal(fs.files[T_PATH], orig);
+		assert.deepEqual(Object.keys(fs.files), [T_PATH]);
+	});
+}
+
+for (const [what, method, code] of [["its read", "readFileSync", "EIO"], ["the tmp file's write", "writeFileSync", "ENOSPC"], ["the rename", "renameSync", "EIO"]]) {
+	test(`disarmTrigger: a failure of ${what} refuses and never throws, with the old file whole`, async () => {
+		const orig = fileOf([onceTrigger(), cronTrigger()]);
+		const fs = triggerFs({ [T_PATH]: orig });
+		fs.failNext(method, code, 2);
+		const res = await disarmTrigger({ triggersPath: T_PATH, index: 0, number: 40, flow: "deploy", jobId: "j1", at: AT, fs });
+		assert.match(res.invalid, new RegExp(`\\(${code}\\)`));
+		assert.equal(fs.files[T_PATH], orig);
+		assert.deepEqual(Object.keys(fs.files), [T_PATH]);
+	});
+}
 
 test("writeTriggers returns { invalid } for a mutate result the loaders would reject, file untouched", () => {
 	const orig = fileOf([labelTrigger()]);

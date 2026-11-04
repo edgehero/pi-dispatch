@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { createFleetReader, readWaiting, readWaitingRow, RUN_ID_RE, WAITING_DISCOVERY_TTL_MS, WAITING_DUE_GRACE_MS, WAITING_PER_LIST_MAX, WAITING_QUEUES_MAX, WAITING_STATES, WAITING_TTL_MS } from "../src/read-model.mjs";
@@ -674,6 +675,48 @@ test("snapshot({ waiting: true }): the waiting jobs once per 5 s for the same qu
   t += WAITING_TTL_MS;
   assert.equal(Object.hasOwn(await fleet.snapshot(), "waiting"), false);
   assert.equal(ranges(), before, "past the window a call that does not ask reads none either");
+});
+
+test("waiting(): the waiting jobs and nothing a snapshot reads besides, sharing the snapshot's one read, and a failed read is no empty line", async () => {
+  const logsDir = tempDir("pd-800-waiting-only-");
+  const v = fakeValkey();
+  addJob(v, "pi-jobs", "gh-1", { record: rec("host-slot") });
+  const redis = snapshotValkey(v);
+  let t = AT;
+  let queueCalls = 0;
+  const reader = createFleetReader(
+    { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json"), schedulerStallMax: 2 },
+    { makeQueueFn: (conn, opts) => {
+      const queue = quietQueue(conn, opts);
+      for (const key of Object.keys(queue)) {
+        if (typeof queue[key] !== "function" || key === "toKey" || key === "close") continue;
+        const real = queue[key];
+        queue[key] = (...args) => { queueCalls += 1; return real(...args); };
+      }
+      return queue;
+    }, parseConnectionFn: () => ({}), redisFn: () => redis, readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => [], nowFn: () => t },
+  );
+  const first = await reader.waiting();
+  assert.deepEqual(first.rows.map((r) => r.jobId), ["gh-1"]);
+  assert.equal(queueCalls, 0, "no queue's counts, no workers, no schedulers");
+  const zranges = () => v.redis.log.filter(([cmd, key]) => cmd === "zrange" && key === "bull:pi-jobs:delayed").length;
+  assert.equal(zranges(), 1);
+  assert.equal(await reader.waiting(), first, "inside the window: the same read");
+  assert.equal(zranges(), 1);
+  t += WAITING_TTL_MS;
+  // Nothing waiting is a list, empty, and read as whole by the skew check.
+  nodeFs.writeFileSync(join(logsDir, "none.json"), JSON.stringify({ triggers: [] }));
+  const empty = fakeValkey();
+  const whole = readerOf(logsDir, snapshotValkey(empty), { now: () => t });
+  const none = await whole.waiting();
+  assert.deepEqual(none.rows, []);
+  assert.deepEqual(await whole.triggerSkew(0, none), { rows: [], queued: [], incomplete: false });
+  // A read that failed says so, and the skew check calls that incomplete: "could not read" is not "nothing waiting".
+  const broken = snapshotValkey(fakeValkey());
+  broken.pipeline = () => { throw new Error("ECONNREFUSED"); };
+  const down = readerOf(logsDir, broken, { now: () => t });
+  assert.deepEqual(await down.waiting(), { unreachable: true });
+  assert.deepEqual(await down.triggerSkew(0, await down.waiting()), { rows: [], incomplete: true });
 });
 
 test("snapshot({ waiting: true }): an unreachable read is kept for the window like a good one, so a Valkey that times out is not sent the whole pipeline on every snapshot", async () => {

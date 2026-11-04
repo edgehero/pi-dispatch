@@ -323,6 +323,7 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   } else steps.push(step("provider", "to-do", NO_DOCTOR_YET("whether the provider key is found"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
   // 7. A first trigger arms matching deliveries; a manual run can already be queued without one.
   if (triggerList.length > 0) steps.push(step("trigger", "ready", [`The triggers file holds ${triggerList.length} ${triggerList.length === 1 ? "trigger" : "triggers"}.`]));
+  else if (s?.triggers?.unreadable) steps.push(step("trigger", "not-yet", [`The triggers file could not be read here${typeof s.triggers.unreadable === "string" ? ` (${s.triggers.unreadable})` : ""}, so this cannot say which triggers it holds.`]));
   else if (s?.triggers?.invalid) steps.push(step("trigger", "not-yet", ["The triggers file does not load, so no trigger can match."]));
   else steps.push(step("trigger", "to-do", ["A matching trigger starts a scheduled or forge job: a cron trigger for a folder, or a label, comment or pull request trigger for a repository. A manual run can be queued without a trigger."]));
   // 8. The forge credentials: only a forge's triggers need them.

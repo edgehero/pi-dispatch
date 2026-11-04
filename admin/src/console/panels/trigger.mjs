@@ -1,7 +1,10 @@
 import { TRIGGER_RECIPES } from "../../trigger-recipes.mjs";
 /** Trigger pages keep prompt text private and use the same add/edit contracts as the tools (#750). */
 import { triggerWhoMayFire } from "../../trigger-policy.mjs";
-import { outcomeWord, reasonWords, recordReason } from "../../words.mjs";
+import { TRIGGER_GETS_WORDS } from "../../trigger-gets-view.mjs";
+import { CARD_FIELDS } from "../../trigger-edit-core.mjs";
+import { triggerGetsDrawn } from "./trigger-gets.mjs";
+import { outcomeWord, reasonWords, recordReason, refusalLine } from "../../words.mjs";
 import { planTriggerAdd } from "../../write-plans.mjs";
 import { triggerBundleOf } from "../../read-model.mjs";
 import { BACKENDS } from "@edgehero/pi-dispatch/backends";
@@ -17,8 +20,12 @@ import { canAct, shownPath, runLink, moneyHtml, timeHtml } from "./common.mjs";
 import { actForm, field, area, table, facts } from "./config-ui.mjs";
 const card = (title, body) => ui.card({ title, body });
 const detail = (v) => v.data?.triggerDetail ?? {};
-const trigger = (v) =>
-  detail(v).trigger ?? v.data?.snapshot?.triggers?.triggers?.[v.query?.index];
+// The row at this place in the file, as the snapshot's detail found it by the index each row carries, or with Valkey down the row the card read from the
+// file itself, since nothing about that row needs Valkey. REJECTED: the display list's place, which skips an entry it cannot use: with one above it, this
+// page drew the next row's facts and its Delete under this row's number, while the action refused this row.
+const trigger = (v) => detail(v).trigger ?? v.data?.triggerGets?.trigger;
+// What failed, when the snapshot did: not the file, which the card has just read.
+const othersUnread = (v) => !v.data?.snapshot && Boolean(v.data?.triggerGets);
 const defaults = (v) =>
   v.data?.triggerEditor?.defaults ??
   v.data?.snapshot?.triggerEditor?.defaults ??
@@ -31,11 +38,36 @@ const show = (x) =>
     : typeof x === "object"
       ? JSON.stringify(x)
       : String(x);
+/**
+ * What an agent's page says of a field its read does not hold. `agentReadProjection` drops what it cannot vouch for: `on.phrase` and `run.image` are
+ * accepted verbatim by the writer, `progress` and `secrets` hold prose and references elsewhere, `forge` is not on its list and the editor's defaults go
+ * whole. So for an agent a missing key says nothing of the file. REJECTED: "not set", which is what this page said of `run.image` and `run.progress`
+ * where the file sets them, and `[]` of a `run.mcp` naming a server. REJECTED too: widening the projection to fill these rows. It is what a model reads
+ * from `dispatch_triggers`, and it goes by a field's name at any depth of any data, so one page's wording is no reason to move it.
+ */
+const AGENT_UNREAD = "not in an agent’s read";
+const isAgent = (v) => v.role === "agent";
+/** One row of what the file says of `run.<k>`, beside the deployment's default where this view can read that. */
+function fieldRow(v, t, k) {
+  const value = isAgent(v) && t[k] === undefined
+    ? AGENT_UNREAD
+    // The display holds these lists only where the file names something, so an empty one is names the read dropped: no server's name reaches an agent.
+    : isAgent(v) && Array.isArray(t[k]) && t[k].length === 0
+      ? `set, and its names are ${AGENT_UNREAD}`
+    : ["instructions", "task"].includes(k)
+      ? (t[k] ? "set (operator only)" : "not set")
+      : ["folder", "skillsDir"].includes(k)
+        ? show(shownPath(t[k]))
+        : show(k === "kind" ? t.forge ?? "local" : t[k]);
+  return [`run.${k}`, isAgent(v) ? value : `${value}; deployment default: ${show(defaults(v)[k])}`];
+}
 const gateText = triggerWhoMayFire;
+/** Who may fire it, where this view can say. Its forge decides that for all but a schedule, and with none to read the rule would read as GitHub's. */
+const whoMayFire = (v, t) => (isAgent(v) && t.type !== "cron" ? null : gateText(t));
 export function triggerTitle(v) {
   const t = trigger(v);
   return t
-    ? `${t.type} ${t.phrase ?? t.id ?? t.action?.join(", ") ?? ""} → ${t.flow ?? t.command ?? "deployment default"}${t.forge ? ` · ${t.forge}` : ""} · row ${v.query.index + 1}`
+    ? `${t.type} ${t.phrase ?? t.id ?? t.action?.join(", ") ?? ""} → ${t.flow ?? t.command ?? (isAgent(v) ? AGENT_UNREAD : "deployment default")}${t.forge ? ` · ${t.forge}` : ""} · row ${v.query.index + 1}`
     : "Trigger unavailable";
 }
 export function triggerOn(v) {
@@ -44,24 +76,28 @@ export function triggerOn(v) {
     return card(
       "What starts it",
       html`<p>
-        ${fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? "This row does not exist. Return to Configuration."}
+        ${fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (v.query?.index < v.data?.snapshot?.triggers?.count ? "The file’s entry at this row is not a usable trigger, so this page has nothing to show or change. Return to Configuration." : "This row does not exist. Return to Configuration.")}
       </p>`,
     );
   return card(
     "What starts it",
     html`${facts([
       ["Kind", t.type],
-      ["Phrase or schedule", t.phrase ?? t.pattern ?? show(t.action)],
-      ["Forge", t.forge ?? "local"],
+      ["Phrase or schedule", t.phrase ?? t.pattern ?? (isAgent(v) && t.action === undefined ? AGENT_UNREAD : show(t.action))],
+      ["Forge", isAgent(v) ? AGENT_UNREAD : t.forge ?? "local"],
       ["Repository", t.repository ?? "any allowed repository"],
       [
         "Who may fire it",
-        gateText(t),
+        whoMayFire(v, t) ?? AGENT_UNREAD,
       ],
-    ])}${t.type === "comment" ? html`<p>Write <code>${`${t.phrase} <flow>`}</code> to choose another flow named by a trigger in this file. Otherwise this trigger's default flow runs.</p>` : null}`,
+    ])}${t.type === "comment" ? html`<p>Write ${t.phrase ? html`<code>${`${t.phrase} <flow>`}</code>` : "its phrase and a flow"} to choose another flow named by a trigger in this file. Otherwise this trigger's default flow runs.</p>` : null}`,
   );
 }
 export function triggerRuns(v) {
+  // Runs are matched by what the row says, so with no row in the snapshot neither "no runs" nor "the queue could not be read" is known, whatever the
+  // history and the queue hold: the file failed, or the row is not there. REJECTED: drawing the card's zeroes, which denied a run that exists. A file
+  // that does not load still gives the page its row, so that one says it. Valkey down is `othersUnread`, and those words are the card's own below.
+  if (!v.data?.triggerDetail && !othersUnread(v)) return trigger(v) ? card("Runs it started", html`<p>This page could not match runs to this row, so it says nothing of them.</p>`) : null;
   const d = detail(v);
   const rows = d.lastRuns ?? [];
   return card(
@@ -88,7 +124,7 @@ export function triggerRuns(v) {
               <td>${recordReason(r) ? reasonWords(recordReason(r)).sentence ?? `No explanation is available for ${recordReason(r)}.` : "No reason was recorded."}</td>
             </tr>`,
         ),
-        "No runs were found in the available history.",
+        Array.isArray(d.history) || !othersUnread(v) ? "No runs were found in the available history." : TRIGGER_GETS_WORDS.historyUnread,
       )}
       <p>
         Jobs in line now:
@@ -99,21 +135,22 @@ export function triggerRuns(v) {
       </p>`,
   );
 }
+/**
+ * The fields of a trigger's `run`, in three groups, and each key has one editor: `CARD_FIELDS` on What its jobs get (`p-trigger-gets`),
+ * `EDIT_FIELDS` on the Edit form (`p-trigger-edit`), and `HAND_FIELDS` in the file alone. A new trigger has no card yet, so the add form
+ * keeps its flow and its model (`ADD_FIELDS`). `trigger-edit` still takes those keys: `dispatch_trigger_edit` keeps its scope, and only
+ * this page's form narrows. REJECTED: leaving them on both forms, where two previews of one key can each pass with the other's words stale.
+ */
 export const EDIT_FIELDS = Object.freeze([
-  "flow",
   "backend",
-  "provider",
-  "model",
   "maxTurns",
   "progress",
   "statusComment",
   "steer",
   "recover",
 ]);
+const ADD_FIELDS = Object.freeze(["flow", "backend", "provider", "model", "maxTurns", "progress", "statusComment", "steer", "recover"]);
 export const HAND_FIELDS = Object.freeze([
-  "maxCostUsd",
-  "models",
-  "mcp",
   "secrets",
   "secretBundle",
   "resume",
@@ -121,7 +158,6 @@ export const HAND_FIELDS = Object.freeze([
   "image",
   "waitFor",
   "replicas",
-  "packages",
   "skillsDir",
   "instructions",
   "task",
@@ -131,44 +167,36 @@ export const HAND_FIELDS = Object.freeze([
   "command",
   "portfolio",
   "github",
-  "fallbackModels",
   "secretsProfile",
   "gates",
   "gateTimeout",
   "gateBudgetRaiseUsd",
-  "excludeTools",
 ]);
 export function triggerRun(v) {
   const t = trigger(v);
   if (!t) return html``;
-  const def = defaults(v);
-  const backend = t.backend ?? def.backend ?? "local";
+  const backend = t.backend ?? defaults(v).backend ?? "local";
   const venue = BACKENDS[backend];
-  const hostRows = triggerSandboxHosts(t, v.data?.snapshot);
+  const hostRows = triggerSandboxHosts(t, v.data?.snapshot ?? {});
   const bundle = triggerBundleOf(t, v.data?.snapshot?.secretBundles);
   const bundleNames = (v.data?.snapshot?.secretBundles?.bundles ?? []).map(b=>`${b.project ?? "project"}: ${b.id}`).join(", ");
   return card(
     "What it runs",
-    html`<h3>Edit here</h3>
+    // Each key has one editor, and a view with no card has none of these in a form: so their rows go where the card's would have been, read-only.
+    html`${triggerGetsDrawn(v) ? html`<p>The flow, the model and its cap, the staged packages, the MCP servers and the tools are in What its jobs get.</p>` : html`<h3>What its jobs get</h3>${facts(CARD_FIELDS.map((k) => fieldRow(v, t, k)))}`}<h3>Edit here</h3>
       ${facts(
         EDIT_FIELDS.filter(
           (k) => t.type !== "cron" || !["statusComment", "recover"].includes(k),
-        ).map((k) => [
-          `run.${k}`,
-          `${["folder", "skillsDir"].includes(k) ? show(shownPath(t[k])) : show(k === "kind" ? t.forge ?? "local" : t[k])}; deployment default: ${show(def[k])}`,
-        ]),
+        ).map((k) => fieldRow(v, t, k)),
       )}
       <h3>By hand</h3>
-      ${facts(
-        HAND_FIELDS.map((k) => [
-          `run.${k}`,
-          `${["instructions", "task"].includes(k) ? (t[k] ? "set (operator only)" : "not set") : ["folder", "skillsDir"].includes(k) ? show(shownPath(t[k])) : show(k === "kind" ? t.forge ?? "local" : t[k])}; deployment default: ${show(def[k])}`,
-        ]),
-      )}
+      ${facts(HAND_FIELDS.map((k) => fieldRow(v, t, k)))}
       <h3>Its runs' sandbox</h3>
       ${hostRows.length ? facts(hostRows.map((h) => [h.name, `${h.backend ?? "venue not published"}${h.deploymentDefault ? " (that host's deployment default)" : " (trigger override)"}; ${h.blessed === null ? "blessing not published" : h.blessed ? "blessed" : "not blessed"}${h.capabilityUnknown ? "; required profile capabilities not published" : ""}${h.backend && BACKENDS[h.backend] ? `; ${Object.entries(BACKENDS[h.backend].serves).map(([key, value]) => `${key}: ${value === "image" ? "with the image" : value}`).join(", ")}` : ""}`])) : html`<p>No live host blessing facts are available.</p>`}
-      <p>These live host declarations show published venue choices; a host that does not bless the selected venue refuses it before spend. ${t.type === "cron" ? "The schedule's owning host runs a cron trigger's local folder; the registry alone does not prove which host has that folder." : "Hosts missing its required secret or wait profile are excluded where their capability list is published."}</p>
-      <p>
+      <p>These live host declarations show published venue choices; a host that does not bless the selected venue refuses it before spend. ${t.type === "cron" ? "The schedule's owning host runs a cron trigger's local folder; the registry alone does not prove which host has that folder." : isAgent(v) ? null : "Hosts missing its required secret or wait profile are excluded where their capability list is published."}</p>
+      ${isAgent(v) && !t.backend
+        ? html`<p>The deployment’s default venue is ${AGENT_UNREAD}.</p>`
+        : html`<p>
         ${ui.icon("shield")}
         <a href="${ui.pageHref(v.pages, "venue", { name: backend })}"
           >${backend}</a
@@ -186,7 +214,7 @@ export function triggerRun(v) {
           : "This venue has no sandbox shell for reopening a workspace."}
         Workspaces are kept for ${detail(v).sandbox?.retentionHours ?? 24} hours; 0
         keeps none.
-      </p>
+      </p>`}
       ${v.role === "operator" ? html`<p><a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ index: String(v.query.index) })}`}">Prepare a sandbox as this trigger</a></p>` : null}
       ${backend.startsWith("openshell")
         ? html`<p>
@@ -199,15 +227,15 @@ export function triggerRun(v) {
         ${t.once
           ? "A one-shot never races."
           : `${t.replicas ?? 1} independent sandbox(s) race each event, on separate branches and, for development flows, separate pull requests.`}
-        Secret profile: ${t.secretsProfile ?? "none"}. Bundle:
+        ${isAgent(v) ? null : html`Secret profile: ${t.secretsProfile ?? "none"}. Bundle:
         ${t.secretBundle === false
           ? "opted out"
-          : (bundle?.id ?? (bundleNames ? `By event project: ${bundleNames}` : "no declared project bundle"))}.
+          : (bundle?.id ?? (bundleNames ? `By event project: ${bundleNames}` : "no declared project bundle"))}.`}
       </p>`,
   );
 }
 export function editFields(v, t = {}, group = null) {
-  return html`${EDIT_FIELDS.filter(
+  return html`${(group === null ? EDIT_FIELDS : ADD_FIELDS).filter(
     (k) => (t.type !== "cron" || !["statusComment", "recover"].includes(k)) && (group === null || (group === "options" ? ["progress","statusComment","steer","recover"].includes(k) : !["progress","statusComment","steer","recover"].includes(k))),
   ).map((k) =>
     field(k, k === "backend" ? "Venue (run.backend)" : ({ progress: "Report phases (run.progress)", statusComment: "Status comment (run.statusComment)", steer: "Take messages (run.steer)", recover: "Recover (run.recover)" }[k] ?? `run.${k}`), {
@@ -249,11 +277,11 @@ export function triggerEdit(v) {
     ? html``
     : card(
         "Edit",
-        actForm("trigger-edit", {
+        html`<p class="muted">${TRIGGER_GETS_WORDS.reloadDrops}</p>${actForm("trigger-edit", {
           hidden: [["index", v.query.index, "int"]],
           fields: editFields(v, t),
           label: `Preview edit of row ${v.query.index + 1}`,
-        }),
+        })}`,
       );
 }
 export function triggerTrust(v) {
@@ -262,14 +290,14 @@ export function triggerTrust(v) {
   return card(
     "Trust model",
     html`<p>
-        ${gateText(t)} Each forge delivery is checked against its configured authentication, bot-loop guard, sender permissions and duplicate protection, then applicable quiet hours, image, repository protection and spend caps. Cron starts from the deployment schedule instead of a webhook. A comment may select another flow; only one
+        ${whoMayFire(v, t)} Each forge delivery is checked against its configured authentication, bot-loop guard, sender permissions and duplicate protection, then applicable quiet hours, image, repository protection and spend caps. Cron starts from the deployment schedule instead of a webhook. A comment may select another flow; only one
         comment trigger per forge may be declared.
       </p>
       <p>
         Keeping a session continues its retained conversation on the same issue.
         Nothing merges by itself.
       </p>
-      ${t.instructions
+      ${isAgent(v) ? html`<p>Whether it has instructions is ${AGENT_UNREAD}.</p>` : t.instructions
         ? v.role === "operator"
           ? html`<h3>Instructions</h3>
               <blockquote>
@@ -332,8 +360,10 @@ export function triggerChange(v) {
   return card(
     "Before you change it",
     html`<p>
-        A job already in line is refused if this trigger has gained a field the
-        job lacks. Adding or deleting a row renumbers the rows after it.
+        A job already in line keeps what it was queued with and runs without a
+        change here, unless this trigger has gained a narrowing field the job
+        lacks, such as a list of models, a cap or a server: then it is refused.
+        Adding or deleting a row renumbers the rows after it.
       </p>
       <p>
         ${!t || detail(v).skewed == null
@@ -341,7 +371,7 @@ export function triggerChange(v) {
             "Jobs that would be refused cannot be checked here.")
           : `${detail(v).skewIncomplete ? "At least " : ""}${detail(v).skewed?.length ?? 0} jobs in view would be refused now.${detail(v).skewIncomplete ? " The queue check was incomplete." : ""}`}
       </p>
-      <p>${fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? "The triggers file loads."}</p>
+      <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (t ? "The triggers file loads." : null)}</p>
       ${(detail(v).skewed ?? []).map(job => html`<p>${runLink(job.jobId)}: ${job.field ?? job.conditions ?? "trigger changed"}</p>`)}
       ${t && canAct(v)
         ? actForm("trigger-delete", {
@@ -431,8 +461,7 @@ export function triggerAdd(v) {
           </p>
           <h3>4. Set by hand</h3>
           <p>
-            The console never sets the job cap, allowed models, MCP servers,
-            session, image, secrets, waits or replicas; new adds opt out of project secret bundles (run.secretBundle: false). Change the bundle opt-out and these other fields by hand in the triggers file.
+            Adding a trigger never sets the job cap, allowed models, MCP servers, session, image, secrets, waits or replicas; new adds opt out of project secret bundles (run.secretBundle: false). Once it exists, a person changes its job cap, allowed models and MCP servers on its page; change the rest and the bundle opt-out by hand in the triggers file.
           </p>`,
         label: "Preview the add",
       })}
@@ -480,5 +509,5 @@ export function triggerRefusalExamples() {
   ].map(({field,params}) => ({field, sentence: planTriggerAdd({ ...shared, params }).refusal}));
 }
 export function triggerRefusals() {
-  return card("Refusals",html`<p>Each field below shows the shared planner's own refusal.</p>${triggerRefusalExamples().map(({field,sentence}) => html`<p><b>${field}</b>: ${sentence}${sentence?.includes("Nothing was changed") ? "." : " Nothing was changed."}</p>`)}`);
+  return card("Refusals",html`<p>Each field below shows the shared planner's own refusal.</p>${triggerRefusalExamples().map(({field,sentence}) => html`<p><b>${field}</b>: ${refusalLine(sentence)}</p>`)}`);
 }

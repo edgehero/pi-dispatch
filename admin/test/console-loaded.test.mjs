@@ -367,7 +367,8 @@ test("each loaded card's design status holds at Built: a status is a claim about
     assert.match(cardPreview(card), /aria-label="Design status: Built"/, card);
     assert.doesNotMatch(cardPreview(card), /aria-label="Design status: (?:Planned|Proposed|Needs a decision)"/, card);
   }
-  assert.ok(cardPreview("LoadedStates").includes("a trigger's last run comes with part 2"), "it says what it does not build");
+  assert.ok(cardPreview("LoadedStates").includes("under each row of What its jobs get, a trigger"), "it names where the same record is repeated");
+  assert.ok(!cardPreview("LoadedStates").includes("comes with part 2") && !cardReadme("LoadedStates").includes("not built yet"), "and promises nothing it has built");
   const markers = readFileSync(new URL("../../design/tools/fix_markers.py", import.meta.url), "utf8");
   assert.match(markers, /for n in \["RunLoaded", "ProjectLoads"\]\},/);
   assert.match(markers, /"LoadedStates": \(BUILT, /);

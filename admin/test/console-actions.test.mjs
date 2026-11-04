@@ -33,6 +33,8 @@ import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
 import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
 import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
 import { createModelRoleActions, MODEL_ROLE_EDIT_FIELDS } from "../src/model-role-plans.mjs";
+import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
+import { triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 
 // The console's action table over HTTP (issue #642, REQ-OPERATOR-CONSOLE-ACTIONS): every action through its GENERATED
 // route, preview then confirm, against the read model's real funnels and the tools' real planners. File actions run on
@@ -186,7 +188,7 @@ after(async () => {
 });
 
 /** A running console over `paths` with the real tickets and audit log; `actionDeps` overrides go in `a`. */
-async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false } = {}) {
+async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false, fs = nodeFs } = {}) {
   const tokenFile = structuredClone(FILE);
   let t = T0;
   const now = () => t;
@@ -229,6 +231,7 @@ async function start({ paths, a = {}, readOnly = false, hub = null, realSessions
     readTokens: () => ({ file: tokenFile }),
     findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha256(presented)) ?? null,
     consumeLoginCode: () => ({ refusal: "unknown" }),
+    fs,
     writePauseWindows: RM.writePauseWindows,
     actionDeps: { rm: RM, plans: WP, paths, env: {}, urlShown: (u) => u.replace(/\/\/[^@]*@/, "//"), readJobsData, host: "console-test", ...a },
     pageDeps: { fleet: a.fleet ?? { snapshot: async () => ({}) } },
@@ -319,6 +322,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
     "run-enqueue": "run-enqueue",
     "standing-answer-add": "standing-answer-add", "answer-draft-drop": "answer-draft-drop",
     "model-role-edit": "model-role-edit",
+    "trigger-environment-edit": "trigger-edit",
     "cancel-held": "cancel-held",
     "cancel-all-held": "held-cancel-all",
     "cancel-queued": "cancel-queued",
@@ -374,6 +378,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
   const FIELDS = {
     "run-enqueue": ["folder", "flow", "task"], "standing-answer-add": ["title", "text", "projects", "repo", "runId"], "answer-draft-drop": ["runId", "draftRunId", "digest"],
     "model-role-edit": [...MODEL_ROLE_EDIT_FIELDS],
+    "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "keyOrder"],
     "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
@@ -393,7 +398,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
   Object.assign(FIELDS, Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, name.startsWith("setup-provider-key") ? ["provider", "value"] : name === "setup-viewer-add" ? ["name"] : name === "setup-viewer-revoke" ? ["name", "identity"] : []])));
-  assert.equal(ACTIONS.length, 60 + SETUP_ACTION_NAMES.length);
+  assert.equal(ACTIONS.length, 61 + SETUP_ACTION_NAMES.length);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -458,6 +463,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["setup-viewer-add", {}, twice("Revoke the exact viewer entry through a fresh confirmation, or use pi-dispatch-console token revoke on the host."), null, "Create viewer invitation", "Created a viewer invitation"],
     ["setup-viewer-revoke", {}, twice("Create a new viewer invitation to restore access. The old entry and its sessions cannot be restored."), null, "Revoke viewer", "Revoked the created viewer entry"],
     ["model-role-edit", { plan: { scope: "default", role: "editor", inverseBody: { scope: "default", role: "editor", entry: "openai/old", expectedEntry: "openai/new" } }, payload: { body: { scope: "default", role: "editor" } } }, twice("Restore the previous mapping for default/editor; another role edit is refused if this mapping has changed"), { action: "model-role-edit", body: { scope: "default", role: "editor", entry: "openai/old", expectedEntry: "openai/new" } }, "Save role mapping", "Changed model role default/editor; no run was started"],
+    ["trigger-environment-edit", { plan: { row: "trigger row 3", undo: "Put trigger row 3 back as it was", inverse: { action: "trigger-environment-edit", body: { index: 2, pageDigest: "a".repeat(64), mcp: null } } } }, twice("Put trigger row 3 back as it was"), { action: "trigger-environment-edit", body: { index: 2, pageDigest: "a".repeat(64), mcp: null } }, "Confirm: change trigger row 3", "Changed trigger row 3 in this host's triggers file; no run was started"],
+    ["trigger-environment-edit", { plan: { row: "trigger row 3", undo: "Edit trigger row 3 back by hand: the file held run.model as null, which this page cannot write", inverse: null } }, twice("Edit trigger row 3 back by hand: the file held run.model as null, which this page cannot write"), null, "Confirm: change trigger row 3", "Changed trigger row 3 in this host's triggers file; no run was started"],
     ["run-enqueue", { reserve: r(2_000_000) }, twice(U.rerunBefore), null, "Start run for up to $2.00", "Queued the local run"],
     ["standing-answer-add", {}, twice("Remove the standing answer by hand from triggers.json after reviewing any draft that cited it."), null, "Adopt standing answer", "Adopted the standing answer"],
     ["answer-draft-drop", {}, twice("Write your own answer on the run page. Dropping a draft never changes the parked question."), null, "Drop draft", "Dropped the draft; the question still waits for you"],
@@ -817,6 +824,41 @@ test("secret-bundle-remove goes through the pipeline and names the bundles it st
   assert.match(refused.json().error, /^PI_SECRET_BUNDLES already declares op-shop on this deployment/);
   assert.equal((await held.act("secret-bundle-add", { name: "x", path: "/opt/b", format: "yaml" })).json().error, "the format is dotenv or json: what the resolver prints, declared, because the worker never guesses it from the output");
 });
+
+/** A real fs whose reads of `path` fail with `code` while `armed()` says so. */
+const failingReads = (path, code, armed = () => true) => ({ ...nodeFs, readFileSync: (p, ...rest) => {
+  if (p === path && armed()) throw Object.assign(new Error(code), { code });
+  return nodeFs.readFileSync(p, ...rest);
+} });
+
+test("secret-bundle-remove on a triggers file it cannot read says it cannot tell, and never that no project's jobs depend on it", async () => {
+  const { paths } = deployment();
+  writeFileSync(paths.settingsFile, `${JSON.stringify({ secretBundles: { "op-shop": { path: "/opt/b", format: "dotenv" } } }, null, 2)}\n`);
+  writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [], secretBundles: { "web-env": { profile: "op-shop", ref: "r", project: "web" } } }, null, 2)}\n`);
+  const read = await (await start({ paths })).act("secret-bundle-remove", { name: "op-shop" });
+  assert.ok(read.json().summary.join("\n").includes("The jobs of bundle web-env are refused pre-spend"), "the control: the file it can read");
+  const c = await start({ paths, fs: failingReads(paths.triggersPath, "EACCES") });
+  const p = await c.act("secret-bundle-remove", { name: "op-shop" });
+  assert.equal(p.status, 200, p.text);
+  const said = p.json().summary.join("\n");
+  assert.ok(said.includes("The triggers file could not be read, so the jobs of any bundle naming it are refused pre-spend"), said);
+  assert.ok(!said.includes("No bundle in triggers.json names it"), said);
+});
+
+for (const [name, body] of [["trigger-edit", { index: 2, flow: "review" }], ["trigger-delete", { index: 2 }]]) {
+  test(`${name} on a triggers file it cannot read says so, and never that the file has no such row`, async () => {
+    const { paths } = deployment();
+    const row = { on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "fix" } };
+    writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: Array.from({ length: 13 }, () => row) }, null, 2)}\n`);
+    const before = read(paths.triggersPath);
+    const c = await start({ paths, fs: failingReads(paths.triggersPath, "EACCES") });
+    const p = await c.act(name, body);
+    assert.notEqual(p.status, 200, p.text);
+    assert.match(p.json().error, /cannot be read \(EACCES\)|could not be read \(EACCES\)/);
+    assert.doesNotMatch(p.text, /no trigger at row|have 0/);
+    assert.equal(read(paths.triggersPath), before);
+  });
+}
 
 test("project-edit on a project a secret bundle names is refused at the preview with the planner's sentence, nothing written (#704)", async () => {
   const { paths } = deployment();
@@ -3430,6 +3472,140 @@ test("a role edit uses the actual ticket/audit/CAS pipeline, exact Undo and pers
   const before = previews;
   assert.equal((await readOnly.act("model-role-edit", params)).status, 403);
   assert.equal(previews, before);
+});
+
+// Only a missing file may start from nothing. One read fails, at the Confirm, and every read after it succeeds: the re-check
+// against the preview then passes, which is how a file went from every row to none on a green banner.
+for (const [name, body, field] of [
+  ["trigger-add", { trigger: { kind: "comment", phrase: "@pi", flow: "fix" } }, "triggersPath"],
+  ["trigger-edit", { index: 0, flow: "review" }, "triggersPath"],
+  ["trigger-delete", { index: 0 }, "triggersPath"],
+  ["pause-window-add", { scope: "acme/web", from: "22:00", to: "23:00" }, "pauseWindowsPath"],
+  ["pause-window-delete", { index: 0 }, "pauseWindowsPath"],
+]) {
+  test(`${name}: a read failing at the Confirm refuses in words that say so, with every row still in the file`, async () => {
+    const { paths } = deployment();
+    const target = paths[field];
+    const before = read(target);
+    let armed = false;
+    const fs = { ...nodeFs, readFileSync: (path, ...rest) => {
+      if (armed && path === target) {
+        armed = false;
+        throw Object.assign(new Error("EIO"), { code: "EIO" });
+      }
+      return nodeFs.readFileSync(path, ...rest);
+    } };
+    const c = await start({ paths, fs });
+    const p = await c.act(name, body);
+    assert.equal(p.status, 200, p.text);
+    armed = true;
+    const done = await c.confirm(name, p.json().ticket);
+    assert.equal(done.status, 409, done.text);
+    assert.match(done.json().error, /could not be read \(EIO\), so its (triggers|windows) cannot be kept; nothing was written/);
+    assert.equal(read(target), before);
+  });
+}
+
+test("a person's change that changes nothing reads as no change through the real pipeline, with nothing to confirm", async () => {
+  const { paths } = deployment();
+  const original = { triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", models: ["anthropic/claude-haiku-4-5"] } }] };
+  writeFileSync(paths.triggersPath, `${JSON.stringify(original, null, 2)}\n`);
+  const bytes = read(paths.triggersPath);
+  const triggerEnvironment = createTriggerEnvironmentActions({ paths, env: { PI_EGRESS: "0" }, now: () => T0 });
+  const c = await start({ paths, a: { triggerEnvironment } });
+  const pageDigest = triggerEntryDigest(original.triggers[0]);
+  for (const body of [{ index: 0, pageDigest }, { index: 0, pageDigest, models: ["anthropic/claude-haiku-4-5"] }]) {
+    const p = await c.act("trigger-environment-edit", body);
+    assert.equal(p.status, 200, p.text);
+    const said = p.json();
+    assert.equal(said.unchanged, true);
+    assert.deepEqual(said.summary, ["trigger row 1 already says this."]);
+    assert.equal(said.ticket, undefined);
+    assert.ok(!said.html.includes("Send at least one field"), said.html);
+  }
+  assert.equal(read(paths.triggersPath), bytes);
+});
+
+test("a person's change to what a trigger's jobs get: the real pipeline, audited as trigger-edit by that person, with its Undo", async () => {
+  const { paths } = deployment();
+  const original = { triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", steer: true, packages: false, secrets: { LINEAR_API_KEY: "op://vault/linear" }, progress: true } }] };
+  writeFileSync(paths.triggersPath, `${JSON.stringify(original, null, 2)}\n`);
+  const bytes = read(paths.triggersPath);
+  let previews = 0;
+  // A real overlay: the worker's own pickup check judges the server this edit turns on.
+  const globalPiDir = tempDir("console-actions-overlay-");
+  writeFileSync(join(globalPiDir, "mcp.json"), JSON.stringify({ mcpServers: { linear: { url: "https://mcp.example.com/mcp", description: "Linear", headers: { Authorization: "Bearer ${LINEAR_API_KEY}" } } } }));
+  const real = createTriggerEnvironmentActions({ paths: { ...paths, globalPiDir }, env: { PI_EGRESS: "0" }, now: () => T0 });
+  const triggerEnvironment = { preview: (...args) => { previews++; return real.preview(...args); }, apply: (...args) => real.apply(...args) };
+  const c = await start({ paths, a: { triggerEnvironment } });
+  const seen = triggerEntryDigest(original.triggers[0]);
+  const params = { index: 0, pageDigest: seen, packages: null, mcp: ["linear"] };
+  // A viewer and an agent are stopped before any private read, a read-only console too.
+  for (const token of [VIEW_TOKEN, AGENT_TOKEN]) {
+    const before = previews;
+    assert.equal((await c.act("trigger-environment-edit", params, await c.cookieFor(token))).status, 403);
+    assert.equal(previews, before);
+  }
+  const readOnly = await start({ paths, readOnly: true, a: { triggerEnvironment } });
+  const readBefore = previews;
+  assert.equal((await readOnly.act("trigger-environment-edit", params)).status, 403);
+  assert.equal(previews, readBefore);
+
+  const p = await c.act("trigger-environment-edit", params);
+  assert.equal(p.status, 200, p.text);
+  assert.equal(read(paths.triggersPath), bytes, "the preview writes nothing");
+  const preview = p.json();
+  assert.equal(preview.kind, "trigger-edit");
+  assert.equal(preview.action, "trigger-environment-edit");
+  assert.equal(preview.paid, false);
+  assert.equal(preview.danger, false);
+  assert.equal(preview.confirmLabel, "Confirm: change trigger row 1");
+  assert.equal(preview.undo, "Put trigger row 1 back as it was");
+  assert.deepEqual(preview.summary.slice(0, 5), ["Change trigger row 1", "MCP: linear on.", "This widens what its jobs reach: a job that reaches its container connects to linear.", "Staged packages: on.", "This widens what its jobs load: every package staged on the host that runs them."]);
+  assert.match(preview.html, /Person only/);
+  assert.match(preview.html, /class="diff/, "the file before and after, in the bar");
+  assert.match(preview.html, /&quot;mcp&quot;: \[|"mcp": \[/, "the diff shows the key it adds");
+  assert.doesNotMatch(preview.html, /op:\/\/vault\/linear/, "a secret reference is no page's business, the diff's rule");
+  assert.match(preview.summary.at(-1), /audited as trigger-edit, by /);
+  assert.doesNotMatch(preview.html, /->|\u2192/, "a confirm uses words, never an arrow");
+
+  // An audit log that cannot take the row writes nothing.
+  c.audit.failNext = 1;
+  assert.equal((await c.confirm("trigger-environment-edit", preview.ticket)).status, 500);
+  assert.equal(read(paths.triggersPath), bytes);
+
+  const done = await c.both("trigger-environment-edit", params);
+  assert.equal(done.confirm.status, 200, done.confirm.text);
+  assert.equal(lastWrite(c).kind, "trigger-edit");
+  assert.equal(lastWrite(c).outcome, "ok");
+  assert.equal(lastWrite(c).target, paths.triggersPath);
+  assert.equal((await c.confirm("trigger-environment-edit", done.preview.ticket)).status, 409, "a ticket is single-use");
+  assert.deepEqual(JSON.parse(read(paths.triggersPath)).triggers[0].run, { kind: "github", flow: "fix", steer: true, secrets: { LINEAR_API_KEY: "op://vault/linear" }, progress: true, mcp: ["linear"] });
+
+  // The banner's Undo is a preview like any other, and puts the file back byte for byte.
+  const change = done.confirm.json().change;
+  assert.equal(change.inverse.action, "trigger-environment-edit");
+  assert.deepEqual(change.inverse.body.keyOrder, ["kind", "flow", "steer", "packages", "secrets", "progress"]);
+  assert.equal(change.inverse.body.mcp, null);
+  const stale = await c.act("trigger-environment-edit", params);
+  assert.equal(stale.status, 409, "the page's digest is the entry before the write, so the page is stale now");
+  assert.match(stale.json().html, /Look again/);
+  const back = await c.both(change.inverse.action, change.inverse.body);
+  assert.equal(back.confirm.status, 200, back.confirm.text);
+  assert.equal(read(paths.triggersPath), bytes);
+});
+
+test("the action refuses a key it does not take by name, and a console started without the planner says so", async () => {
+  const { paths } = deployment();
+  writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } }] }, null, 2)}\n`);
+  const c = await start({ paths, a: { triggerEnvironment: createTriggerEnvironmentActions({ paths, env: {}, now: () => T0 }) } });
+  const extra = await c.act("trigger-environment-edit", { index: 0, pageDigest: "a".repeat(64), image: "evil:latest" });
+  assert.equal(extra.status, 400);
+  assert.match(extra.json().error, /image is not one of them/);
+  const none = await start({ paths });
+  const unwired = await none.act("trigger-environment-edit", { index: 0, pageDigest: "a".repeat(64), packages: false });
+  assert.equal(unwired.status, 503);
+  assert.match(unwired.json().error, /without what the trigger-environment-edit action needs \(triggerEnvironment\)/);
 });
 
 test("each setup registration uses the generated HTTP preview and confirmed apply with its own audit kind", async () => {

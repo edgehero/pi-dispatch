@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { foldCosts } from "../../src/costs.mjs";
+import { attributeRunsToTriggers } from "../../src/read-model.mjs";
 import { buildGraphModel } from "../../src/graph-model.mjs";
 import { capacityViewOf, spendSummaryOf, spendChartsOf } from "../../src/insights-assembly.mjs";
 import { computeCapacity } from "@edgehero/pi-dispatch/capacity";
@@ -14,8 +15,14 @@ const iso = (ms) => new Date(ms).toISOString();
 export const SPEND_HOSTILE_REASON = "Needs <img src=x onerror=alert(1)> & review\u202e\u0001";
 const pricing = { isZeroRated: () => false, reprice: (q) => ({ usd: (q.input + q.output) / 1000, ratesVersion: "fixture" }) };
 const records = () => [0, 1, 2].map((i) => ({ jobId: `gh-spend-${i}`, kind: "github", target: "acme/web#4", repo: "acme/web", project: i === 2 ? "ops" : "web", host: ["build3", "mini1", "mini2"][i], flow: i === 2 ? "review" : "fix", outcome: "completed", startedAt: iso(NOW - (i + 1) * HOUR), endedAt: iso(NOW - (i + .5) * HOUR), queuedAt: iso(NOW - (i + 1) * HOUR - (i + 1) * 10000), exitCode: 0, capacity: { slots: i + 2, memMiB: 8192, cpuCenti: 400, cpus: 4 }, size: { memMiB: 1024, cpuCenti: 100, source: "project" }, tokens: { input: 100, output: 20, total: 120, metered: true, cost: (i + 1) / 10 }, dollars: { settledMicros: (i + 1) * 100000 }, usage: { v: 1, truncated: 0, models: [{ provider: "acme", model: "model-1", calls: 1, input: 100, output: 20, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, total: 120, cost: (i + 1) / 10 }] } }));
+const TRIGGERS = { count: 2, triggers: [{ type: "cron", index: 0, id: "nightly", pattern: "0 3 * * *", folder: "/srv/work/site", flow: "fix", packages: true }, { type: "label", index: 1, any: ["pi"], forge: "github", flow: "review", disarmed: { at: iso(NOW - HOUR), jobId: "gh-spent-one" }, packages: true }] };
+/**
+ * The fold as `assembleCosts` builds it: joined to this deployment's triggers. With no join `byTrigger` is null, which on a real page only a triggers file
+ * that could not be read leaves, so that state has its own golden. REJECTED: leaving the join out of the shared fixture, which drew an empty table over runs.
+ */
+const foldOf = (rs, piAiPin = "fixture") => foldCosts({ records: rs, subscriptions: [], pricing, nowMs: NOW, piAiPin, sinceMs: NOW - 7 * DAY, triggerJoin: attributeRunsToTriggers({ records: rs, triggers: TRIGGERS.triggers }) });
 const graph = () => buildGraphModel({
-  triggers: { count: 2, triggers: [{ type: "cron", index: 0, id: "nightly", pattern: "0 3 * * *", folder: "/srv/work/site", flow: "fix", packages: true }, { type: "label", index: 1, any: ["pi"], forge: "github", flow: "review", disarmed: { at: iso(NOW - HOUR), jobId: "gh-spent-one" }, packages: true }] },
+  triggers: TRIGGERS,
   schedulers: [{ key: "nightly", name: "local", pattern: "0 3 * * *", next: NOW + HOUR, overdueMs: 0 }],
   folderSkills: { "/srv/work/site": { head: "abcdef123456", truncated: false, unreachable: null, skills: [{ name: "fix", aiTrigger: true, mentions: [{ name: "notify", strong: true }] }, { name: "notify", aiTrigger: true, mentions: [] }, { name: "orphan", aiTrigger: false, mentions: [] }] } },
   overlaySkills: { skills: [], truncated: false, unreachable: null }, stagedSkills: { skills: [], unenumerable: [], truncated: false },
@@ -26,7 +33,7 @@ const graph = () => buildGraphModel({
 });
 export function spendFixture() {
   const rs = records();
-  const fold = foldCosts({ records: rs, subscriptions: [], pricing, nowMs: NOW, piAiPin: "fixture", sinceMs: NOW - 7 * DAY });
+  const fold = foldOf(rs);
   const hosts = [{ name: "build3", fpEnvelope: "fixture-digest", jobsMore: "0", jobs: [{ id: "gh-live", p: "web", at: NOW - HOUR, h: 2000000, ha: NOW - HOUR }] }];
   const budget = { day: { reserved: 3, cap: 10, state: "ok" }, week: { reserved: 7, cap: 30, state: "ok" }, month: { reserved: 12, cap: 100, state: "ok" }, softHoldPct: 80, tokens: { spent: 360, cap: 10000 }, scoped: [], dollars: { windows: [{ ledger: "deployment", name: "Deployment", window: "day", counterMicros: 2600000, capMicros: 10000000 }, { ledger: "deployment", name: "Deployment", window: "week", counterMicros: 2600000, capMicros: 50000000 }] } };
   const envelope = { window: "week", totalMicros: 50000000, floors: { web: 5000000, ops: 0 }, defaultWeights: { web: 3, ops: 1 }, delegation: { enabled: true, writers: ["operator-session", "portfolio-job"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 7 } };
@@ -53,7 +60,7 @@ function recordMoneyState(kind) {
   const unknown = { ...base, jobId: "gh-unknown-cost", endedAt: iso(NOW - 1000), dollars: { basis: "unreserved", settledMicros: 0 }, tokens: null, usage: null };
   const rs = kind === "unknown" ? [unknown] : kind === "partial" ? [paid, unknown] : [paid];
   const budget = kind === "partial" ? p.budget : {};
-  const currentFold = foldCosts({ records: rs, subscriptions: [], pricing, nowMs: NOW, piAiPin: "fixture", sinceMs: NOW - 7 * DAY });
+  const currentFold = foldOf(rs);
   return { ...p, budget, fold: currentFold, recent24h: currentFold, spend: { ...spendSummaryOf({ records: rs, hosts: [], budget, nowMs: NOW, jobCapMicros: 2000000 }), ...spendChartsOf({ records: rs, sinceMs: NOW - 7 * DAY, nowMs: NOW, jobCapMicros: 2000000, heldMicros: 0 }) } };
 }
 // Issue #807: a run that reserved at 23:50 UTC and ended at 00:10. Its money is in yesterday's day counter (and this
@@ -99,7 +106,8 @@ const states = {
   "spend-capacity-truncated.viewer": () => { const p = spendFixture(); p.capacity.truncated = true; p.capacity.fleet.incomplete = true; for (const h of p.capacity.hosts) h.truncated = true; return drawSpend("insights-capacity", { role: "viewer", payload: p }); },
   "spend-breakdown.viewer": () => drawSpend("insights-breakdown", { role: "viewer" }),
   "spend-breakdown-unreadable.viewer": () => drawSpend("insights-breakdown", { role: "viewer", payload: { ...spendFixture(), fold: null } }),
-  "spend-breakdown-empty.viewer": () => { const p = spendFixture(); p.fold = foldCosts({ records: [], subscriptions: [], pricing, nowMs: NOW, sinceMs: NOW - 7 * DAY }); return drawSpend("insights-breakdown", { role: "viewer", payload: p }); },
+  "spend-breakdown-triggers-unread.viewer": () => { const p = spendFixture(); p.fold = foldCosts({ records: records(), subscriptions: [], pricing, nowMs: NOW, piAiPin: "fixture", sinceMs: NOW - 7 * DAY }); return drawSpend("insights-breakdown", { role: "viewer", payload: p }); },
+  "spend-breakdown-empty.viewer": () => { const p = spendFixture(); p.fold = foldOf([], null); return drawSpend("insights-breakdown", { role: "viewer", payload: p }); },
   "spend-whatif-unknown.viewer": () => drawSpend("insights-breakdown", { role: "viewer", query: "range=7d&whatif=acme/missing&flow=fix", whatIf: { unknown: true, near: ["acme/model-1"] } }),
   "spend-whatif-seeded.viewer": () => drawSpend("insights-breakdown", { role: "viewer", query: "range=7d&whatif=acme/model-1&flow=fix", whatIf: { result: { class: "seeded", low: .5, high: 5, note: "unmeasured (OQ-002)" } } }),
   "spend-flows-map.viewer": () => drawSpend("insights-flows", { role: "viewer" }),

@@ -112,16 +112,35 @@ export function recordReason(record) {
   return typeof r === "string" && RECORD_REASON_RE.test(r) ? r : null;
 }
 
+/** A sentence with a full stop, adding none where it ends in its own. */
+export const stopped = (s) => `${s}${/[.!?]$/.test(s) ? "" : "."}`;
+
+/**
+ * The words a sentence uses to say that nothing changed. A planner's sentence is sent as it is (the `error` a tool and
+ * the console share, byte for byte), and many already say so in their own words ("nothing was written", "Nothing was
+ * sent", "nothing to cancel"); the slot adds "Nothing was changed." only to one that says none of them.
+ */
+export const SAYS_NOTHING_CHANGED = /\bnothing (?:was|is) (?:changed|done|applied|reverted|queued|sent|written)\b|\bnothing to (?:do|cancel)\b/i;
+
+/** A refusal's sentence as a person reads it anywhere but the slot's bar: stopped, and saying nothing changed once. */
+export const refusalLine = (sentence) => `${stopped(sentence)}${SAYS_NOTHING_CHANGED.test(sentence) ? "" : " Nothing was changed."}`;
+
+/** Names in a sentence: "a", "a and b", "a, b and c". The order is the caller's. */
+export function listed(names) {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
 /**
  * A sentence's first letter in capitals: the planners write theirs in lower case, as the tools' errors read. Only when
- * it opens with a plain word: one that opens with an id (a job id's `gh-2f6a`, a queue's `pi-jobs@build3`) keeps the
- * id as it is written, since "Gh-2f6a" names no job.
+ * it opens with a plain word: one that opens with an id (a job id's `gh-2f6a`, a queue's `pi-jobs@build3`, a model's
+ * `anthropic/claude-opus-5-5`, a repository's `acme/web`) keeps the id as it is written, since "Gh-2f6a" names no job and
+ * "Anthropic/claude-opus-5-5" names no model.
  */
 export function capitalised(s) {
   const t = String(s ?? "");
-  // A word is letters up to a space or a sentence's own punctuation; a dash, an at sign, an underscore or a digit, or a
-  // colon or a full stop with no space after it, joins it into an id.
-  return /^[a-z]+(?![a-z0-9@_-]|[.:]\S)/.test(t) ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+  // A word is letters up to a space or a sentence's own punctuation; a dash, an at sign, an underscore, a slash or a digit,
+  // or a colon or a full stop with no space after it, joins it into an id.
+  return /^[a-z]+(?![a-z0-9@_/-]|[.:]\S)/.test(t) ? t.charAt(0).toUpperCase() + t.slice(1) : t;
 }
 
 /** A failed record with no reason (an older worker's untagged failure, or one whose reason was free text). */

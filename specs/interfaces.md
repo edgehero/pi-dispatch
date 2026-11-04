@@ -4236,6 +4236,16 @@ with it: no delivery-id header, two actor representations, tags as a string, and
 
 ## INT-TRIGGERS-FILE-CONTRACT
 
+- **A read that fails (#800)**: a writer keeps what it cannot see. Only a MISSING file (`ENOENT`) starts `writeTriggers`
+  from an empty set, as an unparseable one still does (the recorded repair). A file that is there and cannot be read
+  (`EIO`, `EACCES`, `EISDIR`, any other failure) refuses with `{ invalid, unreadable: true }`, before `mutate` runs and with
+  the file untouched: "the triggers file <path> could not be read (<code>), so its triggers cannot be kept; nothing was
+  written". It used to read as missing: `expect`'s re-read then succeeded and passed, and the rename replaced every trigger
+  with what `mutate` made of nothing, on an `{ ok: true }`. Every caller gets this from the writer, and says it as it says
+  any refusal. A failure of the lock, the tmp file or the rename throws, and the old file is whole after each, since all
+  three happen beside it. A failed read in the re-check itself says so (`expectRefusal`: "could not be read (<code>) when this
+  change was checked against it"), and names no other session.
+
 - **Answer rules (#772)**: Optional top-level `answerRules` is an array of at most 100 hand-written rows, closed to `{id, projects, categories, confidence, mode, flow, model, decisionModel, maxCostUsd}`. IDs match `^[a-z][a-z0-9_-]{0,63}$`; projects are unique validated IDs and belong to at most one rule. Categories are a nonempty unique subset of `convention`, `how-to`, `decided`; `confidence` is finite, above 0.5 and at most 1; mode is `classify` or `draft`; models are explicit `provider/id`; flow uses the existing skill-name grammar and maxCostUsd the exact dollar grammar. Optional `standingAnswers` has at most 1000 closed `{id,title,text,projects,repo}` rows, bounded 160-byte titles, 8192-byte text and total 256 KiB corpus; repo is forge-qualified, `<forge>:<owner>/<path>`, the forge prefix built from `FORGE_KINDS` itself (#810), so a forge added to `FORGES` is one a standing answer may name. No tool may set either field under any spelling/nesting. Unrelated trigger edits preserve them. Person-confirmed standing adoption validates and atomically writes the same document with an expected digest. Unknown or overlapping rule fields fail validation.
 
 **Extension (#770):** `INT-QUESTION-GROUPS` defines the strict optional top-level `zeroTouch` configuration and human names. Existing trigger matching and instruction limits are unchanged.
@@ -4423,7 +4433,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   take, and its identity checks and every other refusal stand. So a one-shot whose run ended after the file turned
   newer is disarmed for every release that reads the file next, while the pre-spend check still defers. For that
   reason a release that raises this file's version keeps accepting `on.disarmed` as `{ at, jobId? }`: an older
-  build's disarm writes that shape into the newer file. The console's display reader (`readTriggers`) reads a newer
+  build's disarm writes that shape into the newer file. The console's display reader (`readTriggers`) answers `{ missing: true }`
+  only where no file is there, `{ unreadable: <code> }` for a file that is there and cannot be read, and reads a newer
   file as `{ invalid, newer: true }`, naming the versions and never the path. It asks the loaders' question first: a
   file whose `version` reads newer only because the key is repeated (`JSON.parse` keeps the last value) is broken
   there too, never newer, judged on the text by `triggersFileNewer` ("triggers file has a duplicate key, so it is
@@ -4919,6 +4930,9 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   because a staged package is a **capability of the flow**, and a label/comment/PR trigger runs the same
   flows a cron trigger does. With nothing staged the flag emits nothing at all, which is a silent no-op by
   construction — `doctor` is where that becomes visible.
+  **Not model-callable** (AMENDED 2026-11-04, #800): a tool call carrying it or a near miss of it is refused before any
+  confirm (`TOOL_PROOF_FIELDS`), by name, where the edit's planner read neither and only the adapter's field check stood behind it. A person changes it in the file or on the trigger's page
+  (`trigger-environment-edit`). Those near misses are the tool sweep's alone: the loader has never swept this key.
 - **`run.image` (ALL FOUR trigger kinds, optional non-empty string) — a selector, not an arming**: absent
   = the deployment default `PI_JOB_IMAGE`; present = the Docker image this trigger's job containers run in.
   It is **absent-stays-absent** in exactly the sense `provider`/`model`/`maxTurns` are (**Why**, below):
@@ -5108,8 +5122,10 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   membership assert (the runner's `tools.mjs`, exit 2 pre-spend) covers skew and hand-run containers,
   and every flagged job logs `tools_excluded` with the session's active tool list READ BACK.
 
-  **File only**: no panel key, no model-callable setter (`dispatch_trigger_add`/`_edit` carry no such
-  parameter, pinned structurally beside the `secrets` sweep), and a chained job's request file cannot
+  **The file, or a person on the trigger's page** (AMENDED 2026-11-04, #800: `trigger-environment-edit`, person-only): no
+  panel key, no model-callable setter (`dispatch_trigger_add`/`_edit` carry no such
+  parameter, pinned structurally beside the `secrets` sweep, and a call carrying it or a near miss of it is refused before any
+  confirm, `TOOL_PROOF_FIELDS`, by name, where the edit's planner read neither and only the adapter's field check stood behind it), and a chained job's request file cannot
   set OR drop it -- the child inherits the parent's exclusions off validated job data, less the names of MCP
   tools, since the child connects no MCP server (`INT-OUTBOX-CONTRACT`), because here the destructive direction is inverted: dropping the inheritance
   would WIDEN the child.
@@ -8598,7 +8614,9 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
   the writer re-reads the file and refuses, with nothing written, when it differs from what the change was built
   from: the caller's `expect` snapshots (the console's confirm ticket, issue #640) or, without them, the writer's own
   read. Before #640 a write landing between that read and the rename was silently overwritten; now the second writer
-  is told to look again. Since issue #761 both writers (`writePauseWindows`, and the console's whole-list action,
+  is told to look again. Only a missing file starts from no windows, as an unparseable one still does: a file that is there
+  and cannot be read refuses with nothing written (#800, `INT-TRIGGERS-FILE-CONTRACT`'s rule and its reason), and a failed write or rename
+  throws after dropping its own tmp file, with the old file whole. Since issue #761 both writers (`writePauseWindows`, and the console's whole-list action,
   which validates each window against `PAUSE_WINDOW_FIELDS`) serialize through ONE function, `pauseWindowsText`: every
   top-level key of the file other than `windows` and `version` is carried in its place (a block a later release adds
   survives a write from this one; a panel or console from before this release writes `windows` alone), `windows`
@@ -10175,7 +10193,9 @@ refuses on it.
 **`settingsVersion`, `pauseWindowsVersion`, `triggersVersion` and `jobDataVersion` are integers** (AMENDED 2026-11-02,
 #761, `DES-STORE-VERSION-WHEN-NEEDED`): the build's `SETTINGS_VERSION`, `PAUSE_WINDOWS_VERSION`, `TRIGGERS_FILE_VERSION`
 and `JOB_DATA_VERSION`, all 1 at #761 and the last 2 since #796, on `limitsVersion`'s model, so a row without them is a worker from before #761.
-Only `doctor` reads them (`doctor.mjs -> fleetStoreVersionChecks`, the named check `fleet.store-versions`,
+Beside the console's `trigger-environment-edit` (AMENDED 2026-11-04, #800), whose preview and Confirm read each live host's
+`triggersVersion` and `jobDataVersion` when the proposed file needs a version above 1, and REFUSE on a lower one, none, or a
+registry they cannot read, and read no host while the need is 1, only `doctor` reads them (`doctor.mjs -> fleetStoreVersionChecks`, the named check `fleet.store-versions`,
 `INT-DOCTOR-RESULTS-KEY`): for each store whose version THIS host's own file needs above 1 (the higher of what the
 file declares and what its content needs, field and value tables alike; for job data, what the triggers' run keys
 need, counted over what the triggers loader keeps of each trigger (AMENDED 2026-11-03, #761, upgrade path: the parsed
@@ -11364,7 +11384,8 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     never started taken out of its queue, `target` its job id; and `steer` (issue #646), which the console and
     the panel (the TUI's `t` and `T`) both write. The list is descriptive: the writer enforces the charset, not the list, and
     the console's configuration actions write the kind of their action's own name, plus `pause-windows-set` for the
-    whole-list replace.
+    whole-list replace. `trigger-environment-edit` (issue #800, AMENDED 2026-11-04) writes `trigger-edit`: the same write
+    of the same file by a wider hand, so a reader groups a trigger's changes by one word and the row's `actor` says who.
   - `reserve` (optional, issue #642): the micro-dollars a paid action (a re-run, an answer to a parked run) will
     hold, as the preview showed it (`estimateReserve`), a non-negative safe integer. Absent when the action is not
     paid, no dollar cap applies, or the action takes no new reserve (a `steer`, which spends from its run's own).
@@ -13868,3 +13889,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-04 (#800, what the record says it can and cannot say) | **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED** in the residual: "a chip made from it" and "a wrong name refuses the job" described a chip and a refusal this contract does not have, and now say nothing acts on the name and what a later switch could do, as the runner's own sentence does; `INT-RUNNER-EXIT-CODE-PROTOCOL`'s sentence moves to "could" and "would" with it. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED** in the `leftOut` row: an extension turned off in pi on the host is not there and cannot be, because `import-pi` does not copy it and writes that only on its own output, so the overlay holds no trace of it for a worker to read. What shows is the overlay's names and each host's `doctor:loads:<name>`. `SECURITY.md` and `docs/replicas.md` said flatly that a record holds no attacker-chosen text, and `AGENTS.md` named one of the three things that survive, and each now names the residual this contract states: a tool's name, `pi` and each count, each within a closed shape. `docs/global-pi-overlay.md` says what the record cannot say, and that `import-pi` only adds, so an earlier copy of an extension turned off later still loads and reads as loaded. UNCHANGED, checked: `leftOutOf`, `leftOut`'s four keys, what `import-pi` does, and the residual's three things. |
 | 2026-11-04 (#800, what a real record holds) | **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED** in one word of `leftOut`: only a model canary's replay closes the overlay switch. A package canary is an ordinary job on its host's switch. `recordedLoaded` copies each list it keeps, as its contract says of the record's other fields; the shape and `v` are UNCHANGED, checked. **Code evidence**: worker/src/canary-runtime.mjs; worker/src/loaded-record.mjs -> recordedSource. |
 | 2026-11-04 (#800, a job's own image) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `loaded` gains `imageFromJob`, a worker fact present only on a run whose job named an image other than the host's default, with a row of its own in the key table. Without it a project compared a trigger's `run.image` as the host's, and two healthy hosts read as different by whichever trigger ran last on each. A line cannot set it, and `recordedLoaded` keeps only `true` beside an image. The measured worst case moves from 15,951 to 15,971 bytes, the key's 20. `v` stays 1: a conditional key changes no reader's shape. `INT-RUNNER-EXIT-CODE-PROTOCOL`: UNCHANGED, checked: the runner neither writes nor reads the key. |
+| 2026-11-04 (#800, part 2, the write) | **`INT-CONSOLE-AUDIT-LOG` AMENDED**: `trigger-environment-edit` writes the kind `trigger-edit`, the same write of the same file by a wider hand. **`INT-HOST-REGISTRY-CONTRACT` AMENDED**: "only `doctor` reads" `triggersVersion` and `jobDataVersion` is no longer so: that action's preview and Confirm read them when the proposed file needs a version above 1, and refuse on a lower one, none, or a registry they cannot read. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** in two bullets: `run.excludeTools` is no longer file only, and neither it nor `run.packages` is model-callable, a call carrying one being refused by name. UNCHANGED, checked: the triggers file's shape and version (no field added, `TRIGGERS_FILE_VERSION` stays 1, `TRIGGER_RUN_FIELD_VERSIONS` empty); the audit row's fields; the host row, which gains nothing; `INT-DOCTOR-RESULTS-KEY`. **Code evidence**: admin/src/trigger-environment-plans.mjs -> versionGate, admin/src/console/actions.mjs -> triggerEnvironmentActions. |
+| 2026-11-04 (#800, part 2, what a person reads) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED** in two bullets: a tool call carrying `run.excludeTools` or `run.packages` is refused by name, where the edit's planner read neither and only the adapter's field check stood behind it; no model could report what it had not set. UNCHANGED, checked: `INT-HOST-REGISTRY-CONTRACT`'s amendment and the version gate; `INT-CONSOLE-AUDIT-LOG`; the triggers file's shape and version; `INT-DOCTOR-RESULTS-KEY`, whose publication the preview still reads per host. **Code evidence**: admin/src/write-plans.mjs -> TOOL_PROOF_FIELDS. |
+| 2026-11-04 (#800, a read that fails) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** and **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED**: a file that is there and cannot be read refuses, with nothing written, and only a missing or unparseable one starts from empty. One failed read used to make `writeTriggers` and `writePauseWindows` start from nothing: `expect`'s re-read then passed, or two failed reads compared equal, and the rename left no trigger or no window, on an `{ ok: true }`. Every release up to 4.3.1 carried it, on every path that writes either file. The settings, scoped-limits, projects, subscriptions and envelope writers and the console tokens file UNCHANGED, checked: each already refuses. `disarmTrigger` UNCHANGED, checked: it never repaired. An unparseable file is still rebuilt from empty, the recorded posture, UNCHANGED. |
+| 2026-11-04 (#800, a display read that fails) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the console's display read (`readTriggers`) answers `{ unreadable: <code> }` for a file that is there and cannot be read, and `{ missing: true }` on ENOENT only, `readProjects`' shape. It answered missing for both, so a page said the file does not exist, an edit said "no trigger at row 3 (have 0)" of a file holding 13, and a bundle's removal said no project's jobs depend on it. Every caller was read for what it does with the shape. A row is found by the file's position (`t.index`), since the display list drops an entry it cannot use. `dispatch_triggers` returns the shape as it stands. UNCHANGED, checked: the writers' refusals, `readGraphTriggers` and `readTriggerSkew`. |

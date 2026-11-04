@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { readProjectView, projectHolds, projectWindowStart, projectSizeAction, projectViewForAgent, readProjectFleetRuns } from "../src/project-view.mjs";
 import { planProjectEdit, planProjectDelete, planLimitEdit } from "../src/write-plans.mjs";
-import { writeProjects, envelopeRefusal } from "../src/read-model.mjs";
-import { projectMembers, projectDelete, projectBundle } from "../src/console/panels/project.mjs";
+import { readTriggers, writeProjects, envelopeRefusal } from "../src/read-model.mjs";
+import { projectMembers, projectDelete, projectBundle, projectTriggers } from "../src/console/panels/project.mjs";
 import { LOADED_SAMPLES } from "./helpers/loaded-samples.mjs";
 
 const NOW = Date.parse("2026-10-30T12:00:00Z");
@@ -22,6 +22,35 @@ function input(extra = {}) {
   };
   return { id: "billing", paths: { projectsFile: "/private/operator/projects.json", scopedLimitsPath: "/private/operator/limits.json" }, now: NOW, snapshot: { hostBudgets: [host([])], waiting: { rows: [] } }, ...extra, reads };
 }
+
+test("a triggers file that could not be read is said beside the list, so no empty list reads as no trigger having run here", async () => {
+  assert.equal((await readProjectView(input({ reads: { triggers: () => ({ unreadable: "EACCES" }) } }))).triggersKnown, false);
+  assert.equal((await readProjectView(input({ reads: { triggers: () => ({ triggers: [] }) } }))).triggersKnown, true);
+});
+
+test("the list of triggers that ran here says it could not be told from a file it could not load, in words true of each way that happens", async () => {
+  const dir = tempDir("project-triggers-");
+  const failed = join(dir, "failed.json");
+  fs.mkdirSync(failed);
+  const broken = join(dir, "broken.json");
+  fs.writeFileSync(broken, "{");
+  const fine = join(dir, "fine.json");
+  fs.writeFileSync(fine, JSON.stringify({ triggers: [] }));
+  const said = async (triggersPath) => {
+    const projectView = await readProjectView(input({ reads: { triggers: () => readTriggers({ triggersPath }) } }));
+    return String(projectTriggers({ role: "operator", data: { projectView } }));
+  };
+  const UNKNOWN = "The triggers file could not be loaded, so which triggers ran here is unknown.";
+  const NONE = "No retained run here was attributed to a trigger in the last 24 hours.";
+  for (const [what, path] of [["a failed read", failed], ["a file that does not parse", broken], ["no file", join(dir, "absent.json")]]) {
+    const page = await said(path);
+    assert.ok(page.includes(UNKNOWN), what);
+    assert.ok(!page.includes(NONE), what);
+  }
+  const page = await said(fine);
+  assert.ok(page.includes(NONE) && !page.includes(UNKNOWN), "a file it read, holding no such trigger");
+  assert.ok(String(projectTriggers({ role: "operator", data: { projectView: { state: "ready", triggers: [] } } })).includes(UNKNOWN), "a view that does not say it read the file claims no run of none");
+});
 
 test("project holds use exact UTC enforcement windows, not today's holds for a weekly or monthly envelope", () => {
   const hosts = [host([

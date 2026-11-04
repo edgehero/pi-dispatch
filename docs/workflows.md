@@ -254,7 +254,7 @@ edge ([`graph.md`](graph.md)).
 | **the recursion guard** | any extension named like the admin console, or registering a `dispatch_*` tool, is **dropped** and logged | a staged package must not be able to hand the agent the deployment's own control surface |
 | **the overlay is `:ro`** | a package that writes beside itself fails | the overlay is deploy-time config mounted into an adversarial-input container |
 | **secrets** | the overlay must hold none; `doctor` fails if it does | `:ro` is not confidentiality, and job input is untrusted |
-| **per-trigger withdrawal** | `"packages": false` on a trigger withholds the whole staged set from its jobs | changing which flows run third-party code is a reviewed file edit |
+| **per-trigger withdrawal** | `"packages": false` on a trigger withholds the whole staged set from its jobs | changing which flows run third-party code stays a person's act: a reviewed file edit, or the switch on the trigger's [console page](console.md#what-a-triggers-jobs-get) |
 
 `doctor` reports the staged set by `name@version`, fails when a declared directory is missing, fails when a
 trigger says `"packages": true` and nothing is staged (that flow would run without its tools and still
@@ -305,7 +305,8 @@ Two supported ways to continue work **across** jobs:
   peer that is imported as a **value** will not resolve in the container. Type-only peers are erased and
   cost nothing.
 - **Editing the packages flag from the panel or an AI tool.** Both deliberately refuse: the panel displays
-  each trigger's packages state and the staged `name@version` set, and changing it stays a file edit.
+  each trigger's packages state and the staged `name@version` set. A person changes it in the file, or with the switch on
+  the trigger's [console page](console.md#what-a-triggers-jobs-get), which no tool reaches.
 - **A model starting a command.** Job chaining refuses any `/outbox` request naming a `command`, and
   `dispatch_run` cannot express one -- its parameters speak flows only. A command dispatches from the
   reviewed `triggers.json` alone, and unlike a flow there is no `ai-trigger`-style opt-in to widen that.

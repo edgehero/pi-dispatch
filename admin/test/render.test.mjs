@@ -327,6 +327,12 @@ test("renderTriggers degrades on no schedulers and a missing triggers file", () 
   assert.match(out, /triggers file not found/);
 });
 
+test("renderTriggers says a file it could not read, in the failure's own code, and never that it has none", () => {
+  const out = renderTriggers({ schedulers: [], triggers: { unreadable: "EACCES" } });
+  assert.match(out, /\(triggers file could not be read: EACCES\)/);
+  assert.doesNotMatch(out, /no triggers|not found/);
+});
+
 test("renderTriggers reports an invalid triggers file and an empty list", () => {
   assert.match(renderTriggers({ schedulers: [], triggers: { invalid: "bad" } }), /triggers file invalid: bad/);
   assert.match(renderTriggers({ schedulers: [], triggers: { triggers: [] } }), /\(no triggers\)/);

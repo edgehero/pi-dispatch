@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "869b34d3c9ab3fb02565c05fd627d071209460cefded3d0ce20f9dfd561d2e6b",
+  "words": "ec07fdea6638797dd7c5d181caa3e56dcd4c1f844ae5104a2ca8193f262ad247",
   "elements": [
     {
       "el": "p-loaded",
@@ -102,8 +102,16 @@
     {
       "el": "p-loaded-trigger",
       "kind": "panel",
-      "status": "illustrative",
-      "reason": "#800, part 2: the trigger page's What its jobs get. Not built by this part."
+      "status": "new",
+      "as": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": [
+        "Last run on mini1",
+        "The rows say what the next job gets, from the triggers file."
+      ]
     },
     {
       "el": "p-loaded-viewer",
@@ -440,10 +448,15 @@
       "shows": "Ran without its flow."
     },
     {
-      "el": "On a trigger, each run field the record covers gains Its last run",
+      "el": "On a trigger, under each row of What its jobs get, what its last run had",
       "kind": "readme",
-      "status": "illustrative",
-      "reason": "#800, part 2: the trigger page. Not built by this part."
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/loaded-words.mjs#triggerLastRun",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": "Last run on mini1"
     },
     {
       "el": "The run record's new loaded field",

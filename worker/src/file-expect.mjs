@@ -27,15 +27,21 @@ export function fileSnapshot(fs, path) {
 
 /**
  * The refusal for the first snapshot in `expect` whose file changed, or null when every one still holds (and when
- * `expect` is not an array: no expectation, nothing to refuse). The words are `writePauseWindows`' and `replaceFile`'s,
- * so every confirmed write says a lost race the same way.
+ * `expect` is not an array: no expectation, nothing to refuse). Every confirmed write says a lost race in these words:
+ * the triggers and settings writers here, `writePauseWindows` and `replaceFile` through the package's `./file-expect`.
+ *
+ * A difference one side of which is a failed read is no lost race, and "another session wrote it" would send a person
+ * looking for a session that never ran, so it says what happened. Two failed reads with one code still compare equal: a
+ * writer that means to replace the file has read it first, and refuses there.
  */
 export function expectRefusal(fs, expect) {
 	if (!Array.isArray(expect)) return null;
 	for (const input of expect) {
-		if (fileSnapshot(fs, input?.path) !== input?.text) {
-			return `${input?.path} changed after this change was built from it (another session wrote it); nothing was written. Look again and retry`;
-		}
+		const now = fileSnapshot(fs, input?.path);
+		if (now === input?.text) continue;
+		const failed = [now, input?.text].find((snapshot) => typeof snapshot === "string" && snapshot.startsWith(UNREADABLE));
+		if (failed !== undefined) return `${input?.path} could not be read (${failed.slice(UNREADABLE.length)}) when this change was checked against it; nothing was written. Look again and retry`;
+		return `${input?.path} changed after this change was built from it (another session wrote it); nothing was written. Look again and retry`;
 	}
 	return null;
 }

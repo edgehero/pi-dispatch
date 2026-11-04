@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadPageData, pagePanels } from "../src/console/pages.mjs";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { loadPageData, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
+import { fileTrouble } from "../src/console/panels/config.mjs";
+import { readProjects, readTriggers, readTriggersWithStalls } from "../src/read-model.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeLiveHub, stateOf } from "../src/console/live.mjs";
 import { agentReadProjection, agentReasonToken } from "../src/agent-read.mjs";
 const NOW = Date.UTC(2026, 9, 31);
@@ -43,4 +48,50 @@ test("actual live hub keeps viewer cache and rendered SSE separate from the priv
     assert.ok(!output.get("agent").includes(PRIVATE_NAME));
     assert.ok(!output.get("agent").includes("private_decision"));
   } finally { hub.close(); }
+});
+
+/** A real failed read: a directory where the file should be, which refuses any uid, where a file at mode 000 would not refuse root. */
+function unreadableFiles() {
+  const dir = tempDir("agent-unreadable-");
+  const paths = { triggersPath: join(dir, "triggers.json"), projectsPath: join(dir, "projects.json") };
+  for (const path of Object.values(paths)) mkdirSync(path);
+  return paths;
+}
+
+test("a failed read reaches an agent as a yes or no, with no code, and what a tool answers holds no more than that", async () => {
+  const { triggersPath, projectsPath } = unreadableFiles();
+  const triggers = readTriggers({ triggersPath });
+  assert.deepEqual(triggers, { unreadable: "EISDIR" }, "the premise: what the real reader answers");
+  assert.deepEqual(agentReadProjection(triggers), { unreadable: true });
+  assert.deepEqual(agentReadProjection(readProjects({ projectsPath })), { unreadable: true });
+  // What `dispatch_triggers` answers on that read: it read `{}` while the projection dropped the string.
+  assert.deepEqual(agentReadProjection(await readTriggersWithStalls({ triggersPath, url: "redis://unused" })), { unreadable: true });
+  // It stands beside its neighbours, and the word it holds elsewhere does not move: a yes, a no and nothing stay what they are.
+  assert.deepEqual(agentReadProjection({ invalid: "the reason", unreachable: "the reason", unreadable: "the reason" }), { invalid: true, unreachable: true, unreadable: true });
+  assert.deepEqual(agentReadProjection({ unreadable: false, mcp: { unreadable: null } }), { unreadable: false, mcp: { unreadable: null } });
+});
+
+test("fileTrouble says the code where its reader may see one, and only then", () => {
+  assert.equal(fileTrouble({ unreadable: "EACCES" }, "triggers file"), "The triggers file cannot be read (EACCES).");
+  assert.equal(fileTrouble({ unreadable: true }, "triggers file"), "The triggers file cannot be read.");
+});
+
+test("an agent's and a viewer's pages over a file that cannot be read each say so, and neither calls it empty, absent or loaded", async () => {
+  const { triggersPath, projectsPath } = unreadableFiles();
+  const snap = () => ({ readAt: NOW, triggers: readTriggers({ triggersPath }), projects: readProjects({ projectsPath }), runs: [], waiting: { rows: [] }, hostBudgets: [] });
+  const textOf = async (name, query, role) => {
+    const parsed = parsePageQuery(name, query);
+    const data = await loadPageData(name, parsed.query, { now: () => NOW, env: {}, paths: { triggersPath }, fleet: { snapshot: async () => snap(), parkedCount: async () => 0 }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role });
+    return String((await renderPage(name, { query: parsed.query, session: { name: role, role }, data, theme: null })).html).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  };
+  for (const [role, code] of [["agent", ""], ["viewer", " (EISDIR)"]]) {
+    const trigger = await textOf("trigger", "index=2", role);
+    assert.equal(trigger.split(`The triggers file cannot be read${code}.`).length - 1, 2, `${role}: What starts it, and Before you change it`);
+    for (const never of ["This row does not exist", "The triggers file loads.", "(true)", "undefined"]) assert.ok(!trigger.includes(never), `${role}: ${never}`);
+    const config = await textOf("config", "", role);
+    assert.ok(config.includes(`The triggers file cannot be read${code}.`), role);
+    assert.ok(config.includes(`The projects file cannot be read${code}.`), role);
+    for (const never of ["declares no trigger", "declares no project", "(true)"]) assert.ok(!config.includes(never), `${role}: ${never}`);
+    if (role === "agent") assert.ok(!trigger.includes("EISDIR") && !config.includes("EISDIR"), "the code stays out of an agent's copy");
+  }
 });

@@ -12,6 +12,7 @@ import { TRIGGER_PANEL_STATES } from "./helpers/trigger-goldens.mjs";
 import { SPEND_PANEL_STATES } from "./helpers/spend-goldens.mjs";
 import { WORKSPACE_PANEL_STATES } from "./helpers/workspace-goldens.mjs";
 import { LOADED_PANEL_STATES } from "./helpers/loaded-goldens.mjs";
+import { TRIGGER_GETS_PANEL_STATES } from "./helpers/trigger-gets-goldens.mjs";
 import { FLEET_PANEL_STATES } from "./helpers/fleet-goldens.mjs";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,7 +25,7 @@ import { DEFER_BUCKETS, DEFER_BUCKET_WORDS } from "@edgehero/pi-dispatch/defer-r
 import { FREE_SLOT_TEXT, HOST_NO_EXPIRY_TEXT, NEEDS_EMPTY, WAITLISTS_CALM } from "../src/console/panels/overview.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
-import { LONG_NAMES, PANELS, PANEL_STATES, RUN_PANEL_STATES, renderPanelStates } from "./helpers/panel-goldens.mjs";
+import { LONG_NAMES, PANELS, PANEL_STATES, RUN_PANEL_STATES, TRIGGER_GETS_CONFIRM_STATES, renderPanelStates } from "./helpers/panel-goldens.mjs";
 import { CRON_ID_MAX } from "@edgehero/pi-dispatch/triggers";
 
 /**
@@ -57,7 +58,7 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   const runs = ["runs-mirror-off.operator", "runs-mirror-degraded.operator", "runs-truncated.operator", "runs-unreadable.viewer", "runs-empty.viewer", "runs-unknown-reason.viewer"];
   const parked = ["parked-approval.operator", "parked-approval.viewer", "parked-answerable.operator", "parked-unanswerable.operator", "parked-being-answered.operator", "parked-unknown.operator", "parked-empty.viewer"];
   const more = ["run-not-found.operator", "run-not-found.viewer", "confirm-refused-timeout.operator", "confirm-preview-resume-incomplete.operator", "confirm-preview-many-queues.operator"];
-  assert.deepEqual([...PANEL_STATES], [...SETUP_PANEL_STATES, ...ANSWERER_PANEL_STATES, ...Object.keys(AGENT_OVERVIEW_DRAW), ...SANDBOX_PANEL_STATES, ...UPDATES_PANEL_STATES, ...UPDATES_CONFIRM_STATES, ...WORKSPACE_PANEL_STATES, ...LOADED_PANEL_STATES, ...MODELS_PANEL_STATES, ...ZERO_TOUCH_PANEL_STATES, ...CONFIGURATION_PANEL_STATES, ...TRIGGER_LIST_PANEL_STATES, ...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", "audit-newer.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
+  assert.deepEqual([...PANEL_STATES], [...SETUP_PANEL_STATES, ...ANSWERER_PANEL_STATES, ...Object.keys(AGENT_OVERVIEW_DRAW), ...SANDBOX_PANEL_STATES, ...UPDATES_PANEL_STATES, ...UPDATES_CONFIRM_STATES, ...WORKSPACE_PANEL_STATES, ...LOADED_PANEL_STATES, ...TRIGGER_GETS_PANEL_STATES, ...TRIGGER_GETS_CONFIRM_STATES, ...MODELS_PANEL_STATES, ...ZERO_TOUCH_PANEL_STATES, ...CONFIGURATION_PANEL_STATES, ...TRIGGER_LIST_PANEL_STATES, ...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", "audit-newer.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
   // `<state>.<role>`, the role one the width check knows (`console-width-check.mjs` `GOLDEN_ROLES`).
   for (const state of PANEL_STATES) assert.match(state, /^[a-z0-9][a-z0-9-]*\.(?:operator|viewer|anonymous)$/, state);
 });

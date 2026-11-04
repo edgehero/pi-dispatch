@@ -26,9 +26,28 @@ The forge and cron reference below keeps their existing behavior.
 The [Configuration page](console.md#configuration-and-trigger-pages) has Edit and Delete on each row,
 a page per trigger and a structured add editor. Human row labels count from 1; tool indexes remain zero-based.
 The add editor and its JSON fallback write the add tool's entry, including `run.secretBundle: false`.
-The edit form and `dispatch_trigger_edit` share flow, venue (`backend`), provider, model, `maxTurns`,
-progress, statusComment, steer and recover. Omitted fields keep their existing values; unrelated
-hand-written bounds are preserved. Cron cannot enable statusComment or recover.
+
+A trigger's page has two editors, and no key has both:
+
+- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages` and
+  `excludeTools`, with one preview that says each change in words and one Confirm. Only a person can use this form, and no `dispatch_*` tool
+  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other six
+  ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)).
+- **Edit** changes the venue (`backend`), `maxTurns`, `progress`, `statusComment`, `steer` and `recover`. Cron cannot enable
+  statusComment or recover.
+
+`dispatch_trigger_edit` takes flow, venue, provider, model, `maxTurns` and those four flags, behind a confirm, except that a headless
+call with the process's write grant can turn an existing flag off unattended. Omitted fields
+keep their existing values; unrelated hand-written bounds are preserved. Everything else in a trigger, such as `image`, `secrets`
+and `skillsDir`, changes in the file.
+
+**Editing the file stays the same.** Every field can still be written by hand, and the same parser reads the file whoever wrote
+it. An edit of this trigger's entry made after the page drew it refuses the preview, and any edit of the file made after a preview
+refuses its Confirm.
+
+**On a fleet where each host keeps its own file**, the page writes this host's file and no other. "A host with its own copy of this
+file keeps what it has until that copy changes." So make the same change on each, and while the copies differ on a schedule, no
+host installs a change to one ([multi-host](multi-host.md#2-divergent-triggers-files-freeze-cron-rather-than-fighting-over-it)).
 
 Fire now and `dispatch_trigger_fire(index)` start a served cron schedule after a person's confirmation.
 They apply the folder allowlist, clean-tree check, committed flow opt-in and hourly attempt count of
@@ -222,8 +241,10 @@ other top-level block, `secretBundles` among them, so upgrade them first.
 
 ## Optional `run` fields
 
-Each one is a deliberate edit to the file: neither the panel nor any AI tool can set it, because each one
-changes what code runs or what it costs.
+Most of these change what code runs or what it costs, so each is a deliberate edit to the file that neither the panel nor any
+`dispatch_*` tool can set. `packages`, `excludeTools` and `mcp` can also be changed by a person on the
+[trigger's page](console.md#what-a-triggers-jobs-get), which no tool reaches. `progress`, `statusComment`, `steer` and `recover` change
+how a run is followed or picked up, and that page's Edit form and `dispatch_trigger_edit` take them too.
 
 - `"command"` replaces `flow`. You can use exactly one of the two on any trigger type. The job runs a
   registered pi extension command headlessly, with no interactive session. The whole prompt is `/command
@@ -620,7 +641,8 @@ A chained job (`/outbox`) keeps its parent's provider, model and list. A request
 If a listed model is served by a declared model endpoint ([`docs/egress.md`](egress.md)), the job holds
 a slot on that endpoint too, not only on its main model's.
 
-No AI tool can set `models`. Edit the file. `dispatch_trigger_add` and `dispatch_trigger_edit` refuse a
+No AI tool can set `models`. Edit the file, or change it on the [trigger's page](console.md#what-a-triggers-jobs-get), which
+judges the list before it writes. `dispatch_trigger_add` and `dispatch_trigger_edit` refuse a
 call that carries `models`, and an edit keeps the list the entry has. `dispatch_trigger_edit` also refuses,
 before it asks, a new provider or model that is not on the trigger's own list. `dispatch_triggers` and the
 panel show the list.
@@ -690,7 +712,10 @@ Any trigger type can set the most one of its jobs may spend, in US dollars:
   That image's runner would ignore the cap. A deployment that sets no dollar cap anywhere needs no new image.
 - A chained job (job chaining) keeps its parent's cap.
 - No AI tool can set or change it. `dispatch_trigger_add` and `dispatch_trigger_edit` refuse a call that
-  carries it, and an edit leaves it as it is. `dispatch_triggers` and the panel show it.
+  carries it, and an edit leaves it as it is. `dispatch_triggers` and the panel show it. A person can change it in the file
+  or on the [trigger's page](console.md#what-a-triggers-jobs-get), which refuses a cap above the deployment's and one too
+  small for the first call of the model a job starts on, and warns on one too small for a short task's, or for another
+  model it names ([costs](costs.md#a-job-cap-on-a-trigger)).
 
 **Upgrading, and services out of step.** The same as for `models` above: a receiver from before this
 release drops `maxCostUsd`, and its job would run under the deployment's cap or none. The worker refuses

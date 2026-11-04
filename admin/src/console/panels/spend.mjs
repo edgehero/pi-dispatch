@@ -1407,7 +1407,10 @@ export function breakdownRows(v) {
     "Breakdown",
     html`${note("By flow and by project are on the Spend view.")}
       <h3>By trigger</h3>
-      <div class="table-scroll">
+      ${f.byTrigger === null
+        // Not computed, and only a file that could not be read leaves it so here (`assembleCosts`): an empty table would read as no trigger having spent.
+        ? note("The triggers file could not be read, so this spend is not split by trigger.")
+        : html`<div class="table-scroll">
         <table class="table">
           <thead>
             <tr>
@@ -1418,7 +1421,7 @@ export function breakdownRows(v) {
             </tr>
           </thead>
           <tbody>
-            ${(f.byTrigger ?? []).map(
+            ${f.byTrigger.map(
               (r) =>
                 html`<tr>
                   <td>
@@ -1440,7 +1443,7 @@ export function breakdownRows(v) {
             )}
           </tbody>
         </table>
-      </div>
+      </div>`}
       <h3>By repository</h3>
       ${ui.facts(
         f.byRepo.map((r) => [

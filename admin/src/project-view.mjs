@@ -249,7 +249,7 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
     allocation: { window, shareMicros: amount(allocation?.state?.allocations?.[id]), totalMicros: amount(allocation?.totalMicros), floorMicros: amount(allocation?.floors?.[id]), weight: amount(weights[id]), totalWeight: amount(totalWeight), split: allocation?.state ? { id: allocation.state.planId ?? null, writer: allocation.state.writer ?? null, appliedAt: allocation.state.appliedAt ?? null, validUntil: allocation.state.validUntil ?? null } : null, refused: selected.filter((r) => recordReason(r) === "allocation-cap").length, unset: !envelope, problem: allocation?.problem || allocation?.unreachable ? "The allocation could not be read." : null },
     size, sizing: sizingView, sizingUnreadable: registryUnreadable || !sizing || Boolean(sizing.unreachable) || !sl || Boolean(sl.invalid || sl.unreadable), limits: limitRows, limitsUnreadable: !sl || Boolean(sl.invalid || sl.unreadable), bundle, bundleKnown,
     loads: projectLoadsOf(recorded.filter((r) => instant(r) >= now - LOADS_WINDOW_MS), { historyIncomplete: !historyReadable || fleetHistory?.incomplete !== false || newerSkipped > 0 }),
-    triggers: [...triggerCounts.values()].sort((a, b) => a.index - b.index), editRefusal: projectRefusal(edit, id, "edit"), deleteRefusal: projectRefusal(deletion, id, "delete"),
+    triggers: [...triggerCounts.values()].sort((a, b) => a.index - b.index), triggersKnown: Array.isArray(triggers?.triggers), editRefusal: projectRefusal(edit, id, "edit"), deleteRefusal: projectRefusal(deletion, id, "delete"),
   };
 }
 

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { FAILURE_KINDS, MAX_RESET_MS } from "../../image/runner/src/provider-failure.mjs";
 import { PROVIDER_FAILURE_KINDS } from "../src/model-failover-protocol.mjs";
 import { test } from "node:test";
+import { failoverListUsable } from "../src/model-ref.mjs";
 import { FAILOVER_PRICED_APIS, MODEL_COOLDOWN_MAX_MS, checkFailoverCandidate, failoverEgressRequired, failoverModelView, markModelCooldown, modelCooldownKey, readModelAttempt, readModelCooldown, readModelCooldowns, selectFailoverJob, writeModelAttempt } from "../src/model-failover.mjs";
 import { makeProcessor } from "../src/index.mjs";
 import { parseExitProviderFailure, parseExitReplaySafe, parseExitToolsStarted, buildRecord, makeLogSink } from "../src/run-history.mjs";
@@ -499,4 +500,13 @@ test("a subscription activated during primary selection strengthens the API bill
 	assert.equal(primaryReads, 2);
 	assert.equal(result.job, undefined);
 	assert.equal(result.wait, "subscription-quota");
+});
+
+test("failoverListUsable: every fallback on the job's list, and no list leaves none usable, the rule selection refuses by", () => {
+	assert.equal(failoverListUsable({ fallbackModels: ["a/x"], models: ["a/x", "a/y"] }), true);
+	assert.equal(failoverListUsable({ fallbackModels: ["a/x", "b/z"], models: ["a/x"] }), false);
+	assert.equal(failoverListUsable({ fallbackModels: ["a/x"] }), false, "with no allowed list a fallback cannot be tried");
+	assert.equal(failoverListUsable({ models: ["a/x"] }), false, "no fallbacks to try");
+	assert.equal(failoverListUsable({ fallbackModels: ["not a ref"], models: ["a/x"] }), false);
+	assert.equal(failoverListUsable({ fallbackModels: ["a/x"], models: [] }), false);
 });

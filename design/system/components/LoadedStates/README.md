@@ -1,4 +1,4 @@
-The top line of each run's Loaded card, run by run, what the outcome says in the Runs list and on the run page, where the same record is repeated (a sandbox now, and a trigger with #800's part 2), and what a viewer reads.
+The top line of each run's Loaded card, run by run, what the outcome says in the Runs list and on the run page, where the same record is repeated (a sandbox and a trigger), and what a viewer reads.
 
 **How a person uses it.**
 - **Everything loaded** (gh-9575): one green line, nothing to do.
@@ -17,12 +17,12 @@ The top line of each run's Loaded card, run by run, what the outcome says in the
 - **No record** (gh-c3f8): an older release wrote it. **Refused** (gh-e9a0): nothing loaded.
 - **In the Runs list and the banner** (`p-loaded-runs`, and `p-outcome` drawn twice): the record's outcome stays completed, and the word a person reads is *Completed, without its flow* or *Completed, with a failed extension*.
 - **In a sandbox,** What opens gains one row. A shell has no overlay, so pi started there loads only the workspace's own `.pi/`, whatever the run loaded; the row says that first, then what the run itself had, linked to it. A fresh sandbox has no run to quote, so it says what a job of the trigger would load on that host, from its last doctor run with the time, or that this is unknown.
-- **On a trigger,** with #800's part 2 and not built yet: each run field the record covers gains *Its last run*: what the trigger asks for, beside what its last run had, and the one before it when that one did not get it.
+- **On a trigger,** under each row of *What its jobs get* (TriggerEnvironment): what the file says the next job gets, and beneath it what its last run that said what it loaded had, by its id and host. When a newer run could not say, the card names it and why.
 - **As a viewer sees it:** the same words with no button.
 
 **Panels.** `p-loaded`, `p-loaded-runs`, `p-outcome-no-flow`, `p-outcome-extension-failed`, `p-loaded-sandbox`, `p-loaded-sandbox-fresh`, `p-loaded-trigger`, `p-loaded-viewer`. On a run page the two outcome panels are `p-outcome`.
 
-**The server provides.** The run record's new `loaded` field (RunLoaded). For a trigger, with part 2, its last run's record. For a fresh sandbox: What the host's last doctor run published, with its time, or unknown. The repository's part is decided at its base commit. The publication is a new key, `doctor:loads:<name>`, and it is also what the gh-ebd7 line reads for mini1 and mini2. pi's version and the image come from what every live host already publishes, `host:h:<name>` (`image`, `imageDigest`, `piVersion`, `INT-HOST-REGISTRY-CONTRACT`), so mini2's fresh row still has them. Its version is said only where the sandbox's image is the one that host booted on: a kept older image and a trigger's own `run.image` hold their own pi. For a shell, nothing about the overlay: `worker/src/sandbox.mjs` mounts no `/opt/pi-global`, and `worker/src/sandbox-store.mjs` says a reopened workspace loads neither the candidate nor the overlay.
+**The server provides.** The run record's new `loaded` field (RunLoaded). For a trigger, its last run's record. For a fresh sandbox: What the host's last doctor run published, with its time, or unknown. The repository's part is decided at its base commit. The publication is a new key, `doctor:loads:<name>`, and it is also what the gh-ebd7 line reads for mini1 and mini2. pi's version and the image come from what every live host already publishes, `host:h:<name>` (`image`, `imageDigest`, `piVersion`, `INT-HOST-REGISTRY-CONTRACT`), so mini2's fresh row still has them. Its version is said only where the sandbox's image is the one that host booted on: a kept older image and a trigger's own `run.image` hold their own pi. For a shell, nothing about the overlay: `worker/src/sandbox.mjs` mounts no `/opt/pi-global`, and `worker/src/sandbox-store.mjs` says a reopened workspace loads neither the candidate nor the overlay.
 
 **Who sees what.** As RunLoaded: viewers read the same words, and the buttons are operator actions, so a viewer has none (`p-loaded-viewer`).
 

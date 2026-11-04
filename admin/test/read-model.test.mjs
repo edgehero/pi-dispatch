@@ -22,6 +22,8 @@ import {
   readLogTail,
   readSettingsView,
   readTriggers,
+  createFleetReader,
+  readTriggersWithStalls,
   normalizeTriggerForDisplay,
   readStagedPackages,
   listRunIds,
@@ -298,6 +300,37 @@ test("resolvePaths reimplements the non-negative-int parse: invalid PI_DISPATCH_
   assert.equal(resolvePaths({ PI_DISPATCH_RUN_PER_HOUR: "0" }).dispatchRunPerHour, 0, "0 is valid (disables the tool)");
   assert.equal(resolvePaths({ PI_DISPATCH_RUN_PER_HOUR: "abc" }).dispatchRunPerHour, 3, "non-numeric -> default");
   assert.equal(resolvePaths({ PI_DISPATCH_RUN_PER_HOUR: "-1" }).dispatchRunPerHour, 3, "negative -> default");
+});
+
+// Only ENOENT is missing. Each of these is a file that is there with rows nobody could see.
+for (const [code, want] of [["ENOENT", { missing: true }], ["EACCES", { unreadable: "EACCES" }], ["EIO", { unreadable: "EIO" }], ["EISDIR", { unreadable: "EISDIR" }], [undefined, { unreadable: "error" }]]) {
+  test(`readTriggers on a read failing with ${code ?? "no code"}`, () => {
+    const fs = { readFileSync: () => { throw Object.assign(new Error("failed"), code ? { code } : {}); } };
+    assert.deepEqual(readTriggers({ triggersPath: "/t.json", fs }), want);
+  });
+}
+
+test("readTriggers on the real file system: a directory where the file should be is no missing file, and neither is no path", () => {
+  const dir = tempDir("pd-read-triggers-");
+  assert.deepEqual(readTriggers({ triggersPath: dir }), { unreadable: "EISDIR" });
+  assert.deepEqual(readTriggers({ triggersPath: join(dir, "absent.json") }), { missing: true });
+  assert.deepEqual(readTriggers({ triggersPath: null }), { missing: true });
+  assert.deepEqual(readTriggers({ triggersPath: "" }), { missing: true });
+});
+
+test("the console's pages say a triggers file they could not read as that, and a missing one as that, through the same sentence", async () => {
+  const { fileTrouble } = await import("../src/console/panels/config.mjs");
+  const dir = tempDir("pd-read-triggers-");
+  assert.equal(fileTrouble(readTriggers({ triggersPath: dir }), "triggers file"), "The triggers file cannot be read (EISDIR).");
+  assert.equal(fileTrouble(readTriggers({ triggersPath: join(dir, "absent.json") }), "triggers file"), "The triggers file does not exist.");
+});
+
+test("a watch rule's list refuses a file it could not read, and the cron stall read hands the shape on", async () => {
+  const dir = tempDir("pd-read-triggers-");
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir: tempDir("pd-read-triggers-logs-"), triggersPath: dir }, { makeQueueFn: () => ({ close: async () => {} }) });
+  await assert.rejects(reader.watch.listRules(), /watch configuration unreadable/);
+  await reader.dispose?.();
+  assert.deepEqual(await readTriggersWithStalls({ triggersPath: dir, url: "redis://unused" }), { unreadable: "EISDIR" });
 });
 
 test("listRuns parses records, sorts by endedAt desc with nulls last, skips non-json/unparseable", () => {

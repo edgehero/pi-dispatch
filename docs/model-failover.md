@@ -2,7 +2,7 @@
 
 An operator can list models to try on the next queue attempt when a provider is rate limited, out of quota or overloaded. Selection happens at pickup, before credentials are minted, a repository is cloned or budget is reserved. Nothing changes model inside a running attempt.
 
-Add the list to a reviewed trigger file:
+Add the list to a reviewed trigger file, or change it on the trigger's [console page](console.md#what-a-triggers-jobs-get):
 
 ```json
 {

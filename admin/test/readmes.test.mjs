@@ -4,6 +4,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CONSOLE_PICKS } from "../../launch/console-picks.mjs";
 import { loadedRows, outcomeNote } from "../src/loaded-words.mjs";
+import { CARD_FIELDS } from "../src/trigger-edit-core.mjs";
+import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
 import { LOADED_SAMPLES as S } from "./helpers/loaded-samples.mjs";
 import { TOP_HALF_BANNED } from "./helpers/plain-words.mjs";
 
@@ -115,5 +117,84 @@ test("What a job gets says what the console says: the words a row reads, and eve
 });
 
 test("the words the root README's new section leans on are in its glossary", () => {
-  for (const word of ["Skill", "Extension", "Overlay", "Host", "MCP server", "Tool", "Base commit", "Staged"]) assert.match(ROOT, new RegExp(`^\\| \\*\\*${word}\\*\\* \\| `, "m"), word);
+  for (const word of ["Skill", "Extension", "Package", "Overlay", "Host", "MCP server", "Tool", "Base commit", "Staged", "Job cap", "Fallback model", "Doctor", "Triggers file"]) assert.match(ROOT, new RegExp(`^\\| \\*\\*${word}\\*\\* \\| `, "m"), word);
+});
+
+test("What a job gets says what the trigger's page does: the card by its name, the buttons by theirs, what it refuses, and the preview shown", () => {
+  const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## How to use it\n"));
+  const words = section.replaceAll("**", "").replace(/\s+/g, " ");
+  for (const said of [TRIGGER_GETS_WORDS.title, "Preview the change", "Confirm", "Undo", "job cap", "is marked unknown", "can only lower"]) assert.ok(words.includes(said), said);
+  // Each of these had no referent for someone new to this, and each has plain words now.
+  for (const stumble of ["for free", "the one you set for everything", "Nothing is written", "as before", "would get the same", "has not reported", "in one bar", "on this machine", "says no here", "the model a job starts on", "even if you would confirm"]) assert.ok(!words.includes(stumble), stumble);
+  assert.ok(section.includes("console/console-trigger-change.png"), "the section shows the preview it describes");
+  // The card itself is shown where the READMEs list the console's pages, and the line there sends a reader here.
+  const item = ROOT.slice(ROOT.indexOf("**A trigger:**"), ROOT.indexOf("**Your phone:**"));
+  assert.ok(item.includes("console/console-trigger.png") && item.includes("(#what-a-job-gets)"));
+  // A plain name for each row a person changes on the image. A row added to the card fails here until the section says it.
+  const plain = { Model: "the model", "Job cap": "its job cap", "Flow and skills": "the flow", Extensions: "your packages", "MCP servers": "the outside systems", Tools: "the tools" };
+  for (const [row, name] of Object.entries(plain)) assert.ok(words.includes(name), `${row} is said as ${name}`);
+});
+
+test("nothing promises what is not built: no switch per extension, however it is put, and no field still to come", () => {
+  // The words a switch or a chip for one extension could be put in. "One switch for all the staged packages" is what is built, and matches none.
+  const perExtension = /\b(?:switch|toggle|chip)(?:es)?\b[^.|]{0,40}\b(?:per|for each|for every|each|every|one)[\s-]+(?:staged\s+)?(?:package|extension|overlay)\b|\b(?:each|every|one|per)[\s-]+(?:staged\s+)?(?:package|extension)\b[^.|]{0,40}\b(?:switch|toggle|chip)(?:es)?\b/i;
+  for (const said of ["with a switch per extension", "each extension has its own switch", "a per-extension toggle", "one chip per staged package"]) assert.match(said, perExtension, said);
+  assert.doesNotMatch("One switch for all the staged packages. Each staged package and overlay extension is shown, with where it is, and is not switched.", perExtension);
+  for (const path of ["README.md", "admin/README.md", "docs/console.md"]) {
+    const text = read(path).replace(/\s+/g, " ");
+    assert.doesNotMatch(text, perExtension, path);
+    for (const later of ["excludeExtensions", "excludeExtensionTools", "exclude-tool-not-loaded"]) assert.ok(!text.includes(later), `${path} promises ${later}`);
+  }
+});
+
+test("the root README's optional fields name every field a trigger's page changes, and its sentence names exactly those, in order", () => {
+  const start = ROOT.indexOf("`run` names a `flow` or a registered pi `command`");
+  const sentenceAt = ROOT.indexOf("On a trigger's page in the console, a person changes ");
+  assert.ok(start > 0 && sentenceAt > start, "the list, and the sentence after it");
+  const list = ROOT.slice(start, sentenceAt);
+  // `flow` is no option: a run names one or a command, in the line the list opens with. Every other member is a line of the list.
+  for (const field of CARD_FIELDS) assert.ok(list.includes(`\`${field}\``), `the list names ${field}`);
+  const said = /a person changes ((?:`[A-Za-z]+`(?:, | and\s+)?)+) with one preview and one Confirm/.exec(ROOT.slice(sentenceAt));
+  assert.ok(said, "the sentence");
+  assert.deepEqual([...said[1].matchAll(/`([A-Za-z]+)`/g)].map((m) => m[1]), [...CARD_FIELDS]);
+  // Beside it, what the same change does on a fleet: the preview's own line says this, and `console-doc-tables.test.mjs` holds the docs' quote of it.
+  assert.ok(ROOT.replace(/\s+/g, " ").includes("a host keeps what it has until its copy changes"));
+});
+
+test("the admin README's list of what a person changes on a trigger's page is CARD_FIELDS, each by a plain name, and it says the panel's line truly", () => {
+  const admin = read("admin/README.md").replace(/\s+/g, " ");
+  const sentence = /There a person changes (.*?), with one preview that says each change in words, one Confirm, and Undo\./.exec(admin)?.[1];
+  assert.ok(sentence, "the sentence");
+  const plain = { flow: "the flow", provider: "the provider", model: "and model", maxCostUsd: "the job cap", models: "the allowed models", fallbackModels: "and fallbacks", mcp: "the MCP servers", packages: "switch for staged packages", excludeTools: "the tools" };
+  assert.deepEqual(Object.keys(plain), [...CARD_FIELDS], "one plain name per field");
+  for (const [field, name] of Object.entries(plain)) assert.ok(sentence.includes(name), `${field} is said as ${name}`);
+  assert.ok(admin.includes(TRIGGER_GETS_WORDS.title), "the card by its name");
+  assert.ok(!admin.includes("which neither the console nor a model callable tool makes for you"), "the staged packages switch exists now");
+});
+
+test("both READMEs say what no tool can set as the six fields it cannot, and neither overreaches to what a job may spend or reach", () => {
+  const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(read("admin/src/write-plans.mjs"))[1];
+  const fields = [...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort();
+  const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## How to use it\n")).replace(/\s+/g, " ");
+  // Whose: pi-dispatch's own commands, and not everything an AI can run. pi's own `bash` is outside this, as SECURITY.md says, so "No AI tool" overclaims.
+  assert.match(read("SECURITY.md").replace(/\s+/g, " "), /A pi process’s own bash, write and edit tools are outside this policy/);
+  const said = /The commands pi-dispatch gives an AI cannot set a trigger's (.*?): one that tries is refused before you are asked/.exec(section)?.[1];
+  assert.ok(said, "the root README's sentence");
+  assert.doesNotMatch(section, /No AI tool/);
+  // What those commands can still do, as `docs/triggers.md` says: without it the list reads as ruling out a one-confirm change of the model.
+  assert.match(section, /They can still move a trigger's flow, provider and model, and only after you confirm/);
+  assert.match(read("docs/triggers.md").replace(/\s+/g, " "), /`dispatch_trigger_edit` can still set the first three/);
+  const plain = { maxCostUsd: "job cap", models: "the list of models its jobs may use", fallbackModels: "fallback models", mcp: "outside systems", excludeTools: "which tools its jobs lose", packages: "load your packages" };
+  assert.deepEqual(Object.keys(plain).sort(), fields, "one plain name per field");
+  for (const [field, name] of Object.entries(plain)) assert.ok(said.includes(name), `${field} is said as ${name}`);
+  const admin = read("admin/README.md").replace(/\s+/g, " ");
+  const adminPlain = { maxCostUsd: "job cap", models: "allowed models", fallbackModels: "fallbacks", mcp: "MCP servers", excludeTools: "tool exclusions", packages: "staged packages" };
+  assert.deepEqual(Object.keys(adminPlain).sort(), fields);
+  const list = /no `dispatch_\*` tool can set a trigger's (job cap[^.]*?)\. A pi process's own `bash`, `write` and `edit` tools are outside this policy/.exec(admin)?.[1];
+  assert.ok(list, "the admin README's sentence, and what it does not cover");
+  for (const [field, name] of Object.entries(adminPlain)) assert.ok(list.includes(name), `${field} is said as ${name}`);
+  assert.doesNotMatch(admin, /never by a tool/);
+  assert.match(admin, /`dispatch_trigger_edit` can still move its flow, provider and model behind a confirm/);
+  // `dispatch_set` and `dispatch_trigger_edit` each move a job's spend behind a confirm, so neither README may say no tool can.
+  for (const [path, text] of [["README.md", ROOT], ["admin/README.md", read("admin/README.md")]]) assert.doesNotMatch(text.replace(/\s+/g, " "), /(?:change|what) (?:what )?a (?:trigger's )?jobs? may spend or reach/, path);
 });

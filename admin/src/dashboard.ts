@@ -1964,7 +1964,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
     // has no headroom for another hint (`keyHints`' arithmetic), the `j projects` precedent on the runs divider.
     { key: "spend", head: [`${SPEND_TITLE.toLowerCase()} & limits`, `jobs & tokens/day · s set${snapshot.envelopeSet ? " · b split" : ""}`], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
     ...dollarSection(snapshot.dollars, inner, styler),
-    { key: "triggers", head: ["triggers", `${trg.count} standing · a add · ↵ open`], body: [...trg.lines, ...((snapshot?.triggers?.triggers ?? []).some((t: any) => t.type === "watch") ? ["z watch findings and outcomes"] : [])], priority: 3, viewKey: "tab" },
+    { key: "triggers", head: ["triggers", trg.known ? `${trg.count} standing · a add · ↵ open` : "not known"], body: [...trg.lines, ...((snapshot?.triggers?.triggers ?? []).some((t: any) => t.type === "watch") ? ["z watch findings and outcomes"] : [])], priority: 3, viewKey: "tab" },
     ...bundlesSection(snapshot.secretBundles, inner, styler),
     ...profilesSection(snapshot.secretProfiles, inner, styler),
     { key: "pauses", head: ["pause windows", `${pw.count} · w manage`], body: pw.lines, priority: 1, viewKey: "w" },
@@ -2487,15 +2487,18 @@ function fmtTokens(n: number): string {
 
 /** The configured triggers as colored rows: `<kind>  <match>  → <target> <flow>`. Takes the whole snapshot
  * (not just `snapshot.triggers`) so each cron row can join its resident scheduler for the health badge. */
-function triggerLines(snapshot: any, selected: number, inner: number, styler: any): { count: number; lines: string[] } {
+function triggerLines(snapshot: any, selected: number, inner: number, styler: any): { count: number; known: boolean; lines: string[] } {
   const triggers = snapshot?.triggers;
   const lines: string[] = [];
-  if (triggers && triggers.missing) { lines.push(styler.cell("(triggers file not found · a to add)", inner, { color: "dim" })); return { count: 0, lines }; }
-  if (triggers && triggers.invalid) { lines.push(styler.cell(`(triggers file invalid: ${triggers.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
+  if (triggers && triggers.missing) { lines.push(styler.cell("(triggers file not found · a to add)", inner, { color: "dim" })); return { count: 0, known: true, lines }; }
+  // A count of 0 and "a add" over a file nobody could read would say it holds none, and offer a write its planner refuses. The count is still 0 for the
+  // selection, which has no row to land on: `known` is what the head says.
+  if (triggers && triggers.unreadable) { lines.push(styler.cell(`(triggers file could not be read: ${triggers.unreadable})`, inner, { color: "error" })); return { count: 0, known: false, lines }; }
+  if (triggers && triggers.invalid) { lines.push(styler.cell(`(triggers file invalid: ${triggers.invalid})`, inner, { color: "error" })); return { count: 0, known: false, lines }; }
   const list = (triggers && triggers.triggers) ?? [];
-  if (list.length === 0) { lines.push(styler.cell("(no triggers · a to add)", inner, { color: "dim" })); return { count: 0, lines }; }
+  if (list.length === 0) { lines.push(styler.cell("(no triggers · a to add)", inner, { color: "dim" })); return { count: 0, known: true, lines }; }
   list.forEach((t: any, i: number) => lines.push(triggerRow(t, i === selected, inner, styler, cronSchedInfo(t, snapshot), triggerBundleOf(t, snapshot?.secretBundles))));
-  return { count: list.length, lines };
+  return { count: list.length, known: true, lines };
 }
 
 function triggerRow(raw: any, sel: boolean, inner: number, styler: any, sched: any = null, bundle: any = null): string {

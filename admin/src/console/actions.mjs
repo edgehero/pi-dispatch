@@ -88,6 +88,9 @@ import { ANSWERER_ACTIONS, ANSWERER_WRITE_RULES } from "./answerer-actions.mjs";
 import { agentReadProjection } from "../agent-read.mjs";
 import { SETUP_HTTP_ACTIONS, SETUP_WRITE_RULES } from "./setup-actions.mjs";
 import { MODEL_ROLE_EDIT_FIELDS } from "../model-role-plans.mjs";
+// The names only. `trigger-environment-plans.mjs` must stay out of this module's imports, which every tool reaches: the planner
+// arrives through `ctx.a`, which a tool's context does not carry (`trigger-environment-boundary.test.mjs`).
+import { TRIGGER_ENVIRONMENT_EDIT_FIELDS } from "../trigger-edit-core.mjs";
 
 /** The diff moved to the confirm view with the rest of the bar's markup (issue #737); re-exported where it always was. */
 export { DIFF_LINES_MAX, diffHtmlOf, lineDiff, textHtml } from "./confirm-view.mjs";
@@ -623,7 +626,7 @@ function bundleProfilesOf(ctx) {
 /** The triggers-file bundle ids that name bundle profile `name`, for the removal's confirm; null when unreadable. */
 function bundlesNaming(ctx, name) {
   const t = typeof ctx.a.paths.triggersPath === "string" ? ctx.a.rm.readTriggers({ triggersPath: ctx.a.paths.triggersPath, fs: ctx.fs }) : { missing: true };
-  if (t?.invalid) return null;
+  if (t?.invalid || t?.unreadable) return null;
   return Array.isArray(t?.secretBundles) ? t.secretBundles.filter((b) => b.profile === name).map((b) => b.id) : [];
 }
 
@@ -2000,6 +2003,13 @@ const WRITE_RULES = {
     confirmLabel: out => out.plan.remove ? "Remove role mapping" : "Save role mapping",
     done: out => `${out.payload.body.remove ? "Removed" : "Changed"} model role ${out.payload.body.scope}/${out.payload.body.role}; no run was started`,
   },
+  "trigger-environment-edit": {
+    fields: TRIGGER_ENVIRONMENT_EDIT_FIELDS, danger: false,
+    undo: (out) => out.plan.undo,
+    inverse: (out) => out.plan.inverse,
+    confirmLabel: (out) => `Confirm: change ${out.plan.row}`,
+    done: (out) => `Changed ${out.plan.row} in this host's triggers file; no run was started`,
+  },
   "run-enqueue": {
     fields: ["folder", "flow", "task"], danger: false, atConfirm: true,
     undo: (out, body, result) => result === undefined ? UNDO_SENTENCES.rerunBefore : rerunCancel(result) ? `Cancel ${result.jobId} before it starts` : UNDO_SENTENCES.rerunUnnamed,
@@ -2191,6 +2201,24 @@ const modelRoleActions = [{
   },
 }];
 
+/**
+ * What a trigger's jobs get, changed by a person on its page (issue #800). Audited as `trigger-edit`, the same write by a
+ * wider hand: a reader of the log groups by what changed, and the row's actor says who. Authority is the planner's, at the
+ * preview and at the apply, and it reads the session's role alone. `ctx.a.triggerEnvironment` is wired by the console's own
+ * `cli.mjs`: a tool's `ctx.a` does not carry it, so `needs` refuses there too, behind the policy's own refusal.
+ */
+const triggerEnvironmentActions = [{
+  name: "trigger-environment-edit", kind: "trigger-edit", paid: false, bulk: false, needs: ["triggerEnvironment"],
+  async preview(body, ctx) {
+    const params = Object.fromEntries(TRIGGER_ENVIRONMENT_EDIT_FIELDS.map((key) => [key, body[key]]).filter(([, value]) => value !== undefined));
+    const out = await ctx.a.triggerEnvironment.preview(params, { surface: "console", role: ctx.session?.role, name: ctx.session?.name });
+    return out.plan ? { ...out, diff: diffHtmlOf(out.beforeText, out.afterText, { file: out.target }) } : out;
+  },
+  apply(entry, ctx) {
+    return ctx.a.triggerEnvironment.apply(entry, { surface: "console", role: ctx.session?.role });
+  },
+}];
+
 const sandboxActions = ["prepare", "pin", "end", "host-set"].map((operation) => ({
   name: `sandbox-${operation}`, kind: `sandbox-${operation}`, paid: false, bulk: false, needs: ["sandboxes"],
   async preview(body, ctx) {
@@ -2329,7 +2357,7 @@ function adoptable(facts, { name, version }) {
 
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
 export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...packageActions, ...modelRoleActions, ...ANSWERER_ACTIONS, ...SETUP_HTTP_ACTIONS].map(withRules));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...packageActions, ...modelRoleActions, ...triggerEnvironmentActions, ...ANSWERER_ACTIONS, ...SETUP_HTTP_ACTIONS].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {

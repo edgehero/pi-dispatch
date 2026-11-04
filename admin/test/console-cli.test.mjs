@@ -979,6 +979,76 @@ test("host setup authority comes only from the serve flag, and production wiring
   }
 });
 
+test("the console's own command is what wires a person's trigger change, each read to the fleet it answers from", async () => {
+  const dep = deployment();
+  const modules = fakeModules();
+  const asks = [];
+  const fleet = {
+    snapshot: async (opts) => (asks.push(["snapshot", opts]), {}),
+    waiting: async () => (asks.push(["waiting"]), { rows: ["in-line"] }),
+    triggerSkew: async (index, waiting, opts) => (asks.push(["skew", index, waiting, opts]), { rows: [], incomplete: false }),
+    dispose: async () => {},
+  };
+  modules.readModel.createFleetReader = () => fleet;
+  modules.readModel.readHosts = async (args) => (asks.push(["hosts", args.url]), { hosts: [] });
+  let options;
+  const service = { preview() {}, apply() {} };
+  modules.triggerEnvironmentPlans = { createTriggerEnvironmentActions: (opts) => { options = opts; return service; } };
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  const r = await cli(["serve"], { dir: dep.dir, env: dep.env, modules, platform: "linux", until: Promise.resolve() });
+  assert.equal(r.code, 0, r.err.join(" "));
+  assert.equal(captured.actionDeps.triggerEnvironment, service, "the action reaches it through ctx.a, and a tool's ctx.a carries none");
+  assert.ok(options.paths.triggersPath.endsWith("triggers.json"));
+  assert.equal(options.env, captured.actionDeps.env);
+  const proposed = { proposed: true };
+  await options.readSkew(3, proposed);
+  assert.deepEqual(asks.slice(0, 2), [["waiting"], ["skew", 3, { rows: ["in-line"] }, { fs: proposed }]], "the jobs in line and no whole snapshot, judged on the proposed file");
+  await options.readHosts();
+  assert.deepEqual(asks.at(-1), ["hosts", captured.actionDeps.paths.valkeyUrl]);
+  assert.equal(await options.readHostLoads(), await captured.pageDeps.hostLoads(), "the page's own read of what each host published");
+  // What the worker's pickup check reads on this host: each key by the service's own rule, and a file it cannot trust gives nothing.
+  assert.equal(options.deploymentDir, dep.dir);
+  const envAsked = [];
+  const realEnv = modules.serviceEnv ?? (await loadModules()).serviceEnv;
+  modules.serviceEnv = { deploymentServiceEnv: (args) => (envAsked.push([args.dir, args.keys, args.env]), { env: { PI_EGRESS: "0" }, unread: [], hazardSkipped: [] }) };
+  assert.deepEqual(options.readHostEnv(["PI_EGRESS"]), { env: { PI_EGRESS: "0" }, unread: [], hazardLine: null });
+  assert.deepEqual(envAsked, [[dep.dir, ["PI_EGRESS"], {}]], "the deployment's file alone: this console's shell is not the service's");
+  modules.serviceEnv = { deploymentServiceEnv: () => ({ env: {}, unread: [{ key: "A", line: 3 }], hazardSkipped: ["B"], hazard: { line: 7 } }) };
+  assert.deepEqual(options.readHostEnv(["A", "B"]), { env: {}, unread: ["A", "B"], hazardLine: 7 }, "names and a line's number, and never a line's text");
+  for (const state of [{ unreadable: "EACCES" }, { untrusted: "group-writable" }]) {
+    modules.serviceEnv = { deploymentServiceEnv: () => ({ env: { PI_EGRESS: "0" }, unread: [], hazardSkipped: [], ...state }) };
+    assert.throws(() => options.readHostEnv(["PI_EGRESS"]));
+  }
+  // The real reader over a real file. The shell's values never reach the answer, either way round, and a line the reader cannot
+  // vouch for comes back by name and not as absent.
+  modules.serviceEnv = realEnv;
+  writeFileSync(join(dep.dir, ".env"), "PI_EGRESS=1\nPI_FORWARD_ENV=LINEAR_API_KEY\nLINEAR_API_KEY=ab$cd\nDOCS_KEY=ab#cd\n", { mode: 0o600 });
+  const shellHolds = ["PI_EGRESS", "SHELL_ONLY_KEY"];
+  for (const key of shellHolds) dep.env[key] = key === "PI_EGRESS" ? "0" : "from the shell";
+  assert.deepEqual(options.readHostEnv(["PI_EGRESS", "PI_FORWARD_ENV"]), { env: { PI_EGRESS: "1", PI_FORWARD_ENV: "LINEAR_API_KEY" }, unread: [], hazardLine: null }, "the file wins over the shell that says 0");
+  assert.deepEqual(options.readHostEnv(["SHELL_ONLY_KEY"]), { env: {}, unread: [], hazardLine: null }, "a value only this shell holds is no value the worker holds");
+  assert.deepEqual(options.readHostEnv(["LINEAR_API_KEY"]), { env: {}, unread: ["LINEAR_API_KEY"], hazardLine: null }, "not absent: a line the reader cannot vouch for");
+  // A line the service's loader would run: every key the file spells is unknown, none of them on that line, and the line is what to fix.
+  // The wrapper's reading, which a launchd or a shell service gets, whichever machine runs this test.
+  modules.serviceEnv = { deploymentServiceEnv: (args) => realEnv.deploymentServiceEnv({ ...args, platform: "darwin" }) };
+  writeFileSync(join(dep.dir, ".env"), "PI_EGRESS=0\nPI_FORWARD_ENV=LINEAR_API_KEY\nLINEAR_API_KEY=ab cd\n", { mode: 0o600 });
+  assert.deepEqual(options.readHostEnv(["PI_FORWARD_ENV", "PI_EGRESS", "GITLAB_URL"]), { env: {}, unread: ["PI_FORWARD_ENV", "PI_EGRESS"], hazardLine: 3 });
+  // A key the file does not spell is still absent, and that is no answer here: such a line can set it without spelling it (`. ./more.env`).
+  assert.deepEqual(options.readHostEnv(["GITLAB_URL"]), { env: {}, unread: [], hazardLine: 3 });
+  // The other loaders do not run a line, so a hazard there speaks only of the keys it stopped.
+  modules.serviceEnv = { deploymentServiceEnv: (args) => realEnv.deploymentServiceEnv({ ...args, platform: "linux" }) };
+  writeFileSync(join(dep.dir, ".env"), "PI_EGRESS=0\n. ./more.env\n", { mode: 0o600 });
+  assert.deepEqual(options.readHostEnv(["GITLAB_URL"]), { env: {}, unread: [], hazardLine: null });
+  for (const key of shellHolds) delete dep.env[key];
+  modules.modelEndpoints = { loadModelEndpoints: () => [{ id: "e", host: "h", port: 443 }], readOverlayModels: () => null };
+  assert.deepEqual(options.readEndpoints(), [{ id: "e", host: "h", port: 443 }]);
+  modules.modelEndpoints = undefined;
+  assert.deepEqual(options.readEndpoints(), []);
+  const real = await loadModules();
+  assert.equal(typeof real.triggerEnvironmentPlans.createTriggerEnvironmentActions, "function");
+});
+
 test("CLI setup destinations and grants reject misuse before any token or code write", async () => {
   const linked = await cli(["link", "--name", "alice", "--next", "/setup"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env });
   assert.equal(linked.code, 0);

@@ -35,10 +35,11 @@
  *     hook with nobody at the keyboard, and the thing it races (an operator edit, a sibling job's
  *     disarm) clears in milliseconds.
  *
- * `disarmTrigger` is also deliberately NARROWER than `writeTriggers`: it refuses an unreadable file
+ * `disarmTrigger` is also deliberately NARROWER than `writeTriggers`: it refuses a missing or unparseable file
  * outright rather than repairing from empty. The repair posture is right for the operator CRUD path
  * (a missing file plus "add trigger" should scaffold) and catastrophic here -- overwriting a file the
- * worker could not read, to record one disarm, would destroy the operator's trigger set.
+ * worker could not parse, to record one disarm, would destroy the operator's trigger set. A file neither can READ,
+ * both refuse: not being able to see a file is no reason to think it empty.
  *
  * Custom: exclusive-create lockfile per session-store.mjs precedent; no proper-lockfile dependency
  * (repo keeps runtime deps minimal, and the two-writer case needs no lease/renewal machinery)
@@ -210,9 +211,12 @@ function discardTmp(fs, tmp) {
  * human keypress is the approval and CONST-TRIGGER-AUTHOR-GATE's principle holds. The worker's disarm
  * does NOT come through here -- `disarmTrigger` below is its own, narrower entry.
  *
- * A missing or unparseable existing file starts from an empty set; the validated write repairs it.
- * Returns `{ ok: true }`, or `{ invalid }` for a validation failure OR a held lock; fs failures throw,
- * the contract this function has always had.
+ * A missing or unparseable existing file starts from an empty set; the validated write repairs it. A file that is
+ * there and cannot be read (EIO, EACCES, EISDIR) does not: it refuses with `{ invalid, unreadable: true }`, before
+ * `mutate` runs and with the file untouched.
+ * Returns `{ ok: true }`, or `{ invalid }` for a validation failure, a held lock or that read. A failure of the lock,
+ * the tmp file or the rename throws, the contract this function has always had: all three happen beside the file, so
+ * the old file is whole after any of them.
  *
  * `expect` (issue #642): the `{ path, text }` snapshots the change was built from (the admin's `writeInputs`, taken
  * before an operator's confirm, e.g. the console's preview). Re-read INSIDE the lock, right before the rename, so the
@@ -245,14 +249,25 @@ export function writeTriggers({ triggersPath, mutate, mutateDocument = null, exp
 		// would hand it a truncated file and get back a confident answer about a key, when what happened is
 		// that the file was cut in half.
 		let parsedText = null;
+		// Only a MISSING file may start from nothing. A file that is there and could not be read is not an empty one: folded
+		// into "missing", one failed read made `current` empty, the `expect` re-read below then saw the file as it was and
+		// passed, and the rename replaced every trigger with what `mutate` made of nothing, on an `{ ok: true }`. Returned, not
+		// thrown, so every caller says it in the words it says any refusal in, and before `mutate`, which is owed a real list.
+		let raw = null;
 		try {
-			const raw = fs.readFileSync(triggersPath, "utf8");
-			const value = JSON.parse(raw);
-			parsedText = raw;
-			doc = value;
-			if (Array.isArray(value?.triggers)) current = value.triggers;
-		} catch {
-			// Missing/invalid file: start from empty; the validated atomic write below repairs it.
+			raw = fs.readFileSync(triggersPath, "utf8");
+		} catch (err) {
+			if (err?.code !== "ENOENT") return { invalid: `the triggers file ${triggersPath} could not be read (${typeof err?.code === "string" ? err.code : "read-error"}), so its triggers cannot be kept; nothing was written`, unreadable: true };
+		}
+		if (raw !== null) {
+			try {
+				const value = JSON.parse(raw);
+				parsedText = raw;
+				doc = value;
+				if (Array.isArray(value?.triggers)) current = value.triggers;
+			} catch {
+				// An unparseable file: start from empty, the recorded repair; the validated atomic write below replaces it.
+			}
 		}
 		// The repair posture above cannot extend to a duplicate key (issue #313), and the two are exactly
 		// separated by the parse. A file that does not parse is repairable and stays repairable. A file that

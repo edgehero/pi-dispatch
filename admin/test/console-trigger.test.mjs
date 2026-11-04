@@ -7,7 +7,7 @@ import { loadPageData, parsePageQuery, renderPage } from "../src/console/pages.m
 import { planPauseWindowEdit, planLimitEdit } from "../src/write-plans.mjs";
 import { configPauseWindows, configScopedLimits } from "../src/console/panels/config.mjs";
 const NOW = Date.UTC(2026,9,30,12);
-const snap = () => ({ readAt:NOW,triggers:{triggers:[{type:"comment",forge:"github",phrase:"@pi",flow:"fix",instructions:true,task:true}]},triggerInstructions:{0:'Private instructions <script>bad()</script>'},triggerTasks:{0:"Private task text"},runs:[],waiting:{rows:[]},settings:{overlay:{}} });
+const snap = () => ({ readAt:NOW,triggers:{triggers:[{type:"comment",forge:"github",phrase:"@pi",flow:"fix",instructions:true,task:true,index:0}]},triggerInstructions:{0:'Private instructions <script>bad()</script>'},triggerTasks:{0:"Private task text"},runs:[],waiting:{rows:[]},settings:{overlay:{}} });
 async function draw(role, readOnly=false) {
  const data=await loadPageData("trigger",{index:0},{fleet:{snapshot:async()=>snap()},now:()=>NOW,triggerEditor:()=>({defaults:{},backends:[],forges:[],flows:[]})},{role,readOnly});
  return String((await renderPage("trigger",{query:{index:0},session:{name:"ops",role},readOnly,data})).html);
@@ -51,7 +51,7 @@ test("unloaded trigger files show the newest named doctor result and never fabri
  const page=String(await triggerGolden({invalid:true}));
  assert.match(page,/trigger 5: once needs number/);assert.match(page,/build3/);assert.match(page,/2m ago/);
  assert.doesNotMatch(page,/0 jobs in view would be refused|Jobs in line now:\s*none in view/);
- assert.match(page,/could not be read/);assert.match(page,/cannot be checked here/);
+ assert.doesNotMatch(page,/the queue could not be read/,"the queue read fine: it is the row that is not known");assert.doesNotMatch(page,/No runs were found|runs in the last 24 hours/,"nor of its runs, which no row can be matched to");assert.match(page,/cannot be checked here/);
 });
 test("editor refusal examples are the shared planner's exact sentences and the refusal golden marks the actual field",async()=>{
  const { triggerRefusalExamples }=await import("../src/console/panels/trigger.mjs");

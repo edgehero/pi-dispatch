@@ -499,7 +499,8 @@ test("the project, envelope, secret-profile and priorities plans", async () => {
 // in write-plans.mjs (`refusal:`, `unchanged:`, a thrown template, and the strings the `*Refusal` helpers return) and
 // requires each to be produced, and asserted, by one row of the table below. A new refusal sentence with no row fails.
 
-const PLANS_SRC = readFileSync(fileURLToPath(new URL("../src/write-plans.mjs", import.meta.url)), "utf8");
+// With the module the trigger edit's body moved to (issue #800): its sentences are this module's refusals, and stay held here.
+const PLANS_SRC = ["../src/write-plans.mjs", "../src/trigger-edit-core.mjs"].map((file) => readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8")).join("\n");
 
 /** Read one JS string or template literal starting at `src[i]` (a quote or backtick): `{ parts, end }`, holes as null. */
 function readLiteral(src, i) {
@@ -558,6 +559,26 @@ function refusalLiterals() {
 }
 const literalRe = (parts) => new RegExp(`^${parts.map((p) => (p === null ? "[\\s\\S]*?" : p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).join("")}$`);
 
+// The display list drops an entry it cannot use, so its position and the file's differ. Each plan writes by the file's position,
+// and each of its sentences must name that row and no other.
+test("an edit and a delete name the row the file holds at that position, where an unusable entry above moves the display list", () => {
+  const dir = tempDir("pd-raw-index-");
+  const triggersPath = join(dir, "triggers.json");
+  const row = (flow) => ({ on: { type: "label", any: ["x"] }, run: { kind: "github", flow } });
+  writeFileSync(triggersPath, `${JSON.stringify({ triggers: [null, row("one"), row("two")] }, null, 2)}\n`);
+  const paths = { triggersPath };
+  const edit = plans.planTriggerEdit({ params: { index: 1, flow: "next" }, paths, env: {} });
+  assert.deepEqual(edit.plan.changes, [["flow", "one", "next"]]);
+  assert.match(plans.planTriggerDelete({ index: 1, paths, surface: "console" }).plan.summary.join(" "), /flow: one/);
+  // The entry it cannot use is no row to change, and no count: the file holds three here, and the list two.
+  assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "next" }, paths, env: {} }).refusal, "trigger #1 is not one this can change: the file's entry there is not a usable trigger; nothing was changed");
+  assert.equal(plans.planTriggerDelete({ index: 0, paths, surface: "console" }).refusal, "trigger row 1 is not one this can change: the file's entry there is not a usable trigger; nothing was changed");
+  // Past the end of the file, what the file holds.
+  assert.equal(plans.planTriggerDelete({ index: 9, paths, surface: "console" }).refusal, "no trigger at row 10 (have 3)");
+  assert.equal(plans.planTriggerEdit({ params: { index: 9, flow: "next" }, paths, env: {} }).refusal, "no trigger at index 9 (have 3)");
+  assert.ok(!/have 2/.test(JSON.stringify([plans.planTriggerDelete({ index: 0, paths, surface: "console" }), plans.planTriggerDelete({ index: 9, paths, surface: "console" })])), "two rows is the list's count, and false of the file");
+});
+
 test("every refusal sentence in write-plans.mjs is asserted word for word, and a scan finds each one in the table", () => {
   const { paths, restore } = deployment();
   try {
@@ -593,6 +614,9 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["no trigger field", plans.planTriggerEdit({ params: { index: 0 }, paths, env }).refusal, "send at least one trigger field to edit"],
       ["blank flow", plans.planTriggerEdit({ params: { index: 0, flow: "  " }, paths, env }).refusal, "flow must be non-empty"],
       ["trigger delete index", plans.planTriggerDelete({ index: 9, paths }).refusal, "no trigger at index 9 (have 1)"],
+      ["an entry it cannot use", plans.planTriggerDelete({ index: 0, paths, fs: { readFileSync: () => JSON.stringify({ triggers: [null] }) } }).refusal, "trigger #1 is not one this can change: the file's entry there is not a usable trigger; nothing was changed"],
+      ["triggers file unread", plans.planTriggerDelete({ index: 0, paths, fs: { readFileSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } } }).refusal, "the triggers file could not be read (EACCES); nothing was changed"],
+      ["triggers file broken", plans.planTriggerDelete({ index: 0, paths, fs: { readFileSync: () => "{ not json" } }).refusal, "the triggers file does not load (triggers file is not valid JSON); nothing was changed"],
       ["tool unknown key", plans.planSettingChange({ key: "nope", value: "1", paths, env }).refusal, `unknown key 'nope'. valid keys: ${keys}`],
       ["command unknown key (set)", plans.planSettingSet({ key: "nope", valueTokens: ["1"], paths, env, surface: "command" }).refusal, `set: unknown key 'nope'. valid keys: ${keys}`],
       ["command unknown key (unset)", plans.planSettingUnset({ key: "nope", paths, env, surface: "command" }).refusal, `unset: unknown key 'nope'. valid keys: ${keys}`],
@@ -629,9 +653,12 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["run.recover on a venue that does not recover", plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["go"], recover: true }, paths, env: { PI_BACKENDS: "openshell" } }).refusal, { prefix: "run.recover cannot be armed on a trigger whose jobs run in the openshell venue" }],
       ["no backends", plans.backendRefusal("local", { PI_BACKENDS: "vapour" }), "this deployment blesses no backends, so run.backend cannot be set (see PI_BACKENDS)"],
       ["backend not blessed", plans.backendRefusal("podman", { PI_BACKENDS: "local" }), "backend 'podman' is not blessed by this deployment (PI_BACKENDS: local)"],
-      ["tool-proof dollar cap", plans.wideningFieldRefusal({ maxCostUsd: "1" }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.maxCostUsd (sent as maxCostUsd): a trigger's per-job dollar cap is set by hand in the triggers file, never by a tool"],
-      ["tool-proof model list", plans.wideningFieldRefusal({ run: { models: ["a/b"] } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.models (sent as run.models): a trigger's allowed-model list is set by hand in the triggers file, never by a tool"],
-      ["tool-proof mcp", plans.wideningFieldRefusal({ mcp: [] }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.mcp (sent as mcp): a trigger's list of MCP servers is set by hand in the triggers file, never by a tool"],
+      ["tool-proof dollar cap", plans.wideningFieldRefusal({ maxCostUsd: "1" }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.maxCostUsd (sent as maxCostUsd): a trigger's per-job dollar cap is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof model list", plans.wideningFieldRefusal({ run: { models: ["a/b"] } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.models (sent as run.models): a trigger's allowed-model list is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof mcp", plans.wideningFieldRefusal({ mcp: [] }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.mcp (sent as mcp): a trigger's list of MCP servers is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof fallback list", plans.wideningFieldRefusal({ fallbackModels: [] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.fallbackModels (sent as fallbackModels): a trigger's fallback-model list is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof exclusions", plans.wideningFieldRefusal({ excludeTools: ["bash"] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.excludeTools (sent as excludeTools): a trigger's list of removed tools is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof packages", plans.wideningFieldRefusal({ run: { packages: false } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.packages (sent as run.packages): a trigger's staged-package switch is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
       ["memory size", thrown(() => plans.sizeFieldsOf({ memory: "12q" })), { prefix: "memory: " }],
       ["cpus size", thrown(() => plans.sizeFieldsOf({ cpus: "lots" })), { prefix: "cpus: " }],
     ];
@@ -879,4 +906,13 @@ test("trigger edit merges maxTurns and explicit false flags, preserves omitted f
     assert.equal(unchangedTurns.run.steer, true);
     for (const maxTurns of [0, -1, 1.5, "12", NaN]) assert.match(plans.planTriggerEdit({ params: { index: 0, flow: "fix", maxTurns }, paths, env: process.env }).refusal, /maxTurns/);
   } finally { restore(); }
+});
+
+test("a tool-proof refusal carries its own stop, so a tool reads a whole sentence and a page adds none", async () => {
+  const { wideningFieldRefusal } = await import("../src/write-plans.mjs");
+  for (const [what, params] of [["a field on the card", { maxCostUsd: "1" }], ["one that is not", { secretBundle: false }]]) {
+    const said = wideningFieldRefusal(params, "this form");
+    assert.match(said, /^this form cannot set /, what);
+    assert.match(said, /[^.]\.$/, `${what}: ${said}`);
+  }
 });

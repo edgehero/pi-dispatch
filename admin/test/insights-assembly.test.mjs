@@ -1,16 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { resolvePaths } from "../src/read-model.mjs";
-import { assembleInsights } from "../src/insights-assembly.mjs";
+import { assembleInsights, assembleInsightsView } from "../src/insights-assembly.mjs";
 import * as html from "../src/insights-html.mjs";
 import { buildGraphScene } from "../src/graph-html.mjs";
 import * as ia from "../src/insights-assembly.mjs";
 import { insightsBody } from "../src/console/panels.mjs";
+import { parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { modelDollarKeyPrefix, scopeDollarKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 
 /**
@@ -75,6 +76,38 @@ function deployment() {
   writeFileSync(join(logs, "cost-1.json"), JSON.stringify(record));
   return { env, paths: resolvePaths(env) };
 }
+
+test("a triggers file that could not be read leaves the spend by trigger not computed, and files no run under no trigger", async () => {
+  const { env, paths } = deployment();
+  const nowMs = Date.now();
+  const read = await assembleInsights(paths, "7d", { pricing: PRICING, nowMs, envFn: () => env });
+  assert.ok(Array.isArray(read.fold.byTrigger), "the control: a file it could read");
+  assert.notEqual(read.costByTrigger, null);
+  rmSync(paths.triggersPath, { force: true });
+  mkdirSync(paths.triggersPath, { recursive: true });
+  const failed = await assembleInsights(paths, "7d", { pricing: PRICING, nowMs, envFn: () => env });
+  assert.equal(failed.fold.byTrigger, null);
+  assert.equal(failed.costByTrigger, null);
+  assert.equal(failed.fold.provenance.runsTotal, read.fold.provenance.runsTotal, "the rest of the fold stands");
+  // The console's Breakdown says so where its table would stand empty, and still draws the table for a file it read.
+  const breakdown = async (insights) => {
+    const parsed = parsePageQuery("insights-breakdown", "");
+    return String((await renderPage("insights-breakdown", { query: parsed.query, session: { name: "ops", role: "operator" }, data: { now: nowMs, env: {}, insights }, readOnly: false })).html).replace(/\s+/g, " ");
+  };
+  const NOT_SPLIT = "The triggers file could not be read, so this spend is not split by trigger.";
+  const without = await breakdown(failed);
+  assert.ok(without.includes(NOT_SPLIT));
+  assert.ok(without.includes("By trigger") && without.slice(without.indexOf("By trigger"), without.indexOf("By repository")).indexOf("<table") < 0, "no empty table");
+  const withTable = await breakdown(read);
+  assert.ok(!withTable.includes(NOT_SPLIT));
+  assert.ok(withTable.slice(withTable.indexOf("By trigger"), withTable.indexOf("By repository")).includes("<table"));
+  // The insights page's own words hold for this shape as for a caller that wired no join.
+  const REASON = "not computed (no list of triggers to join its runs to)";
+  assert.ok(html.breakdownHtml(html.normFold(failed.fold), new Map(), []).includes(REASON));
+  const flows = await assembleInsightsView(paths, "7d", { view: "flows", role: "operator", nowMs, pricing: PRICING, envFn: () => env, reads: { graph: async () => null } });
+  assert.equal(flows.costByTrigger, null);
+  assert.equal((await assembleInsightsView(deployment().paths, "7d", { view: "flows", role: "operator", nowMs, pricing: PRICING, envFn: () => env, reads: { graph: async () => null } })).costByTrigger === null, false, "the control");
+});
 
 test("assembleInsights runs in a process without pi, over a small deployment, and its sections render", async () => {
   const { env, paths } = deployment();

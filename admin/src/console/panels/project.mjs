@@ -175,7 +175,8 @@ export function projectBundle(v) {
 export function projectTriggers(v) {
   if (!ready(v)) return null;
   const p = data(v);
-  return card("Triggers that ran here", html`${p.triggers.length ? html`<ul class="rows proj-triggers">${p.triggers.map((t) => html`<li class="rowpill"><a class="link" href="${`/config/trigger?index=${t.index}`}">Trigger ${t.index + 1}</a><span class="proj-trigger-desc">${kindText(t)}${t.id ? html` ${t.id}` : null}${t.flow ? html` → ${t.flow}` : null}</span><span class="end">${t.count} runs</span></li>`)}</ul>` : note("No retained run here was attributed to a trigger in the last 24 hours.")}${note("Forge triggers fire on any member that sends events. A cron trigger runs here when its folder is a member.")}`, "last 24 hours");
+  // `triggersKnown` is false of a file absent, broken or unreadable alike, so "could not be loaded", the bundle card's word beside it, is true of each.
+  return card("Triggers that ran here", html`${p.triggers.length ? html`<ul class="rows proj-triggers">${p.triggers.map((t) => html`<li class="rowpill"><a class="link" href="${`/config/trigger?index=${t.index}`}">Trigger ${t.index + 1}</a><span class="proj-trigger-desc">${kindText(t)}${t.id ? html` ${t.id}` : null}${t.flow ? html` → ${t.flow}` : null}</span><span class="end">${t.count} runs</span></li>`)}</ul>` : note(p.triggersKnown ? "No retained run here was attributed to a trigger in the last 24 hours." : "The triggers file could not be loaded, so which triggers ran here is unknown.")}${note("Forge triggers fire on any member that sends events. A cron trigger runs here when its folder is a member.")}`, "last 24 hours");
 }
 
 export function projectDelete(v) {
