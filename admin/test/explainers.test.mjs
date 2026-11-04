@@ -18,7 +18,7 @@ const DIR = "docs/images/explain";
 const read = (path) => readFileSync(`${REPO}${path}`, "utf8");
 const flat = (text) => text.replace(/\s+/g, " ");
 const wordsOf = (explainer) => explainerWords(explainerSvg(explainer, "light"));
-/** The pictures the npm page shows too: the two that say what the product is, not the two worries. */
+/** The pictures the npm page shows too: the two that say what the product is, not the worries or the swarm. */
 const ON_NPM = ["how-close-you-stay", "one-job"];
 const tokens = JSON.parse(read("design/system/tokens.json"));
 
@@ -101,7 +101,8 @@ test("no picture says the simpler thing the docs refute", () => {
   // keys go in and the agent can read both. A refusal can keep its job count slot, and the machine costs what it costs.
   // The worker has dozens of refusals, so any count of checks is stale the day one is added.
   // An AI reviews and never approves: a self-approval is a merge by another name (`CONST-MERGE-NEVER-AUTOMATIC`).
-  const REFUTED = [/\b(can ?not|can't|unable to) (merge|accept)/i, /\bcan ?not (pass|exceed|overspend)/i, /\bnever (passes|exceeds|overspends)/i, /nothing (gets|leaves|comes) out/i, /\bfree\b/i, /\b\d+ (checks|gates|limits)\b/i, /never accepted/i, /\b(AI|agent|it) (also )?approves?\b/i, /approved by AI/i];
+  // pi-dispatch looks after a swarm and does not direct it, so "orchestrates" would be another agent it does not have.
+  const REFUTED = [/\b(can ?not|can't|unable to) (merge|accept)/i, /\bcan ?not (pass|exceed|overspend)/i, /\bnever (passes|exceeds|overspends)/i, /nothing (gets|leaves|comes) out/i, /\bfree\b/i, /\b\d+ (checks|gates|limits)\b/i, /never accepted/i, /\b(AI|agent|it) (also )?approves?\b/i, /approved by AI/i, /\borchestrat/i];
   for (const explainer of EXPLAINERS) {
     for (const words of [...wordsOf(explainer), explainer.alt]) for (const refuted of REFUTED) assert.doesNotMatch(words, refuted, `${explainer.name}: ${words}`);
   }
@@ -220,7 +221,7 @@ test("the root README shows every picture in both themes, a still to who asked f
   for (const { name } of EXPLAINERS) assert.ok(top.includes(`explain/${name}.png`), `${name} is for the half written for someone who does not write code`);
 });
 
-test("the root README's first picture says at once what a folder job does instead", () => {
+test("the one-job picture says at once what a folder job does instead", () => {
   // The picture ends in a proposed change, and a job on a folder has none. It is the one simplification the words cannot
   // carry, so the caption has to, right under it.
   const readme = read("README.md");
@@ -230,8 +231,7 @@ test("the root README's first picture says at once what a folder job does instea
 
 test("the paragraph that says what the loop is comes before the picture of it", () => {
   const readme = read("README.md");
-  const why = readme.indexOf("## Why: from in the loop");
-  assert.ok(readme.indexOf("You type, it works, you check", why) < readme.indexOf("explain/how-close-you-stay", why));
+  assert.ok(readme.indexOf("You type, it works, you check") < readme.indexOf("explain/how-close-you-stay"));
 });
 
 test("the npm page shows its two pictures by absolute URL, light and moving, since it has neither SVG nor themes", () => {

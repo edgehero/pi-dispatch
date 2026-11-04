@@ -1,14 +1,14 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-03" alt="pi-dispatch: hand software work to an AI coding agent, and decide how closely you watch it" width="880">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-04" alt="pi-dispatch: go from sitting next to one AI coding agent to running many in the background" width="880">
 </p>
 
-# pi-dispatch: hand software work to an AI coding agent, and decide how closely you watch it
+# pi-dispatch: go from sitting next to one AI coding agent to running many in the background
 
 [pi](https://github.com/earendil-works/pi) is an open source coding agent that you normally run in a terminal. pi-dispatch runs it for you
 in the background: on a schedule, on your repo's issues and pull requests, or from the command line. Each job happens in a sealed box that is
 thrown away afterwards, stops at the spending limit you set, and shows up live on one web page. You start in the loop, watching it work. You
-move to near the loop, where it asks when it needs you, and to out of the loop, where a second agent reviews the work and then you decide. pi-dispatch never merges
-anything, so what ships stays a person's decision. It runs on a provider key or a subscription you already have, falls back to other models you
+move to near the loop, where it asks when it needs you, and to out of the loop, where a second agent reviews the work and then you decide, until you are looking after a swarm of
+agents rather than one: dark engineering. pi-dispatch never merges anything, so what ships stays a person's decision. It runs on a provider key or a subscription you already have, falls back to other models you
 list, and brings your own pi setup and extensions along with `pi-dispatch import-pi`. The [main README](https://github.com/edgehero/pi-dispatch#readme)
 explains all of it.
 

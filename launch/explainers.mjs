@@ -1,5 +1,5 @@
 /**
- * The READMEs' explaining pictures (issue #820): four small animations in the console's own design language, drawn as
+ * The READMEs' explaining pictures (issue #820): small animations in the console's own design language, drawn as
  * SVG from words and the design folder, and shot to animated PNG by `render-images.mjs --explain`. The console images
  * show what the product looks like; these say how it works, to someone who has not used it. Each holds one idea.
  *
@@ -526,6 +526,175 @@ function inAndOutOfTheBox(c) {
 }
 
 /**
+ * Opacity for a state a thing holds during `windows` of the loop. Unlike `during`, a window may touch either end, so a thing
+ * that is on as the loop ends is on as it starts and the loop closes without a blink.
+ */
+const holding = (windows, fade = 0.6) => {
+	const rows = [];
+	if (windows.length === 0 || windows[0][0] > 0) rows.push([0, "opacity:0"]);
+	for (const [from, to] of windows) {
+		if (from > 0) rows.push([from - fade, "opacity:0"], [from, "opacity:1"]);
+		else rows.push([0, "opacity:1"]);
+		if (to < 100) rows.push([to, "opacity:1"], [to + fade, "opacity:0"]);
+		else rows.push([100, "opacity:1"]);
+	}
+	if (windows.length === 0 || windows.at(-1)[1] < 100) rows.push([100, "opacity:0"]);
+	return rows;
+};
+
+/**
+ * Picture 5: what a swarm looks like from where you stand. The eight boxes are the point: at no moment is anything asking for
+ * your eyes except the one count that needs you. It says "works, asks, reviews", and never that agents talk to each other,
+ * because they do not: pi-dispatch looks after them and does not direct them (`docs/replicas.md`: neither replica knows what
+ * the other did). The switch is drawn because it is what makes a swarm safe to leave: it stops new work, running jobs finish
+ * (`docs/service.md`), and the line holds and then moves again, so nothing is dropped.
+ */
+function manyAtOnce(c) {
+	const seconds = 12;
+	const height = 564;
+	const paused = [58, 80];
+	// Each box's day, in percent of the loop: state, from, to. Nothing starts during the pause. What holds at 100 holds at 0.
+	const DAY = [
+		[["works", 0, 24], ["works", 30, 62], ["works", 82, 100]],
+		[["reviews", 0, 14], ["works", 20, 52], ["reviews", 86, 100]],
+		[["works", 10, 40], ["asks", 40, 56], ["works", 56, 70]],
+		[["works", 0, 34], ["reviews", 44, 66], ["works", 84, 100]],
+		[["asks", 0, 18], ["works", 18, 46], ["works", 54, 74], ["works", 84, 94], ["asks", 94, 100]],
+		[["works", 0, 12], ["works", 26, 58], ["works", 82, 100]],
+		[["reviews", 6, 30], ["works", 36, 68]],
+		[["reviews", 0, 8], ["works", 16, 50], ["works", 56, 72], ["reviews", 88, 100]],
+	];
+	// A job starts where a box goes from open to busy. An answer picks up the same job, so it is no start.
+	const starts = DAY.flatMap((day, i) => day.filter(([, from], at) => from > 0 && (at === 0 || day[at - 1][2] < from)).map(([, from]) => ({ box: i, at: from }))).sort((a, b) => a.at - b.at);
+	const answers = DAY.flatMap((day, i) => day.filter(([state]) => state === "asks").filter(([, , to]) => to < 100).map(([, , to]) => ({ box: i, at: to })));
+	/** Which moments of the loop a count holds, read from the boxes, so the page in the picture cannot disagree with its floor. */
+	const countWindows = (states) => {
+		const edges = [...new Set([0, 100, ...DAY.flatMap((day) => day.flatMap(([, from, to]) => [from, to]))])].sort((a, b) => a - b);
+		const value = (t) => DAY.filter((day) => day.some(([state, from, to]) => states.includes(state) && from <= t && t < to)).length;
+		const windows = new Map();
+		for (let i = 0; i + 1 < edges.length; i++) {
+			const n = value(edges[i]);
+			const list = windows.get(n) ?? [];
+			if (list.length > 0 && list.at(-1)[1] === edges[i]) list.at(-1)[1] = edges[i + 1];
+			else list.push([edges[i], edges[i + 1]]);
+			windows.set(n, list);
+		}
+		return windows;
+	};
+	const slotW = 117;
+	const slotH = 84;
+	const slotX = (i) => 314 + (i % 4) * (slotW + 12);
+	const slotY = (i) => (i < 4 ? 246 : 374);
+	const laneEnd = 264;
+	const laneY = 476;
+	const step = 72;
+	// The line: it moves one place for every job that starts, and stands still while new work is stopped.
+	const laneRows = [[0, "transform:translateX(0)"]];
+	let moved = 0;
+	let previous = 0;
+	for (const at of [...new Set(starts.map((s) => s.at))]) {
+		laneRows.push([Math.max(previous, at - 2.5), `transform:translateX(${moved}px)`]);
+		moved += step * starts.filter((s) => s.at === at).length;
+		laneRows.push([at, `transform:translateX(${moved}px)`]);
+		previous = at;
+	}
+	laneRows.push([100, `transform:translateX(${moved}px)`]);
+	const hop = (name, from, to, at, span = 3) => frames(name, [
+		[0, `transform:translate(${from[0]}px,${from[1]}px);opacity:0`],
+		[at - span, `transform:translate(${from[0]}px,${from[1]}px);opacity:0`],
+		[at - span + 0.5, `transform:translate(${from[0]}px,${from[1]}px);opacity:1`],
+		[at, `transform:translate(${to[0]}px,${to[1]}px);opacity:1`],
+		[at + 0.5, `transform:translate(${to[0]}px,${to[1]}px);opacity:0`],
+		[100, `transform:translate(${to[0]}px,${to[1]}px);opacity:0`],
+	]);
+	const middleOf = (i) => [slotX(i) + slotW / 2, slotY(i) + slotH / 2];
+	const needsYouAt = [1110, 240];
+	const running = countWindows(["works", "reviews"]);
+	const needing = countWindows(["asks"]);
+	const STATES = ["works", "asks", "reviews"];
+	// A count changes at once: the new digit starts as the old one ends, so no frame of the loop shows both.
+	const digit = (windows) => holding(windows.map(([from, to]) => [from > 0 ? from + 0.05 : from, to]), 0.05);
+	const css = [
+		frames("mm-lane", laneRows),
+		...DAY.flatMap((day, i) => STATES.map((state) => frames(`mm-${i}-${state}`, holding(day.filter(([s]) => s === state).map(([, from, to]) => [from, to]))))),
+		...starts.map((s, n) => hop(`mm-start-${n}`, [laneEnd, laneY], middleOf(s.box), s.at)),
+		...answers.map((s, n) => hop(`mm-answer-${n}`, needsYouAt, middleOf(s.box), s.at, 4)),
+		...[...running].map(([n, windows]) => frames(`mm-run-${n}`, digit(windows))),
+		...[...needing].map(([n, windows]) => frames(`mm-need-${n}`, digit(windows))),
+		frames("mm-need-on", holding([...needing].filter(([n]) => n > 0).flatMap(([, windows]) => windows).sort((a, b) => a[0] - b[0]))),
+		frames("mm-off", holding([paused])),
+		frames("mm-on", holding([[0, paused[0]], [paused[1], 100]])),
+		frames("mm-knob", [[0, "transform:translateX(36px)"], [paused[0] - 1, "transform:translateX(36px)"], [paused[0], "transform:translateX(0)"], [paused[1] - 1, "transform:translateX(0)"], [paused[1], "transform:translateX(36px)"], [100, "transform:translateX(36px)"]]),
+		frames("mm-spend", [[0, "transform:scaleX(.3)"], [58, "transform:scaleX(.72)"], [80, "transform:scaleX(.78)"], [97, "transform:scaleX(.9)"], [100, "transform:scaleX(.3)"]]),
+		`.mm-lane{animation:${eased("mm-lane", seconds)}}.mm-knob{animation:${eased("mm-knob", seconds)}}.mm-spend{transform-box:fill-box;transform-origin:0 50%;animation:${eased("mm-spend", seconds)}}.mm-off{animation:${steady("mm-off", seconds)}}.mm-on{animation:${steady("mm-on", seconds)}}.mm-need-on{animation:${steady("mm-need-on", seconds)}}`,
+		DAY.flatMap((_, i) => STATES.map((state) => `.mm-${i}-${state}{animation:${steady(`mm-${i}-${state}`, seconds)}}`)).join(""),
+		starts.map((_, n) => `.mm-start-${n}{animation:${eased(`mm-start-${n}`, seconds)}}`).join(""),
+		answers.map((_, n) => `.mm-answer-${n}{animation:${eased(`mm-answer-${n}`, seconds)}}`).join(""),
+		[...running.keys()].map((n) => `.mm-run-${n}{animation:${steady(`mm-run-${n}`, seconds)}}`).join(""),
+		[...needing.keys()].map((n) => `.mm-need-${n}{animation:${steady(`mm-need-${n}`, seconds)}}`).join(""),
+	].join("");
+	/** One box of the floor: open underneath, and a state on top of it while it holds one. */
+	const slot = (i) => {
+		const [x, y] = [slotX(i), slotY(i)];
+		const cx = x + slotW / 2;
+		const busy = (state, tone, inner) => `<g class="mm-${i}-${state}">${box(x, y, slotW, slotH, 16, `fill="${c(`${tone}-tint`)}" stroke="${c(tone)}" stroke-width="3"`)}${inner}${text(cx, y + 74, state, { size: 22, weight: 650, fill: c("ink"), anchor: "middle" })}</g>`;
+		return [
+			box(x, y, slotW, slotH, 16, `fill="${c("surface-2")}" stroke="${c("line-strong")}" stroke-width="2" stroke-dasharray="6 6"`),
+			text(cx, y + 50, "open", { size: 22, fill: c("ink-muted"), anchor: "middle" }),
+			busy("works", "running", mark(cx, y + 28, 18, "pi", c("running"), c("on-running"), 22)),
+			busy("asks", "parked", `<circle cx="${cx}" cy="${y + 28}" r="18" fill="${c("parked")}"/>${icon("parked", cx - 12, y + 16, 24, c("on-parked"))}`),
+			busy("reviews", "ok", mark(cx, y + 28, 18, "pi", c("ok"), c("on-ok"), 22)),
+		].join("");
+	};
+	const row = (y, name, words) => `${tile(66, y - 24, 48, name, c)}${text(126, y + 8, words, { size: 24, fill: c("ink") })}`;
+	const body = [
+		// New work, and the line it waits in.
+		cardAt(44, 156, 236, 372, c),
+		text(66, 198, "New work", { size: 26, weight: 650, fill: c("ink") }),
+		row(244, "clock", "A schedule"),
+		row(300, "issue", "An issue"),
+		row(356, "comment", "A comment"),
+		text(66, 432, "One line", { size: 22, weight: 650, fill: c("ink-muted") }),
+		`<clipPath id="mm-clip"><rect x="52" y="450" width="220" height="52"/></clipPath>`,
+		`<g clip-path="url(#mm-clip)"><g class="mm-lane">`,
+		...Array.from({ length: Math.round(moved / step) + 5 }, (_, k) => `<g transform="translate(${laneEnd - 32 - k * step} ${laneY})">${jobPill(64, "job", c("surface"), c("ink"), { dashed: c("line-strong") })}</g>`),
+		`</g></g>`,
+		`<g class="mm-off">${box(52, 450, 220, 52, 14, `fill="none" stroke="${c("attention")}" stroke-width="3"`)}</g>`,
+		// The floor.
+		cardAt(292, 156, 548, 372, c),
+		text(314, 198, "Each agent in its own box", { size: 26, weight: 650, fill: c("ink") }),
+		text(314, 234, "Machine 1", { size: 22, weight: 650, fill: c("ink-muted") }),
+		text(314, 362, "Machine 2", { size: 22, weight: 650, fill: c("ink-muted") }),
+		...DAY.map((_, i) => slot(i)),
+		text(314, 504, "One budget", { size: 22, weight: 650, fill: c("ink-muted") }),
+		box(452, 490, 366, 14, 7, `fill="${c("surface-3")}"`),
+		box(452, 490, 366, 14, 7, `class="mm-spend" fill="${c("ok")}"`),
+		// Where you stand.
+		cardAt(852, 156, 304, 372, c),
+		mark(892, 196, 24, "you", c("primary"), c("on-primary"), 22),
+		text(928, 205, "One page", { size: 26, weight: 650, fill: c("ink") }),
+		`<g class="mm-need-on">${box(866, 226, 276, 46, 14, `fill="${c("parked-tint")}" stroke="${c("parked")}" stroke-width="3"`)}</g>`,
+		text(880, 258, "Needs you", { size: 24, fill: c("ink") }),
+		...[...needing.keys()].map((n) => `<g class="mm-need-${n}">${text(1128, 260, String(n), { size: 28, weight: 800, fill: c("parked-ink"), anchor: "end" })}</g>`),
+		text(880, 310, "Running", { size: 24, fill: c("ink") }),
+		...[...running.keys()].map((n) => `<g class="mm-run-${n}">${text(1128, 312, String(n), { size: 28, weight: 800, fill: c("running-ink"), anchor: "end" })}</g>`),
+		`<path d="M874 336H1134" stroke="${c("line")}" stroke-width="2"/>`,
+		text(880, 382, "One switch", { size: 26, weight: 650, fill: c("ink") }),
+		`<g class="mm-on">${box(1056, 358, 72, 36, 18, `fill="${c("ok")}"`)}</g>`,
+		`<g class="mm-off">${box(1056, 358, 72, 36, 18, `fill="${c("attention")}"`)}</g>`,
+		`<g class="mm-knob"><circle cx="1074" cy="376" r="14" fill="${c("surface")}"/></g>`,
+		// Said at full strength in every frame, on or off, so a reader who only ever sees it on still learns what off does.
+		text(880, 428, "Off: new work waits,", { size: 22, fill: c("ink") }),
+		text(880, 458, "running jobs finish.", { size: 22, fill: c("ink") }),
+		`<g class="mm-off">${box(866, 402, 276, 70, 14, `fill="none" stroke="${c("attention")}" stroke-width="3"`)}</g>`,
+		// Work going to a box, and an answer going to the one that asked.
+		...starts.map((_, n) => `<g class="mm-start-${n}"><circle r="8" fill="${c("running")}" stroke="${c("surface")}" stroke-width="2"/></g>`),
+		...answers.map((_, n) => `<g class="mm-answer-${n}"><circle r="8" fill="${c("primary")}" stroke="${c("surface")}" stroke-width="2"/></g>`),
+	].join("");
+	return { height, seconds, stillAt: 0.45, css, body: page(height, c, "Many agents, one place to run them", "A swarm works in the background. You look after it from one page.", body) };
+}
+
+/**
  * Every picture, with its alt text (which the READMEs use unchanged) and its claims: `says` is words the picture holds,
  * and `needle` the sentence in `source` that makes them true. A picture is a restatement like any table, so
  * `admin/test/explainers.test.mjs` holds both ends: reword either and the test sends you to look at the other.
@@ -582,6 +751,20 @@ export const EXPLAINERS = Object.freeze([
 			{ says: "thrown away", source: "README.md", needle: "a sealed box that is thrown away afterwards" },
 			{ says: "so a leak does less harm", source: "README.md", needle: "The limit is on the damage, not on the leak" },
 			{ says: "Instructions, read only", source: "README.md", needle: "/job read-only" },
+		],
+	}),
+	Object.freeze({
+		name: "many-at-once",
+		alt: "An animation of many agents at once, under the headline: many agents, one place to run them. New work comes from a schedule, an issue or a comment, and waits in line. Two machines hold eight boxes, each with one agent that works, asks or reviews, or open for the next job, under one budget. One page tells you how many need you and how many are running. One switch stops new work: new work waits in line, running jobs finish, and when it is switched back on the line moves again.",
+		build: manyAtOnce,
+		claims: [
+			{ says: "One line", source: "README.md", needle: "several projects sharing one queue, one budget and one page" },
+			{ says: "One budget", source: "docs/multi-host.md", needle: "Two Mac minis, one queue, one budget, one panel" },
+			{ says: "One switch", source: "README.md", needle: "one switch that stops new work everywhere" },
+			{ says: "running jobs finish", source: "admin/skills/operate-pi-dispatch/SKILL.md", needle: "already running containers finish" },
+			{ says: "new work waits", source: "docs/service.md", needle: "Jobs still queue up and wait" },
+			{ says: "reviews", source: "docs/triggers.md", needle: '"flow": "review"' },
+			{ says: "Each agent in its own box", source: "docs/replicas.md", needle: "Neither replica knows what the other did" },
 		],
 	}),
 ]);

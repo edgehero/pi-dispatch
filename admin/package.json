@@ -1,7 +1,7 @@
 {
   "name": "@edgehero/pi-dispatch-admin",
   "version": "4.3.1",
-  "description": "Operator console for pi-dispatch, as a pi extension: a /dispatch panel over the queue, spend caps, scoped limits, run history and insights, editable cron and GitHub, GitLab, Forgejo and Azure DevOps triggers, pause windows, and human-confirmed tools your AI can operate.",
+  "description": "Go from sitting next to one AI coding agent to running many in the background: the web console and /dispatch panel of pi-dispatch, over the queue, spend caps, scoped limits, run history and insights, editable cron and GitHub, GitLab, Forgejo and Azure DevOps triggers, pause windows, and human-confirmed tools your AI can operate.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -47,7 +47,7 @@
     "skills": [
       "./skills"
     ],
-    "image": "https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-03"
+    "image": "https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-04"
   },
   "scripts": {
     "build": "node build.mjs",
