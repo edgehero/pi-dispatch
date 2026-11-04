@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -55,6 +56,42 @@ test("preview changes nothing, confirm changes only reviewed modelRoles and the 
     assert.equal(selected.model, "new"); assert.equal(selected.provider, "openai");
     assert.deepEqual(selected.fallbackModels, ["openai/backup", "anthropic/new"]);
   }
+});
+
+test("a role edit is checked as the writer writes it, and its after digest is the applied file's: stamped, without a dropped version 1, today's with no rule", async () => {
+  // A role with fallbacks stands in for a modelRoles value a later release widens.
+  const versions = { blockValueTable: Object.freeze({ modelRoles: roles => (Object.values(roles ?? {}).some(scope => Object.values(scope ?? {}).some(entry => Array.isArray(entry?.fallbackModels))) ? 2 : 1) }), supported: 2 };
+  const sha = text => createHash("sha256").update(text).digest("hex");
+  const f = fixture();
+  const text = () => nodeFs.readFileSync(f.paths.triggersPath, "utf8");
+  const service = createModelRoleActions({ paths: f.paths, env: {}, now: () => NOW, checkModelsKnown: knownCheck, versions });
+  const stamped = await service.preview({ ...body, fallbackModels: ["openai/backup"] }, operator);
+  assert.ok(stamped.plan, JSON.stringify(stamped));
+  assert.deepEqual(await service.apply(stamped, operator), { ok: true });
+  assert.ok(text().startsWith('{\n  "version": 2,\n  "modelRoles": {'), text());
+  assert.equal(stamped.afterDigest, sha(text()), "the after digest is the applied file's");
+  assert.equal(stamped.afterText, `${JSON.stringify({ modelRoles: { default: { editor: { model: "openai/new", fallbackModels: ["openai/backup"] } } } }, null, 2)}\n`, "the diff still shows the block alone");
+  // The stamped file is read by the same rules; a plain mapping needs no stamp, and the after digest drops it too.
+  const plainer = await service.preview(body, operator);
+  assert.ok(plainer.plan, JSON.stringify(plainer));
+  assert.deepEqual(await service.apply(plainer, operator), { ok: true });
+  assert.doesNotMatch(text(), /"version"/);
+  assert.equal(plainer.afterDigest, sha(text()));
+
+  // A hand-written "version": 1 is dropped by the writer, and so by the after digest.
+  const one = fixture({ doc: { version: 1, modelRoles: { default: { editor: "openai/old" } }, triggers: [trigger()] } });
+  const dropped = await preview(one);
+  assert.deepEqual(await one.service.apply(dropped, operator), { ok: true });
+  assert.doesNotMatch(nodeFs.readFileSync(one.paths.triggersPath, "utf8"), /"version"/);
+  assert.equal(dropped.afterDigest, sha(nodeFs.readFileSync(one.paths.triggersPath, "utf8")));
+
+  // With every table empty: today's exact bytes.
+  const today = fixture();
+  const plain = await preview(today);
+  const bytes = `${JSON.stringify({ modelRoles: { default: { editor: "openai/new" } }, triggers: [trigger()] }, null, 2)}\n`;
+  assert.equal(plain.afterDigest, sha(bytes));
+  assert.deepEqual(await today.service.apply(plain, operator), { ok: true });
+  assert.equal(nodeFs.readFileSync(today.paths.triggersPath, "utf8"), bytes);
 });
 
 test("Undo restores exact absent, string and object entries and refuses a subsequently changed mapping", async () => {

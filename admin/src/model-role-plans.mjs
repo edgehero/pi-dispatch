@@ -11,7 +11,7 @@ import { MODEL_ROLE_RE, resolveModelRoles } from "@edgehero/pi-dispatch/model-ro
 import { isProjectId, parseProjects } from "@edgehero/pi-dispatch/projects";
 import { readOverlay } from "@edgehero/pi-dispatch/runtime-settings";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
-import { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
+import { triggersFileText, writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
 import { canaryComparisonLines, collectModelPolicies } from "./models-view.mjs";
 
 export const MODEL_ROLE_EDIT_FIELDS = Object.freeze(["scope", "role", "model", "fallbackModels", "remove", "canary", "entry", "pruneScope", "pruneMap", "expectedEntry"]);
@@ -159,7 +159,9 @@ function policyEffectDigest(before, after) {
   return sha(JSON.stringify({ before: evidence(before), after: evidence(after) }));
 }
 
-export function createModelRoleActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, canarySample = null } = {}) {
+/** `versions` are the triggers file's version rules (`supported` and the five tables), injectable for tests: the current
+ * file, the proposed one and the write are judged by the same ones. */
+export function createModelRoleActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, canarySample = null, versions = {} } = {}) {
   async function preview(body, ctx) {
     if (!authority(ctx)) return denied;
     const problem = inputProblem(body);
@@ -168,15 +170,18 @@ export function createModelRoleActions({ paths, env = {}, fs = nodeFs, now = Dat
     const captured = capture(paths, fs);
     if (captured.refusal) return captured;
     const readFs = captured.fs;
-    let raw, loaded, next, nextLoaded, projects, deployment, envList, models;
+    let raw, loaded, next, nextText, nextLoaded, projects, deployment, envList, models;
     try {
       const text = readFs.readFileSync(paths.triggersPath, "utf8");
-      loaded = parseTriggersDocument(text, paths.triggersPath);
+      loaded = parseTriggersDocument(text, paths.triggersPath, versions);
       raw = JSON.parse(text);
       if (Object.hasOwn(body, "expectedEntry") && !same(raw.modelRoles?.[body.scope]?.[body.role] ?? null, body.expectedEntry)) return refuse("The role changed after the edit being undone; reload Models before choosing a new mapping.", 409);
       if (body.remove === true && !Object.hasOwn(raw.modelRoles?.[body.scope] ?? {}, body.role)) return { unchanged: "This scope no longer declares the role." };
       next = proposedDocument(raw, body);
-      nextLoaded = parseTriggersDocument(JSON.stringify(next), paths.triggersPath);
+      // The bytes `apply` writes (issue #823), so the policy is checked with the `version` they need stamped, and the
+      // after digest is the written file's: `next` itself carries no stamp, and keeps a `"version": 1` the writer drops.
+      nextText = triggersFileText(next.triggers, next, versions);
+      nextLoaded = parseTriggersDocument(nextText, paths.triggersPath, versions);
       projects = paths.projectsFile ? parseProjects(readFs.readFileSync(paths.projectsFile, "utf8"), paths.projectsFile) : [];
       const settings = paths.settingsFile ? readOverlay(paths.settingsFile, { fs: readFs }) : { overlay: {} };
       if (settings.invalid) return refuse("The settings file is invalid; correct it before editing model roles.", 409);
@@ -201,7 +206,7 @@ export function createModelRoleActions({ paths, env = {}, fs = nodeFs, now = Dat
     const inverseBody = { ...(previous === undefined ? { scope: body.scope, role: body.role, remove: true, pruneScope: !Object.hasOwn(raw.modelRoles ?? {}, body.scope), pruneMap: !Object.hasOwn(raw, "modelRoles") } : { scope: body.scope, role: body.role, entry: structuredClone(previous) }), expectedEntry: structuredClone(next.modelRoles?.[body.scope]?.[body.role] ?? null) };
     const beforeText = roleText(raw), afterText = roleText(next);
     const summary = [`${body.remove ? "Remove" : "Set"} model role ${body.scope}/${body.role}`, impact.selected.length ? `Trigger ${impact.selected.length === 1 ? "row" : "rows"} ${impact.selected.map(index => index + 1).join(", ")} ${impact.selected.length === 1 ? "uses" : "use"} the reviewed mapping on ${impact.selected.length === 1 ? "its" : "their"} next delivery.` : "No current trigger changes its selected model or fallback order.", ...(impact.permissions.length ? [`Trigger ${impact.permissions.length === 1 ? "row" : "rows"} ${impact.permissions.map(index => index + 1).join(", ")} ${impact.permissions.length === 1 ? "keeps its" : "keep their"} selected model and fallback order, but the allowed-model list or role aliases change on ${impact.permissions.length === 1 ? "its" : "their"} next delivery.`] : []), "Nothing runs now. Recovery keeps its checkpoint's physical model and still validates the reviewed policy.", ...(sample ? canaryComparisonLines(sample) : [])];
-    return { target: paths.triggersPath, expect: captured.expect, beforeText, afterText, beforeDigest: sha(captured.expect.find(input => input.path === paths.triggersPath).text), afterDigest: sha(`${JSON.stringify(next, null, 2)}\n`), summary, inverseBody,
+    return { target: paths.triggersPath, expect: captured.expect, beforeText, afterText, beforeDigest: sha(captured.expect.find(input => input.path === paths.triggersPath).text), afterDigest: sha(nextText), summary, inverseBody,
       plan: { scope: body.scope, role: body.role, remove: body.remove === true, affected, inverseBody },
       payload: { body: structuredClone(body), envDigest: envDigest(env), effectDigest: policyEffectDigest(before, checked.collected), ...(sample ? { canary: { ...body.canary } } : {}) } };
   }
@@ -214,7 +219,7 @@ export function createModelRoleActions({ paths, env = {}, fs = nodeFs, now = Dat
     const expected = Array.isArray(entry.expect) ? entry.expect : [];
     if (expected.length !== current.expect.length || expected.some((input, index) => input.path !== current.expect[index].path || input.text !== current.expect[index].text)) return { invalid: "A model policy input changed after preview; reload Models and preview the role edit again." };
     if (entry.payload.effectDigest !== current.payload.effectDigest) return { invalid: "The effective trigger scopes or model policy changed after preview; reload Models and review the role edit again." };
-    return writeTriggers({ triggersPath: paths.triggersPath, mutate: entries => entries, mutateDocument: doc => proposedDocument(doc, entry.payload.body), expect: expected, fs, now });
+    return writeTriggers({ triggersPath: paths.triggersPath, mutate: entries => entries, mutateDocument: doc => proposedDocument(doc, entry.payload.body), expect: expected, fs, now, ...versions });
   }
   return { preview, apply };
 }
