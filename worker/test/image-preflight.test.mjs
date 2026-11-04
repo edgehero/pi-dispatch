@@ -385,9 +385,10 @@ test("loadExclusions (#800): either field needs it, and so does a tool exclusion
 	assert.ok(tokens.indexOf("excludeTools") < tokens.indexOf("modelRoles") && tokens.indexOf("modelRoles") < tokens.indexOf("loadExclusions"), "what the two reasons above rest on");
 	const fresh = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label([...declared, "loadExclusions"].join(","))) });
 	assert.equal((await fresh({ kind: "local", excludeTools: ["bash"], ...roles })).ok, true);
-	// Each sentence of the row's words holds of each job that reaches it, the one with neither of the first two fields among them.
+	// One sentence of each job that reaches this row, whichever of its fields it carries: it names no key and no child, since not every such job has either.
 	const said = row.comment("img", "is absent");
-	for (const field of ["`run.excludeExtensions`", "`run.excludeExtensionTools`", "`run.excludeTools`", "role child"]) assert.ok(said.includes(field), field);
+	assert.ok(said.includes("does not declare support for this job's exclusions") && said.includes("so its runner would not honour them"), said);
+	assert.doesNotMatch(said, /role child|run\.exclude/);
 });
 
 test("reportProgress (#644): a job armed with run.progress needs it; an unarmed one never does", async () => {

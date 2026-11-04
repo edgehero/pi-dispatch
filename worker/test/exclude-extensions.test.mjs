@@ -7,6 +7,7 @@ import { JOB_DATA_FIELD_VERSIONS, jobDataNewer, jobDataVersionFor, withJobDataVe
 import { extensionsNotHere, LEFT_OUT_NAMES_MAX, LOADED_JOB_TOOLS, leftOutOf, overlayEntryNamed, recordedLoaded, leavesOut } from "../src/loaded-record.mjs";
 import { TERMINAL_COMMENTS } from "../src/comment-tables.mjs";
 import { dollarSettlement, FLOOR_COUNTERS } from "../src/dollar-budget.mjs";
+import { CAPABILITY_GATES } from "../src/image-preflight.mjs";
 import { flowTierOf } from "../src/host-loads.mjs";
 import { explainReason } from "../src/reason-catalog.mjs";
 import { RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
@@ -78,6 +79,17 @@ test("a tool with another key or no extension behind it refuses, saying where it
 	for (const name of ["Bash", "BASH", "Write", "bAsH", "Read", "Powershell", "Codemode", "Tool_Search", "LIST_MCP_RESOURCES", "MCP__linear__search", "Mcp__x"]) assert.throws(load(name), /belongs on run\.excludeTools/, name);
 	for (const name of ["Report_Progress", "REPORT_PROGRESS", "Await_Human_Input", "Subagent", "Query_Logs", "SUBMIT_ANSWER_DRAFT"]) assert.throws(load(name), /tool the job itself offers/, name);
 	for (const tool of [...EXCLUDABLE_TOOL_NAMES, ...MCP_EXCLUDABLE_TOOL_NAMES]) assert.throws(load(tool.toUpperCase()), /belongs on run\.excludeTools/, `${tool}, in any case`);
+	// The refusal names the spelling the other list takes: as written, `BASH` is a second refusal there, and the spelling it names is not.
+	const excludeTools = (name) => () => parseTriggers(JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "f", mcp: ["linear"], excludeTools: [name] } }] }), "/t");
+	for (const tool of [...EXCLUDABLE_TOOL_NAMES, ...MCP_EXCLUDABLE_TOOL_NAMES]) {
+		assert.throws(load(tool.toUpperCase()), (e) => e.message.includes(`it belongs on run.excludeTools, spelled "${tool}"`), tool);
+		assert.throws(excludeTools(tool.toUpperCase()), /is not a tool the pinned pi knows/, `${tool}: the premise`);
+		assert.doesNotThrow(excludeTools(tool), tool);
+	}
+	assert.throws(load("MCP__linear__search"), /run\.excludeTools, where a server's tools go all at once, as mcp__<server>__\*/);
+	assert.doesNotThrow(excludeTools("mcp__linear__*"));
+	// A job's own tool: none of these says a run field arms it, since a role map arms `subagent` and a label trigger's draft arms `decide` and `read_repository`.
+	for (const name of ["subagent", "decide", "read_repository", "report_progress"]) assert.throws(load(name), (e) => e.message.includes("is a tool the job itself offers, not an extension's; to remove another extension's tool of that name, exclude its extension in run.excludeExtensions") && !/run field|turn that field off/.test(e.message), name);
 	for (const tool of LOADED_JOB_TOOLS.filter((name) => !MCP_EXCLUDABLE_TOOL_NAMES.has(name))) assert.throws(load(tool.toUpperCase()), /tool the job itself offers/, `${tool}, in any case`);
 	assert.deepEqual(parse([KINDS[1][1]({ excludeExtensionTools: ["lint_run", "Search-Web", "Bashful", "read_all"] })])[0].run.excludeExtensionTools, ["lint_run", "Search-Web", "Bashful", "read_all"], "a name of its own, in any case, is an extension's");
 });
@@ -152,6 +164,11 @@ test("a job that arrived without a field its entry authors is refused by name, e
 		assert.deepEqual(await check(arrived({ [field]: null })), { skewed: true, field });
 		assert.deepEqual(await check(arrived({ [field]: ["x"] })), { ok: true });
 	}
+	// Where the docs say "where it can read the file": a worker that cannot runs what a receiver queued without the field, and one that reads less waits on a stamped file.
+	const unreadable = makeCheckWaitSkew({ triggersPath: "/t.json", fs: { readFileSync: () => { throw new Error("ENOENT"); } } });
+	assert.deepEqual(await unreadable(arrived()), { ok: true });
+	const newer = makeCheckWaitSkew({ triggersPath: "/t.json", fs: { readFileSync: () => JSON.stringify({ version: TRIGGERS_FILE_VERSION + 1, triggers: [] }) } });
+	assert.deepEqual(await newer(arrived()), { newer: true });
 });
 
 test("a watch rule refuses both keys by the rule it always had: its data is built by name, and a watch job never carries them", () => {
@@ -181,40 +198,40 @@ test("job data: each field rides conditionally, stamps version 3, and an unflagg
 });
 
 /**
- * What a host at the tag this work waits on holds of the job data table. Written out, because the point is the bytes of that release and not this one's:
+ * What a host on a release that reads job data 2 holds of the job data table. Written out, because the point is the bytes of that release and not this one's:
  * a later row moving the real table must leave this standing for that host.
  */
-const AT_THE_TAG = Object.freeze({ supported: 2, table: Object.freeze({ packageCanary: 2 }) });
+const READS_JOB_DATA_2 = Object.freeze({ supported: 2, table: Object.freeze({ packageCanary: 2 }) });
 
 test("a host that reads only version 2 knows a canary and not these two: such a job waits there, and a stored message is not rebuilt without them", async () => {
 	const fake = () => {
 		const adds = [];
 		return { adds, add: async (_name, data, opts) => (adds.push(data), { id: opts.jobId }) };
 	};
-	const forge = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", trigger: { deliveryId: "d-tag", sender: { id: 1 } } };
-	assert.equal(jobDataNewer({ ...forge, excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"], dataVersion: 2 }, AT_THE_TAG), null, "the premise: stamped 2, that host reads such a job as its own, and ignores both fields");
+	const forge = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", trigger: { deliveryId: "d-reads-2", sender: { id: 1 } } };
+	assert.equal(jobDataNewer({ ...forge, excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"], dataVersion: 2 }, READS_JOB_DATA_2), null, "the premise: stamped 2, that host reads such a job as its own, and ignores both fields");
 	for (const [field, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensionTools", ["lint_run"]]]) {
 		const q = fake();
 		await enqueueForgeJob(q, "github", { ...forge, [field]: value });
 		const stored = q.adds[0];
-		assert.deepEqual(jobDataNewer(stored, AT_THE_TAG), { version: 3 }, `${field}: it waits, spending nothing, for a worker that can read it`);
+		assert.deepEqual(jobDataNewer(stored, READS_JOB_DATA_2), { version: 3 }, `${field}: it waits, spending nothing, for a worker that can read it`);
 		assert.equal(jobDataNewer(stored), null, `${field}: and this build reads what it wrote`);
 		// A message stored for later, picked up by that host: its builder refuses, and the caller answers with a reply rather than a job with the field gone.
-		await assert.rejects(enqueueLateForgeJob(q, "github", stored, { dataVersions: AT_THE_TAG }), (e) => e.code === "newer-release", field);
+		await assert.rejects(enqueueLateForgeJob(q, "github", stored, { dataVersions: READS_JOB_DATA_2 }), (e) => e.code === "newer-release", field);
 		assert.equal(q.adds.length, 1, `${field}: nothing was queued there`);
 	}
 	const canary = withJobDataVersion({ ...forge, packageCanary: { name: "a", version: "1.0.0" } });
 	assert.equal(canary.dataVersion, 2, "a canary is still what that host reads");
-	assert.equal(jobDataNewer(canary, AT_THE_TAG), null);
+	assert.equal(jobDataNewer(canary, READS_JOB_DATA_2), null);
 	assert.equal(withJobDataVersion({ ...canary, excludeExtensions: ["pi-lint"] }).dataVersion, 3, "and beside one of these, the higher need is the job's");
 	assert.equal(jobDataVersionFor({ excludeTools: ["bash"], packages: false }), 1, "and a job of what that host already knows stays unstamped");
 });
 
-test("a job data field added after the tag takes a version that host cannot read", () => {
+test("a job data field added after that release takes a version that host cannot read", () => {
 	// The whole of the defect in one line: a row at or below what a running host reads turns that host's gate off for exactly the field it would drop.
 	for (const [field, version] of Object.entries(JOB_DATA_FIELD_VERSIONS)) {
-		if (Object.hasOwn(AT_THE_TAG.table, field)) assert.equal(version, AT_THE_TAG.table[field], `${field} keeps the version that host reads it at`);
-		else assert.ok(version > AT_THE_TAG.supported, `${field} is at ${version}, which that host reads as its own and then drops`);
+		if (Object.hasOwn(READS_JOB_DATA_2.table, field)) assert.equal(version, READS_JOB_DATA_2.table[field], `${field} keeps the version that host reads it at`);
+		else assert.ok(version > READS_JOB_DATA_2.supported, `${field} is at ${version}, which that host reads as its own and then drops`);
 	}
 });
 
@@ -438,13 +455,18 @@ test("the docs' numbers and lists are the code's", () => {
 	// The boundary, in every place that promises what exclusion does, and said in full in one of them. "With a shell" undersold it: `write` alone reaches pi's settings.
 	for (const path of ["docs/exclude-tools.md", "docs/global-pi-overlay.md", "docs/triggers.md", "SECURITY.md", "specs/requirements.md", "specs/interfaces.md", "specs/design.md"]) {
 		const said = flat(path);
-		assert.ok(said.includes("an agent that can write files or run commands"), path);
+		assert.ok(said.includes("an agent that can write or edit files, or run commands"), path);
 		assert.doesNotMatch(said, /an agent with a shell|also removes its shell/, path);
 	}
 	for (const path of ["docs/global-pi-overlay.md", "docs/triggers.md", "SECURITY.md"]) assert.ok(flat(path).includes("exclude-tools.md#what-exclusion-does-not-stop"), path);
 	const boundary = doc.slice(doc.indexOf("## What exclusion does not stop"), doc.indexOf("## Versions and older hosts"));
-	for (const said of ["`~/.pi/agent/settings.json`", "`~/.pi/agent/extensions/`", "`write` alone, with no shell", "Removing `bash` is not enough", "(`bash`, `powershell`, `write`)", "`/opt/pi-global`", "A third-party subagent package's own child", "A person's re-run of a chained child", "`tools: [bash]`", "`../outside.js`", "`import`"]) assert.ok(boundary.includes(said), said);
-	assert.doesNotMatch(boundary, /`edit`[^.]*(?:reaches|closes|writes)/, "no sentence claims a route for `edit`, which no test tried");
+	assert.ok(flat("docs/exclude-tools.md").includes("A correct name can stop a job too, in four ways"), "the fourth is a canary whose candidate no longer brings the tool");
+	assert.ok(flat("docs/exclude-tools.md").includes("A package canary stops when its candidate no longer brings the tool"));
+	assert.ok(flat("docs/exclude-tools.md").includes("$0 if no call was made, and what the calls cost if the line holds their usage. Otherwise at least the reservation stands."));
+	for (const said of ["**An extension baked into an image cannot be named.**", "`~/.pi/agent/settings.json`", "`~/.pi/agent/extensions/`", "`write` alone, with no shell", "Removing `bash` is not enough", "neither is removing `bash`, `powershell` and `write`", "(`bash`, `powershell`, `write`, `edit`)", "`~/.pi/agent/auth.json`", "`/opt/pi-global`", "A third-party subagent package's own child", "A person's re-run of a chained child", "`tools: [bash]`", "`../outside.js`", "`import`"]) assert.ok(boundary.includes(said), said);
+	// `image/runner/test/role-child-exclusions.integration.test.mjs` runs each route on the real tools, and with all four removed.
+	assert.doesNotMatch(boundary, /\(`bash`, `powershell`, `write`\)/, "the three that leave `edit` holding a route");
+	assert.doesNotMatch(flat("specs/design.md"), /Removing the tools that run commands and write files does/);
 	// "Stops what a job loads" is true of one key: removing a tool leaves its extension's code running.
 	assert.ok(boundary.includes("`run.excludeExtensionTools` and `run.excludeTools` take tools out of the session and stop nothing from loading"));
 	assert.doesNotMatch(doc, /Both of these keys stop what a job loads/);
@@ -461,6 +483,34 @@ test("the docs' numbers and lists are the code's", () => {
 	const fleetRows = section.split("\n").filter((line) => line.startsWith("| ")).slice(1).map((line) => line.split(" | ")[0].slice(2));
 	assert.deepEqual(fleetRows, ["Worker", "Receiver", "Panel, console, `/dispatch`"], "who a fleet upgrades, each with what an older one does");
 	for (const said of ["`newer-release`", "`trigger-skew`", "`fleet.store-versions`", "`job-image-load-exclusions-unsupported`", "`loadExclusions`", "role map"]) assert.ok(section.includes(said), said);
+	// A host that reads `version` does not refuse a file that lost its stamp: it runs wider, and only a release that reads version 2 refuses it. Each shape off the real parsers, in the test above and below.
+	const flatSection = section.replace(/\s+/g, " ");
+	for (const key of ["excludeTools", "packages"]) assert.equal(triggersFileVersionFor({ triggers: [KINDS[1][1]({ [key]: key === "packages" ? false : ["bash"] })] }), 1, `${key}: what the section offers until then needs no version`);
+	for (const said of ["Until then leave both out of the file: `\"packages\": false` and `run.excludeTools` need neither version.", "**Once either is used, no 4.3.1 writer may touch the file**", "**A file that lost its stamp.**", "one-shot disarm", "A release that reads `version` and less loads it and drops both keys", "Only a release that reads version 2 refuses that file (`run.excludeExtensions needs triggers file version 2`)", "No release this old has a console", "It reads live workers alone: a receiver publishes no version and a stopped worker's row expires", "so a delivery still matches and queues its job without the keys", "where it can read the file", "whoever maintains it rebuilds it from this release"]) assert.ok(flatSection.includes(said), said);
+	for (const wrong of ["so deliveries in between match nothing", "a release that reads `version` then refuses the file"]) assert.ok(!flatSection.includes(wrong), wrong);
+	assert.doesNotMatch(upgrading, /Deliveries in between match nothing/);
+	assert.ok(flat("docs/multi-host.md").includes("job data at version 3, and a live peer reads less or publishes nothing"));
+	assert.doesNotMatch(flat("docs/triggers.md"), /which a writer stamps/);
+	assert.doesNotMatch(flat("docs/exclude-tools.md"), /another run field arms/);
+	assert.ok(flat("docs/exclude-tools.md").includes("`subagent` and the rest), which is no extension's"));
+	assert.doesNotMatch(flat("specs/interfaces.md"), /which another run field arms/);
+	assert.ok(flat("docs/reasons.md").includes("What to do: This job goes without the connection's adapter, so reconnecting cannot help."));
+	// What the design says of the same, and where its variables are: a job's inputs hold neither.
+	const designText = flat("specs/design.md");
+	assert.ok(designText.includes("land only after a tag holding #761 is out, and are used only once every host reads them"));
+	assert.ok(designText.includes("On a file that lost its stamp it loads the file and drops both, and only a release that reads version 2 refuses that shape."));
+	assert.doesNotMatch(designText, /a 4\.3\.1 panel, console or disarm|every file today/);
+	assert.match(designText, /Traces to\*\*: `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`/);
+	const interfacesText = flat("specs/interfaces.md");
+	assert.doesNotMatch(interfacesText, /before a table has a row|a worker at the tag|`INT-CONTAINER-JOB-INPUTS` AMENDED\*\*: `PI_EXCLUDE_EXTENSIONS`/);
+	assert.ok(interfacesText.slice(interfacesText.indexOf("## INT-CONTAINER-RUNTIME-CONTRACT"), interfacesText.indexOf("## INT-CONTAINER-RUNTIME-CONTRACT") + 60000).includes("`PI_EXCLUDE_EXTENSIONS`"), "the variables are in the contract the spec names");
+	assert.match(upgrading, /3\. \*\*Upgrade the job image\.\*\* Pull the release's image and point `PI_JOB_IMAGE` at it\. An image a trigger names in `run\.image` moves too/, "the order's own step, which said PI_JOB_IMAGE alone");
+	assert.match(doc, /\| A release that reads `version` and reads less than these \| It waits on every job \(`newer-release`\), and it refuses the file at its next start \| It loads the file, drops both keys and runs the job wider than the file says, on a clean record \|/);
+	assert.match(doc, /\| A release that reads file version 2 and job data version 3 \| It runs the job as the file says \| It refuses the file: `run\.excludeExtensions needs triggers file version 2` \|/);
+	assert.doesNotMatch(doc, /every writer stamps|the file refuses to load/);
+	const requirement = flat("specs/requirements.md");
+	assert.ok(requirement.includes("a file that lost its stamp (a 4.3.1 writer's or disarm's, or a hand edit) it loads, dropping both keys, and only a worker that reads these refuses that shape"));
+	assert.ok(requirement.includes("no 4.3.1 writer may touch the file once either is used"));
 	assert.ok(fleet.indexOf("### What a fleet needs before a trigger leaves something out") > fleet.indexOf("## Mixed versions: what is safe"));
 	// The label and the row name the capability the same.
 	const label = /LABEL dev\.pi-dispatch\.capabilities="([^"]+)"/.exec(readFileSync(new URL("../../image/Dockerfile", import.meta.url), "utf8"))[1].split(",");
@@ -475,6 +525,16 @@ test("what a stop for a name that matched nothing costs: only a trusted line wit
 	assert.equal(words.sentence, TERMINAL_COMMENTS["exclude-tool-not-loaded"]);
 	for (const cause of ["misspelled", "missing on this host", "register it later"]) assert.ok(words.sentence.includes(cause), cause);
 	assert.match(words.next, /`run\.excludeExtensions`/, "the way out for a tool registered late");
+	// The one refusal these words are of, each shape that reaches it: a file's exclusion or `packages: false`, and no other (`subscription-runtime.mjs`). Reconnecting mends neither.
+	const adapter = explainReason("auth-adapter-disabled");
+	for (const way of ["`run.excludeExtensions`", '`"packages": false`', "reconnecting cannot help"]) assert.ok(adapter.next.includes(way), way);
+	// Of a job with no role map on an image with no role machinery, too: the sentence names neither the keys nor a child.
+	const image = explainReason("job-image-load-exclusions-unsupported");
+	assert.ok(image.sentence.includes("this job's exclusions, so its runner would not honour them"));
+	assert.doesNotMatch(image.sentence, /role child|run\.exclude/);
+	const gate = CAPABILITY_GATES.find((row) => row.token === "loadExclusions");
+	assert.doesNotMatch(gate.comment("pi-job:old", "lacks it"), /role child|run\.exclude/);
+	assert.ok(gate.comment("pi-job:old", "lacks it").includes("this job's exclusions"));
 	assert.doesNotMatch(words.sentence, /nothing was spent|free/i, "an extension may have called a model as it loaded");
 	const reservedMicros = 2_000_000;
 	const meter = { metered: true, costCapMicros: reservedMicros, calls: 0, cost: 0 };
@@ -486,4 +546,6 @@ test("what a stop for a name that matched nothing costs: only a trusted line wit
 	assert.equal(zero(null).settledMicros, reservedMicros, "no tokens on the line");
 	const { costCapMicros: _noCap, ...uncapped } = meter;
 	assert.equal(zero(cleanTokens(uncapped)).settledMicros, reservedMicros, "a job with no cap of its own keeps the reservation, whatever its line says");
+	// A trusted line that holds a call's usage is believed too: the docs' "what the calls cost", from the worker's own function.
+	assert.deepEqual(dollarSettlement({ tokens: cleanTokens({ ...meter, calls: 1, cost: 0.25 }), usage: { models: {} }, reservedMicros, trusted: true }), { settledMicros: 250_000, basis: "metered" });
 });

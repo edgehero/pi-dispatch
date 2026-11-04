@@ -86,7 +86,7 @@ Be precise about the boundary before relying on it:
 
 Each entry is a tool's exact name: a letter, then letters, digits, `_` or `-`, at most 48 characters, and at most 16 names. No
 pattern. The file refuses pi's own tools and a server's, which belong on `run.excludeTools`. It also refuses a tool the job itself
-offers (`report_progress`, `await_human_input`, `request_approval`, `subagent` and the rest), because another run field arms those:
+offers (`report_progress`, `await_human_input`, `request_approval`, `subagent` and the rest), which is no extension's:
 to remove another extension's tool of such a name, leave that extension out below.
 
 pi removes these names from the session's tool registry, as it does for `run.excludeTools`. No extension can turn one back on, a
@@ -104,14 +104,15 @@ tool, with no name to fix. The key still takes that repository's tool out of the
 | Nothing was held back from it: no `"packages": false`, no `run.excludeExtensions`, this host's overlay open, no parent job, and every extension loaded | It stops before its prompt, as `exclude-tool-not-loaded` |
 | Anything else: the tool may be in what it did not load, so the name may be right | It runs. The job log says `exclude_tools_unmatched`, and its record names the tool (`loaded.tools.unmatched`) |
 
-A correct name can stop a job too, in three ways, so read the reason before fixing the spelling. A package that brings the tool and is
+A correct name can stop a job too, in four ways, so read the reason before fixing the spelling. A package that brings the tool and is
 missing on this one host stops that host's jobs. A tool an extension registers after it loads stops the job on every host, since the check reads
 what was registered when they loaded: the way out is to leave that extension out with `run.excludeExtensions`, which removes it
-and turns this check off. A name only a repository registers stops every job the first row above describes, on that repository too: take the name off this key.
+and turns this check off. A name only a repository registers stops every job the first row above describes, on that repository too: take the name off this key. A package canary stops
+when its candidate no longer brings the tool, which is what the canary found.
 
 **What a stop costs.** The agent never starts, and the container did. An extension that calls a model while it loads is metered like
-any call, and that money is spent. A dollar reservation settles to what the job's exit line reports, down to $0 only when the worker
-trusts that line, the job has a cost cap and no call was made; otherwise the reservation stands. The job-count slot stays held. A
+any call, and that money is spent. A dollar reservation settles to what the job's exit line reports when the worker trusts that line and the job
+has a cost cap: $0 if no call was made, and what the calls cost if the line holds their usage. Otherwise at least the reservation stands. The job-count slot stays held. A
 forge job gets a comment, and `PI_ON_FAILURE` fires. It is not retried.
 
 ## Leaving an extension out (`run.excludeExtensions`)
@@ -143,14 +144,15 @@ whose adapter is excluded is refused as `auth-adapter-disabled`, and a package c
 
 `run.excludeExtensions` and `"packages": false` stop what a job loads on its own. `run.excludeExtensionTools` and `run.excludeTools`
 take tools out of the session and stop nothing from loading: an extension one of its tools was taken from still loads, and its code still
-runs. None of the four keeps code away from an agent that can write files or run commands, and they have other limits:
+runs. None of the four keeps code away from an agent that can write or edit files, or run commands, and they have other limits:
 
-- **Such an agent can bring code back.** pi's `write` tool takes any path, and `~/.pi/agent/` is
+- **Such an agent can bring code back.** pi's `write` and `edit` tools take any path, and `~/.pi/agent/` is
   writable in the image (0777, so that a job can run as any uid). So `write` alone, with no shell, reaches `~/.pi/agent/settings.json`
   and `~/.pi/agent/extensions/`. A role child started after that reads both, so it loads an excluded overlay extension or package, or
-  the repository's extensions, or runs code the agent wrote there. Removing `bash` is not enough. A trigger that must keep code away from its
-  agent removes the tools that run commands and write files (`bash`, `powershell`, `write`), which closes these routes as long as no extension
-  or server the job keeps brings a tool that does the same. The example at the top of this page also removes `edit`.
+  the repository's extensions, or runs code the agent wrote there. `edit` alone needs a file that is already there, and a role child's own start creates
+  `~/.pi/agent/auth.json`: a key in it that starts with `!` is a command, which the next child runs when it reads that key. Removing `bash` is not enough,
+  and neither is removing `bash`, `powershell` and `write`. A trigger that must keep code away from its agent removes the tools that run commands, write files
+  and edit them (`bash`, `powershell`, `write`, `edit`), which closes these routes as long as no extension or server the job keeps brings a tool that does the same.
 - **An excluded file stays readable.** The overlay is mounted read-only and whole (`/opt/pi-global`), so an excluded extension's or
   package's files are still there for `read` to open.
 - **A third-party subagent package's own child keeps everything.** The runner hands these lists only to its own `subagent` tool. A package
@@ -160,26 +162,28 @@ runs. None of the four keeps code away from an agent that can write files or run
 - **A role child can end up with no tools.** An agent with `tools: [bash]`, on a trigger that removes `bash`, still starts, and has none.
 - **An overlay manifest's entry outside its folder cannot be named.** A root `package.json` in `extensions/` may list `../outside.js`, and
   no name in `run.excludeExtensions` means it: it stays in the job while that manifest lists it.
+- **An extension baked into an image cannot be named.** pi finds one in `~/.pi/agent/extensions` by itself, which is where a derived image would put it. It is on neither
+  list, so no name in `run.excludeExtensions` reaches it, and it stays loaded.
 - **A kept extension can import an excluded file.** The name takes an entry off the list of what pi loads. It does not stop an `import`, so
   that module still runs.
 
 ## Versions and older hosts
 
-A file that uses either key needs `"version": 2`, which every writer stamps and takes away again when nothing needs it. Written by
-hand with no stamp, the file refuses to load. A job that carries either is stamped job data version 3 (a canary's stays at 2). Every host
-needs a release that reads both before a file uses either ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)):
+A file that uses either key needs `"version": 2`. A writer that reads that version stamps it, and takes it away again when nothing needs it. A
+job that carries either is stamped job data version 3 (a canary's stays at 2). Every host needs a release that reads both before a file uses either, and once one does,
+no 4.3.1 writer may touch the file ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)): it keeps the keys and drops the stamp, as a hand edit can.
 
-| A worker on | With such a file or job |
-|---|---|
-| A release from before issue #761, 4.3.1 among them | It publishes no version, reads the file, drops both keys and runs the job wider than the file says, on a clean record |
-| A release that reads `version` and reads less than these | It waits on every job (`newer-release`), and it refuses the file at its next start |
-| A release that reads file version 2 and job data version 3 | It runs the job as the file says |
+| A worker on | A file with either key and `"version": 2`, or a job with either | The same file with no stamp |
+|---|---|---|
+| A release from before issue #761, 4.3.1 among them | It publishes no version, reads the file, drops both keys and runs the job wider than the file says, on a clean record | The same |
+| A release that reads `version` and reads less than these | It waits on every job (`newer-release`), and it refuses the file at its next start | It loads the file, drops both keys and runs the job wider than the file says, on a clean record |
+| A release that reads file version 2 and job data version 3 | It runs the job as the file says | It refuses the file: `run.excludeExtensions needs triggers file version 2` |
 
-The trigger's page refuses the change while a live host reads less or publishes no version, and names it. A hand edit is not
+The trigger's page refuses the change while a live worker reads less or publishes no version, and names it. It reads live workers alone, not receivers or stopped workers. A hand edit is not
 stopped, and `pi-dispatch doctor` names such a host (`fleet.store-versions`).
 
 An image without the `loadExclusions` capability is refused before any spend (`job-image-load-exclusions-unsupported`). Its runner would
-ignore both keys, and would start a role child with no `--exclude-tools`, so a job with `run.excludeTools` is refused the same way where its
+not honour either key, and where it starts a role child that child gets no `--exclude-tools`, so a job with `run.excludeTools` is refused the same way where its
 scope has a role map, even on a trigger that never starts a child. A job with none of that runs on such an image as it did.
 
 ## The file, or a person on the trigger's page
@@ -219,5 +223,5 @@ from a current tree and the refusal disappears.
 | Version floor | worker 2.0.0, receiver 2.0.0, admin 2.0.0, plus the 2.0.0 job image (`ghcr.io/edgehero/pi-job:2.0.0`) or one rebuilt from the same tree |
 | `run.excludeExtensionTools` | up to 16 exact tool names, any trigger kind but a watch rule; pi's, a server's and the job's own are refused at load; a name no staged package or overlay extension registered stops a job that held nothing back (`exclude-tool-not-loaded`), and is logged and recorded on any other; its extension's code still runs |
 | `run.excludeExtensions` | up to 16 names of staged packages (manifest name) or overlay extensions (file stem, whole file name or folder), any trigger kind but a watch rule; a name not on this host is recorded and doctor warns |
-| Both, on an older host or image | the file at version 2 and job data at version 3: a worker that reads `version` and less waits (`newer-release`), and one from before issue #761 drops both and runs wider, so every host reads both first; an older image is refused (`job-image-load-exclusions-unsupported`), and so is a job with `run.excludeTools` and a role map |
+| Both, on an older host or image | the file at version 2 and job data at version 3: a worker that reads `version` and less waits (`newer-release`) on a stamped file and runs wider on one that lost the stamp, and one from before issue #761 drops both and runs wider on either, so every host reads both first; an older image is refused (`job-image-load-exclusions-unsupported`), and so is a job with `run.excludeTools` and a role map |
 | Related | [job image](job-image.md), [global pi overlay](global-pi-overlay.md), [workflows](workflows.md) |

@@ -2090,7 +2090,7 @@ export async function collectChecks(shellVars, seams) {
 					ok: false,
 					warn: true,
 					label: `Trigger flow "${g.flow}" resolves in NO tier visible here (${at})`,
-					fix: `checked: ${checked.join(", ") || "nothing checkable"}${unknown.length > 0 ? `; not checkable here: ${unknown.join(", ")}` : ""} -- commit .pi/skills/${g.flow}/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0`,
+					fix: `checked: ${checked.join(", ") || "nothing checkable"}${unknown.length > 0 ? `; not checkable here: ${unknown.join(", ")}` : ""} -- commit .pi/skills/${g.flow}/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it (one already staged must be off this trigger's run.excludeExtensions, and run.packages must not be false); a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0`,
 				});
 			}
 		}
@@ -3508,7 +3508,7 @@ export async function collectChecks(shellVars, seams) {
 			}
 
 			// Staged pi packages (REQ-GLOBAL-PI-OVERLAY): pinned third-party code the operator staged with
-			// `import-pi --with-packages`, loaded by every job whose trigger did not set `run.packages: false`.
+			// `import-pi --with-packages`, loaded by every job whose trigger did not set `run.packages: false` or name it in `run.excludeExtensions`.
 			// Keyed on the dir the same way the extensions pair above is, so a deployment that stages none
 			// prints nothing here.
 			const packagesDir = join(overlay, PACKAGES_SUBDIR);
@@ -3564,7 +3564,7 @@ export async function collectChecks(shellVars, seams) {
 						});
 					}
 					// There is no dormant state left to report: a staged, manifested package loads into every
-					// job whose trigger did not opt out -- INCLUDING jobs no trigger file describes at all
+					// job whose trigger did not opt out or leave it out by name -- INCLUDING jobs no trigger file describes at all
 					// (a matched webhook, `dispatch_run`, the CLI). So "staged" IS "loading", and the honest
 					// line says so and names how much of the trigger file withholds it. Warn, never fail: this
 					// is the intended posture, and it is stated so a forgotten stage cannot read as inert.
@@ -3573,8 +3573,9 @@ export async function collectChecks(shellVars, seams) {
 					checks.push({
 						ok: false,
 						warn: true,
-						label: `Staged packages LOAD in every job (${optingOut} trigger(s) opt out with run.packages: false)`,
-						fix: "they run third-party code against adversarial input with open egress -- vet each, keep every version exactly pinned, and set run.packages: false on any trigger that must not load them",
+						// Counted against this host's manifest: a name in the list may be an overlay extension, which withholds no package, and a trigger with packages off is counted above.
+						label: `Staged packages LOAD in every job (${optingOut} trigger(s) opt out with run.packages: false, ${(excludedNames ?? []).filter((listed) => listed.packages && listed.names.some((name) => manifest.packages.some((staged) => staged.name === name))).length} leave one or more out with run.excludeExtensions)`,
+						fix: "they run third-party code against adversarial input with open egress -- vet each, keep every version exactly pinned, and on a trigger that must not load them set run.packages: false, or name one in run.excludeExtensions",
 					});
 
 					// A staged package whose --ignore-scripts build never ran (issue #102, comment 1). The
@@ -5245,7 +5246,8 @@ function nodeCheck(version) {
  * that every image a trigger names is actually on this host -- with `--pull=never` nothing will fetch one at
  * job time, so this is the only warning that arrives BEFORE the trigger fires at 03:00.
  *
- * `optingOut` counts `run.packages: false` -- the only thing that now withholds the staged set from a job.
+ * `optingOut` counts `run.packages: false` -- the only thing that withholds the whole staged set from a job. `run.excludeExtensions`
+ * withholds one package at a time, and `excludedNames` holds those names.
  * `requiring` counts explicit `run.packages: true`, which arms nothing any more but is still an operator
  * asserting "this flow needs those packages"; that assertion is what makes an empty stage a hard failure.
  *
@@ -6122,7 +6124,7 @@ export function storeVersionNeeds({ settingsFile, fileExists, pauseWindowFacts, 
  * own file needs) is above 1, a WARNING naming the peers that publish that field below the need (they defer what the
  * file touches until they are upgraded) and one naming the peers that publish no such field at all (workers from before
  * the field: they read the file without its version and drop what they do not know, which can widen a job). Nothing
- * at all while every need is 1, which is every deployment today, since no store's table has a row yet. Hosts are named,
+ * at all while every need is 1, which is a deployment whose files use nothing a table has a row for. Hosts are named,
  * never a file's content. `fleetSizeChecks` keeps its own line: a peer without `limitsVersion` still reads version 2.
  */
 export function fleetStoreVersionChecks(needs, peers) {

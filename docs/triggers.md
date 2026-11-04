@@ -276,10 +276,10 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
 - `"excludeExtensions": ["@acme/deploy-tools", "git-guard"]` leaves named extensions out of that trigger's jobs: a staged package by
   its manifest name, with its skills, prompts and themes, or an overlay extension by its file stem or folder name, before any of
   its code runs. `"excludeExtensionTools": ["deploy_preview"]` removes named tools an extension brings. Neither takes a watch rule.
-  Either makes the file `"version": 2`, which a writer stamps, and needs every host on a release that reads it
+  Either makes the file `"version": 2`, which a writer that reads that version stamps, and needs every host on a release that reads it
   ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). A name not on a host is no refusal there, and a tool name
   no staged package or overlay extension brought can stop a job before its prompt. Removing a tool does not stop its extension's code from running, and
-  neither key stops what an agent that can write files or run commands can reach ([what exclusion does not stop](exclude-tools.md#what-exclusion-does-not-stop)).
+  neither key stops what an agent that can write or edit files, or run commands, can reach ([what exclusion does not stop](exclude-tools.md#what-exclusion-does-not-stop)).
 
 - `"mcp": ["docs", "files"]` names MCP servers from the overlay's `mcp.json` for that trigger's jobs to
   connect ([`docs/mcp.md`](mcp.md)). Names only: the servers themselves, and the credentials they take, are the

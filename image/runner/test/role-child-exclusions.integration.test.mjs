@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runRoleChild } from "../src/model-roles.mjs";
@@ -160,6 +160,70 @@ test("the boundary the docs state: exclusion stops what a job loads on its own, 
 	} finally {
 		await server.close();
 	}
+});
+
+/**
+ * A whole job whose model edits `~/.pi/agent/auth.json` between two children: the first child's CLI creates that file, and pi's `edit`
+ * needs a file that exists, so no write tool is involved at any point. The model's own tool call reaches pi's real `edit` tool.
+ */
+async function editRouteJob(excluded) {
+	const offered = [];
+	const results = [];
+	let steps = [];
+	const server = createServer((req, res) => {
+		let text = "";
+		req.on("data", (chunk) => (text += chunk));
+		req.on("end", () => {
+			const body = JSON.parse(text);
+			const names = (body.tools ?? []).map((tool) => tool.function?.name);
+			offered.push(names);
+			const last = body.messages.at(-1);
+			if (last?.role === "tool") results.push(JSON.stringify(last.content));
+			const step = names.includes("subagent") ? steps.shift() : undefined;
+			const chunk = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			const base = { id: "r", object: "chat.completion.chunk", created: 0, model: JOB_MODEL };
+			chunk({ ...base, choices: [{ index: 0, delta: step ? { role: "assistant", tool_calls: [{ index: 0, id: `call_${steps.length}`, type: "function", function: { name: step[0], arguments: JSON.stringify(step[1]) } }] } : { role: "assistant", content: "done" }, finish_reason: null }] });
+			chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: step ? "tool_calls" : "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+			res.write("data: [DONE]\n\n");
+			res.end();
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	try {
+		const root = jobTree({ base: `http://127.0.0.1:${server.address().port}/v1` });
+		const marker = join(root, "tmp", "ran-from-auth-json");
+		// `!` makes this key a command: pi's `resolveConfigValue` runs it when a process next reads the provider's key.
+		const edit = { path: "~/.pi/agent/auth.json", edits: [{ oldText: "{}", newText: JSON.stringify({ [JOB_PROVIDER]: { type: "api_key", key: `!echo ran >> ${marker}; echo real-job-fake-key` } }) }] };
+		steps = [["subagent", { agent: "scout", task: "look" }], ["edit", edit], ["subagent", { agent: "scout", task: "look" }]];
+		const ref = `${JOB_PROVIDER}/${JOB_MODEL}`;
+		put(root, "/job/model-roles.json", JSON.stringify({ version: 1, roles: {}, parent: ref, models: [ref] }));
+		put(root, "/job/agents.json", JSON.stringify({ version: 1, agents: [{ name: "scout", description: "probe", content: "Probe." }] }));
+		mkdirSync(join(root, "home", ".pi", "agent"), { recursive: true });
+		writeFileSync(join(root, "home", ".pi", "agent", "models.json"), readFileSync(join(root, "opt", "pi-global", "models.json")));
+		const { exit, stderr } = await runRealJob(root, { PI_MODEL_ROLES_FILE: "/job/model-roles.json", PI_AGENTS_FILE: "/job/agents.json", PI_EXCLUDE_TOOLS: excluded.join(","), PI_ALLOWED_MODELS: ref, PI_OFFLINE: "1", PI_MAX_TURNS: "10" });
+		assert.equal(exit?.code, 0, `${JSON.stringify(exit)}\n${stderr}`);
+		return { parentTools: offered[0], results, ran: existsSync(marker), auth: readFileSync(join(root, "home", ".pi", "agent", "auth.json"), "utf8") };
+	} finally {
+		await new Promise((resolve) => {
+			server.close(resolve);
+			server.closeAllConnections();
+		});
+	}
+}
+
+test("the boundary the docs state: pi's edit tool, with no shell and no write, runs code through auth.json in the next child, and only removing edit as well closes that", { skip }, async () => {
+	const kept = await editRouteJob(["bash", "powershell", "write"]);
+	for (const name of ["bash", "powershell", "write"]) assert.ok(!kept.parentTools.includes(name), `${name} is gone: ${kept.parentTools}`);
+	assert.ok(kept.parentTools.includes("edit"), "the premise: the agent still has edit");
+	assert.ok(kept.results.some((result) => result.includes("Successfully replaced")), `pi's edit tool did it: ${kept.results}`);
+	assert.ok(kept.auth.includes(`"key":"!echo`), "the first child's CLI made the file, and the edit reached it");
+	assert.equal(kept.ran, true, "the residual this test pins, which the docs say out loud: the next child ran what the agent put in that key");
+
+	const removed = await editRouteJob(["bash", "powershell", "write", "edit"]);
+	assert.ok(!removed.parentTools.includes("edit"));
+	assert.ok(!removed.auth.includes("!echo"), "the same call, with edit removed, changed nothing");
+	assert.equal(removed.ran, false, "what the docs tell a trigger to do closes this route");
 });
 
 test("a whole job: an extension tool the trigger names is out of the child too, and a child is no strict job", { skip }, async () => {

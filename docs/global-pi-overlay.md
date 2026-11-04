@@ -286,7 +286,7 @@ place, because two of them are easy to forget and #58 originally called the thir
 
 `"excludeExtensions"` stops what a job loads on its own. An overlay entry it names is taken off the runner's list before pi imports
 anything, and a package it names is left out whole, with its skills, prompts and themes. A name not on this host is no refusal: the
-run's record says so and doctor warns. Neither it nor `"packages": false` keeps code away from an agent that can write files or run commands
+run's record says so and doctor warns. Neither it nor `"packages": false` keeps code away from an agent that can write or edit files, or run commands
 ([what exclusion does not stop](exclude-tools.md#what-exclusion-does-not-stop)).
 
 The third one surprises people, and it is deliberate. pi's normal discovery posture is on

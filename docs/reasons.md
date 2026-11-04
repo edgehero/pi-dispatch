@@ -346,7 +346,7 @@ The image does not declare command support, so its runner would not dispatch `ru
 
 ### job-image-load-exclusions-unsupported
 
-The job image does not declare support for leaving out an extension or an extension's tool, so its runner would ignore `run.excludeExtensions` and `run.excludeExtensionTools`, and would start a role child without `run.excludeTools`. No container started and nothing was spent.
+The job image does not declare support for this job's exclusions, so its runner would not honour them. No container started and nothing was spent.
 
 What to do: rebuild the job image from this release. See [exclude-tools.md](exclude-tools.md#versions-and-older-hosts).
 
@@ -1774,7 +1774,7 @@ What to do: Run `pi-dispatch auth status` on the connection owner host, check it
 
 Stopped before starting: the configured subscription connection cannot authorize this job (auth-adapter-disabled). No container was started and nothing was spent.
 
-What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+What to do: This job goes without the connection's adapter, so reconnecting cannot help. Take the adapter's package off the trigger's `run.excludeExtensions`, or take its `"packages": false` off. `pi-dispatch auth status` on the connection owner host names the adapter.
 
 ### auth-credit-cap-required
 

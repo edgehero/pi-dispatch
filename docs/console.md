@@ -2399,7 +2399,7 @@ overlay; what the worker's own service environment sets cannot be seen from here
 Any of these can stop a job at pickup, so what a preview says of an added server holds beside them: "a job that reaches its container connects to" it.
 
 Either exclusion makes the proposed file need version 2 and job data version 3, and so does a row of the file that already holds one. The preview then reads each
-live host's release, and so does the Confirm, and each refuses on a lower one, none, or a registry it cannot read. A host that reads less would hold every job this file touches. A host
+live worker's release, and so does the Confirm, and each refuses on a lower one, none, or a registry it cannot read. It reads live workers alone, not receivers or stopped workers. A host that reads less would hold every job this file touches. A host
 that publishes no version is from before issue #761: it drops what it does not know and can run a job wider on a clean record. The refusal names each, and what to do is to upgrade it
 ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). Where they all read it, it says "mini1 and mini2 each read what this change needs.", and with no live host, "No host is live right now, so no host's release could be checked." Neither says anything of an image, which has its own line above. It says what the write does to the file's stamp: "Stamps the file version 2:
 a host reading less waits on every trigger's jobs, not only this one's.", "The file stays at version 2.", or "The file no longer needs version 2, so

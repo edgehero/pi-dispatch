@@ -92,7 +92,7 @@ test("a name that is no overlay entry's leaves the overlay whole, a repository's
 	}
 });
 
-test("what the docs say a name does not reach: a kept extension's import of an excluded file, and a root manifest's entry outside the folder", { skip }, async () => {
+test("what the docs say a name does not reach: a kept extension's import of an excluded file, a root manifest's entry outside the folder, and one baked into the agent dir", { skip }, async () => {
 	const server = await chatServer();
 	try {
 		const imports = jobTree({ base: server.base });
@@ -110,6 +110,13 @@ test("what the docs say a name does not reach: a kept extension's import of an e
 		const named = await run(outside, { PI_EXCLUDE_EXTENSIONS: "outside,outside.js" });
 		assert.equal(named.exit?.code, 0, named.stderr);
 		assert.ok(marksOf(outside).includes("factory:outside"), "no name means an entry that climbs out of the folder");
+
+		// Where a derived image would put one: pi's own discovery finds it, and it is on neither list a name can take it off.
+		const baked = jobTree({ base: server.base });
+		put(baked, "/home/.pi/agent/extensions/baked.js", marked("baked"));
+		const stays = await run(baked, { PI_EXCLUDE_EXTENSIONS: "baked,baked.js" });
+		assert.equal(stays.exit?.code, 0, stays.stderr);
+		assert.deepEqual(marksOf(baked), ["module:baked", "factory:baked"], "no name reaches it, and it stays loaded");
 	} finally {
 		await server.close();
 	}

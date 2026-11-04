@@ -14,7 +14,7 @@ import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { TRIGGERS_FILE_VERSION, parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
 import { agentReadProjection } from "../src/agent-read.mjs";
-import { createFleetReader, normalizeTriggerForDisplay, readTriggerSkew } from "../src/read-model.mjs";
+import { createFleetReader, normalizeTriggerForDisplay, readHosts, readTriggerSkew } from "../src/read-model.mjs";
 import { triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
 import { recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
@@ -434,8 +434,8 @@ for (const [key, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensi
     };
     assert.equal((await refused(async () => ({ hosts: [reads("mini1"), reads("mini2", "1")] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 3. mini2 reads less, and would hold every job this file touches. Upgrade that host first.");
     assert.equal((await refused(async () => ({ hosts: [reads("mini1"), { name: "old" }] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 3. old publishes no version, and would drop what it does not know, which can run a job wider on a clean record. Upgrade that host first.");
-    // A host at the tag this work waits on reads a canary's job data at 2, and neither of these: 2 is not enough, whatever it says of the file.
-    assert.equal((await refused(async () => ({ hosts: [reads("mini1"), { name: "tag", triggersVersion: "1", jobDataVersion: "2" }] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 3. tag reads less, and would hold every job this file touches. Upgrade that host first.");
+    // A host on a release that reads job data 2 reads a canary's job data, and neither of these: 2 is not enough, whatever it says of the file.
+    assert.equal((await refused(async () => ({ hosts: [reads("mini1"), { name: "older", triggersVersion: "1", jobDataVersion: "2" }] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 3. older reads less, and would hold every job this file touches. Upgrade that host first.");
     assert.match((await refused(async () => ({ hosts: [{ name: "half", triggersVersion: "2", jobDataVersion: "2" }] }))).refusal, /^This change needs the triggers file at version 2 and the job data at version 3\. half reads less/);
     assert.equal((await refused(async () => { throw new Error("down"); })).refusal, "The live hosts could not be read, so nothing says each reads what this change needs. Nothing was written; try again.");
     // The Confirm asks again: a host that moved between the two refuses there.
@@ -496,6 +496,21 @@ const LAYOUT_LINE = "This file is not in the writer's layout";
 const VALUES_BACK = "Put trigger row 1's values back; the file stays in the form the writer gives it";
 const AS_IT_WAS = "Put trigger row 1 back as it was";
 const stampSaid = (out) => out.summary.filter((line) => /^(Stamps the file|The file (no longer needs|stays at)|This write also takes)/.test(line));
+
+test("the version refusal reads live workers alone: a stopped worker and a receiver stop nothing, whatever they read, and each page that promises the refusal says so", async () => {
+  // Through the reader the console wires (`cli.mjs`), on a registry as a fleet leaves it: a stopped worker's member can outlive its row, whose fields have expired, and a receiver writes neither.
+  const rows = { mini1: { name: "mini1", beatAt: String(NOW), triggersVersion: "2", jobDataVersion: "3" }, stopped: {} };
+  const redisFn = () => ({ smembers: async () => Object.keys(rows), hgetall: async (key) => rows[key.replace("host:h:", "")] ?? {}, srem: async () => {}, disconnect() {} });
+  const preview = () => world({ deps: { readHosts: () => readHosts({ url: "redis://x", redisFn, now: () => NOW }) } }).preview({ excludeExtensions: ["pi-lint"] });
+  const passes = await preview();
+  assert.equal(passes.refusal, undefined, JSON.stringify(passes.refusal));
+  assert.ok(passes.summary.length > 0);
+  // The same reader does see a worker that is running and reads less, so the pass above is the expired row's and not a reader that sees nobody.
+  rows.running = { name: "running", beatAt: String(NOW), triggersVersion: "1", jobDataVersion: "2" };
+  assert.match((await preview()).refusal, /running reads less/);
+  const said = (path) => nodeFs.readFileSync(new URL(`../../${path}`, import.meta.url), "utf8").replace(/\s+/g, " ");
+  for (const [path, sentence] of [["docs/upgrading.md", "It reads live workers alone: a receiver publishes no version and a stopped worker's row expires"], ["docs/exclude-tools.md", "It reads live workers alone, not receivers or stopped workers"], ["docs/console.md", "It reads live workers alone, not receivers or stopped workers"], ["specs/requirements.md", "it asks no receiver and no stopped worker"]]) assert.ok(said(path).includes(sentence), path);
+});
 
 test("a file in the writer's layout whose stamp says more or less than it needs: no line says the whole file moves, and one says what the stamp does", async () => {
   // A stamp nothing needs: a flow edit takes it off, and the Undo has no way to put it back.

@@ -456,6 +456,17 @@ test("reloadTriggers swaps cfg.triggers in place from the new file (live, no res
 	assert.deepEqual(cfg.triggers.github.label[0].predicate.any, ["new"]);
 });
 
+test("over a file a newer release stamped, a live receiver keeps the rules it had, so a delivery still matches and queues without what the file added", () => {
+	const cfg = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } }] }) });
+	const before = JSON.stringify(cfg.triggers);
+	assert.equal(cfg.triggers.github.comment.phrase, "@pi", "the premise: the rule a delivery matches");
+	const newer = JSON.stringify({ version: 99, triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", somethingNewer: ["x"] } }] });
+	const res = reloadTriggers({ WEBHOOK_SECRET: "shh" }, cfg, { fileExists: () => true, readFile: () => newer });
+	assert.match(res.invalid, /written by a newer pi-dispatch \(version 99;/);
+	assert.equal(JSON.stringify(cfg.triggers), before, "not an empty table: docs/upgrading.md says deliveries still match");
+	assert.throws(() => loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => newer }), /written by a newer pi-dispatch/, "and a fresh start does not start on it");
+});
+
 test("reloadTriggers keeps the running triggers when the new file is invalid (never crash a live receiver)", () => {
 	const original = { label: [{ predicate: { any: ["old"] }, flow: "keep" }], comment: null, pullRequest: [], knownFlows: new Set() };
 	const cfg = { triggers: original };

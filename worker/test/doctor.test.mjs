@@ -495,9 +495,29 @@ test("doctor: staged packages LOAD by default -- with no trigger flag anywhere, 
 	const code = await runDoctor(overlayEnv(dir, { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(out));
 	assert.equal(code, 0, "loading third-party code an operator staged is the intended posture — warn, don't fail");
 	assert.match(text(), /✓ Staged packages present \(pi-fmt@1\.2\.3, pi-lint@0\.4\.0\)/, "the pinned versions are named");
-	assert.match(text(), /⚠ Staged packages LOAD in every job \(0 trigger\(s\) opt out with run\.packages: false\)/);
+	assert.match(text(), /⚠ Staged packages LOAD in every job \(0 trigger\(s\) opt out with run\.packages: false, 0 leave one or more out with run\.excludeExtensions\)/);
 	assert.match(text(), /keep every version exactly pinned/);
 	assert.doesNotMatch(text(), /dormant|ARMED/, "there is no dormant state left, and no switch to be armed");
+});
+
+test("doctor: a trigger that leaves a staged package out by name is counted, and one that names only what is no staged package is not", async () => {
+	const dir = overlay({ packages: [pkg()] });
+	const stamped = (run) => {
+		const path = join(tempDir("pi-triggers-"), "triggers.json");
+		writeFileSync(path, JSON.stringify({ version: 2, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t", ...run } }] }));
+		return path;
+	};
+	const lineFor = async (run) => {
+		const { out, text } = capture();
+		await runDoctor(overlayEnv(dir, { PI_TRIGGERS_FILE: stamped(run) }), overlayDeps(out));
+		return /⚠ Staged packages LOAD in every job \([^\n]*\)/.exec(text())?.[0];
+	};
+	assert.match(await lineFor({ excludeExtensions: ["pi-fmt"] }), /0 trigger\(s\) opt out with run\.packages: false, 1 leave one or more out with run\.excludeExtensions/);
+	const { out: said, text: saidText } = capture();
+	await runDoctor(overlayEnv(dir, { PI_TRIGGERS_FILE: triggersFile() }), overlayDeps(said));
+	assert.match(saidText(), /on a trigger that must not load them set run\.packages: false, or name one in run\.excludeExtensions/);
+	assert.match(await lineFor({ excludeExtensions: ["git-guard"] }), /, 0 leave one or more out/, "an overlay's name, or a typo, withholds no package");
+	assert.match(await lineFor({ excludeExtensions: ["pi-fmt"], packages: false }), /1 trigger\(s\) opt out with run\.packages: false, 0 leave one or more out/, "packages off is the whole set: its names leave out nothing more");
 });
 
 test("doctor: the opt-out count is reported, and counted strictly (=== false)", async () => {
@@ -505,12 +525,12 @@ test("doctor: the opt-out count is reported, and counted strictly (=== false)", 
 	const { out, text } = capture();
 	const code = await runDoctor(overlayEnv(dir, { PI_TRIGGERS_FILE: triggersFile(false) }), overlayDeps(out));
 	assert.equal(code, 0);
-	assert.match(text(), /⚠ Staged packages LOAD in every job \(1 trigger\(s\) opt out with run\.packages: false\)/);
+	assert.match(text(), /⚠ Staged packages LOAD in every job \(1 trigger\(s\) opt out with run\.packages: false, 0 leave one or more out with run\.excludeExtensions\)/);
 
 	// An explicit `true` is not an opt-out, and no longer arms anything either -- it reads exactly like absent.
 	const { out: o2, text: t2 } = capture();
 	await runDoctor(overlayEnv(dir, { PI_TRIGGERS_FILE: triggersFile(true) }), overlayDeps(o2));
-	assert.match(t2(), /⚠ Staged packages LOAD in every job \(0 trigger\(s\) opt out with run\.packages: false\)/);
+	assert.match(t2(), /⚠ Staged packages LOAD in every job \(0 trigger\(s\) opt out with run\.packages: false, 0 leave one or more out with run\.excludeExtensions\)/);
 });
 
 test("doctor: a manifest entry whose staged dir is gone fails", async () => {
@@ -8402,7 +8422,7 @@ const MIXED_PIN = {
 			"✓ Docker daemon reachable",
 			"✓ Job image present (pi-job:latest)",
 			"⚠ Trigger flow \"review\" resolves in NO tier visible here (cron \"nightly\")",
-			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
+			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it (one already staged must be off this trigger's run.excludeExtensions, and run.packages must not be false); a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
 			"✓ Trigger job image present (my-python:1.2.0)",
 			"✓ Egress proxy running (pi-dispatch-egress-proxy)",
 			"✓ Egress proxy health: healthy",
@@ -8481,7 +8501,7 @@ const MIXED_PIN = {
 			"✗ Job image present (pi-job:latest)",
 			"    → docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest  (or build image/Dockerfile)",
 			"⚠ Trigger flow \"review\" resolves in NO tier visible here (cron \"nightly\")",
-			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
+			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it (one already staged must be off this trigger's run.excludeExtensions, and run.packages must not be false); a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
 			"✓ Jobs run on: local, podman (a trigger that names none runs on local; run.backend selects)",
 			"⚠ local: egress CAN be enforced here, but PI_EGRESS is off, so this deployment is not getting it",
 			"    → arm PI_EGRESS to get it (the job reaches only what the allowlist proxy permits (CONST-EGRESS-POLICY-IN-THE-ARGV))",
@@ -8546,7 +8566,7 @@ const MIXED_PIN = {
 			"✗ Job image present (pi-job:latest)",
 			"    → docker pull ghcr.io/edgehero/pi-job:latest && docker tag ghcr.io/edgehero/pi-job:latest pi-job:latest  (or build image/Dockerfile)",
 			"⚠ Trigger flow \"review\" resolves in NO tier visible here (cron \"nightly\")",
-			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
+			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it (one already staged must be off this trigger's run.excludeExtensions, and run.packages must not be false); a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
 			"✓ Trigger job image present (my-python:1.2.0)",
 			"✓ Jobs run on: local, podman (a trigger that names none runs on local; run.backend selects)",
 			"⚠ local: isolation is ASSERTED by the daemon, not enforced: the daemon answered in a shape nothing here reads (unparseable)",
@@ -8611,7 +8631,7 @@ const MIXED_PIN = {
 			"✓ Docker daemon reachable",
 			"✓ Job image present (pi-job:latest)",
 			"⚠ Trigger flow \"review\" resolves in NO tier visible here (cron \"nightly\")",
-			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
+			"    → checked: staged packages; not checkable here: repo (/srv/repo is not readable as a git repo here) -- commit .pi/skills/review/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it (one already staged must be off this trigger's run.excludeExtensions, and run.packages must not be false); a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0",
 			"✓ Trigger job image present (my-python:1.2.0)",
 			"✓ Jobs run on: local, podman (a trigger that names none runs on local; run.backend selects)",
 			"⚠ local: isolation is ASSERTED by the daemon, not enforced: the daemon answered in a shape nothing here reads (unparseable)",

@@ -36,8 +36,9 @@ Each guide keeps the notes about its own feature. [The last sections](#notes-kep
    whole fleet and across restarts. Deliveries still queue up and wait.
 2. **Wait for the running jobs**, until `pi-dispatch status` shows no active job. Parked, held and recovering runs may
    stay where they are: none of them holds a container.
-3. **Upgrade the job image.** Pull the release's image and point `PI_JOB_IMAGE` at it. The image goes before the
-   worker ([why](#why-this-order)).
+3. **Upgrade the job image.** Pull the release's image and point `PI_JOB_IMAGE` at it. An image a trigger names in
+   `run.image` moves too, on every host that runs it: point the trigger at the release's image, or rebuild yours from it
+   ([job-image.md](job-image.md)). The image goes before the worker ([why](#why-this-order)).
 4. **Upgrade and restart every worker.** In each deployment folder, `npm install --save-exact` the release's packages,
    then `pi-dispatch service restart`. On rootless Podman, run `pi-dispatch service install --force` before that
    restart: it rewrites the units this release changed and restarts Valkey when its unit changed
@@ -144,7 +145,7 @@ for what an older receiver queued, and run those jobs again.
 | An older worker, a newer job image | The worker drops what the image added to its exit line | Ship them in one window |
 | An older worker, a newer receiver or console | An older worker does not offer a secret profile declared through the panel, so the receiver can route a job that binds it to a host that refuses it | Workers first ([secrets.md](secrets.md)) |
 | A newer worker, an older receiver | The receiver drops a `run` field it does not know; the worker refuses such a job before it spends (`trigger-skew`, `wait-skew`) when it can read the triggers file | Receivers right after the workers, in the same `npm install`; run refused jobs again |
-| A receiver older than the triggers file | From 5.0.0 on, a receiver refuses a triggers file whose `version` is above what it reads: it does not start on one, and on a live edit it keeps the triggers it had. Deliveries in between match nothing, and a forge does not send them again on its own | Upgrade every receiver before any trigger uses a field that needs version 2 ([what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out)) |
+| A receiver older than the triggers file | From 5.0.0 on, a receiver refuses a triggers file whose `version` is above what it reads. It does not start on one, and a forge does not send again what it misses while it is down. On a live edit it keeps the triggers it had, so a delivery still matches those and queues its job without what the file now adds. A worker that reads the added field refuses that job (`trigger-skew`) where it can read the file | Upgrade every receiver before any trigger uses a field that needs version 2 ([what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out)) |
 | A worker older than the settings file, `pause-windows.json` or `triggers.json` | From 5.0.0 on, the worker defers jobs as `newer-release` ("Queued or configured by a newer pi-dispatch: waits for this host's upgrade") and looks again every ten minutes. A 4.x worker ignores `version` and drops what it does not know | Of these, only `triggers.json` needs more than version 1, for a trigger that leaves something out ([what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out)). Doctor's `fleet.store-versions` names the hosts ([multi-host.md](multi-host.md#what-the-panel-and-doctor-show-you)) |
 | A job queued by a newer release, on an older worker | From 5.0.0 on, the job waits (`newer-release`). A 4.x worker has no such gate and runs a job by the fields it knows. A canary from the console's Updates page queues job data version 2, which a 4.x worker would run as the trigger's ordinary job, without the candidate package. A job of a trigger that leaves something out queues version 3, which a worker that reads 2 holds and a 4.x worker runs wider | Every worker on 5.0.0 before anyone runs a canary from the Updates page ([console.md](console.md#updates)), and on a release that reads version 3 before a trigger leaves something out ([below](#what-a-fleet-needs-before-a-trigger-leaves-something-out)) |
 | An older `/dispatch` or console writing the settings file | A `/dispatch` from 4.3.1 or earlier drops every key it does not know (`secretBundles` included). From 5.0.0 on, an unknown key is kept | Write no setting a newer release added until every panel and console is upgraded |
@@ -163,22 +164,29 @@ on; an older receiver publishes nothing), so check the receivers there ([multi-h
 
 `run.excludeExtensions` and `run.excludeExtensionTools` need `triggers.json` at version 2 and job data at version 3
 ([exclusions](exclude-tools.md#versions-and-older-hosts)). The first release that reads both comes after 5.0.0. Move everything to it
-before any trigger uses either:
+before any trigger uses either. Until then leave both out of the file: `"packages": false` and `run.excludeTools` need neither version.
+**Once either is used, no 4.3.1 writer may touch the file**: no `/dispatch` or panel of that release, and no worker of it that can disarm a one-shot.
 
 | Program | On a release from before issue #761, 4.3.1 among them | On a release that reads `version` and less, 5.0.0 among them | So |
 |---|---|---|---|
-| Worker | Reads the file, drops both keys and runs the job wider than the file says, on a clean record | Waits on every job (`newer-release`) from its next reload of the file, and refuses the file at its next start | Every worker. Doctor's `fleet.store-versions` names one that reads less or publishes no version |
-| Receiver | Drops both keys from the jobs it queues. A worker that reads them refuses such a job (`trigger-skew`) | Refuses the file: it does not start on it, and on a live edit it keeps the triggers it had, so deliveries in between match nothing | Every receiver. Check them on the console's Connections page: doctor cannot see them |
-| Panel, console, `/dispatch` | Writes `triggers` alone, dropping the stamp, and a release that reads `version` then refuses the file | Refuses to write over the file | Every one that writes this file |
+| Worker | Reads the file, drops both keys and runs the job wider than the file says, on a clean record | Waits on every job (`newer-release`) from its next reload of the file, and refuses the file at its next start. A file that lost its stamp (below) it loads, and runs the job wider | Every worker. Doctor's `fleet.store-versions` names one that reads less or publishes no version |
+| Receiver | Drops both keys from the jobs it queues. A worker that reads them refuses such a job (`trigger-skew`) where it can read the file, and runs it without them where it cannot. A worker that reads `version` and less waits while the file is stamped | Does not start on the file. On a live edit it keeps the triggers it had, so a delivery still matches and queues its job without the keys, which the workers treat as in the column before. A file that lost its stamp it loads, and drops both keys | Every receiver. Check them on the console's Connections page: doctor cannot see them |
+| Panel, console, `/dispatch` | `/dispatch` and its panel write `triggers` alone, so both keys stay and the stamp goes (below). No release this old has a console | Refuses to write over a stamped file | Every one that writes this file |
 
-The console's trigger page refuses the change while a live worker reads less or publishes no version, and names it, and while it cannot read which workers are live. A hand edit is
+**A file that lost its stamp.** A 4.3.1 `/dispatch` or panel writes `triggers` alone, and so does a 4.3.1 worker's one-shot disarm, and a hand edit can leave
+the same shape: either key, with no `"version": 2`. Only a release that reads version 2 refuses that file (`run.excludeExtensions needs triggers file version 2`), and does not start
+on it. A release that reads `version` and less loads it and drops both keys, as 4.3.1 does: it does not wait, and the job runs wider than the file says, on a clean record.
+
+The console's trigger page refuses the change while a live worker reads less or publishes no version, and names it, and while it cannot read which workers are live. It reads live
+workers alone: a receiver publishes no version and a stopped worker's row expires, so neither stops a change, whatever it reads. A hand edit is
 not stopped: doctor warns once a host's own file needs the version.
 
 **The job image, and when a rebuild comes first.** A job with either key on an image whose `dev.pi-dispatch.capabilities` label does not list
 `loadExclusions` is refused before it spends (`job-image-load-exclusions-unsupported`). So is a job with `run.excludeTools` whose scope has a
 role map ([model roles](model-roles.md)), even if its trigger never starts a child and no file uses either key: the map is the scope's, and that image would
 start a child with every tool the trigger removes. So those jobs are refused as soon as a worker of this release runs, with no change to the file, until the image they
-run on, `PI_JOB_IMAGE` or the trigger's `run.image`, is this release's or is rebuilt from it. A job with neither key, and no `run.excludeTools` beside a role map, runs on an older image as it did.
+run on, `PI_JOB_IMAGE` or the trigger's `run.image`, is this release's or is rebuilt from it. Pull the published image on each host. Nothing rebuilds an image you built, by `FROM` or from a copy of
+`image/Dockerfile`: whoever maintains it rebuilds it from this release and puts it on each host that runs it ([job-image.md](job-image.md)). A job with neither key, and no `run.excludeTools` beside a role map, runs on an older image as it did.
 
 ## Valkey and BullMQ
 
@@ -279,7 +287,7 @@ Release numbers come from the git tags. The next release is 5.0.0.
 
 | Store | What changed, and what an older release does with it | Guide |
 |---|---|---|
-| `triggers.json` | A trigger with `run.excludeExtensions` or `run.excludeExtensionTools` makes the file version 2, which every writer stamps. A 5.0.0 worker or receiver refuses such a file and its worker waits; a 4.x worker or receiver reads it and drops both keys | [What a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out) |
+| `triggers.json` | A trigger with `run.excludeExtensions` or `run.excludeExtensionTools` makes the file version 2, which a writer of this release stamps. A 5.0.0 worker or receiver refuses such a file and its worker waits; a 4.x worker or receiver reads it and drops both keys, a 4.x writer drops the stamp, and a 5.0.0 worker or receiver then reads it and drops both keys too | [What a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out) |
 | Queued jobs | Such a trigger's jobs are job data version 3. A 5.0.0 worker holds them (`newer-release`); a 4.x worker runs them by the fields it knows, so wider than the file says | [What a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out) |
 | Follow-up jobs (`/outbox`) | A follow-up job now inherits its parent's `"packages": false`, so a follow-up job of such a trigger loses the staged packages it used to load: their extensions, tools, skills and prompts. Its flow is its repository's, as every follow-up job's is, so it still starts. A worker from before this builds the follow-up without the key, as it always did | [exclude-tools.md](exclude-tools.md) |
 | The job image | The `loadExclusions` capability. A job with `run.excludeTools` whose scope has a role map needs it too | [What a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out) |

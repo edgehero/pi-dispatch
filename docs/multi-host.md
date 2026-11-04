@@ -415,7 +415,7 @@ console that writes the triggers file (one from before issue #761 drops a key it
 release that reads version 2", or, for the jobs, "every receiver and every console that queues these jobs (a receiver
 publishes no registry row, so doctor cannot see which receivers are older)". Upgrade them before you use what needs
 it. The line shows once a trigger uses `run.excludeExtensions` or `run.excludeExtensionTools`, which need the triggers file at version 2 and
-job data at version 3 ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). A run record written by a newer worker is shown
+job data at version 3, and a live peer reads less or publishes nothing ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). A run record written by a newer worker is shown
 by its core facts only (id, attempt, outcome, times, host, kind and project), and left out of totals, which say so.
 
 **Which release each worker runs** (`fleet.versions`, issue #761). Every worker publishes its pi-dispatch version on
