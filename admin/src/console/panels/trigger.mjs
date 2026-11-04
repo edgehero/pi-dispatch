@@ -93,6 +93,10 @@ export function triggerOn(v) {
   );
 }
 export function triggerRuns(v) {
+  // Runs are matched by what the row says, so with no row in the snapshot neither "no runs" nor "the queue could not be read" is known, whatever the
+  // history and the queue hold: the file failed, or the row is not there. REJECTED: drawing the card's zeroes, which denied a run that exists. A file
+  // that does not load still gives the page its row, so that one says it. Valkey down is `othersUnread`, and those words are the card's own below.
+  if (!v.data?.triggerDetail && !othersUnread(v)) return trigger(v) ? card("Runs it started", html`<p>This page could not match runs to this row, so it says nothing of them.</p>`) : null;
   const d = detail(v);
   const rows = d.lastRuns ?? [];
   return card(
@@ -504,5 +508,5 @@ export function triggerRefusalExamples() {
   ].map(({field,params}) => ({field, sentence: planTriggerAdd({ ...shared, params }).refusal}));
 }
 export function triggerRefusals() {
-  return card("Refusals",html`<p>Each field below shows the shared planner's own refusal.</p>${triggerRefusalExamples().map(({field,sentence}) => html`<p><b>${field}</b>: ${sentence}${sentence?.includes("Nothing was changed") ? "." : " Nothing was changed."}</p>`)}`);
+  return card("Refusals",html`<p>Each field below shows the shared planner's own refusal.</p>${triggerRefusalExamples().map(({field,sentence}) => html`<p><b>${field}</b>: ${sentence}${sentence?.includes("Nothing was changed") ? "." : ". Nothing was changed."}</p>`)}`);
 }

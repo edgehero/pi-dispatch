@@ -34,6 +34,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   historyUnread: "The run history could not be read just now, so this says nothing of what its runs had.",
   repositoryPart: "The repository’s part is decided at its base commit.",
   noHost: "No live host says it can run this trigger’s jobs.",
+  noLiveList: "No live host is listed just now, so these are the hosts that last published, running or not.",
   hostsUnread: "The hosts’ doctor runs could not be read, so each reads unknown, never the same.",
   repositoryExtensions: ".pi/extensions at the base commit, merge-gated. Changed in the repository, not here.",
   oneExtension: "A trigger cannot turn off one extension: it takes all the staged packages, or none.",
@@ -174,9 +175,11 @@ function lacksFlow(row, trigger) {
  * beside three silent ones as proof. Each difference is said by what a host has over another, what it goes without, what it runs and how it
  * defines a server. A host with no answer for the flow, or no image to read, is said as that: not known to differ, and not the same. A host
  * whose doctor found the flow nowhere says so whoever agrees with it, and alone or beside silent hosts as much as beside others: hosts that all
- * lack it do agree, and REJECTED is "the same" there, over jobs that would not find what they are told to run.
+ * lack it do agree, and REJECTED is "the same" there, over jobs that would not find what they are told to run. `liveList`: whether these rows are the
+ * live hosts'. Where they are only who last published (every worker stopped, or the fleet not read yet), a stopped host's record is still in date, so
+ * one row proves nothing about how many hosts there are, and "the only host" is a claim only the live list can back.
  */
-function hostPills(rows, trigger) {
+function hostPills(rows, trigger, liveList) {
   const named = overlayServersOf(trigger);
   const known = rows.filter((row) => cannotSay(row, trigger) === null).map((row) => ({ row, facts: hostFacts(row, trigger), flow: trigger.flow === null ? null : flowAnswer(row, trigger), lacksFlow: lacksFlow(row, trigger) }));
   // A server it names is what its jobs ask for, so going without one is said even where every host does.
@@ -189,7 +192,7 @@ function hostPills(rows, trigger) {
   return rows.map((row) => {
     const mine = known.find((entry) => entry.row === row);
     if (!mine) return { name: row.name, tone: "unknown", icon: "minus", word: "unknown" };
-    if (known.length === 1 && !mine.lacksFlow) return { name: row.name, tone: "plain", icon: "info", word: rows.length === 1 ? "the only host" : "the only one known" };
+    if (known.length === 1 && !mine.lacksFlow) return { name: row.name, tone: "plain", icon: "info", word: rows.length === 1 && liveList ? "the only host" : "the only one known" };
     const also = [...mine.facts.entries()].filter(([key]) => known.some(({ facts }) => !facts.has(key))).map(([, word]) => word);
     const without = [...everything.entries()].filter(([key]) => !mine.facts.has(key)).map(([, word]) => word.replace(", from its overlay", ""));
     const redefined = named.filter((name) => definitions.get(name).length > 1 && (row.mcp ?? []).some((server) => server.name === name && server.enabled === true));
@@ -212,12 +215,13 @@ function hostPills(rows, trigger) {
 }
 
 /** How old each host's answer is, and why the rest have none. A sentence per kind, so a fleet's worth of hosts stays one line. */
-function hostsNote(rows, trigger, hostLoads) {
+function hostsNote(rows, trigger, hostLoads, liveList) {
   if (hostLoads?.unreachable) return [TRIGGER_GETS_WORDS.hostsUnread];
   const by = (why) => rows.filter((row) => cannotSay(row, trigger) === why).map((row) => row.name);
   const known = rows.filter((row) => cannotSay(row, trigger) === null);
   const parts = known.length > 0 ? ["What each host’s last doctor run published: ", ...known.flatMap((row, at) => [...(at > 0 ? [", "] : []), `${row.name} at `, time(row.at)]), ". "] : [];
   const sentences = [
+    liveList ? null : TRIGGER_GETS_WORDS.noLiveList,
     by("absent").length > 0 ? `${listed(by("absent"))} ${by("absent").length === 1 ? "has" : "have"} published none, so ${by("absent").length === 1 ? "it reads" : "they read"} unknown, never the same.` : null,
     by("unreachable").length > 0 ? `${listed(by("unreachable"))} could not be read, so ${by("unreachable").length === 1 ? "it reads" : "they read"} unknown.` : null,
     by("unreadable").length > 0 ? `${listed(by("unreadable"))}’s could not be read, or a newer release wrote it, so it reads unknown.` : null,
@@ -428,6 +432,7 @@ function imageRow({ trigger, rows }) {
  * read failed, which is not a trigger with no runs.
  */
 export function triggerGetsOf({ trigger, records = [], historyUnread = false, hostLoads = null, liveHosts = null, defaults = {}, editor = null, modelChoices = [], overlayServers = [] }) {
+  const liveList = liveHosts !== null;
   const names = liveHosts ?? (Array.isArray(hostLoads?.hosts) ? hostLoads.hosts.map((row) => row?.name).filter((name) => typeof name === "string") : []);
   const rows = names.map((name) => hostLoadsRow(hostLoads, name));
   const last = triggerLastRun(records, hostLoads);
@@ -442,8 +447,8 @@ export function triggerGetsOf({ trigger, records = [], historyUnread = false, ho
     ? [TRIGGER_GETS_WORDS.fileSays, " ", last.newest === null ? noRun : "Its last run, ", ...(last.newest === null ? [] : [run(last.newest.id), `: ${last.newest.said}`])]
     : [TRIGGER_GETS_WORDS.fileSays, " Under each is what ", run(quoted.id), `, its ${last.newest.id === quoted.id ? "last run" : "newest run that says what it loaded"}, had${quoted.host ? ` on ${quoted.host}` : ""}.`, ...quoted.notes.map((note) => ` ${note}`), ...(last.newest.id === quoted.id ? [] : [" The last it started, ", run(last.newest.id), `: ${last.newest.said}`])];
   return {
-    pills: hostPills(rows, trigger),
-    hostsNote: rows.length === 0 ? (hostLoads?.unreachable ? [TRIGGER_GETS_WORDS.hostsUnread] : [TRIGGER_GETS_WORDS.noHost]) : hostsNote(rows, trigger, hostLoads),
+    pills: hostPills(rows, trigger, liveList),
+    hostsNote: rows.length === 0 ? (hostLoads?.unreachable ? [TRIGGER_GETS_WORDS.hostsUnread] : [TRIGGER_GETS_WORDS.noHost]) : hostsNote(rows, trigger, hostLoads, liveList),
     quote,
     problems: quoted?.problems ?? {},
     record: quoted?.record ?? null,

@@ -642,3 +642,46 @@ test("turning the staged packages on over a file's false is planned, takes the k
   assert.deepEqual(await service.apply(undone, operator), { ok: true });
   assert.equal(nodeFs.readFileSync(paths.triggersPath, "utf8"), before, "byte for byte");
 });
+
+test("a page with no live host reads the pills of what published, and says no host is the only one", async () => {
+  const entry = GETS_ENTRY;
+  const one = { more: 0, hosts: [{ ...HOST_LOADS.hosts.find((row) => row.state === "current"), image: null, piVersion: null, flows: [] }] };
+  const panel = textOf(panelOf(await triggerGetsPage({ entry, live: [], loads: one, records: [] }), "p-trigger-gets"));
+  assert.ok(!panel.includes("the only host"), panel.slice(0, 300));
+  assert.ok(panel.includes("the only one known"), panel.slice(0, 300));
+  assert.ok(panel.includes("No live host is listed just now, so these are the hosts that last published, running or not."));
+});
+
+test("a page that cannot match runs to a row says nothing of its runs, while the run and the queue read fine", async () => {
+  const run = { ...S.everything(), jobId: "gh-aaa1" };
+  const draw = async (triggers, { snapshot = { readAt: NOW, triggers, runs: [run], waiting: { rows: [] }, hostBudgets: [] }, role = "operator", fs = fileOnlyFs("") } = {}) => {
+    const parsed = parsePageQuery("trigger", "index=2");
+    const data = await loadPageData("trigger", parsed.query, { now: () => NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs, fleet: { snapshot: async () => snapshot }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role });
+    return String((await renderPage("trigger", { query: parsed.query, session: { name: role, role }, data })).html);
+  };
+  const dir = tempDir("pd-800-runs-");
+  const failed = join(dir, "triggers.json");
+  nodeFs.mkdirSync(failed);
+  const { readTriggers } = await import("../src/read-model.mjs");
+  const unreadable = readTriggers({ triggersPath: failed });
+  assert.deepEqual(unreadable, { unreadable: "EISDIR" });
+  for (const [what, triggers] of [["a failed read", unreadable], ["no file", readTriggers({ triggersPath: join(dir, "absent.json") })]]) {
+    for (const role of ["operator", "agent"]) {
+      const page = textOf(await draw(triggers, { role, fs: { readFileSync: () => { throw Object.assign(new Error("x"), { code: "EISDIR" }); } } }));
+      for (const never of ["No runs were found", "the queue could not be read", "Jobs in line now", "runs in the last 24 hours"]) assert.ok(!page.includes(never), `${what}, ${role}: ${never}`);
+    }
+  }
+  // A file that does not load still gives the page its row, and the runs cannot be matched to it.
+  const invalid = textOf(panelOf(await draw({ invalid: "triggers file failed its check" }, { fs: fileOnlyFs(getsFile()) }), "p-trigger-runs"));
+  assert.ok(invalid.includes("This page could not match runs to this row, so it says nothing of them."), invalid);
+  for (const never of ["No runs were found", "the queue could not be read", "runs in the last 24 hours"]) assert.ok(!invalid.includes(never), never);
+  // The file read: the same run is its row's, no run is what it says where none is, and the queue is what the queue is.
+  const read = readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs: fileOnlyFs(getsFile()) });
+  const fine = textOf(panelOf(await draw(read, { fs: fileOnlyFs(getsFile()) }), "p-trigger-runs"));
+  assert.ok(fine.includes("gh-aaa1"), fine);
+  assert.ok(fine.includes("none in view"), fine);
+  const noRuns = textOf(panelOf(await draw(read, { fs: fileOnlyFs(getsFile()), snapshot: { readAt: NOW, triggers: read, runs: [], waiting: { rows: [] }, hostBudgets: [] } }), "p-trigger-runs"));
+  assert.ok(noRuns.includes("No runs were found in the available history."), noRuns);
+  const queueDown = textOf(panelOf(await draw(read, { fs: fileOnlyFs(getsFile()), snapshot: { readAt: NOW, triggers: read, runs: [], waiting: { unreachable: "down" }, hostBudgets: [] } }), "p-trigger-runs"));
+  assert.ok(queueDown.includes("the queue could not be read"), "the sentence stands where it is so");
+});

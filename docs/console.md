@@ -2239,6 +2239,8 @@ Open a trigger to see what starts it, who may fire it, its last 24 hours and las
 [what its jobs get](#what-a-triggers-jobs-get), the other run fields and their defaults, sandbox capabilities and the
 effect of a change on queued jobs. A viewer sees these facts but no write controls or private task/instruction text.
 Instructions are escaped for operators.
+Runs are matched by what the row says, so where the triggers file could not be read, or has no such row, the page says nothing of
+its runs or its jobs in line. Where the file gives the row but does not load, it says it could not match runs to this row.
 A spent one-shot explains how to re-arm it. Cron health uses the configured stall threshold.
 
 Add a trigger opens a structured editor for cron, label, comment, pull request and issue triggers. Only
@@ -2261,14 +2263,16 @@ can load, and a run's record says what that run had ([What a run loaded](#what-a
 decided at its base commit, so the card says that rather than guess.
 
 **The hosts come first.** One pill per live host that can run the trigger. A host that does not bless its venue refuses the
-job before it spends, so it gets no pill. A note under the pills says how old each host's answer is, and why the rest have
-none.
+job before it spends, so it gets no pill. With no live host listed, because every worker has stopped or the fleet has not been
+read, there is one pill per host that last published, running or not, and none of them says it is the only host: a stopped
+host's last doctor run can still be in date. A note under the pills says how old each host's answer is, why the rest have
+none, and when no live host is listed.
 
 | The pill says | When |
 |---|---|
 | `the same` | Two or more hosts can say, and they agree on everything the rows beneath say: what this trigger loads from (its staged packages unless it withholds them, the overlay's extensions where the host allows them, the overlay's skills, the servers it names and how each is defined, and where doctor found its flow), and the image and its pi, unless the trigger names its own image. |
-| `the only host` | There is one host, so it has nothing to be the same as. |
-| `the only one known` | The other hosts read `unknown`, so it has nothing to compare with. |
+| `the only host` | There is one host on the list of live hosts, so it has nothing to be the same as. |
+| `the only one known` | The other hosts read `unknown`, or no live host is listed, so it has nothing to compare with. |
 | `also …; without …; … defined differently; its flow …; runs …` | Hosts differ. Each part is there only when it is true of this host: what it has over another, what it goes without (a server this trigger names, even where every host does), a server it names defined differently, where it finds the flow when hosts find it in different places, and the image it runs when hosts run different ones. |
 | `its flow in no tier` | As doctor last read it, a job on this host would not find its flow: the repository's folder is on this host and does not hold it, and no other tier this trigger loads from does. It says so whoever agrees with it, beside other hosts or alone. A forge's repository is not on a host, so that answer stays unknown and is never this. |
 | `no answer for its flow`, `its flow …`, `its image unknown` | Not known to differ, and not the same either. A doctor run from before this flow was named has no answer for it, and beside it a host with an answer says what it is. A host that beats no image has none to compare. |

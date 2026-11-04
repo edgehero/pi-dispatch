@@ -334,7 +334,7 @@ export function wideningFieldRefusal(params, tool) {
     for (const key of Object.keys(source)) {
       const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key) ?? excludeToolsFieldNearMiss(key) ?? packagesFieldNearMiss(key);
       if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
-      return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${TOOL_PROOF_WORDS[meant]} is set by hand in the triggers file, never by a tool`;
+      return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${TOOL_PROOF_WORDS[meant]} is set by a person on that trigger's page or by hand in the triggers file, never by a tool`;
     }
   }
   return null;

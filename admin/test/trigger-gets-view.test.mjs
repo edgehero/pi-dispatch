@@ -384,3 +384,28 @@ test("the pills and the MCP row say one thing about a server: the pill what thes
   assert.deepEqual(oneHost.pills.map((pill) => pill.word), ["the same", "the same"]);
   assert.deepEqual(oneHost.mcp.items.map((item) => [item.sub, item.tag]), [[WORDS, "a; not on b"]]);
 });
+
+test("with no list of live hosts a pill claims no host is the only one, and the note says whose these are", async () => {
+  const known = { packages: PACKAGES };
+  // What production reads when every worker has stopped: its beat gone, its publication still in date, and the fleet's list empty.
+  const stopped = await published({ mini1: known }, { live: [] });
+  assert.equal(stopped.hosts[0].state, "current", "the premise: the publication reads as in date");
+  const read = (hostLoads, liveHosts) => {
+    const out = triggerGetsOf({ trigger: NO_FLOW, hostLoads, liveHosts });
+    return { words: out.pills.map((pill) => pill.word), note: lineOf(out.hostsNote) };
+  };
+  const UNLISTED = "No live host is listed just now, so these are the hosts that last published, running or not.";
+  const none = read(stopped, null);
+  assert.deepEqual(none.words, ["the only one known"]);
+  assert.ok(none.note.includes(UNLISTED), none.note);
+  // The list read, holding that one host: then it is the only host, and no note qualifies it.
+  const listed = read(await published({ mini1: known }), ["mini1"]);
+  assert.deepEqual(listed.words, ["the only host"]);
+  assert.ok(!listed.note.includes(UNLISTED), listed.note);
+  // Two hosts that published and no list: each still says what it can, under the note.
+  const two = read(await published({ mini1: known, mini2: known }, { live: [] }), null);
+  assert.deepEqual(two.words, ["its image unknown", "its image unknown"], "no beat, so no image to read");
+  assert.ok(two.note.includes(UNLISTED), two.note);
+  // A flow found nowhere still says so, with no list as with one.
+  assert.deepEqual(read(await published({ mini1: { ...known, flows: [] } }, { live: [] }), null).words, ["the only one known"]);
+});

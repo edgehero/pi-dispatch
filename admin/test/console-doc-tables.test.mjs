@@ -522,6 +522,7 @@ test("docs/console.md's table of the hosts' pills: a row for every word the pill
   assert.deepEqual(await pillWords({ one: same, two: same }), { one: "the same", two: "the same" });
   assert.deepEqual(await pillWords({ one: a }), { one: "the only host" });
   assert.deepEqual(await pillWords({ one: a, silent: null }), { one: "the only one known", silent: "unknown" });
+  assert.deepEqual(triggerGetsOf({ trigger: PILL_TRIGGER, hostLoads: await published({ one: a }), liveHosts: null }).pills.map((pill) => pill.word), ["the only one known"], "no live host listed: what the table's row says");
   const differ = await pillWords({ one: { ...a, flows: flows("repository") }, two: { ...b, flows: flows("overlay") } });
   assert.match(differ.one, /^also pi-lint 1\.4\.2; without pi-test 0\.9\.0; its flow from the repository$/);
   assert.deepEqual(await pillWords({ one: same, two: a }), { one: "its flow from the repository", two: "no answer for its flow" });
@@ -530,7 +531,7 @@ test("docs/console.md's table of the hosts' pills: a row for every word the pill
   // The card has no other word: a pill's word is one of these literals, or the differences joined.
   const source = read("admin/src/trigger-gets-view.mjs");
   const body = source.slice(source.indexOf("function hostPills("), source.indexOf("/** How old each host's answer is"));
-  const words = [...body.matchAll(/word: (?:rows\.length === 1 \? )?"([^"]+)"(?: : "([^"]+)")?/g)].flatMap((m) => m.slice(1).filter(Boolean));
+  const words = [...body.matchAll(/word: (?:rows\.length === 1 && liveList \? )?"([^"]+)"(?: : "([^"]+)")?/g)].flatMap((m) => m.slice(1).filter(Boolean));
   assert.deepEqual([...words].sort(), ["the only host", "the only one known", "the same", "unknown"], "the literal words a pill takes are the table's");
   for (const word of words) assert.ok(rows.some(([cell]) => cell.includes(`\`${word}\``)), word);
   assert.match(body, /word: \[\.\.\.differs, \.\.\.unsaid\]\.join\("; "\)/, "and one where it says the differences");
@@ -564,6 +565,8 @@ test("docs/console.md's table of the hosts' pills: a row for every word the pill
   assert.equal((await pillWords({ one: { ...answered, overlayExtensionsAllowed: false, extensions: [{ name: "guard", kind: "dir" }] }, two: answered })).one, "the same", "extensions a host does not allow deny nothing");
   assert.match(when.get("`the only host`"), /There is one host/);
   assert.match(when.get("`the only one known`"), /The other hosts read `unknown`/);
+  assert.match(when.get("`the only one known`"), /no live host is listed/);
+  assert.match(when.get("`the only host`"), /on the list of live hosts/);
   assert.match(when.get("`also …; without …; … defined differently; its flow …; runs …`"), /what it has over another, what it goes without[^|]*a server it names defined differently[^|]*where it finds the flow[^|]*the image it runs/);
   const lacking = { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] };
   const local = { index: 2, type: "cron", flow: "fix", packages: true, folder: "/srv/web" };
