@@ -6,7 +6,8 @@ import { makeWaitChecker } from "../src/wait-check.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
+import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "../src/doctor-spawner.mjs";
+import { defaultPublishDoctor, doctorHostLoads, dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
 import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
@@ -12805,6 +12806,289 @@ test("doctor publishes one record per run: unique ids, named where the console q
 	const json = JSON.stringify(record);
 	for (const secret of [SEEDED_KEY, SEEDED_PASSWORD, dir, "hunter2"]) assert.ok(!json.includes(secret), `${secret} reached the published record`);
 	assert.doesNotMatch(json, /"(?:\/|[A-Za-z]:\\\\)[^"]*"|[\s(]\/(?:Users|home|srv|tmp|var|private)\//, "no absolute path anywhere in it");
+});
+
+// Issue #800 (`INT-DOCTOR-RESULTS-KEY`'s `doctor:loads:<name>`): the same run says what this host's jobs can load, off the same
+// answers as its check lines, and a host that publishes less never reads as the same (worker/test/host-loads.test.mjs).
+test("doctor publishes what this host's jobs can load beside its record, and each flow row says what its check line says (#800)", { skip: skipNoPi }, async () => {
+	const dir = overlay({ skills: ["review", "deploy"], packages: [{ name: "wf-tools", version: "1.0.0", dir: "wf-tools", skills: ["packed"] }] });
+	mkdirSync(join(dir, "extensions", "guard"), { recursive: true });
+	writeFileSync(join(dir, "extensions", "guard", "index.js"), "export default () => {};\n");
+	writeFileSync(join(dir, "extensions", "git-guard.ts"), "export default () => {};\n");
+	writeFileSync(join(dir, "extensions", "README.md"), "not an extension\n");
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { linear: { url: "https://mcp.linear.app/mcp/${LINEAR_PATH}?key=${LINEAR_KEY}", description: "Linear", headers: { Authorization: "Bearer ${LINEAR_TOKEN}" } }, local: { command: "/usr/local/bin/my-server", args: ["--secret-arg=${ARG_KEY}"], description: "A local one", enabled: false } } }));
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ triggers: [
+		{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t" } },
+		{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "packed" } },
+		{ on: { type: "label", any: ["pi:lost"] }, run: { kind: "github", flow: "nowhere" } },
+		{ on: { type: "cron", id: "absent", pattern: "0 4 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "nowhere", task: "t", packages: false } },
+	] }));
+	const published = [];
+	const { out, text } = capture();
+	await runDoctor({ ...publishEnv(triggers), PI_GLOBAL_PI_DIR: dir }, publishDeps(out, { publish: true, fileExists: existsSync, cwd: tmpdir(), agentDir: NO_AGENT_DIR, spawn: fakeSpawn({ ...green, [gitKey("/srv/repo", "rev-parse")]: { code: 0, output: `${"a".repeat(40)}\n` }, [gitKey("/srv/repo", "ls-tree")]: { code: 0, output: "" } }), publishDoctor: async (url, name, record, loads) => published.push({ url, name, record, loads }) }));
+	const [{ record, loads }] = published;
+	assert.equal(loads.v, 1);
+	assert.equal(loads.at, record.at, "one run, one time");
+	assert.equal(loads.every, record.every);
+	assert.deepEqual(loads.by, record.by);
+	assert.equal(loads.overlayExtensionsAllowed, true);
+	assert.deepEqual(loads.extensions, [{ name: "git-guard.ts", kind: "file" }, { name: "guard", kind: "dir" }], "what a job would load, and no README");
+	assert.deepEqual(loads.skills, ["deploy", "review"]);
+	assert.deepEqual(loads.mcp, [
+		{ name: "linear", transport: "http", where: "mcp.linear.app", exposure: "codemode", enabled: true, keys: ["LINEAR_KEY", "LINEAR_PATH", "LINEAR_TOKEN"] },
+		{ name: "local", transport: "stdio", where: "my-server", exposure: "codemode", enabled: false, keys: ["ARG_KEY"] },
+	]);
+	assert.deepEqual(loads.packages, [{ name: "wf-tools", version: "1.0.0" }]);
+	assert.deepEqual(loads.flows, [
+		{ trigger: 0, flow: "review", tier: "overlay", package: null, repo: "absent" },
+		{ trigger: 1, flow: "packed", tier: "package", package: "wf-tools", repo: "unknown" },
+		{ trigger: 2, flow: "nowhere", tier: "unknown", package: null, repo: "unknown" },
+		{ trigger: 3, flow: "nowhere", tier: "none", package: null, repo: "absent" },
+	], "a forge's repository is not on a host, so a forge trigger found nowhere reads unknown; a local one checked everywhere reads none");
+	assert.deepEqual(loads.more, {});
+	assert.equal(Object.hasOwn(loads, "unread"), false);
+	// The lines this run printed say what the rows say.
+	assert.match(text(), /✓ Trigger flow "review" resolves \(cron "nightly": the overlay skills\/\)/);
+	assert.match(text(), /✓ Trigger flow "packed" resolves \(label trigger #1: staged package wf-tools\)/);
+	assert.match(text(), /⚠ Trigger flow "nowhere" resolves in NO tier visible here \(label trigger #2\)/);
+	const json = JSON.stringify(loads);
+	for (const leak of [dir, "/usr/local/bin", "/mcp/", "Bearer", "--secret-arg", SEEDED_KEY, SEEDED_PASSWORD]) assert.ok(!json.includes(leak), `${leak} reached the published loads`);
+});
+
+test("a part this run cannot read is named `unread`, a flow that fails the charset is not published, and the doctor record goes out whatever happens (#800)", { skip: skipNoPi }, async () => {
+	const dir = overlay({});
+	writeFileSync(join(dir, "mcp.json"), "{ not json");
+	mkdirSync(join(dir, "packages"), { recursive: true });
+	writeFileSync(join(dir, "packages", "packages.json"), "{ not json");
+	mkdirSync(join(dir, "extensions"), { recursive: true });
+	writeFileSync(join(dir, "extensions", ".ignore"), "secret.ts\n");
+	writeFileSync(join(dir, "extensions", "secret.ts"), "export default () => {};\n");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ triggers: [{ on: { type: "cron", id: "bad", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "Not A Skill", task: "t" } }] }));
+	const published = [];
+	await runDoctor({ ...publishEnv(triggers), PI_GLOBAL_PI_DIR: dir, PI_GLOBAL_ALLOW_EXTENSIONS: "0" }, publishDeps(capture().out, { publish: true, fileExists: existsSync, cwd: tmpdir(), agentDir: NO_AGENT_DIR, publishDoctor: async (url, name, record, loads) => published.push({ record, loads }) }));
+	const [{ record, loads }] = published;
+	assert.ok(record.v === 1);
+	assert.deepEqual(loads.unread, ["extensions", "mcp", "packages"], "an ignore file the host cannot read as a job does, a file that does not parse, a manifest that does not read");
+	assert.deepEqual([loads.extensions, loads.mcp, loads.packages], [[], [], []]);
+	assert.equal(loads.overlayExtensionsAllowed, false, "PI_GLOBAL_ALLOW_EXTENSIONS=0");
+	assert.deepEqual(loads.flows, [{ trigger: 0, flow: null, tier: "none", package: null, repo: "unknown" }]);
+	assert.ok(!JSON.stringify(loads).includes("Not A Skill") && !JSON.stringify(loads).includes("secret.ts"));
+
+	// A host with no overlay has nothing to hide and nothing it could not read.
+	const none = [];
+	await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: true, fileExists: existsSync, cwd: tmpdir(), agentDir: NO_AGENT_DIR, publishDoctor: async (url, name, record, loads_) => none.push(loads_) }));
+	assert.deepEqual([none[0].extensions, none[0].skills, none[0].mcp, none[0].packages, none[0].overlayExtensionsAllowed], [[], [], [], [], true]);
+	assert.equal(Object.hasOwn(none[0], "unread"), false);
+});
+
+// What a folder at mode 000 answers, as any uid: a seam, because a test running as root would read straight through a real one.
+const fsDenying = (denied) => {
+	const check = (path) => {
+		if (denied.test(String(path))) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+	};
+	return {
+		statSync: (path, ...rest) => (check(path), statSync(path, ...rest)),
+		readFileSync: (path, ...rest) => (check(path), readFileSync(path, ...rest)),
+		readdirSync: (path, ...rest) => (check(path), readdirSync(path, ...rest)),
+	};
+};
+
+// One row per place the flow tiers read. Each is run twice, the same paths failing with EACCES and then with ENOENT, so the
+// readers answer the same both times: the row is all that may differ, and doctor's stdout not at all.
+test("a flow row reads `unknown`, never `none`, where a tier could not be read, and doctor's own lines do not move (#800)", { skip: skipNoPi }, async () => {
+	const dir = overlay({ skills: ["review"], packages: [{ name: "wf-tools", version: "1.0.0", dir: "wf-tools", skills: ["packed"] }] });
+	const skillsDir = join(dir, "trigger-skills");
+	mkdirSync(join(skillsDir, "lost"), { recursive: true });
+	writeFileSync(join(skillsDir, "lost", "SKILL.md"), "---\ndescription: x\n---\n");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ triggers: [
+		{ on: { type: "cron", id: "pack", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "packed", task: "t" } },
+		{ on: { type: "cron", id: "lost", pattern: "0 4 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "lost", task: "t", skillsDir, packages: false } },
+		{ on: { type: "cron", id: "over", pattern: "0 5 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t", packages: false } },
+		{ on: { type: "cron", id: "gone", pattern: "0 6 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "nowhere", task: "t", packages: false } },
+	] }));
+	const spawn = fakeSpawn({ ...green, [gitKey("/srv/repo", "rev-parse")]: { code: 0, output: `${"a".repeat(40)}\n` }, [gitKey("/srv/repo", "ls-tree")]: { code: 0, output: "" } });
+	const failing = (denied, code) => {
+		const check = (path) => {
+			if (denied.test(String(path))) throw Object.assign(new Error(`${code}: ${path}`), { code });
+		};
+		return { statSync: (path, ...rest) => (check(path), statSync(path, ...rest)), readFileSync: (path, ...rest) => (check(path), readFileSync(path, ...rest)), readdirSync: (path, ...rest) => (check(path), readdirSync(path, ...rest)) };
+	};
+	const run = async (denied, code) => {
+		const published = [];
+		const { out, text } = capture();
+		// `existsSync` answers false on any failure, so the seam beside the throwing reads does too.
+		const fileExists = (path) => !denied.test(String(path)) && existsSync(path);
+		await runDoctor({ ...publishEnv(triggers), PI_GLOBAL_PI_DIR: dir }, publishDeps(out, { publish: true, fileExists, flowFs: failing(denied, code), cwd: tmpdir(), agentDir: NO_AGENT_DIR, spawn, publishDoctor: async (url, name, record, loads) => published.push(loads) }));
+		return { rows: published[0].flows.map((row) => row.tier), stdout: text() };
+	};
+	assert.deepEqual((await run(/^$/, "EACCES")).rows, ["package", "trigger", "overlay", "none"], "the premise: with every tier read, each flow is found, and the last is nowhere");
+
+	const cases = [
+		["a staged package's folder", /packages\/wf-tools(?:\/|$)/, 0],
+		["its package.json", /wf-tools\/package\.json$/, 0],
+		["its skills folder", /wf-tools\/skills(?:\/|$)/, 0],
+		["one skill in it", /skills\/packed(?:\/|$)/, 0],
+		["run.skillsDir", /trigger-skills(?:\/|$)/, 1],
+		["the flow's folder in run.skillsDir", /trigger-skills\/lost(?:\/|$)/, 1],
+		["the flow's folder in the overlay", /skills\/review(?:\/|$)/, 2],
+	];
+	for (const [what, denied, row] of cases) {
+		const blocked = await run(denied, "EACCES");
+		const absent = await run(denied, "ENOENT");
+		assert.equal(blocked.rows[row], "unknown", `${what} at mode 000: not checked, so not none`);
+		assert.equal(absent.rows[row], "none", `${what} really absent: every tier answered`);
+		assert.equal(blocked.stdout, absent.stdout, `${what}: doctor's own lines are the same`);
+		// A row answers for its own tiers: rows 1 to 3 withhold the packages, and no row but 1 looks in that run.skillsDir. This is
+		// what keeps the last row `none` throughout, so `unknown` is never a whole host's word for one blocked folder.
+		for (const other of [0, 1, 2, 3].filter((index) => index !== row)) assert.equal(blocked.rows[other], absent.rows[other], `${what}: row ${other} is not this one's question`);
+		assert.equal(blocked.rows[3], "none", `${what}: the flow every one of its tiers answered for`);
+	}
+	// A flow found stays found: `unknown` is a word for what would have read `none`. The overlay's review is found though the
+	// stage cannot be read, and the first tier that holds it answers.
+	assert.deepEqual((await run(/packages\/wf-tools(?:\/|$)/, "EACCES")).rows.slice(1), ["trigger", "overlay", "none"]);
+});
+
+test("a part this uid cannot enter is named `unread`, never an empty list, so another uid's run cannot read as a host with nothing on it (#800)", () => {
+	const dir = overlay({ skills: ["review"], packages: [{ name: "wf-tools", version: "1.0.0", dir: "wf-tools", skills: ["packed"] }] });
+	mkdirSync(join(dir, "extensions"), { recursive: true });
+	writeFileSync(join(dir, "extensions", "guard.ts"), "x");
+	const record = { at: 1000, every: 24, by: { uid: 501, worker: false } };
+	const flowRows = [{ trigger: 0, flow: "lost", tier: "none", package: null, repo: "absent" }, { trigger: 1, flow: "review", tier: "overlay", package: null, repo: "absent" }, { trigger: 2, flow: null, tier: "none", package: null, repo: "unknown" }];
+	const read = (denied, seams = {}) => doctorHostLoads({ seams: { flowRows, ...seams }, env: { PI_GLOBAL_PI_DIR: dir }, record, fs: fsDenying(denied) });
+	const whole = read(/^$/);
+	assert.equal(Object.hasOwn(whole, "unread"), false, "the premise: all of it reads");
+	assert.deepEqual([whole.extensions, whole.skills, whole.packages], [[{ name: "guard.ts", kind: "file" }], ["review"], [{ name: "wf-tools", version: "1.0.0" }]]);
+	assert.equal(whole.flows[0].tier, "none", "with every tier read, none is what it says");
+
+	const denied = (path) => Object.assign(new Error(`EACCES: ${path}`), { code: "EACCES" });
+	const everything = read(new RegExp(`^${dir}`), { readOverlayFile: (path) => { throw denied(path); }, lstatOverlayFile: (path) => { throw denied(path); } });
+	assert.deepEqual(everything.unread, ["extensions", "skills", "mcp", "packages"], "the overlay at mode 000");
+	assert.deepEqual([everything.extensions, everything.skills, everything.mcp, everything.packages], [[], [], [], []]);
+	const packages = read(/\/packages\//);
+	assert.deepEqual(packages.unread, ["packages"], "packages/ at mode 000, which read as nothing staged");
+	assert.deepEqual([packages.extensions, packages.skills], [[{ name: "guard.ts", kind: "file" }], ["review"]], "the rest of it stays");
+	const skill = read(/skills\/review\/SKILL\.md$/);
+	assert.deepEqual(skill.unread, ["skills"], "one skill's folder at mode 000, which read as no skill");
+	assert.deepEqual(read(/extensions$/).unread, ["extensions"]);
+	assert.deepEqual(read(/packages\.json$/).unread, ["packages"], "the manifest itself, which is there and does not read");
+
+	// `none` says every tier was checked, and a tier in `unread` was not. A flow nothing could hold stays `none`.
+	for (const blind of [everything, packages, skill]) assert.deepEqual(blind.flows.map((row) => row.tier), ["unknown", "overlay", "none"]);
+	assert.deepEqual(read(/extensions$/).flows.map((row) => row.tier), ["none", "overlay", "none"], "an extension has no say in where a flow is");
+
+	const none = doctorHostLoads({ seams: {}, env: { PI_GLOBAL_PI_DIR: join(dir, "not-here") }, record });
+	assert.equal(Object.hasOwn(none, "unread"), false, "no overlay at all is every list empty, and nothing it could not read");
+});
+
+/** A fake of the client `defaultPublishDoctor` connects, keeping the order of what reached it. */
+function fakeDoctorClient({ failSet = () => false } = {}) {
+	const client = {
+		sets: [],
+		commands: [],
+		disconnected: 0,
+		on() {},
+		connect: async () => {},
+		get: async () => null,
+		set: async (key, ...rest) => {
+			client.commands.push(`set ${key}`);
+			if (failSet(key)) throw new Error(`ECONNRESET redis://:${SEEDED_PASSWORD}@127.0.0.1:6399`);
+			client.sets.push([key, ...rest]);
+			return "OK";
+		},
+		sadd: async (key) => (client.commands.push(`sadd ${key}`), 1),
+		smembers: async () => [],
+		mget: async () => [],
+		srem: async () => 1,
+		disconnect: () => (client.disconnected++, undefined),
+	};
+	return client;
+}
+
+test("the real write: the doctor record, then the loads, on one client, and the loads are read back whole (#800)", async () => {
+	const record = { v: 1, at: 1000, by: { uid: 501, worker: true } };
+	const loads = { v: 1, at: 1000, extensions: [] };
+	const client = fakeDoctorClient();
+	await defaultPublishDoctor("redis://127.0.0.1:6399", "mini1", record, loads, { makeClient: () => client });
+	assert.deepEqual(client.commands, ["set doctor:h:mini1", "sadd doctor:hosts", "set doctor:loads:mini1"], "the record's write puts this host under the index, and only then the loads");
+	assert.deepEqual(JSON.parse(client.sets[1][1]), loads);
+	assert.deepEqual(client.sets[1].slice(2), ["PX", 7 * 24 * 3_600_000]);
+	assert.equal(client.disconnected, 1, "and the client is dropped");
+
+	const alone = fakeDoctorClient();
+	await defaultPublishDoctor("redis://127.0.0.1:6399", "mini1", record, null, { makeClient: () => alone });
+	assert.deepEqual(alone.commands, ["set doctor:h:mini1", "sadd doctor:hosts"], "no loads, no write");
+
+	// A record that does not land takes the loads with it: nothing under that key names a host the index does not.
+	const down = fakeDoctorClient({ failSet: (key) => key.startsWith("doctor:h:") });
+	await assert.rejects(defaultPublishDoctor("redis://127.0.0.1:6399", "mini1", record, loads, { makeClient: () => down }), (error) => error.doctorRecordLanded !== true);
+	assert.deepEqual(down.commands, ["set doctor:h:mini1"]);
+	const half = fakeDoctorClient({ failSet: (key) => key.startsWith("doctor:loads:") });
+	await assert.rejects(defaultPublishDoctor("redis://127.0.0.1:6399", "mini1", record, loads, { makeClient: () => half }), (error) => error.doctorRecordLanded === true);
+	assert.equal(half.disconnected, 1);
+});
+
+test("each way the publication falls short says what is true of it, in one line with no URL and no value, and the verdict stays (#800)", { skip: skipNoPi }, async () => {
+	const dir = tempDir("pi-doctor-publish-");
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, '{"version":1,"triggers":[]}');
+	const baseline = await runDoctor(publishEnv(triggers), publishDeps(capture().out));
+	const clean = (line) => {
+		assert.doesNotMatch(line, /redis|hunter2|127\.0\.0\.1/, "the note names no URL and no value");
+		assert.ok(line.endsWith("\n") && !line.slice(0, -1).includes("\n"), "one line");
+	};
+
+	// Only the loads failed to write. The record landed, so "results not published" would be false, and the spawner reads it.
+	const half = fakeDoctorClient({ failSet: (key) => key.startsWith("doctor:loads:") });
+	const halfErrs = [];
+	const halfCode = await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: true, writeErr: (s) => halfErrs.push(s), publishDoctor: (url, name, record, loads) => defaultPublishDoctor(url, name, record, loads, { makeClient: () => half }) }));
+	assert.equal(halfCode, baseline);
+	assert.deepEqual(half.sets.map(([key]) => key), ["doctor:h:mini1"], "the record went out");
+	assert.equal(halfErrs.length, 1);
+	assert.match(halfErrs[0], /^doctor: results published, but not what this host's jobs can load \(Valkey did not take them\); the console keeps the last list it had\n$/);
+	assert.ok(!halfErrs[0].includes(DOCTOR_PUBLISH_SKIPPED_PREFIX), "the worker's spawner reads that prefix as no record at all");
+	clean(halfErrs[0]);
+
+	// The record failed. Nothing is written, and the old words stand.
+	const down = fakeDoctorClient({ failSet: (key) => key.startsWith("doctor:h:") });
+	const downErrs = [];
+	await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: true, writeErr: (s) => downErrs.push(s), publishDoctor: (url, name, record, loads) => defaultPublishDoctor(url, name, record, loads, { makeClient: () => down }) }));
+	assert.equal(downErrs.length, 1);
+	assert.match(downErrs[0], /^doctor: results not published \(Valkey did not take them\); the console and the panel keep the last published results\n$/);
+	clean(downErrs[0]);
+
+	// The build of the loads threw: the doctor record goes out whatever happens, and a record from an earlier run stays
+	// where a reader can see it, reading as current. So "unknown" is not what a reader says, and this run says what is true.
+	const published = [];
+	const threwErrs = [];
+	const threwCode = await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: true, writeErr: (s) => threwErrs.push(s), hostLoadsOf: () => { throw new Error(`boom ${SEEDED_KEY}`); }, publishDoctor: async (url, name, record, loads) => published.push({ record, loads }) }));
+	assert.equal(threwCode, baseline);
+	assert.equal(published.length, 1, "the record goes out");
+	assert.equal(published[0].record.v, 1);
+	assert.equal(published[0].loads, null, "with no loads beside it");
+	assert.equal(threwErrs.length, 1);
+	assert.match(threwErrs[0], /^doctor: results published, but not what this host's jobs can load \(this run could not read them\); the console keeps the last list it had\n$/);
+	assert.ok(!threwErrs[0].includes(DOCTOR_PUBLISH_SKIPPED_PREFIX) && !threwErrs[0].includes(SEEDED_KEY));
+	clean(threwErrs[0]);
+
+	// Both: nothing went out, and the one thing to say is that.
+	const bothErrs = [];
+	await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: true, writeErr: (s) => bothErrs.push(s), hostLoadsOf: () => { throw new Error("boom"); }, publishDoctor: async () => { throw new Error("no"); } }));
+	assert.equal(bothErrs.length, 1);
+	assert.match(bothErrs[0], /^doctor: results not published \(Valkey did not take them\)/);
+
+	// INT-DOCTOR-RESULTS-KEY says these two sentences' opening words.
+	const spec = readFileSync(new URL("../../specs/interfaces.md", import.meta.url), "utf8");
+	for (const words of [`${DOCTOR_PUBLISH_SKIPPED_PREFIX} (`, "doctor: results published, but not what this host's jobs can load ("]) assert.ok(spec.includes(`\`${words}\``), words);
+
+	// The whole of it, working: nothing to say, and the two keys on one run.
+	const well = fakeDoctorClient();
+	const wellErrs = [];
+	await runDoctor(publishEnv(triggers), publishDeps(capture().out, { publish: true, writeErr: (s) => wellErrs.push(s), publishDoctor: (url, name, record, loads) => defaultPublishDoctor(url, name, record, loads, { makeClient: () => well }) }));
+	assert.deepEqual(wellErrs, []);
+	assert.deepEqual(well.sets.map(([key]) => key), ["doctor:h:mini1", "doctor:loads:mini1"]);
 });
 
 test("publishing is best effort: a refused write or no usable Valkey is one stderr line and the same exit code (#712)", { skip: skipNoPi }, async () => {

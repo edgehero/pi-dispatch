@@ -13,6 +13,7 @@ import { beatAgeOf } from "../../doctor-view.mjs";
 import { fmtCost, usd2 } from "../../panel.mjs";
 import { resolveWorkerCount, forgeLinkOf, progressStaleFor } from "../../read-model.mjs";
 import { parseRunFilter } from "../../run-filter.mjs";
+import { outcomeNote } from "../../loaded-words.mjs";
 // The one vocabulary the panel reads too (issue #710): outcome words and tones, the venue label, the Spend and Held titles.
 import { NO_EXPLANATION, NO_REASON_FAILED, outcomeKey, outcomeWord, reasonWords, recordReason, shortSentence } from "../../words.mjs";
 import { html } from "../html.mjs";
@@ -362,6 +363,8 @@ function activeTable(s, now, act = false) {
  * cancelled; an outcome this release does not know is shown as it is (escaped, like every record string).
  */
 function outcomeText(r) {
+  const note = outcomeNote(r);
+  if (note !== null) return note.charAt(0).toLowerCase() + note.slice(1);
   const w = outcomeWord(r?.outcome, r?.reason);
   return w.known ? w.word : cell(r?.outcome);
 }
@@ -395,6 +398,9 @@ export function outcomeCell(record, { link = true } = {}) {
   const raw = record?.reason;
   const w = outcomeWord(outcome, raw);
   const key = outcomeKey(outcome, raw);
+  // Issue #800: a run that completed without what it needed does not stay quiet in a list that is mostly completed ones.
+  const note = key === "completed" ? outcomeNote(record) : null;
+  if (note !== null) return ui.badge("attention", note);
   if (key === "completed") return ui.badge("idle", w.word.charAt(0).toUpperCase() + w.word.slice(1), { icon: ui.STATUS.ok.icon });
   const badge = ui.outcomeBadge(outcome, raw);
   if (w.says) return badge;

@@ -16,10 +16,9 @@ import { FORGE_MCP_SERVER_NAME } from "./mcp-config.mjs";
  */
 
 /**
- * The image this job runs in: the job's own `image` when it carries one, otherwise the deployment default
- * (`PI_JOB_IMAGE`). Today nothing sets the per-job field, so every job resolves the default; the seam exists
- * because the preflight and the argv builder must never disagree about which tag they mean, and one function
- * is how that is guaranteed rather than hoped for.
+ * The image this job runs in: the job's own `image` when it carries one (a trigger's `run.image`, the CLI's `--image`),
+ * otherwise the deployment default (`PI_JOB_IMAGE`). The preflight and the argv builder must never disagree about which
+ * tag they mean, and one function is how that is guaranteed rather than hoped for.
  */
 export function resolveJobImage(job, defaultImage) {
 	const image = job?.image ?? defaultImage;
@@ -119,7 +118,10 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", cop
 			}
 			// `capabilities` rides the ok result for issue #341's job-user gate, which needs `anyUid` and runs after
 			// this preflight; an image that declares nothing reads as [].
-			return { ok: true, image: wanted, piVersion, imageDigest, capabilities: capabilities ?? [] };
+			// `fromJob`: a run on an image its job named says nothing of the image this host runs everything else on, which only
+			// this function can tell, since it alone holds both (the record's `imageFromJob`, loaded-record.mjs). A job naming this
+			// host's own default ran on this host's own image, so it is no such run.
+			return { ok: true, image: wanted, piVersion, imageDigest, capabilities: capabilities ?? [], ...(wanted !== image ? { fromJob: true } : {}) };
 		}
 		if ((await runDocker(bin, spawnFn, ["info"])).code === 0) return { missing: wanted };
 		return { unavailable: wanted };

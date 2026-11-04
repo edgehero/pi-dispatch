@@ -35,6 +35,7 @@
     {"el":"**Preview a fork** (paid) selects a saved entry boundary and its options","kind":"readme","status":"real","panel":"p-actions","source":"admin/src/console/panels/run.mjs#runActionsPanel","golden":["panels/run-chat-fork.operator"],"shows":"Preview a fork"},
     {"el":"A big outcome headline with the title","kind":"readme","status":"illustrative","reason":"the page's banner holds the outcome and its reason in the catalog's words"},
     {"el":"Tokens as one big total with a soft hold line","kind":"readme","status":"illustrative","reason":"the page draws the split and its bar, with the total in the list"},
-    {"el":"Actions right after Run","kind":"readme","status":"illustrative","reason":"the page keeps one panel order for every state of a run"}
+    {"el":"Actions right after Run","kind":"readme","status":"illustrative","reason":"the page keeps one panel order for every state of a run"},
+    {"el":"p-loaded","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runLoaded","golden":["panels/run-chat-fork.operator"],"reason":"The Loaded card is RunLoaded's, drawn after p-run on an ended run's page (#800)."}
   ]
 }

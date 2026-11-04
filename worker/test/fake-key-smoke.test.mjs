@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CAP_MICROS, FAKE_KEY, smoke, smokeProblems, smokeWanted } from "../../.github/scripts/fake-key-smoke.mjs";
+import { CAP_MICROS, FAKE_KEY, MISSING_FLOW, smoke, smokeProblems, smokeWanted } from "../../.github/scripts/fake-key-smoke.mjs";
 
 // Issue #587: the image job's zero-spend provider smoke. Its verdict on real runner output (the shape measured in the
 // lab on the 1.0.3 image), and its split between a defect in the image and a runner that cannot reach Anthropic.
 
+const LOADED = { v: 1, at: "ready", pi: "1.0.3", flow: "none", packages: [], tiers: { package: [0, 0, 0, 0, 0, 0, 0, 0], repository: [0, 0, 0, 0, 0, 0, 0, 0], trigger: [0, 0, 0, 0, 0, 0, 0, 0], overlay: [0, 0, 0, 0, 0, 0, 0, 0], other: [0, 0, 0, 0, 0, 0, 0, 0] }, overlay: { loaded: [], failed: [] }, mcp: [], tools: { active: 4, own: ["read", "bash", "edit", "write"] }, extTools: { p: [], o: [] }, cut: { form: "full", packages: 0, servers: 0, names: 0, counts: 0 } };
 const METER = (capped) => JSON.stringify({ event: "usage_meter", ok: true, methods: ["streamSimple", "stream", "streamDeferred", "classify", "generateImages"], compat: "pi", fallback: true, capped: false, costCapped: capped, listed: false, brake: capped });
 const EXIT = (capped, over = {}) =>
 	JSON.stringify({
@@ -15,6 +16,7 @@ const EXIT = (capped, over = {}) =>
 		turns: 1,
 		tokens: { input: 0, output: 0, total: 0, cost: 0, metered: true, sessions: 1, calls: 1, ...(capped ? { costCapMicros: 5000000, costRefused: 0, costUnanswered: 1 } : {}) },
 		usage: { v: 1, piAi: "1.0.3", models: [{ provider: "anthropic", model: "claude-sonnet-4-5-20250929", calls: 1, cost: 0 }] },
+		loaded: LOADED,
 		...over,
 	});
 const run = (capped, exitOver, meter = METER(capped)) => ['{"event":"workspace_not_writable","path":"/workspace"}', "", meter, "", EXIT(capped, exitOver), ""].join("\n");
@@ -38,6 +40,22 @@ test("each way the smoke can be wrong is named", () => {
 	assert.match(at(run(true, { tokens: { calls: 1, cost: 0, costRefused: 1 } }), true).join(), /refused 1 call/);
 	assert.match(at(run(false), true).join(), /costCapped is false, want true/);
 	assert.deepEqual(at("not json at all"), ["no usage_meter line: the meter never reported installing", "no exit line: the runner did not finish"]);
+});
+
+test("issue #800: the real exit line must carry the record of what the job loaded, and each way it can be wrong is named", () => {
+	const at = (loaded) => smokeProblems(run(false, { loaded }), { piVersion: "1.0.3", capped: false }).join();
+	assert.match(at(undefined), /no `loaded` on the exit line/);
+	assert.match(at({ ...LOADED, v: 2 }), /loaded\.v is 2/);
+	assert.match(at({ ...LOADED, at: "session" }), /loaded\.at is "session"/);
+	assert.match(at({ ...LOADED, pi: null }), /loaded\.pi is null, not the pin 1\.0\.3/);
+	assert.match(at({ ...LOADED, flow: "repository" }), /loaded\.flow is "repository"/);
+	assert.match(at({ ...LOADED, cut: { ...LOADED.cut, form: "minimal" } }), /loaded\.cut\.form is "minimal"/);
+	assert.match(at({ ...LOADED, tools: { active: 1, own: ["read"] } }), /loaded\.tools\.own lacks bash/);
+	assert.match(at({ ...LOADED, tools: { active: 0, own: ["read", "bash"] } }), /loaded\.tools\.active is 0/);
+	assert.match(at({ ...LOADED, tiers: {} }), /loaded\.tiers is/);
+	const seen = [];
+	smoke({ image: "i", piVersion: "1.0.3", jobDir: "/j", docker: (args) => (seen.push(args), { status: 2, output: run(args.includes(`PI_MAX_COST_MICROS=${CAP_MICROS}`)) }) });
+	assert.ok(seen.every((args) => args.includes(`PI_FLOW=${MISSING_FLOW}`)), "both runs name a flow nothing holds, so `none` comes off the real loader");
 });
 
 test("a failed run is the image's fault when a plain fetch from the image reaches Anthropic, and infrastructure when it does not", () => {

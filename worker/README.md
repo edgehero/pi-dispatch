@@ -10,7 +10,7 @@ The worker takes jobs from a durable queue (Valkey with BullMQ). Before anything
 cap that applies: job counts and a daily token count for the whole deployment, job counts per repo, folder
 or project, and dollars per day, week or month for the deployment and per repo, folder, project or model,
 plus each project's share of the budget split. It then starts one locked down container per job (Docker or
-Podman), holds the job to its own dollar cap when one is set, gives the agent the job, records what it did
+Podman), holds the job to its own dollar cap when one is set, gives the agent the job, records what it loaded, what it did
 and what it cost, and removes the container. Jobs come from the command line, from cron triggers, or from
 forge events that the
 [receiver](https://www.npmjs.com/package/@edgehero/pi-dispatch-receiver) queues.

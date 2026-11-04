@@ -6,6 +6,9 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { fakeNpm } from "./helpers/fake-npm.mjs";
 import { makePackageCanaryRuntime, parsePackageCanary, readChangelog, recordedPackageCanary, stagedContainerPath, withCanaryPath } from "../src/package-canary.mjs";
 import { buildRecord, parseExitCanaryLoad } from "../src/run-history.mjs";
+import { buildHostLoads, parseHostLoads } from "../src/host-loads.mjs";
+import { rebuildLoaded } from "../src/loaded-record.mjs";
+import { isPackageName } from "../src/package-names.mjs";
 import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
 
 const NOW = 1_800_000_000_000;
@@ -23,6 +26,30 @@ const runtime = (over = {}) => makePackageCanaryRuntime({ globalPiDir: overlay()
 test("the job field is rebuilt: one package at one exact version, or nothing", () => {
 	assert.deepEqual(parsePackageCanary({ ...CANARY, extra: "dropped" }), CANARY);
 	for (const bad of [null, [], "x", { name: "@a/b" }, { ...CANARY, version: "^1.0.0" }, { ...CANARY, version: "latest" }, { ...CANARY, name: "../up" }, { ...CANARY, name: "A B" }]) assert.equal(parsePackageCanary(bad), null, JSON.stringify(bad));
+});
+
+test("one validator: what a run loaded and what a host publishes read a package through this reader, and hold no copy of its rules", () => {
+	const longest = { name: "a".repeat(214), version: `1.0.0-${"r".repeat(122)}` };
+	assert.equal(longest.version.length, 128);
+	assert.deepEqual(parsePackageCanary(longest), longest);
+	for (const over of [{ name: "a".repeat(215) }, { version: `1.0.0-${"r".repeat(123)}` }]) assert.equal(parsePackageCanary({ ...longest, ...over }), null, JSON.stringify(over).length);
+	assert.equal(isPackageName(longest.name), true);
+	assert.equal(isPackageName(`${longest.name}a`), false);
+	for (const bad of [null, 7, "A B", "../up"]) assert.equal(isPackageName(bad), false, String(bad));
+	for (const file of ["loaded-record.mjs", "host-loads.mjs"]) {
+		const source = fs.readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8");
+		assert.match(source, /import \{ parsePackageCanary \} from "\.\/package-canary-record\.mjs";/, file);
+		assert.doesNotMatch(source, /import \{[^}]*(?:NPM_NAME_RE|EXACT_VERSION_RE)[^}]*\} from/, `${file} tests no package's shape itself`);
+		assert.doesNotMatch(source, /PACKAGE_(?:NAME|VERSION)_MAX/, file);
+	}
+	// Each through its own door, at the bound.
+	const row = (pkg) => parseHostLoads(JSON.stringify({ ...buildHostLoads({ at: NOW }), packages: [pkg] })).packages;
+	assert.deepEqual(row(longest), [longest]);
+	assert.deepEqual(row({ ...longest, name: "a".repeat(215) }), []);
+	const known = { packages: [{ ...longest, name: "a".repeat(215) }, longest] };
+	const line = { v: 1, at: "loader", pi: "1.5.0", cut: { form: "compact", packages: 0, servers: 0, names: 0, counts: 0 }, flow: "package", flowPackage: 1, tiers: Object.fromEntries(["package", "repository", "trigger", "overlay", "other"].map((tier) => [tier, [0, 0, 0, 0, 0, 0, 0, 0]])) };
+	assert.deepEqual(rebuildLoaded(line, known).flow, { tier: "package", package: longest.name });
+	assert.deepEqual(rebuildLoaded({ ...line, flowPackage: 0 }, known).flow, { tier: "package", package: null }, "the worker could not name that one");
 });
 
 test("the record says what the runner said, in a closed word, and a missing report reads as its own word", () => {

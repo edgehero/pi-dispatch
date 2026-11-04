@@ -99,7 +99,7 @@ const SENTENCE = "the rootless network keeper pi-dispatch-netns-keeper has been 
 const young = (startedMs, at = NOW) => ({ unavailable: "pi-dispatch-egress-proxy", keeper: SENTENCE, remedy: "start it as the worker's account: X", problem: "has been running for only ...", young: { startedMs, ageMs: at - startedMs, waitMs: netnsKeeperYoungWaitMs(at - startedMs) } });
 const gone = { unavailable: "pi-dispatch-egress-proxy", keeper: "the rootless network keeper pi-dispatch-netns-keeper is not under this account's Podman, ... so this job is retried rather than started", remedy: "start it as the worker's account: X", problem: "is not under this account's Podman" };
 
-function harness({ now = () => NOW, egress, cancelReq = undefined, exitCode = 0, wrap = (redis) => redis, extra = {} }) {
+function harness({ now = () => NOW, egress, cancelReq = undefined, exitCode = 0, wrap = (redis) => redis, extra = {}, imagePreflight = undefined }) {
 	const seen = { containerCalls: 0, records: [], logs: [], incr: 0, comments: [], redisOps: [] };
 	const redis = wrap({ incr: async () => (seen.incr++, 1), decr: async () => 0, expire: async () => {} });
 	// A cancel request key (issue #287's `cancel:req:<id>`), only when a test asks for one: `get` arms the cancel poll.
@@ -121,6 +121,7 @@ function harness({ now = () => NOW, egress, cancelReq = undefined, exitCode = 0,
 		timeoutMs: 100000,
 		deps: {
 			egressPreflight: async () => egress,
+			...(imagePreflight ? { imagePreflight } : {}),
 			prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j" }),
 			runContainer: async () => (seen.containerCalls++, { code: exitCode, aborted: false, turns: 1 }),
 			cleanup: async () => {},
@@ -195,6 +196,27 @@ test("a hold checked again after more than the bound starts afresh: a retry afte
 	// Exactly at the bound is still the same hold.
 	const edge = spyJob({ ...DATA, netnsKeeperHoldSinceMs: NOW - 10_000, netnsKeeperHoldLastMs: NOW - NETNS_KEEPER_YOUNG_HOLD_MAX_MS, netnsKeeperHoldStartedMs: NOW - 9_000 });
 	await assert.rejects(() => harness({ egress: young(NOW - 500) }).processor(edge.job, "tok", new AbortController().signal), (err) => err.reason === NETNS_KEEPER_CRASH_LOOP);
+});
+
+// Issue #800: each crash-loop record is a new error made from the keeper's, so each must carry what the keeper's held: the
+// image, which the plain keeper failure at this gate has always kept. No container ran, so no runner part.
+test("every crash-loop record names the image the job would have run on, as the plain keeper failure at this gate does (#800)", { skip }, async () => {
+	const IMAGE = { ok: true, image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0", capabilities: ["exitAuth"] };
+	const imagePreflight = async () => IMAGE;
+	const held = { netnsKeeperHoldSinceMs: NOW - 3_400, netnsKeeperHoldLastMs: NOW - 3_400, netnsKeeperHoldStartedMs: NOW - 4_000 };
+	for (const [label, data, egress, reason] of [
+		["a keeper that started again while the job waited", held, young(NOW - 500), NETNS_KEEPER_CRASH_LOOP],
+		["the keeper gone while the job was held", held, gone, NETNS_KEEPER_CRASH_LOOP],
+		["a later attempt of a job that saw the loop", { netnsKeeperLoopSeen: [NOW - 250, NOW + 3_400] }, gone, NETNS_KEEPER_CRASH_LOOP],
+		["the plain keeper failure, the sentence this holds the others to", {}, gone, NETNS_KEEPER_NOT_HOLDING],
+	]) {
+		const { job } = spyJob({ ...DATA, ...data });
+		const { processor, seen } = harness({ egress, imagePreflight });
+		await assert.rejects(() => processor(job, "tok", new AbortController().signal), (err) => err.reason === reason, label);
+		const record = buildRecord(seen.records[0]);
+		assert.equal(record.reason, reason, label);
+		assert.deepEqual([record.loaded?.runner, record.loaded?.image, record.loaded?.imageDigest, record.loaded?.imagePi], ["absent", IMAGE.image, IMAGE.imageDigest, "1.5.0"], label);
+	}
 });
 
 // Gate of PR #479: the loop's retry comes after the queue's 60 s backoff, past the hold's 30 s window, and met a keeper

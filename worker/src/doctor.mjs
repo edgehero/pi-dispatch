@@ -79,7 +79,7 @@ import { findLiteralSecret, ADMIN_RE } from "./import-pi.mjs";
 import { mcpServerWhere, readOverlayMcp } from "./mcp-config.mjs";
 import { allowlistEntryFor, egressRefusalFor, packageRunnerHosts, parseAllowlist } from "./egress-allowlist.mjs";
 import { agentDirFrom, readHostPi } from "./host-pi.mjs";
-import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest } from "./packages.mjs";
+import { PACKAGES_SUBDIR, readStagedSkills, readStageManifest, STAGE_MANIFEST } from "./packages.mjs";
 import { copySkillTree } from "./copy-tree.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { GIT_READ_FLAGS } from "./git-hardening.mjs";
@@ -138,9 +138,10 @@ import { RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RU
 import { verifyConsoleAudit } from "./console-audit.mjs";
 import { OTHER } from "./priorities.mjs";
 import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
-import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, secretValuesIn } from "./doctor-results.mjs";
+import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, publishRedactor, secretValuesIn } from "./doctor-results.mjs";
 import { olderStateFindings as olderStateFindingsReal, VALKEY_CONTAINER } from "./older-state.mjs";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
+import { buildHostLoads, flowProbes, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
@@ -276,7 +277,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		bundleSpawn,
 		// Issue #712: publish this run's results to Valkey for the console and the panel (`doctor-results.mjs`). Strictly
 		// `=== true`, as `live`: the CLI passes it unless `--no-publish`, and a caller that hands runDoctor an option bag
-		// (every test) publishes nothing unless it says so. `publishDoctor(url, name, record)` is the write, a seam so a
+		// (every test) publishes nothing unless it says so. `publishDoctor(url, name, record, loads)` is the write, a seam so a
 		// test drives it against a fake Valkey; `writeErr` takes the one line said when it could not publish; `publishNow`
 		// stamps the record.
 		publish = false,
@@ -284,6 +285,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// interval the worker actually runs at, not this resolution's reading of it.
 		publishBy = null,
 		publishDoctor = defaultPublishDoctor,
+		hostLoadsOf = doctorHostLoads,
 		writeErr = (s) => process.stderr.write(s),
 		publishNow = Date.now,
 		openshellRun,
@@ -303,6 +305,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		readEnvFile = (path) => readFileSync(path),
 		// Issue #345: the host files the runtime-mounts observation reads (Podman's mounts.conf and containers.conf).
 		observationFs = { statSync, readFileSync, readdirSync },
+		// Issue #800: what the flow tiers read, so a test can stand in for a folder at mode 000, which root reads straight through.
+		flowFs = { statSync, readFileSync, readdirSync },
 		// Issue #464: the jobs dir check's reads (its owner, whether this account may write it, the old shared default's
 		// retained workspaces). Never a write: doctor says what the worker will meet, and the worker creates the dir.
 		jobsDirFs = { accessSync, lstatSync, readdirSync, statSync },
@@ -448,7 +452,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -512,7 +516,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 	const record = doctorResultsRecord({ checks: [...checks, ...liveRendered], liveRendered, seams, env, at: publishNow(), by: publishBy });
 	if (json === true) output(`${JSON.stringify(record)}\n`);
 	if (publish === true) {
-		await publishResults({ seams, publishDoctor, writeErr, record });
+		await publishResults({ seams, publishDoctor, hostLoadsOf, writeErr, record, env });
 	}
 
 	// Issue #477: whether anything doctor judged came from the deployment's `.env`, which a hand-started worker never reads.
@@ -531,7 +535,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
  * Issue #712: publish one run's results (`INT-DOCTOR-RESULTS-KEY`). Never throws and never decides anything: a Valkey
  * this run may not talk to, or one that does not answer, is ONE line on stderr whose wording starts with
  * `DOCTOR_PUBLISH_SKIPPED_PREFIX` (the worker's spawner reads that prefix and nothing else), and no URL, path or value
- * is in it. The secrets the record must not carry are every secret-named value of the resolution (`env`, which holds
+ * is in it. A record that landed without its `doctor:loads` beside it (issue #800) is one line in other words, for the same
+ * reader: it was published, and saying it was not would be false.
+ * The secrets the record must not carry are every secret-named value of the resolution (`env`, which holds
  * this shell's whole environment with the service's `.env` values over it), plus the `.env` values the resolution did
  * not take (a provider key resolved later, a value this shell disagrees with), so a value the file holds is as absent
  * as one this shell exports.
@@ -547,28 +553,93 @@ export function doctorResultsRecord({ checks, liveRendered = [], seams, env, at,
 	return buildDoctorRecord({ checks, ids, at, version: PACKAGE_VERSION, openshell: seams.openshellJudged === true, every, secrets, by: { uid: process.geteuid?.() ?? null, worker } });
 }
 
-async function publishResults({ seams, publishDoctor, writeErr, record }) {
-	const say = (why) => {
+/**
+ * Issue #800: what this host's jobs can load, for `doctor:loads:<name>` (`host-loads.mjs`), read when it is published and
+ * through the readers a job's worker uses, so a run by `--no-publish` reads nothing more. A part that cannot be read is
+ * named in `unread`, which a reader takes as unknown, and an empty list would read as none. Only ABSENT_CODES are absence
+ * (`pathIsThere`): an overlay this uid cannot enter is not an overlay with nothing in it. A throw that gets past that is
+ * the caller's to say: the doctor record goes out either way.
+ */
+export function doctorHostLoads({ seams, env, record, fs = { readFileSync, readdirSync, statSync } }) {
+	const overlay = typeof env.PI_GLOBAL_PI_DIR === "string" ? env.PI_GLOBAL_PI_DIR : "";
+	const unread = [];
+	const read = (part, fn, fallback) => {
 		try {
-			writeErr(`${DOCTOR_PUBLISH_SKIPPED_PREFIX} (${why}); the console and the panel keep the last published results\n`);
+			const value = fn();
+			if (value !== null) return value;
+		} catch {
+			// named below, by part alone: what failed is the doctor line's to say
+		}
+		unread.push(part);
+		return fallback;
+	};
+	const service = seams.serviceEnv ?? {};
+	const fileSide = Object.fromEntries((service.disagreements ?? []).map((d) => [d.key, d.file]));
+	const redact = publishRedactor(secretValuesIn(env, service.fromFile, service.extraFromFile, fileSide));
+	const extensions = read("extensions", () => readOverlayExtensionRows(overlay, { fs }), []);
+	const skills = read("skills", () => readOverlaySkillNames(overlay, { fs }), []);
+	const mcp = read("mcp", () => mcpRowsOf(readOverlayMcp(overlay, { readFileSync: seams.readOverlayFile ?? ((p, enc) => readFileSync(p, enc)), ...(seams.lstatOverlayFile ? { lstatSync: seams.lstatOverlayFile } : {}) })?.servers, { redact }), []);
+	// A manifest that is there and does not read is not "nothing staged": the job's own reader degrades, this one says so.
+	const packages = read("packages", () => {
+		if (overlay === "" || !pathIsThere(join(overlay, PACKAGES_SUBDIR, STAGE_MANIFEST), fs)) return [];
+		return readStageManifest({ globalPiDir: overlay, readFile: (p) => fs.readFileSync(p, "utf8"), fileExists: () => true })?.packages ?? null;
+	}, []);
+	// `none` says every tier was checked, and a tier in `unread` was not. Doctor's line stays as it is, since "visible here" is
+	// still true of it. What is published is what can be said: not that the flow is nowhere, only that it was not found.
+	const blind = unread.includes("skills") || unread.includes("packages");
+	const flows = (seams.flowRows ?? []).map((row) => (blind && row.tier === "none" && row.flow !== null ? { ...row, tier: "unknown" } : row));
+	return buildHostLoads({ at: record.at, every: record.every, by: record.by, overlayExtensionsAllowed: env.PI_GLOBAL_ALLOW_EXTENSIONS !== "0", extensions, skills, mcp, packages, flows, unread });
+}
+
+async function publishResults({ seams, publishDoctor, hostLoadsOf, writeErr, record, env }) {
+	const line = (text) => {
+		try {
+			writeErr(`${text}\n`);
 		} catch {
 			// A closed stderr cannot change the verdict either.
 		}
 	};
+	const say = (why) => line(`${DOCTOR_PUBLISH_SKIPPED_PREFIX} (${why}); the console and the panel keep the last published results`);
+	// Not that prefix, on purpose: the doctor record DID land, and the worker's spawner reads the prefix as "it did not". And not
+	// "readers say unknown", which is false: the last list stays for its seven days and reads as current until it is old.
+	const sayLoads = (why) => line(`doctor: results published, but not what this host's jobs can load (${why}); the console keeps the last list it had`);
 	const target = seams.publishTo;
 	if (!target) return say("doctor talked to no Valkey on this run");
 	if (target.refused) return say(target.refused);
+	let loads = null;
+	let loadsThrew = false;
 	try {
-		await publishDoctor(target.url, target.name, record);
+		loads = hostLoadsOf({ seams, env, record });
 	} catch {
-		say("Valkey did not take them");
+		// Each part's own read fails into `unread`, so this is the build of it failing. The doctor record is the older promise
+		// and goes out on its own.
+		loadsThrew = true;
 	}
+	try {
+		await publishDoctor(target.url, target.name, record, loads);
+	} catch (error) {
+		return error?.doctorRecordLanded === true ? sayLoads("Valkey did not take them") : say("Valkey did not take them");
+	}
+	if (loadsThrew) sayLoads("this run could not read them");
 }
 
-/** The real write: doctor's own fail-fast client, bounded, always dropped (`withDoctorClient`). */
-export async function defaultPublishDoctor(url, name, record) {
+/**
+ * The real write: doctor's own fail-fast client, bounded, always dropped (`withDoctorClient`). A fault on the second write says
+ * the first landed (`doctorRecordLanded`), since "nothing was published" would then be false of a record readers can see.
+ */
+export async function defaultPublishDoctor(url, name, record, loads = null, { makeClient } = {}) {
 	const { publishDoctorRecord } = await import("./doctor-results.mjs");
-	await withDoctorClient(url, (client) => publishDoctorRecord(client, name, record));
+	const { publishHostLoads } = await import("./host-loads.mjs");
+	await withDoctorClient(url, async (client) => {
+		await publishDoctorRecord(client, name, record);
+		if (loads === null) return;
+		// After the doctor record, whose write puts this host under the index both share.
+		try {
+			await publishHostLoads(client, name, loads);
+		} catch (cause) {
+			throw Object.assign(new Error("the doctor record landed and the loads did not", { cause }), { doctorRecordLanded: true });
+		}
+	}, { makeClient });
 }
 
 /**
@@ -1972,14 +2043,20 @@ export async function collectChecks(shellVars, seams) {
 	// (DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS): these probes read dir names, and a frontmatter
 	// `name:` rename is invisible to them, so a ⚠ here can be wrong in only the loud direction.
 	// A deployment with no triggers adds no lines at all, so its output is byte-identical.
+	// Issue #800: the same answer per trigger, for the record of what this host's jobs can load (`publishResults`). Set afresh
+	// on every collection, so a `--fix` re-collect replaces it, as `seams.checkSection` is.
+	seams.flowRows = [];
 	if (flows.length > 0) {
 		// One stage read for the whole run; each tuple's staged probe is a lookup on its result.
-		const staged = readStagedSkills({ globalPiDir: env.PI_GLOBAL_PI_DIR, readFile: (p) => readFileSync(p, "utf8"), fileExists });
+		const flowFs = seams.flowFs ?? { statSync, readFileSync, readdirSync };
+		const stagedProbes = flowProbes({ fileExists, fs: flowFs });
+		const staged = readStagedSkills({ globalPiDir: env.PI_GLOBAL_PI_DIR, readFile: stagedProbes.readFile, fileExists: stagedProbes.fileExists, readDir: stagedProbes.readDir });
 		const groups = new Map();
 		for (const f of flows) {
 			const key = JSON.stringify([f.flow, f.folder, f.skillsDir, f.packages]);
-			if (!groups.has(key)) groups.set(key, { ...f, labels: [] });
+			if (!groups.has(key)) groups.set(key, { ...f, labels: [], triggers: [] });
 			groups.get(key).labels.push(f.label);
+			groups.get(key).triggers.push(f.index);
 		}
 		for (const g of groups.values()) {
 			const at = g.labels.join(", ");
@@ -1993,37 +2070,18 @@ export async function collectChecks(shellVars, seams) {
 					label: `Trigger flow ${JSON.stringify(g.flow)} fails the skill name charset (${at})`,
 					fix: "a flow name must match the skill charset (lowercase alphanumerics, - and _, 64 max), or no tier can ever hold it -- fix run.flow",
 				});
+				// No tier can hold it, and a name that fails the charset is not published.
+				for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: null, tier: "none", package: null, repo: "unknown" });
 				continue;
 			}
-			let resolved = null;
-			const checked = [];
-			const unknown = [];
-			if (g.folder) {
-				const state = await repoFlowAtHead(spawn, g.folder, g.flow);
-				if (state === "present") resolved = `repo .pi/skills at HEAD of ${g.folder}`;
-				else if (state === "absent") checked.push("repo .pi/skills at HEAD");
-				else unknown.push(`repo (${g.folder} is not readable as a git repo here)`);
-			} else {
-				unknown.push("repo (a forge clone, not on this host)");
-			}
-			if (!resolved && g.skillsDir) {
-				if (fileExists(join(g.skillsDir, g.flow, "SKILL.md"))) resolved = `injected run.skillsDir ${g.skillsDir}`;
-				else checked.push("injected run.skillsDir");
-			}
-			if (!resolved && env.PI_GLOBAL_PI_DIR) {
-				if (fileExists(join(env.PI_GLOBAL_PI_DIR, "skills", g.flow, "SKILL.md"))) resolved = "the overlay skills/";
-				else checked.push("overlay skills/");
-			}
-			if (!resolved) {
-				if (!g.packages) {
-					checked.push("staged packages (withheld: run.packages false)");
-				} else {
-					const hit = staged.skills.find((s) => s.name === g.flow);
-					if (hit) resolved = `staged package ${hit.package}`;
-					else if (staged.unenumerable.length > 0) unknown.push(`staged package(s) ${staged.unenumerable.join(", ")} (manifest patterns, not enumerable here)`);
-					else checked.push("staged packages");
-				}
-			}
+			const probes = flowProbes({ fileExists, fs: flowFs });
+			const found = await flowTierOf(g, { repoFlowAtHead: (folder, flow) => repoFlowAtHead(spawn, folder, flow), fileExists: probes.fileExists, overlay: env.PI_GLOBAL_PI_DIR, staged });
+			const { resolved, checked, unknown } = found;
+			// `none` says every tier was checked. Per question, and the stage's read only where this one looks in the stage: a
+			// trigger that withholds the packages did not, and another trigger's unreadable folder says nothing of this one's.
+			const blind = probes.blind() || (g.packages !== false && stagedProbes.blind());
+			const tier = found.tier === "none" && blind ? "unknown" : found.tier;
+			for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: g.flow, tier, package: found.package, repo: found.repo });
 			if (resolved) {
 				checks.push({ ok: true, label: `Trigger flow "${g.flow}" resolves (${at}: ${resolved})` });
 			} else {
@@ -6663,6 +6721,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// entries by raw file position (the admin's trigger:<index> identity).
 			flows: triggers
 				.map((t, index) => ({
+					index,
 					label: triggerLabel(t, index),
 					flow: t.run.flow,
 					kind: t.run.kind,

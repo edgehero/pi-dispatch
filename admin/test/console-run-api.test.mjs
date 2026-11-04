@@ -9,6 +9,7 @@ import { parkedQuestions, runChat } from "../src/console/panels.mjs";
 import { createConsoleServer } from "../src/console/server.mjs";
 import * as sessionsModule from "../src/console/sessions.mjs";
 import { agentReadProjection } from "../src/agent-read.mjs";
+import { recordedLoaded } from "../../worker/src/loaded-record.mjs";
 import { NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE } from "../src/newer-release.mjs";
 import { FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, PENDING_STATES, readJobStatus, readPendingAnswer, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD, runAbsent, runPlaces, targetKeyOf } from "../src/read-model.mjs";
 
@@ -311,7 +312,26 @@ test("/api/run gives an agent a run's end time as it gives a viewer, for a versi
   assert.deepEqual(agentReadProjection({ finishedAt: iso(T0) }), { finishedAt: iso(T0) });
 });
 
-const RUN_KEYS = ["attempt", "backend", "exitCode", "finishedAt", "flow", "host", "id", "jobId", "kind", "maxTurns", "model", "outcome", "parentJobId", "project", "provider", "reason", "recoveryOf", "repo", "session", "startedAt", "target", "triggerIndex", "triggerType", "turns"];
+test("/api/run gives an operator and a viewer what a run loaded in the same words, and an agent only the closed sentence (#800)", async () => {
+  const r = { ...record("gh-loaded"), reason: null, loaded: recordedLoaded({ v: 1, runner: "reported", at: "ready", cut: null, image: "pi-job:4.3.1", imageDigest: null, imagePi: "1.5.0", pi: "1.5.0", flow: { tier: "none", package: null }, sources: [], mcp: [], tools: { active: 1, own: ["read"], job: [] }, problems: { failed: 0, dropped: 0, mcp: 0 }, leftOut: null }) };
+  assert.ok(r.loaded, "the sample survives the record's rebuild");
+  const c = await runConsole(fakeFleet({ records: { [r.jobId]: r } }));
+  const of = async (cookie) => (await c.get(`/api/run?id=${r.jobId}`, cookie)).json().run;
+  const operator = await of();
+  const viewer = await of(c.viewer);
+  assert.deepEqual(operator.loaded, r.loaded);
+  assert.equal(operator.outcomeNote, "Completed, without its flow");
+  assert.equal(operator.outcome, "completed", "the outcome stays completed");
+  assert.deepEqual(viewer.loaded, operator.loaded);
+  assert.equal(viewer.outcomeNote, operator.outcomeNote);
+  const agent = await of(c.agent);
+  assert.equal(Object.hasOwn(agent, "loaded"), false, "the agent's projection does not gain it");
+  assert.equal(Object.hasOwn(agent, "outcomeNote"), false);
+  assert.equal(agent.note, "Completed, without its flow", "as the note a model is already allowed");
+  assert.equal(agent.outcome, "completed");
+});
+
+const RUN_KEYS = ["attempt", "backend", "exitCode", "finishedAt", "flow", "host", "id", "jobId", "kind", "loaded", "maxTurns", "model", "outcome", "outcomeNote", "parentJobId", "project", "provider", "reason", "recoveryOf", "repo", "session", "startedAt", "target", "triggerIndex", "triggerType", "turns"];
 
 test("/api/run: the keys, a finished run's fork, and no free text, job data or session key for either role", { timeout: 20_000 }, async () => {
   const fleet = fakeFleet({ records: { "gh-1": record("gh-1") } });
@@ -348,6 +368,8 @@ test("/api/run: the keys, a finished run's fork, and no free text, job data or s
     parentJobId: null,
     recoveryOf: null,
     session: { kept: true, resumed: false },
+    loaded: null,
+    outcomeNote: null,
   });
   assert.equal(doc.version, 1);
   assert.equal(doc.state, "finished");

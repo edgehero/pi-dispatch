@@ -3,6 +3,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CONSOLE_PICKS } from "../../launch/console-picks.mjs";
+import { loadedRows, outcomeNote } from "../src/loaded-words.mjs";
+import { LOADED_SAMPLES as S } from "./helpers/loaded-samples.mjs";
 
 // The READMEs are the project's front door, and several things about them are hand-written restatements of something
 // else, so each is held to it (AGENTS.md: a table that restates a derivable source is derived or pinned, never trusted).
@@ -95,4 +97,22 @@ test("every console image in the tree is a pick, and every pick is shown by a RE
   assert.deepEqual(committed, picks, "docs/images/console holds exactly the picks: run render-images.mjs --console");
   const shown = [...READMES, ...walkMarkdown("docs")].map(read).join("\n");
   for (const file of picks) assert.ok(shown.includes(`console/${file}`), `${file} is shown somewhere`);
+});
+
+test("What a job gets says what the console says: the words a row reads, and every line of the Loaded card by a plain name", () => {
+  const start = ROOT.indexOf("## What a job gets\n");
+  const end = ROOT.indexOf("## How to use it\n");
+  assert.ok(start > 0 && start < end, "the section comes before How to use it");
+  const section = ROOT.slice(start, end);
+  const words = section.replaceAll("**", "").replace(/\s+/g, " ");
+  for (const record of [S.noFlow(), S.extensionFailed()]) assert.ok(words.includes(outcomeNote(record)), outcomeNote(record));
+  // A plain name for each line a reader sees on the image below it. A line added to the card fails here until the list says it.
+  const named = { pi: "pi", Model: "the model", Extensions: "its extensions", Skills: "its skills", MCP: "the outside systems", Tools: "its tools" };
+  assert.deepEqual(loadedRows(S.everything()).map((row) => row.label), Object.keys(named));
+  for (const [label, plain] of Object.entries(named)) assert.ok(words.includes(plain), `${label} is said as ${plain}`);
+  assert.ok(section.includes("console/console-run-loaded.png"), "the section shows the card it describes");
+});
+
+test("the words the root README's new section leans on are in its glossary", () => {
+  for (const word of ["Skill", "Extension", "Overlay", "Host", "MCP server", "Tool", "Base commit", "Staged"]) assert.match(ROOT, new RegExp(`^\\| \\*\\*${word}\\*\\* \\| `, "m"), word);
 });

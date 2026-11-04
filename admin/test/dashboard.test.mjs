@@ -16,7 +16,7 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const dashboardPath = fileURLToPath(new URL("../src/dashboard.ts", import.meta.url));
-const { makeDashboard, targetUrl, createDashboardDeps, FAILED_KEPT_TEXT } = await jiti.import(dashboardPath);
+const { makeDashboard, renderRunList, targetUrl, createDashboardDeps, FAILED_KEPT_TEXT } = await jiti.import(dashboardPath);
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -4132,4 +4132,31 @@ test("the degraded plain panel carries the open input, so a narrow terminal show
   comp.handleInput("\x1b");
   assert.equal(last(6), "[p]au\u2026", "closed again: the key hints");
   await comp.dispose();
+});
+
+test("a completed run that lacked its flow reads so in the panel's list, in a warning's glyph, and its record's outcome stays completed (#800)", async () => {
+  const lacking = { ...SNAPSHOT.runs[0], jobId: "j2", outcome: "completed", loaded: { v: 1, runner: "reported", at: "ready", cut: null, image: null, imageDigest: null, imagePi: null, pi: "1.5.0", flow: { tier: "none", package: null }, sources: [], mcp: [], tools: { active: 1, own: ["read"], job: [] }, problems: { failed: 0, dropped: 0, mcp: 0 }, leftOut: null } };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [lacking, SNAPSHOT.runs[0]] }) }) });
+  await flush();
+  const out = stripAnsi(comp.render(120).join("\n"));
+  await comp.dispose();
+  assert.match(out, /⚠ completed, without its flow/);
+  assert.match(out, /✔ completed/, "the run beside it reads as it did");
+  assert.equal(lacking.outcome, "completed");
+});
+
+test("the panel's detail says it too, and so does the monochrome list, so neither reads such a run as plainly completed (#800)", async () => {
+  const lacking = { ...SNAPSHOT.runs[0], jobId: "j2", outcome: "completed", loaded: { v: 1, runner: "reported", at: "ready", cut: null, image: null, imageDigest: null, imagePi: null, pi: "1.5.0", flow: { tier: "none", package: null }, sources: [], mcp: [], tools: { active: 1, own: ["read"], job: [] }, problems: { failed: 0, dropped: 0, mcp: 0 }, leftOut: { tools: [], packages: false, overlayExtensions: false, restricted: false } } };
+  const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, runs: [lacking, SNAPSHOT.runs[0]] }) }) });
+  await flush();
+  comp.handleInput("\r");
+  await flush();
+  const detail = stripAnsi(comp.render(120).join("\n"));
+  assert.match(detail, /⚠ completed, without its flow/);
+  assert.doesNotMatch(detail, /✔ completed/);
+  await comp.dispose();
+  // The plain twin of the list, for a panel with no width to frame to. It clips its rows far shorter than this, which is why it is read here at a width where the word shows.
+  const lines = renderRunList([{ kind: "run", record: lacking }, { kind: "run", record: SNAPSHOT.runs[0] }], 0, 120);
+  assert.match(lines[0], /j2 · .* · completed, without its flow · /);
+  assert.doesNotMatch(lines[1], /without its flow/);
 });

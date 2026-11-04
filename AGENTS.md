@@ -69,7 +69,8 @@ Two consequences worth internalising before you design anything:
   `overrides`; `.github/scripts/pi-pin-check.mjs` holds those, the lockfile and every hand-written copy of the
   pin to the runner's. A copy of a pi file's logic is pinned by that file's content hash, not by pi's version.
 - **No secrets or PII in logs.** Log key *names*, never values, and never payload text. The run record is
-  PII-free by construction: it holds no attacker-chosen string.
+  PII-free by construction: it holds no attacker-chosen string, but for one named residual: code in the runner's process can forge
+  three things on `loaded`, each within a narrow shape: an extension tool's name, `pi` and each count (`INT-RUN-HISTORY-FILE-CONTRACT`).
 - **Fail loudly, or fail open and say which.** A silent no-op is the worst outcome available here. If a
   feature cannot do what it was asked, it refuses with a reason an operator can act on. Where it fails open,
   the reason is named in the record.
@@ -180,7 +181,8 @@ Two consequences worth internalising before you design anything:
   `worker/test/defer-reasons.test.mjs`; and the design folder's `tokens.json` and `components/bundle.css` against
   the console's pasted copies (`admin/test/design-folder.test.mjs`: the tokens equal, the stylesheet equal or exactly
   the version recorded as waiting to be pasted); and `docs/console.md`'s screens table against `PAGES`
-  (`console-doc-tables.test.mjs`); and each ledger's panels and words against its design card (`console-ledger.test.mjs`,
+  (`console-doc-tables.test.mjs`); and `docs/console.md`'s Loaded states against `LOADED_STATES`, `outcomeNote`'s words in the docs
+  and the requirements, and the root README's What a job gets against the card's lines; and what a run loaded: `INT-RUNNER-EXIT-CODE-PROTOCOL`'s `loaded` table and clamps (`image/runner/test/loaded.test.mjs`), `INT-RUN-HISTORY-FILE-CONTRACT`'s `loaded` table and `docs/global-pi-overlay.md`'s by-tier list (`worker/test/loaded-record.test.mjs`), and `INT-DOCTOR-RESULTS-KEY`'s lists and worst size (`worker/test/host-loads.test.mjs`); and each ledger's panels and words against its design card (`console-ledger.test.mjs`,
   `onCard` for a fragment a test keeps), so a rebuilt card fails until its ledger is re-read; and the READMEs: the docs
   index against `docs/`, the worker's commands against the CLI, every image and cache tag, links to the root README's
   headings, and `launch/console-picks.mjs` against `docs/images/console/` and what shows them (`readmes.test.mjs`); and the record shape each release's `buildRecord` makes from the

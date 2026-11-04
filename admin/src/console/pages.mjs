@@ -39,7 +39,7 @@ import { secretsView } from "../secrets-view.mjs";
 import { secretsHeadline, secretsProblems, secretsProfiles, secretsBundles, secretsAdd, secretsHelp } from "./panels/secrets.mjs";
 import { updatesDescription, updatesHosts, updatesHow, updatesJobs, updatesProblems, updatesRecent } from "./panels/updates.mjs";
 import { connectionsDescription, connectionsProblems, connectionsForges, connectionsEgress, connectionsEndpoints, connectionsNotify, connectionsMcp, connectionsEnvironment, connectionsPackages } from "./panels/connections.mjs";
-import { projectTitle, projectDescription, projectSpend, projectRuns, projectSize, projectMembers, projectSizing, projectRecent, projectAllocation, projectLimits, projectBundle, projectTriggers, projectDelete } from "./panels/project.mjs";
+import { projectTitle, projectDescription, projectSpend, projectRuns, projectSize, projectLoads, projectMembers, projectSizing, projectRecent, projectAllocation, projectLimits, projectBundle, projectTriggers, projectDelete } from "./panels/project.mjs";
 import { triggersNavigation, triggersViewer, triggersCount, triggersNext, triggersSpend, triggersFilters, triggersWeek, triggersSchedules, triggersGithub, triggersGitlab, triggersForgejo, triggersAzure, triggersUnknown, triggersCheck, triggerCheckPage, triggersDescription } from "./panels/triggers.mjs";
 import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
@@ -106,6 +106,7 @@ import {
   runChain, runHeadline, runRecord, runRest, runTranscriptState, runTerminal, runActionsPanel, runSandbox, runSecrets, runModels, runTail, runRecovery, runWhy, runHost, runViewer,
   runChat,
   runCostPanel,
+  runLoaded,
   runInbox,
   runOutcome,
   runWorkspace,
@@ -182,7 +183,7 @@ const PAGE_PANELS = Object.freeze({
   secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
   updates: [["p-up-problems", updatesProblems], ["p-up-jobs", updatesJobs], ["p-up-hosts", updatesHosts], ["p-up-how", updatesHow], ["p-up-recent", updatesRecent]],
   connections: [["p-connection-problems", connectionsProblems], ["p-provider-keys", connectionsProviderKeys], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-subscription-auth", connectionsSubscriptionAuth], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
-  project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
+  project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-loads", projectLoads], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
   triggers: [["p-tr-tabs", triggersNavigation], ["p-tr-viewer", triggersViewer], ["p-tr-count", triggersCount], ["p-tr-next", triggersNext], ["p-tr-spend", triggersSpend], ["p-tr-filters", triggersFilters], ["p-tr-week", triggersWeek], ["p-tr-schedule", triggersSchedules], ["p-tr-github", triggersGithub], ["p-tr-gitlab", triggersGitlab], ["p-tr-forgejo", triggersForgejo], ["p-tr-azure", triggersAzure], ["p-tr-unknown", triggersUnknown], ["p-tr-check", triggersCheck]],
   "trigger-check": [["p-tr-check", triggerCheckPage]],
   // Issue #737: the first run's checklist (empty once the deployment runs), then what needs a person first, what waits,
@@ -191,7 +192,7 @@ const PAGE_PANELS = Object.freeze({
   // swapping panels; on a phone, where the layout is one column, Needs you comes first once the checklist is gone.
   overview: [["p-setup", overviewSetup], ["p-setup-pi", overviewSetupPi], ["p-setup-empty", overviewSetupEmpty], ["p-needs", overviewNeeds], ["p-waiting", overviewWaiting], ["p-active", overviewActive], ["p-spend", overviewSpend], ["p-agent-writes", overviewAgentWrites], ["p-timeline", overviewTimeline], ["p-caps", overviewCaps], ["p-waitlists", overviewWaitlists], ["p-hosts", overviewHosts]],
   runs: [["p-filters", runsFilters], ["p-summary", runsSummary], ["p-runs", runsTable]],
-  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-workspace", runWorkspace], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-answer-draft", runAnswerDraft], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
+  run: [["p-viewer", runViewer], ["p-outcome", runOutcome], ["p-workspace", runWorkspace], ["p-progress", runProgress], ["p-recovery", runRecovery], ["p-transcript", runTranscriptState], ["p-record", runRecord], ["p-rest", runRest], ["p-chat", runChat], ["p-answer-draft", runAnswerDraft], ["p-terminal", runTerminal], ["p-inbox", runInbox], ["p-run", runSummary], ["p-loaded", runLoaded], ["p-sandbox", runSandbox], ["p-secrets", runSecrets], ["p-actions", runActionsPanel], ["p-why", runWhy], ["p-host", runHost], ["p-cost", runCostPanel], ["p-models", runModels], ["p-resources", runResources], ["p-session", runSession], ["p-chain", runChain], ["p-tail", runTail]],
   parked: [["p-questions", parkedQuestions]],
   "answer-rules": [["p-questions", parkedQuestions]],
   ...SPEND_PANELS,
@@ -244,7 +245,7 @@ const PAGE_LAYOUT = Object.freeze({
   "zero-touch": [{ cls: "cards-4 zt-kpis", items: ["p-zt-rate", "p-zt-streak", "p-zt-wait", "p-zt-handled"] }, { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions"] }, { cls: "stack zt-side", items: ["p-zt-causes", "p-zt-fixes"] }] }],
   updates: [{ cls: "stack", items: ["p-up-problems"] }, { cls: "cols updates-layout", items: [{ cls: "stack", items: ["p-up-jobs", "p-up-hosts"] }, { cls: "stack", items: ["p-up-how", "p-up-recent"] }] }],
   connections: [{ cls: "stack", items: ["p-connection-problems"] }, { cls: "cols connections-layout", items: [{ cls: "stack", items: ["p-provider-keys", "p-forges", "p-egress", "p-endpoints", "p-subscription-auth"] }, { cls: "stack", items: ["p-notify", "p-mcp", "p-env", "p-packages"] }] }],
-  project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
+  project: [{ cls: "cards-3 project-kpis", items: ["p-proj-spend", "p-proj-runs", "p-proj-size"] }, { cls: "cols project-layout", items: [{ cls: "stack", items: ["p-proj-loads", "p-proj-members", "p-proj-sizing", "p-proj-recent"] }, { cls: "stack", items: ["p-proj-alloc", "p-proj-limits", "p-proj-bundle", "p-proj-triggers", "p-proj-delete"] }] }],
   triggers: [{ cls: "stack", items: ["p-tr-tabs", "p-tr-viewer"] }, { cls: "cards-3 triggers-kpis", items: ["p-tr-count", "p-tr-next", "p-tr-spend"] }, { cls: "cols triggers-layout", items: [{ cls: "stack triggers-rules", items: ["p-tr-filters", "p-tr-week", "p-tr-schedule", "p-tr-github", "p-tr-gitlab", "p-tr-forgejo", "p-tr-azure", "p-tr-unknown"] }, { cls: "stack triggers-check-side", items: ["p-tr-check"] }] }],
   ...SPEND_LAYOUTS,
   config: [{ cls: "stack", items: ["cf-navigation"] }, { cls: "cols cols--wide-side config-layout", items: [{ cls: "stack", items: ["cf-settings", "cf-triggers", "cf-pause-windows", "cf-scoped-limits", "cf-projects", "cf-files"] }, { cls: "stack", items: ["cf-unset", "cf-mcp-servers", "cf-packages", "cf-secret-profiles", "cf-secret-bundles"] }] }],
@@ -253,7 +254,7 @@ const PAGE_LAYOUT = Object.freeze({
   fleet: [{ cls: "stack", items: ["p-fleetbar", "p-active"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-queues", "p-held", "p-failed", "p-delayed", "p-schedules"] }, { cls: "stack", items: ["p-hosts", "p-doctor"] }] }, { cls: "stack", items: ["p-venues"] }],
   host: [{ cls: "stack", items: ["p-hoststate"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-hostjobs", "p-hostsandboxes", "p-hostbudget", "p-hostcap"] }, { cls: "stack", items: ["p-hostrow", "p-hostdoctor"] }] }],
   venue: [{ cls: "cols", items: [{ cls: "stack", items: ["p-venue-props"] }, { cls: "stack", items: ["p-venue", "p-venue-serves", "p-venue-hosts", "p-venue-fix"] }] }, { cls: "stack", items: ["p-venue-compare"] }],
-  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-workspace", "p-run", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-answer-draft", "p-terminal", "p-inbox", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
+  run: [{ cls: "stack", items: ["p-viewer"] }, { cls: "cols", items: [{ cls: "stack run-main", items: ["p-outcome", "p-workspace", "p-run", "p-loaded", "p-progress", "p-recovery", "p-transcript", "p-record", "p-rest", "p-sandbox", "p-secrets", "p-actions", "p-why", "p-host"] }, { cls: "stack run-side", items: ["p-chat", "p-answer-draft", "p-terminal", "p-inbox", "p-cost", "p-models", "p-resources", "p-session", "p-chain", "p-tail"] }] }],
   overview: Object.freeze([
     Object.freeze({ cls: "cols", items: Object.freeze(["p-setup", Object.freeze({ cls: "stack", items: Object.freeze(["p-setup-pi", "p-setup-empty"]) })]) }),
     Object.freeze({ cls: "cards-4", slotAfter: true, items: Object.freeze(["p-needs", "p-waiting", "p-active", "p-spend"]) }),
@@ -613,11 +614,11 @@ export function returnPathOf(raw) {
 const PAGE_READS = Object.freeze({
   setup: ["snapshot", "setup"],
   models: ["snapshot", "waiting", "models"],
-  sandboxes: ["parkedCount"],
+  sandboxes: ["parkedCount", "hostLoads"],
   "zero-touch": ["parkedCount"],
   overview: ["snapshot", "waiting"],
   runs: ["runsPage", "subscriptions", "runsWindow", "parkedCount"],
-  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount"],
+  run: ["run", "subscriptions", "transcriptMeta", "progress", "inbox", "chat", "actions", "parkedCount", "hostLoads"],
   parked: ["snapshot", "parkedChecks"],
   "answer-rules": ["snapshot", "parkedCount"],
   insights: ["insights", "parkedCount"],
@@ -780,7 +781,20 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     try { const hosts = deps.sandboxes.hosts(); data.sandboxHosts = hosts.config ?? null; data.sandboxHostsProblem = hosts.refusal ?? null; } catch { data.sandboxHosts = null; data.sandboxHostsProblem = "Terminal host configuration could not be read. Inspect its owner, permissions and format."; }
     if (name === "sandboxes") {
       try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }
+      // The run a kept workspace came from, for what opens: its record's `loaded`, unknown when it cannot be read. A read that
+      // failed is not a record with nothing in it, so it says so rather than "not recorded". `readRunById` answers that and does not
+      // throw: `{ unreadable }` or `{ invalid }`, and only `{ missing }` means both places were read and hold none.
+      if (typeof q.id === "string" && typeof deps.fleet?.runById === "function") {
+        let found = null;
+        try { found = await deps.fleet.runById(q.id); } catch { found = { unreadable: true }; }
+        data.sandboxRun = found?.record ?? null;
+        if (found?.unreadable || found?.invalid) data.sandboxRunUnread = true;
+      }
     }
+  }
+  // What the hosts published (issue #800). A missing or failed read is unknown, never an error page and never "the same".
+  if (reads.includes("hostLoads")) {
+    try { data.hostLoads = typeof deps.hostLoads === "function" ? await deps.hostLoads() : null; } catch { data.hostLoads = null; }
   }
   if (name === "zero-touch") {
     try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role }) : null; } catch { data.zeroTouch = null; }
@@ -1052,7 +1066,7 @@ function viewOf(name, ctx) {
 }
 
 /** The viewer card's fixed visible panels. The other ids remain empty for live state swaps. */
-export const RUN_VIEWER_PANELS = Object.freeze(["p-viewer", "p-outcome", "p-progress", "p-transcript", "p-chat", "p-inbox", "p-run"]);
+export const RUN_VIEWER_PANELS = Object.freeze(["p-viewer", "p-outcome", "p-progress", "p-transcript", "p-chat", "p-inbox", "p-run", "p-loaded"]);
 
 /**
  * The run page's panels for a record a NEWER pi-dispatch wrote (issue #761), for both roles: the outcome banner and the

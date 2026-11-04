@@ -1,5 +1,7 @@
 /** Populated ProjectDetail fixture shared by panel, ledger, width and browser checks (#751). */
 import { projectSizeAction } from "../../src/project-view.mjs";
+import { projectLoadsOf } from "../../src/loaded-words.mjs";
+import { billingRecords } from "./loaded-samples.mjs";
 
 export function consoleProjectFixture(now) {
   if (!Number.isFinite(now)) throw new TypeError("consoleProjectFixture needs the injected page clock");
@@ -27,6 +29,7 @@ export function consoleProjectFixture(now) {
     ], totalRuns: 24,
     limits: [{ index: 2, scope: "project:billing", memory: "8g", cpus: 4 }], limitsUnreadable: false,
     bundle: { id: "billing", profile: "vault-bundle", format: "dotenv", declared: "env", optedOut: [3], forkReviews: false, last: { jobId: "gh-ebd7", at: new Date(now - 3_060_000).toISOString(), variables: ["DB_URL", "STRIPE_KEY", "SENTRY_DSN"] } },
+    loads: projectLoadsOf(billingRecords()),
     triggers: [{ index: 2, forge: "github", type: "comment", flow: "fix", count: 8 }, { index: 3, forge: "gitlab", type: "pull_request", flow: "review", count: 2 }],
   };
 }

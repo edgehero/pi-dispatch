@@ -7,6 +7,8 @@ import { bundleDeclaredText } from "../../read-model.mjs";
 import { OUTCOME_KEY_WORDS, reasonWords, shortSentence } from "../../words.mjs";
 import { newerSkippedSentence } from "../../newer-release.mjs";
 import { canAct, runLink, timeHtml, usdText, moneyHtml } from "./common.mjs";
+import { LOADED_WORDS } from "../../loaded-words.mjs";
+import { fixButton, loadedFoot, loadedList, stateLine, wordsHtml } from "./loaded-parts.mjs";
 import { actForm } from "./config-ui.mjs";
 
 const DAY = 86_400_000;
@@ -26,6 +28,7 @@ const gibText = (mib) => Number.isFinite(mib) ? `${(mib / 1024).toFixed(1)} GiB`
 // The worker owns the evidence sentences. Convert only their memory-unit tokens, never a command or reason.
 const memoryWords = (text) => typeof text === "string" ? text.replace(/\b(\d+(?:\.\d+)?)(g|m)\b/g, (_all, value, unit) => gibText(Number(value) * (unit === "g" ? 1024 : 1))) : text;
 const runBadge = (r) => {
+  if (typeof r.note === "string") return ui.badge("attention", r.note);
   const word = OUTCOME_KEY_WORDS[r.outcome];
   return ui.badge(r.outcome === "completed" ? "idle" : word?.status ?? "attention", word ? word.word.charAt(0).toUpperCase() + word.word.slice(1) : "Unknown", { icon: r.outcome === "completed" ? ui.STATUS.ok.icon : null });
 };
@@ -62,6 +65,21 @@ export function projectSize(v) {
   if (!ready(v)) return null;
   const p = data(v); const s = p.size;
   return card("Job size", s ? html`<div class="proj-kv"><b>${sizeText(s.memMiB)}</b><span>and ${Number.isFinite(s.cpuCenti) ? formatCpus(s.cpuCenti) : "unknown"} CPUs per job</span></div>${note(s.memorySource === s.cpuSource ? `From ${s.memorySource === "project row" ? "the project row" : s.memorySource}.` : `Memory from ${s.memorySource}; CPUs from ${s.cpuSource}.`)}${p.sizing?.memory?.reason === "oversized" ? html`<p class="proj-state tone-attention">${ui.icon("attention", { size: "sm" })}<span>Larger than its runs use: ${memoryWords(p.sizing.words?.memory)}. A smaller size is suggested.</span></p>` : null}` : note("The job size is unknown because its settings could not be read."));
+}
+
+/**
+ * What its runs load (issue #800, the ProjectLoads card): the last 7 days' records by host, with a warning when runs of one
+ * project load different things on different hosts. A viewer reads the same words, and the top line has no way to the host.
+ * An agent's page draws no card: its copy has no `loads`, by rule, and "could not be read" would be false.
+ */
+export function projectLoads(v) {
+  if (!ready(v) || v.role === "agent") return null;
+  const l = data(v).loads;
+  if (l === null || l === undefined) return card(LOADED_WORDS.projectTitle, note("What its runs load could not be read."));
+  const opens = v.role === "operator" ? l.links.map((fix) => html`<a class="link" href="${fix.href}">${fix.label}</a> `) : null;
+  const top = html`<p class="ld-top">${stateLine(l.tone, l.icon, l.top)} ${opens}${l.small.map((text) => html`<small>${text}</small>`)}</p>`;
+  const hosts = l.hosts.length === 0 ? null : html`<div class="ld-more ld-host">${ui.tbl({ caption: "What its runs load, by host", stack: true, heads: [{ label: "Host", l: "" }, { label: "Runs", num: true }, { label: "Recorded", num: true }, "Extensions", "Flow"], rows: l.hosts.map((host) => [html`<b class="code">${host.name}</b> ${host.backend === null ? null : ui.vtag(host.backend)}`, { html: String(host.runs), num: true }, { html: String(host.recorded), num: true }, { html: wordsHtml(host.extensions), wide: true }, host.flows.length > 0 ? html`${host.flows.map((flow, at) => html`${at > 0 ? ", " : null}<span class="code">${flow}</span>`)}` : "-"]) })}</div>`;
+  return card(LOADED_WORDS.projectTitle, html`${top}${l.rows.length > 0 ? loadedList(l.rows) : null}${hosts}${l.foot === null ? null : loadedFoot(l.foot)}`, l.sub);
 }
 
 export function projectMembers(v) {

@@ -58,7 +58,7 @@ class Refusal extends Error {}
 
 /** Load the real collaborators. Dynamic so `--help` and the tests never need them; static strings so esbuild inlines them. */
 export async function loadModules() {
-  const [updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
+  const [updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions] = await Promise.all([
     import("../updates-view.mjs"),
     import("@edgehero/pi-dispatch/updates"),
     import("@edgehero/pi-dispatch/console-tokens"),
@@ -90,13 +90,14 @@ export async function loadModules() {
     import("../project-view.mjs"),
     import("../zero-touch-data.mjs"),
     import("../sandbox-data.mjs"),
+    import("../host-loads-view.mjs"),
     import("../models-view.mjs"),
     import("../model-role-plans.mjs"),
     import("../setup-actions.mjs"),
     import("../setup-host-client.mjs"),
     import("./actions.mjs"),
   ]);
-  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
+  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, setupActions, setupHostClient, consoleActions };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -585,6 +586,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const pageDeps = {
       fleet,
       sandboxes,
+      // Doctor publishes these once a run, usually daily, and a run page reads them every tick: `doctorResults`' reason.
+      hostLoads: cachedFor(() => m.hostLoadsView?.readHostLoadsView(redis, { now }) ?? null, { now, ttlMs: INSIGHTS_CACHE_MS }),
       gatewayView: async () => {
         if (gateway) return gateway.view();
         const read = gatewayRegistry();

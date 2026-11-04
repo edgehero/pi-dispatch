@@ -2,6 +2,8 @@ import { answererRun, standingAnswerEditor, offeredAnswerDraft } from "./answere
 import { sandboxLinks, sandboxBrowserLink, sandboxCopy, sandboxNativeLink, sandboxDriverLine } from "../sandbox-links.mjs";
 import { modelRolesTelemetryOf } from "@edgehero/pi-dispatch/run-history";
 import { modelChoiceSentence, providerFailureSentence } from "../../model-words.mjs";
+import { LOADED_WORDS, loadedFold, loadedOf, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, runningVerdict } from "../../loaded-words.mjs";
+import { fixButton, loadedFoot, loadedList, stateLine, wordsHtml } from "./loaded-parts.mjs";
 /**
  * The run page's panels (the outcome banner, progress, inbox, chat and the record's panels), split out of
  * `../panels.mjs` (issue #737), which re-exports what this module exports. The rules every panel keeps (one pure,
@@ -15,7 +17,7 @@ import { forkArchiveFact } from "@edgehero/pi-dispatch/fork-job";
 import { modelIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { UNATTRIBUTED_BACKEND, servesOf, SERVES, declarationOf, BACKENDS } from "@edgehero/pi-dispatch/backends";
-import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleReceivedText, checkpointsText, isProgressSnapshot, progressStaleFor, recordBundle, recordRecovery, recoveredText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile, RUN_RECORD_UNREAD, runPlaces, runPlacesText, SERVES_TEXT, CUSTODY_TEXT, venueCustody, transcriptAbsentText, forgeLinkOf } from "../../read-model.mjs";
+import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT, VENUE_MAY_NOT_STREAM, liveAbsentCause, progressAbsentText, recordSkips, sandboxShellRefusal, bundleCountsText, bundleReceivedText, checkpointsText, isProgressSnapshot, progressStaleFor, recordBundle, recordRecovery, recoveredText, openshellCountsText, openshellHostsText, recordOpenshell, recordSecretsProfile, RUN_RECORD_UNREAD, runPlaces, runPlacesText, SERVES_TEXT, CUSTODY_TEXT, venueCustody, transcriptAbsentText, forgeBaseLinkOf, forgeLinkOf } from "../../read-model.mjs";
 import { CHAIN_MAX_PER_JOB_DEFAULT } from "@edgehero/pi-dispatch/config";
 import { RECOVERY_CAP, RECOVERY_TTL_MS, RECOVERY_MAX_WAIT_MS } from "@edgehero/pi-dispatch/recovery-queue";
 import { recordedEarlier } from "@edgehero/pi-dispatch/run-history";
@@ -197,7 +199,10 @@ export function runOutcome(view) {
   const token = recordReason(r);
   const w = outcomeWord(r.outcome, token);
   const recovering = token === "recovery-enqueued" && [view.data?.chat?.activeJobId, view.data?.chat?.queuedJobId].some((id) => typeof id === "string" && id !== r.jobId);
-  const word = recovering ? "Failed, continuing" : refusedBeforeStart(r) ? w.word === "cancelled" ? "Cancelled before it started" : "Refused before it started" : capitalised(w.known ? w.word : bannerCut(r.outcome));
+  // Issue #800: a clean exit is not proof. The record's outcome stays completed, so every count does; only the word changes.
+  const note = outcomeNote(r);
+  const lacked = outcomeBanner(r);
+  const word = recovering ? "Failed, continuing" : refusedBeforeStart(r) ? w.word === "cancelled" ? "Cancelled before it started" : "Refused before it started" : note ?? capitalised(w.known ? w.word : bannerCut(r.outcome));
   const started = msOf(r.startedAt), ended = msOf(r.endedAt);
   const where = r.host ? ` on ${r.host}${String(r.backend).startsWith("openshell") ? ", in an OpenShell sandbox" : ""}` : "";
   const duration = Number.isFinite(started) && Number.isFinite(ended) ? `: finished in ${ageText(ended - started)}${where}` : where;
@@ -208,8 +213,8 @@ export function runOutcome(view) {
   const recoveryId = view.data?.chat?.activeJobId ?? view.data?.chat?.queuedJobId;
   const recoveryActions = recovering ? html`${typeof recoveryId === "string" && RUN_ID_RE.test(recoveryId) ? ui.btn({ href: `/run?id=${encodeURIComponent(recoveryId)}`, label: "Open recovery run", kind: "primary", icon: "running" }) : null}${view.data?.siblings?.map((s) => ui.btn({ href: `/run?id=${encodeURIComponent(s.jobId)}`, label: "Open sibling replica", kind: "sm", icon: "runs" }))}` : null;
   const fixLink = r.outcome === "policy" && !["awaiting-input", "awaiting-approval"].includes(token) && /^[a-f0-9]{64}$/.test(r.touchScopeId ?? "") ? ui.btn({ href: `/config?becauseRun=${encodeURIComponent(r.jobId)}`, label: "Fix configuration", kind: "sm", icon: "config" }) : null;
-  const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
-  return ui.banner({ block: true, status: recovering ? "running" : w.status, title: `${word}${refusedBeforeStart(r) ? "" : duration}`, body: html`<p>${reason}</p>${next}${(view.data?.children?.length ?? 0) > 0 || r.chainRefused > 0 ? html`<p>It queued ${view.data?.children?.length ?? 0} runs from /outbox${r.chainRefused > 0 ? `, and ${r.chainRefused} more requests were refused: a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT}` : ""}. ${view.data?.children?.map((child) => runLink(child.jobId))}</p>` : null}${refusedBeforeStart(r) ? html`<p>Nothing was spent.</p>` : href ? html`<p>Merges are never automatic: a person merges the pull request on the forge.</p>` : null}`, actions });
+  const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${lacked ? lacked.fixes.map((fix) => fixButton(fix, { repositoryHref: forgeBaseLinkOf(r, view.env) })) : null}${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
+  return ui.banner({ block: true, status: recovering ? "running" : note !== null ? "attention" : w.status, title: `${word}${refusedBeforeStart(r) ? "" : duration}`, body: html`${lacked === null || token ? html`<p>${reason}</p>` : null}${lacked === null ? null : lacked.sentences.map((sentence) => html`<p>${sentence}</p>`)}${next}${(view.data?.children?.length ?? 0) > 0 || r.chainRefused > 0 ? html`<p>It queued ${view.data?.children?.length ?? 0} runs from /outbox${r.chainRefused > 0 ? `, and ${r.chainRefused} more requests were refused: a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT}` : ""}. ${view.data?.children?.map((child) => runLink(child.jobId))}</p>` : null}${refusedBeforeStart(r) ? html`<p>Nothing was spent.</p>` : href ? html`<p>Merges are never automatic: a person merges the pull request on the forge.</p>` : null}`, actions });
 }
 
 /**
@@ -672,12 +677,32 @@ function skipRows(r, view) {
   ];
 }
 
+/** What today's triggers file says the trigger matches, or nothing: an agent's copy keeps none of it, and an empty clause would still name the file. */
+function triggerMatchWords(view) {
+  const trigger = view.data?.trigger;
+  const said = trigger ? [trigger.phrase, trigger.label, trigger.pattern].filter(Boolean).join(", ") : "";
+  return said === "" ? "" : `: ${said} (as the triggers file says now)`;
+}
+
+/**
+ * The Run card's MCP row: what today's triggers file names, and only where nothing better is on the page. A record whose `loaded.mcp`
+ * says what connected is the Loaded card's, and today's file beside it could disagree. Every other record says nothing of it (older,
+ * `absent`, `invalid`, `cut`, stopped at the loader), so the row stands. An agent's page has no row: its copy has no `loaded`, so "the record
+ * does not say" would be false of it, and the projection keeps no server's name, so it would read "none" of a trigger that names one.
+ */
+function triggerServersRow(view, r) {
+  const trigger = view.data?.trigger;
+  if (!trigger || view.role === "agent") return null;
+  const servers = trigger.mcp?.length ? trigger.mcp.join(", ") : "none";
+  return Array.isArray(loadedOf(r)?.mcp) ? null : `${servers} (as the triggers file says now; the record does not say which connected)`;
+}
+
 /**
  * The run summary's OpenShell rows (issue #712): "Sandbox policy" (the mode, the credential providers and placeholders
  * the sandbox was given) and "Rule hosts" (the hosts its policy admitted, with the count of any the record does not
  * list), the worker's rebuild (`recordOpenshell`: hosts held to the host-name charset), escaped by the renderer; and
  * "Secrets profile", the profile NAME run.secrets resolved through. No row for a record without the keys, so every
- * other run renders byte-identical. MCP connection state is not recorded on any venue, so no row claims it.
+ * other run renders byte-identical. MCP connection state is no part of these fields: the record's `loaded.mcp` holds it (#800).
  */
 function openshellRows(r) {
   const o = recordOpenshell(r);
@@ -758,8 +783,8 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Provider failure", providerFailureSentence(r.providerFailure)],
     ["Provider reset", providerFailureOf(r.providerFailure)?.resetAt !== undefined ? timeHtml(r.providerFailure.resetAt) : null],
     ["Turns", `${cell(r.turns)}${Number.isSafeInteger(r.maxTurns) ? ` of ${r.maxTurns}` : ""}`],
-    ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? html`<a href="/config">row ${r.triggerIndex + 1}</a> (${cell(r.triggerType)})${view.data?.trigger ? `: ${[view.data.trigger.phrase, view.data.trigger.label, view.data.trigger.pattern].filter(Boolean).join(", ")} (as the triggers file says now)` : ""}` : "-"],
-    ["MCP", view.data?.trigger ? `${view.data.trigger.mcp?.length ? view.data.trigger.mcp.join(", ") : "none"} (as the triggers file says now; the record does not say which connected)` : null],
+    ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? html`<a href="/config">row ${r.triggerIndex + 1}</a> (${cell(r.triggerType)})${triggerMatchWords(view)}` : "-"],
+    ["MCP", triggerServersRow(view, r)],
     ["Replica", Number.isInteger(r.replica) ? html`${r.replica} of ${cell(r.replicas)}${view.data?.siblings?.length ? html` · ${view.data.siblings.map((s) => html`${runLink(s.jobId)} ${ui.outcomeBadge(s.outcome, recordReason(s))} `)}` : null}` : null],
     ["Queued", Number.isFinite(msOf(r.queuedAt)) ? timeHtml(msOf(r.queuedAt)) : null],
     ["Wait for a slot", Number.isFinite(msOf(r.queuedAt)) && Number.isFinite(started) ? ageText(started - msOf(r.queuedAt)) : null],
@@ -854,7 +879,7 @@ export function runHeadline(view) {
   const chat = view.data?.chat;
   const recovering = r?.reason === "recovery-enqueued" && (chat?.activeJobId || chat?.queuedJobId);
   const active = chat?.jobState === "active" || runningWithoutRecord(view);
-  const badge = recovering ? ui.badge("running", "Recovering") : r ? ui.outcomeBadge(r.outcome, recordReason(r)) : ui.badge(active ? "running" : "idle", active ? "Running" : QUEUED_STATES.includes(chat?.jobState) ? "Queued" : "Unknown");
+  const badge = recovering ? ui.badge("running", "Recovering") : r ? outcomeNote(r) !== null ? ui.badge("attention", outcomeNote(r)) : ui.outcomeBadge(r.outcome, recordReason(r)) : ui.badge(active ? "running" : "idle", active ? "Running" : QUEUED_STATES.includes(chat?.jobState) ? "Queued" : "Unknown");
   const facts = r ?? a ?? {};
   const cancel = canAct(view) && chat?.jobState === "active" && RUN_ID_RE.test(view.query?.id ?? "") ? ui.actForm({ action: "cancel-active", hidden: [["jobId", view.query.id]], label: "Cancel run", kind: ["sm", "danger"], icon: "cancel" }) : null;
   return html`${badge} ${facts.project ? ui.ptag(facts.project) : null} ${facts.target ? targetLink(facts, view.env) : null} ${facts.flow ?? ""} ${facts.host ? `on ${facts.host}` : ""} ${facts.endedAt ? timeHtml(msOf(facts.endedAt)) : facts.startedAt ? timeHtml(msOf(facts.startedAt)) : null}${cancel}`;
@@ -869,6 +894,33 @@ export function runSummary(view) {
   const a = view.data?.activeRun;
   if (!a) return html``;
   return titled("Run", facts([["Target", targetLink(a, view.env)], ["Project", a.project], ["Flow", a.flow], ["Host", a.host], [VENUE_LABEL, a.backend], ["Provider and model", [a.provider, a.model].filter(Boolean).join(" / ")], ["Queue", a.queue], ["Queued", timeHtml(msOf(a.queuedAt))], ["Started", timeHtml(msOf(a.startedAt))]]));
+}
+
+/**
+ * The Loaded card (issue #800, the RunLoaded and LoadedStates cards): what the job had when it started, from its record, one
+ * line per kind with the details folded. Its top line says whether everything the trigger asks for loaded, or names what
+ * did not, with a way to where each thing is fixed. Both roles read the same words, names, versions, counts and states and
+ * never content; a viewer has no button. A running job's line says when the card arrives: the record is written from the
+ * exit line, and a live card would need the worker to trust a second line during the run. An agent's page draws no card: its copy
+ * of the record has no `loaded`, by rule (`agentReadProjection`), and a card over that copy would say "an older release wrote this".
+ */
+export function runLoaded(view) {
+  if (view.role === "agent") return html``;
+  const r = recordOf(view);
+  if (!r && !runningWithoutRecord(view)) return html``;
+  const v = r ? loadedVerdict(r, view.data?.hostLoads ?? null, { jobState: view.data?.chat?.jobState ?? null }) : runningVerdict(view.data?.activeRun?.triggerIndex);
+  const operator = view.role === "operator";
+  const repositoryHref = r ? forgeBaseLinkOf(r, view.env) : null;
+  const fix = (entry) => (operator ? entry.fixes.map((one) => fixButton(one, { repositoryHref })) : null);
+  // A problem and a chosen line draw their icon and tone; the quiet ones (no record, nothing loaded) are one muted line, as on the card.
+  const line = (entry, lead = null) => html`${lead === null ? null : html`${lead} `}${entry.bold ? html`<b>${entry.bold}</b> ` : null}${entry.rest}${(entry.then ?? []).map((part) => html` <b>${part.bold}</b> ${part.rest}`)}`;
+  const top = v.tone === "idle" ? html`<span class="muted">${line(v)}</span>` : stateLine(v.tone, v.icon, line(v, v.lead));
+  const small = v.small.map((text) => html`<small>${text}</small>`);
+  const also = v.also.map((entry) => html`<p class="ld-top">${stateLine(entry.tone, entry.icon, line(entry))} ${fix(entry)}</p>`);
+  const rows = r ? loadedRows(r) : [];
+  const fold = r ? loadedFold(r) : [];
+  const folded = fold.length === 0 ? null : html`<details class="ld-more"><summary>${LOADED_WORDS.fold}</summary><div class="tbl-wrap"><table class="tbl tbl--stack ld-fold"><caption class="sr">What ${r.jobId} loaded</caption><thead><tr><th scope="col">Kind</th><th scope="col">Name or count</th><th scope="col">Version</th><th scope="col">From</th></tr></thead><tbody>${fold.map((row) => html`<tr><td>${row.kind}</td><td class="ld-fold__n">${wordsHtml(row.name)}</td><td${row.version ? html` data-l="Version"` : null}>${row.version}</td><td class="wide">${wordsHtml(row.from, { repositoryHref })}</td></tr>`)}</tbody></table></div></details>`;
+  return ui.card({ title: LOADED_WORDS.title, sub: LOADED_WORDS.sub, body: html`<p class="ld-top">${top} ${fix(v)}${small}</p>${also}${rows.length > 0 ? loadedList(rows) : null}${folded}${fold.length > 0 ? loadedFoot(LOADED_WORDS.foot) : null}` });
 }
 
 export function runRecord(view) {

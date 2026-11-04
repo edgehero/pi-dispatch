@@ -16,6 +16,7 @@ import {
 	getAgentDir,
 	ModelRuntime,
 	SettingsManager,
+	VERSION,
 } from "@earendil-works/pi-coding-agent";
 // Issue #645: pi-coding-agent does not re-export runToolCall, the one call that runs a tool through the session's own
 // hooks without the agent loop. Pinned exactly in package.json, and pinned-api.test.mjs holds that this resolves to
@@ -49,6 +50,7 @@ import {
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
 import { readCgroupUsage } from "./src/cgroup-usage.mjs";
 import { createExitWriter, readExitKey, writeAllSync } from "./src/exit-line.mjs";
+import { createLoadedRecorder, createLoadTee } from "./src/loaded.mjs";
 import { createJobModelRuntime, loadPiAuthStorage } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { isNestedRunner, runAsPiCli } from "./src/child-route.mjs";
@@ -163,6 +165,11 @@ let frameChannel = null;
 let stopMcp = async () => {};
 
 async function main() {
+	// Issue #800: what this job loaded, noted through the #796 route, so whichever path ends the run carries the latest.
+	// First, because a job refused here on still says which pi refused it. The supervisor's writer has no note: a line it
+	// writes names no `loaded`, which is what tells the worker the runner never got to say.
+	const loaded = createLoadedRecorder({ pi: VERSION, note: (value) => exitWriter.note({ loaded: value }), log });
+	loaded.record("start");
 	// A worker that asked for a signed exit line and did not deliver a usable key: the run goes on with an unsigned
 	// line, which that worker reads as no line at all (the floor, tokens unknown). Said here, by kind only.
 	if (exitKey.problem !== null) log("exit_key_unread", { problem: exitKey.problem });
@@ -391,6 +398,7 @@ async function main() {
 
 	if (watchDecisionInput || questionGroupingInput) {
 		// A deterministic classifier owns this container. No extension loader or agent session exists.
+		loaded.record("none");
 		let result;
 		try { result = questionGroupingInput ? await executeQuestionGrouping({ input: questionGroupingInput, runtime: modelRuntime }) : await executeWatchDecision({ input: watchDecisionInput, runtime: modelRuntime }); }
 		finally { usageMeter.uninstall(); failureObserver.uninstall(); subscriptionCredentials?.uninstall(); subscriptionRegistration?.uninstall(); }
@@ -440,13 +448,15 @@ async function main() {
 		exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...meteredExitFields(), turns: 0, retryTurns: 0, toolsStarted: 0, replaySafe: false, answerDraftDigest: answerTools.state.receipt });
 		return outcome.code;
 	}
+	// Teed, so an extension is failed or dropped on the record exactly when the log says so (issue #800).
+	const loadTee = createLoadTee(log, { overlayExtensions: `${GLOBAL_PI_DIR}/extensions` });
 	const resourceLoader = await buildLoadedResourceLoader({
 		...(answerTools ? { watchExtensionFactories: answerTools.factories } : watchTools ? { watchExtensionFactories: watchTools.factories } : {}),
 		watchReadOnly: watchReadOnly || Boolean(answerDraftInput),
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
 		packagePaths: cfg.packages,
-		log,
+		log: loadTee.log,
 		...(extensionFactories.length > 0 && { extensionFactories }),
 	});
 
@@ -460,6 +470,21 @@ async function main() {
 		log("package_canary_load", { load: canaryLoad });
 	}
 	const { skills, diagnostics } = resourceLoader.getSkills();
+	// The protected roots are derived from the loader's own constants rather than written out again, so a change to where
+	// the worker materialises .pi/ cannot leave these checks guarding paths that no longer exist.
+	const protectedRoots = [`${JOB_PI_DIR}/skills`, TRIGGER_SKILLS_DIR, `${GLOBAL_PI_DIR}/skills`];
+	const shadowed = findShadowedSkills(diagnostics, { packageRoots: cfg.packages, protectedRoots });
+	loaded.record("loader", () => ({
+		roots: { packages: cfg.packages, jobPi: JOB_PI_DIR, triggerSkills: TRIGGER_SKILLS_DIR, overlay: GLOBAL_PI_DIR, workspace: WORKSPACE },
+		flow: cfg.flow,
+		extensions: resourceLoader.getExtensions().extensions.map((extension) => extension.path),
+		skills,
+		prompts: resourceLoader.getPrompts().prompts.map((prompt) => prompt.filePath),
+		themes: resourceLoader.getThemes().themes.map((theme) => theme.sourcePath),
+		failures: loadTee.failures(),
+		drops: loadTee.drops(),
+		shadowed,
+	}));
 
 	// REPORT a flow that resolved in NO tier (issue #189). The trigger's run.flow reaches the model
 	// as prompt prose, and pi never matches prose against loaded skill names, so without this line a
@@ -493,12 +518,6 @@ async function main() {
 		// against a procedure that is not the one now running, so it may do less than it claims. Refusing
 		// the job would be refusing a conflict we have already resolved the documented way; saying
 		// nothing would leave the operator to discover it from behaviour.
-		//
-		// The protected roots are derived from the loader's own constants rather than written out
-		// again, so a change to where the worker materialises .pi/ cannot leave this check guarding
-		// paths that no longer exist.
-		const protectedRoots = [`${JOB_PI_DIR}/skills`, TRIGGER_SKILLS_DIR, `${GLOBAL_PI_DIR}/skills`];
-		const shadowed = findShadowedSkills(diagnostics, { packageRoots: cfg.packages, protectedRoots });
 		if (shadowed.length > 0) {
 			// The winner is read off the LOADED skill, not off pi's pre-override diagnostic: the
 			// diagnostic records what the raw load produced, and reporting that as the outcome would
@@ -524,7 +543,8 @@ async function main() {
 				// per-root visibility until now, and a package prompt template changes what a /name
 				// dispatches even when it shadows nothing.
 				promptPaths: resourceLoader.getPrompts().prompts.map((prompt) => prompt.filePath),
-				themePaths: resourceLoader.getThemes().themes.map((theme) => theme.filePath),
+				// `sourcePath`, not `filePath`: pi's Theme names no `filePath`, so this count read 0 for every package.
+				themePaths: resourceLoader.getThemes().themes.map((theme) => theme.sourcePath),
 			}),
 		});
 	}
@@ -576,6 +596,16 @@ async function main() {
 		log("tools_excluded", { excludeTools: cfg.excludeTools, active: session.getActiveToolNames() });
 	}
 
+	// What the session holds, read again after the servers connect, since a server's direct tools register then. Before
+	// the first prompt, on every path, so nothing the agent writes can reach it (issue #800).
+	const liveTools = () => ({
+		tools: session.getAllTools().map((tool) => ({ name: tool.name, path: tool.sourceInfo?.path })),
+		active: session.getActiveToolNames(),
+		ownNames: excludableToolNames(),
+		mcp: jobMcp ? jobMcp.lifecycle.states() : [],
+	});
+	loaded.record("session", liveTools);
+
 	// Deterministic re-arm of the meter's COMPAT half. An extension that registered an api id in pi-ai's legacy
 	// registry while it loaded or during createAgentSession left it unwrapped until now; the unref'd interval
 	// inside the meter would eventually catch it, and this closes the window before the first prompt. (The
@@ -604,7 +634,17 @@ async function main() {
 	if (jobMcp) {
 		const shadow = mcpShadow({ tools: session.getAllTools(), commands: session.extensionRunner.getRegisteredCommands() });
 		if (shadow !== null) throw configError(`another extension registers ${shadow}, which only the job's MCP servers may`, "mcp-shadowed");
-		await jobMcp.lifecycle.start(session.extensionRunner.createContext());
+		// In a finally, so a job a failed or timed-out server stops still names which one: `session`, since it never became
+		// ready. An MCP failure never lets the run go on; this only records it on the way out.
+		let connected = false;
+		try {
+			await jobMcp.lifecycle.start(session.extensionRunner.createContext());
+			connected = true;
+		} finally {
+			loaded.record(connected ? "ready" : "session", liveTools);
+		}
+	} else {
+		loaded.record("ready", liveTools);
 	}
 
 	// The one packages count that cannot ride packages_loaded: a COMMAND exists only once the

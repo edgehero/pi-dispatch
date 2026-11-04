@@ -1,4 +1,5 @@
 import { CANARY_LOADS, recordedPackageCanary } from "./package-canary-record.mjs";
+import { LOADED_LINE_CUT, recordedLoaded } from "./loaded-record.mjs";
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 import { ANSWER_ID_RE, ANSWER_RUN_RE } from "./answerer.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
@@ -698,6 +699,18 @@ export function parseExitCanaryLoad(text) {
 	return CANARY_LOADS.includes(parsed?.canaryLoad) ? parsed.canaryLoad : null;
 }
 
+/**
+ * The decisive exit line's `loaded` as the runner wrote it (issue #800), `LOADED_LINE_CUT` when the line says the runner had
+ * one and no room for it (`loadedCut: true`), or null when it says neither, which is a line from an older image or from the
+ * supervisor. Handed on unread: every check is `rebuildLoaded`'s (loaded-record.mjs), which knows what the line is checked
+ * against, and the sink knows none of that. A value that is no object is still handed on, so it reads as a line that failed
+ * its checks and not as a line that said nothing. Never throws.
+ */
+export function parseExitLoaded(text) {
+	const line = decisiveExitLine(text);
+	return line?.loaded ?? (line?.loadedCut === true ? LOADED_LINE_CUT : null);
+}
+
 /** The decisive exit line's `steer` block (`steerCounts`), or null. Never throws. */
 export function parseExitSteer(text) {
 	const parsed = decisiveExitLine(text);
@@ -1045,6 +1058,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const bundle = recordedBundle(source.bundle);
 	if (bundle !== null && !Object.hasOwn(OPENSHELL_VENUE_MODES, backend)) delete bundle.placeholderNames;
 	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
+	const loaded = recordedLoaded(source.loaded);
 	return {
 		jobId: job.id,
 		// Internal references can refuse before they resolve to a local execution envelope. Keep the public
@@ -1302,6 +1316,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(touchTracking ? { touchTrackingVersion: 1, touchScopeId: touchScopeOf(data, host) } : {}),
 		...(Array.isArray(source.touches) ? { touches: source.touches.slice(0, 16).map(cleanTouch).filter(Boolean) } : {}),
 		...(source.touchLineageSkipped === "source-unavailable" ? { touchLineageSkipped: "source-unavailable" } : {}),
+		// What the run loaded (issue #800, INT-RUN-HISTORY-FILE-CONTRACT): REBUILT (`recordedLoaded`), a display no decision
+		// reads. CONDITIONAL and the last key before `v`, so a refusal before the image was known, and every older record,
+		// is byte-identical to what it was. Names only from what the deployment staged and configured, and counts for what
+		// a repository holds. A repository extension can still forge what the line alone says, each held to a closed shape
+		// (loaded-record.mjs says which and what is left).
+		...(loaded !== null ? { loaded } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
 		// asks one key, and a missing one reads as 1.
@@ -1617,6 +1637,9 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// Issue #646: a steer-armed runner's inbox counts, off the same line.
 			const steer = parseExitSteer(exitText);
 			const canaryLoad = parseExitCanaryLoad(exitText);
+			// Issue #800: never off an unsigned line, a read any tool's write could feed. The signature is necessary and not
+			// sufficient: what is on the line is judged by `rebuildLoaded`, because an extension shares the signer's process.
+			const loaded = keyed && exitAuth === "verified" ? parseExitLoaded(exitText) : null;
 			try {
 				if (stream !== null) {
 					const s = stream;
@@ -1644,7 +1667,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			// (issue #507) only when the line named one, for the same reason.
 			// `resources` (issue #596) only when the line carried a block, and `exitOomKilled` only when true, for the same reason.
 			// `recovery` (issue #645) only when the line carried one, for the same reason, and `steer` (issue #646) the same.
-			return { ...(canaryLoad !== null ? { canaryLoad } : {}), turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
+			return { ...(canaryLoad !== null ? { canaryLoad } : {}), ...(loaded !== null ? { loaded } : {}), turns, tokens, session, usage, context, exitReason, exitLineCode, ...(answerDraftDigest ? { answerDraftDigest } : {}), ...(questionRefDigest ? { questionRefDigest } : {}), ...(modelRoles ? { modelRoles } : {}), ...(providerFailure ? { providerFailure } : {}), ...(toolsStarted !== null ? { toolsStarted } : {}), ...(replaySafe !== null ? { replaySafe } : {}), ...(approval ? { approval } : {}), ...(exitWhy !== null ? { exitWhy } : {}), ...(resources !== null ? { resources } : {}), ...(oomKilled ? { exitOomKilled: true } : {}), ...(recovery !== null ? { recovery } : {}), ...(steer !== null ? { steer } : {}), ...(keyed ? { exitAuth } : {}) };
 		}
 
 		return { write, close };

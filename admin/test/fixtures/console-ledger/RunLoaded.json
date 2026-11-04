@@ -1,0 +1,303 @@
+{
+  "card": "RunLoaded",
+  "pr": 800,
+  "words": "92845bed14e690eb69df5341103cbe8b6a57c852706a247eb267a5771662de1b",
+  "elements": [
+    {
+      "el": "p-outcome",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runOutcome",
+      "golden": [
+        "panels/run-loaded.operator"
+      ],
+      "shows": "Completed: finished in"
+    },
+    {
+      "el": "p-run",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runSummary",
+      "golden": [
+        "panels/run-loaded.operator"
+      ]
+    },
+    {
+      "el": "p-loaded",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/run.mjs#runLoaded",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": [
+        "Loaded",
+        "what this run had"
+      ]
+    },
+    {
+      "el": "p-cost",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runCostPanel",
+      "golden": [
+        "panels/run-loaded.operator"
+      ]
+    },
+    {
+      "el": "p-resources",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runResources",
+      "golden": [
+        "panels/run-loaded.operator"
+      ]
+    },
+    {
+      "el": "p-session",
+      "kind": "panel",
+      "status": "real",
+      "source": "admin/src/console/panels/run.mjs#runSession",
+      "golden": [
+        "panels/run-loaded.operator"
+      ]
+    },
+    {
+      "el": "The top line says whether everything the trigger asks for loaded",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": "Everything trigger 3 asks for loaded."
+    },
+    {
+      "el": "pi: the version and image the job ran, with the image id",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedRows",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": [
+        "pi 1.5.0 in",
+        "pi-job:4.3.1",
+        "sha256:7c1e0b4…",
+        "as mini1 ran it"
+      ]
+    },
+    {
+      "el": "Model: the model and its calls",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedRows",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": [
+        "anthropic / claude-sonnet-5-5",
+        "14 calls"
+      ]
+    },
+    {
+      "el": "Extensions: each staged package with its exact version, overlay extensions by name, and how many came from the repository",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedRows",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": [
+        "pi-lint 1.4.2, pi-test-runner 0.9.0",
+        "staged on mini1"
+      ]
+    },
+    {
+      "el": "Skills: the flow and where it was found, and how many more loaded, by tier",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedRows",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": [
+        "the flow, from the repository",
+        "and 3 more: 2 from the repository, 1 from pi-test-runner"
+      ]
+    },
+    {
+      "el": "MCP: each server the trigger names, its state and how many tools it brought",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedRows",
+      "golden": [
+        "panels/run-loaded-mcp-connected.operator"
+      ],
+      "shows": "linear connected, with 12 tools"
+    },
+    {
+      "el": "Tools: how many were active, pi's own and the job's own by name, and which the trigger removed",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedRows",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": [
+        "10 active",
+        "read, bash, edit and write, 5 from the extensions, and report_progress, the job’s own; none removed"
+      ]
+    },
+    {
+      "el": "What was left out on purpose is said as such, never as missing",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "golden": [
+        "panels/run-loaded-left-out.operator",
+        "panels/run-loaded-left-out-overlay.operator"
+      ],
+      "shows": "Left out"
+    },
+    {
+      "el": "Each item, and where it came from folds a table with every name and count",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedFold",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.fold",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": [
+        "Each item, and where it came from",
+        "Name or count",
+        "Skill replaced",
+        "Prompt template",
+        "Extension dropped",
+        "Theme",
+        "Read them there",
+        "by a skill of that name from the repository, the skills folder or the overlay"
+      ]
+    },
+    {
+      "el": "On a phone a row reads kind, then name or count, with Version only where there is one",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/console/panels/run.mjs#runLoaded",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": "data-l=\"Version\""
+    },
+    {
+      "el": "What pi loaded when this run started, from its record",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#LOADED_WORDS",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.foot",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": "What pi loaded when this run started, from its record"
+    },
+    {
+      "el": "Today: the model, the flow's name, the per-model usage, the trigger row and the host",
+      "kind": "provides",
+      "status": "real",
+      "source": "worker/src/run-history.mjs#buildRecord"
+    },
+    {
+      "el": "One bounded loaded field on the runner's signed exit line, kept in the run record",
+      "kind": "provides",
+      "status": "new",
+      "source": "worker/src/loaded-record.mjs#rebuildLoaded"
+    },
+    {
+      "el": "The worker adds the image and its id",
+      "kind": "provides",
+      "status": "new",
+      "source": "worker/src/loaded-record.mjs#loadedWithImage"
+    },
+    {
+      "el": "It adds the commit the workspace was prepared at too, so the fold's Read them there and a repository extension's problem open the code that ran",
+      "kind": "provides",
+      "status": "new",
+      "source": "worker/src/loaded-record.mjs#loadedWithBase"
+    },
+    {
+      "el": "Past its bound the record says it was cut and never drops an entry silently",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.cutCompact",
+      "golden": [
+        "panels/run-loaded-cut.operator"
+      ],
+      "shows": "Cut to fit: this record keeps the counts and leaves out package, overlay and tool names."
+    },
+    {
+      "el": "Older records have no loaded field, and say so",
+      "kind": "provides",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.notRecorded",
+      "golden": [
+        "panels/run-loaded-not-recorded.operator"
+      ],
+      "shows": "Not recorded: an older release wrote this run’s record."
+    },
+    {
+      "el": "Operators and viewers alike: the card holds names, versions, counts and states, never content",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/console/panels/run.mjs#runLoaded",
+      "golden": [
+        "panels/run-loaded.viewer"
+      ],
+      "shows": "pi-lint 1.4.2, pi-test-runner 0.9.0"
+    },
+    {
+      "el": "gh-9575, acme/web#490, fix on mini1, trigger 3 and the model",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample run, as on RunEnded; drawn by the goldens' own records because the shared fixture sets packages false on every trigger."
+    },
+    {
+      "el": "pi 1.5.0, pi-job:4.3.1 and the staged packages pi-lint 1.4.2 and pi-test-runner 0.9.0",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample pairing, as on Updates, Sandboxes and Connections."
+    },
+    {
+      "el": "The image id, the counts, the replaced skill, and the tool names and split",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample values."
+    }
+  ]
+}

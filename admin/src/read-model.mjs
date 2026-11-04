@@ -32,6 +32,7 @@ import { logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { LOADED_BASE_SHA_RE } from "@edgehero/pi-dispatch/loaded-record";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
@@ -117,6 +118,7 @@ import { BUNDLE_SKIPPED_TEXT, LIVE_SKIPPED_TEXT, STEER_SKIPPED_TEXT } from "@edg
 // A record reason as every surface carries it (issue #737): `recordReason`, the worker's own token charset (its
 // import-free leaf), else null. The one door: no reader here hands out a record's reason another way.
 import { OUTCOME_KEYS, OUTCOME_WORDS, outcomeKey, outcomeWord, recordReason, rowNumber } from "./words.mjs";
+import { outcomeNote } from "./loaded-words.mjs";
 
 // Re-exported so the command layer reaches the key contract through the admin's single worker-coupling
 // funnel, never re-deriving the five known keys.
@@ -5109,6 +5111,7 @@ export function createFleetReader(
           project: text(projectOf(data, projects), PROJECT_ID_RE), host: text(host?.name, WORKER_NAME_RE),
           queue: text(job.queueName ?? job.queue?.name, /^[A-Za-z0-9@._-]{1,200}$/),
           queuedAt: queuedAtOf(job), startedAt: instant(job.processedOn),
+          triggerIndex: Number.isSafeInteger(data.trigger?.matched?.index) && data.trigger.matched.index >= 0 ? data.trigger.matched.index : null,
         };
       } catch {
         return null;
@@ -7414,8 +7417,9 @@ export function recordBundle(record) {
  * `secretsProfile` are rebuilt the same way (names that are operator config, and counts; never a resolver path).
  * Issue #737: the `reason` is the one every surface shows (words.mjs `recordReason`): a token, else null, so an older
  * worker's error text (a forge's API path, an address, a library's words) reaches no model either. Every other key is
- * the record's own, and a record with none of the three whose reason is a token or null is returned as it is (the same
- * object), so every other run reads byte-identical.
+ * the record's own but `loaded`, which goes, and a record with none of them whose reason is a token or null is returned
+ * as it is (the same object), so every other run reads byte-identical. Issue #800: what the field said of a completed run that
+ * lacked its flow or an extension stays as `note`, `outcomeNote`'s closed sentence: fixed words and a count, no name.
  */
 export function modelRunRecord(record, { list = false } = {}) {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return record;
@@ -7424,15 +7428,19 @@ export function modelRunRecord(record, { list = false } = {}) {
   // model's own sentence: it names the fields it is given, where a page's names what the page shows.
   if (fromNewerRelease(record)) return { ...coreRecordOf(record), newer: true, note: NEWER_RECORD_MODEL_NOTE };
   const hasBundle = Object.hasOwn(record, "bundle");
+  // Issue #800: the list of what a run loaded is for the console's operator and viewer views, and no model reads it.
+  const hasLoaded = Object.hasOwn(record, "loaded");
   const hasOpenshell = Object.hasOwn(record, "openshell");
   const hasProfile = Object.hasOwn(record, "secretsProfile");
   const hasRoles = Object.hasOwn(record, "modelRole") || Object.hasOwn(record, "modelRoles");
   const hasFailover = Object.hasOwn(record, "modelWhy") || Object.hasOwn(record, "providerFailure");
   const freeReason = Object.hasOwn(record, "reason") && record.reason !== null && recordReason(record) === null;
-  if (!hasBundle && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles) return record;
-  const { modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
+  if (!hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles) return record;
+  const { modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
   const out = { ...rest };
   if (freeReason) out.reason = null;
+  const lacked = outcomeNote(record);
+  if (lacked !== null) out.note = lacked;
   if (modelRolesTelemetryOf(record.modelRoles)) out.modelRoles = modelRolesTelemetryOf(record.modelRoles);
   if (typeof record.modelRole === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(record.modelRole)) out.modelRole = record.modelRole;
   if (MODEL_WHY.includes(record.modelWhy)) out.modelWhy = record.modelWhy;
@@ -7513,7 +7521,45 @@ function forgeBase(kind, env) {
  * instance URL that is not http(s), or an unknown host. Never a guessed host: a link an operator clicks to the wrong
  * place is worse than none.
  */
-export function forgeLinkOf(record, env = {}) {
+/**
+ * The record's repository on its forge, or null: `forgeLinkOf`'s checks and instance rule, without the issue. For a problem
+ * fixed in the repository (issue #800), through `forgeBaseLinkOf`.
+ */
+export function forgeRepoLinkOf(record, env = {}) {
+  const parts = forgeTargetParts(record);
+  if (parts === null) return null;
+  const { kind, repo } = parts;
+  if (kind === "github") return `https://github.com/${repo}`;
+  const base = forgeBase(kind, env);
+  if (base === null) return null;
+  if (kind === "azure") {
+    const [project, name] = repo.split("/");
+    return `${base}/${project}/_git/${name}`;
+  }
+  return `${base}/${repo}`;
+}
+
+/** Where a commit's page sits under a repository's own link, per forge. Held to every forge kind by a test. */
+export const FORGE_COMMIT_PATH = Object.freeze({ github: "/commit/", gitlab: "/-/commit/", forgejo: "/commit/", azure: "/commit/" });
+
+/**
+ * Where a problem in a run's repository is read (issue #800): the commit its record names on the forge, the code that ran,
+ * or the repository itself where the record names none, or null where no link can be built. Built on `forgeRepoLinkOf`, so it
+ * refuses what that refuses, and the commit is held to the rule `recordedLoaded` keeps it by, so a button's words
+ * (`repositoryFix`) and its address agree about which records name one.
+ */
+export function forgeBaseLinkOf(record, env = {}) {
+  const repository = forgeRepoLinkOf(record, env);
+  const sha = record?.loaded?.baseSha;
+  if (repository === null || typeof sha !== "string" || !LOADED_BASE_SHA_RE.test(sha)) return repository;
+  return `${repository}${FORGE_COMMIT_PATH[record.kind] ?? "/commit/"}${sha}`;
+}
+
+/**
+ * A run's forge target as a link may read it: `{ kind, repo, sep, n }`, or null. The one reading of a target for a link, so a repository's
+ * link and an issue's cannot disagree about which targets are safe to build one from.
+ */
+function forgeTargetParts(record) {
   const kind = record?.kind;
   const target = record?.target;
   if (!isForgeKind(kind) || typeof target !== "string" || target.length > 300 || hasControls(target)) return null;
@@ -7522,6 +7568,13 @@ export function forgeLinkOf(record, env = {}) {
   const [, repo, sep, n] = m;
   // A `.` or `..` segment would walk the link's path out of the repository on the forge's own host.
   if (!FORGE_REPO_RE[kind]?.test(repo) || repo.split("/").some((seg) => seg === "." || seg === "..")) return null;
+  return { kind, repo, sep, n };
+}
+
+export function forgeLinkOf(record, env = {}) {
+  const parts = forgeTargetParts(record);
+  if (parts === null) return null;
+  const { kind, repo, sep, n } = parts;
   const request = sep === "!";
   if (request && FORGES[kind].pullRequestSep !== "!") return null; // a separator this forge never writes
   if (kind === "github") return `https://github.com/${repo}/issues/${n}`;

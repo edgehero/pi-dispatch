@@ -435,7 +435,7 @@ export function mcpServerWhere(server) {
 	return basename(server.command);
 }
 
-const ABSENT_CODES = new Set(["ENOENT", "ELOOP", "ENOTDIR", "ENAMETOOLONG"]);
+export const ABSENT_CODES = new Set(["ENOENT", "ELOOP", "ENOTDIR", "ENAMETOOLONG"]);
 
 /**
  * The overlay's `mcp.json` (`<globalPiDir>/mcp.json`), parsed: `null` when there is none, the `parseOverlayMcp` result

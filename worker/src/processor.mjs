@@ -17,6 +17,7 @@ import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { mergeBundleSecrets } from "./secret-bundles.mjs";
 import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
+import { imageFactsOf, loadedWithBase, loadedWithImage } from "./loaded-record.mjs";
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "./record-reason.mjs";
@@ -337,7 +338,9 @@ export async function runJob(job, deps) {
 	const touches = [];
 	let touchLineageSkipped = null;
 	// Issue #796: what the runner said of a canary's candidate, carried on every way out, since a job can load its candidate and still end any way at all.
-	const canaryFacts = { load: null };
+	// Issue #800: what the job loaded, the same way and for the same reason, a retried attempt's record included: a server
+	// that timed out exits 1 and retries (`mcp-unreachable`), and that record is the one a person opens to find out why.
+	const canaryFacts = { load: null, loaded: null };
 	const recordTouch = async (value) => {
 		const event = cleanTouch(value);
 		if (!event) return;
@@ -353,6 +356,13 @@ export async function runJob(job, deps) {
 		return result && typeof result === "object" && (touches.length || touchLineageSkipped) ? { ...result, ...(touches.length ? { touches } : {}), ...(touchLineageSkipped ? { touchLineageSkipped } : {}) } : result;
 	} catch (error) {
 		if (canaryFacts.load !== null && error && typeof error === "object") error.canaryLoad = canaryFacts.load;
+		if (error && typeof error === "object") {
+			const ran = error.loaded ?? null;
+			// A throw that already holds what the container said (`InfraRetry`'s `loaded`) came out of the run's own wrapper before
+			// the processor could note it, so what is noted here is the worker's own facts alone. The line stands, with them added.
+			if (ran !== null && canaryFacts.loaded !== null) error.loaded = loadedWithBase({ ...ran, ...imageFactsOf(canaryFacts.loaded) }, canaryFacts.loaded.baseSha);
+			else if (ran === null && canaryFacts.loaded !== null) error.loaded = canaryFacts.loaded;
+		}
 		if (touches.length && error && typeof error === "object") error.touches = touches;
 		if (touchLineageSkipped && error && typeof error === "object") error.touchLineageSkipped = touchLineageSkipped;
 		throw error;
@@ -360,7 +370,8 @@ export async function runJob(job, deps) {
 }
 
 function withCanaryLoad(result, facts) {
-	return facts.load !== null && result !== null && typeof result === "object" ? { ...result, canaryLoad: facts.load } : result;
+	if (result === null || typeof result !== "object" || (facts.load === null && facts.loaded === null)) return result;
+	return { ...result, ...(facts.load !== null ? { canaryLoad: facts.load } : {}), ...(facts.loaded !== null ? { loaded: facts.loaded } : {}) };
 }
 
 async function runJobInner(job, deps) {
@@ -1041,6 +1052,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// current schema no longer accepts -- so the resume has to be refused, not repaired mid-run. Null
 		// when the image declares none, which downstream means "never resume": the safe direction.
 		const piVersion = img.piVersion ?? null;
+		// Issue #800: from here a refusal can say which image it would have run on. Before this, and on a preflight that found
+		// no usable image, no value is set, so such a record is byte-identical to what it was.
+		if (deps.canaryFacts && img.ok === true) deps.canaryFacts.loaded = loadedWithImage(null, img);
 		if (img.missing) {
 			await comment(job, `Refused: the job image "${img.missing}" is not present on the worker host. Not run.`);
 			log("refused_image_missing", { image: img.missing });
@@ -2388,8 +2402,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// refused job never writes to the store. A recovery's base is already there. A base that could not be primed means
 		// no checkpoint of this run can ever be restored: the run goes on unprotected and the record says so.
 		let checkpointArgs = null;
+		const baseSha = isRecovery ? manifest.workspace.baseSha : prepared.sha;
 		if (armed) {
-			const baseSha = isRecovery ? manifest.workspace.baseSha : prepared.sha;
 			if (!isRecovery) {
 				const objectFormat = typeof baseSha === "string" && baseSha.length === 64 ? "sha256" : "sha1";
 				let primed = null;
@@ -2412,7 +2426,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
 		if (subscriptionAuth.length > 0 && !(await validateSubscriptionAuth(subscriptionAuth))) throw new InfraRetry("subscription binding changed before container start", { reason: "container-never-started", budgetReserved: true });
-		const { canaryLoad: canaryLoadOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		// Issue #800: the commit the repository's part of this run came from, beside the image's facts. Noted here, the last
+		// thing before the container, and not at the prepare above: a refusal between the two loaded nothing, so it has nothing
+		// to point at, and its record stays byte-identical to what it was. Every way out from here keeps it, a retried attempt's too.
+		if (deps.canaryFacts) deps.canaryFacts.loaded = loadedWithBase(deps.canaryFacts.loaded, baseSha);
+		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
@@ -2453,6 +2471,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// the field). Every result and every throw below carries it, so a retried attempt's record says what it used too.
 		resources = ranResources ?? null;
 		if (deps.canaryFacts && job.packageCanary !== undefined) deps.canaryFacts.load = canaryLoadOfRun ?? null;
+		if (deps.canaryFacts && loadedOfRun !== null) deps.canaryFacts.loaded = loadedWithBase(loadedWithImage(loadedOfRun, img), baseSha);
 		progress = ranProgress ?? null;
 		// Issue #596: CONFIRMED killed for memory. The image's supervisor (image/runner/src/supervise.mjs) outlives the runner,
 		// whose process tree it gives the highest OOM score, and when the runner dies of SIGKILL with the cgroup's
@@ -3050,7 +3069,7 @@ function isNeverStartedRetry(e) {
 }
 
 export class InfraRetry extends Error {
-	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved, dollars, resources } = {}) {
+	constructor(message, { cause, reason, exitCode, turns, tokens, session, usage, provider, model, budgetReserved, dollars, resources, loaded } = {}) {
 		super(message, cause ? { cause } : undefined);
 		this.name = "InfraRetry";
 		this.piDispatchRetry = true;
@@ -3077,6 +3096,9 @@ export class InfraRetry extends Error {
 		this.dollars = dollars ?? null;
 		// Issue #596: what the container used, off its exit line, or null; set on a throw after a container ran.
 		this.resources = resources ?? null;
+		// Issue #800: what the run loaded, for a throw that REPLACES another (`runJob` sets it on the first), or that comes out
+		// of the run's wrapper before the processor noted it. Absent otherwise, so an error that holds none says so.
+		if (loaded !== undefined && loaded !== null) this.loaded = loaded;
 	}
 }
 

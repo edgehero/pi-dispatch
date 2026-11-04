@@ -744,6 +744,21 @@ test("a recovery of a base with .pi/extensions is refused as recovery-unsafe-ext
 	assert.equal(redis.ops.filter((o) => o[0] === "incr").length, 0);
 });
 
+// Issue #800: a recovery's record names the base its workspace was restored to, the one the checkpoint's arguments take.
+test("a recovery's base commit is its checkpoint's, and a refusal after the prepare names none", async () => {
+	const imaged = { imagePreflight: async () => ({ ok: true, image: "pi-job:4.3.1", piVersion: PI, capabilities: ["recover"], imageDigest: `sha256:${"d".repeat(64)}` }) };
+	const moved = "e".repeat(40);
+	const recovered = deps({ ...imaged, prepareWorkspace: async () => ({ workspace: "/j/workspace", jobDir: "/j", sha: moved }) });
+	assert.equal((await runJob(recoveryJob(1), recovered.deps)).loaded.baseSha, BASE, "the manifest's, whatever the preparer returned");
+	const fresh = deps(imaged);
+	assert.equal((await runJob(job, fresh.deps)).loaded.baseSha, BASE, "a fresh run's is what it prepared");
+	const unsafe = deps({ ...imaged, baseHasExtensions: async () => true });
+	const refused = await runJob(recoveryJob(1), unsafe.deps);
+	assert.equal(refused.reason, "recovery-unsafe-extensions");
+	assert.equal(refused.loaded.image, "pi-job:4.3.1");
+	assert.equal(Object.hasOwn(refused.loaded, "baseSha"), false, "it loaded nothing, so it has nothing to point at, and its record is what it was");
+});
+
 test("every never-started fault of a RECOVERY job becomes a 60 s wait hold, never a spent attempt", async () => {
 	const cases = {
 		"pointer read throws": { readCheckpointPointer: async () => Promise.reject(new Error("x")) },

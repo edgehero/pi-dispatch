@@ -4,6 +4,7 @@ import { REASONS, SESSION_REASON_TEXT, PLAN_REASON_TEXT } from "@edgehero/pi-dis
 import { DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { MEMORY_REASONS, CPU_REASONS } from "@edgehero/pi-dispatch/size-suggest";
 import { NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE } from "./newer-release.mjs";
+import { isOutcomeNote, outcomeNote } from "./loaded-words.mjs";
 // These are source enums, not a grammar claiming that arbitrary single-word prose is safe.
 const REASON_TOKENS = new Set([...Object.keys(REASONS), ...Object.keys(SESSION_REASON_TEXT), ...Object.keys(PLAN_REASON_TEXT), ...Object.keys(DEFER_WHYS), ...MEMORY_REASONS, ...CPU_REASONS]);
 const WHY_TOKENS = new Set([...REASON_TOKENS, "fallback-unlisted", "unboundable", "external", "over-cap"]);
@@ -12,9 +13,10 @@ const ID = /^[A-Za-z0-9_][A-Za-z0-9._:@/+#!~-]{0,299}$/;
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const STRINGS = new Set(["class", "basis", "field", "rule", "ref", "scopeId", "touchScopeId", "digest", "envelopeDigest", "afterDigest", "beforeDigest", "models", "fallbackModels", "kept", "members", "memory", "cpus", "hostShare", "modelRole", "role", "property", "word", "assertedBy", "armedBy", "observedBy", "blessed", "default", "format", "sourcesSeen", "sourceStatus", "readStatus", "served", "floor", "coverage", "mirror", "capture", "providerFailure", "modelWhy", "whyKnown", "reasonKey", "stat", "unit", "maxCostUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd", "dayUsd", "weekUsd", "monthUsd", "totalUsd","class", "role", "page", "id", "jobId", "runId", "draftRunId", "sourceRunId", "queue", "host", "worker", "version", "piVersion", "kind", "type", "mode", "status", "state", "outcome", "reason", "why", "provider", "model", "backend", "venue", "project", "projectId", "repo", "repository", "target", "flow", "key", "scope", "ledger", "window", "source", "writer", "name", "planId", "action", "cause", "classification", "vocabulary", "triggerType", "cron", "expression", "from", "to", "tz", "date", "at", "startedAt", "endedAt", "finishedAt", "createdAt", "updatedAt", "next", "keptUntil", "retainedUntil"]);
 // The only `note` values a model or an agent is handed: this build's own sentences beside a run record a newer
-// pi-dispatch wrote (issue #761), the one `dispatch_runs` gives and the one the run page and `/api/run` give.
+// pi-dispatch wrote (issue #761), the one `dispatch_runs` gives and the one the run page and `/api/run` give, and
+// `outcomeNote`'s closed sentences beside a run that lacked its flow or an extension (issue #800, `isOutcomeNote`).
 const OWN_NOTES = new Set([NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE]);
-const PRIVATE = new Set(["text", "body", "task", "title", "description", "summary", "instructions", "note", "notes", "phase", "phases", "progress", "recoveryProgress", "failedReason", "reasonText", "whyText", "fix", "fixes", "command", "argv", "path", "paths", "root", "roots", "resolver", "secretProfiles", "secretBundles", "secretReferences", "secrets", "headers", "args", "url", "href", "html", "transcript", "entries", "privateDraft", "draft", "question", "sources", "probabilities", "standing", "standingAnswers", "answerRules", "rules", "groups", "questionGroups", "triggerEditor", "forkPoints", "sandboxHosts", "sandboxHostsProblem", "configLocations", "barLines", "classification", "draftRunId", "sourceRunId"]);
+const PRIVATE = new Set(["text", "body", "task", "title", "description", "summary", "instructions", "note", "notes", "phase", "phases", "progress", "recoveryProgress", "failedReason", "reasonText", "whyText", "fix", "fixes", "command", "argv", "path", "paths", "root", "roots", "resolver", "secretProfiles", "secretBundles", "secretReferences", "secrets", "headers", "args", "url", "href", "html", "transcript", "entries", "privateDraft", "draft", "question", "sources", "probabilities", "standing", "standingAnswers", "answerRules", "rules", "groups", "questionGroups", "triggerEditor", "forkPoints", "sandboxHosts", "sandboxHostsProblem", "configLocations", "barLines", "classification", "draftRunId", "sourceRunId", "loaded", "outcomeNote", "hostLoads", "loads", "sandboxRun"]);
 
 export function agentReadProjection(value, key = "", depth = 0) {
   if (depth > 16 || value === undefined) return undefined;
@@ -45,7 +47,11 @@ export function agentReadProjection(value, key = "", depth = 0) {
     // constants, so nothing a record or a file holds reaches the reader through them, while every other `note` (an
     // operator's or a job's prose) is still dropped. Without them a record cut to its core arrives with nothing saying
     // why the rest is gone.
-    if (field === "note" && OWN_NOTES.has(v)) { out.note = v; continue; }
+    if (field === "note" && (OWN_NOTES.has(v) || isOutcomeNote(v))) { out.note = v; continue; }
+    // Issue #800: a model reads what the run lacked in the words a person does, and none of the list behind them. The sentence is
+    // fixed words and a count, so it holds no name; the field holds a tool's name that only its shape vouches for, so it goes.
+    if (field === "outcomeNote" && isOutcomeNote(v)) { out.note = v; continue; }
+    if (field === "loaded") { const note = outcomeNote(value); if (note !== null) out.note = note; continue; }
     if (PRIVATE.has(field)) continue;
     if (field === "invalid" && Array.isArray(v)) { out.invalid = v.filter((name) => ["maxCostUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"].includes(name)); continue; }
     if (["invalid", "unreachable", "refusal", "refused", "countersUnreachable", "recordsUnreachable"].includes(field) && typeof v === "string") { out[field] = true; continue; }

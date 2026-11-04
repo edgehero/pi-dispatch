@@ -261,3 +261,11 @@ test("real manifest telemetry survives durable inventory and the service: per-wo
   }
   await publisher.close();
 });
+
+test("a fresh sandbox knows whether its trigger withholds the staged packages, so what a job would load is not a guess (#800)", async () => {
+  const s = setup();
+  assert.equal((await s.service.read({})).withholdsPackages, false);
+  s.triggers.triggers[0].run.packages = false;
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  assert.equal((await s.service.read({})).withholdsPackages, true);
+});

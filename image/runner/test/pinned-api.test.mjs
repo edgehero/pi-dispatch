@@ -895,6 +895,37 @@ test("CreateAgentSessionOptions declares the tools trio, and INT-SDK-SESSION-OPT
 	assert.match(sessionDts, /setActiveToolsByName\(toolNames: string\[\]\): void;/, "AgentSession.setActiveToolsByName moved -- the loader acceptance proves exclusion survives it");
 });
 
+test("the record of what a job loaded reads these off pi (issue #800): each is a silent zero or a wrong tier if it moves", { skip }, () => {
+	// VERSION is pi's own constant, the field's `pi`. "0.0.0" is its fallback when it cannot read its package, which the
+	// record reads as null, so it must still be that fallback and not what the pin reports.
+	const config = agentDistFile("config.js");
+	assert.match(config, /export const VERSION = pkg\.version \|\| "0\.0\.0";/, "pi's VERSION fallback moved -- src/loaded.mjs reads \"0.0.0\" as unknown");
+	assert.equal(mod.VERSION, JSON.parse(agentDistFile("..", "package.json")).version);
+	// The session's tools, by source: what attributes a tool to a package, the overlay, a repository, or pi.
+	const types = agentDistFile("core", "extensions", "types.d.ts");
+	const toolInfo = types.match(/export type ToolInfo = [\s\S]*?\n\};/)?.[0] ?? "";
+	assert.match(toolInfo, /sourceInfo: SourceInfo;/, "ToolInfo.sourceInfo moved -- the record attributes each tool by it");
+	const sourceInfo = agentDistFile("core", "source-info.d.ts").match(/export interface SourceInfo \{([\s\S]*?)\n\}/)?.[1] ?? "";
+	assert.match(sourceInfo, /\n\s*path: string;/, "SourceInfo.path moved");
+	assert.match(agentDistFile("core", "source-info.js"), /export const BUILTIN_PATH_PREFIX = "builtin:";/, "pi's own tools no longer carry the prefix src/loaded.mjs tells them apart by");
+	const extension = types.match(/export interface Extension \{([\s\S]*?)\n\}/)?.[1] ?? "";
+	assert.match(extension, /\n\s*path: string;/, "Extension.path moved -- the record counts extensions by it");
+	// An inline factory's path, the job's own, which no tier counts.
+	assert.match(agentDistFile("core", "resource-loader.js"), /`<inline:\$\{/, "an inline extension's path no longer starts <inline: -- the job's own factories would count as `other`");
+	// A skill and a prompt template name their file as filePath, which is what a theme does not do (the test below).
+	assert.match(agentDistFile("core", "skills.d.ts").match(/export interface Skill \{([\s\S]*?)\n\}/)?.[1] ?? "", /\n\s*filePath: string;/);
+	assert.match(agentDistFile("core", "prompt-templates.d.ts").match(/export interface PromptTemplate \{([\s\S]*?)\n\}/)?.[1] ?? "", /\n\s*filePath: string;/);
+});
+
+test("a loaded theme names its file as sourcePath, the field run-job.mjs counts a package's themes by (issue #800)", { skip }, () => {
+	// A reader of `filePath`, which skills and prompts have and a Theme does not, counted 0 themes for every package with
+	// no error anywhere: the same silent zero a rename here would bring back.
+	const dts = agentDistFile("modes", "interactive", "theme", "theme.d.ts");
+	const theme = dts.match(/export declare class Theme \{([\s\S]*?)\n\}/)?.[1] ?? "";
+	assert.match(theme, /readonly sourcePath\?: string;/, "Theme.sourcePath moved -- packages_loaded and the record's theme counts read it");
+	assert.doesNotMatch(theme, /\bfilePath\b/, "Theme gained a filePath: check which of the two is the file now");
+});
+
 test("the pinned built-in tool set matches the loader's constant and the runner's factory derivation", { skip }, async () => {
 	// The exports map constrains bare specifiers only, so a file URL reaches the canonical set the root
 	// does not export -- the meter's own resolver trick. Three spellings must agree: pi's allToolNames,

@@ -196,9 +196,9 @@ function finite(value) {
  * worker's recovery path, not against taste: the run record is rebuilt from a bounded 8 KiB tail of
  * container stdout (worker/src/run-history.mjs, TAIL_CAP_BYTES), and an exit line the tail truncates
  * loses ALL token accounting at once -- tokens, turns and ledger together, not merely the rows that
- * pushed it over. Eight worst-case named rows keep the whole line under ~5 KB with headroom, which
- * usage-meter.test.mjs asserts against a maximal fixture; if the line ever grows, shrink THIS cap --
- * never the test's budget.
+ * pushed it over. Eight worst-case named rows keep a completed run's line, with no `message`, `context` or `loaded`, under
+ * ~5 KB, which usage-meter.test.mjs asserts against a maximal fixture; a line carrying those too is held to the writer's own
+ * limit (exit-line.mjs `EXIT_LINE_MAX_BYTES`). If that line ever grows, shrink THIS cap -- never the test's budget.
  */
 const MAX_NAMED_ROWS = 8;
 

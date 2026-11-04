@@ -146,7 +146,8 @@ by job id. `/dispatch runs` shows a `REPLICA` column. A trigger carrying the fie
 trigger list, and its drill-in states the multiplier alongside the trust model.
 
 The run records themselves carry `replica` and `replicas` as plain integers — which is why they may be
-there at all: the record is PII-free by construction and holds no attacker-chosen string, and a
+there at all: the record is PII-free by construction and holds no attacker-chosen string, but for a
+narrow residual on `loaded` that [`INT-RUN-HISTORY-FILE-CONTRACT`](../specs/interfaces.md) names, and a
 host-assigned index is not one. The branch name they imply is deliberately **not** stored.
 
 ## Related

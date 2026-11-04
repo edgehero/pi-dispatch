@@ -665,7 +665,8 @@ its network policy (your allowlist's, your model endpoints' and the forge's, all
 holds nothing a webhook or an issue chose; up to 32 listed and the total counted), how many credential providers the
 sandbox was given (the job's own, made only when it has a secret and the policy a rule, and one per bundle host) and
 how many keys they bound as placeholders. Counts only for credentials, never a name or a value. The console's run page
-and the panel's run detail show them ([`console.md`](console.md)). MCP connection state is not recorded.
+and the panel's run detail show them ([`console.md`](console.md)). Whether an MCP server connected is not in this field: a
+run's page says it in its Loaded card ([`console.md`](console.md#what-a-run-loaded)).
 
 **git push.** The clone's remote carries no token, so a forge job's exec gets a git credential helper (through
 `GIT_CONFIG_COUNT`) that prints the forge token's placeholder as the password, the supervisor rewriting it in a request to

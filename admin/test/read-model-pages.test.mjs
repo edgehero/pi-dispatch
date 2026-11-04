@@ -1979,7 +1979,7 @@ test("the live run facts allowlist excludes queue payload text, validates fields
     assert.equal(facts.startedAt, new Date(AT).toISOString());
     assert.equal(facts.queuedAt, new Date(AT - 2000).toISOString());
     assert.equal(facts.queue, "pi-jobs@mini");
-    assert.deepEqual(Object.keys(facts).sort(), ["target", "kind", "flow", "backend", "provider", "model", "maxTurns", "project", "host", "queue", "queuedAt", "startedAt"].sort());
+    assert.deepEqual(Object.keys(facts).sort(), ["target", "kind", "flow", "backend", "provider", "model", "maxTurns", "project", "host", "queue", "queuedAt", "startedAt", "triggerIndex"].sort());
     assert.ok(!JSON.stringify(facts).includes("PRIVATE"));
     delete job.data.maxTurns;
     assert.equal((await reader.runLiveFacts("gh-live", { live: true })).maxTurns, 40);

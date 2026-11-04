@@ -33,6 +33,8 @@ import { BUMP_PATHS } from "./pi-bump.mjs";
 export const FAKE_KEY = `sk-ant-api03-${"0".repeat(93)}AA`;
 export const MODEL = "claude-sonnet-4-5-20250929";
 export const CAP_MICROS = "5000000";
+/** A flow no tier of this image's empty job holds, so the record's `none` comes off the real loader (issue #800). */
+export const MISSING_FLOW = "no-such-flow";
 /**
  * The control: the same fake key, sent by a plain fetch from the same image. Only Anthropic's 401 for it shows the
  * provider was reachable and answering keys. A 5xx, a 529 or a 429 is Anthropic having a bad minute, and a network
@@ -77,6 +79,27 @@ export function smokeProblems(output, { piVersion, capped }) {
 	if (exit.tokens?.cost !== 0 || (exit.usage?.models ?? []).some((m) => m.cost !== 0)) problems.push(`the run cost ${exit.tokens?.cost}, not $0`);
 	if (exit.usage?.piAi !== piVersion) problems.push(`the run used pi-ai ${exit.usage?.piAi}, not the pin ${piVersion}`);
 	if (capped && exit.tokens?.costRefused !== 0) problems.push(`the cost guard refused ${exit.tokens?.costRefused} call(s) of the default model under a $5 cap`);
+	return [...problems, ...loadedProblems(exit, piVersion)];
+}
+
+/**
+ * Issue #800: the record of what the job loaded, off a real exit line from the real pi in the image. The unit tests
+ * prove the runner handles what pi hands it on the host's pi; this is the one place that proves the image's pi hands it
+ * over at all, on the line a real job ends on. Here and not in verify-image.sh, which also judges an operator's derived
+ * image: such an image on an older base writes no `loaded`, and a worker reads that as not recorded, not as a fault.
+ */
+export function loadedProblems(exit, piVersion) {
+	const loaded = exit?.loaded;
+	if (loaded === undefined) return ["no `loaded` on the exit line: the runner did not record what the job loaded"];
+	const problems = [];
+	if (loaded.v !== 1) problems.push(`loaded.v is ${JSON.stringify(loaded.v)}, not 1`);
+	if (loaded.at !== "ready") problems.push(`loaded.at is ${JSON.stringify(loaded.at)}, not ready: the job reached its prompt`);
+	if (loaded.pi !== piVersion) problems.push(`loaded.pi is ${JSON.stringify(loaded.pi)}, not the pin ${piVersion}`);
+	if (loaded.flow !== "none") problems.push(`loaded.flow is ${JSON.stringify(loaded.flow)}, not none: this job names a flow nothing holds`);
+	if (loaded.cut?.form !== "full") problems.push(`loaded.cut.form is ${JSON.stringify(loaded.cut?.form)}, not full: a job this small has room`);
+	for (const name of ["read", "bash"]) if (!loaded.tools?.own?.includes(name)) problems.push(`loaded.tools.own lacks ${name}: ${JSON.stringify(loaded.tools?.own)}`);
+	if (!(loaded.tools?.active >= 1)) problems.push(`loaded.tools.active is ${JSON.stringify(loaded.tools?.active)}: the session holds no tools`);
+	if (JSON.stringify(Object.keys(loaded.tiers ?? {})) !== JSON.stringify(["package", "repository", "trigger", "overlay", "other"])) problems.push(`loaded.tiers is ${JSON.stringify(loaded.tiers)}`);
 	return problems;
 }
 
@@ -93,7 +116,7 @@ export function smoke({ image, piVersion, docker = defaultDocker, jobDir }) {
 	const report = [];
 	let failed = false;
 	for (const capped of [false, true]) {
-		const args = ["run", "--rm", "-v", `${jobDir}:/job:ro`, "-e", "PI_PROVIDER=anthropic", "-e", `PI_MODEL=${MODEL}`, "-e", "PI_MAX_TURNS=1", "-e", `ANTHROPIC_API_KEY=${FAKE_KEY}`];
+		const args = ["run", "--rm", "-v", `${jobDir}:/job:ro`, "-e", "PI_PROVIDER=anthropic", "-e", `PI_MODEL=${MODEL}`, "-e", "PI_MAX_TURNS=1", "-e", `ANTHROPIC_API_KEY=${FAKE_KEY}`, "-e", `PI_FLOW=${MISSING_FLOW}`];
 		if (capped) args.push("-e", `PI_MAX_COST_MICROS=${CAP_MICROS}`);
 		const { output } = docker([...args, image]);
 		const problems = smokeProblems(output, { piVersion, capped });

@@ -125,10 +125,14 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   line now yields no verified line rather than the forged one, which reads as unknown. It stays open on an image
   that does not declare `exitAuth`, and for code running inside the runner process. One boundary condition on the accidental
   half, recorded so the close is not read as unconditional: the leading newline closes a dangling write
-  only because the runner emits its own line in a single `write()` that lands atomically, which holds
-  because the success exit line (the one carrying all five values) is well under a pipe's atomic-write
-  size; the catch-path line can in principle exceed it and interleave mid-line, but it carries none of
-  the five values, so nothing measured is at risk there.
+  only because the runner emits its own line in a single `write()` that lands atomically. That no longer holds
+  for every success line (CORRECTED 2026-11-03, issue #800): a line may now take 7,680 bytes
+  (`EXIT_LINE_MAX_BYTES`), and a write over `PIPE_BUF` (4 KiB) can interleave with another writer on the same
+  pipe. Such a line fails its MAC, reads as no verified line and settles at the floor, which fails closed; the
+  catch-path line was already in that position. **The same residual covers what is on the line:** code inside the runner
+  process can put any string there and the runner signs it (a repository extension patching
+  `RegExp.prototype.test`, measured for #800), so a verified line's content is checked by the worker where
+  it can be (`rebuildLoaded`, `INT-RUN-HISTORY-FILE-CONTRACT`).
 
 ## OQ-004 — Egress from the job container is unrestricted in v1
 
@@ -2811,3 +2815,4 @@ adversarial passes did.
 | 2026-11-02 (#753, shipped-scope reconciliation) | `OQ-051` position reconciled to #772 already implementing draft-only assistance. Its OPEN status, requirements for unattended sending and person-confirmed answer boundary UNCHANGED, checked. `OQ-050` gateway adoption is unchanged by displaying already retained draft-answer counts. |
 | 2026-11-02 (#754, measured implementation) | `OQ-050` is ADOPTED and IMPLEMENTED: the recorded decision/threat model preceded gateway code, and subsequent live runtime and genuine-HTTPS distinct-site browser evidence is linked by permanent spec IDs. Final PR closure and final-commit checks remain separate from the adoption answer. Native opener, console CSP/process isolation, socket/renderer/browser/Valkey residuals, zero-touch causes and `OQ-051` human confirmation UNCHANGED, checked. |
 | 2026-11-02 (#792, implemented) | `OQ-050`'s amended limit (one writing driver plus at most three consented read-only watchers) is built, and its pending marker is removed. The threat model stands as written: a watcher sees what is typed, which is why watching starts off and the roster stays on the driver's screen. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
+| 2026-11-03 | Issue #800. **`OQ-003` AMENDED, status unchanged**: "well under a pipe's atomic-write size" is refuted for a line that can now take 7,680 bytes. Over `PIPE_BUF` it can interleave with another writer, fail its MAC and settle at the floor, which fails closed. And the residual for code inside the runner process now names what is on the line: it can be any string, measured, so the worker's rebuild of `loaded` is the boundary there. |
