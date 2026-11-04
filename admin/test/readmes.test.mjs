@@ -69,7 +69,75 @@ test("the top half of the root README is for someone who does not write code", (
     assert.doesNotMatch(top, new RegExp(`\\b${word}(?![a-z])`, "i"), `"${word}" belongs below "For engineers"`);
   }
   for (const stage of ["In the loop", "Near the loop", "Out of the loop"]) assert.match(top, new RegExp(`### \\d\\. ${stage}`), stage);
-  assert.ok(top.indexOf("## Why") < top.indexOf("## How to use it"), "why comes before how");
+  // The goal, then what it takes to start, then the path, so nobody is asked to install what nobody has explained, and the way
+  // back in is found before it is needed.
+  const order = ["dark engineering", "## Install in four steps", "## Open the web page", "## How to use it", "## Manage a swarm of agents", "## Is this for you?"].map((part) => top.indexOf(part));
+  assert.ok(order.every((at) => at >= 0), `every part is there: ${order}`);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), "in that order");
+});
+
+test("each stage of the path says what it is and how to get there, in one place", () => {
+  const path = ROOT.slice(ROOT.indexOf("## How to use it"), ROOT.indexOf("## Manage a swarm of agents"));
+  const stages = path.split(/^### /m).slice(1);
+  assert.equal(stages.length, 3);
+  for (const stage of stages) assert.match(stage, /\*\*To get here:\*\*/, stage.slice(0, 40));
+});
+
+test("the install prompt leaves a person's step to the person, and says what Claude Code is not", () => {
+  const prompt = /\*\*With Claude Code\*\*[^`]*```text\n([^]*?)\n```/.exec(ROOT)?.[1]?.replace(/\s+/g, " ");
+  assert.ok(prompt, "the prompt");
+  // Without a terminal every question `up` asks answers no, so an agent could only get through with --yes, which accepts nearly
+  // all of them at once. And it prints an operator's sign in link, which /dispatch console --link keeps out of a model's context.
+  assert.match(prompt, /Do not run `pi-dispatch up` yourself/);
+  assert.match(prompt, /do not ask me for any key or password/);
+  assert.doesNotMatch(prompt, /--yes/);
+  assert.match(read("worker/src/up.mjs"), /no interactive stdin/);
+  assert.match(read("admin/src/console-command.mjs"), /nothing here reaches model context/);
+  // The steps it sends an agent to are there, under the name it uses.
+  assert.match(prompt, /"By hand"/);
+  assert.match(ROOT, /\*\*By hand\*\*, install into a folder/);
+  assert.ok(ROOT.replace(/\s+/g, " ").includes("Claude Code only does the installing: your jobs run on pi"));
+});
+
+test("the README says the web page is not on npm for exactly as long as that is true", () => {
+  // 4.3.1 went out before the console existed (its tag does not hold `admin/src/console/cli.mjs`), and the README describes what
+  // `main` holds. A release moves this version, which makes the note false: take it out in that pull request, and this test with it.
+  const note = "The web page is not on npm yet";
+  if (JSON.parse(read("admin/package.json")).version === "4.3.1") assert.ok(ROOT.includes(note), "say so");
+  else assert.ok(!ROOT.includes(note), "the release that moved the version carries the web page");
+});
+
+test("Open the web page says what the console's commands do", () => {
+  const section = ROOT.slice(ROOT.indexOf("## Open the web page"), ROOT.indexOf("## How to use it"));
+  const consoleCli = read("admin/src/console/cli.mjs");
+  const bootstrap = read("worker/src/console-bootstrap.mjs");
+  assert.ok(section.includes("http://127.0.0.1:4790"));
+  assert.match(consoleCli, /default 127\.0\.0\.1:4790/);
+  // The name setup gives the first operator when nobody chooses one, so the command works as it is printed here.
+  assert.ok(section.includes("pi-dispatch-console link --name operator"));
+  assert.match(bootstrap, /"--yes"\) \? "operator" : .*\|\| "operator"/);
+  assert.match(consoleCli, /link --name <name>/);
+  assert.match(consoleCli, /token list/);
+  // Setup keeps only the token's hash, which is why this section offers a token to keep at all.
+  assert.ok(section.includes("Setup keeps no password you could paste"));
+  assert.match(bootstrap, /delete made\.token/);
+  assert.ok(section.includes("pi-dispatch-console token rotate --name operator"));
+  assert.match(consoleCli, /token rotate --name <name>/);
+  assert.ok(section.includes("/dispatch console --link"));
+  assert.match(read("admin/src/console-command.mjs"), /\[--link \[token name\]\]/);
+  assert.ok(section.includes("service start --console") && section.includes("service status --console"));
+  assert.match(read("worker/src/cli.mjs"), /service <render\|install\|uninstall\|status\|start\|stop\|restart> \[--receiver\|--console\]/);
+  assert.match(read("docs/console.md"), /One-time links do not work on a Windows host/);
+});
+
+test("Manage a swarm says what pi-dispatch does for many agents, and that it does not direct them", () => {
+  const section = ROOT.slice(ROOT.indexOf("## Manage a swarm of agents"), ROOT.indexOf("## Is this for you?"));
+  const words = section.replace(/\s+/g, " ");
+  assert.ok(section.includes("console/console-overview.png"), "the page it talks about");
+  for (const said of ["adds no agent of its own", "does not plan the work", "does not have agents talk to each other"]) assert.ok(words.includes(said), said);
+  assert.match(read("docs/replicas.md"), /Neither replica knows what the other did/);
+  for (const word of ["Swarm", "Dark engineering"]) assert.match(ROOT, new RegExp(`^\\| \\*\\*${word}\\*\\* \\| `, "m"), word);
+  assert.doesNotMatch(ROOT.slice(0, ROOT.indexOf("## For engineers\n")), /orchestrat/i);
 });
 
 test("every link to a heading of the root README lands on one", () => {
@@ -104,8 +172,8 @@ test("every console image in the tree is a pick, and every pick is shown by a RE
 
 test("What a job gets says what the console says: the words a row reads, and every line of the Loaded card by a plain name", () => {
   const start = ROOT.indexOf("## What a job gets\n");
-  const end = ROOT.indexOf("## How to use it\n");
-  assert.ok(start > 0 && start < end, "the section comes before How to use it");
+  const end = ROOT.indexOf("## Words used here\n");
+  assert.ok(start > 0 && start < end, "the section comes before the glossary");
   const section = ROOT.slice(start, end);
   const words = section.replaceAll("**", "").replace(/\s+/g, " ");
   for (const record of [S.noFlow(), S.extensionFailed()]) assert.ok(words.includes(outcomeNote(record)), outcomeNote(record));
@@ -121,7 +189,7 @@ test("the words the root README's new section leans on are in its glossary", () 
 });
 
 test("What a job gets says what the trigger's page does: the card by its name, the buttons by theirs, what it refuses, and the preview shown", () => {
-  const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## How to use it\n"));
+  const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## Words used here\n"));
   const words = section.replaceAll("**", "").replace(/\s+/g, " ");
   for (const said of [TRIGGER_GETS_WORDS.title, "Preview the change", "Confirm", "Undo", "job cap", "is marked unknown", "can only lower"]) assert.ok(words.includes(said), said);
   // Each of these had no referent for someone new to this, and each has plain words now.
@@ -175,7 +243,7 @@ test("the admin README's list of what a person changes on a trigger's page is CA
 test("both READMEs say what no tool can set as the six fields it cannot, and neither overreaches to what a job may spend or reach", () => {
   const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(read("admin/src/write-plans.mjs"))[1];
   const fields = [...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort();
-  const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## How to use it\n")).replace(/\s+/g, " ");
+  const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## Words used here\n")).replace(/\s+/g, " ");
   // Whose: pi-dispatch's own commands, and not everything an AI can run. pi's own `bash` is outside this, as SECURITY.md says, so "No AI tool" overclaims.
   assert.match(read("SECURITY.md").replace(/\s+/g, " "), /A pi process’s own bash, write and edit tools are outside this policy/);
   const said = /The commands pi-dispatch gives an AI cannot set a trigger's (.*?): one that tries is refused before you are asked/.exec(section)?.[1];

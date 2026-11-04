@@ -13,8 +13,8 @@ never write bare `npx pi-dispatch` in launch copy; always the scoped form, and l
 
 ## The one-liner
 
-> Run the [pi](https://github.com/earendil-works/pi) coding agent as a service: on demand, on a cron, or on a
-> label, comment or PR in GitHub, GitLab, Forgejo or Azure DevOps, in a container you control, with a durable
+> Go from sitting next to one AI coding agent to running many in the background: dark engineering with the
+> [pi](https://github.com/earendil-works/pi) coding agent, on demand, on a cron, or on a label, comment or PR in GitHub, GitLab, Forgejo or Azure DevOps, in a container you control, with a durable
 > queue and a spend cap.
 
 ## The elevator pitch (3 sentences)
@@ -148,7 +148,7 @@ registers what it names:
 "pi": {
   "extensions": ["./dist/index.mjs"],
   "skills": ["./skills"],
-  "image": "https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-03"
+  "image": "https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-04"
 }
 ```
 

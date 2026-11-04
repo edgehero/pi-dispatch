@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-label="pi-dispatch: hand software work to an AI coding agent, and decide how closely you watch it">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-label="pi-dispatch: go from sitting next to one AI coding agent to running many in the background">
   <rect x="1" y="1" width="1198" height="358" rx="18" fill="#0f1011" stroke="#2c2e30" stroke-width="2"/>
 
   <!-- wordmark and tagline -->
   <g font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
     <text x="64" y="118" font-size="62" font-weight="800" letter-spacing="-1.5" fill="#f4f4f2">pi-dispatch</text>
-    <text x="66" y="168" font-size="24" fill="#c9cac8">Hand software work to an AI coding agent,</text>
-    <text x="66" y="200" font-size="24" fill="#c9cac8">and decide how closely you watch it.</text>
+    <text x="66" y="168" font-size="24" fill="#c9cac8">Go from sitting next to one AI coding agent</text>
+    <text x="66" y="200" font-size="24" fill="#c9cac8">to running many in the background.</text>
 
     <!-- the three stages -->
     <g font-size="16" font-weight="650">
@@ -17,8 +17,11 @@
       <path d="M362 257h14m-5-5 5 5-5 5" fill="none" stroke="#7d7f81" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       <rect x="386" y="240" width="142" height="34" rx="17" fill="#1b3a2b"/>
       <text x="457" y="262" text-anchor="middle" fill="#8ee0b0">out of the loop</text>
+      <path d="M538 257h14m-5-5 5 5-5 5" fill="none" stroke="#7d7f81" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="562" y="240" width="152" height="34" rx="17" fill="#2c2e30"/>
+      <text x="638" y="262" text-anchor="middle" fill="#f4f4f2">dark engineering</text>
     </g>
-    <text x="66" y="312" font-size="15" fill="#8d8f91">Spending limits that hold, a sealed box for every job, and a person still merges.</text>
+    <text x="66" y="312" font-size="15" fill="#8d8f91">Spending limits that hold, a sealed box for every job, and pi-dispatch never merges.</text>
 
     <!-- the console, in small -->
     <g transform="translate(726 42)">
