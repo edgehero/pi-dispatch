@@ -236,17 +236,23 @@ function loadedForms(loaded) {
 	}
 }
 
-/** What a line keeps when nothing else fits: its verdict and what the settlement reads, each only when the line had it. */
-function lastResortFields(fields) {
-	return Object.fromEntries(["code", "reason", "why", "by", "tokens"].filter((name) => fields?.[name] !== undefined).map((name) => [name, fields[name]]));
+/**
+ * What a line keeps when nothing else fits: its verdict and what the settlement reads, each only when the line had it. `usage`
+ * only on request, because the two tries differ by it: `dollarSettlement` (worker/src/dollar-budget.mjs) floors a run that made
+ * calls with no ledger, so tokens alone cost the very money this line is kept for. Nothing bounds it, though, so the writer
+ * tries with it first and then without, and a ledger too long to fit fails closed at the floor, as a line with none does.
+ */
+function lastResortFields(fields, { usage }) {
+	const names = ["code", "reason", "why", "by", "tokens", ...(usage ? ["usage"] : [])];
+	return Object.fromEntries(names.filter((name) => fields?.[name] !== undefined).map((name) => [name, fields[name]]));
 }
 
 /**
  * The line to write, measured in bytes on the whole write, signature and newlines included, because that is what has to
  * stay inside the tail. In the order the room runs out: the largest form of `loaded` that fits; then the smallest form
  * and `message` cut to the room left, because the head of a provider's error says what it is and nothing else says
- * what the job loaded; then no `loaded` and the message given what that frees; then the last resort; then, because the
- * last resort keeps `reason` and `tokens` as they came and nothing bounds those, the smallest line there is. `forms` is
+ * what the job loaded; then no `loaded` and the message given what that frees; then the last resort, with `usage` and then
+ * without it; then, because the last resort keeps `reason` and `tokens` as they came and nothing bounds those, the smallest line there is. `forms` is
  * `[null]` for a line with nothing noted. A form of `loaded` is held to `loadedMaxBytes` and everything else to `maxBytes`,
  * so the line with no form on it is the one that can still use the room the field may not.
  */
@@ -264,8 +270,11 @@ function fitExitLine({ compose, forms, message, maxBytes, loadedMaxBytes, lastRe
 		const room = limitOf(form) - size(compose(form, { message: "" }));
 		if (room >= 0) return compose(form, { message: cutExitMessage(message, room) });
 	}
-	const resort = lastResort();
-	return size(resort) <= maxBytes ? resort : smallest();
+	for (const usage of [true, false]) {
+		const resort = lastResort({ usage });
+		if (size(resort) <= maxBytes) return resort;
+	}
+	return smallest();
 }
 
 /**
@@ -321,7 +330,7 @@ export function createExitWriter({ key = null, jobId, write, exit, resources = (
 		// Before any form is chosen, so an error's length cannot be what costs the record.
 		const said = typeof fields?.message === "string" ? { ...fields, message: cutExitMessage(fields.message, EXIT_MESSAGE_MAX_BYTES) } : fields;
 		const compose = (form, over = {}) => lineOf({ event: "exit", jobId, ...notes, ...(form === null ? cutOff : { loaded: form }), ...said, ...over, ...usedField });
-		const lastResort = () => lineOf({ event: "exit", jobId, ...lastResortFields(said), lineCut: true, ...cutOff });
+		const lastResort = (keep) => lineOf({ event: "exit", jobId, ...lastResortFields(said, keep), lineCut: true, ...cutOff });
 		const smallest = () => lineOf({ event: "exit", ...(Number.isSafeInteger(said?.code) ? { code: said.code } : {}), lineCut: true, ...cutOff });
 		write(fitExitLine({ compose, forms, message: said?.message, maxBytes, loadedMaxBytes: Math.min(maxBytes, EXIT_LINE_LOADED_MAX_BYTES), lastResort, smallest }));
 		return true;

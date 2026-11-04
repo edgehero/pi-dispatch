@@ -8,6 +8,7 @@ import { buildLoaded, fitLoaded } from "../src/loaded.mjs";
 import { capExitMessage } from "../src/outcome.mjs";
 import { longestNames, maximalLoaded } from "./helpers/maximal-loaded.mjs";
 import { deathFields, BY_SUPERVISOR } from "../src/supervise.mjs";
+import { dollarSettlement } from "../../../worker/src/dollar-budget.mjs";
 import { authenticExitLines, makeLogSink, RESOURCE_KEYS, RUNNER_POLICY_REASONS, TOKEN_KEYS } from "../../../worker/src/run-history.mjs";
 
 /**
@@ -774,6 +775,49 @@ test("a field the last resort keeps is not bounded either, so past it the line i
 	createExitWriter({ key: KEY, jobId: longId, write: (s) => out.push(s), exit: () => {} }).writeExit({ code: 2, reason: "error" });
 	assert.deepEqual(bodyOf(out[0]), { event: "exit", code: 2, lineCut: true }, "the smallest line names no job id, so even an id past the whole tail cannot cost it");
 	assert.ok(Buffer.byteLength(out[0]) < 200);
+});
+
+test("the last resort keeps what the settlement reads: a trusted metered run that falls to it settles metered wherever `usage` fits", async () => {
+	const RESERVED = 2_000_000;
+	const tokens = Object.fromEntries(TOKEN_KEYS.map((key) => [key, key === "metered" ? true : key === "cost" ? 1.5 : key === "costCapMicros" ? RESERVED : key === "calls" ? 3 : 0]));
+	const row = { provider: "anthropic", model: "claude-sonnet-4-5-20250929", calls: 3, input: 10, output: 20, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, reasoning: 0, total: 30, cost: 1.5, unpriced: 0, providerBilled: 0 };
+	const usage = { v: 1, piAi: "1.5.0", truncated: 0, models: [row] };
+	// A field nothing bounds, past the whole budget: only the last resort can still verify.
+	const fields = (over = {}) => ({ code: 0, reason: "stop", tokens, usage, session: { resumed: false, reason: "r".repeat(20_000) }, ...over });
+	const settled = async (line) => {
+		const read = await throughSink(`${"agent noise\n".repeat(900)}${line}`);
+		assert.equal(read.exitAuth, "verified");
+		return { read, money: dollarSettlement({ tokens: read.tokens, usage: read.usage, reservedMicros: RESERVED, trusted: true }) };
+	};
+
+	const line = writeOne(fields());
+	assert.ok(bytesOf(line) <= EXIT_LINE_MAX_BYTES);
+	const body = bodyOf(line);
+	assert.equal(body.lineCut, true, "the premise: this line fell to the last resort");
+	assert.equal(Object.hasOwn(body, "session"), false);
+	assert.deepEqual(body.usage, usage);
+	const { read, money } = await settled(line);
+	assert.deepEqual(money, { settledMicros: 1_500_000, basis: "metered" }, "what it spent, where tokens alone settle at the whole reservation");
+	assert.equal(read.usage.models[0].cost, 1.5);
+
+	// With a noted `loaded` too: the settlement's fields are worth more than a form's room, and the field says it went.
+	const noted = linedWith(fields(), { maxBytes: EXIT_LINE_MAX_BYTES });
+	assert.equal(bodyOf(noted).loadedCut, true);
+	assert.deepEqual((await settled(noted)).money, { settledMicros: 1_500_000, basis: "metered" });
+
+	// At the budget's edge, by the byte: `usage` stays while it fits, and past that the line still verifies, at the floor.
+	const longUsage = { ...usage, models: Array.from({ length: 9 }, (_, i) => ({ ...row, provider: `provider-${i}`.padEnd(64, "x"), model: `model-${i}`.padEnd(64, "x") })) };
+	const edge = bytesOf(writeOne(fields({ usage: longUsage })));
+	assert.deepEqual(bodyOf(writeOne(fields({ usage: longUsage }), { maxBytes: edge })).usage, longUsage, "exactly at the budget");
+	const without = writeOne(fields({ usage: longUsage }), { maxBytes: edge - 1 });
+	assert.equal(Object.hasOwn(bodyOf(without), "usage"), false, "one byte under, it goes");
+	assert.deepEqual(bodyOf(without).tokens, tokens, "and the tokens stay");
+	assert.deepEqual((await settled(without)).money, { settledMicros: RESERVED, basis: "floor" }, "calls with no ledger settle at the floor, which fails closed");
+
+	// A ledger nothing bounds is what it always was: the last resort goes on without it.
+	const unbounded = writeOne(fields({ usage: { models: "u".repeat(20_000) } }));
+	assert.equal(Object.hasOwn(bodyOf(unbounded), "usage"), false);
+	assert.equal(bodyOf(unbounded).lineCut, true);
 });
 
 test("a long non-ASCII error is held to 2 KiB as written before any form is chosen, so it cannot cost the record of what loaded", async () => {
