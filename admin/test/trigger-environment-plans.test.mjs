@@ -60,6 +60,21 @@ const refusal = async (f, change, index = 1) => {
   assert.ok(out.refusal, JSON.stringify(out?.summary ?? out));
   return out;
 };
+/** A preview that stands and warns: the person can still Confirm, and the warnings as one text. */
+const warned = async (f, change, index = 1) => {
+  const out = await f.service.preview(ask(f, change, index), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.ok(out.plan.warnings.length > 0, JSON.stringify(out.summary));
+  for (const line of out.plan.warnings) assert.ok(out.summary.includes(line), line);
+  return out.plan.warnings.join(" ");
+};
+/** A preview that stands and has nothing to warn of. */
+const quiet = async (f, change, index = 1) => {
+  const out = await f.service.preview(ask(f, change, index), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.deepEqual(out.plan.warnings, []);
+  return out;
+};
 /** The Undo button's own round trip: the form the banner draws, read back the way `script.mjs` `bodyOf` reads each input. */
 function undoBody(inverse) {
   const form = String(doneBannerHtml({ summary: "Changed", by: "ops", auditSeq: 1, count: 1, undo: "Put it back", inverse }));
@@ -731,22 +746,59 @@ test("a role resolves first: the bound and the catalog judge the model it names"
   assert.match((await refusal(f, { model: "role:nobody" })).refusal, /could not be resolved \(model-role-unknown\): every job would be refused before it spends/);
 });
 
-test("a model the deployment does not know, one off the list and a fallback off it each refuse for free, with the reason a job would get", async () => {
+test("a model this host does not know, or that its own list leaves off, is a warning in the reason a job would get, and can still be confirmed", async () => {
+  const run = { provider: "anthropic", model: "claude-haiku-4-5" };
+  const f = fixture({ run });
+  assert.match(await warned(f, { model: "claude-typo" }), /^On this host this trigger's jobs would be refused as model-unknown, before they spend: anthropic\/claude-typo is a model this deployment does not know \(not-in-catalog\)\. Choose one from the catalog, or declare it in the overlay's models\.json\./);
+  assert.match(await warned(f, { models: [HAIKU, "anthropic/claude-typo"] }), /claude-typo is a model this deployment does not know/);
+  // Another host's overlay may declare it, and that host's pickup is free: the page does not stand in the way.
+  const planned = await f.service.preview(ask(f, { model: "claude-typo" }), operator);
+  assert.deepEqual(await f.service.apply(planned, operator), { ok: true });
+  assert.equal(f.entry().run.model, "claude-typo");
+
+  // A list from this host's PI_ALLOWED_MODELS, where another host's may hold the model.
+  const offEnvList = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5" }, env: { PI_ALLOWED_MODELS: SONNET } });
+  assert.match(await warned(offEnvList, { model: "claude-haiku-4-5" }), /refused as model-not-allowed, before they spend: anthropic\/claude-haiku-4-5 is not on the models they may call here/);
+  const noList = fixture({ run });
+  assert.match(await warned(noList, { fallbackModels: [SONNET] }), /refused as model-failover-no-candidate, before they spend: every fallback must be on the allowed list .* and anthropic\/claude-sonnet-5-5 is not/);
+  assert.match(await warned(fixture({ run, env: { PI_ALLOWED_MODELS: HAIKU } }), { fallbackModels: [SONNET] }), /anthropic\/claude-sonnet-5-5 is not/);
+  await quiet(fixture({ run, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` } }), { fallbackModels: [SONNET] });
+  assert.match(await warned(fixture({ run: { provider: "anthropic", model: "claude-fable-5" } }), { models: ["anthropic/claude-fable-5"] }), /refused as model-not-allowed.*claude-fable-5 declares fallback models the allowed list does not name/);
+});
+
+test("a list the file itself contradicts is the loader's to refuse, since that holds on every host", async () => {
   const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } });
-  assert.match((await refusal(f, { model: "claude-typo" })).refusal, /^anthropic\/claude-typo is a model this deployment does not know \(not-in-catalog\), so every job would be refused as model-unknown/);
-  assert.match((await refusal(f, { models: [HAIKU, "anthropic/claude-typo"] })).refusal, /claude-typo is a model this deployment does not know/);
+  assert.match((await refusal(f, { models: [SONNET] })).refusal, /^rejected: trigger at index 1: run\.models does not list this trigger's own run\.provider\/run\.model, so every job it starts would be refused/, "the loader's own words, from the funnel");
+  const listed = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] } });
+  assert.match((await refusal(listed, { fallbackModels: [SONNET] })).refusal, /^rejected: trigger at index 1: run\.models does not list a run\.fallbackModels entry/);
+  await quiet(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET] } }), { fallbackModels: [SONNET] });
+});
 
-  const envList = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: SONNET } });
-  assert.match((await refusal(envList, { model: "claude-haiku-4-5", maxCostUsd: "5" })).refusal, /^anthropic\/claude-haiku-4-5 is not on the models this trigger's jobs may call, so every job would be refused as model-not-allowed/);
+test("a model edit judges what it touches: an unknown model it did not touch says nothing, and its first call is not asked of", async () => {
+  const f = fixture({ run: { provider: "anthropic", model: "claude-typo" } });
+  assert.deepEqual((await f.service.preview(ask(f, { flow: "review" }), operator)).plan.warnings, []);
+  const capped = await f.service.preview(ask(f, { maxCostUsd: "1" }), operator);
+  assert.ok(!capped.summary.join(" ").includes("model-unknown"), capped.summary.join(" | "));
+  // An opus that a $1 cap cannot pay for is this edit's business only when the edit touches the cap or the model.
+  const opus = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", maxCostUsd: "1", models: [OPUS, HAIKU, SONNET] } });
+  await quiet(opus, { models: [OPUS, HAIKU] });
+  assert.match((await refusal(opus, { maxCostUsd: "0.99" })).refusal, /needs at least \$2\.654295 for a short task's first call/);
+  // A cap this edit did not touch stays out of it, though the deployment's is lower: a person changing the model is not told to fix it.
+  const above = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", maxCostUsd: "9" }, env: { PI_MAX_COST_USD: "5" } });
+  await quiet(above, { model: "claude-sonnet-5-5" });
+  assert.match((await refusal(above, { maxCostUsd: "8" })).refusal, /can only lower the deployment's/);
+});
 
-  const noList = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } });
-  assert.match((await refusal(noList, { fallbackModels: [SONNET] })).refusal, /^Every fallback must be on the allowed list .* and anthropic\/claude-sonnet-5-5 is not, so every job would be refused as model-failover-no-candidate/);
-  const offEnv = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: HAIKU } });
-  assert.match((await refusal(offEnv, { fallbackModels: [SONNET] })).refusal, /anthropic\/claude-sonnet-5-5 is not/);
-  const onEnv = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` } });
-  assert.ok((await onEnv.service.preview(ask(onEnv, { fallbackModels: [SONNET] }), operator)).plan);
-  const declared = fixture({ run: { provider: "anthropic", model: "claude-fable-5" } });
-  assert.match((await refusal(declared, { models: ["anthropic/claude-fable-5"] })).refusal, /claude-fable-5 declares fallback models the allowed list does not name, so every job would be refused as model-not-allowed/);
+test("a role only one project declares warns of those jobs by their project, and a role no job resolves refuses", async () => {
+  const doc = { modelRoles: { web: { oai: "openai/gpt-4o" } }, triggers: [cron, comment({ model: "role:oai" })] };
+  const nobody = fixture({ doc });
+  assert.match((await refusal(nobody, { flow: "review", maxCostUsd: "1" })).refusal, /This trigger's model could not be resolved \(model-role-unknown\): every job would be refused before it spends/);
+  const some = fixture({ doc });
+  some.paths.projectsFile = join(some.dir, "projects.json");
+  nodeFs.writeFileSync(some.paths.projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }, { id: "api", members: ["github:acme/api"] }] }));
+  const words = await warned(some, { flow: "review", maxCostUsd: "5" });
+  assert.ok(words.includes("In project api this trigger's model could not be resolved (model-role-unknown), so those jobs would be refused before they spend."), words);
+  assert.ok(words.includes("In no project this trigger's model could not be resolved (model-role-unknown)"), words);
 });
 
 test("a model no cap can bound refuses under any cap, and a cap-free job is not asked", async () => {
@@ -787,10 +839,11 @@ test("settings or a list it cannot read refuse a model or cap edit, and leave ev
   nodeFs.writeFileSync(unknownProjects.paths.projectsFile, "{ not json");
   assert.match((await refusal(unknownProjects, { maxCostUsd: "1" })).refusal, /project or role policy could not be read/);
 
+  // A read that may pass on a second try, and a catalog that answers nothing, are no reason to stop a person: a pickup asks again.
   const down = fixture({ deps: { checkModelsKnown: () => ({ unavailable: "EIO" }) } });
-  assert.match((await refusal(down, { maxCostUsd: "1" })).refusal, /models\.json could not be read just now/);
+  assert.match(await warned(down, { model: "claude-sonnet-5-5" }), /^The overlay's models\.json could not be read just now, so whether this deployment knows anthropic\/claude-sonnet-5-5 could not be judged here; a pickup asks again\.$/);
   const silent = fixture({ deps: { checkModelsKnown: () => ({}) } });
-  assert.match((await refusal(silent, { maxCostUsd: "1" })).refusal, /did not judge this change/);
+  assert.match(await warned(silent, { model: "claude-sonnet-5-5" }), /^The model catalog could not judge anthropic\/claude-sonnet-5-5 here; a pickup asks again\.$/);
 });
 
 // ---- the worker's own pickup check --------------------------------------------------------------------------------------
@@ -799,132 +852,202 @@ const HELD = { secrets: { LINEAR_API_KEY: "op://vault/linear" } };
 /** The real check, as the worker's wiring builds it, for a job with this `run`: what the next job of the trigger would meet. */
 const pickup = (f, job, { egress = false, forwardEnv = [], hostEnv = {} } = {}) => makeMcpCheck({ globalPiDir: f.paths.globalPiDir, forwardEnv, hostEnv, egress })({ kind: "github", provider: "anthropic", ...job });
 
-test("a server whose key the trigger does not pass refuses at the preview, in the worker's own reason, with what to do", async () => {
+const TAIL = "This reads this host's .env and overlay; what the worker's own service environment sets cannot be seen from here.";
+const CONNECTS = /\bconnect/;
+
+test("a server whose key this host does not hold warns, in the worker's own reason, says what to do, and can still be confirmed", async () => {
   const f = fixture({ env: { PI_FORWARD_ENV: "" } });
-  const before = f.read();
   assert.equal(pickup(f, { mcp: ["linear"] }).refused, "mcp-secret-unmapped", "what the real check says of the next job");
-  const out = await refusal(f, { mcp: ["linear"] });
-  assert.equal(out.refusal, "On this host every job of this trigger would be refused as mcp-secret-unmapped, before it spends. linear: it references LINEAR_API_KEY, which the trigger does not pass (run.secrets, or a PI_FORWARD_ENV name the worker holds a value for). Pass the credential the server needs in the trigger's `run.secrets`. `run.secrets` is set in the triggers file, not on this page, and a value only the worker's own service environment holds cannot be seen from here.");
-  assert.equal(out.status, 400);
-  assert.equal(f.read(), before);
+  const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
+  assert.deepEqual(out.plan.warnings, [
+    "On this host this trigger's jobs would be refused as mcp-secret-unmapped, before they spend. linear: it references LINEAR_API_KEY, which the trigger does not pass (run.secrets, or a PI_FORWARD_ENV name the worker holds a value for). Pass the credential the server needs in the trigger's `run.secrets`. `run.secrets` is set in the triggers file, not on this page.",
+    TAIL,
+  ]);
+  assert.ok(!out.summary.some((line) => CONNECTS.test(line)), "where a warning stands, no sentence says jobs connect");
+  assert.equal(out.plan.changes[0].widening, "This widens what its jobs may reach: linear.");
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+  assert.deepEqual(f.entry().run.mcp, ["linear"]);
 });
 
-test("what passes the real check passes the preview: a key the trigger passes, or one forwarded with a value on this host", async () => {
-  const held = fixture({ run: HELD, env: { PI_FORWARD_ENV: "" } });
-  assert.ok((await held.service.preview(ask(held, { mcp: ["linear"] }), operator)).plan);
-  const forwarded = fixture({ env: { PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "a value" } });
-  assert.ok((await forwarded.service.preview(ask(forwarded, { mcp: ["linear"] }), operator)).plan);
+test("a server this host does not offer warns, and the host that has it is named beside it", async () => {
+  const f = fixture({ mcpJson: { mcpServers: {} }, deps: { readHostLoads: async () => ({ hosts: [{ name: "mini2", state: "current", mcp: [{ name: "docs", enabled: true, where: "docs.example.com", keys: [] }], unread: [], more: {} }] }) } });
+  const out = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
+  assert.match(out.plan.warnings[0], /^On this host this trigger's jobs would be refused as mcp-server-unknown, before they spend\. docs: the overlay's mcp\.json does not offer it\./);
+  assert.ok(out.summary.some((line) => line.endsWith("mini2 has it.")), out.summary.join(" | "));
+  assert.ok(!out.summary.some((line) => CONNECTS.test(line)));
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+});
+
+test("what passes the real check is quiet: a key the trigger passes, or one forwarded with a value on this host", async () => {
+  const held = await quiet(fixture({ run: HELD, env: { PI_FORWARD_ENV: "" } }), { mcp: ["linear"] });
+  assert.ok(held.summary.some((line) => CONNECTS.test(line)), "nothing stands against it, so this one may say it");
+  await quiet(fixture({ env: { PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "a value" } }), { mcp: ["linear"] });
   // Named in PI_FORWARD_ENV with no value here: the worker's rule, since `buildContainerEnv` forwards only what it holds.
-  const empty = fixture({ env: { PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "" } });
-  assert.match((await refusal(empty, { mcp: ["linear"] })).refusal, /refused as mcp-secret-unmapped/);
+  assert.match(await warned(fixture({ env: { PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "" } }), { mcp: ["linear"] }), /refused as mcp-secret-unmapped/);
 });
 
-test("removing every way to a server refuses at the preview as the check refuses it, whichever of the two the edit sent", async () => {
+test("the file alone cuts a server off: refused, on every host, whichever of the two the edit sent", async () => {
   const excluded = ["mcp__linear__*", "read_mcp_resource"];
   const f = fixture({ run: { ...HELD, mcp: ["linear"] } });
   assert.equal(pickup(f, { ...HELD, mcp: ["linear"], excludeTools: excluded }).refused, "mcp-excluded");
   const out = await refusal(f, { excludeTools: excluded });
-  assert.equal(out.refusal, "On this host every job of this trigger would be refused as mcp-excluded, before it spends. linear: run.excludeTools removes every tool that reaches it (its own, the discovery tools that reach them, and read_mcp_resource). Remove the server from `run.mcp`, or keep a tool that reaches it out of `run.excludeTools`.");
-  assert.ok((await f.service.preview(ask(f, { excludeTools: ["mcp__linear__*"] }), operator)).plan, "one way left in is a way in, as the check says");
+  assert.equal(out.refusal, "On every host this trigger's jobs would be refused as mcp-excluded, before they spend. linear: run.excludeTools removes every tool that reaches it (its own, the discovery tools that reach them, and read_mcp_resource). Remove the server from `run.mcp`, or keep a tool that reaches it out of `run.excludeTools`.");
   // The server added to a trigger whose exclusions already leave it no way in, sent with the list it needs.
-  const g = fixture({ run: HELD });
-  assert.match((await refusal(g, { mcp: ["linear"], excludeTools: excluded })).refusal, /refused as mcp-excluded/);
+  assert.match((await refusal(fixture({ run: HELD }), { mcp: ["linear"], excludeTools: excluded })).refusal, /^On every host .* mcp-excluded/);
+  // A server the overlay does not even hold: it is the file that leaves it no way in.
+  assert.match((await refusal(fixture({ run: HELD, mcpJson: { mcpServers: {} } }), { mcp: ["linear"], excludeTools: excluded })).refusal, /^On every host/);
 });
 
-test("each of the check's other refusals is said, by the reason it would refuse with", async () => {
+test("a cut only this host's routing makes warns, and one that was there before the edit says nothing", async () => {
+  // The own tools left, but no discovery tool to find them with: a host that exposes the server directly still reaches it.
+  const excluded = ["codemode", "tool_search", "read_mcp_resource"];
+  const f = fixture({ run: { ...HELD, mcp: ["linear"] } });
+  assert.equal(pickup(f, { ...HELD, mcp: ["linear"], excludeTools: excluded }).refused, "mcp-excluded");
+  const words = await warned(f, { excludeTools: excluded });
+  assert.match(words, /^On this host this trigger's jobs would be refused as mcp-excluded, before they spend\. linear: run\.excludeTools removes every tool that reaches it .* Another host's overlay may route it another way\./);
+  const planned = await f.service.preview(ask(f, { excludeTools: excluded }), operator);
+  assert.deepEqual(await f.service.apply(planned, operator), { ok: true });
+  // Already cut before this edit: an edit that adds one more exclusion speaks only of what it moved, which is nothing here.
+  await quiet(fixture({ run: { ...HELD, mcp: ["linear"], excludeTools: excluded } }), { excludeTools: [...excluded, "write"] });
+  // One way left in is a way in, as the check says.
+  await quiet(fixture({ run: { ...HELD, mcp: ["linear"] } }), { excludeTools: ["mcp__linear__*"] });
+  // A server added with the list that cuts it: said once, by the route, and not again by the server's own check.
+  const added = await warned(fixture({ run: HELD }), { mcp: ["linear"], excludeTools: excluded });
+  assert.equal(added.split("refused as mcp-excluded").length - 1, 1, added);
+});
+
+test("each of the check's other answers is said, by the reason it would refuse with, only of a server the edit adds", async () => {
   const f = fixture({ env: {} });
-  assert.match((await refusal(f, { mcp: ["nobody"] })).refusal, /^On this host every job of this trigger would be refused as mcp-server-unknown, before it spends\. nobody: the overlay's mcp\.json does not offer it\. Declare the server in the overlay `mcp\.json`, or fix the name in `run\.mcp`\.$/);
+  assert.match(await warned(f, { mcp: ["nobody"] }), /^On this host this trigger's jobs would be refused as mcp-server-unknown, before they spend\. nobody: the overlay's mcp\.json does not offer it\. Declare the server in the overlay `mcp\.json`, or fix the name in `run\.mcp`\./);
   const off = fixture({ mcpJson: { mcpServers: { docs: { url: "https://docs.example.com/mcp", description: "Docs", enabled: false } } } });
-  assert.match((await refusal(off, { mcp: ["docs"] })).refusal, /refused as mcp-server-unknown.*docs: the overlay's mcp\.json turns it off/);
+  assert.match(await warned(off, { mcp: ["docs"] }), /refused as mcp-server-unknown.*docs: the overlay's mcp\.json turns it off/);
   const none = fixture({ mcpJson: null });
-  assert.match((await refusal(none, { mcp: ["docs"] })).refusal, /refused as mcp-config-invalid.*The list: the overlay holds no mcp\.json/);
+  assert.match(await warned(none, { mcp: ["docs"] }), /refused as mcp-config-invalid.*The list: the overlay holds no mcp\.json/);
   const broken = fixture({ mcpJson: "{ not json" });
-  assert.match((await refusal(broken, { mcp: ["docs"] })).refusal, /refused as mcp-config-invalid.*cannot be read whole/);
-  assert.ok((await none.service.preview(ask(none, { mcp: ["forge"] }), operator)).plan, "the forge's own server needs no overlay file");
+  assert.match(await warned(broken, { mcp: ["docs"] }), /refused as mcp-config-invalid.*cannot be read whole/);
+  await quiet(none, { mcp: ["forge"] });
   const reserved = fixture({ mcpJson: { mcpServers: { k: { url: "https://k.example.com/mcp", description: "K", headers: { Authorization: "Bearer ${ANTHROPIC_API_KEY}" } } } }, run: { secrets: { ANTHROPIC_API_KEY: "op://v/r" } } });
-  assert.match((await refusal(reserved, { mcp: ["k"] })).refusal, /refused as mcp-secret-reserved.*k: it references ANTHROPIC_API_KEY, which this deployment uses for the job's own credentials\. Give the server's credential a variable of its own\./);
+  assert.match(await warned(reserved, { mcp: ["k"] }), /refused as mcp-secret-reserved.*k: it references ANTHROPIC_API_KEY, which this deployment uses for the job's own credentials\. Give the server's credential a variable of its own\./);
+  // A server already on the trigger that this host refuses neither speaks nor hides the one being added.
+  const both = fixture({ run: { mcp: ["linear"] }, env: { PI_FORWARD_ENV: "" } });
+  const said = await quiet(both, { mcp: ["linear", "docs"] });
+  assert.ok(!said.summary.join(" ").includes("mcp-secret-unmapped"), said.summary.join(" | "));
 });
 
 test("the egress rules are this host's: its PI_EGRESS, its allowlist file and its declared endpoints", async () => {
   const armed = { env: { PI_EGRESS: "" } };
   const f = fixture(armed);
-  assert.match((await refusal(f, { mcp: ["docs"] })).refusal, /refused as mcp-egress-unreachable.*docs: /);
+  assert.match(await warned(f, { mcp: ["docs"] }), /refused as mcp-egress-unreachable.*docs: /);
   nodeFs.writeFileSync(join(f.dir, "egress-allowlist.conf"), "docs.example.com\n");
-  assert.ok((await f.service.preview(ask(f, { mcp: ["docs"] }), operator)).plan, "the host on its allowlist is reachable");
+  await quiet(f, { mcp: ["docs"] });
   // A declared endpoint at the server's own host and port is the other way through the proxy.
-  const declared = fixture({ ...armed, deps: { readEndpoints: () => [{ id: "docs", host: "docs.example.com", port: 443 }] } });
-  assert.ok((await declared.service.preview(ask(declared, { mcp: ["docs"] }), operator)).plan);
-  const elsewhere = fixture({ ...armed, deps: { readEndpoints: () => [{ id: "other", host: "other.example.com", port: 443 }] } });
-  assert.match((await refusal(elsewhere, { mcp: ["docs"] })).refusal, /refused as mcp-egress-unreachable/);
+  await quiet(fixture({ ...armed, deps: { readEndpoints: () => [{ id: "docs", host: "docs.example.com", port: 443 }] } }), { mcp: ["docs"] });
+  assert.match(await warned(fixture({ ...armed, deps: { readEndpoints: () => [{ id: "other", host: "other.example.com", port: 443 }] } }), { mcp: ["docs"] }), /refused as mcp-egress-unreachable/);
   const runner = fixture({ env: { PI_EGRESS: "" }, mcpJson: { mcpServers: { r: { command: "npx", args: ["-y", "some-server@1.0.0"], allowPackageRunner: true, description: "R" } } } });
-  assert.match((await refusal(runner, { mcp: ["r"] })).refusal, /refused as mcp-package-runner.*r: it fetches its server from /);
+  assert.match(await warned(runner, { mcp: ["r"] }), /refused as mcp-package-runner.*r: it fetches its server from /);
 });
 
-test("a host's .env it cannot read as the worker does, or a bad value in it, says the check could not run and writes nothing", async () => {
-  const sentence = "This host's .env could not be read as the worker reads it, so the worker's pickup check could not be run. Nothing was written.";
-  for (const deps of [{ readHostEnv: () => { throw new Error("untrusted"); } }]) {
-    const f = fixture({ deps });
-    assert.deepEqual(await f.service.preview(ask(f, { mcp: ["docs"] }), operator), { refusal: sentence, status: 409 });
+test("what could not be read says which, and what follows from that: never a refusal, never a sentence about jobs connecting", async () => {
+  const notRead = "This host's .env could not be read as the worker reads it, so the worker's pickup check could not be run.";
+  const cases = [
+    [{ deps: { readHostEnv: () => { throw new Error("untrusted"); } } }, notRead],
+    [{ env: { PI_EGRESS: "banana" } }, "This host's PI_EGRESS or PI_FORWARD_ENV is one the worker refuses, so the worker's pickup check could not be run."],
+    [{ env: { PI_FORWARD_ENV: "GITHUB_TOKEN" } }, "This host's PI_EGRESS or PI_FORWARD_ENV is one the worker refuses, so the worker's pickup check could not be run."],
+    [{ env: { PI_EGRESS: "" }, deps: { readEndpoints: () => { throw new Error("no"); } } }, "This host's model endpoints could not be read, so the worker's pickup check could not judge docs."],
+    [{ deps: { readHostEnv: () => ({ env: { PI_EGRESS: "0" }, unread: ["PI_FORWARD_ENV"] }) } }, "This host's .env holds PI_FORWARD_ENV in a line that could not be read as the worker reads it, so the worker's pickup check could not be run."],
+  ];
+  for (const [options, sentence] of cases) {
+    const f = fixture(options);
+    const out = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
+    assert.deepEqual(out.plan?.warnings, [sentence, TAIL], JSON.stringify(out));
+    assert.ok(!out.summary.some((line) => CONNECTS.test(line)), sentence);
+    assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   }
-  const badEgress = fixture({ env: { PI_EGRESS: "banana" } });
-  assert.equal((await badEgress.service.preview(ask(badEgress, { mcp: ["docs"] }), operator)).refusal, sentence);
-  const badForward = fixture({ env: { PI_FORWARD_ENV: "GITHUB_TOKEN" } });
-  assert.equal((await badForward.service.preview(ask(badForward, { mcp: ["docs"] }), operator)).refusal, sentence);
-  const throwing = fixture({ env: { PI_EGRESS: "" }, deps: { readEndpoints: () => { throw new Error("no"); } } });
-  assert.equal((await throwing.service.preview(ask(throwing, { mcp: ["docs"] }), operator)).refusal, sentence);
+  // The allowlist, by its own name: the worker's own check turns an unreadable list into a refusal of its own.
+  const dir = fixture({ env: { PI_EGRESS: "" } });
+  nodeFs.mkdirSync(join(dir.dir, "egress-allowlist.conf"));
+  assert.match(await warned(dir, { mcp: ["docs"] }), /refused as mcp-egress-unreachable.*egress-allowlist\.conf cannot be read \(EISDIR\)/);
 });
 
-test("a read that may pass on a second try says try again, and asks for no refusal the worker would not make", async () => {
+test("a key's .env line the reader cannot vouch for is unknown: neither absent nor held, and the sentence says so", async () => {
+  const hostEnv = (keys) => ({ env: { PI_EGRESS: "0", PI_FORWARD_ENV: "LINEAR_API_KEY" }, unread: keys.includes("LINEAR_API_KEY") ? ["LINEAR_API_KEY"] : [] });
+  const f = fixture({ deps: { readHostEnv: hostEnv } });
+  const out = await f.service.preview(ask(f, { mcp: ["linear"] }), operator);
+  assert.deepEqual(out.plan.warnings, ["LINEAR_API_KEY is forwarded by this host, and its line in the .env could not be read as the worker reads it, so whether linear gets that key could not be judged here.", TAIL]);
+  assert.ok(!out.summary.some((line) => CONNECTS.test(line)));
+  // A key the trigger passes itself needs no line: nothing to say.
+  await quiet(fixture({ run: HELD, deps: { readHostEnv: hostEnv } }), { mcp: ["linear"] });
+  // A server that reads no such key is not told about it.
+  await quiet(fixture({ deps: { readHostEnv: hostEnv } }), { mcp: ["docs"] });
+});
+
+test("a read that may pass on a second try says so as a warning, and a pickup asks again", async () => {
   const f = fixture();
   const flaky = { ...nodeFs, readFileSync: (path, ...rest) => { if (String(path).endsWith("mcp.json")) throw Object.assign(new Error("busy"), { code: "EIO" }); return nodeFs.readFileSync(path, ...rest); } };
   const service = createTriggerEnvironmentActions({ paths: f.paths, env: HOST_ENV, fs: flaky, now: () => NOW });
-  assert.deepEqual(await service.preview(ask(f, { mcp: ["docs"] }), operator), { refusal: "An overlay file the worker's pickup check reads could not be read just now, so this change could not be judged; try again.", status: 409 });
+  const out = await service.preview(ask(f, { mcp: ["docs"] }), operator);
+  assert.deepEqual(out.plan.warnings, ["An overlay file the worker's pickup check reads could not be read just now, so it could not judge docs; a pickup asks again.", TAIL]);
+  const tools = fixture({ run: { mcp: ["docs"] } });
+  const toolsService = createTriggerEnvironmentActions({ paths: tools.paths, env: HOST_ENV, fs: flaky, now: () => NOW });
+  assert.deepEqual((await toolsService.preview(ask(tools, { excludeTools: ["write"] }), operator)).plan.warnings, ["This host's overlay mcp.json could not be read, so whether these tools still reach a server could not be judged here.", TAIL]);
 });
 
-test("the check runs only for a change that reaches it, with the job's real provider, and a Confirm asks it again", async () => {
+test("the check runs only for an edit of the servers or the exclusions, and speaks only of what that edit touched", async () => {
   const run = { provider: "anthropic", model: "claude-haiku-4-5", mcp: ["linear"] };
   const noKey = { env: { PI_FORWARD_ENV: "" } };
-  // The file already says something the check refuses. An edit of something it does not read is no reason to refuse a person.
-  for (const change of [{ flow: "review" }, { packages: false }, { maxCostUsd: "1" }, { fallbackModels: null }]) {
+  // The file already says something the check would refuse. None of these touches it, and none is told about it.
+  for (const change of [{ flow: "review" }, { packages: false }, { maxCostUsd: "1" }, { model: "claude-sonnet-5-5" }, { provider: "anthropic", model: "claude-sonnet-5-5" }, { provider: "openai" }, { models: [HAIKU] }, { excludeTools: ["write"] }]) {
     const f = fixture({ run, ...noKey });
     const out = await f.service.preview(ask(f, change), operator);
-    assert.ok(out.plan ?? out.unchanged, JSON.stringify([change, out]));
+    assert.ok(out.plan, JSON.stringify([change, out]));
+    assert.ok(!out.summary.join(" ").includes("linear:"), JSON.stringify([change, out.summary]));
+    assert.ok(!out.summary.join(" ").includes("mcp-secret-unmapped"), JSON.stringify(change));
   }
-  for (const change of [{ excludeTools: ["bash"] }, { model: "claude-sonnet-5-5" }, { provider: "anthropic", model: "claude-sonnet-5-5" }, { models: [HAIKU] }]) {
-    const f = fixture({ run, ...noKey });
-    assert.match((await refusal(f, change)).refusal, /refused as mcp-secret-unmapped/, JSON.stringify(change));
-  }
-  // A model edit moves which keys the job keeps for itself: a key the job now needs can no longer be handed to a server.
-  const mcpJson = { mcpServers: { k: { url: "https://k.example.com/mcp", description: "K", headers: { Authorization: "Bearer ${OPENAI_API_KEY}" } } } };
-  const moved = fixture({ mcpJson, run: { provider: "anthropic", model: "claude-haiku-4-5", mcp: ["k"], secrets: { OPENAI_API_KEY: "op://v/r" } } });
-  assert.match((await refusal(moved, { provider: "openai", model: "gpt-4o" })).refusal, /refused as mcp-secret-reserved/);
-  const byProvider = fixture({ mcpJson, run: { model: "gpt-4o", mcp: ["k"], secrets: { OPENAI_API_KEY: "op://v/r" } } });
-  assert.match((await refusal(byProvider, { provider: "openai" })).refusal, /refused as mcp-secret-reserved/, "the provider alone moves it");
   // The job as the worker resolves it: a role's model reaches its provider's key, though the file names neither.
+  const mcpJson = { mcpServers: { k: { url: "https://k.example.com/mcp", description: "K", headers: { Authorization: "Bearer ${OPENAI_API_KEY}" } } } };
   const roles = fixture({ mcpJson, doc: { modelRoles: { default: { oai: "openai/gpt-4o" } }, triggers: [cron, comment({ model: "role:oai", secrets: { OPENAI_API_KEY: "op://v/r" } })] }, env: { PI_ALLOWED_MODELS: HAIKU } });
-  assert.match((await refusal(roles, { mcp: ["k"] })).refusal, /refused as mcp-secret-reserved/);
-  // Settings it cannot read leave the check nothing to judge a job by: said, and not a crash.
-  const unsettled = fixture();
-  nodeFs.writeFileSync(unsettled.paths.settingsFile, "{ not json");
-  assert.match((await refusal(unsettled, { mcp: ["docs"] })).refusal, /settings file is invalid/);
+  assert.match(await warned(roles, { mcp: ["k"] }), /^On this host this trigger's jobs would be refused as mcp-secret-reserved/);
   // Removing the servers leaves nothing to check.
-  const gone = fixture({ run, ...noKey });
-  assert.ok((await gone.service.preview(ask(gone, { mcp: null }), operator)).plan);
-  // The overlay moved between the two: the Confirm meets what the next job would.
+  await quiet(fixture({ run, ...noKey }), { mcp: null });
+  // The overlay moved between the two: a warning is no reason to stop a person who was told nothing, and the file alone still decides.
   const later = fixture({ run: HELD });
   const planned = await later.service.preview(ask(later, { mcp: ["linear"] }), operator);
   assert.ok(planned.plan);
   nodeFs.writeFileSync(join(later.paths.globalPiDir, "mcp.json"), JSON.stringify({ mcpServers: {} }));
-  const before = later.read();
-  assert.match((await later.service.apply(planned, operator)).invalid, /refused as mcp-server-unknown/);
-  assert.equal(later.read(), before);
+  assert.deepEqual(await later.service.apply(planned, operator), { ok: true });
 });
 
-test("what the page would refuse today has no Undo button: removing a server the check refuses says by hand why", async () => {
+test("settings or a project's list it cannot read warn on an edit of the servers, in words about that check and not a model or a cap", async () => {
+  const unsettled = fixture();
+  nodeFs.writeFileSync(unsettled.paths.settingsFile, "{ not json");
+  const settings = await warned(unsettled, { mcp: ["docs"] });
+  assert.equal(settings, `The deployment's settings could not be read as the worker reads them, so the worker's pickup check could not be run. ${TAIL}`);
+  const projects = fixture();
+  projects.paths.projectsFile = join(projects.dir, "projects.json");
+  nodeFs.writeFileSync(projects.paths.projectsFile, "{ not json");
+  assert.equal(await warned(projects, { mcp: ["docs"] }), `The trigger's project or role policy could not be read, so the worker's pickup check could not be run. ${TAIL}`);
+});
+
+test("a project whose role takes a key warns of that project's jobs alone, since another project's run clean", async () => {
+  const mcpJson = { mcpServers: { k: { url: "https://k.example.com/mcp", description: "K", headers: { Authorization: "Bearer ${OPENAI_API_KEY}" } } } };
+  const doc = { modelRoles: { default: { main: HAIKU }, web: { main: "openai/gpt-4o" } }, triggers: [cron, comment({ model: "role:main", secrets: { OPENAI_API_KEY: "op://v/r" } })] };
+  const f = fixture({ mcpJson, doc });
+  f.paths.projectsFile = join(f.dir, "projects.json");
+  nodeFs.writeFileSync(f.paths.projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }, { id: "api", members: ["github:acme/api"] }] }));
+  const words = await warned(f, { mcp: ["k"] });
+  assert.match(words, /^On this host this trigger's jobs in project web would be refused as mcp-secret-reserved, before they spend\. k: it references OPENAI_API_KEY/);
+  assert.ok(!words.includes("every job"), words);
+});
+
+test("what the file alone would refuse has no Undo button; what this host only warns of can be put back", async () => {
   const f = fixture({ run: { mcp: ["linear"] }, env: { PI_FORWARD_ENV: "" } });
-  const out = await write(f, { mcp: null });
+  const warnedBack = await write(f, { mcp: null });
+  assert.deepEqual(warnedBack.plan.inverse.body.mcp, ["linear"], "the way back warns, and a warning is no refusal");
+  const excluded = ["mcp__linear__*", "read_mcp_resource"];
+  const cut = fixture({ run: { ...HELD, mcp: ["linear"], excludeTools: excluded } });
+  const out = await write(cut, { excludeTools: null });
   assert.equal(out.plan.inverse, null);
-  assert.match(out.plan.undo, /^Edit trigger row 2 back by hand: this page would refuse what it said before\. On this host every job of this trigger would be refused as mcp-secret-unmapped/);
+  assert.match(out.plan.undo, /^Edit trigger row 2 back by hand: this page would refuse what it said before\. On every host this trigger's jobs would be refused as mcp-excluded/);
   const fine = fixture({ run: { ...HELD, mcp: ["linear"] } });
   assert.deepEqual((await write(fine, { mcp: null })).plan.inverse.body.mcp, ["linear"]);
 });

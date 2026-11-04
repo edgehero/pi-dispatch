@@ -1009,13 +1009,26 @@ test("the console's own command is what wires a person's trigger change, each re
   // What the worker's pickup check reads on this host: each key by the service's own rule, and a file it cannot trust gives nothing.
   assert.equal(options.deploymentDir, dep.dir);
   const envAsked = [];
-  modules.serviceEnv = { deploymentServiceEnv: (args) => (envAsked.push([args.dir, args.keys]), { env: { PI_EGRESS: "0" } }) };
-  assert.deepEqual(options.readHostEnv(["PI_EGRESS"]), { PI_EGRESS: "0" });
-  assert.deepEqual(envAsked, [[dep.dir, ["PI_EGRESS"]]]);
+  const realEnv = modules.serviceEnv ?? (await loadModules()).serviceEnv;
+  modules.serviceEnv = { deploymentServiceEnv: (args) => (envAsked.push([args.dir, args.keys, args.env]), { env: { PI_EGRESS: "0" }, unread: [], hazardSkipped: [] }) };
+  assert.deepEqual(options.readHostEnv(["PI_EGRESS"]), { env: { PI_EGRESS: "0" }, unread: [] });
+  assert.deepEqual(envAsked, [[dep.dir, ["PI_EGRESS"], {}]], "the deployment's file alone: this console's shell is not the service's");
+  modules.serviceEnv = { deploymentServiceEnv: () => ({ env: {}, unread: [{ key: "A", line: 3 }], hazardSkipped: ["B"] }) };
+  assert.deepEqual(options.readHostEnv(["A", "B"]), { env: {}, unread: ["A", "B"] }, "names only, and never a line's text");
   for (const state of [{ unreadable: "EACCES" }, { untrusted: "group-writable" }]) {
-    modules.serviceEnv = { deploymentServiceEnv: () => ({ env: { PI_EGRESS: "0" }, ...state }) };
+    modules.serviceEnv = { deploymentServiceEnv: () => ({ env: { PI_EGRESS: "0" }, unread: [], hazardSkipped: [], ...state }) };
     assert.throws(() => options.readHostEnv(["PI_EGRESS"]));
   }
+  // The real reader over a real file. The shell's values never reach the answer, either way round, and a line the reader cannot
+  // vouch for comes back by name and not as absent.
+  modules.serviceEnv = realEnv;
+  writeFileSync(join(dep.dir, ".env"), "PI_EGRESS=1\nPI_FORWARD_ENV=LINEAR_API_KEY\nLINEAR_API_KEY=ab$cd\nDOCS_KEY=ab#cd\n", { mode: 0o600 });
+  const shellHolds = ["PI_EGRESS", "SHELL_ONLY_KEY"];
+  for (const key of shellHolds) dep.env[key] = key === "PI_EGRESS" ? "0" : "from the shell";
+  assert.deepEqual(options.readHostEnv(["PI_EGRESS", "PI_FORWARD_ENV"]), { env: { PI_EGRESS: "1", PI_FORWARD_ENV: "LINEAR_API_KEY" }, unread: [] }, "the file wins over the shell that says 0");
+  assert.deepEqual(options.readHostEnv(["SHELL_ONLY_KEY"]), { env: {}, unread: [] }, "a value only this shell holds is no value the worker holds");
+  assert.deepEqual(options.readHostEnv(["LINEAR_API_KEY"]), { env: {}, unread: ["LINEAR_API_KEY"] }, "not absent: a line the reader cannot vouch for");
+  for (const key of shellHolds) delete dep.env[key];
   modules.modelEndpoints = { loadModelEndpoints: () => [{ id: "e", host: "h", port: 443 }], readOverlayModels: () => null };
   assert.deepEqual(options.readEndpoints(), [{ id: "e", host: "h", port: 443 }]);
   modules.modelEndpoints = undefined;

@@ -421,16 +421,19 @@ test("the cards say what the write side says: their words are the planner's, Bui
   assert.ok(cost.refusal.includes("$2.654295 for a short task's first call"), cost.refusal);
   const excluded = await service.preview({ index: 2, pageDigest, mcp: ["linear"], excludeTools: ["codemode", "tool_search", "mcp__linear__*", "read_mcp_resource"] }, operator);
   held(excluded.refusal.split(" linear: ")[0]);
-  assert.ok(W.lastWay.includes("The preview refuses that, as this host’s overlay routes it"), "the Tools row says how far the check it just ran holds");
+  assert.ok(excluded.refusal.startsWith("On every host"), excluded.refusal);
+  assert.ok(W.lastWay.includes("The preview refuses that where the file alone decides it, and warns where this host’s overlay routes it so"), "the Tools row says how far the check it just ran holds");
   held(excluded.refusal.slice(excluded.refusal.indexOf("Remove the server from")).replaceAll("`", ""));
-  // With no deployment's cap in the way, the thin cap previews and says so; and with no key passed, the server refuses.
+  // With no deployment's cap in the way, the thin cap previews and says so; and with no key passed, the server warns.
   const elsewhere = createTriggerEnvironmentActions({ paths, env: { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-5-5" }, now: () => NOW, deploymentDir: dir });
   const thin = await elsewhere.preview({ index: 2, pageDigest, model: "claude-opus-5-5", maxCostUsd: "2.62144" }, operator);
   assert.ok(thin.plan, JSON.stringify(thin));
   held(thin.summary.find((line) => line.includes("clears this $2.62144 job cap")));
   const unpassed = await elsewhere.preview({ index: 2, pageDigest, mcp: ["linear"] }, operator);
-  held(unpassed.refusal.split(" linear: ")[0]);
-  held(unpassed.refusal.slice(unpassed.refusal.indexOf("`run.secrets` is set")).replaceAll("`", ""));
+  const [warning, tail] = unpassed.plan.warnings;
+  held(warning.split(" linear: ")[0]);
+  held(warning.slice(warning.indexOf("`run.secrets` is set")).replaceAll("`", ""));
+  held(straight(tail));
   assert.ok(straight(card).includes("This trigger changed since the page drew it"));
   const stale = await service.preview({ index: 2, pageDigest: "a".repeat(64), mcp: ["linear"] }, operator);
   assert.ok(stale.refusal.startsWith("This trigger changed since the page drew it"));

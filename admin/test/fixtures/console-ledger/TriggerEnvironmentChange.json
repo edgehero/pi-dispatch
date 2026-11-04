@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironmentChange",
   "pr": 800,
-  "words": "b0f8ba73de51e9fe1713b0dd5ff2053252526b74e7eaadc3bf44c757f6a45ecb",
+  "words": "4a7dc69d95a39c779926357ee10f5226917820609b435fe20126f35d35cf976e",
   "elements": [
     {
       "el": "p-trigger-gets-preview",
@@ -106,7 +106,7 @@
       ]
     },
     {
-      "el": "A server this host's pickup check would refuse: its key not passed, or every way in removed",
+      "el": "A server this host's pickup check would refuse warns; every way in removed by the file alone refuses",
       "kind": "readme",
       "status": "new",
       "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",

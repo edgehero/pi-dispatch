@@ -238,9 +238,10 @@ function exposuresOf(server) {
  * `autoEnableCodemode` is not false) and tool_search when some server has a deferred one; the resource tools take their
  * server's own exposure, and a `hidden` server's resources are never offered. Judged only for what the trigger's
  * exclusions take away: a server the overlay leaves no way in is the overlay's, not this trigger's to be refused for.
- * Returns `{ name, why }` for the first server the exclusions cut off, or null.
+ * Returns a `{ name, why }` for each server the exclusions cut off, in the list's order. The console says each one it did
+ * not already cut (`trigger-environment-plans.mjs`); a pickup refuses on the first, `mcpRouteProblem`.
  */
-export function mcpRouteProblem(servers, names, excluded, { autoEnableCodemode = true } = {}) {
+export function mcpRouteCuts(servers, names, excluded, { autoEnableCodemode = true } = {}) {
 	const routes = (removed) => {
 		const all = names.map((name) => exposuresOf(servers[name]));
 		const has = (kind) => all.some(({ own, tools }) => own === kind || tools.includes(kind));
@@ -259,8 +260,12 @@ export function mcpRouteProblem(servers, names, excluded, { autoEnableCodemode =
 	};
 	const before = routes(new Set());
 	const after = routes(excluded);
-	const i = names.findIndex((_, k) => before[k] && !after[k]);
-	return i < 0 ? null : { name: names[i], why: "run.excludeTools removes every tool that reaches it (its own, the discovery tools that reach them, and read_mcp_resource)" };
+	return names.filter((_, k) => before[k] && !after[k]).map((name) => ({ name, why: "run.excludeTools removes every tool that reaches it (its own, the discovery tools that reach them, and read_mcp_resource)" }));
+}
+
+/** The first server `mcpRouteCuts` finds, or null: what a pickup refuses on. */
+export function mcpRouteProblem(servers, names, excluded, options) {
+	return mcpRouteCuts(servers, names, excluded, options)[0] ?? null;
 }
 
 /**

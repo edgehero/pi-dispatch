@@ -181,7 +181,7 @@
       ]
     },
     {
-      "el": "Removing the last way to a server is refused at pickup as mcp-excluded, and the preview refuses it as this host routes it",
+      "el": "Removing the last way to a server is refused at pickup as mcp-excluded; the preview refuses it where the file alone decides it, and warns where this host routes it so",
       "kind": "readme",
       "status": "new",
       "panel": "p-trigger-gets",
@@ -189,7 +189,7 @@
       "golden": [
         "panels/trigger-gets-long-names.operator"
       ],
-      "shows": "The preview refuses that, as this host’s overlay routes it; another host’s may route it another way."
+      "shows": "The preview refuses that where the file alone decides it, and warns where this host’s overlay routes it so; another host’s may route it another way."
     },
     {
       "el": "Image and secrets, shown and changed where they are",

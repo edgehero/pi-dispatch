@@ -45,7 +45,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   toolsOn: "On means not removed. powershell, grep, find and ls stay off unless an extension turns them on, so a trigger can remove them too.",
   extensionTools: "A tool an extension adds cannot be removed on its own yet. A repository’s tools stay a count, so they have no chip here.",
   serverToolsLater: "A server’s tools are offered once this trigger names it: turn it on and confirm first.",
-  lastWay: "Removing every tool that reaches a server refuses every job of this trigger at pickup as mcp-excluded, before it spends. The preview refuses that, as this host’s overlay routes it; another host’s may route it another way.",
+  lastWay: "Removing every tool that reaches a server refuses its jobs at pickup as mcp-excluded, before they spend. The preview refuses that where the file alone decides it, and warns where this host’s overlay routes it so; another host’s may route it another way.",
   jobTool: "report_progress comes with run.progress, in the Edit form: no list removes it.",
   elsewhere: "Set elsewhere: the image in each host’s environment or run.image in the file, secrets on the Secrets page, and the skills folder (run.skillsDir) in the file.",
   noScript: "Enable JavaScript to preview and confirm a change. Reading and navigation work without it.",

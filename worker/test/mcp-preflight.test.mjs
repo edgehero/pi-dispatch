@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MCP_REFUSAL_COMMENT, MCP_TRANSIENT_READ_CODES, jobProviders, makeMcpCheck, providerKeyNames, reservedJobNames } from "../src/mcp-preflight.mjs";
+import { MCP_REFUSAL_COMMENT, MCP_TRANSIENT_READ_CODES, jobProviders, makeMcpCheck, mcpRouteCuts, mcpRouteProblem, providerKeyNames, reservedJobNames } from "../src/mcp-preflight.mjs";
 import { RESERVED_ENV_NAMES } from "../src/triggers.mjs";
 import { parseOverlayMcp } from "../src/mcp-config.mjs";
 import { OVERLAY_TRANSIENT_READ_CODES } from "../src/model-catalog.mjs";
@@ -285,4 +285,14 @@ test("makeMcpCheck: a GITLAB_URL the forge entry cannot carry refuses a gitlab j
 	const ok = check({ read: () => null, gitlabUrl: "https://gitlab.com/api/v4", allowlist: () => ["gitlab.com"] })(forgeJob(["forge"], "gitlab"));
 	assert.equal(ok.document.servers.forge.env.GITLAB_API_URL, "https://gitlab.com/api/v4", "an /api/v4 already there is not doubled");
 	assert.equal(check({ read: () => null, gitlabUrl: "https://u:p@gitlab.com", allowlist: () => ["api.github.com"] })(forgeJob(["forge"])).ok, true, "a github job never reads GITLAB_URL");
+});
+
+test("every server the exclusions cut is named, in the list's order, and a pickup refuses on the first", () => {
+	const direct = { exposure: "direct" };
+	const servers = { a: direct, b: direct, c: direct };
+	const excluded = new Set(["mcp__a__*", "mcp__c__*", "read_mcp_resource"]);
+	assert.deepEqual(mcpRouteCuts(servers, ["a", "b", "c"], excluded).map((cut) => cut.name), ["a", "c"]);
+	assert.equal(mcpRouteProblem(servers, ["a", "b", "c"], excluded).name, "a");
+	assert.deepEqual(mcpRouteCuts(servers, ["b"], excluded), []);
+	assert.equal(mcpRouteProblem(servers, ["b"], excluded), null);
 });
