@@ -194,7 +194,7 @@ test("the parser is an allowlist: an unknown key is not read, and a row that fai
 });
 
 test("a record with no shape does not read: unknown, never an empty current host that agrees with a real one", async () => {
-	// What an independent check found, whole: this parsed as a host with nothing on it, off, and said "the same" of one.
+	// Regression: this parsed as a host with nothing on it, off, and said "the same" of one.
 	const shapeless = '{"v":1,"at":1000}';
 	assert.equal(parseHostLoads(shapeless), null);
 	const real = { name: "real", state: "current", ...parseHostLoads(JSON.stringify(buildHostLoads({ at: 1000, overlayExtensionsAllowed: false }))) };
@@ -245,7 +245,7 @@ test("a record past the bound does not read, however it got there: no builder wr
 	assert.equal(Buffer.byteLength(pad(HOST_LOADS_MAX_BYTES), "utf8"), HOST_LOADS_MAX_BYTES);
 	assert.ok(parseHostLoads(pad(HOST_LOADS_MAX_BYTES)) !== null, "at the bound it reads");
 	assert.equal(parseHostLoads(pad(HOST_LOADS_MAX_BYTES + 1)), null, "one byte past it does not");
-	assert.equal(parseHostLoads(pad(2 * 1024 * 1024)), null, "nor the two megabytes a check read as current");
+	assert.equal(parseHostLoads(pad(2 * 1024 * 1024)), null, "nor two megabytes, which read as current");
 	// By bytes, not characters: another host's multi-byte text cannot get past the bound on its length.
 	const wide = JSON.stringify({ ...record(), pad: "é".repeat(HOST_LOADS_MAX_BYTES / 2) });
 	assert.ok(wide.length < HOST_LOADS_MAX_BYTES + 512 && Buffer.byteLength(wide, "utf8") > HOST_LOADS_MAX_BYTES);

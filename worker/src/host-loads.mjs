@@ -185,7 +185,7 @@ export function buildHostLoads({ at, every = null, by = null, overlayExtensionsA
  * writes; JSON that does not parse; any `v` but this one, newer included; and a record with no shape. Another host wrote it,
  * so a row that fails its charset is dropped and COUNTED in `more`: a list shorter than what that host said can never read
  * as the same as another's. A list that is not there, or a `more` that cannot be read, is not that: nothing can be counted.
- * REJECTED: reading such a part as empty or off, as this did until a check found `{"v":1,"at":1000}` parsed as a real host
+ * REJECTED: reading such a part as empty or off, as this did, which let `{"v":1,"at":1000}` parse as a real host
  * with nothing on it, agreeing with one. Null reads as unknown, and unknown is the rule (`hostsAgree`).
  */
 export function parseHostLoads(text) {

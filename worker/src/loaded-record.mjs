@@ -532,8 +532,8 @@ export function recordedLoaded(value) {
 	const { at, cut, pi, flow, sources, mcp, tools, problems } = runnerPart;
 	const out = { v: LOADED_RECORD_VERSION, runner: value.runner, at, cut, image, imageDigest, imagePi, pi, flow, sources, mcp, tools, problems, leftOut, ...base };
 	if (Buffer.byteLength(JSON.stringify(out), "utf8") <= LOADED_RECORD_MAX_BYTES) return out;
-	// No job's line gets here today (the tests measure the worst one); a cap that grows would. REJECTED: null, as this read
-	// until a check found it. The bound falls after the image's facts are added, so a line that had passed every check then
+	// No job's line gets here today (the tests measure the worst one); a cap that grows would. REJECTED: null, as this read before.
+	// The bound falls after the image's facts are added, so a line that had passed every check then
 	// left no key at all, and the run read like an older worker's. What is left always fits: the image's three facts and at
 	// most 32 left-out tools and the base commit, a few KiB between them.
 	return { ...out, runner: "cut", at: null, cut: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null };
