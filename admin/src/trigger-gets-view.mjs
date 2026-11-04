@@ -56,6 +56,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   readOnly: "Forms are off on this read-only console.",
   viewer: "An operator changes these on this page, with one preview and one Confirm.",
   noTool: "No tool reaches this action; dispatch_trigger_edit keeps today’s scope.",
+  flowPicker: "It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed.",
   reloadDrops: "A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.",
   othersUnread: "This page read the triggers file, and its other reads failed: the run history, the hosts and the jobs in line are unknown.",
   pillOrder: "differs in the order or kind of what it loads",
@@ -280,6 +281,12 @@ function modelRow({ trigger, defaults, modelChoices }) {
   };
 }
 
+/**
+ * The flow picker's suggestions: what the file says, what this console can list and each host's overlay skills. Not complete, and the how panel
+ * says so (`flowPicker`). A skills folder is a folder on each host, and no reader of this page or publication lists it. REJECTED: reading the
+ * trigger's `run.skillsDir` here, which would add a filesystem read of a path in the file to a page load, on the console's host, to offer names
+ * the host that runs the job may not have.
+ */
 function flowRow({ trigger, rows, editor }) {
   const offered = [...(trigger.flow ? [{ name: trigger.flow, from: "as the file says" }] : []), ...(editor?.flows ?? []).map((entry) => ({ name: entry.name, from: entry.tier === "packages" ? "a staged package" : entry.tier === "overlay" ? "the overlay" : "the repository" })), ...rows.flatMap((row) => (row.skills ?? []).map((name) => ({ name, from: `${row.name}’s overlay` })))];
   const seen = new Set();

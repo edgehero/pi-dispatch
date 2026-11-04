@@ -14,6 +14,7 @@ import { PAGES, loadPageData, parsePageQuery, renderPage } from "../src/console/
 import { EDIT_FIELDS, HAND_FIELDS } from "../src/console/panels/trigger.mjs";
 import { TRIGGER_GETS_CSS, TRIGGER_GETS_CSS_SHA256 } from "../src/console/trigger-gets-css.mjs";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
+import { readTriggerEditor } from "../src/read-model.mjs";
 import { wordsText } from "../src/loaded-words.mjs";
 import { CARD_FIELDS, triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
@@ -440,7 +441,7 @@ test("the cards say what the write side says: their words are the planner's, Bui
   assert.ok(stale.refusal.startsWith("This trigger changed since the page drew it"));
   // The card's rows say what the page says: each fixed sentence the panel draws is on the card, word for word.
   const page = straight(cardText(cardPreview("TriggerEnvironment")));
-  for (const sentence of [W.fileSays, W.repositoryPart, W.oneExtension, W.newExtension, W.packagesOn, W.serverRefused, W.toolsOn, W.extensionTools, W.serverToolsLater, W.jobTool, W.elsewhere, W.noTool]) assert.ok(page.includes(straight(sentence)), sentence);
+  for (const sentence of [W.fileSays, W.repositoryPart, W.oneExtension, W.newExtension, W.packagesOn, W.serverRefused, W.toolsOn, W.extensionTools, W.serverToolsLater, W.jobTool, W.elsewhere, W.noTool, W.flowPicker]) assert.ok(page.includes(straight(sentence)), sentence);
   // What each card is not to say.
   for (const name of ["TriggerEnvironment", "TriggerEnvironmentChange"]) {
     const words = `${cardText(cardPreview(name))} ${cardReadme(name)}`;
@@ -517,4 +518,18 @@ test("a flow doctor found nowhere is drawn with attention, for whoever reads the
     assert.ok(note >= 0 && textOf(panel.slice(note)).includes(line), role);
   }
   assert.ok(!textOf(panelOf(await triggerGetsPage({ entry, records: [], loads: loads(answer("overlay", "absent")) }), "p-trigger-gets")).includes("would not find"));
+});
+
+test("the flow picker says it is not the whole list where it is drawn, and what it leaves out is what its readers cannot list", async () => {
+  const how = async (options) => textOf(panelOf(await triggerGetsPage(options), "p-trigger-gets-how"));
+  assert.ok((await how({})).includes(`The flow picker is not the whole list. ${W.flowPicker}`));
+  assert.ok(!(await how({ role: "viewer" })).includes(W.flowPicker), "a viewer has no picker");
+  assert.ok(!(await how({ readOnly: true })).includes(W.flowPicker), "a read-only console has no picker");
+  // The sentence holds while no tier the editor lists is a skills folder, and while the card asks nothing else. Each is real: the reader, not a list of its tiers.
+  const absent = () => { throw Object.assign(new Error("absent"), { code: "ENOENT" }); };
+  const listed = { skills: [{ name: "listed" }] };
+  const editor = readTriggerEditor({ paths: { settingsFile: "/none/settings.json", triggersPath: "/none/triggers.json", globalPiDir: "/none/pi" }, env: {}, folder: "/srv/web", fs: { readFileSync: absent, existsSync: () => false, readdirSync: absent, statSync: absent }, folderSkillsFn: () => listed, overlaySkillsFn: () => listed, stagedSkillsFn: () => listed });
+  assert.deepEqual(editor.flows.map((entry) => entry.tier), ["repository", "overlay", "packages"]);
+  const names = triggerGetsOf({ trigger: { ...COMMENT, skillsDir: "/srv/skills" }, editor, liveHosts: [] }).flow.choices.map((entry) => entry.name);
+  assert.deepEqual(names, ["fix", "listed"]);
 });
