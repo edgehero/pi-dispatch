@@ -18,6 +18,7 @@ import * as nodeFs from "node:fs";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME } from "@edgehero/pi-dispatch/mcp-config";
 import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
 import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
+import { optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { hostLoadsRow, hostPiFor, triggerLastRun } from "./loaded-words.mjs";
 import { normalizeTriggerForDisplay } from "./read-model.mjs";
 import { triggerEntryDigest } from "./trigger-edit-core.mjs";
@@ -221,18 +222,34 @@ export const MODEL_CHOICES_MAX = 200;
 const PROVIDER_CHOICES_MAX = 64;
 const FLOW_CHOICES_MAX = 200;
 
+/**
+ * The deployment's job cap, as written, where it is an amount; else null. `readTriggerEditor` fills its fact tables' words in where no layer
+ * sets one, a value the worker refuses at boot could be anything typed into the wrong field, and an editor that could not be read has no
+ * value at all, so each is asked of the parser the worker uses. REJECTED: truthiness, which drew "the deployment's $no per-job dollar cap",
+ * and "the deployment sets none" for the rest, which holds of one of those three. What a blank means for a job there is the preview's to
+ * say, from what the worker would read.
+ */
+function deploymentCapOf(value) {
+  try {
+    return optionalUsdMicros(value, "maxCostUsd") === null ? null : value;
+  } catch {
+    return null;
+  }
+}
+
 function modelRow({ trigger, defaults, modelChoices }) {
   const allowed = defaults?.models;
   const inUse = unique([trigger.provider, defaults?.provider, ...[...(trigger.models ?? []), ...(trigger.fallbackModels ?? [])].map((ref) => String(ref).split("/")[0])].filter(Boolean));
   const catalog = (Array.isArray(modelChoices) ? modelChoices : []).filter((ref) => typeof ref === "string" && ref.includes("/"));
   const refs = catalog.filter((ref) => inUse.includes(ref.split("/")[0])).slice(0, MODEL_CHOICES_MAX);
   const cap = trigger.maxCostUsd ?? null;
+  const deploymentCap = deploymentCapOf(defaults?.maxCostUsd);
   return {
     provider: trigger.provider ?? "",
     model: trigger.model ?? "",
     cap: cap ?? "",
     deployment: { provider: defaults?.provider ?? null, model: defaults?.model ?? null },
-    capHint: defaults?.maxCostUsd ? `Blank uses the deployment’s $${defaults.maxCostUsd}; a trigger can only lower it.` : "Blank means no cap of its own, and the deployment sets none.",
+    capHint: deploymentCap !== null ? `Blank uses the deployment’s $${deploymentCap}; a trigger can only lower it.` : "Blank means no cap of its own.",
     allowed: trigger.models ?? [],
     fallbacks: trigger.fallbackModels ?? [],
     allowedNone: Array.isArray(allowed) ? `The deployment’s list applies: ${allowed.join(", ")}.` : "Any model is allowed.",
@@ -243,7 +260,7 @@ function modelRow({ trigger, defaults, modelChoices }) {
       trigger.model ? `${trigger.provider ? `${trigger.provider} / ` : ""}${trigger.model}` : `the deployment’s model${defaults?.model ? `, ${defaults.provider ? `${defaults.provider} / ` : ""}${defaults.model}` : ""}`,
       trigger.models ? `allowed: ${trigger.models.join(", ")}` : Array.isArray(allowed) ? "the deployment’s allowed list" : "any model allowed",
       trigger.fallbackModels ? `fallbacks: ${trigger.fallbackModels.join(", ")}` : "no fallback",
-      cap !== null ? `$${cap} cap` : defaults?.maxCostUsd ? `the deployment’s $${defaults.maxCostUsd} cap` : "no cap",
+      cap !== null ? `$${cap} cap` : deploymentCap !== null ? `the deployment’s $${deploymentCap} cap` : "no cap of its own",
     ].join(" · "),
   };
 }

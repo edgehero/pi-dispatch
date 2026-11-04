@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildHostLoads, hostLoadsKey } from "@edgehero/pi-dispatch/host-loads";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
+import { readTriggerEditor } from "../src/read-model.mjs";
 import { triggerLastRun, wordsText } from "../src/loaded-words.mjs";
 import { TRIGGER_GETS_WORDS as W, triggerGetsOf } from "../src/trigger-gets-view.mjs";
 import { recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
@@ -169,10 +170,10 @@ test("the pickers offer the catalog of the providers in use, bounded, and a pers
   const read = (trigger, defaults = {}) => triggerGetsOf({ trigger: { ...COMMENT, ...trigger }, liveHosts: [], defaults }).model.read;
   assert.equal(read({}, { provider: "anthropic", model: "a", maxCostUsd: "2" }), "the deployment’s model, anthropic / a · any model allowed · no fallback · the deployment’s $2 cap");
   assert.equal(read({ provider: "kimi", model: "k", models: ["kimi/k"], fallbackModels: ["kimi/l"], maxCostUsd: "1.5" }), "kimi / k · allowed: kimi/k · fallbacks: kimi/l · $1.5 cap");
-  assert.equal(read({}, { models: ["a/b"] }), "the deployment’s model · the deployment’s allowed list · no fallback · no cap");
+  assert.equal(read({}, { models: ["a/b"] }), "the deployment’s model · the deployment’s allowed list · no fallback · no cap of its own");
   // What the deployment's cap and list mean, or that it has none.
   const none = triggerGetsOf({ trigger: COMMENT, liveHosts: [], defaults: {} }).model;
-  assert.equal(none.capHint, "Blank means no cap of its own, and the deployment sets none.");
+  assert.equal(none.capHint, "Blank means no cap of its own.");
   assert.equal(none.allowedNone, "Any model is allowed.");
   assert.equal(triggerGetsOf({ trigger: COMMENT, liveHosts: [], defaults: { models: ["a/b"] } }).model.allowedNone, "The deployment’s list applies: a/b.");
 });
@@ -289,4 +290,31 @@ test("a record cut short says so on this card, and a list of hosts that cannot s
   const empty = triggerGetsOf({ trigger: { ...COMMENT, forge: null }, hostLoads: await published({ a: {} }), liveHosts: ["a"] });
   assert.equal(empty.extensions.noneWord, W.noExtensions);
   assert.equal(empty.mcp.noneWord, W.noServers);
+});
+
+test("the deployment's cap is quoted only where it is an amount, through the real reader's own fill", () => {
+  const absent = () => { throw Object.assign(new Error("absent"), { code: "ENOENT" }); };
+  const editor = (env, overlay = null) => readTriggerEditor({
+    paths: { settingsFile: "/none/settings.json", triggersPath: "/none/triggers.json", globalPiDir: "/none/pi" },
+    env,
+    fs: { readFileSync: (path) => (path === "/none/settings.json" && overlay !== null ? JSON.stringify(overlay) : absent()), existsSync: () => false, readdirSync: absent, statSync: absent },
+    folderSkillsFn: () => ({ skills: [] }), overlaySkillsFn: () => ({ skills: [] }), stagedSkillsFn: () => ({ skills: [] }),
+  });
+  const model = (defaults, trigger = COMMENT) => triggerGetsOf({ trigger, defaults }).model;
+  const none = editor({}).defaults;
+  assert.equal(none.maxCostUsd, "no per-job dollar cap", "what the reader fills in where nothing sets a cap");
+  // Each of these is no amount: the reader's own words, a value the worker refuses at boot, a blank line in an env file, and an editor that could not be read.
+  for (const [what, defaults] of [["none set", none], ["a word", editor({ PI_MAX_COST_USD: "abc" }).defaults], ["zero", editor({ PI_MAX_COST_USD: "0" }).defaults], ["blank", editor({ PI_MAX_COST_USD: "" }).defaults], ["unread", {}], ["null", null]]) {
+    const out = model(defaults);
+    assert.equal(out.capHint, "Blank means no cap of its own.", what);
+    assert.ok(out.read.endsWith(" · no cap of its own"), `${what}: ${out.read}`);
+    assert.doesNotMatch(`${out.capHint} ${out.read}`, /\$|abc/, what);
+  }
+  for (const [what, defaults, amount] of [["the env's", editor({ PI_MAX_COST_USD: "2.50" }).defaults, "2.50"], ["the overlay's, a number", editor({ PI_MAX_COST_USD: "9" }, { maxCostUsd: 2 }).defaults, "2"]]) {
+    const out = model(defaults);
+    assert.equal(out.capHint, `Blank uses the deployment’s $${amount}; a trigger can only lower it.`, what);
+    assert.ok(out.read.endsWith(` · the deployment’s $${amount} cap`), `${what}: ${out.read}`);
+  }
+  // The trigger's own says itself, whatever the deployment's is.
+  assert.ok(model(none, { ...COMMENT, maxCostUsd: "1.50" }).read.endsWith(" · $1.50 cap"));
 });
