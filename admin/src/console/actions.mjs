@@ -2282,6 +2282,7 @@ const packageActions = [
       if (!got.plan) return got;
       const p = got.plan;
       if (p.schedule.data?.packages === false) return { refusal: "This trigger sets run.packages to false, so it has no staged copy for a candidate to replace. Choose a trigger that loads staged packages. Nothing was queued." };
+      if (p.schedule.data?.excludeExtensions?.includes(canary.name)) return { refusal: `This trigger leaves ${canary.name} out in run.excludeExtensions, so a run of it would say nothing about the jobs this package goes into. Choose a trigger that loads it. Nothing was queued.` };
       if (p.schedule.data?.resume === true) return { refusal: "This trigger resumes its transcript, so its next run would continue the candidate's work, and a canary is for one job. Choose a trigger that does not resume. Nothing was queued." };
       return { target: `${canary.name}@${canary.version}`, payload: { plan: p, canary }, reserve: p.reserve, beforeDigest: p.fileDigest,
         summary: [`Runs one paid job of cron trigger ${p.schedulerId} with ${canary.name} ${canary.version} in place of ${row.version}, for that job only`, "No other job loads it, and nothing stays staged", "This is third-party code in a job that holds that trigger's credentials, and what it does to that trigger's own folder or repository stays done", "Its result reads completed or failed. A job that completed does not prove the extension is good: read the run"] };

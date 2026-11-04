@@ -133,8 +133,9 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   job logs the active tool list read back so the fact is observable rather than assumed. The boundary
   is stated as plainly as the grant: this removes pi **tools**, never container capabilities (excluding
   `bash` does not remove the shell from the image; the isolation flags were always the worker's own
-  `docker run` argv), and extension or custom tools are not excludable, so a genuinely read-only
-  trigger also declines the staged packages (`"packages": false`). Like every capability field it has
+  `docker run` argv), and an extension's tools have their own key, `run.excludeExtensionTools`, so a genuinely read-only
+  trigger also declines the staged packages (`"packages": false`) or names what it leaves out
+  (`run.excludeExtensions`). Those stop what a job loads on its own, not what an agent with a shell can reach. Like every capability field it has
   no panel key and no AI tool: a person changes it in the file or on the trigger's console page. A chained child inherits its parent's exclusions, and
   a job carrying exclusions is refused pre-spend on an image too old to honour them
   (`job-image-exclude-tools-unsupported`) rather than allowed to fail open

@@ -116,12 +116,12 @@ function grouping({ settings, triggers = { triggers: [], zeroTouch: ZERO_TOUCH }
 test("the question grouping runtime answers newer for a newer settings or triggers file, before any status is set", async () => {
 	const settingsNewer = grouping({ settings: SETTINGS_NEWER });
 	assert.deepEqual(await settingsNewer.runtime.resolve(settingsNewer.data, "grouping-job"), { newer: "the settings file" });
-	const triggersNewer = grouping({ triggers: { version: 2, triggers: [], zeroTouch: ZERO_TOUCH } });
+	const triggersNewer = grouping({ triggers: { version: 3, triggers: [], zeroTouch: ZERO_TOUCH } });
 	assert.deepEqual(await triggersNewer.runtime.resolve(triggersNewer.data, "grouping-job"), { newer: "the triggers file" });
 	assert.deepEqual([...settingsNewer.statuses, ...triggersNewer.statuses], [], "no grouping status is set: the source stays as it was");
 	// A source that is not ready has its status set as the refusal is answered. A newer file is answered before that
 	// too, so the source keeps the status it had for the release that can read the file.
-	for (const [what, g] of [["the settings file", grouping({ settings: SETTINGS_NEWER, sourceStatus: "source-expired" })], ["the triggers file", grouping({ triggers: { version: 2, triggers: [], zeroTouch: ZERO_TOUCH }, sourceStatus: "source-expired" })]]) {
+	for (const [what, g] of [["the settings file", grouping({ settings: SETTINGS_NEWER, sourceStatus: "source-expired" })], ["the triggers file", grouping({ triggers: { version: 3, triggers: [], zeroTouch: ZERO_TOUCH }, sourceStatus: "source-expired" })]]) {
 		assert.deepEqual(await g.runtime.resolve(g.data, "grouping-job"), { newer: what });
 		assert.deepEqual(g.statuses, [], `${what}: no status set on a source that is not ready`);
 	}
@@ -139,7 +139,7 @@ test("through the real processor, a grouping job that meets a newer settings or 
 	const cases = [
 		["the settings file", grouping({ newerAfterHead: true })],
 		// The watcher has not reloaded yet (`triggersNewer` is false), but the file on disk is already newer.
-		["the triggers file", grouping({ triggers: { version: 2, triggers: [], zeroTouch: ZERO_TOUCH } })],
+		["the triggers file", grouping({ triggers: { version: 3, triggers: [], zeroTouch: ZERO_TOUCH } })],
 	];
 	for (const [what, g] of cases) {
 		const { job, moves } = delayedJob("grouping-job", g.data);
@@ -191,7 +191,7 @@ function draft({ triggers }) {
 }
 
 test("the answer draft runtime answers newer for a newer triggers file, never the throw that uses an attempt", async () => {
-	const d = draft({ triggers: { version: 2, triggers: [], answerRules: [RULE], standingAnswers: [] } });
+	const d = draft({ triggers: { version: 3, triggers: [], answerRules: [RULE], standingAnswers: [] } });
 	assert.deepEqual(await d.runtime.resolve(d.data, "draft-job"), { newer: "the triggers file" });
 	assert.deepEqual(d.updates, [], "the intent is not passed, failed or run");
 	// A broken (not newer) file is still the infrastructure retry it always was.
@@ -200,7 +200,7 @@ test("the answer draft runtime answers newer for a newer triggers file, never th
 });
 
 test("through the real processor, an answer draft that meets a newer triggers file in its runtime waits ten minutes", { skip }, async () => {
-	const d = draft({ triggers: { version: 2, triggers: [], answerRules: [RULE], standingAnswers: [] } });
+	const d = draft({ triggers: { version: 3, triggers: [], answerRules: [RULE], standingAnswers: [] } });
 	const { job, moves } = delayedJob("draft-job", d.data);
 	await assert.rejects(() => d.processor(job, "the-token", new AbortController().signal), (err) => err.name === "DelayedError");
 	assert.deepEqual(moves, [{ ts: NOW + 600_000, token: "the-token" }]);

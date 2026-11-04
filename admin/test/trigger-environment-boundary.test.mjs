@@ -86,6 +86,21 @@ test("planTriggerEdit has no such parameter: a recording call reads exactly its 
   }
 });
 
+test("a tool call carrying run.excludeExtensions or run.excludeExtensionTools, or a near miss, is refused and writes nothing, and an edit keeps the file's own", async () => {
+  // Not on `TOOL_PROOF_FIELDS` yet, which holds what a person changes on the trigger's page, so the adapter's field check is what stands here.
+  const f = fixture();
+  const before = f.read();
+  for (const key of ["excludeExtensions", "excludeExtensionTools", "exclude_extensions", "excludeExtensionTool"]) {
+    for (const params of [{ [key]: ["pi-lint"] }, { run: { [key]: ["pi-lint"] } }, { on: { [key]: ["pi-lint"] } }]) {
+      await assert.rejects(executeToolAction("dispatch_trigger_edit", { index: 0, flow: "review", ...params }, interactive, f.options), /received a field it does not take/, key);
+    }
+  }
+  assert.equal(f.read(), before);
+  const { plan } = plans.planTriggerEdit({ params: { index: 0, flow: "review" }, paths: f.paths, env: {} });
+  const [written] = plan.mutate([{ on: {}, run: { flow: "fix", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] } }]);
+  assert.deepEqual(written.run, { flow: "review", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] }, "a tool can neither set nor drop what the file holds");
+});
+
 test("what a tool's edit writes holds no person-only key, whatever it was handed", () => {
   const f = fixture();
   const { plan } = plans.planTriggerEdit({ params: { index: 0, flow: "review" }, paths: f.paths, env: {} });

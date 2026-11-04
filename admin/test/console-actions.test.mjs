@@ -3097,6 +3097,9 @@ test("a canary's preview refuses what could prove nothing, for free", async () =
   assert.match((await preview(updatesRow())).text, /run\.packages to false/);
   const resuming = await (await start({ paths, a: { rm: { ...RM, planTriggerFire: async () => ({ plan: { ...planned.plan, schedule: { data: { resume: true } } } }) }, updates: updatesDeps(updatesRow()).updates } })).act("package-canary", { index: 0, name: "pi-lint", version: "1.4.3" });
   assert.match(resuming.text, /resumes its transcript/, "its effects would outlive the one job");
+  const excluding = (names) => async () => (await start({ paths, a: { rm: { ...RM, planTriggerFire: async () => ({ plan: { ...planned.plan, schedule: { data: { excludeExtensions: names } } } }) }, updates: updatesDeps(updatesRow()).updates } })).act("package-canary", { index: 0, name: "pi-lint", version: "1.4.3" });
+  assert.match((await excluding(["pi-lint"])()).text, /leaves pi-lint out in run\.excludeExtensions/, "a candidate in a job its trigger keeps the package out of says nothing");
+  assert.doesNotMatch((await excluding(["other"])()).text, /run\.excludeExtensions/, "another name is not this package");
   for (const version of ["^1.4.3", "latest", "1.x"]) assert.equal((await preview(updatesRow(), { index: 0, name: "pi-lint", version })).status, 400, version);
   assert.equal((await preview(updatesRow(), { index: 0, name: "../x", version: "1.4.3" })).status, 400);
 });

@@ -302,7 +302,8 @@ Release numbers come from the git tags. The next release is 5.0.0.
    - a triggers file with `replicas` on a trigger that is not GitHub is refused before 1.1.0, and only a hand edit
      removes the field ([replicas.md](replicas.md#upgrading-and-rolling-back));
    - a `version` above 1 in the settings file, `pause-windows.json` or `triggers.json` makes a 5.0.0 or later worker
-     wait; a 4.x worker ignores it and drops what it does not know. No release writes one yet;
+     wait; a 4.x worker ignores it and drops what it does not know. A release writes one into `triggers.json` only for a
+     trigger with `run.excludeExtensions` or `run.excludeExtensionTools`, and no release writes one into the other two yet;
    - a console token of a role the older console does not know is kept and signs in nowhere (5.0.0 and later).
    Fix those by hand, or restore the copy you took before the upgrade. Restoring `triggers.json` re-arms the one-shots
    that fired since: keep the newer `on.disarmed` marks ([backup.md](backup.md#restoring)).

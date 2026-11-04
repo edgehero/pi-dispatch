@@ -186,7 +186,9 @@ test("the trigger field inventory is the loader's normalized run contract, inclu
   const approvalReturn = approval.match(/^\s*return \{ gates:[^\n]+$/m);
   assert.ok(approvalReturn, "the approval normalizer must be found");
   addKeys(approvalReturn[0].slice(approvalReturn[0].indexOf("{") + 1));
-  const actual = [...CARD_FIELDS, ...EDIT_FIELDS, ...HAND_FIELDS];
+  // Issue #800: the loader's two fields no page shows yet. They join CARD_FIELDS with the trigger's card, and this line goes with them.
+  const onNoPageYet = ["excludeExtensions", "excludeExtensionTools"];
+  const actual = [...CARD_FIELDS, ...EDIT_FIELDS, ...HAND_FIELDS, ...onNoPageYet];
   assert.equal(new Set(actual).size, actual.length, "every run field belongs to exactly one group");
   assert.deepEqual([...actual].sort(), [...keys].sort());
   assert.ok(!actual.includes("modelRoles"), "modelRoles is a top-level file policy, never a run field");

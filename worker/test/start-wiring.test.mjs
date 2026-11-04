@@ -5402,7 +5402,7 @@ test("issue #761: a triggers reload that meets a newer file keeps the running sc
 	const log = (event, fields) => lines.push([event, fields]);
 	const state = { newer: false };
 	const ref = { current: [{ schedulerId: "kept" }] };
-	const newerError = Object.assign(new Error("triggers file written by a newer pi-dispatch (version 2; this build understands 1): /t.json"), { piDispatchConfig: true, newer: true });
+	const newerError = Object.assign(new Error("triggers file written by a newer pi-dispatch (version 3; this build understands 2): /t.json"), { piDispatchConfig: true, newer: true });
 	// The real cron reload, with the loader and the reconcile replaced: what it keeps on a refused load is its own rule.
 	const reconciled = [];
 	const reconcileFn = async (_queue, served) => (reconciled.push(served), { installed: served.length, removed: 0 });
@@ -5434,8 +5434,8 @@ test("issue #761: a pause windows or triggers file a newer pi-dispatch wrote ref
 	writeFileSync(pausePath, `${JSON.stringify({ version: 2, windows: [] }, null, 2)}\n`);
 	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_PAUSE_WINDOWS_FILE: pausePath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `pause-windows file written by a newer pi-dispatch (version 2; this build understands 1): ${pausePath}`);
 	const triggersPath = join(dir, "triggers.json");
-	writeFileSync(triggersPath, `${JSON.stringify({ version: 2, triggers: [] }, null, 2)}\n`);
-	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version 2; this build understands 1): ${triggersPath}`);
+	writeFileSync(triggersPath, `${JSON.stringify({ version: 3, triggers: [] }, null, 2)}\n`);
+	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version 3; this build understands 2): ${triggersPath}`);
 });
 
 test("issue #761: a pause windows reload that meets a newer file keeps the last good windows and sets the newer state, which only a good reload clears", { skip }, () => {
@@ -5496,7 +5496,7 @@ test("issue #761: a running worker's watchers carry a newer pause windows or tri
 			assert.equal(captured.triggersNewer(), false);
 			await until("the pause windows reload", () => captured.pauseWindowsNewer() === true, [[pausePath, today({ version: 2, windows: [] })]]);
 			// The triggers watcher was handed the state the processor reads; with its own default the gate never moves.
-			await until("the triggers reload", () => captured.triggersNewer() === true, [[triggersPath, today({ version: 2, triggers: [] })]]);
+			await until("the triggers reload", () => captured.triggersNewer() === true, [[triggersPath, today({ version: 3, triggers: [] })]]);
 			await until("both good reloads", () => captured.pauseWindowsNewer() === false && captured.triggersNewer() === false, [[pausePath, today({ windows: [] })], [triggersPath, today({ triggers: [] })]]);
 			seen = "cleared";
 		},

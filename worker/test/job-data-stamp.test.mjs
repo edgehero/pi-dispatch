@@ -43,8 +43,9 @@ function fakeQueue(request = null) {
 const FORGE = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", trigger: { deliveryId: "d-761", sender: { id: 1 } } };
 const LOCAL = { folder: "/srv/site", flow: "tidy", task: "t", now: new Date("2026-11-02T09:00:00Z") };
 
-test("the shipped table is empty and this build reads version 1, so nothing is stamped today", () => {
-	assert.deepEqual(JOB_DATA_FIELD_VERSIONS, { packageCanary: 2 }, "issue #796: an older worker would run a plain paid job in a canary's place");
+test("the shipped table names what an older worker would misread, and this build reads version 2", () => {
+	// Issue #796: an older worker would run a plain paid job in a canary's place. Issue #800: it would run the job with what its trigger takes away.
+	assert.deepEqual(JOB_DATA_FIELD_VERSIONS, { packageCanary: 2, excludeExtensions: 2, excludeExtensionTools: 2 });
 	assert.equal(JOB_DATA_VERSION, 2);
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 });

@@ -500,12 +500,28 @@ test("a chained child does NOT inherit the parent's run.mcp, and the request fil
 	assert.equal(JSON.stringify(args).includes("MARKER-server"), false);
 });
 
+test("a chained child inherits both load exclusions whole, off the parent's job data: a child connects no server, and does load extensions (#800)", async () => {
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", excludeExtensions: ["MARKER-ext"], excludeExtensionTools: ["MARKER-tool"] }) } } });
+	const cap = makeCapture();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+	const parent = localJob();
+	parent.data = { ...parent.data, excludeExtensions: ["pi-lint", "git-guard"], excludeExtensionTools: ["lint_run", "codemode_extra"] };
+	await collect({ job: parent, prepared: PREPARED });
+	const { args } = cap.enqueued[0];
+	assert.deepEqual(args.excludeExtensions, ["pi-lint", "git-guard"], "dropped, a child loads what the trigger took away");
+	assert.deepEqual(args.excludeExtensionTools, ["lint_run", "codemode_extra"], "and it is not filtered as MCP names are");
+	assert.equal(JSON.stringify(args).includes("MARKER"), false, "the request file can neither set nor add to them");
+	assert.equal(args.parentJobId, parent.id, "which is what keeps the child from being strict");
+});
+
 test("a parent with no excludeTools chains a child whose data carries none either (#291)", async () => {
 	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it" }) } } });
 	const cap = makeCapture();
 	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
 	await collect({ job: localJob(), prepared: PREPARED });
 	assert.equal(cap.enqueued[0].args.excludeTools, undefined, "byte-identical to a pre-issue chain");
+	assert.equal(cap.enqueued[0].args.excludeExtensions, undefined);
+	assert.equal(cap.enqueued[0].args.excludeExtensionTools, undefined);
 });
 
 test("a chained child inherits the PARENT'S provider, model, models and maxCostUsd, never the request file's (#502)", async () => {

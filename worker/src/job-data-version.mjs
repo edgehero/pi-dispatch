@@ -22,8 +22,9 @@ export const JOB_DATA_VERSION = 2;
 /**
  * Each job data field that needs a version above 1, with the version that introduced it.
  * `packageCanary` (issue #796): an older worker would ignore it and run the trigger's ordinary job in its place, a paid run that tried nothing and reported on nothing.
+ * `excludeExtensions` and `excludeExtensionTools` (issue #800): an older worker would ignore either and run the job with what its trigger takes away, on a clean record.
  */
-export const JOB_DATA_FIELD_VERSIONS = Object.freeze({ packageCanary: 2 });
+export const JOB_DATA_FIELD_VERSIONS = Object.freeze({ packageCanary: 2, excludeExtensions: 2, excludeExtensionTools: 2 });
 
 /**
  * Each EXISTING top-level field whose range a later release widens, as `field -> (value) => version` (the shared rule,

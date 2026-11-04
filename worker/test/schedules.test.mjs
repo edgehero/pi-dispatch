@@ -175,6 +175,17 @@ test("the diagonal is enforced at load: a cron -> github trigger throws", () => 
 	assert.throws(() => load([{ ...CRON, run: { ...CRON.run, kind: "github" } }]), isConfigError);
 });
 
+test("a cron trigger's load exclusions reach the scheduler data, stamped, and an unflagged one carries neither (#800)", () => {
+	for (const [field, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensionTools", ["lint_run"]]]) {
+		const text = JSON.stringify({ version: 2, triggers: [{ ...CRON, run: { ...CRON.run, [field]: value } }] });
+		const [s] = loadSchedules(CONFIG, { existsSync: () => true, readFileSync: () => text });
+		assert.deepEqual(s.data[field], value, field);
+		assert.equal(s.data.dataVersion, 2, `${field}: every tick of this schedule says what it needs`);
+	}
+	const [plain] = load([CRON]);
+	assert.equal("excludeExtensions" in plain.data || "excludeExtensionTools" in plain.data || "dataVersion" in plain.data, false);
+});
+
 test("a cron trigger's excludeTools reaches the scheduler data, and an unflagged one carries no key (#291)", () => {
 	const [s] = load([{ ...CRON, run: { ...CRON.run, excludeTools: ["bash", "edit"] } }]);
 	assert.deepEqual(s.data.excludeTools, ["bash", "edit"]);

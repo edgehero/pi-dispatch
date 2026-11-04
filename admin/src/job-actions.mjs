@@ -453,6 +453,8 @@ function runFieldsOf(run, flow) {
     ...(run.image !== undefined ? { image: run.image } : {}),
     ...(run.backend !== undefined ? { backend: run.backend } : {}),
     ...(run.excludeTools !== undefined ? { excludeTools: run.excludeTools } : {}),
+    ...(run.excludeExtensions !== undefined ? { excludeExtensions: run.excludeExtensions } : {}),
+    ...(run.excludeExtensionTools !== undefined ? { excludeExtensionTools: run.excludeExtensionTools } : {}),
     ...(run.mcp !== undefined ? { mcp: run.mcp } : {}),
     ...(run.provider !== undefined ? { provider: run.provider } : {}),
     ...(run.model !== undefined ? { model: run.model } : {}),

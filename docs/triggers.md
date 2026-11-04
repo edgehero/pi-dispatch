@@ -203,7 +203,7 @@ as broken). Nothing needs one yet, so today's files have none and every write le
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 
 **A file written by a newer pi-dispatch** names the versions in its refusal ("triggers file written by a newer
-pi-dispatch (version 2; this build understands 1)"):
+pi-dispatch (version 3; this build understands 2)"):
 
 - A worker or receiver refuses to start on it, as on any file that does not load.
 - A running worker keeps its schedules and logs `triggers_reload_newer`, and from then on defers EVERY job, cron runs
@@ -234,7 +234,7 @@ broken when its last value reads newer and otherwise shows the file as it did be
 **Upgrading.** Earlier releases ignored a top-level `version` in this file; since issue #761 it is read. If you put one
 there yourself, remove it before you upgrade: one that is not a whole number of 1 or more makes the file broken, so the
 worker and the receiver refuse to start on it (a running worker keeps its schedules, and the next panel write drops
-it), and one above 1 reads as a file a newer release wrote, so every job waits.
+it), and one above what this release reads (2) is taken for a file a newer release wrote, so every job waits.
 
 Every top-level key beside `triggers`, and every `run` key of an entry, including ones this release does not know, is
 kept by every write of a release with issue #704 or later. A `/dispatch` panel or worker from before it (4.3.1
@@ -271,6 +271,13 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
   must declare the `excludeTools` capability. The shipped image does. A job carrying exclusions on an
   older image is refused before it costs anything. That image's runner would run the job with every tool
   you removed ([`docs/exclude-tools.md`](exclude-tools.md)).
+
+- `"excludeExtensions": ["@acme/deploy-tools", "git-guard"]` leaves named extensions out of that trigger's jobs: a staged package by
+  its manifest name, with its skills, prompts and themes, or an overlay extension by its file stem or folder name, before any of
+  its code runs. `"excludeExtensionTools": ["deploy_preview"]` removes named tools an extension brings. Neither takes a watch rule.
+  Either makes the file `"version": 2`, which a writer stamps. A name not on a host is no refusal there, and a tool name that matched
+  nothing can stop a job before its prompt. These stop what a job loads on its own, not what an agent with a shell can reach
+  ([`docs/exclude-tools.md`](exclude-tools.md)).
 
 - `"mcp": ["docs", "files"]` names MCP servers from the overlay's `mcp.json` for that trigger's jobs to
   connect ([`docs/mcp.md`](mcp.md)). Names only: the servers themselves, and the credentials they take, are the

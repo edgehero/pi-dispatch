@@ -591,6 +591,11 @@ export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	// promised it would be heard. Only `true` arms it, and the job data carries it only then, so `false` is nothing
 	// authored.
 	Object.freeze({ key: "steer", authored: (v) => v === true }),
+	// Issue #800: what a trigger's jobs do not load and which tools they lose. Dropped by a service below the version floor, or a
+	// current one reading a dead inode through compose's single-file mount, the job loads what the file takes away and keeps the
+	// tool, on a clean record.
+	Object.freeze({ key: "excludeExtensions", authored: (v) => Array.isArray(v) && v.length > 0 }),
+	Object.freeze({ key: "excludeExtensionTools", authored: (v) => Array.isArray(v) && v.length > 0 }),
 ]);
 
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {

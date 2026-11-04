@@ -141,6 +141,7 @@ import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
 import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, publishRedactor, secretValuesIn } from "./doctor-results.mjs";
 import { olderStateFindings as olderStateFindingsReal, VALKEY_CONTAINER } from "./older-state.mjs";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
+import { extensionsNotHere } from "./loaded-record.mjs";
 import { buildHostLoads, flowProbes, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -1893,7 +1894,7 @@ export async function collectChecks(shellVars, seams) {
 	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. Every table is empty in
 	// this release, so this seam is how a test drives a need above 1 through the real collection before a table has a row.
 	const versionTables = seams.versionTables ?? {};
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(env, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(env, fileExists, versionTables.pauseWindows);
@@ -2053,7 +2054,7 @@ export async function collectChecks(shellVars, seams) {
 		const staged = readStagedSkills({ globalPiDir: env.PI_GLOBAL_PI_DIR, readFile: stagedProbes.readFile, fileExists: stagedProbes.fileExists, readDir: stagedProbes.readDir });
 		const groups = new Map();
 		for (const f of flows) {
-			const key = JSON.stringify([f.flow, f.folder, f.skillsDir, f.packages]);
+			const key = JSON.stringify([f.flow, f.folder, f.skillsDir, f.packages, f.excludeExtensions]);
 			if (!groups.has(key)) groups.set(key, { ...f, labels: [], triggers: [] });
 			groups.get(key).labels.push(f.label);
 			groups.get(key).triggers.push(f.index);
@@ -2090,6 +2091,37 @@ export async function collectChecks(shellVars, seams) {
 					warn: true,
 					label: `Trigger flow "${g.flow}" resolves in NO tier visible here (${at})`,
 					fix: `checked: ${checked.join(", ") || "nothing checkable"}${unknown.length > 0 ? `; not checkable here: ${unknown.join(", ")}` : ""} -- commit .pi/skills/${g.flow}/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0`,
+				});
+			}
+		}
+	}
+
+	// Issue #800: a name in run.excludeExtensions that this host holds neither way. No job refuses over it and nothing loads for it, since a host's overlay
+	// and stage are its own and the file is shared, but a typo in a list that keeps code out of a job reads as kept out. ⚠ and never ✗. Only against what
+	// was read: an overlay or manifest that cannot be read says nothing of a name, and has its own line. A trigger that withholds the packages is passed
+	// over: its name may be a package's, which that trigger never looks for.
+	{
+		const overlayDir = env.PI_GLOBAL_PI_DIR;
+		let held = null;
+		try {
+			const entries = readOverlayExtensionRows(overlayDir, { fs: seams.flowFs ?? { readFileSync, readdirSync, statSync } });
+			const manifest = overlayDir && fileExists(join(overlayDir, PACKAGES_SUBDIR, STAGE_MANIFEST)) ? readStageManifest({ globalPiDir: overlayDir, readFile: (p) => readFileSync(p, "utf8"), fileExists }) : { packages: [] };
+			if (entries !== null && manifest !== null) held = { overlay: entries.map((row) => row.name), packages: manifest.packages };
+		} catch {
+			held = null;
+		}
+		if (held !== null) {
+			const lines = new Map();
+			for (const { label, names, packages } of excludedNames) {
+				if (!packages) continue;
+				for (const name of extensionsNotHere(names, held)) lines.set(name, [...(lines.get(name) ?? []), label]);
+			}
+			for (const [name, labels] of lines) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `run.excludeExtensions names ${JSON.stringify(name)}, and this host has no staged package or overlay extension of that name (${labels.join(", ")})`,
+					fix: "nothing loads for it here, so a job is not refused: fix the name if it is a typo, since a misspelled name keeps nothing out on a host that has the real one",
 				});
 			}
 		}
@@ -6528,7 +6560,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
-	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
+	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -6665,8 +6697,11 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 					folder: typeof t.run.folder === "string" ? t.run.folder : null,
 					skillsDir: typeof t.run.skillsDir === "string" ? t.run.skillsDir : null,
 					packages: t.run.packages !== false,
+					excludeExtensions: Array.isArray(t.run.excludeExtensions) ? t.run.excludeExtensions : [],
 				}))
 				.filter((f) => typeof f.flow === "string"),
+			// Issue #800: each trigger's run.excludeExtensions, for the line that says a name is on neither side of this host.
+			excludedNames: triggers.flatMap((t, index) => (Array.isArray(t.run.excludeExtensions) ? [{ label: triggerLabel(t, index), names: t.run.excludeExtensions, packages: t.run.packages !== false }] : [])),
 			// Issue #501: every trigger that sets run.maxCostUsd, with the label the cap check names it by. The value
 			// already parsed (the loader validated it), so the check below only compares.
 			costCaps: triggers.map((t, index) => ({ label: triggerLabel(t, index), maxCostUsd: t.run.maxCostUsd })).filter((r) => r.maxCostUsd !== undefined && r.maxCostUsd !== null),
