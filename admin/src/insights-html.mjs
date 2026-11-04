@@ -1304,8 +1304,9 @@ export function breakdownHtml(nf, minted, tips, names = new Map()) {
   secs.push(listSection("by flow", nf.byFlow.map((r) => ({ label: r.flow, cost: r.cost, runs: r.runs, apiEquiv: r.apiEquiv })), "spend by flow", tips));
   if (nf.byTrigger === null) {
     // Absence, not an empty table: an empty list would read as "nothing spent", which is a claim
-    // the caller explicitly did not compute.
-    secs.push('<div class="bl"><h3>by trigger</h3><div class="dim small">not computed (no trigger join wired)</div></div>');
+    // the caller explicitly did not compute. Two ways here, a caller that wired no join and a triggers file that could
+    // not be read, and the reason is the one thing true of both: REJECTED is naming either, which reads false on the other.
+    secs.push('<div class="bl"><h3>by trigger</h3><div class="dim small">not computed (no list of triggers to join its runs to)</div></div>');
   } else {
     secs.push(listSection(
       "by trigger",

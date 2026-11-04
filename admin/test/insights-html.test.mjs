@@ -537,7 +537,7 @@ test("null payload, unreachable costs, missing joins and junk all degrade to a s
 
   const noJoin = CANNED_PAYLOAD();
   noJoin.fold.byTrigger = null;
-  assert.ok(insightsHtml(noJoin, { now: NOW }).includes("not computed (no trigger join wired)"), "absence, not an empty table");
+  assert.ok(insightsHtml(noJoin, { now: NOW }).includes("not computed (no list of triggers to join its runs to)"), "absence, not an empty table");
 
   const empty = CANNED_PAYLOAD();
   empty.fold.daily = [];

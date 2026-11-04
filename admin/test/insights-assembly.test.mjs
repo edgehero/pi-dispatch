@@ -11,6 +11,7 @@ import * as html from "../src/insights-html.mjs";
 import { buildGraphScene } from "../src/graph-html.mjs";
 import * as ia from "../src/insights-assembly.mjs";
 import { insightsBody } from "../src/console/panels.mjs";
+import { parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { modelDollarKeyPrefix, scopeDollarKeyPrefix } from "@edgehero/pi-dispatch/scoped-limits";
 
 /**
@@ -88,6 +89,21 @@ test("a triggers file that could not be read leaves the spend by trigger not com
   assert.equal(failed.fold.byTrigger, null);
   assert.equal(failed.costByTrigger, null);
   assert.equal(failed.fold.provenance.runsTotal, read.fold.provenance.runsTotal, "the rest of the fold stands");
+  // The console's Breakdown says so where its table would stand empty, and still draws the table for a file it read.
+  const breakdown = async (insights) => {
+    const parsed = parsePageQuery("insights-breakdown", "");
+    return String((await renderPage("insights-breakdown", { query: parsed.query, session: { name: "ops", role: "operator" }, data: { now: nowMs, env: {}, insights }, readOnly: false })).html).replace(/\s+/g, " ");
+  };
+  const NOT_SPLIT = "The triggers file could not be read, so this spend is not split by trigger.";
+  const without = await breakdown(failed);
+  assert.ok(without.includes(NOT_SPLIT));
+  assert.ok(without.includes("By trigger") && without.slice(without.indexOf("By trigger"), without.indexOf("By repository")).indexOf("<table") < 0, "no empty table");
+  const withTable = await breakdown(read);
+  assert.ok(!withTable.includes(NOT_SPLIT));
+  assert.ok(withTable.slice(withTable.indexOf("By trigger"), withTable.indexOf("By repository")).includes("<table"));
+  // The insights page's own words hold for this shape as for a caller that wired no join.
+  const REASON = "not computed (no list of triggers to join its runs to)";
+  assert.ok(html.breakdownHtml(html.normFold(failed.fold), new Map(), []).includes(REASON));
   const flows = await assembleInsightsView(paths, "7d", { view: "flows", role: "operator", nowMs, pricing: PRICING, envFn: () => env, reads: { graph: async () => null } });
   assert.equal(flows.costByTrigger, null);
   assert.equal((await assembleInsightsView(deployment().paths, "7d", { view: "flows", role: "operator", nowMs, pricing: PRICING, envFn: () => env, reads: { graph: async () => null } })).costByTrigger === null, false, "the control");
