@@ -448,7 +448,9 @@ The threat model, and what answers each part:
   own reader still tidies both, as it always did), and a test records every Valkey command a snapshot sends. The one
   write left is BullMQ's own: opening a queue client sets that queue's metadata (its library version and event cap)
   to the values every worker already writes, so it changes nothing a reader sees.
-- **Who sees what.** Run records hold no attacker-chosen text by construction, so both roles see them; their job id,
+- **Who sees what.** Run records hold no attacker-chosen text by construction, with one narrow residual: code in a job's runner
+  process can forge an extension tool's name, `pi` and each count on `loaded`, each within a closed shape
+  (`INT-RUN-HISTORY-FILE-CONTRACT`). So both roles see them; their job id,
   target and parent job id can still be shaped by whoever opened an issue, and are escaped like every value. **Since
   #737 a record's reason is a fixed word by construction too**: an older worker recorded an infrastructure error's own
   message there, which can name a forge API path and a repository, and the worker now records a fixed word for every

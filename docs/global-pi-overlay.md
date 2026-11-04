@@ -90,6 +90,13 @@ A tool's name that holds one of the job's own values is left off the record and 
 everything you forward with `PI_FORWARD_ENV` as a secret: `SEARCH_INDEX=docs_search` beside a package's `docs_search` tool is
 enough. The row's count of tools stays, and the worker's log says `loaded_names_withheld` with how many.
 
+**What the record cannot say.** An extension you turned off in pi on the host is not in that list, and a run cannot say so:
+`import-pi` does not copy it and says so only on its own output, and a file it never copied leaves nothing in the overlay
+for a worker to read. To the record it is an extension you never had. What you can read is what
+the host does have: the overlay's names on a run's page, and the host's publication below, which differs from another host's
+where one of them staged it. `import-pi` only adds, too: a copy an earlier import made stays in the overlay after you turn the
+extension off, and loads, and the record then says it loaded, which is true. Delete it from the overlay's `extensions/` to stop it.
+
 **What the host's publication says.** Each host also says what its jobs can load. Every doctor run writes
 `doctor:loads:<host>` beside its results, for 7 days (`INT-DOCTOR-RESULTS-KEY`): the overlay's extensions and skills by name;
 each MCP server's name, transport, where it runs, how its tools are reached, whether it is on and the names of the
