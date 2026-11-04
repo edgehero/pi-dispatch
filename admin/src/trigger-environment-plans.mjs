@@ -33,6 +33,7 @@ import { FIRST_CALL_SHORT_TASK_BYTES, boundModelOf, builtinChatModels as catalog
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, forgeMcpServer, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { makeMcpCheck, mcpRouteCuts, reservedJobNames } from "@edgehero/pi-dispatch/mcp-preflight";
 import { readOverlayModels } from "@edgehero/pi-dispatch/model-endpoints";
+import { checkFailoverCandidate, selectFailoverJob } from "@edgehero/pi-dispatch/model-failover";
 import { RADIUS_COST_CAP_FIX, RADIUS_COST_CAP_LABEL } from "@edgehero/pi-dispatch/model-observation";
 import { failoverListUsable, modelOnList, splitModelEntry } from "@edgehero/pi-dispatch/model-ref";
 import { effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
@@ -71,6 +72,8 @@ const PICKUP_TAIL = "This reads this host's .env and overlay; what the worker's 
 const SKEW_NAMED_MAX = 5;
 /** How long the preview waits for the jobs in line, `SNAPSHOT_TIMEOUT_MS`'s bound and for its reason. */
 const JOBS_READ_MS = 10_000;
+/** What `failoverOrder` answers the worker's loop with for a model that passes, so the loop goes on to the next. */
+const QUALIFIES = "qualifies";
 
 /** A built-in tool no job has unless an extension turns it on: `DEFAULT_ON_TOOL_NAMES`' other half. */
 const offByDefault = (name) => EXCLUDABLE_TOOL_NAMES.has(name) && !DEFAULT_ON_TOOL_NAMES.has(name);
@@ -503,18 +506,41 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
   }
 
   /**
+   * The worker's own selection (`selectFailoverJob`) asked of a job's models on this host: each candidate in its order, with the reason
+   * it is skipped or `QUALIFIES`, so what a job starts on is the first that qualifies. Its loop and its check, and no copy of either. A
+   * cooldown, a dollar window or a busy endpoint is a moment's and no preview reads them, so `redis` answers none and no limit or
+   * endpoint is handed over. Every model that passes is answered as if it had not, or the loop would stop at the first and say nothing
+   * of a fallback behind it.
+   */
+  async function failoverOrder(job, list, overlay) {
+    const order = [];
+    await selectFailoverJob({ ...job, models: list }, {
+      redis: { get: async () => null },
+      id: "preview",
+      models: overlay,
+      now,
+      log: (event, row) => {
+        if (event === "model_candidate_skipped") order.push(row);
+      },
+      checkCandidate: async (candidate) => (await checkFailoverCandidate(candidate, { models: overlay, lookup: builtinModel })) ?? QUALIFIES,
+    });
+    return order;
+  }
+
+  /**
    * What a job of this entry would call under the deployment's cap (issue #800), judged only when the edit touches a model field
    * or the cap, and only of what it touches, so an edit of the flow is never refused over a pairing the person did not touch.
    *
    * What pickup refuses for free and this host's overlay or `.env` decides (a model it does not know, a list that comes from its
-   * PI_ALLOWED_MODELS) is a warning: another host may hold what this one lacks, `judgeMcp`'s rule. What stays a refusal costs
-   * more than a free refusal: a cap above the deployment's refuses the whole file at the loader, and a cap the MAIN model cannot
-   * clear refuses a job's every call inside a paid container, so those are stopped here (CONST-BUDGET-BEFORE-TOKENS). A listed or
-   * fallback model that cannot clear it is a warning: the job starts on its main model, and the cost guard refuses a call to that
-   * one only if the job makes it, which stops the job as `cost-cap`. A list the file itself contradicts on every host is the
-   * loader's to refuse, in the funnel. One that clears only the smallest possible request is said out loud (`thin`).
+   * PI_ALLOWED_MODELS) is a warning: another host may hold what this one lacks, `judgeMcp`'s rule. A job with fallbacks is not refused
+   * for one model at all: the worker's own selection skips it and starts the job on the next, so that is what is said (`failoverOrder`).
+   * What stays a refusal costs more than a free refusal: a cap above the deployment's refuses the whole file at the loader, and a cap
+   * the model a job STARTS ON cannot clear refuses its every call inside a paid container, so those are stopped here
+   * (CONST-BUDGET-BEFORE-TOKENS). Any other model that cannot clear it is a warning: the cost guard refuses a call to it only if the job
+   * makes one, which stops the job as `cost-cap`. A list the file itself contradicts on every host is the loader's to refuse, in the
+   * funnel. One that clears only the smallest possible request is said out loud (`thin`).
    */
-  function judgeModels({ entry, was, text, facts, touched }) {
+  async function judgeModels({ entry, was, text, facts, touched }) {
     const run = entry.run;
     const has = (key) => touched.includes(key);
     const capTouched = has("maxCostUsd");
@@ -546,25 +572,57 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       const main = { provider: job.provider, id: job.model };
       const mainName = `${main.provider}/${main.id}`;
       const list = job.models ?? facts.envList ?? null;
-      const asked = [...(mainTouched ? [{ ...main, main: true }] : []), ...addedRefs("models"), ...addedRefs("fallbackModels")];
-      for (const ref of asked) {
-        const name = `${ref.provider}/${ref.id}`;
-        const known = checkModelsKnown([ref], { readOverlay: readOverlayDoc });
-        if (known?.unavailable) warnings.add(`The overlay's models.json could not be read just now, so whether this deployment knows ${name} could not be judged here; a pickup asks again.`);
-        else if (known?.unknown) warnings.add(onHost("model-unknown", `${name} is a model this deployment does not know (${known.why}). Choose one from the catalog, or declare it in the overlay's models.json.`));
-        else if (known?.ok !== true && !known?.fallbackUnlisted) warnings.add(`The model catalog could not judge ${name} here; a pickup asks again.`);
-      }
-      if (has("models") && Array.isArray(list) && list.length > 0) {
-        const known = checkModelsKnown(refsOf(list), { readOverlay: readOverlayDoc });
-        if (known?.fallbackUnlisted) warnings.add(onHost("model-not-allowed", `${known.fallbackUnlisted.provider}/${known.fallbackUnlisted.id} declares fallback models the allowed list does not name. Add them to the list, or remove it.`));
-      }
-      // A main model and a list both written in this entry that disagree never get here: the loader refuses them, in the funnel.
-      if ((mainTouched || has("models")) && Array.isArray(list) && !modelOnList(list, main.provider, main.id)) warnings.add(onHost("model-not-allowed", `${mainName} is not on the models they may call here. Add it to the list, or choose another model.`));
       const fallbacks = refsOf(job.fallbackModels);
-      if (has("fallbackModels") || has("models")) {
-        const offList = fallbacks.find((ref) => !failoverListUsable({ models: list, fallbackModels: [`${ref.provider}/${ref.id}`] }));
-        // A list written in this entry that leaves out its own fallback never gets here either: the loader refuses that.
-        if (offList) warnings.add(onHost("model-failover-no-candidate", `every fallback must be on the allowed list (run.models, or PI_ALLOWED_MODELS when the trigger has none), and ${offList.provider}/${offList.id} is not.`));
+      const failover = fallbacks.length > 0;
+      // The model this job starts on: its main one, unless the worker's selection would pass that over.
+      let startName = mainName;
+      let selected = false;
+      if (failover) {
+        if (has("fallbackModels") || has("models")) {
+          const offList = fallbacks.find((ref) => !failoverListUsable({ models: list, fallbackModels: [`${ref.provider}/${ref.id}`] }));
+          // A list written in this entry that leaves out its own fallback never gets here: the loader refuses that, in the funnel.
+          if (offList) warnings.add(onHost("model-failover-no-candidate", `every fallback must be on the allowed list (run.models, or PI_ALLOWED_MODELS when the trigger has none), and ${offList.provider}/${offList.id} is not.`));
+        }
+        let overlay;
+        try {
+          overlay = readOverlayDoc();
+          selected = true;
+        } catch {
+          // Said below, by the questions that need the file, and no selection is claimed without it.
+        }
+        if (selected) {
+          const order = await failoverOrder(job, list, overlay);
+          const start = order.find((row) => row.reason === QUALIFIES)?.model;
+          if (start !== undefined) startName = start;
+          const skipped = order.filter((row) => row.reason !== QUALIFIES);
+          const named = (rows) => listed(rows.map((row) => `${row.model} (${row.reason})`));
+          const added = addedRefs("fallbackModels").map((ref) => `${ref.provider}/${ref.id}`);
+          const spoken = skipped.filter((row) => has("models") || (mainTouched && row.model === mainName) || added.includes(row.model));
+          if (order.length > 0 && start === undefined && (mainTouched || has("models") || has("fallbackModels"))) warnings.add(onHost("model-failover-no-candidate", `a job skips ${named(skipped)} and has no model left.`));
+          else if (start !== undefined && spoken.length > 0) warnings.add(`On this host a job of this trigger skips ${named(spoken)} and starts on ${start}.`);
+        }
+      }
+      // A job with fallbacks reaches none of these as itself, since selection answers for each of its models. One whose overlay could
+      // not be read is asked what can be said without it, and that names the file and claims nothing of a model.
+      if (!selected) {
+        const asked = [...(mainTouched ? [{ ...main, main: true }] : []), ...addedRefs("models"), ...addedRefs("fallbackModels")];
+        for (const ref of asked) {
+          const name = `${ref.provider}/${ref.id}`;
+          const known = checkModelsKnown([ref], { readOverlay: readOverlayDoc });
+          if (known?.unavailable) warnings.add(`The overlay's models.json could not be read just now, so whether this deployment knows ${name} could not be judged here; a pickup asks again.`);
+          // Not the model's fault and no other model's way out: every model on this provider, or every model at all, meets this.
+          else if (known?.unknown && known.why !== "not-in-catalog") warnings.add(`The overlay's models.json could not be read or used for ${name} (${known.why}), so this host cannot run it. Fix that file, since another model may be refused the same way.`);
+          else if (known?.unknown) warnings.add(onHost("model-unknown", `${name} is a model this deployment does not know (${known.why}). Choose one from the catalog, or declare it in the overlay's models.json.`));
+          else if (known?.ok !== true && !known?.fallbackUnlisted) warnings.add(`The model catalog could not judge ${name} here; a pickup asks again.`);
+        }
+      }
+      if (!failover) {
+        if (has("models") && Array.isArray(list) && list.length > 0) {
+          const known = checkModelsKnown(refsOf(list), { readOverlay: readOverlayDoc });
+          if (known?.fallbackUnlisted) warnings.add(onHost("model-not-allowed", `${known.fallbackUnlisted.provider}/${known.fallbackUnlisted.id} declares fallback models the allowed list does not name. Add them to the list, or remove it.`));
+        }
+        // A main model and a list both written in this entry that disagree never get here: the loader refuses them, in the funnel.
+        if ((mainTouched || has("models")) && Array.isArray(list) && !modelOnList(list, main.provider, main.id)) warnings.add(onHost("model-not-allowed", `${mainName} is not on the models they may call here. Add it to the list, or choose another model.`));
       }
       const cap = facts.capOf(job.maxCostUsd);
       if (cap === null) continue;
@@ -574,10 +632,11 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       const named = capTouched ? [main, ...refsOf(run.models), ...fallbacks] : [...(mainTouched ? [main] : []), ...addedRefs("models"), ...addedRefs("fallbackModels")];
       for (const ref of new Map(named.map((one) => [`${one.provider}/${one.id}`, one])).values()) {
         const name = `${ref.provider}/${ref.id}`;
-        // What this model's failing means for a job: it cannot start at all, or it starts on its main model and stops at a call to this one.
+        // What this model's failing means for a job: it cannot start at all, or it stops at a call to this one. Failover can move a job
+        // to it with no check of the cap (`selectFailoverJob`), so the job then starts a container before that first call is refused.
         const stopped = (sentence) => {
-          if (name === mainName) return refuse(sentence);
-          warnings.add(`${sentence} A job still starts on ${mainName}, and a call to this one stops it as cost-cap.`);
+          if (name === startName) return refuse(sentence);
+          warnings.add(`${sentence} A call to this one stops the job as cost-cap, and a job moved to it starts a paid container first.`);
           return null;
         };
         // A models.json that cannot be read now was said above, and an amount read without it would be a guess.
@@ -629,7 +688,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
    * Everything the file and the settings say, with no queue or registry read: the preview's and the apply's one judgement. The
    * apply runs it again because a deployment's cap can move between the two, and `expect` covers only the triggers file.
    */
-  function judge(rawBody) {
+  async function judge(rawBody) {
     const body = plain(rawBody) && typeof rawBody.index === "string" && /^\d{1,6}$/.test(rawBody.index) ? { ...rawBody, index: Number(rawBody.index) } : rawBody;
     const problem = shapeProblem(body);
     if (problem) return refuse(problem);
@@ -721,7 +780,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
       facts = modelFacts({ paths, readHostEnv, fs });
       if (facts.refusal) return facts;
-      const judged = judgeModels({ entry: nextEntry, was: entry, text: afterText, facts, touched });
+      const judged = await judgeModels({ entry: nextEntry, was: entry, text: afterText, facts, touched });
       if (judged.refusal) return judged;
       unjudged = judged.unjudged;
       thin = judged.thin;
@@ -745,7 +804,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const beforeLoads = wasLoaded !== undefined;
     let backRefused = null;
     if (beforeLoads && heldNull === undefined) {
-      if (touched.some((key) => MODEL_OR_CAP.includes(key))) backRefused = judgeModels({ entry, was: nextEntry, text: beforeText, facts, touched }).refusal ?? null;
+      if (touched.some((key) => MODEL_OR_CAP.includes(key))) backRefused = (await judgeModels({ entry, was: nextEntry, text: beforeText, facts, touched })).refusal ?? null;
       if (backRefused === null && reachesPickup) backRefused = judgeMcp({ was: nowRun, run: wasRun, entry, text: beforeText, facts }).refusal ?? null;
     }
     let inverse = null;
@@ -847,7 +906,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
 
   async function preview(body, ctx) {
     if (!authority(ctx)) return denied;
-    const judged = judge(body);
+    const judged = await judge(body);
     if (judged.refusal || judged.unchanged) return judged;
     const gate = await versionGate(judged.need);
     if (gate.refusal) return gate;
@@ -915,7 +974,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
   async function apply(entry, ctx) {
     if (!authority(ctx)) return { invalid: denied.refusal };
     if (!entry?.payload?.body) return { invalid: "This confirmation holds no change; preview it again." };
-    const judged = judge(entry.payload.body);
+    const judged = await judge(entry.payload.body);
     if (judged.refusal) return { invalid: judged.refusal };
     if (judged.unchanged) return { invalid: judged.unchanged };
     const gate = await versionGate(judged.need);

@@ -204,7 +204,7 @@ const CRON = Object.freeze({ on: { type: "cron", id: "daily", pattern: "0 6 * * 
 const COMMENT_ON = Object.freeze({ type: "comment", phrase: "@pi" });
 
 /** The real planner over a real triggers file and overlay, with the entry at row 2. `failing` makes a read of one file name fail as a disk would. */
-function plannerWorld({ run = {}, doc = null, settings = "{}", env = {}, overlay = null, failing = null, projects = null, deps = {} } = {}) {
+function plannerWorld({ run = {}, doc = null, settings = "{}", env = {}, overlay = null, failing = null, failingCode = "EIO", projects = null, deps = {} } = {}) {
   const dir = tempDir("pd-800-docs-");
   const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), projectsFile: projects === null ? null : join(dir, "projects.json"), globalPiDir: join(dir, "overlay") };
   nodeFs.writeFileSync(paths.triggersPath, `${JSON.stringify(doc ?? { triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", ...run } }] }, null, 2)}\n`);
@@ -213,7 +213,7 @@ function plannerWorld({ run = {}, doc = null, settings = "{}", env = {}, overlay
   nodeFs.mkdirSync(paths.globalPiDir);
   nodeFs.writeFileSync(join(paths.globalPiDir, "mcp.json"), JSON.stringify(FILE_MCP));
   if (overlay !== null) nodeFs.writeFileSync(join(paths.globalPiDir, "models.json"), JSON.stringify(overlay));
-  const fs = failing === null ? nodeFs : { ...nodeFs, readFileSync: (path, ...rest) => { if (String(path).endsWith(failing)) throw Object.assign(new Error("busy"), { code: "EIO" }); return nodeFs.readFileSync(path, ...rest); } };
+  const fs = failing === null ? nodeFs : { ...nodeFs, readFileSync: (path, ...rest) => { if (String(path).endsWith(failing)) throw Object.assign(new Error("busy"), { code: failingCode }); return nodeFs.readFileSync(path, ...rest); } };
   const service = createTriggerEnvironmentActions({ paths, env: { PI_PROVIDER: "anthropic", PI_MODEL: "claude-haiku-4-5", PI_EGRESS: "0", PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "a value", ...env }, fs, now: () => PLANNER_NOW, deploymentDir: dir, ...deps });
   const digest = () => triggerEntryDigest(JSON.parse(nodeFs.readFileSync(paths.triggersPath, "utf8")).triggers[1]);
   const preview = (change, over = {}) => service.preview({ index: 1, pageDigest: over.pageDigest ?? digest(), ...change, ...over }, operator);
@@ -262,13 +262,16 @@ const REFUSALS = Object.freeze({
  */
 const WARNINGS = Object.freeze({
   "is a model this deployment does not know": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-typo" }),
+  "could not be read or used for": () => plannerWorld({ run: MODEL_RUN, overlay: LOCAL_MODEL, failing: "models.json", failingCode: "EACCES" }).preview({ model: "claude-sonnet-5-5" }),
   "declares fallback models the allowed list does not name": () => plannerWorld({ run: { provider: "anthropic", model: "claude-fable-5" } }).preview({ models: ["anthropic/claude-fable-5"] }),
   "is not on the models they may call here": () => plannerWorld({ run: { provider: "anthropic", model: "claude-sonnet-5-5" }, env: { PI_ALLOWED_MODELS: SONNET } }).preview({ model: "claude-haiku-4-5" }),
   "every fallback must be on the allowed list": () => plannerWorld({ run: MODEL_RUN }).preview({ fallbackModels: [SONNET] }),
+  "a job of this trigger skips": () => plannerWorld({ run: { provider: "anthropic", model: "claude-opus-5-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` } }).preview({ fallbackModels: [SONNET], model: "claude-typo" }),
+  "and has no model left": () => plannerWorld({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: "anthropic/claude-typo,anthropic/claude-nope" } }).preview({ model: "claude-typo", fallbackModels: ["anthropic/claude-nope"] }),
   "this trigger's model could not be resolved": () => { const projects = JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }, { id: "api", members: ["github:acme/api"] }] }); return plannerWorld({ projects, doc: { modelRoles: { web: { oai: "openai/gpt-4o" } }, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", model: "role:oai" } }] } }).preview({ flow: "review", maxCostUsd: "5" }); },
   "would be refused as": () => plannerWorld({ env: { PI_FORWARD_ENV: "" } }).preview({ mcp: ["linear"] }),
   "On this host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["docs"], excludeTools: ["codemode"] }),
-  "A job still starts on": () => plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" }),
+  "stops the job as cost-cap": () => plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" }),
   "no skill named": () => plannerWorld({ deps: { readHostLoads: () => published({ mini1: {} }) } }).preview({ flow: "review" }),
   "clears this": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-opus-5-5", maxCostUsd: "2.62144" }),
   "could not be bounded here": () => plannerWorld({ overlay: { providers: { free: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "x", models: [{ id: "m" }] } } }, run: MODEL_RUN, env: { PI_MAX_COST_USD: "5" } }).preview({ provider: "free", model: "m" }),
@@ -336,12 +339,14 @@ const REFUSAL_TODO = Object.freeze({
 });
 const WARNING_TODO = Object.freeze({
   "is a model this deployment does not know": { says: /Choose one from the catalog, or declare it in the overlay's `?models\.json`?/, shared: true },
+  "could not be read or used for": { says: /Fix that file/, shared: true },
   "declares fallback models the allowed list does not name": { says: /Add (?:it|them) to the list/, shared: true },
   "every fallback must be on the allowed list": { says: /`?run\.models`?[^|]*`?PI_ALLOWED_MODELS`? when the trigger has (?:no list|none)/, shared: true },
+  "a job of this trigger skips": { says: /Correct the model it names/ },
   "this trigger's model could not be resolved": { says: /Correct its model or its role/, shared: true },
   "would be refused as": { says: /`?run\.secrets`? is set in the (?:triggers )?file, not on this page/, shared: true },
   "On this host this trigger's jobs would be refused as mcp-excluded": { says: /Remove the server from `run\.mcp`, or keep a tool that reaches it out of `run\.excludeTools`/, shared: true },
-  "A job still starts on": { says: /Choose another model/i, shared: true },
+  "stops the job as cost-cap": { says: /Choose another model/i, shared: true },
   "no skill named": { says: /Check the flow's name/ },
   "clears this": { says: /Choose another model/i, shared: true },
   "could not be bounded here": { says: /Read it, and decide/ },
@@ -376,10 +381,10 @@ test("docs/console.md's table of what the trigger's preview refuses: each quote 
   await holdTodo(rows.slice(0, Object.keys(REFUSAL_TODO).length), REFUSAL_TODO, REFUSALS, (out) => out.refusal);
   // Of the model a job starts on, and no other: a listed one under the same cap plans, and both rows say so.
   for (const [row] of [["needs at least"], ["has no verified local cost bound"]]) assert.match(rows.find(([says]) => says.includes(row))[1], /the model a job starts on[^|]*A listed or fallback model[^|]*warns/, row);
-  assert.ok((await WARNINGS["A job still starts on"]()).plan, "a listed model under the cap plans");
+  assert.ok((await WARNINGS["stops the job as cost-cap"]()).plan, "a listed model under the cap plans");
   const radiusListed = await plannerWorld({ run: MODEL_RUN, settings: JSON.stringify({ maxCostUsd: "5" }), deps: { checkModelsKnown: () => ({ ok: true }) } }).preview({ fallbackModels: ["radius/balanced"], models: [HAIKU, "radius/balanced"] });
   assert.ok(radiusListed.plan, JSON.stringify(radiusListed));
-  assert.ok(radiusListed.summary.some((line) => line.includes("has no verified local cost bound") && line.includes("A job still starts on")), radiusListed.summary.join("\n"));
+  assert.ok(radiusListed.summary.some((line) => line.includes("has no verified local cost bound") && line.includes("stops the job as cost-cap")), radiusListed.summary.join("\n"));
 });
 
 test("docs/console.md's table of what the preview warns of: each quote is in what the real planner says, and a warning leaves the Confirm", async () => {
@@ -419,7 +424,7 @@ test("every warning the planner can say is in that table: a new sentence has to 
   literals.push(...[...source.matchAll(/failedRead \? `[^`]*` : `((?:[^`\\]|\\.)*)`/g)].map((m) => m[1]));
   assert.ok(source.includes("this trigger's model could not be resolved (${unresolved.reason})"));
   // Each of these went unforced when the scan skipped a literal it could not read: held by name, so a scan that loses one says so.
-  for (const said of ["A job still starts on", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here", "The worker's pickup check could not judge"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
+  for (const said of ["stops the job as cost-cap", "a job of this trigger skips", "could not be read or used for", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here", "The worker's pickup check could not judge"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
   assert.ok(literals.length >= 20, `the scan finds the planner's sentences (${literals.length})`);
   const quotes = Object.keys(WARNINGS);
   for (const literal of literals) assert.ok(quotes.some((quote) => literal.includes(quote)), `no row for: ${literal}`);
@@ -781,14 +786,14 @@ test("docs/costs.md's amounts are the real bound's, at the pin, and each row of 
   const judged = /const MODEL_OR_CAP = Object\.freeze\(\[([^\]]*)\]\)/.exec(read("admin/src/trigger-environment-plans.mjs"))[1];
   assert.deepEqual([...judged.matchAll(/"([^"]+)"/g)].map((m) => m[1]), ["provider", "model", "models", "fallbackModels", "maxCostUsd"]);
   assert.match(text, /only when the change sends the model, the provider, a list or the cap/);
-  // A listed or fallback model under the same cap, in the words the row quotes: a job starts on its main model.
+  // A listed or fallback model under the same cap, in the words the row quotes.
   const listed = await plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" });
   assert.ok(listed.plan, JSON.stringify(listed));
   const [, listedQuote] = quotes(below[1]);
   assert.ok(listed.plan.warnings.some((line) => line.endsWith(listedQuote)), listedQuote);
   assert.match(below[1], /^Of the model a job starts on, refuses/);
   assert.match(below[1], /Of a listed or fallback model, previews/);
-  assert.match(text, /is refused under any cap as the model a job starts on, and warned of as a listed or fallback model/);
+  assert.match(text, /is refused under any cap as the model a job starts on, and warned of as any other model/);
   // What a change of the model or a list asks: only what moved. The cap asks all of them.
   const held = plannerWorld({ run: { ...MODEL_RUN, models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" } });
   assert.ok(!(await held.preview({ flow: "review" })).summary.some((line) => line.includes("claude-opus-5-5")), "an edit that names no model asks of none");
