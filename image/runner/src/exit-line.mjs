@@ -71,6 +71,17 @@ export const EXIT_TAIL_BYTES = 8 * 1024;
  */
 export const EXIT_LINE_MAX_BYTES = 7680;
 /**
+ * The most a line may take with a form of `loaded` on it (issue #800, INT-RUNNER-EXIT-CODE-PROTOCOL): 6 KiB, which leaves the
+ * 2 KiB of the tail a line had before that field existed. `EXIT_LINE_MAX_BYTES` sets aside the supervisor's line and nothing
+ * more, and the line is not the job's last write: the process lives on until its event loop drains (`process.exitCode`,
+ * run-job.mjs), so an extension's timer, a child that outlived the session or a shutdown log can still write to stdout. A few
+ * hundred bytes after a 7.6 KB line push its head out of the tail, the MAC fails, every field reads null and the dollars settle
+ * at the floor, and a field nothing decides by must not be what made the line that long.
+ * REJECTED: lowering `EXIT_LINE_MAX_BYTES` to this. A line with no `loaded` on it could already reach that size, and it would
+ * then lose its message to a limit that is here for the sake of a field it does not carry.
+ */
+export const EXIT_LINE_LOADED_MAX_BYTES = 6 * 1024;
+/**
  * The most `message` may take of the line as written (issue #800), held before any form of `loaded` is chosen. A provider's
  * error is the one field here whose size says nothing about the run: 1,700 CJK characters pass capExitMessage, which
  * counts as JSON.stringify spells them, and escape to six bytes each here, so one such error took the whole record of what
@@ -236,19 +247,21 @@ function lastResortFields(fields) {
  * and `message` cut to the room left, because the head of a provider's error says what it is and nothing else says
  * what the job loaded; then no `loaded` and the message given what that frees; then the last resort; then, because the
  * last resort keeps `reason` and `tokens` as they came and nothing bounds those, the smallest line there is. `forms` is
- * `[null]` for a line with nothing noted.
+ * `[null]` for a line with nothing noted. A form of `loaded` is held to `loadedMaxBytes` and everything else to `maxBytes`,
+ * so the line with no form on it is the one that can still use the room the field may not.
  */
-function fitExitLine({ compose, forms, message, maxBytes, lastResort, smallest }) {
+function fitExitLine({ compose, forms, message, maxBytes, loadedMaxBytes, lastResort, smallest }) {
 	const size = (line) => Buffer.byteLength(line, "utf8");
+	const limitOf = (form) => (form === null ? maxBytes : loadedMaxBytes);
 	for (const form of forms) {
 		const line = compose(form);
-		if (size(line) <= maxBytes) return line;
+		if (size(line) <= limitOf(form)) return line;
 	}
 	for (const form of new Set([forms.at(-1), null])) {
 		const whole = compose(form);
-		if (size(whole) <= maxBytes) return whole;
+		if (size(whole) <= limitOf(form)) return whole;
 		if (typeof message !== "string") continue;
-		const room = maxBytes - size(compose(form, { message: "" }));
+		const room = limitOf(form) - size(compose(form, { message: "" }));
 		if (room >= 0) return compose(form, { message: cutExitMessage(message, room) });
 	}
 	const resort = lastResort();
@@ -266,7 +279,8 @@ function fitExitLine({ compose, forms, message, maxBytes, lastResort, smallest }
  * exit code and the last line still agree. Before this the runner had no handler, so a `docker stop` killed it
  * mid-run and no genuine line followed whatever a tool had written.
  *
- * The line it writes fits `maxBytes` (exitLineMaxBytes): a noted `loaded` falls to a smaller form, a `message` too long
+ * The line it writes fits `maxBytes` (exitLineMaxBytes): a noted `loaded` falls to a smaller form, none of which may take the
+ * line past `EXIT_LINE_LOADED_MAX_BYTES`, a `message` too long
  * for the room left is cut, and, past that, only what the settlement reads is kept, marked `lineCut`, because such a line
  * still verifies and an oversized one reads as no line at all. If even that is over (a `reason` or `tokens` nothing bounded),
  * the line is `{ event, code, lineCut }`, under any limit a real job id leaves: it names no job id, and with no tokens it
@@ -309,7 +323,7 @@ export function createExitWriter({ key = null, jobId, write, exit, resources = (
 		const compose = (form, over = {}) => lineOf({ event: "exit", jobId, ...notes, ...(form === null ? cutOff : { loaded: form }), ...said, ...over, ...usedField });
 		const lastResort = () => lineOf({ event: "exit", jobId, ...lastResortFields(said), lineCut: true, ...cutOff });
 		const smallest = () => lineOf({ event: "exit", ...(Number.isSafeInteger(said?.code) ? { code: said.code } : {}), lineCut: true, ...cutOff });
-		write(fitExitLine({ compose, forms, message: said?.message, maxBytes, lastResort, smallest }));
+		write(fitExitLine({ compose, forms, message: said?.message, maxBytes, loadedMaxBytes: Math.min(maxBytes, EXIT_LINE_LOADED_MAX_BYTES), lastResort, smallest }));
 		return true;
 	}
 	function terminate(fields = {}) {

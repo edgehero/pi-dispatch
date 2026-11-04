@@ -3,10 +3,10 @@ import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { createExitWriter, drainStdin, EXIT_LINE_MAX_BYTES, EXIT_MESSAGE_MAX_BYTES, EXIT_TAIL_BYTES, EXIT_TERMINATED, exitLineJson, exitLineMac, exitLineMaxBytes, readExitKey, signExitLine, SUPERVISOR_LINE_BYTES, writeAllSync } from "../src/exit-line.mjs";
+import { createExitWriter, drainStdin, EXIT_LINE_LOADED_MAX_BYTES, EXIT_LINE_MAX_BYTES, EXIT_MESSAGE_MAX_BYTES, EXIT_TAIL_BYTES, EXIT_TERMINATED, exitLineJson, exitLineMac, exitLineMaxBytes, readExitKey, signExitLine, SUPERVISOR_LINE_BYTES, writeAllSync } from "../src/exit-line.mjs";
 import { buildLoaded, fitLoaded } from "../src/loaded.mjs";
 import { capExitMessage } from "../src/outcome.mjs";
-import { maximalLoaded } from "./helpers/maximal-loaded.mjs";
+import { longestNames, maximalLoaded } from "./helpers/maximal-loaded.mjs";
 import { deathFields, BY_SUPERVISOR } from "../src/supervise.mjs";
 import { authenticExitLines, makeLogSink, RESOURCE_KEYS, RUNNER_POLICY_REASONS, TOKEN_KEYS } from "../../../worker/src/run-history.mjs";
 
@@ -409,6 +409,7 @@ test("the numbers INT-RUNNER-EXIT-CODE-PROTOCOL states are measured here: every 
 	const spec = readFileSync(new URL("../../../specs/interfaces.md", import.meta.url), "utf8");
 	const section = spec.slice(spec.indexOf("**The whole line has a limit of its own (issue #800)"), spec.indexOf("**The job user cannot read its own inputs (issue #341)**"));
 	for (const number of [line.length, withSupervisor, EXIT_LINE_MAX_BYTES]) assert.ok(section.includes(String(number)) || section.includes(number.toLocaleString("en-US")), `the spec does not say ${number}`);
+	assert.ok(section.includes(`\`EXIT_LINE_LOADED_MAX_BYTES\`, ${EXIT_LINE_LOADED_MAX_BYTES.toLocaleString("en-US")} bytes`), "the spec names the lower limit");
 });
 
 test("a maximal line stays at or under 7,680 bytes and verifies, with the code, the reason and the money intact", async () => {
@@ -598,7 +599,7 @@ test("a line with no message goes straight from the smallest form to no field", 
 	assert.equal(Object.hasOwn(bodyOf(linedWith(fields, { maxBytes: minimal - 1 })), "lineCut"), false, "the verdict's fields all still fit");
 });
 
-test("the worst line carrying the worst field stays at or under the budget and verifies, keeping the verdict, the money and the smallest form", async () => {
+test("the worst line has no room for even the smallest form beside the lower limit: it says so, and the verdict and the money stay under the hard cap", async () => {
 	const fields = worstFields();
 	const out = [];
 	const writer = createExitWriter({ key: KEY, jobId: JOB_ID, write: (s) => out.push(s), exit: () => {}, resources: () => LONGEST_RESOURCES });
@@ -606,10 +607,13 @@ test("the worst line carrying the worst field stays at or under the budget and v
 	writer.writeExit(fields);
 	const line = out[0];
 	assert.ok(bytesOf(line) <= EXIT_LINE_MAX_BYTES, `the line is ${bytesOf(line)} bytes`);
+	assert.ok(bytesOf(line) > EXIT_LINE_LOADED_MAX_BYTES, "the premise: this line is past the lower limit with nothing of `loaded` on it");
 	const body = bodyOf(line);
-	assert.equal(body.loaded.cut.form, "minimal");
+	assert.equal(Object.hasOwn(body, "loaded"), false, "so a form of it could only have made that longer");
+	assert.equal(body.loadedCut, true);
 	assert.equal(body.code, fields.code);
 	assert.deepEqual(body.tokens, fields.tokens);
+	assert.deepEqual(body.usage, fields.usage);
 	assert.deepEqual(body.resources, LONGEST_RESOURCES);
 	assert.match(body.message, /\[truncated \d+ chars\]$/);
 	const read = await throughSink(`${"agent noise\n".repeat(900)}${line}`);
@@ -617,15 +621,119 @@ test("the worst line carrying the worst field stays at or under the budget and v
 	assert.equal(read.tokens.total, 99_999_999);
 });
 
-test("an everyday line keeps the largest field whole: one model, a capped provider error, and every name at its cap", () => {
+/** One model, a provider's HTML error through capExitMessage: what a failed run really writes beside what it loaded. */
+function everydayFields() {
 	const message = `403 ${'<p class="x">Forbidden.</p>\n'.repeat(600)}`;
-	const fields = { ...capExitMessage({ code: 2, reason: "provider-auth-refused", message }), turns: 4, retryTurns: 0, tokens: Object.fromEntries(TOKEN_KEYS.map((key) => [key, key === "metered" ? true : 99_999])), usage: { v: 1, piAi: "1.5.0", models: [{ provider: "anthropic", model: "claude-sonnet-4-5-20250929", calls: 9, input: 99_999, output: 99_999, cacheRead: 99_999, cacheWrite: 99_999, cacheWrite1h: 0, reasoning: 0, total: 99_999, cost: 12.5, unpriced: 0, providerBilled: 0 }] }, session: { resumed: false, reason: "absent" }, replaySafe: false, toolsStarted: 1 };
+	return { ...capExitMessage({ code: 2, reason: "provider-auth-refused", message }), turns: 4, retryTurns: 0, tokens: Object.fromEntries(TOKEN_KEYS.map((key) => [key, key === "metered" ? true : 99_999])), usage: { v: 1, piAi: "1.5.0", models: [{ provider: "anthropic", model: "claude-sonnet-4-5-20250929", calls: 9, input: 99_999, output: 99_999, cacheRead: 99_999, cacheWrite: 99_999, cacheWrite1h: 0, reasoning: 0, total: 99_999, cost: 12.5, unpriced: 0, providerBilled: 0 }] }, session: { resumed: false, reason: "absent" }, replaySafe: false, toolsStarted: 1 };
+}
+function linedAtBudget(fields, loaded) {
 	const out = [];
 	const writer = createExitWriter({ key: KEY, jobId: JOB_ID, write: (s) => out.push(s), exit: () => {}, resources: () => LONGEST_RESOURCES });
-	writer.note({ loaded: maximalLoaded() });
+	writer.note({ loaded });
 	writer.writeExit(fields);
-	assert.equal(bodyOf(out[0]).loaded.cut.form, "full", `the line is ${bytesOf(out[0])} bytes`);
-	assert.ok(bytesOf(out[0]) <= EXIT_LINE_MAX_BYTES);
+	return out[0];
+}
+
+test("an everyday line keeps the largest field whole: five packages, three overlay extensions, two servers, one model and a capped provider error", () => {
+	const packages = Array.from({ length: 5 }, (_, i) => `/opt/pi-global/packages/pkg${i}`);
+	const guards = ["git-guard.ts", "secret-scan.ts", "commit-style.ts"];
+	const everyday = buildLoaded({
+		at: "ready",
+		pi: "1.5.0",
+		roots: { packages, jobPi: "/job/pi", triggerSkills: "/job/trigger-skills", overlay: "/opt/pi-global", workspace: "/workspace" },
+		flow: "deep",
+		skills: [{ name: "deep", filePath: "/job/pi/skills/deep/SKILL.md" }],
+		extensions: [...packages.map((root) => `${root}/ext.js`), ...guards.map((guard) => `/opt/pi-global/extensions/${guard}`)],
+		tools: [...packages.flatMap((root, i) => ["run", "check", "report"].map((verb) => ({ name: `pkg${i}_${verb}_tool`, path: `${root}/ext.js` }))), ...guards.map((guard, i) => ({ name: `guard_${i}_check`, path: `/opt/pi-global/extensions/${guard}` })), { name: "read", path: "builtin:read" }, { name: "bash", path: "builtin:bash" }, { name: "report_progress", path: "<inline:job-report-progress>" }],
+		active: ["read", "bash", "report_progress"],
+		ownNames: ["read", "bash"],
+		mcp: [["connected", 12], ["connected", 40]],
+	});
+	const line = linedAtBudget(everydayFields(), everyday);
+	assert.equal(bodyOf(line).loaded.cut.form, "full", `the line is ${bytesOf(line)} bytes`);
+	assert.ok(bytesOf(line) <= EXIT_LINE_LOADED_MAX_BYTES);
+	// Every list at its cap and every name at its longest is what falls, and only beside that error: with none it stays whole.
+	const { message: _message, ...withoutError } = everydayFields();
+	assert.equal(bodyOf(linedAtBudget({ ...withoutError, code: 0, reason: "stop" }, longestNames())).loaded.cut.form, "full");
+	assert.equal(bodyOf(linedAtBudget({ ...withoutError, code: 0, reason: "stop" }, maximalLoaded())).loaded.cut.form, "full", "every count at its bound too");
+	const fallen = bodyOf(linedAtBudget(everydayFields(), longestNames()));
+	assert.equal(fallen.loaded.cut.form, "compact");
+	assert.equal(fallen.message, everydayFields().message, "and the message is whole");
+});
+
+test("a form of `loaded` grows the line only to its own limit, past which the field goes and the rest of the line keeps the hard cap", () => {
+	assert.equal(EXIT_TAIL_BYTES - EXIT_LINE_LOADED_MAX_BYTES, 2048, "the 2 KiB outcome.mjs says a line had inside the tail before the field");
+	const fields = (pad, over = {}) => ({ code: 0, reason: "stop", tokens: { total: 7 }, ...over, pad: "p".repeat(pad) });
+	const size = (form, pad, over) => bytesOf(`\n${signExitLine(JSON.stringify({ event: "exit", jobId: "j", ...(form ? { loaded: form } : { loadedCut: true }), ...fields(pad, over) }), KEY)}\n`);
+	const [full, compact, minimal] = fitLoaded(NOTED_LOADED);
+	const padFor = (form, limit = EXIT_LINE_LOADED_MAX_BYTES, over) => limit - size(form, 0, over);
+	const at = (pad, over) => bodyOf(linedWith(fields(pad, over), { maxBytes: EXIT_LINE_MAX_BYTES }));
+	const formAt = (pad) => at(pad).loaded?.cut.form ?? null;
+
+	assert.equal(formAt(padFor(full)), "full", "exactly at the limit");
+	assert.equal(formAt(padFor(full) + 1), "compact", "one byte over, the next smaller form");
+	assert.equal(formAt(padFor(compact)), "compact");
+	assert.equal(formAt(padFor(compact) + 1), "minimal");
+	assert.equal(formAt(padFor(minimal)), "minimal");
+	const past = at(padFor(minimal) + 1);
+	assert.equal(Object.hasOwn(past, "loaded"), false, "past that, no form: the line does not take a display field over the limit");
+	assert.equal(past.loadedCut, true, "and says so");
+	assert.equal(past.pad.length, padFor(minimal) + 1, "the rest of the line stays whole");
+	assert.equal(Object.hasOwn(past, "lineCut"), false, "and nothing the settlement reads was touched");
+
+	// The message pays first, to the same limit, and takes back what the field frees once it goes.
+	const message = "m".repeat(1500);
+	const over = { code: 2, reason: "error", message };
+	const bare = padFor(minimal, EXIT_LINE_LOADED_MAX_BYTES, { ...over, message: "" });
+	const paid = at(bare - 500, over);
+	assert.equal(paid.loaded.cut.form, "minimal");
+	assert.match(paid.message, /^m+\.\.\. \[truncated \d+ chars\]$/);
+	assert.ok(bytesOf(linedWith(fields(bare - 500, over), { maxBytes: EXIT_LINE_MAX_BYTES })) <= EXIT_LINE_LOADED_MAX_BYTES);
+	const whole = at(bare + 1, over);
+	assert.equal(Object.hasOwn(whole, "loaded"), false);
+	assert.equal(whole.message, message, "with the field gone, this line fits the hard cap as it is");
+
+	// 7680 stays the limit of a line with no `loaded`, noted or not.
+	const hardFit = EXIT_LINE_MAX_BYTES - bytesOf(linedWith(fields(0), { note: false, maxBytes: EXIT_LINE_MAX_BYTES }));
+	const atHardCap = linedWith(fields(hardFit), { note: false, maxBytes: EXIT_LINE_MAX_BYTES });
+	assert.equal(bytesOf(atHardCap), EXIT_LINE_MAX_BYTES);
+	assert.equal(bodyOf(atHardCap).pad.length, hardFit, "nothing noted, nothing lower");
+	// The limit is a ceiling on the budget and not a floor: a smaller budget, a long job id's, still holds a form to itself.
+	assert.ok(bytesOf(linedWith(fields(0), { maxBytes: size(compact, 0) })) <= size(compact, 0));
+	assert.equal(bodyOf(linedWith(fields(0), { maxBytes: size(compact, 0) })).loaded.cut.form, "compact");
+});
+
+test("what a job writes after its line cannot cost the line: a large `loaded` still verifies with 1,500 bytes more of stdout behind it, through the real sink", async () => {
+	// The process lives on after the line (`process.exitCode`, run-job.mjs) until its event loop drains, so this is an
+	// extension's timer, a child that outlived the session, or a shutdown log, and the tail keeps the LAST 8 KiB.
+	const fields = everydayFields();
+	const AFTER = "a shutdown log line\n".repeat(75);
+	assert.equal(AFTER.length, 1500);
+	const wholeField = bytesOf(`\n${signExitLine(JSON.stringify({ event: "exit", jobId: JOB_ID, loaded: maximalLoaded(), ...fields, resources: LONGEST_RESOURCES }), KEY)}\n`);
+	assert.ok(wholeField <= EXIT_LINE_MAX_BYTES, `the premise: the full form fits the hard cap, at ${wholeField} bytes`);
+	assert.ok(wholeField + AFTER.length > EXIT_TAIL_BYTES, "and there it would leave the tail");
+	const line = linedAtBudget(fields, maximalLoaded());
+	assert.ok(bytesOf(line) <= EXIT_LINE_LOADED_MAX_BYTES, `the line is ${bytesOf(line)} bytes`);
+	const read = await throughSink(`${"agent noise\n".repeat(900)}${line}${AFTER}`);
+	assert.equal(read.exitAuth, "verified");
+	assert.equal(read.exitLineCode, fields.code);
+	assert.equal(read.exitReason, fields.reason);
+	assert.equal(read.tokens.total, 99_999);
+	assert.equal(read.usage.models.length, 1, "the ledger the settlement reads");
+
+	// At the limit exactly, with the supervisor's longest line behind it as well, where a run's tail is at its most crowded.
+	const pad = EXIT_LINE_LOADED_MAX_BYTES - bytesOf(`\n${signExitLine(JSON.stringify({ event: "exit", jobId: JOB_ID, loaded: NOTED_LOADED, code: 0, reason: "stop", tokens: { total: 7 }, pad: "" }), KEY)}\n`);
+	const out = [];
+	const writer = createExitWriter({ key: KEY, jobId: JOB_ID, write: (s) => out.push(s), exit: () => {} });
+	writer.note({ loaded: NOTED_LOADED });
+	writer.writeExit({ code: 0, reason: "stop", tokens: { total: 7 }, pad: "p".repeat(pad) });
+	assert.equal(bytesOf(out[0]), EXIT_LINE_LOADED_MAX_BYTES);
+	assert.equal(bodyOf(out[0]).loaded.cut.form, "full");
+	const verdict = deathFields("SIGKILL", { oomKills: 1 });
+	const supervisor = writeOne({ code: verdict.code, reason: verdict.reason, signal: verdict.signal, by: BY_SUPERVISOR });
+	const crowded = await throughSink(`${"agent noise\n".repeat(900)}${out[0]}${AFTER}${supervisor}`);
+	assert.equal(crowded.exitAuth, "verified");
+	assert.equal(crowded.tokens.total, 7, "the runner's own line still decides");
 });
 
 test("non-ASCII in a noted field is escaped with the rest, so the record can never be what splits the line", () => {
@@ -681,11 +789,11 @@ test("a long non-ASCII error is held to 2 KiB as written before any form is chos
 	assert.match(body.message, /^中+\.\.\. \[truncated \d+ chars\]$/);
 	assert.ok(exitLineJson(body.message).length - 2 <= EXIT_MESSAGE_MAX_BYTES, "held as written");
 	assert.equal((await throughSink(out[0])).exitAuth, "verified");
-	const worst = [];
-	const worstWriter = createExitWriter({ key: KEY, jobId: JOB_ID, write: (s) => worst.push(s), exit: () => {}, resources: () => LONGEST_RESOURCES });
-	worstWriter.note({ loaded: maximalLoaded() });
-	worstWriter.writeExit({ ...capped, turns: 4 });
-	assert.equal(bodyOf(worst[0]).loaded.cut.form, "full", "every list at its cap too");
+	assert.equal(bodyOf(linedAtBudget({ ...capped, turns: 4 }, longestNames())).loaded.cut.form, "full", "every list at its cap too");
+	const worstForm = bodyOf(linedAtBudget({ ...capped, turns: 4 }, maximalLoaded()));
+	assert.equal(worstForm.loaded.cut.form, "compact", "and only every count at its bound as well takes the next form");
+	assert.match(worstForm.message, /^中+\.\.\. \[truncated \d+ chars\]$/, "with the error held to no less than the 2 KiB above");
+	assert.equal(worstForm.message, body.message);
 	const ascii = "m".repeat(1700);
 	assert.equal(bodyOf(linedWith(capExitMessage({ code: 2, reason: "error", message: ascii }))).message, ascii, "what capExitMessage passes in ASCII is untouched");
 });

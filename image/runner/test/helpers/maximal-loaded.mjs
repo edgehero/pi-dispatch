@@ -4,13 +4,10 @@ import { buildLoaded, LOADED_JOB_TOOLS, LOADED_MAX_COUNT, LOADED_MAX_EXT_TOOLS, 
 export const ROOTS = Object.freeze({ packages: [], jobPi: "/job/pi", triggerSkills: "/job/trigger-skills", overlay: "/opt/pi-global", workspace: "/workspace" });
 
 /**
- * The largest `loaded` the runner can note, built through buildLoaded and then widened where its input cannot reach
- * cheaply: every row at its clamp, every list at its cap, every name at its longest, each tier total at the largest safe
- * integer (`tiers` keeps true totals, so nothing here bounds it) and each `cut` count at five digits. That is the worst for
- * this LINE's budget; the worker reads a count past 999,999 as `invalid` (`LOADED_COUNT_MAX`), so its own worst RECORD is built
- * from this with those brought in (worker/test/loaded-record.test.mjs `maximal`).
+ * Every list at its cap and every name at its longest, with the small counts buildLoaded's own input gives: the largest `full`
+ * form a run could write without a count at its bound.
  */
-export function maximalLoaded() {
+export function longestNames() {
 	const packages = Array.from({ length: LOADED_MAX_PACKAGES + 8 }, (_, i) => `/opt/pi-global/packages/p${i}`);
 	const roots = { ...ROOTS, packages };
 	const name = (prefix, i) => `${prefix}${String(i).padStart(2, "0")}`.padEnd(48, "x");
@@ -23,7 +20,7 @@ export function maximalLoaded() {
 		// worst line had no own tools at all, and every size measured from it was 60 characters short.
 		...["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"].map((own) => ({ name: own, path: `builtin:${own}` })),
 	];
-	const loaded = buildLoaded({
+	return buildLoaded({
 		at: "session",
 		pi: `${"9".repeat(28)}.9.9`,
 		roots,
@@ -35,6 +32,17 @@ export function maximalLoaded() {
 		ownNames: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"],
 		mcp: Array.from({ length: LOADED_MAX_SERVERS }, () => ["connected", LOADED_MAX_TOOL_COUNT]),
 	});
+}
+
+/**
+ * The largest `loaded` the runner can note, built through buildLoaded and then widened where its input cannot reach
+ * cheaply: every row at its clamp, every list at its cap, every name at its longest, each tier total at the largest safe
+ * integer (`tiers` keeps true totals, so nothing here bounds it) and each `cut` count at five digits. That is the worst for
+ * this LINE's budget; the worker reads a count past 999,999 as `invalid` (`LOADED_COUNT_MAX`), so its own worst RECORD is built
+ * from this with those brought in (worker/test/loaded-record.test.mjs `maximal`).
+ */
+export function maximalLoaded() {
+	const loaded = longestNames();
 	const row = LOADED_ROW.map((_, slot) => (slot < 5 ? LOADED_MAX_COUNT : LOADED_MAX_PROBLEM_COUNT));
 	return {
 		...loaded,
