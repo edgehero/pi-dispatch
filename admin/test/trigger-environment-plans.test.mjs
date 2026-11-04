@@ -2,6 +2,7 @@
 // back after each write. Nothing here hand-writes a plan or a file the writer did not write, because a shape written by hand
 // can hide the defect it stands in for.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +10,8 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeMcpCheck } from "@edgehero/pi-dispatch/mcp-preflight";
 import { checkFailoverCandidate, markModelCooldown, selectFailoverJob } from "@edgehero/pi-dispatch/model-failover";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
+import { readEnvAssignments } from "@edgehero/pi-dispatch/env-file";
+import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { resolveModelRoles } from "@edgehero/pi-dispatch/model-roles";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
 import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
@@ -821,18 +824,18 @@ test("an overlay models.json that cannot be read stays unread for every model th
 });
 
 // The real reader over a real file, as the console's own wiring reads it (`cli.mjs`): the shell never reaches this.
-const envFile = (f, text) => {
+const envFile = (f, text, platform = "darwin") => {
   nodeFs.writeFileSync(join(f.dir, ".env"), text, { mode: 0o600 });
   return (keys) => {
     // One loader's reading, whichever machine runs this: a line can be a hazard to one service's loader and plain to another's.
-    const read = deploymentServiceEnv({ env: {}, dir: f.dir, keys, fs: nodeFs, platform: "darwin" });
+    const read = deploymentServiceEnv({ env: {}, dir: f.dir, keys, fs: nodeFs, platform });
     if (read.unreadable || read.untrusted) throw new Error("no");
     return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null };
   };
 };
-const withEnvFile = (run, text, env = {}) => {
+const withEnvFile = (run, text, env = {}, platform = "darwin") => {
   const base = fixture({ run, env });
-  const readHostEnv = envFile(base, text);
+  const readHostEnv = envFile(base, text, platform);
   return { ...base, service: createTriggerEnvironmentActions({ paths: base.paths, env: { PI_MAX_COST_USD: "9", PI_PROVIDER: "anthropic", PI_MODEL: "claude-opus-5-5", ...env }, now: () => NOW, deploymentDir: base.dir, readHostEnv }) };
 };
 
@@ -851,8 +854,45 @@ test("a deployment's cap and model come from its file: a console started from a 
   await quiet(withEnvFile({}, "PI_PROVIDER=anthropic\nPI_MODEL=claude-haiku-4-5\n"), { maxCostUsd: "1" });
 });
 
+test("a cap the loader would refuse, beside a line it cannot vouch for: under a sourcing shell it warns of the whole file, and where the reader can take the key it refuses", async () => {
+  const run = { provider: "anthropic", model: "claude-haiku-4-5" };
+  const text = "PI_MAX_COST_USD=2\nOTHER=ab cd\n";
+  const shell = withEnvFile(run, text);
+  const words = await warned(shell, { maxCostUsd: "5" });
+  assert.equal(words, "Line 2 of this host's .env could not be read as the worker reads it, so the deployment's job cap and its list of models could not be judged here. A trigger's cap above what the worker reads makes it refuse the whole file.");
+  // It stays a warning: the file alone does not decide this, and the worker's own line may read otherwise on the host that runs it.
+  const planned = await shell.service.preview(ask(shell, { maxCostUsd: "5" }), operator);
+  assert.deepEqual(await shell.service.apply(planned, operator), { ok: true });
+  // What that write meets, in the worker's own loader, at the value this shape really sources to.
+  assert.throws(() => loadSchedules({ triggersFile: shell.paths.triggersPath, maxCostUsd: "2" }), /run\.maxCostUsd is above this deployment's PI_MAX_COST_USD/);
+  // To systemd `OTHER=ab cd` is one key's value it cannot vouch for, and no hazard: the cap's own line is read, and judged.
+  assert.match((await refusal(withEnvFile(run, text, {}, "linux"), { maxCostUsd: "5" })).refusal, /^A trigger's job cap can only lower the deployment's: \$5\.00 is above its \$2\.00\./);
+});
+
+test("why a plain line is not believed beside one a sourcing shell runs: each of these reads $2 by its own line and sources otherwise", (t) => {
+  if (!nodeFs.existsSync("/bin/sh")) return t.skip("no /bin/sh here");
+  const dir = tempDir("pd-800-env-source-");
+  const sourced = (text) => {
+    nodeFs.writeFileSync(join(dir, ".env"), text);
+    return execFileSync("/bin/sh", ["-c", 'set -a; . ./.env; set +a; printf %s "${PI_MAX_COST_USD-unset}"'], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  };
+  assert.equal(sourced("PI_MAX_COST_USD=2\nOTHER=ab cd\n"), "2", "the shape met: this one happens to leave it");
+  assert.equal(sourced("PI_MAX_COST_USD=2\nOTHER=ab export PI_MAX_COST_USD=9\n"), "9");
+  assert.equal(sourced("PI_MAX_COST_USD=2\nunset PI_MAX_COST_USD\n"), "unset");
+  assert.equal(sourced("exit 0\nPI_MAX_COST_USD=2\n"), "", "the shell ended on that line, so nothing after the sourcing ran");
+  const read = (text) => readEnvAssignments(text, ["PI_MAX_COST_USD"], { loader: "shell" }).PI_MAX_COST_USD;
+  for (const text of ["PI_MAX_COST_USD=2\nOTHER=ab export PI_MAX_COST_USD=9\n", "PI_MAX_COST_USD=2\nunset PI_MAX_COST_USD\n", "exit 0\nPI_MAX_COST_USD=2\n"]) {
+    const line = read(text);
+    assert.deepEqual([line.plain, line.value, line.vouched], [true, "2", false], "its own line reads plain, and the reader does not vouch for it");
+  }
+  // An open quote above takes the key into its own value. The reader sees that one itself, so there is no plain line to believe.
+  const quoted = "OTHER='ab\nPI_MAX_COST_USD=2\nMORE=cd'\n";
+  assert.equal(sourced(quoted), "unset");
+  assert.deepEqual([read(quoted).plain, read(quoted).value, read(quoted).vouched], [false, null, false]);
+});
+
 test("a deployment's file it cannot vouch for leaves the cap unjudged, says so, and stops nobody", async () => {
-  const note = (head) => `${head} so the deployment's job cap and its list of models could not be judged here.`;
+  const note = (head) => `${head} so the deployment's job cap and its list of models could not be judged here. A trigger's cap above what the worker reads makes it refuse the whole file.`;
   const unread = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "PI_MAX_COST_USD=ab$cd\n");
   assert.equal(await warned(unread, { maxCostUsd: "5" }), note("This host's .env holds PI_MAX_COST_USD in a line that could not be read as the worker reads it,"));
   const untrusted = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, deps: { readHostEnv: () => { throw new Error("untrusted"); } } });
@@ -1601,7 +1641,7 @@ test("a .env line the worker's loader reads differently is named by its line, an
   assert.deepEqual(out.plan.warnings, ["Line 3 of this host's .env could not be read as the worker reads it, so the worker's pickup check could not be run.", TAIL]);
   assert.doesNotMatch(out.summary.join(" "), /PI_FORWARD_ENV/);
   const cap = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "PI_MAX_COST_USD=2\nOTHER=ab cd\n");
-  assert.equal(await warned(cap, { maxCostUsd: "5" }), "Line 2 of this host's .env could not be read as the worker reads it, so the deployment's job cap and its list of models could not be judged here.");
+  assert.equal(await warned(cap, { maxCostUsd: "5" }), "Line 2 of this host's .env could not be read as the worker reads it, so the deployment's job cap and its list of models could not be judged here. A trigger's cap above what the worker reads makes it refuse the whole file.");
 });
 
 test("the forge server is no host's to lack, and a server taken away reads no host at all", async () => {

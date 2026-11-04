@@ -278,10 +278,14 @@ const MODEL_FACT_KEYS = Object.freeze(["PI_PROVIDER", "PI_MODEL", "PI_MAX_COST_U
  * The deployment's `.env` as far as a model edit needs it, or what could not be read of it: `{ env, note }`. The file and not the
  * console's own environment, for `judgeMcp`'s reason and with more at stake: that environment is built once at the console's
  * start with its shell winning, so it could pass a cap above the one in the file, and `loadSchedules` refuses the whole file over
- * that. A file it cannot vouch for leaves those keys unjudged and says so, since another host may read its own.
+ * that. A file it cannot vouch for leaves those keys unjudged and says so, and says what is at stake, since Confirm stays: another
+ * host may read its own. REJECTED: believing a key's own plain line beside a line the loader reads differently. Under a sourcing
+ * shell that other line may run anything: `OTHER=ab export PI_MAX_COST_USD=9`, `unset`, or `exit`. The test beside this one measures
+ * each in a real shell. A line that is only a value it cannot read, as `OTHER=ab cd` is
+ * to systemd, is no such line: the reader takes the key's value there, and the cap is judged.
  */
 function modelEnv(readHostEnv) {
-  const cannot = "so the deployment's job cap and its list of models could not be judged here.";
+  const cannot = "so the deployment's job cap and its list of models could not be judged here. A trigger's cap above what the worker reads makes it refuse the whole file.";
   let read;
   try {
     read = readHostEnv(MODEL_FACT_KEYS);
