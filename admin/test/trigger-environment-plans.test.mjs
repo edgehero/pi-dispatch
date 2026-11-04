@@ -201,6 +201,26 @@ test("the preview: every read failing once answers, and writes nothing; the file
   assert.ok(words.has("The triggers file could not be read, so this change could not be judged. Nothing is written over a file this page cannot read."), [...words].join(" | "));
 });
 
+for (const change of [{ model: "claude-sonnet-5-5", maxCostUsd: "5" }, { models: [HAIKU, "local/own"] }, { fallbackModels: [SONNET] }, { excludeTools: ["write"] }, { flow: "review" }]) {
+  test(`the preview of ${JSON.stringify(change)}: a read failing anywhere, with an overlay to read, answers and writes nothing`, async () => {
+    let current = nodeFs;
+    const fs = new Proxy({}, { get: (_, key) => current[key] });
+    const f = fixture({ run: { mcp: ["docs"] }, overlay: { providers: { local: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "none", models: [{ id: "own" }] } } }, deps: { fs } });
+    const before = f.read();
+    const body = ask(f, change);
+    const counting = failingOnce(0);
+    current = counting;
+    const clean = await f.service.preview(body, operator);
+    assert.ok(clean.plan, JSON.stringify(clean));
+    for (let target = 1, reads = counting.count; target <= reads; target += 1) {
+      current = failingOnce(target);
+      const out = await f.service.preview(body, operator);
+      assert.ok(out.plan || out.refusal, `read ${target}: ${JSON.stringify(out)}`);
+      assert.equal(f.read(), before, `read ${target}`);
+    }
+  });
+}
+
 test("the preview, the dry run's own read failing: the same sentence, by the same state, not a broken page", async () => {
   const f = failingFixture();
   const body = ask(f, { mcp: ["docs"] });
