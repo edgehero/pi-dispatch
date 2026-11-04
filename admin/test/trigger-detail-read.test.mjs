@@ -159,6 +159,7 @@ test("configuration file labels expose only final folders and precisely identify
 test("the trigger field inventory is the loader's normalized run contract, including shared model and approval fields", async () => {
   const { readFileSync } = await import("node:fs");
   const { EDIT_FIELDS, HAND_FIELDS } = await import("../src/console/panels/trigger.mjs");
+  const { CARD_FIELDS } = await import("../src/trigger-edit-core.mjs");
   const source = readFileSync(new URL("../../worker/src/triggers.mjs", import.meta.url), "utf8");
   // Each normalizer returns one explicit run literal. Include conditional object literals inside it, and refuse a
   // new unrecognized spread rather than letting the inventory silently miss a shared validator's new fields.
@@ -178,7 +179,7 @@ test("the trigger field inventory is the loader's normalized run contract, inclu
   const approvalReturn = approval.match(/^\s*return \{ gates:[^\n]+$/m);
   assert.ok(approvalReturn, "the approval normalizer must be found");
   addKeys(approvalReturn[0].slice(approvalReturn[0].indexOf("{") + 1));
-  const actual = [...EDIT_FIELDS, ...HAND_FIELDS];
+  const actual = [...CARD_FIELDS, ...EDIT_FIELDS, ...HAND_FIELDS];
   assert.equal(new Set(actual).size, actual.length, "every run field belongs to exactly one group");
   assert.deepEqual([...actual].sort(), [...keys].sort());
   assert.ok(!actual.includes("modelRoles"), "modelRoles is a top-level file policy, never a run field");

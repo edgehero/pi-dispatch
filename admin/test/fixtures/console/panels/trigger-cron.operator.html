@@ -87,10 +87,20 @@ spend.
 <p>
 Jobs in line now:
 none in view.
-</p></div></section><section id="p-trigger-run" data-panel><div class="card"><div class="card__head"><h2>What it runs</h2></div><h3>Edit here</h3>
-<dl class="facts"><div class="fact"><dt>run.flow</dt><dd>tidy; deployment default: not set</dd></div><div class="fact"><dt>run.backend</dt><dd>openshell; deployment default: local</dd></div><div class="fact"><dt>run.provider</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.model</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.maxTurns</dt><dd>not set; deployment default: 30</dd></div><div class="fact"><dt>run.progress</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.steer</dt><dd>not set; deployment default: not set</dd></div></dl>
+</p></div></section><section id="p-trigger-gets" data-panel><div class="card"><div class="card__head"><h2>What its jobs get</h2><span class="card__sub">as a job of trigger 1 would start, from each host’s last doctor run</span></div><div class="te-hosts" role="list" aria-label="Where its jobs run"></div><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-doctor"></use></svg><span>No live host says it can run this trigger’s jobs.</span></p><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg><span>The rows say what the next job gets, from the triggers file. No run in the available history.</span></p><p class="te-note tone-attention"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-attention"></use></svg><span>This page could not read this trigger’s row from the file, so it shows the last read and offers no change. Reload to try again.</span></p><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-bolt"></use></svg><span>Model<small>what its jobs call</small></span></p><div class="te-sec__v"><p class="te-read">the deployment’s model · any model allowed · no fallback · no cap</p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>No run in the available history.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-skill"></use></svg><span>Flow and skills<small>what it is told to do</small></span></p><div class="te-sec__v"><p class="te-read"><span class="code">tidy</span></p><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>Skills folder (<span class="code">run.skillsDir</span>): none, a folder on each host, set in the file.</span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>No run in the available history.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-layers"></use></svg><span>Extensions<small>code its jobs load</small></span></p><div class="te-sec__v"><div class="te-items">
+<div class="te-item te-item--ro"><span><b>Staged packages: on</b><small>Its jobs load what is staged on the host that runs them.</small></span><span class="te-tag"></span></div>
+
+<div class="te-item te-item--ro"><span><b>The repository’s own</b><small>.pi/extensions at the base commit, merge-gated. Changed in the repository, not here.</small></span><span class="te-tag"></span></div>
+</div><p class="te-note">No host has published a staged package or an overlay extension.</p>
+<p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>One extension cannot be turned off on its own yet: a trigger takes all the staged packages, or none. A new extension, or another version, is staged first, for every trigger. <a class="link" href="/config/updates">Open Updates</a></span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>No run in the available history.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-plug"></use></svg><span>MCP servers<small>outside systems it reaches</small></span></p><div class="te-sec__v"><p class="te-note">No host has published an MCP server, and this trigger names none.</p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>No run in the available history.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-flows"></use></svg><span>Tools<small>what the agent may use</small></span></p><div class="te-sec__v"><div><p class="te-sub">pi’s own</p><div class="te-chips"><span class="te-chip te-chip--ro">read</span><span class="te-chip te-chip--ro">bash</span><span class="te-chip te-chip--ro">powershell</span><span class="te-chip te-chip--ro">edit</span><span class="te-chip te-chip--ro">write</span><span class="te-chip te-chip--ro">grep</span><span class="te-chip te-chip--ro">find</span><span class="te-chip te-chip--ro">ls</span></div></div>
+<p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>On means not removed. powershell, grep, find and ls stay off unless an extension turns them on, so a trigger can remove them too.</span></p>
+
+
+
+<p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>No run in the available history.</p></div></div><div class="te-sec"><p class="te-sec__k"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-box"></use></svg><span>Image and secrets<small>set elsewhere</small></span></p><div class="te-sec__v"><p class="te-read">each host’s own PI_JOB_IMAGE; no host says which</p><p class="te-read">Secrets: none named on this trigger; a job also gets its project’s bundle, if it has one. <a class="link" href="/config/secrets">Open Secrets</a></p><p class="te-note"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"></use></svg><span>Set elsewhere: the image in each host’s environment or run.image in the file, secrets on the Secrets page, and the skills folder (run.skillsDir) in the file.</span></p><p class="te-last"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-chain"></use></svg>No run in the available history.</p></div></div></div></section><section id="p-trigger-run" data-panel><div class="card"><div class="card__head"><h2>What it runs</h2></div><p>The flow, the model and its cap, the staged packages, the MCP servers and the tools are in What its jobs get.</p><h3>Edit here</h3>
+<dl class="facts"><div class="fact"><dt>run.backend</dt><dd>openshell; deployment default: local</dd></div><div class="fact"><dt>run.maxTurns</dt><dd>not set; deployment default: 30</dd></div><div class="fact"><dt>run.progress</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.steer</dt><dd>not set; deployment default: not set</dd></div></dl>
 <h3>By hand</h3>
-<dl class="facts"><div class="fact"><dt>run.maxCostUsd</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.models</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.mcp</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.secrets</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.secretBundle</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.resume</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.awaitInput</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.image</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.waitFor</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.replicas</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.packages</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.skillsDir</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.instructions</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.task</dt><dd>set (operator only); deployment default: not set</dd></div><div class="fact"><dt>run.kind</dt><dd>local; deployment default: not set</dd></div><div class="fact"><dt>run.folder</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.repository</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.command</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.portfolio</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.github</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.fallbackModels</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.secretsProfile</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gates</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gateTimeout</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gateBudgetRaiseUsd</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.excludeTools</dt><dd>not set; deployment default: not set</dd></div></dl>
+<dl class="facts"><div class="fact"><dt>run.secrets</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.secretBundle</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.resume</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.awaitInput</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.image</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.waitFor</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.replicas</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.skillsDir</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.instructions</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.task</dt><dd>set (operator only); deployment default: not set</dd></div><div class="fact"><dt>run.kind</dt><dd>local; deployment default: not set</dd></div><div class="fact"><dt>run.folder</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.repository</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.command</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.portfolio</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.github</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.secretsProfile</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gates</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gateTimeout</dt><dd>not set; deployment default: not set</dd></div><div class="fact"><dt>run.gateBudgetRaiseUsd</dt><dd>not set; deployment default: not set</dd></div></dl>
 <h3>Its runs' sandbox</h3>
 <p>No live host blessing facts are available.</p>
 <p>These live host declarations show published venue choices; a host that does not bless the selected venue refuses it before spend. The schedule&#39;s owning host runs a cron trigger&#39;s local folder; the registry alone does not prove which host has that folder.</p>
@@ -130,20 +140,6 @@ value="0"
  data-type="int"
 /><div class="field">
 <label
->run.flow<input
-class="input"
-name="flow"
-type="text"
-value="tidy"
- required
-maxlength="512"
-autocomplete="off"
-spellcheck="false"
-/></label
-><p class="field__hint">Required: name the skill to run; its location is explained below.</p>
-<p class="field__err" data-field-error="flow" hidden></p>
-</div><div class="field">
-<label
 >Venue (run.backend)<select
 class="select"
 name="backend"
@@ -164,34 +160,6 @@ local: live transcript yes, steering yes, recovery yes, sandbox shell yes
 </select></label
 ><p class="field__hint">Blank keeps the current value (openshell); deployment default: local.</p>
 <p class="field__err" data-field-error="backend" hidden></p>
-</div><div class="field">
-<label
->run.provider<input
-class="input"
-name="provider"
-type="text"
-value=""
-
-maxlength="512"
-autocomplete="off"
-spellcheck="false"
-/></label
-><p class="field__hint">Blank keeps the current value (not set); deployment default: not set.</p>
-<p class="field__err" data-field-error="provider" hidden></p>
-</div><div class="field">
-<label
->run.model<input
-class="input"
-name="model"
-type="text"
-value=""
-
-maxlength="512"
-autocomplete="off"
-spellcheck="false"
-/></label
-><p class="field__hint">Blank keeps the current value (not set); deployment default: not set.</p>
-<p class="field__err" data-field-error="model" hidden></p>
 </div><div class="field">
 <label
 >run.maxTurns<input
@@ -264,7 +232,7 @@ false
 </fieldset>
 <noscript><p class="muted">Enable JavaScript to preview and confirm a change. Reading and navigation work without it.</p></noscript>
 <p class="field__err" data-form-error hidden role="alert"></p>
-</form></div></section></div><div class="stack"><section id="p-trigger-trust" data-panel><div class="card"><div class="card__head"><h2>Trust model</h2></div><p>
+</form></div></section></div><div class="stack"><section id="p-trigger-gets-how" data-panel><div class="card"><div class="card__head"><h2>How a change applies</h2></div><ul class="te-list"><li><svg class="ic" aria-hidden="true"><use href="#i-edit"></use></svg><span><b>Change it in place.</b> A switch for the staged packages and each MCP server, a chip for each tool, a picker for the model and the flow.</span></li><li><svg class="ic" aria-hidden="true"><use href="#i-eye"></use></svg><span><b>Nothing is written</b> until you preview the change and confirm it.</span></li><li><svg class="ic" aria-hidden="true"><use href="#i-shield"></use></svg><span><b>A person, at the console.</b> No tool reaches this action; dispatch_trigger_edit keeps today’s scope.</span></li><li><svg class="ic" aria-hidden="true"><use href="#i-rerun"></use></svg><span><b>Undo</b> puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.</span></li></ul></div></section><section id="p-trigger-trust" data-panel><div class="card"><div class="card__head"><h2>Trust model</h2></div><p>
 This deployment&#39;s scheduler starts it on its schedule; an operator may fire it by hand. Each forge delivery is checked against its configured authentication, bot-loop guard, sender permissions and duplicate protection, then applicable quiet hours, image, repository protection and spend caps. Cron starts from the deployment schedule instead of a webhook. A comment may select another flow; only one
 comment trigger per forge may be declared.
 </p>

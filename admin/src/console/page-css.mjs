@@ -31,6 +31,7 @@ import { PARKED_CSS } from "./parked-css.mjs";
 import { PULSE_CSS } from "./pulse-css.mjs";
 import { RUN_CSS } from "./run-css.mjs";
 import { LOADED_CSS } from "./loaded-css.mjs";
+import { TRIGGER_GETS_CSS } from "./trigger-gets-css.mjs";
 import { RUNS_CSS } from "./runs-css.mjs";
 
 /** A selector's start that names the document itself: replaced by the scope. */
@@ -756,7 +757,8 @@ ${FLEET_CSS}
 `;
 
 /** Each page's own rules, by page name, unscoped as written; `pageCss()` confines them. */
-export const PAGE_CSS = Object.freeze({ "sandbox-gateway": GATEWAY_CONSOLE_CSS, setup: SETUP_CSS, sandboxes: SANDBOX_CSS, "zero-touch": ZERO_TOUCH_CSS, insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: `${RUN_CSS}${ANSWERER_CSS}${LOADED_CSS}`, project: LOADED_CSS, runs: RUNS_CSS, parked: `${PARKED_CSS}${ANSWERER_CSS}`, "answer-rules": ANSWERER_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
+export const PAGE_CSS = Object.freeze({ "sandbox-gateway": GATEWAY_CONSOLE_CSS, setup: SETUP_CSS, sandboxes: SANDBOX_CSS, "zero-touch": ZERO_TOUCH_CSS, insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: `${RUN_CSS}${ANSWERER_CSS}${LOADED_CSS}`, project: LOADED_CSS, trigger: `${LOADED_CSS}
+${TRIGGER_GETS_CSS}`, runs: RUNS_CSS, parked: `${PARKED_CSS}${ANSWERER_CSS}`, "answer-rules": ANSWERER_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
 ${FLEET_CSS}`, venue: VENUE_CSS });
 
 /**

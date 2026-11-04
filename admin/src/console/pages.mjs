@@ -34,6 +34,8 @@ import { zeroTouchView } from "../zero-touch-view.mjs";
  * every screen now uses the same kit (#750).
  */
 import { triggerOn, triggerRuns, triggerRun, triggerEdit, triggerTrust, triggerKinds, triggerChange, triggerAdd, triggerKindHelp, triggerForgeWords, triggerRefusals, triggerTitle } from "./panels/trigger.mjs";
+import { triggerGets, triggerGetsHow } from "./panels/trigger-gets.mjs";
+import { readTriggerGetsEntry } from "../trigger-gets-view.mjs";
 import { configNavigation, configFiles, configUnset, configDescription } from "./panels/config.mjs";
 import { secretsView } from "../secrets-view.mjs";
 import { secretsHeadline, secretsProblems, secretsProfiles, secretsBundles, secretsAdd, secretsHelp } from "./panels/secrets.mjs";
@@ -200,7 +202,7 @@ const PAGE_PANELS = Object.freeze({
   host: [["p-hoststate", hostState], ["p-hostjobs", hostJobs], ["p-hostsandboxes", hostSandboxes], ["p-hostbudget", hostBudget], ["p-hostcap", hostCapacity], ["p-hostrow", hostRow], ["p-hostdoctor", hostDoctor]],
   venue: [["p-venue", venueSummary], ["p-venue-serves", venueServes], ["p-venue-hosts", venueHosts], ["p-venue-props", venueProperties], ["p-venue-fix", venueFix], ["p-venue-compare", venueCompare]],
   config: [["cf-navigation", configNavigation], ["cf-settings", configSettings], ["cf-triggers", configTriggers], ["cf-pause-windows", configPauseWindows], ["cf-scoped-limits", configScopedLimits], ["cf-projects", configProjects], ["cf-files", configFiles], ["cf-unset", configUnset], ["cf-mcp-servers", configMcp], ["cf-packages", configPackages], ["cf-secret-profiles", configSecretProfiles], ["cf-secret-bundles", configSecretBundles]],
-  trigger: [["p-trigger-on", triggerOn], ["p-trigger-runs", triggerRuns], ["p-trigger-run", triggerRun], ["p-trigger-edit", triggerEdit], ["p-trigger-trust", triggerTrust], ["p-trigger-kinds", triggerKinds], ["p-trigger-change", triggerChange]],
+  trigger: [["p-trigger-on", triggerOn], ["p-trigger-runs", triggerRuns], ["p-trigger-gets", triggerGets], ["p-trigger-gets-how", triggerGetsHow], ["p-trigger-run", triggerRun], ["p-trigger-edit", triggerEdit], ["p-trigger-trust", triggerTrust], ["p-trigger-kinds", triggerKinds], ["p-trigger-change", triggerChange]],
   "trigger-add": [["p-trigger-add", triggerAdd], ["p-kinds", triggerKindHelp], ["p-forge-words", triggerForgeWords], ["p-refusals", triggerRefusals]],
   watch: [["p-watch", watchPanel]],
   "watch-board": [["p-watch-board", watchBoardPanel]],
@@ -249,7 +251,7 @@ const PAGE_LAYOUT = Object.freeze({
   triggers: [{ cls: "stack", items: ["p-tr-tabs", "p-tr-viewer"] }, { cls: "cards-3 triggers-kpis", items: ["p-tr-count", "p-tr-next", "p-tr-spend"] }, { cls: "cols triggers-layout", items: [{ cls: "stack triggers-rules", items: ["p-tr-filters", "p-tr-week", "p-tr-schedule", "p-tr-github", "p-tr-gitlab", "p-tr-forgejo", "p-tr-azure", "p-tr-unknown"] }, { cls: "stack triggers-check-side", items: ["p-tr-check"] }] }],
   ...SPEND_LAYOUTS,
   config: [{ cls: "stack", items: ["cf-navigation"] }, { cls: "cols cols--wide-side config-layout", items: [{ cls: "stack", items: ["cf-settings", "cf-triggers", "cf-pause-windows", "cf-scoped-limits", "cf-projects", "cf-files"] }, { cls: "stack", items: ["cf-unset", "cf-mcp-servers", "cf-packages", "cf-secret-profiles", "cf-secret-bundles"] }] }],
-  trigger: [{ cls: "cols config-layout", items: [{ cls: "stack", items: ["p-trigger-on", "p-trigger-runs", "p-trigger-run", "p-trigger-edit"] }, { cls: "stack", items: ["p-trigger-trust", "p-trigger-kinds", "p-trigger-change"] }] }],
+  trigger: [{ cls: "cols config-layout", items: [{ cls: "stack", items: ["p-trigger-on", "p-trigger-runs", "p-trigger-gets", "p-trigger-run", "p-trigger-edit"] }, { cls: "stack", items: ["p-trigger-gets-how", "p-trigger-trust", "p-trigger-kinds", "p-trigger-change"] }] }],
   "trigger-add": [{ cls: "cols cols--wide-side config-layout", items: [{ cls: "stack", items: ["p-trigger-add"] }, { cls: "stack", items: ["p-kinds", "p-forge-words", "p-refusals"] }] }],
   fleet: [{ cls: "stack", items: ["p-fleetbar", "p-active"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-queues", "p-held", "p-failed", "p-delayed", "p-schedules"] }, { cls: "stack", items: ["p-hosts", "p-doctor"] }] }, { cls: "stack", items: ["p-venues"] }],
   host: [{ cls: "stack", items: ["p-hoststate"] }, { cls: "cols cols--wide-side", items: [{ cls: "stack", items: ["p-hostjobs", "p-hostsandboxes", "p-hostbudget", "p-hostcap"] }, { cls: "stack", items: ["p-hostrow", "p-hostdoctor"] }] }],
@@ -634,7 +636,7 @@ const PAGE_READS = Object.freeze({
   connections: ["snapshot", "connections", "setup"],
   updates: ["snapshot", "updates"],
   project: ["snapshot", "waiting", "project"],
-  trigger: ["snapshot", "waiting"],
+  trigger: ["snapshot", "waiting", "hostLoads"],
   triggers: ["snapshot", "waiting"],
   "trigger-check": ["parkedCount"],
   "trigger-add": ["snapshot"],
@@ -843,6 +845,15 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     catch { data.triggerList = triggerListOf({ snapshot: null, now }); }
   }
   if (name === "trigger") {
+    // What the card draws, read once with the digest of those same bytes (`readTriggerGetsEntry`), and the digest only where a person's
+    // form is drawn, because it covers the entry's prompt and secret references. Not for an agent, whose copy of the data has neither.
+    if (who?.role !== "agent" && typeof deps.paths?.triggersPath === "string") {
+      const forForm = who?.role === "operator" && who?.readOnly !== true;
+      data.triggerGets = readTriggerGetsEntry({ triggersPath: deps.paths.triggersPath, index: q.index, withDigest: forForm, ...(deps.fs ? { fs: deps.fs } : {}) });
+      if (forForm) {
+        try { const models = typeof deps.pricedModels === "function" ? deps.pricedModels() : []; data.modelChoices = Array.isArray(models) ? models : []; } catch { data.modelChoices = []; }
+      }
+    }
     if (data.snapshot && typeof deps.fleet?.triggerSkew === "function") {
       try { data.snapshot = { ...data.snapshot, triggerSkew: { [q.index]: await deps.fleet.triggerSkew(q.index, data.snapshot.waiting) } }; } catch { /* An unreadable skew check remains unknown. */ }
     }

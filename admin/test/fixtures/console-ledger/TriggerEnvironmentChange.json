@@ -1,0 +1,181 @@
+{
+  "card": "TriggerEnvironmentChange",
+  "pr": 800,
+  "words": "b0f8ba73de51e9fe1713b0dd5ff2053252526b74e7eaadc3bf44c757f6a45ecb",
+  "elements": [
+    {
+      "el": "p-trigger-gets-preview",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-trigger-gets",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "golden": [
+        "panels/trigger-gets-preview.operator"
+      ],
+      "shows": [
+        "Change trigger row 3",
+        "Confirm: change trigger row 3",
+        "Put trigger row 3 back as it was"
+      ],
+      "reason": "On the page the preview is the confirm slot, after this card."
+    },
+    {
+      "el": "p-trigger-gets-refuses",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-trigger-gets",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "golden": [
+        "panels/trigger-gets-refused-cost.operator",
+        "panels/trigger-gets-refused-stale.operator"
+      ],
+      "reason": "On the page a refusal is the confirm slot's bar, after this card, in the planner's own words."
+    },
+    {
+      "el": "p-trigger-gets-viewer",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets.viewer"
+      ],
+      "reason": "On the page a viewer reads this card's own rows, drawn with no controls."
+    },
+    {
+      "el": "Each change in words, never an arrow, a widening said as one",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "This widens",
+      "golden": [
+        "panels/trigger-gets-preview.operator"
+      ],
+      "shows": [
+        "MCP: linear on.",
+        "Tools: bash off.",
+        "This widens what its jobs reach: jobs queued from this file connect to mcp.example.com, with LINEAR_API_KEY by name."
+      ]
+    },
+    {
+      "el": "The jobs it affects",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "as trigger-skew",
+      "golden": [
+        "panels/trigger-gets-preview.operator"
+      ],
+      "shows": "With this change, a host reading this file refuses 1 of this trigger's jobs in line, before it spends: gh-c9e1 as trigger-skew (run.mcp). Re-run it from its page."
+    },
+    {
+      "el": "What a host without the server does",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "mcp-config-invalid",
+      "golden": [
+        "panels/trigger-gets-preview.operator"
+      ],
+      "shows": "a host with no overlay or no mcp.json refuses it as mcp-config-invalid."
+    },
+    {
+      "el": "Where it is written and how it is audited",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "audited as trigger-edit",
+      "golden": [
+        "panels/trigger-gets-preview.operator"
+      ],
+      "shows": "Written to triggers.json on this host and audited as trigger-edit, by ops at the console."
+    },
+    {
+      "el": "When a change takes effect, as far as is true of this file on this host",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "from their next reload",
+      "golden": [
+        "panels/trigger-gets-preview.operator"
+      ],
+      "shows": [
+        "The services reading this file use it from their next reload, for the jobs they queue after that.",
+        "A job already in line keeps what it was queued with, or is refused if this file now narrows something it lacks. A running job is not touched.",
+        "A host with its own copy of this file keeps what it has until that copy changes."
+      ]
+    },
+    {
+      "el": "A server this host's pickup check would refuse: its key not passed, or every way in removed",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "makeMcpCheck"
+    },
+    {
+      "el": "A cap that clears the floor but not a short task previews, and says so",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "only for the smallest first call"
+    },
+    {
+      "el": "A model that cannot make one call under the cap",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "needs at least",
+      "golden": [
+        "panels/trigger-gets-refused-cost.operator"
+      ],
+      "shows": "$2.654295 for a short task's first call, above the deployment's $2.00 job cap"
+    },
+    {
+      "el": "This trigger changed since the page drew it",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "This trigger changed since the page drew it",
+      "golden": [
+        "panels/trigger-gets-refused-stale.operator"
+      ],
+      "shows": [
+        "This trigger changed since the page drew it, so nothing was changed. Reload the page and make the change again.",
+        "Look again"
+      ]
+    },
+    {
+      "el": "The server provides each model's first-call bound",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "firstCallBoundMicros"
+    },
+    {
+      "el": "The server provides the digest of the entry and compares it at preview",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "pageDigest"
+    },
+    {
+      "el": "The server provides the versions each live host publishes, read only when the file needs more than version 1",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "versionGate"
+    },
+    {
+      "el": "A host on an older release",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "The planner holds the refusal, with injected version tables, and no field this page writes needs it yet: it comes into use with the later pull request's two fields."
+    },
+    {
+      "el": "gh-c9e1, the amounts and the host names",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample values, from the design fixture; the amount is the planner's for anthropic/claude-opus-5-5 at the pinned pi."
+    }
+  ]
+}

@@ -1876,7 +1876,86 @@ ${FIT_JS}
     var fallback = form.querySelector("[data-form-error]");
     if (fallback) { fallback.hidden = !message || matched; fallback.textContent = message || ""; }
   }
+  // What a trigger's jobs get (issue #800), one form read by the one submit handler below. A control as the server drew it is what the
+  // file says, so a change is a control that differs from how it was drawn (\`defaultValue\`, \`defaultChecked\`), and that is all the
+  // browser works out: whether a model fits a cap, or a host reads a field, is the server's to say at the preview. A blank text box
+  // that held a value is null, which deletes the key: the planner refuses a blank rather than read it as not sent.
+  function getsLists(form) {
+    var lists = Object.create(null);
+    function listOf(key) { return lists[key] || (lists[key] = { was: [], now: [] }); }
+    var chips = form.querySelectorAll("[data-gets-list]");
+    for (var i = 0; i < chips.length; i++) {
+      var inverse = chips[i].hasAttribute("data-gets-inverse");
+      var row = listOf(chips[i].getAttribute("data-gets-list"));
+      var value = chips[i].getAttribute("data-gets-value");
+      if (chips[i].defaultChecked !== inverse) row.was.push(value);
+      if (chips[i].checked !== inverse) row.now.push(value);
+    }
+    var adds = form.querySelectorAll("[data-gets-add]");
+    for (var j = 0; j < adds.length; j++) {
+      var into = listOf(adds[j].getAttribute("data-gets-add"));
+      var typed = adds[j].value.split(/[\\s,]+/);
+      for (var k = 0; k < typed.length; k++) if (typed[k] !== "" && into.now.indexOf(typed[k]) < 0) into.now.push(typed[k]);
+    }
+    return lists;
+  }
+  function getsBody(form) {
+    var out = {};
+    var hidden = form.querySelectorAll("input[type=hidden]");
+    for (var h = 0; h < hidden.length; h++) out[hidden[h].name] = hidden[h].getAttribute("data-type") === "int" ? Number(hidden[h].value) : hidden[h].value;
+    var boxes = form.querySelectorAll("input[name][data-gets-word]");
+    for (var i = 0; i < boxes.length; i++) {
+      var next = boxes[i].value.trim();
+      if (next !== boxes[i].defaultValue.trim()) out[boxes[i].name] = next === "" ? null : next;
+    }
+    var flags = form.querySelectorAll("[data-gets-flag]");
+    for (var f = 0; f < flags.length; f++) if (flags[f].checked !== flags[f].defaultChecked) out[flags[f].getAttribute("data-gets-flag")] = flags[f].checked;
+    var lists = getsLists(form);
+    for (var key in lists) if (JSON.stringify(lists[key].now) !== JSON.stringify(lists[key].was)) out[key] = lists[key].now.length > 0 ? lists[key].now : null;
+    return out;
+  }
+  // The bar's count and words, each from the server's own text on the control that changed (\`data-gets-*\`), through \`textContent\`.
+  function getsRefresh(form) {
+    var words = [];
+    var boxes = form.querySelectorAll("input[data-gets-word]");
+    for (var i = 0; i < boxes.length; i++) {
+      if (boxes[i].value.trim() !== boxes[i].defaultValue.trim()) words.push(boxes[i].getAttribute("data-gets-word"));
+    }
+    var ticks = form.querySelectorAll("[data-gets-list], [data-gets-flag]");
+    for (var t = 0; t < ticks.length; t++) {
+      var moved = ticks[t].checked !== ticks[t].defaultChecked;
+      if (moved) words.push(ticks[t].getAttribute(ticks[t].checked ? "data-gets-on" : "data-gets-off"));
+      var item = ticks[t].closest("[data-gets-item]");
+      if (!item) continue;
+      if (moved) item.classList.add("te-changed"); else item.classList.remove("te-changed");
+      var pend = item.querySelector(".te-pend");
+      if (pend) pend.hidden = !moved;
+    }
+    var bar = form.querySelector("[data-gets-bar]");
+    if (!bar) return;
+    bar.hidden = words.length === 0;
+    var count = bar.querySelector("[data-gets-count]");
+    if (count) count.textContent = String(count.getAttribute(words.length === 1 ? "data-one" : "data-many")).replace("{n}", String(words.length));
+    var said = bar.querySelector("[data-gets-words]");
+    if (said) said.textContent = words.length > 0 ? words.join(", ") + "." : "";
+  }
+  var GETS_FORM = 'form[data-structured="trigger-gets"]';
+  function getsMoved(ev) {
+    var form = ev.target && typeof ev.target.closest === "function" ? ev.target.closest(GETS_FORM) : null;
+    if (form) getsRefresh(form);
+  }
+  document.addEventListener("input", getsMoved);
+  document.addEventListener("change", getsMoved);
+  // Discard is the form's own reset. The browser resets its controls after this event, so the bar is read a tick later. A preview of what
+  // was just discarded closes with it: a Confirm left open would write a change the page no longer shows.
+  document.addEventListener("reset", function (ev) {
+    var form = ev.target;
+    if (!form || typeof form.matches !== "function" || !form.matches(GETS_FORM)) return;
+    later(function () { getsRefresh(form); }, 0);
+    if (slot && !slot.hidden && slotOwner === form.closest("section[data-panel]")) closeSlot();
+  });
   function bodyOf(form) {
+    if (typeof form.getAttribute === "function" && form.getAttribute("data-structured") === "trigger-gets") return getsBody(form);
     var out = {};
     var els = form.elements;
     for (var i = 0; i < els.length; i++) {

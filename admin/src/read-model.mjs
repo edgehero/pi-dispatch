@@ -2984,7 +2984,7 @@ export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subsc
     cost24hMicros: measured.reduce((sum, n) => sum + (n ?? 0), 0),
     costIncomplete: measured.some((n) => n === null),
     historyIncomplete: Boolean(snapshot.parkedUnreachable || snapshot.failures24hFloor),
-    lastRuns: runs.slice(0, 5), queued: trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
+    lastRuns: runs.slice(0, 5), history: runs, queued: trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
     skewed: snapshot.triggerSkew?.[index]?.rows ?? null,
     skewIncomplete: snapshot.triggerSkew?.[index]?.incomplete ?? true,
     cron: trigger.type === "cron" ? { scheduler, next: scheduler?.next ?? null, overdueMs: scheduler?.overdueMs ?? null, stalls, stallLimit: (snapshot.schedulerStallMax ?? 2) + 1 } : null,

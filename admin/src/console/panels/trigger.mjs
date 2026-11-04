@@ -99,21 +99,22 @@ export function triggerRuns(v) {
       </p>`,
   );
 }
+/**
+ * The fields of a trigger's `run`, in three groups, and each key has one editor: `CARD_FIELDS` on What its jobs get (`p-trigger-gets`),
+ * `EDIT_FIELDS` on the Edit form (`p-trigger-edit`), and `HAND_FIELDS` in the file alone. A new trigger has no card yet, so the add form
+ * keeps its flow and its model (`ADD_FIELDS`). `trigger-edit` still takes those keys: `dispatch_trigger_edit` keeps its scope, and only
+ * this page's form narrows. REJECTED: leaving them on both forms, where two previews of one key can each pass with the other's words stale.
+ */
 export const EDIT_FIELDS = Object.freeze([
-  "flow",
   "backend",
-  "provider",
-  "model",
   "maxTurns",
   "progress",
   "statusComment",
   "steer",
   "recover",
 ]);
+const ADD_FIELDS = Object.freeze(["flow", "backend", "provider", "model", "maxTurns", "progress", "statusComment", "steer", "recover"]);
 export const HAND_FIELDS = Object.freeze([
-  "maxCostUsd",
-  "models",
-  "mcp",
   "secrets",
   "secretBundle",
   "resume",
@@ -121,7 +122,6 @@ export const HAND_FIELDS = Object.freeze([
   "image",
   "waitFor",
   "replicas",
-  "packages",
   "skillsDir",
   "instructions",
   "task",
@@ -131,12 +131,10 @@ export const HAND_FIELDS = Object.freeze([
   "command",
   "portfolio",
   "github",
-  "fallbackModels",
   "secretsProfile",
   "gates",
   "gateTimeout",
   "gateBudgetRaiseUsd",
-  "excludeTools",
 ]);
 export function triggerRun(v) {
   const t = trigger(v);
@@ -149,7 +147,7 @@ export function triggerRun(v) {
   const bundleNames = (v.data?.snapshot?.secretBundles?.bundles ?? []).map(b=>`${b.project ?? "project"}: ${b.id}`).join(", ");
   return card(
     "What it runs",
-    html`<h3>Edit here</h3>
+    html`<p>The flow, the model and its cap, the staged packages, the MCP servers and the tools are in What its jobs get.</p><h3>Edit here</h3>
       ${facts(
         EDIT_FIELDS.filter(
           (k) => t.type !== "cron" || !["statusComment", "recover"].includes(k),
@@ -207,7 +205,7 @@ export function triggerRun(v) {
   );
 }
 export function editFields(v, t = {}, group = null) {
-  return html`${EDIT_FIELDS.filter(
+  return html`${(group === null ? EDIT_FIELDS : ADD_FIELDS).filter(
     (k) => (t.type !== "cron" || !["statusComment", "recover"].includes(k)) && (group === null || (group === "options" ? ["progress","statusComment","steer","recover"].includes(k) : !["progress","statusComment","steer","recover"].includes(k))),
   ).map((k) =>
     field(k, k === "backend" ? "Venue (run.backend)" : ({ progress: "Report phases (run.progress)", statusComment: "Status comment (run.statusComment)", steer: "Take messages (run.steer)", recover: "Recover (run.recover)" }[k] ?? `run.${k}`), {
@@ -431,8 +429,7 @@ export function triggerAdd(v) {
           </p>
           <h3>4. Set by hand</h3>
           <p>
-            The console never sets the job cap, allowed models, MCP servers,
-            session, image, secrets, waits or replicas; new adds opt out of project secret bundles (run.secretBundle: false). Change the bundle opt-out and these other fields by hand in the triggers file.
+            Adding a trigger never sets the job cap, allowed models, MCP servers, session, image, secrets, waits or replicas; new adds opt out of project secret bundles (run.secretBundle: false). Once it exists, a person changes its job cap, allowed models and MCP servers on its page; change the rest and the bundle opt-out by hand in the triggers file.
           </p>`,
         label: "Preview the add",
       })}

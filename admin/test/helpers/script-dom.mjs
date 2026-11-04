@@ -411,6 +411,20 @@ class Element extends Node {
     this.liveChecked = Boolean(v);
   }
 
+  get defaultChecked() {
+    return this.hasAttribute("checked");
+  }
+
+  /** A form's reset as a browser runs it: the event, then (not prevented) each control back as the server drew it. */
+  reset() {
+    const go = this.dispatchEvent(new Event("reset", { bubbles: true }));
+    if (!go) return;
+    for (const el of this.elements) {
+      el.liveValue = undefined;
+      el.liveChecked = undefined;
+    }
+  }
+
   /** A form's controls, in document order. */
   get elements() {
     return this.querySelectorAll("input, textarea, select, button");
@@ -475,6 +489,7 @@ class Element extends Node {
     const go = this.dispatchEvent(ev);
     const form = this.closest("form");
     if (go && form && this.localName === "button" && this.type === "submit") form.dispatchEvent(new Event("submit", { bubbles: true, submitter: this }));
+    if (go && form && this.localName === "button" && this.type === "reset") form.reset();
   }
 }
 

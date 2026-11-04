@@ -9,7 +9,7 @@ One rule keeps it simple, as on the Workspace row: one line per kind, and the de
 
 Three cards:
 - RunLoaded: a completed run's Loaded card (pi and image, model, extensions, skills, MCP, tools).
-- LoadedStates: that card's one line, run by run, and where it is repeated (a sandbox, and with part 2 a trigger).
+- LoadedStates: that card's one line, run by run, and where it is repeated (a sandbox and a trigger).
 - ProjectLoads: the project page's What its runs load, which says when runs of one project differ by host."""
 from pulse import *
 from gen_runs import RUN_STYLE, RUNS_STYLE, RUNS, run_title, ended_facts, ended_tokens, ended_resources, ended_session, row as runs_row
@@ -272,12 +272,12 @@ def states_page():
         (f'<span class="ld-new">On mini2</span>', f'<span class="ld-new">{NO_OVERLAY} What a job of trigger 3 would load on this host is unknown: it has published no doctor run.</span>'),
     ], 1) + f'<p class="ld-foot">{ic("info", "ic ic--sm")}<span>A fresh sandbox has no run to quote, so it says what a job would load there, from the host’s last doctor run, or unknown. The repository’s part is decided at its base commit.</span></p>',
         sub="Sandboxes, a fresh one", id_="p-loaded-sandbox-fresh")
-    # Part 2's, drawn here because this card is where a run's record is repeated. No console page draws it yet, so its sub says so.
+    # Under a row of What its jobs get, the row's control from the file and the record's words beneath it, past, by the run's id and host.
     trigger = card("MCP servers", facts([
-        (code("run.mcp"), "linear"),
-        (f'<span class="ld-new">Its last run</span>', f'<span class="ld-new"><a class="link code" href="#">gh-2f6a</a> connected linear, with 12 tools. Before it, <a class="link code" href="#">gh-4b12</a> connected none: linear did not answer.</span>'),
-    ], 1) + f'<p class="ld-foot">{ic("info", "ic ic--sm")}<span>Each run field the record covers gets this line: what the trigger asks for, beside what its last run had.</span></p>',
-        sub="trigger 7, a run field; comes with part 2", id_="p-loaded-trigger")
+        (code("run.mcp"), "linear, as the file says now"),
+        (f'<span class="ld-new">Last run</span>', f'<span class="ld-new">Last run on mini1, <a class="link code" href="#">gh-2f6a</a>: linear connected, with 12 tools.</span>'),
+    ], 1) + f'<p class="ld-foot">{ic("info", "ic ic--sm")}<span>Each row of What its jobs get has this line: what the file says the next job gets, and under it what its last run had.</span></p>',
+        sub="trigger 7, under a row of What its jobs get", id_="p-loaded-trigger")
     rest = (f'<h3 class="ld-h3">The same record, in two more places</h3><div class="ld-pair">{sandbox}{fresh}</div>'
             f'<div class="ld-pair">{trigger}</div>')
     viewer = f'<h3 class="ld-h3">For a viewer</h3>{viewer_card()}'
@@ -416,7 +416,7 @@ A completed run's **Loaded** card: what the job had when it started, one line pe
 **Fixture note.** gh-9575, acme/web#490, fix on mini1, trigger 3 and the model are the fixture, as on RunEnded. pi 1.5.0, pi-job:4.3.1 and the staged packages pi-lint 1.4.2 and pi-test-runner 0.9.0 are as on Updates, Sandboxes and Connections. That pairing is sample only: tag 4.3.1 pins pi 1.2.0, and these cards cite 4.3.1 for its behaviour alone. Sample: the image id, the counts, the replaced skill, and the tool names and split (as on TriggerEnvironment).
 """,
 "LoadedStates": """
-The top line of each run's Loaded card, run by run, what the outcome says in the Runs list and on the run page, where the same record is repeated (a sandbox now, and a trigger with #800's part 2), and what a viewer reads.
+The top line of each run's Loaded card, run by run, what the outcome says in the Runs list and on the run page, where the same record is repeated (a sandbox and a trigger), and what a viewer reads.
 
 **How a person uses it.**
 - **Everything loaded** (gh-9575): one green line, nothing to do.
@@ -435,12 +435,12 @@ The top line of each run's Loaded card, run by run, what the outcome says in the
 - **No record** (gh-c3f8): an older release wrote it. **Refused** (gh-e9a0): nothing loaded.
 - **In the Runs list and the banner** (`p-loaded-runs`, and `p-outcome` drawn twice): the record's outcome stays completed, and the word a person reads is *Completed, without its flow* or *Completed, with a failed extension*.
 - **In a sandbox,** What opens gains one row. A shell has no overlay, so pi started there loads only the workspace's own `.pi/`, whatever the run loaded; the row says that first, then what the run itself had, linked to it. A fresh sandbox has no run to quote, so it says what a job of the trigger would load on that host, from its last doctor run with the time, or that this is unknown.
-- **On a trigger,** with #800's part 2 and not built yet: each run field the record covers gains *Its last run*: what the trigger asks for, beside what its last run had, and the one before it when that one did not get it.
+- **On a trigger,** under each row of *What its jobs get* (TriggerEnvironment): what the file says the next job gets, and beneath it what its last run that said what it loaded had, by its id and host. When a newer run could not say, the card names it and why.
 - **As a viewer sees it:** the same words with no button.
 
 **Panels.** `p-loaded`, `p-loaded-runs`, `p-outcome-no-flow`, `p-outcome-extension-failed`, `p-loaded-sandbox`, `p-loaded-sandbox-fresh`, `p-loaded-trigger`, `p-loaded-viewer`. On a run page the two outcome panels are `p-outcome`.
 
-**The server provides.** The run record's new `loaded` field (RunLoaded). For a trigger, with part 2, its last run's record. For a fresh sandbox: What the host's last doctor run published, with its time, or unknown. The repository's part is decided at its base commit. The publication is a new key, `doctor:loads:<name>`, and it is also what the gh-ebd7 line reads for mini1 and mini2. pi's version and the image come from what every live host already publishes, `host:h:<name>` (`image`, `imageDigest`, `piVersion`, `INT-HOST-REGISTRY-CONTRACT`), so mini2's fresh row still has them. Its version is said only where the sandbox's image is the one that host booted on: a kept older image and a trigger's own `run.image` hold their own pi. For a shell, nothing about the overlay: `worker/src/sandbox.mjs` mounts no `/opt/pi-global`, and `worker/src/sandbox-store.mjs` says a reopened workspace loads neither the candidate nor the overlay.
+**The server provides.** The run record's new `loaded` field (RunLoaded). For a trigger, its last run's record. For a fresh sandbox: What the host's last doctor run published, with its time, or unknown. The repository's part is decided at its base commit. The publication is a new key, `doctor:loads:<name>`, and it is also what the gh-ebd7 line reads for mini1 and mini2. pi's version and the image come from what every live host already publishes, `host:h:<name>` (`image`, `imageDigest`, `piVersion`, `INT-HOST-REGISTRY-CONTRACT`), so mini2's fresh row still has them. Its version is said only where the sandbox's image is the one that host booted on: a kept older image and a trigger's own `run.image` hold their own pi. For a shell, nothing about the overlay: `worker/src/sandbox.mjs` mounts no `/opt/pi-global`, and `worker/src/sandbox-store.mjs` says a reopened workspace loads neither the candidate nor the overlay.
 
 **Who sees what.** As RunLoaded: viewers read the same words, and the buttons are operator actions, so a viewer has none (`p-loaded-viewer`).
 
@@ -486,7 +486,7 @@ The project page's **What its runs load**: what its runs had in the last 7 days,
 if __name__ == "__main__":
     write("RunLoaded", card_marker("Runs", 1700, 1440, "A completed run’s Loaded card: pi and its image, the model, extensions, skills, MCP and tools, one line each"),
           "Run gh-9575, what it loaded", run_loaded_page(), RUN_STYLE + CSS)
-    write("LoadedStates", card_marker("Runs", 1300, 1440, "The Loaded card’s top line run by run, and the same record in a sandbox and, with part 2, on a trigger"),
+    write("LoadedStates", card_marker("Runs", 1300, 1440, "The Loaded card’s top line run by run, and the same record in a sandbox and on a trigger"),
           "What each run loaded", states_page(), RUN_STYLE + RUNS_STYLE + CSS)
     write("ProjectLoads", card_marker("Configuration", 1100, 1440, "The project page’s What its runs load: one line per kind, and a warning when runs differ by host"),
           "billing, what its runs load", project_page(), CSS + PROJECT_CSS)

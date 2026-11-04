@@ -1,0 +1,332 @@
+{
+  "card": "TriggerEnvironment",
+  "pr": 800,
+  "words": "730d2378d672f0f8a6871bd391d17330374856c66eda9dd18626576255ef9bfb",
+  "elements": [
+    {
+      "el": "p-trigger-gets",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets.operator",
+        "panels/trigger-gets.viewer"
+      ],
+      "shows": [
+        "What its jobs get",
+        "as a job of trigger 3 would start, from each host’s last doctor run"
+      ]
+    },
+    {
+      "el": "p-trigger-gets-how",
+      "kind": "panel",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGetsHow",
+      "golden": [
+        "panels/trigger-gets.operator",
+        "panels/trigger-gets.viewer"
+      ],
+      "shows": "No tool reaches this action; dispatch_trigger_edit keeps today’s scope."
+    },
+    {
+      "el": "p-trigger-gets-states",
+      "kind": "panel",
+      "status": "new",
+      "as": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-no-run.operator",
+        "panels/trigger-gets-no-flow.operator"
+      ],
+      "reason": "The card draws the other states in one panel. On the page each is the same panel, with its own file and record."
+    },
+    {
+      "el": "The hosts: one pill per host, whether its jobs get the same there",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#triggerGetsOf",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": [
+        "also git-guard, from its overlay",
+        "without git-guard",
+        "unknown"
+      ]
+    },
+    {
+      "el": "A host with no publication reads unknown, never the same",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#triggerGetsOf",
+      "golden": [
+        "panels/trigger-gets-unknown-host.operator"
+      ],
+      "shows": "has published none, so it reads unknown, never the same."
+    },
+    {
+      "el": "Under each row, what the last run had, naming its host, and why it quotes that run",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/loaded-words.mjs#triggerLastRun",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": [
+        "The rows say what the next job gets, from the triggers file.",
+        "Last run on mini1",
+        "Nothing loaded: it was refused before its container started."
+      ]
+    },
+    {
+      "el": "Model: provider, model, job cap, allowed models and fallbacks",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": [
+        "Job cap, in dollars",
+        "Blank uses the deployment’s $2; a trigger can only lower it.",
+        "Any model is allowed.",
+        "Add a fallback"
+      ]
+    },
+    {
+      "el": "Allowed models and a fallback as chips",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-long-names.operator"
+      ],
+      "shows": "data-gets-list=\"fallbackModels\""
+    },
+    {
+      "el": "Flow and skills: a picker and doctor's answer on each host",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#triggerGetsOf",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": [
+        "name=\"flow\"",
+        "Doctor’s answer:",
+        "A forge’s repository is not on a host, so for that tier read the last run."
+      ]
+    },
+    {
+      "el": "A warning when a run went without its flow",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/loaded-words.mjs#triggerLastRun",
+      "golden": [
+        "panels/trigger-gets-no-flow.operator"
+      ],
+      "shows": "Ran without its flow."
+    },
+    {
+      "el": "Extensions: the all-off switch for staged packages, each extension shown, the repository's own shown",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": [
+        "data-gets-flag=\"packages\"",
+        "One extension cannot be turned off on its own yet: a trigger takes all the staged packages, or none.",
+        "The repository’s own"
+      ]
+    },
+    {
+      "el": "MCP servers: a switch per server, with each host, a server some hosts lack flagged",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#triggerGetsOf",
+      "golden": [
+        "panels/trigger-gets-host-lacks.operator"
+      ],
+      "shows": [
+        "off on mini1; not on build3; unknown on mini2",
+        "mcp-server-unknown",
+        "mcp-config-invalid",
+        "mcp-secret-unmapped"
+      ]
+    },
+    {
+      "el": "Tools: pi's own and a server's as chips, extension tools shown, report_progress shown",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#triggerGetsOf",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": [
+        "data-gets-inverse",
+        "lint_file",
+        "report_progress comes with run.progress, in the Edit form: no list removes it."
+      ]
+    },
+    {
+      "el": "Removing the last way to a server is refused at pickup as mcp-excluded, and the preview refuses it as this host routes it",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-long-names.operator"
+      ],
+      "shows": "The preview refuses that, as this host’s overlay routes it; another host’s may route it another way."
+    },
+    {
+      "el": "Image and secrets, shown and changed where they are",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#triggerGetsOf",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": [
+        "pi-job:4.3.1 with pi 1.5.0",
+        "Open Secrets"
+      ]
+    },
+    {
+      "el": "The bar collects the changes, with Preview the change and Discard",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-changed.operator"
+      ],
+      "shows": [
+        "2 changes, not written yet:",
+        "linear on, bash off.",
+        "Preview the change",
+        "Discard"
+      ]
+    },
+    {
+      "el": "Discard is the form's reset, and takes a preview of it away",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-changed.operator"
+      ],
+      "shows": "type=\"reset\""
+    },
+    {
+      "el": "Each change is sent, and nothing else",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": "data-structured=\"trigger-gets\""
+    },
+    {
+      "el": "A viewer reads the same rows with no controls",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets.viewer"
+      ],
+      "panel": "p-trigger-gets",
+      "shows": "An operator changes these on this page, with one preview and one Confirm."
+    },
+    {
+      "el": "A read-only console offers no form",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-read-only.operator"
+      ],
+      "shows": "Forms are off on this read-only console."
+    },
+    {
+      "el": "No script: the page reads the same and no control works",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets.operator"
+      ],
+      "shows": "Enable JavaScript to preview and confirm a change. Reading and navigation work without it."
+    },
+    {
+      "el": "The server provides the digest of the entry, read with what the page draws",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/trigger-gets-view.mjs#readTriggerGetsEntry",
+      "holds": "triggerEntryDigest"
+    },
+    {
+      "el": "The server provides each host's publication and the image and pi it beats out",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/host-loads-view.mjs#readHostLoadsView",
+      "holds": "piVersion"
+    },
+    {
+      "el": "The server provides the catalog's priced models for the pickers",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/pages.mjs#loadPageData",
+      "holds": "pricedModels"
+    },
+    {
+      "el": "A person-only write",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "authority"
+    },
+    {
+      "el": "On TriggerDetail, the card's fields leave By hand and the Edit form",
+      "kind": "provides",
+      "status": "new",
+      "source": "admin/src/console/panels/trigger.mjs#EDIT_FIELDS"
+    },
+    {
+      "el": "A switch per extension, and a chip per extension tool",
+      "kind": "readme",
+      "status": "illustrative",
+      "reason": "Each extension is shown and not switched in this pull request: `run.excludeExtensions` and `run.excludeExtensionTools` wait on a later one, and the card's status says so."
+    },
+    {
+      "el": "Trigger 3, its hosts, gh-9575, gh-e9a0, gh-03a9, linear, docs, git-guard, pi-lint and pi-test-runner",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample values, from the design fixture. Drawn by the goldens' own file and records, because the shared fixture sets packages false on every trigger."
+    },
+    {
+      "el": "mini1's doctor run at 2026-10-08 14:39 UTC and build3's at 2026-10-05 15:39 UTC",
+      "kind": "sample",
+      "status": "illustrative",
+      "reason": "Sample times. The goldens' hosts both published an hour before the fixture's clock."
+    }
+  ]
+}
