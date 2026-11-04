@@ -984,7 +984,8 @@ test("the console's own command is what wires a person's trigger change, each re
   const modules = fakeModules();
   const asks = [];
   const fleet = {
-    snapshot: async (opts) => (asks.push(["snapshot", opts]), { waiting: { rows: ["in-line"] } }),
+    snapshot: async (opts) => (asks.push(["snapshot", opts]), {}),
+    waiting: async () => (asks.push(["waiting"]), { rows: ["in-line"] }),
     triggerSkew: async (index, waiting, opts) => (asks.push(["skew", index, waiting, opts]), { rows: [], incomplete: false }),
     dispose: async () => {},
   };
@@ -1002,7 +1003,7 @@ test("the console's own command is what wires a person's trigger change, each re
   assert.equal(options.env, captured.actionDeps.env);
   const proposed = { proposed: true };
   await options.readSkew(3, proposed);
-  assert.deepEqual(asks.slice(0, 2), [["snapshot", { waiting: true }], ["skew", 3, { rows: ["in-line"] }, { fs: proposed }]], "the jobs in line, judged on the proposed file");
+  assert.deepEqual(asks.slice(0, 2), [["waiting"], ["skew", 3, { rows: ["in-line"] }, { fs: proposed }]], "the jobs in line and no whole snapshot, judged on the proposed file");
   await options.readHosts();
   assert.deepEqual(asks.at(-1), ["hosts", captured.actionDeps.paths.valkeyUrl]);
   assert.equal(await options.readHostLoads(), await captured.pageDeps.hostLoads(), "the page's own read of what each host published");

@@ -4665,6 +4665,16 @@ export function createFleetReader(
     // (and `opts.queue`, a one-queue preview's, wherever it stands), and says so beside them: `switchTotal`, how many the
     // switch flips; `switchTruncated`, true when `queueCounts` holds fewer; `switchIncomplete`, `SWITCH_SCAN_INCOMPLETE`
     // when the keyspace scan behind the set did not finish, else null.
+    // The waiting jobs and nothing else (issue #800), for a preview that names the ones a change would refuse. `snapshot` reads every
+    // queue's counts, the run history and the schedulers besides, and a timeout around it stops the wait for them and not the reads,
+    // so each preview of a slow Valkey left one running. This shares the snapshot's window and its one read (`waitingOf`), and a read
+    // that failed answers `{ unreachable: true }`, which `readTriggerSkew` calls incomplete: never an empty line.
+    async waiting() {
+      const queues = await fleetQueues();
+      const projects = readProjects({ projectsPath: paths.projectsFile });
+      const triggers = readTriggers({ triggersPath: paths.triggersPath, fs });
+      return waitingOf(queues, Array.isArray(projects?.projects) ? projects.projects : null, Array.isArray(triggers?.triggers) ? triggers.triggers : null);
+    },
     // `viaFs` (issue #800): a preview asks what the PROPOSED file would refuse, by handing in the dry run's file system.
     async triggerSkew(index, waiting, { fs: viaFs = fs } = {}) {
       return readTriggerSkew({ index, waiting, triggersPath: paths.triggersPath, fs: viaFs, lookupJob: async (name, id) => {
