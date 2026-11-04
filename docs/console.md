@@ -1585,7 +1585,7 @@ is refused here with the same words, and every action lands in the [audit log](#
 | After a re-run | Cancel a queued job | Takes the job the re-run queued out of its queue before it starts ([below](#cancelling-a-queued-job)). |
 | Run | Steer, Follow-up, Withdraw | Sends a message to a running, steer-armed job, or takes one back ([below](#steering-a-running-job)). Spends from the run's own reservation. |
 | Run | Sandbox | Opens the operator’s terminal through its checked local handler, or copies the host command ([below](#opening-a-sandbox)). |
-| A trigger's page | Preview the change | What its jobs get ([below](#what-a-triggers-jobs-get)): its flow, its model and cap, its servers, its tools and whether it loads the staged packages. A person's action, which no tool reaches. |
+| A trigger's page | Preview the change | What its jobs get ([below](#what-a-triggers-jobs-get)): its flow, its provider and model, its job cap, its allowed models and fallbacks, its servers, its tools and whether it loads the staged packages. A person's action, which no tool reaches. |
 | Configuration | Edit | Triggers, settings, pause windows, scoped limits, projects, the envelope, priorities, reverting the budget split, secret profile names, and bundle resolvers (a name, a path and a format). |
 
 **Paid actions show what they reserve.** A re-run, an answer and a retry start a paid job, so their preview shows what the
@@ -2270,6 +2270,7 @@ none.
 | `the only host` | There is one host, so it has nothing to be the same as. |
 | `the only one known` | The other hosts read `unknown`, so it has nothing to compare with. |
 | `also …; without …; … defined differently; its flow …; runs …` | Hosts differ. Each part is there only when it is true of this host: what it has over another, what it goes without (a server this trigger names, even where every host does), a server it names defined differently, where it finds the flow when hosts find it in different places, and the image it runs when hosts run different ones. |
+| `its flow in no tier` | As doctor last read it, a job on this host would not find its flow: the repository's folder is on this host and does not hold it, and no other tier this trigger loads from does. It says so whoever agrees with it, beside other hosts or alone. A forge's repository is not on a host, so that answer stays unknown and is never this. |
 | `no answer for its flow`, `its flow …`, `its image unknown` | Not known to differ, and not the same either. A doctor run from before this flow was named has no answer for it, and beside it a host with an answer says what it is. A host that beats no image has none to compare. |
 | `differs in the order or kind of what it loads` | The same names, in another load order, or one a file and the other a folder. |
 | `unknown` | It published nothing, its record is old or could not be read (one a newer release wrote reads so), or it left out part of what this trigger loads from. Silence never reads as the same. |
@@ -2280,10 +2281,10 @@ newer one could not say, that run and why. A row with nothing to quote reads "No
 
 | Row | What a person changes | What it shows and leaves |
 |---|---|---|
-| Model | `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels` | Blank uses the deployment's. The pickers offer the catalog's priced models for the providers in use, and anything else can be typed, for the preview to judge. |
-| Flow and skills | `flow` | Doctor's answer for each host, which cannot see a forge's repository, and `run.skillsDir`, a folder on each host, set in the file. A `run.command` is shown, set in the file. |
+| Model | `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels` | Blank uses the deployment's, and where the deployment has no amount for the cap, a blank cap means no cap of its own. The pickers offer the catalog's priced models for the providers in use, and anything else can be typed, for the preview to judge. |
+| Flow and skills | `flow` | Doctor's answer for each host, which cannot see a forge's repository, with a warning where it found the flow nowhere, and `run.skillsDir`, a folder on each host, set in the file. A `run.command` is shown, set in the file. The picker is not the whole list: "It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed." |
 | Extensions | `packages` | One switch for all the staged packages. Each staged package and overlay extension is shown, with where it is, and is not switched. The repository's own are shown too: merge-gated, changed in the repository. A new extension, or another version, goes through [Updates](#updates). |
-| MCP servers | `mcp` | A switch per server a host publishes, this host's overlay offers or the trigger names, with its transport, where it is, its exposure and its key by name, and which hosts have it, lack it, have it off or have not said. `forge` is the job's own, in no overlay. |
+| MCP servers | `mcp` | A switch per server a host publishes, this host's overlay offers or the trigger names, with its transport, where it is, its exposure and its key by name, and which hosts have it, lack it, have it off or have not said. Where hosts define a server two ways, one it names reads "defined differently by host" and one it does not reads "not on for these jobs; turning it on would differ by host". `forge` is the job's own, in no overlay. |
 | Tools | `excludeTools` | A chip per tool of pi's own, and for a server the trigger names, its tools as a whole and the MCP tools, each on meaning not removed. A tool an extension adds is named as a run loaded it, by its id and host, because no host publishes a tool's name. It is not switched, it is not shown once the file withholds the packages it came with, and a repository's stay a count. `report_progress` is shown where the file sets `run.progress`, in the Edit form. |
 | Image and secrets | Nothing here | The image is each host's `PI_JOB_IMAGE` or `run.image` in the file, and secrets are on [Secrets](#secrets). |
 
@@ -2296,30 +2297,34 @@ holds, and the bar and the Edit form both say so. With no script the page reads 
 
 **The preview says, before anything is written:**
 
-- each change in words, never an arrow, with a widening said as one on a line of its own (`MCP: linear on.`, then where its jobs
-  now connect and with which key, by name);
+- each change in words, never an arrow, with a widening said as one on a line of its own (`MCP: linear on.`, then "a job that reaches
+  its container connects to" where the server is, with its key by name);
 - when it takes effect, only as far as is true of this file on this host: "The services reading this file use it from their
   next reload, for the jobs they queue after that." A job in line keeps what it was queued with and runs without this change, unless
   the preview names it as refused, and a running job is not touched. "A host with its own copy of this file keeps what it has
   until that copy changes." A schedule adds that while hosts' copies differ, no host installs a change to one;
 - the jobs in line a host reading this file refuses, judged on the proposed entry and named up to five (`trigger-skew`, or
   `wait-skew`), or that the line could not all be read;
-- what it warns of, below, and which hosts have a server it adds;
+- what it warns of, below, and which hosts have a server it adds, or that what the hosts published could not be read;
 - where it is written and how it is audited (`trigger-edit`, by you), then the file's lines as they would change, the Undo and
   one Confirm.
 
 The Confirm judges again, because a deployment's cap can move between the two, and it is refused if the file moved. A change
-that says the same to a job is no change, and the page says the row already says this: `1.5` and `"1.50"` are one cap, and
-`true` is what no `packages` key already means.
+that says the same is no change, and the page says the row already says this: `1.5` and `"1.50"` are one cap. `run.packages: true`
+and no key are not one value. A job loads the staged packages under either, and doctor fails a host with none staged only on `true`,
+so the preview says which way a change moves that: "Staged packages: stay on, and the file no longer says this flow needs them, so
+doctor stops failing a host with none staged." The switch's on removes a `false`, so a `true` stays until the switch goes off and on.
 
 **Undo** is an edit like any other, previewed the same way, and puts back the keys the change touched, in their places. Where this
-page could not write them (a key the file held as `null`, or a trigger this page would refuse today), the preview says to edit
-it back by hand, and why. A first write to a file this writer did not write also puts the whole file in the writer's form, as
-every writer of this file does: its layout, a `"version": 1`, which is written as nothing, and a number as JSON reads it. No Undo
-restores those.
+page could not write them (a key the file held as `null`, a file the loader refused as it was, or a trigger this page would refuse
+today), the preview says to edit it back by hand, and why. A first write to a file this writer did not write also puts the whole file
+in the writer's form, as every writer of this file does: its layout, a `"version": 1`, which is written as nothing, and a number as
+JSON reads it. No Undo restores those, and the Confirm and the Undo each say so.
 
-**What it refuses.** What the file alone decides, on every host, and what could not be judged. Each is free, and nothing is written.
-The words are the start of what the page says, which goes on to name the model, the amount or the row:
+**What it refuses.** What the file alone decides on every host, what would cost more later than a refusal at pickup (a cap above the
+deployment's, which stops the whole file at the loader, and a cap the model a job starts on cannot clear, which stops every call inside
+a paid container), and what could not be judged. A refusal here costs nothing, and nothing is written. Each quote is part of what the
+page says, which also names the model, the amount or the row:
 
 | It says | Why | What to do |
 |---|---|---|
@@ -2330,15 +2335,15 @@ The words are the start of what the page says, which goes on to name the model, 
 | `A trigger's flow cannot be removed` | The Flow box was emptied. | Choose another flow. |
 | `trigger row`, `rejected:` | The loader's own words for a value, from the trigger edit's check or a dry run of the write: a provider with a space, an allowed model with no provider, a cap that is not an amount. Or the file moved while the preview read it. | Correct the value it names, or look again and retry. |
 | `A trigger's job cap can only lower the deployment's` | The cap is above the deployment's. A job runs under the smaller of the two, and a value above `PI_MAX_COST_USD` is refused when the worker loads the file. | Set the amount it names or less, or remove this trigger's cap. The deployment's own cap belongs to its settings ([costs](costs.md#a-job-cap-on-a-trigger)). |
-| `needs at least` | The cap is below the least any call to a model this trigger names can be bounded at, so the runner would refuse every call to it before it is sent. | Choose another model, or set the amount it names ([costs](costs.md#a-job-cap-on-a-trigger)). If it is the deployment's cap that is too small, choose another model. |
+| `needs at least` | The cap is below the least any call to the model a job starts on can be bounded at, so the runner would refuse every call to it before it is sent. A listed or fallback model under the same cap warns instead (below). | Choose another model, or set the amount it names ([costs](costs.md#a-job-cap-on-a-trigger)). If it is the deployment's cap that is too small, choose another model. |
 | `could not be resolved` | The trigger's model or role resolves to nothing for any of its jobs, so every job would be refused before it spends. | Correct its model or its role. |
-| `has no verified local cost bound`, `travels as max_completion_tokens` | No cap can bound a call to this model, so the runner refuses it under any cap. | Choose another model. A local server takes the `maxTokensField` the sentence names ([egress](egress.md)). |
+| `has no verified local cost bound`, `travels as max_completion_tokens` | No cap can bound a call to the model a job starts on, so the runner refuses it under any cap. A listed or fallback model warns instead (below). | Choose another model. A local server takes the `maxTokensField` the sentence names ([egress](egress.md)). |
 | `On every host this trigger's jobs would be refused as mcp-excluded` | The exclusions leave a server it names no way in, however a host routes it. | Remove the server from `run.mcp`, or keep a tool that reaches it out of `run.excludeTools`. |
 | `The deployment's settings file is invalid`, `PI_ALLOWED_MODELS is invalid`, `The deployment's job cap could not be read`, `The trigger's project or role policy could not be read` | Something the judgement of a model or a cap needs could not be read, so it could not be judged. An edit that does not need it is not refused for it. | Correct what it names. |
 
-**What it warns of.** What depends on the host: its overlay, its `.env`, its allowlist and its endpoints. Another host may run the
-job, and a refusal at pickup is free and names its reason, so the preview says so, in the worker's own reason, and Confirm stays. It
-speaks only of what the change touches, and the check's lines end by saying what they read: "This reads this host's .env and
+**What it warns of.** What depends on the host (its overlay, its `.env`, its allowlist and its endpoints), and what stops a job only if
+it makes that call. Another host may run the job, and a refusal at pickup is free and names its reason, so the preview says so, in the
+worker's own reason, and Confirm stays. It speaks only of what the change touches, and the check's lines end by saying what they read: "This reads this host's .env and
 overlay; what the worker's own service environment sets cannot be seen from here."
 
 | It says | Why | What to do |
@@ -2349,11 +2354,14 @@ overlay; what the worker's own service environment sets cannot be seen from here
 | `this trigger's model could not be resolved` | Its model or role resolves to nothing for the jobs of one project, and those would be refused before they spend. | Correct its model or its role. |
 | `would be refused as` | The worker's own pickup check, on the entry as it would be: a server this overlay does not offer or turns off, a key that does not reach the job, and the rest of [mcp.md](mcp.md#naming-servers-in-a-trigger)'s reasons. | What the line says. `run.secrets` is set in the file, not on this page. |
 | `On this host this trigger's jobs would be refused as mcp-excluded` | The exclusions leave a server no way in as this overlay routes it, and another host's may route it another way. | Remove the server from `run.mcp`, or keep a tool that reaches it out of `run.excludeTools`. |
+| `A job still starts on` | A listed or fallback model's first call does not fit the cap, or no cap can bound it. The job starts on its main model, and a call to this one stops it as `cost-cap`. | Choose another model, or the amount it names ([costs](costs.md#a-job-cap-on-a-trigger)). |
+| `no skill named` | The hosts that answered list no such skill in their overlay, nor a staged package that holds it for this flow. A job there finds it only in its repository, the trigger's skills folder or a staged package, and runs without its flow if none holds it. A host that did not answer is not named. | Check the flow's name, or add the skill where a job can find it. |
 | `clears this` | The cap is above the floor and below a short task's first call ([costs](costs.md#a-job-cap-on-a-trigger)). | Choose another model, or the amount it names. |
 | `could not be bounded here` | The first call on this model could not be bounded, so the runner judges it when a job runs. | Read it, and decide. |
+| `of this host's .env could not be read as the worker reads it, so the deployment's job cap`, `in a line that could not be read as the worker reads it, so the deployment's job cap`, `This host's .env could not be read as the worker reads it, so the deployment's job cap` | A line of this host's `.env` that its reader cannot vouch for, a key in such a line, or a `.env` it could not read at all. The cap and the list it judged by leave that out, and another host reads its own. | Correct the line it names, and preview again. |
 | `could not be read just now`, `the worker's pickup check could not`, `still reach a server could not be judged here`, `its line in the .env could not be read`, `The model catalog could not judge` | What the check reads could not be read, so it could not judge this. A pickup asks again. | Correct what it names, or try again. |
 
-A preview that warns does not say where its jobs now connect: it says what they may reach, because the next job may be refused first.
+Any of these can stop a job at pickup, so what a preview says of an added server holds beside them: "a job that reaches its container connects to" it.
 
 When the proposed file needs a version above 1, the preview and the Confirm also read each live host's release, and refuse on a
 lower one, none, or a registry they cannot read, because an older host would drop what it does not know and can run a job wider
@@ -2366,18 +2374,19 @@ on a clean record. No field on this card needs that yet, so no host is read for 
 | An operator, on a console that takes changes | The form, with the digest of the entry it drew. | |
 | An operator, on a read-only console | The same rows, no control and no digest. | Forms are off on this read-only console. |
 | A viewer | The same rows, no control and no digest: names, versions, counts and states, and each server's key by its name, never a value. | An operator changes these on this page, with one preview and one Confirm. |
-| An agent | No card: its copy of the page's data holds none of it. | |
+| An agent | No card: its copy of the page's data holds none of it. What it runs lists the same fields as read-only facts, each as its read holds it, and a field its read lacks reads "not in an agent's read". | |
 | A watch rule | The rows, and no form. | A watch rule's run is set in the file: it allows only some of these fields, so this page offers no change here. |
 | A row the file did not give back | The last read, and no form. | This page could not read this trigger's row from the file, so it shows the last read and offers no change. Reload to try again. |
-| A triggers file a newer release wrote, or one the page cannot read | No card. What starts it says why. | |
+| A triggers file a newer release wrote, or one the page cannot read | No card. What starts it says that the file does not load, or that it cannot be read and the error's code. | |
 | A page whose Valkey read failed | The card, from the file it read, and its form. Before you change it says what is unread. | The rows say what the next job gets, from the triggers file. The run history could not be read just now, so this says nothing of what its runs had. |
 | A page reached from a refused run | The form and this line, because the page's banner links other changes to that refusal. | A change made on this card is not linked to that run's refusal. |
 
 **What a tool cannot reach.** `trigger-environment-edit` is a person's action (`rule("person", ...)`): only the console's own
 process loads its planner, a test walks the tools' import graph to hold that, and no tool and no agent reaches it, behind a confirm or
-not. `dispatch_trigger_edit` keeps its nine fields. A tool call carrying `run.maxCostUsd`, `run.models`, `run.fallbackModels`,
-`run.mcp`, `run.excludeTools` or `run.packages`, or a near miss of one, is refused by name before anything is confirmed. What a
-job can spend or reach is the operator's to write, and a person at the console is the operator while a model's call is not.
+not. `dispatch_trigger_edit` keeps its nine fields, flow, provider and model among them, and `dispatch_set` still sets the deployment's own
+caps, behind a confirm wherever a cap could rise. A tool call carrying `run.maxCostUsd`, `run.models`, `run.fallbackModels`,
+`run.mcp`, `run.excludeTools` or `run.packages`, or a near miss of one, is refused by name before anything is confirmed. Those
+six are the operator's to write, and a person at the console is the operator while a model's call is not.
 
 ### The rules page and event checker
 

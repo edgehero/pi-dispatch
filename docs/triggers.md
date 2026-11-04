@@ -30,12 +30,14 @@ The add editor and its JSON fallback write the add tool's entry, including `run.
 A trigger's page has two editors, and no key has both:
 
 - **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages` and
-  `excludeTools`, with one preview that says each change in words and one Confirm. Only a person can do this: no tool
-  reaches it ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)).
+  `excludeTools`, with one preview that says each change in words and one Confirm. Only a person can use this form, and no tool
+  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no tool can set the other six
+  ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)).
 - **Edit** changes the venue (`backend`), `maxTurns`, `progress`, `statusComment`, `steer` and `recover`. Cron cannot enable
   statusComment or recover.
 
-`dispatch_trigger_edit` takes flow, venue, provider, model, `maxTurns` and those four flags, behind a confirm. Omitted fields
+`dispatch_trigger_edit` takes flow, venue, provider, model, `maxTurns` and those four flags, behind a confirm, except that a headless
+call with the process's write grant can turn an existing flag off unattended. Omitted fields
 keep their existing values; unrelated hand-written bounds are preserved. Everything else in a trigger, such as `image`, `secrets`
 and `skillsDir`, changes in the file.
 
@@ -711,7 +713,8 @@ Any trigger type can set the most one of its jobs may spend, in US dollars:
 - No AI tool can set or change it. `dispatch_trigger_add` and `dispatch_trigger_edit` refuse a call that
   carries it, and an edit leaves it as it is. `dispatch_triggers` and the panel show it. A person can change it in the file
   or on the [trigger's page](console.md#what-a-triggers-jobs-get), which refuses a cap above the deployment's and one too
-  small for a model's first call, and warns on one too small for a short task's ([costs](costs.md#a-job-cap-on-a-trigger)).
+  small for the first call of the model a job starts on, and warns on one too small for a short task's, or for another
+  model it names ([costs](costs.md#a-job-cap-on-a-trigger)).
 
 **Upgrading, and services out of step.** The same as for `models` above: a receiver from before this
 release drops `maxCostUsd`, and its job would run under the deployment's cap or none. The worker refuses

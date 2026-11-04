@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { buildHostLoads, hostLoadsKey } from "@edgehero/pi-dispatch/host-loads";
 import { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_SHORT_TASK_BYTES, builtinModel, firstCallBoundMicros, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
-import { formatMicros } from "@edgehero/pi-dispatch/money";
+import { effectiveCostCapMicros, formatMicros } from "@edgehero/pi-dispatch/money";
 import { ACTIONS } from "../src/console/actions.mjs";
 import { AUDIT_ACTOR_ROLES } from "../src/console/audit-view.mjs";
 import { auditFilter } from "../src/console/panels/audit.mjs";
@@ -258,8 +258,13 @@ const WARNINGS = Object.freeze({
   "this trigger's model could not be resolved": () => { const projects = JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }, { id: "api", members: ["github:acme/api"] }] }); return plannerWorld({ projects, doc: { modelRoles: { web: { oai: "openai/gpt-4o" } }, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", model: "role:oai" } }] } }).preview({ flow: "review", maxCostUsd: "5" }); },
   "would be refused as": () => plannerWorld({ env: { PI_FORWARD_ENV: "" } }).preview({ mcp: ["linear"] }),
   "On this host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["docs"], excludeTools: ["codemode"] }),
+  "A job still starts on": () => plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" }),
+  "no skill named": () => plannerWorld({ deps: { readHostLoads: () => published({ mini1: {} }) } }).preview({ flow: "review" }),
   "clears this": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-opus-5-5", maxCostUsd: "2.62144" }),
   "could not be bounded here": () => plannerWorld({ overlay: { providers: { free: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "x", models: [{ id: "m" }] } } }, run: MODEL_RUN, env: { PI_MAX_COST_USD: "5" } }).preview({ provider: "free", model: "m" }),
+  "of this host's .env could not be read as the worker reads it, so the deployment's job cap": () => plannerWorld({ deps: { readHostEnv: () => ({ env: {}, unread: [], hazardLine: 3 }) } }).preview({ maxCostUsd: "5" }),
+  "in a line that could not be read as the worker reads it, so the deployment's job cap": () => plannerWorld({ deps: { readHostEnv: () => ({ env: {}, unread: ["PI_MAX_COST_USD"] }) } }).preview({ maxCostUsd: "5" }),
+  "This host's .env could not be read as the worker reads it, so the deployment's job cap": () => plannerWorld({ deps: { readHostEnv: () => { throw new Error("no"); } } }).preview({ maxCostUsd: "5" }),
   "could not be read just now": () => plannerWorld({ run: MODEL_RUN, overlay: LOCAL_MODEL, failing: "models.json" }).preview({ model: "claude-sonnet-5-5" }),
   "the worker's pickup check could not": () => plannerWorld({ deps: { readHostEnv: () => { throw new Error("no"); } } }).preview({ mcp: ["linear"] }),
   "still reach a server could not be judged here": () => plannerWorld({ run: { mcp: ["linear"] }, failing: "mcp.json" }).preview({ excludeTools: ["write"] }),
@@ -285,9 +290,51 @@ const NOT_IN_THE_TABLE = Object.freeze({
 });
 
 const REFUSAL_HEADER = "| It says | Why | What to do |";
+
+/**
+ * What each row's What to do must say, by the row's first quote. `shared`: the page's own sentence says it too, so a row and a page cannot give
+ * a person two ways out. Otherwise the sentence only says what is wrong, and the row alone says what to do, so it is held here to that much.
+ */
+const REFUSAL_TODO = Object.freeze({
+  "This trigger changed since the page drew it": { says: /Reload the page/, shared: true },
+  "There is no trigger at row": { says: /Reload the page/, shared: true },
+  "The triggers file could not be read": { says: /Correct the file\. `pi-dispatch doctor` names what is wrong with it/ },
+  "nothing was written and nothing in it was lost; change it with that release": { says: /with that release/, shared: true },
+  "A trigger's flow cannot be removed": { says: /Choose another flow/i, shared: true },
+  "trigger row": { says: /Correct the value it names, or look again and retry/ },
+  "A trigger's job cap can only lower the deployment's": { says: /or less[^|]*remove this trigger's cap[^|]*belongs to its settings/, shared: true },
+  "needs at least": { says: /Choose another model/, shared: true },
+  "could not be resolved": { says: /Correct its model or its role/, shared: true },
+  "has no verified local cost bound": { says: /Choose another model/ },
+  "On every host this trigger's jobs would be refused as mcp-excluded": { says: /Remove the server from `run\.mcp`, or keep a tool that reaches it out of `run\.excludeTools`/, shared: true },
+  "The deployment's settings file is invalid": { says: /Correct what it names/ },
+});
+const WARNING_TODO = Object.freeze({
+  "is a model this deployment does not know": { says: /Choose one from the catalog, or declare it in the overlay's `?models\.json`?/, shared: true },
+  "declares fallback models the allowed list does not name": { says: /Add (?:it|them) to the list/, shared: true },
+  "every fallback must be on the allowed list": { says: /`?run\.models`?[^|]*`?PI_ALLOWED_MODELS`? when the trigger has (?:no list|none)/, shared: true },
+  "this trigger's model could not be resolved": { says: /Correct its model or its role/, shared: true },
+  "would be refused as": { says: /`?run\.secrets`? is set in the (?:triggers )?file, not on this page/, shared: true },
+  "On this host this trigger's jobs would be refused as mcp-excluded": { says: /Remove the server from `run\.mcp`, or keep a tool that reaches it out of `run\.excludeTools`/, shared: true },
+  "A job still starts on": { says: /Choose another model/i, shared: true },
+  "no skill named": { says: /Check the flow's name/ },
+  "clears this": { says: /Choose another model/i, shared: true },
+  "could not be bounded here": { says: /Read it, and decide/ },
+  "of this host's .env could not be read as the worker reads it, so the deployment's job cap": { says: /Correct the line it names/ },
+  "could not be read just now": { says: /Correct what it names, or try again/ },
+});
+/** Each row names its way out, by its first quote, and the page says the same where it says one at all. */
+async function holdTodo(rows, table, meetings, of) {
+  assert.deepEqual(rows.map(([says]) => spans(says)[0]), Object.keys(table), "a way out named for every row");
+  for (const [says, , todo] of rows) {
+    const first = spans(says)[0];
+    assert.match(todo, table[first].says, `${first}: its What to do`);
+    if (table[first].shared) assert.match(of(await meetings[first]()), table[first].says, `${first}: the page's own words`);
+  }
+}
 const PICKUP_TAIL = "This reads this host's .env and overlay; what the worker's own service environment sets cannot be seen from here.";
 
-test("docs/console.md's table of what the trigger's preview refuses: each quote is the start of what the real planner says, in the table's order", async () => {
+test("docs/console.md's table of what the trigger's preview refuses: each quote is in what the real planner says, in the table's order", async () => {
   const rows = tableRows(read("docs/console.md"), REFUSAL_HEADER);
   const quoted = rows.flatMap(([says]) => spans(says));
   assert.deepEqual(quoted, Object.keys(REFUSALS), "the table's quotes, and the scenarios that meet them");
@@ -299,6 +346,15 @@ test("docs/console.md's table of what the trigger's preview refuses: each quote 
     assert.ok(typeof out?.refusal === "string", `${quote}: ${JSON.stringify(out?.summary ?? out)}`);
     assert.ok(out.refusal.includes(quote), `${quote}: the planner says ${JSON.stringify(out.refusal)}`);
   }
+  // The two sentences that open on a model's name are why the section says "part of", and not "the start of".
+  assert.ok(flat(read("docs/console.md")).includes("Each quote is part of what the page says"));
+  await holdTodo(rows.slice(0, Object.keys(REFUSAL_TODO).length), REFUSAL_TODO, REFUSALS, (out) => out.refusal);
+  // Of the model a job starts on, and no other: a listed one under the same cap plans, and both rows say so.
+  for (const [row] of [["needs at least"], ["has no verified local cost bound"]]) assert.match(rows.find(([says]) => says.includes(row))[1], /the model a job starts on[^|]*A listed or fallback model[^|]*warns/, row);
+  assert.ok((await WARNINGS["A job still starts on"]()).plan, "a listed model under the cap plans");
+  const radiusListed = await plannerWorld({ run: MODEL_RUN, settings: JSON.stringify({ maxCostUsd: "5" }), deps: { checkModelsKnown: () => ({ ok: true }) } }).preview({ fallbackModels: ["radius/balanced"], models: [HAIKU, "radius/balanced"] });
+  assert.ok(radiusListed.plan, JSON.stringify(radiusListed));
+  assert.ok(radiusListed.summary.some((line) => line.includes("has no verified local cost bound") && line.includes("A job still starts on")), radiusListed.summary.join("\n"));
 });
 
 test("docs/console.md's table of what the preview warns of: each quote is in what the real planner says, and a warning leaves the Confirm", async () => {
@@ -315,14 +371,27 @@ test("docs/console.md's table of what the preview warns of: each quote is in wha
   assert.ok(flat(read("docs/console.md")).includes(`"${PICKUP_TAIL}"`), "the line a pickup warning stands beside");
   const tailed = await WARNINGS["would be refused as"]();
   assert.equal(tailed.plan.warnings.at(-1), PICKUP_TAIL);
+  await holdTodo(warned, WARNING_TODO, WARNINGS, (out) => out.plan.warnings.join(" ") + out.summary.join(" "));
+  // What the section says of a server a preview adds, beside anything it warns of.
+  const doc = flat(read("docs/console.md"));
+  const widening = tailed.plan.changes.find((change) => change.key === "mcp").widening;
+  assert.ok(widening.includes("a job that reaches its container connects to"), widening);
+  assert.ok(doc.includes('"a job that reaches its container connects to" it.'));
+  // Host names are what the row says of them: only a host that answered is named.
+  const silent = await plannerWorld({ deps: { readHostLoads: () => published({ mini1: {}, quiet: null }) } }).preview({ flow: "review" });
+  assert.ok(silent.plan.warnings.some((line) => line.startsWith("mini1 has no skill named review")), silent.plan.warnings.join("\n"));
+  assert.ok(!silent.plan.warnings.some((line) => line.includes("quiet")), "a host that did not answer is not named");
 });
 
 test("every warning the planner can say is in that table: a new sentence has to choose", async () => {
   const source = read("admin/src/trigger-environment-plans.mjs");
   // A template inside a template ends the match early, so the one sentence that opens with a choice of words is held by its own words below.
-  const literals = [...source.matchAll(/(?:\bwarnings\.(?:push|add)\((?:\[|failedRead \? )?|\bcould\(|\bnotRead = |\bonHost\("[^"]+", )(?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => literal !== "" && !literal.includes("sentence") && !literal.startsWith("${unresolved.project"));
+  const cannot = /const cannot = "([^"]+)"/.exec(source)[1];
+  const literals = [...source.matchAll(/(?:\bwarnings\.(?:push|add)\((?:\[|failedRead \? )?|\bthin\.add\(|\bcould\(|\bnotRead = |\bonHost\("[^"]+", |\bnote: |\blacking\.length > 0 \? \[|\bunjudged\.length > 0 \? \[)(?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => literal !== "" && !literal.startsWith("${unresolved.project")).map((literal) => literal.replace("${cannot}", cannot));
   assert.ok(source.includes("this trigger's model could not be resolved (${unresolved.reason})"));
-  assert.ok(literals.length >= 14, `the scan finds the planner's sentences (${literals.length})`);
+  // Each of these went unforced when the scan skipped a literal it could not read: held by name, so a scan that loses one says so.
+  for (const said of ["A job still starts on", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
+  assert.ok(literals.length >= 20, `the scan finds the planner's sentences (${literals.length})`);
   const quotes = Object.keys(WARNINGS);
   for (const literal of literals) assert.ok(quotes.some((quote) => literal.includes(quote)), `no row for: ${literal}`);
 });
@@ -368,26 +437,38 @@ test("the sentences the docs quote of the preview are the real preview's, and no
   const planner = read("admin/src/trigger-environment-plans.mjs");
   assert.match(planner, /const SKEW_NAMED_MAX = 5;/);
   assert.match(consoleDoc, /named up to five/);
+  // A server it adds, where the hosts' publication could not be read: said, and never read as no host having it.
+  const unreadHosts = await plannerWorld({ deps: { readHostLoads: async () => { throw new Error("down"); } } }).preview({ mcp: ["linear"] });
+  assert.ok(unreadHosts.summary.some((line) => line.endsWith("What the hosts published could not be read, so which of them have it is unknown.")), unreadHosts.summary.join("\n"));
+  assert.match(consoleDoc, /or that what the hosts published could not be read/);
   // A change that says the same to a job is none, in the spelling the section names.
   const held = plannerWorld({ run: { maxCostUsd: 1.5 } });
   assert.match((await held.preview({ maxCostUsd: "1.50" })).unchanged, /already says this/);
   assert.match(consoleDoc, /`1\.5` and `"1\.50"` are one cap/);
+  // `true` and no key: a job loads the same, doctor does not, and the preview says which way a change moves that.
+  const cleared = await plannerWorld({ run: { packages: true } }).preview({ packages: null });
+  const clearedLine = cleared.plan.changes.find((change) => change.key === "packages").line;
+  assert.ok(consoleDoc.includes(`"${clearedLine}"`), clearedLine);
+  assert.match((await plannerWorld().preview({ packages: true })).plan.changes[0].line, /now says this flow needs them/);
+  assert.match(consoleDoc, /`run\.packages: true` and no key are not one value/);
+  assert.match(read("admin/src/console/script.mjs"), /flags\[f\]\.checked \? null : false/);
+  assert.match(consoleDoc, /The switch's on removes a `false`, so a `true` stays until the switch goes off and on/);
 });
 
 /** What the hosts published, written by the real builder and read back by the real reader beside what its host beats out. */
-async function published(hosts) {
+async function published(hosts, images = {}) {
   const strings = new Map(Object.entries(hosts).filter(([, row]) => row !== null && typeof row === "object").map(([name, row]) => [hostLoadsKey(name), JSON.stringify(buildHostLoads({ at: PLANNER_NOW - 3_600_000, every: 24, by: { uid: 1000, worker: true }, overlay: { extensionsAllowed: true, extensions: [], skills: [] }, mcp: [], packages: [], flows: [], ...row }))]));
   const redis = { smembers: async () => Object.keys(hosts), mget: async (...keys) => keys.map((key) => strings.get(key) ?? null) };
-  return readHostLoadsView(redis, { now: () => PLANNER_NOW, readHosts: async () => ({ hosts: Object.keys(hosts).map((name) => ({ name, image: "pi-job:4.3.1", piVersion: "1.5.0" })) }) });
+  return readHostLoadsView(redis, { now: () => PLANNER_NOW, readHosts: async () => ({ hosts: Object.keys(hosts).map((name) => ({ name, image: images[name] ?? "pi-job:4.3.1", piVersion: "1.5.0" })) }) });
 }
 const PILL_TRIGGER = Object.freeze({ index: 2, type: "comment", flow: "fix", packages: true, forge: "github" });
-const pillWords = async (hosts) => Object.fromEntries(triggerGetsOf({ trigger: PILL_TRIGGER, hostLoads: await published(hosts), liveHosts: Object.keys(hosts) }).pills.map((pill) => [pill.name, pill.word]));
+const pillWords = async (hosts, { trigger = PILL_TRIGGER, images = {} } = {}) => Object.fromEntries(triggerGetsOf({ trigger, hostLoads: await published(hosts, images), liveHosts: Object.keys(hosts) }).pills.map((pill) => [pill.name, pill.word]));
 
 test("docs/console.md's table of the hosts' pills: a row for every word the pill can say, each said by the real card over a real publication", async () => {
   const rows = tableRows(read("docs/console.md"), "| The pill says | When |");
   const a = { packages: [{ name: "pi-lint", version: "1.4.2" }] };
   const b = { packages: [{ name: "pi-test", version: "0.9.0" }] };
-  assert.deepEqual(rows.map(([word]) => word), ["`the same`", "`the only host`", "`the only one known`", "`also …; without …; … defined differently; its flow …; runs …`", "`no answer for its flow`, `its flow …`, `its image unknown`", `\`${W.pillOrder}\``, "`unknown`"]);
+  assert.deepEqual(rows.map(([word]) => word), ["`the same`", "`the only host`", "`the only one known`", "`also …; without …; … defined differently; its flow …; runs …`", "`its flow in no tier`", "`no answer for its flow`, `its flow …`, `its image unknown`", `\`${W.pillOrder}\``, "`unknown`"]);
   const flows = (tier) => [{ trigger: 2, flow: "fix", tier, package: null, repo: "unknown" }];
   const same = { ...a, flows: flows("repository") };
   assert.deepEqual(await pillWords({ one: same, two: same }), { one: "the same", two: "the same" });
@@ -407,6 +488,49 @@ test("docs/console.md's table of the hosts' pills: a row for every word the pill
   assert.match(body, /word: \[\.\.\.differs, \.\.\.unsaid\]\.join\("; "\)/, "and one where it says the differences");
   assert.match(body, /word: unsaid\.join\("; "\)/, "and one where it says what it cannot");
   for (const word of ['"no answer for its flow"', '"its image unknown"', "`its flow ${mine.flow}`"]) assert.ok(body.includes(word), word);
+
+  // Each row's When, held to what the card does: every thing "the same" compares denies it when that alone differs, and is named.
+  const when = new Map(rows.map(([word, says]) => [word, says]));
+  const sameWhen = when.get("`the same`");
+  const answered = { flows: flows("repository") };
+  const server = (where) => ({ name: "linear", transport: "http", where, exposure: "codemode", enabled: true, keys: [] });
+  const named = { ...PILL_TRIGGER, mcp: ["linear"] };
+  const denies = {
+    "its staged packages": [{ ...answered, packages: a.packages }, { ...answered, packages: b.packages }],
+    "the overlay's extensions": [{ ...answered, extensions: [{ name: "guard", kind: "dir" }] }, answered],
+    "the overlay's skills": [{ ...answered, skills: ["review"] }, answered],
+    "the servers it names": [{ ...answered, mcp: [server("a.example")] }, answered, { trigger: named }],
+    "how each is defined": [{ ...answered, mcp: [server("a.example")] }, { ...answered, mcp: [server("b.example")] }, { trigger: named }],
+    "where doctor found its flow": [answered, { flows: flows("overlay") }],
+  };
+  for (const [words, [one, two, options]] of Object.entries(denies)) {
+    assert.ok(sameWhen.includes(words), `the row names ${words}`);
+    assert.notEqual((await pillWords({ one, two }, options)).one, "the same", `${words} alone denies it`);
+  }
+  assert.match(sameWhen, /the image and its pi, unless the trigger names its own image/);
+  assert.notEqual((await pillWords({ one: answered, two: answered }, { images: { one: "pi-job:1", two: "pi-job:2" } })).one, "the same", "the image alone denies it");
+  assert.equal((await pillWords({ one: answered, two: answered }, { trigger: { ...PILL_TRIGGER, image: "mine:1" }, images: { one: "pi-job:1", two: "pi-job:2" } })).one, "the same", "and not where the trigger names its own");
+  assert.match(sameWhen, /its staged packages unless it withholds them/);
+  assert.equal((await pillWords({ one: { ...answered, packages: a.packages }, two: { ...answered, packages: b.packages } }, { trigger: { ...PILL_TRIGGER, packages: false } })).one, "the same", "withheld packages deny nothing");
+  assert.match(sameWhen, /the overlay's extensions where the host allows them/);
+  assert.equal((await pillWords({ one: { ...answered, overlayExtensionsAllowed: false, extensions: [{ name: "guard", kind: "dir" }] }, two: answered })).one, "the same", "extensions a host does not allow deny nothing");
+  assert.match(when.get("`the only host`"), /There is one host/);
+  assert.match(when.get("`the only one known`"), /The other hosts read `unknown`/);
+  assert.match(when.get("`also …; without …; … defined differently; its flow …; runs …`"), /what it has over another, what it goes without[^|]*a server it names defined differently[^|]*where it finds the flow[^|]*the image it runs/);
+  const lacking = { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] };
+  const local = { index: 2, type: "cron", flow: "fix", packages: true, folder: "/srv/web" };
+  assert.deepEqual(await pillWords({ one: lacking, two: lacking }, { trigger: local }), { one: "its flow in no tier", two: "its flow in no tier" }, "whoever agrees with it");
+  assert.deepEqual(await pillWords({ one: lacking }, { trigger: local }), { one: "its flow in no tier" }, "or alone");
+  assert.match(when.get("`its flow in no tier`"), /whoever agrees with it, beside other hosts or alone/);
+  // A forge's repository is not on a host: tier `none` with its answer `unknown` is not this.
+  assert.notEqual((await pillWords({ one: { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "unknown" }] } })).one, "its flow in no tier");
+  assert.match(when.get("`its flow in no tier`"), /A forge's repository is not on a host/);
+  const unknownWhen = when.get("`unknown`");
+  const silence = { "published nothing": null, "could not be read": "{", "a newer release wrote": JSON.stringify({ v: 99, at: PLANNER_NOW }), "left out part": { unread: ["packages"] }, "record is old": { at: PLANNER_NOW - 100 * 3_600_000 } };
+  for (const [words, row] of Object.entries(silence)) {
+    assert.ok(unknownWhen.includes(words), `the row names ${words}`);
+    assert.equal((await pillWords({ one: a, other: row })).other, "unknown", words);
+  }
 });
 
 test("docs/console.md's table of the card's rows: its rows are the page's, in order, and each names exactly the controls that row draws", async () => {
@@ -427,6 +551,44 @@ test("docs/console.md's table of the card's rows: its rows are the page's, in or
   assert.ok(doc.includes(`"${W.noRun.replace(/\.$/, "")}"`), W.noRun);
   assert.ok(doc.includes(`*2 changes, not written yet*`) && W.barMany === "{n} changes, not written yet:");
   for (const label of ["Preview the change", "Discard"]) assert.ok(panel.includes(label) && doc.includes(`**${label}**`), label);
+  // A cell's own quotes of what the rows draw.
+  const row = (label) => flat(rows.find(([name]) => name === label)[2]);
+  assert.ok(row("Flow and skills").includes(`"${straight(W.flowPicker)}"`), "the picker's list is not whole");
+  assert.ok(textOf(panelOf(await triggerGetsPage(), "p-trigger-gets-how")).includes(straight(W.flowPicker)), "and the page says so");
+  const servers = (where) => ({ name: "linear", transport: "http", where, exposure: "codemode", enabled: true, keys: [] });
+  const defined = await published({ one: { mcp: [servers("a.example")] }, two: { mcp: [servers("b.example")] } });
+  const subOf = (trigger) => triggerGetsOf({ trigger, hostLoads: defined, liveHosts: ["one", "two"] }).mcp.items.find((item) => item.name === "linear").sub;
+  assert.ok(row("MCP servers").includes(`one it does not reads "${subOf(PILL_TRIGGER)}"`), subOf(PILL_TRIGGER));
+  assert.ok(row("MCP servers").includes(`one it names reads "${subOf({ ...PILL_TRIGGER, mcp: ["linear"] })}"`));
+  const noCap = triggerGetsOf({ trigger: PILL_TRIGGER, defaults: { maxCostUsd: "no per-job dollar cap" } }).model.capHint;
+  assert.equal(noCap, "Blank means no cap of its own.");
+  assert.ok(row("Model").includes("a blank cap means no cap of its own"));
+  // Hosts doctor found no flow on: the row warns, in the card's own words.
+  const lacking = await published({ one: { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] } });
+  assert.match(triggerGetsOf({ trigger: { index: 2, type: "cron", flow: "fix", packages: true, folder: "/srv/web" }, hostLoads: lacking, liveHosts: ["one"] }).flow.lacking, /^As doctor last read it, a job on one would not find fix/);
+  assert.ok(row("Flow and skills").includes("with a warning where it found the flow nowhere"));
+});
+
+test("docs/console.md's actions table has the card's action, by the button a person presses, with a plain name for each field it changes", () => {
+  const rows = tableRows(read("docs/console.md"), "| Where | Action | What it does |");
+  const row = rows.find(([where]) => where === "A trigger's page");
+  assert.ok(row, "the row");
+  assert.equal(row[1], "Preview the change");
+  const plain = { flow: "its flow", provider: "its provider", model: "and model", maxCostUsd: "its job cap", models: "its allowed models", fallbackModels: "and fallbacks", mcp: "its servers", packages: "the staged packages", excludeTools: "its tools" };
+  assert.deepEqual(Object.keys(plain), [...CARD_FIELDS], "one plain name per field");
+  for (const [field, name] of Object.entries(plain)) assert.ok(row[2].includes(name), `${field} is said as ${name}`);
+  assert.match(row[2], /A person's action, which no tool reaches/);
+  assert.match(read("admin/src/action-policy.mjs"), /"trigger-environment-edit": rule\("person",/);
+});
+
+test("design/system/README.md lists what a trigger's jobs get among the screens that are built, as its card's status says", () => {
+  const readme = read("design/system/README.md");
+  const row = (name) => readme.split("\n").find((line) => line.startsWith(`| ${name} |`));
+  assert.match(row("Triggers"), /what a trigger's jobs get on each host, changed in place, and its preview \(#800/);
+  assert.doesNotMatch(row("Triggers"), /\bproposed\b|\bplanned\b/i, "the row holds what is built");
+  assert.doesNotMatch(row("Planned and proposed"), /what a trigger's jobs get/);
+  const markers = read("design/tools/fix_markers.py");
+  assert.match(markers, /\*\*\{n: \(BUILT, "Built by #800, part 2: what a trigger's jobs get/);
 });
 
 test("docs/console.md's table of who reads what: each row is what the real page draws in that state, in the card's own words", async () => {
@@ -460,9 +622,17 @@ test("docs/console.md's table of who reads what: each row is what the real page 
   expectRow("A page reached from a refused run", await trigger({ query: "index=2&becauseRun=gh-1" }), { form: true, word: W.notLinked });
   const agent = await trigger({ role: "agent" });
   expectRow("An agent", agent, { form: false, card: false });
+  const agentRun = textOf(panelOf(agent.whole, "p-trigger-run"));
+  assert.ok(rows.get("An agent").gets.includes(`"${straight("not in an agent’s read")}"`));
+  assert.ok(agentRun.includes(straight("not in an agent’s read")), "a field its read lacks");
+  for (const key of CARD_FIELDS) assert.ok(agentRun.includes(`run.${key}`), `What it runs lists run.${key}`);
   const newer = await trigger({ fs: fileOnlyFs(JSON.stringify({ version: 999, triggers: JSON.parse(getsFile()).triggers })) });
   expectRow("A triggers file a newer release wrote, or one the page cannot read", newer, { form: false, card: false });
   assert.ok(textOf(panelOf(newer.whole, "p-trigger-on")).includes("The triggers file does not load; run pi-dispatch doctor for the reason."), "What starts it says why");
+  const denied = await trigger({ fs: { readFileSync: () => { throw Object.assign(new Error("no"), { code: "EACCES" }); }, existsSync: () => true } });
+  assert.equal(denied.card.replace(/<section[^>]*>/, ""), "", "a file it cannot read draws no card either");
+  assert.ok(textOf(panelOf(denied.whole, "p-trigger-on")).includes("The triggers file cannot be read (EACCES)."), "and says so, by the error's code");
+  assert.match(rows.get("A triggers file a newer release wrote, or one the page cannot read").gets, /does not load, or that it cannot be read and the error's code/);
   // Valkey down: the snapshot read fails, and the file it does not need is read all the same.
   const fs = fileOnlyFs(getsFile());
   const downParsed = parsePageQuery("trigger", "index=2");
@@ -484,7 +654,12 @@ test("docs/console.md says what a tool cannot reach, and names the fields a tool
   assert.deepEqual(spans(carrying).sort(), [...proof.matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort());
   const editable = ACTIONS.find((action) => action.name === "trigger-edit").fields.filter((key) => !["index", "becauseRun"].includes(key));
   assert.equal(editable.length, 9);
-  assert.match(said, /`dispatch_trigger_edit` keeps its nine fields/);
+  assert.match(said, /`dispatch_trigger_edit` keeps its nine fields, flow, provider and model among them/);
+  for (const key of ["flow", "provider", "model"]) assert.ok(editable.includes(key), key);
+  // The deployment's caps are a setting, which a tool can raise behind a confirm: "those six" is as far as this holds, and the section says so.
+  assert.match(read("admin/src/action-policy.mjs"), /"setting-set": rule\("confirm",[^\n]*"dispatch_set"\)/);
+  assert.match(said, /`dispatch_set` still sets the deployment's own caps, behind a confirm wherever a cap could rise/);
+  assert.match(said, /Those six are the operator's to write/);
 });
 
 test("docs/triggers.md's two editors are the card's fields and the Edit form's, and its tool sentence takes what the tool does", () => {
@@ -497,6 +672,14 @@ test("docs/triggers.md's two editors are the card's fields and the Edit form's, 
   assert.deepEqual(CARD_FIELDS.filter((key) => EDIT_FIELDS.includes(key)), []);
   const tool = ACTIONS.find((action) => action.name === "trigger-edit").fields;
   for (const key of ["flow", "backend", "provider", "model", "maxTurns", ...EDIT_FIELDS.slice(2)]) assert.ok(tool.includes(key), key);
+  // Which of the card's fields a tool can still set: "the first three", and that it cannot set the rest, read from what the tool takes.
+  assert.deepEqual(CARD_FIELDS.filter((key) => tool.includes(key)), CARD_FIELDS.slice(0, 3));
+  assert.match(doc, /Of those fields, `dispatch_trigger_edit` can still set the first three, and no tool can set the other six/);
+  const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(read("admin/src/write-plans.mjs"))[1];
+  assert.deepEqual([...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort(), CARD_FIELDS.slice(3).sort());
+  // Behind a confirm, but for the one thing the policy lets a headless call do alone.
+  assert.match(read("admin/src/action-policy.mjs"), /"trigger-edit": rule\("confirm", "Only turning existing execution flags off is unattended\."/);
+  assert.match(doc, /behind a confirm, except that a headless call with the process's write grant can turn an existing flag off unattended/);
 });
 
 test("docs/costs.md's amounts are the real bound's, at the pin, and each row of what the preview does is what the real planner does", async () => {
@@ -539,4 +722,35 @@ test("docs/costs.md's amounts are the real bound's, at the pin, and each row of 
   const judged = /const MODEL_OR_CAP = Object\.freeze\(\[([^\]]*)\]\)/.exec(read("admin/src/trigger-environment-plans.mjs"))[1];
   assert.deepEqual([...judged.matchAll(/"([^"]+)"/g)].map((m) => m[1]), ["provider", "model", "models", "fallbackModels", "maxCostUsd"]);
   assert.match(text, /only when the change sends the model, the provider, a list or the cap/);
+  // A listed or fallback model under the same cap, in the words the row quotes: a job starts on its main model.
+  const listed = await plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" });
+  assert.ok(listed.plan, JSON.stringify(listed));
+  const [, listedQuote] = quotes(below[1]);
+  assert.ok(listed.plan.warnings.some((line) => line.endsWith(listedQuote)), listedQuote);
+  assert.match(below[1], /^Of the model a job starts on, refuses/);
+  assert.match(below[1], /Of a listed or fallback model, previews/);
+  assert.match(text, /is refused under any cap as the model a job starts on, and warned of as a listed or fallback model/);
+  // What a change of the model or a list asks: only what moved. The cap asks all of them.
+  const held = plannerWorld({ run: { ...MODEL_RUN, models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" } });
+  assert.ok(!(await held.preview({ flow: "review" })).summary.some((line) => line.includes("claude-opus-5-5")), "an edit that names no model asks of none");
+  assert.ok((await held.preview({ maxCostUsd: "2.1" })).summary.some((line) => line.includes("claude-opus-5-5 needs at least")), "a change of the cap asks of each");
+  assert.match(text, /a change of the cap asks it of each of those models, and a change of the model or a list only of what moved/);
+  // It can only lower the deployment's cap: the worker's own rule, and what the bold line says of it.
+  assert.ok(text.includes("**It can only lower the deployment's cap.** A job runs under the smaller of the two"));
+  assert.equal(effectiveCostCapMicros("7", "5"), 5_000_000);
+  assert.equal(effectiveCostCapMicros("3", "5"), 3_000_000);
+  assert.equal(effectiveCostCapMicros("3", null), 3_000_000, "the trigger's applies on its own");
+  assert.ok(text.includes("When the deployment sets no cap, the trigger's applies on its own"));
+  assert.ok((await plannerWorld().preview({ maxCostUsd: "900" })).plan, "with none set, any amount is taken");
+  assert.ok(raise.refusal.includes("remove this trigger's cap") && raise.refusal.includes("belongs to its settings, not to this page"));
+  assert.ok(text.includes("It offers this trigger's cap or none as the way out, and no way to move the deployment's cap, which belongs to its settings"));
+  assert.match((await plannerWorld({ run: { maxCostUsd: "1" }, settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ maxCostUsd: null })).plan.changes[0].widening, /widens what each job may spend/);
+  assert.ok(text.includes("Removing a trigger's cap, or raising it, is said as a widening when it lets a job spend more"));
+  // The size of pi's default prompt and tools, as the constants' own reason measures it at the pin.
+  const catalog = read("worker/src/model-catalog.mjs");
+  const measured = /serialise to about ([\d,]+) bytes/.exec(catalog)[1];
+  assert.ok(text.includes(`alone come to about ${measured} bytes at the pinned pi`), measured);
+  const bytes = Number(measured.replace(",", ""));
+  assert.ok(bytes > FIRST_CALL_MIN_CONTEXT_BYTES && bytes < FIRST_CALL_SHORT_TASK_BYTES, "and it sits between the two amounts, as first-call-bytes.pinned.test.mjs holds at the pin");
+  assert.doesNotMatch(text, /4,465/);
 });

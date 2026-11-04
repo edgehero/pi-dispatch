@@ -4433,7 +4433,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   take, and its identity checks and every other refusal stand. So a one-shot whose run ended after the file turned
   newer is disarmed for every release that reads the file next, while the pre-spend check still defers. For that
   reason a release that raises this file's version keeps accepting `on.disarmed` as `{ at, jobId? }`: an older
-  build's disarm writes that shape into the newer file. The console's display reader (`readTriggers`) reads a newer
+  build's disarm writes that shape into the newer file. The console's display reader (`readTriggers`) answers `{ missing: true }`
+  only where no file is there, `{ unreadable: <code> }` for a file that is there and cannot be read, and reads a newer
   file as `{ invalid, newer: true }`, naming the versions and never the path. It asks the loaders' question first: a
   file whose `version` reads newer only because the key is repeated (`JSON.parse` keeps the last value) is broken
   there too, never newer, judged on the text by `triggersFileNewer` ("triggers file has a duplicate key, so it is
