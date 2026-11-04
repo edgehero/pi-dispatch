@@ -123,7 +123,8 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   can open an issue already carrying your trigger label. A GitLab label is therefore a routing hint and
   nothing more, and **every** GitLab trigger — labels included — is gated on the actor's API-resolved
   project `access_level >= 30` (Developer). Group-inherited membership counts; a lookup that cannot
-  complete answers 503 and is redelivered rather than silently dropped. `OQ-013` records the residual:
+  complete answers 503 rather than being silently dropped. GitLab does not send that delivery again on its own:
+  it shows as failed in the hook's Recent events, where someone can resend it. `OQ-013` records the residual:
   this gate depends on a network call, and on a role table that varies by version and edition.
 - **What a trigger's agent can do, structurally (`run.excludeTools`).** A trigger may remove named
   built-in pi tools from its jobs' sessions, and unlike every behavioural line in the guardrails this

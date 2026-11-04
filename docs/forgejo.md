@@ -176,7 +176,8 @@ versions, and the cost of being wrong is a stranger starting paid jobs — so if
 approval, this check is redundant rather than wrong, which is the cheaper direction to be wrong in.
 
 A lookup that **could not be completed** — a 5xx, a dead socket, a revoked token — answers **503**, not
-204. Forgejo redelivers, and the stable delivery GUID dedups the retry. Answering 204 there would drop real
+204. Forgejo does not send it again on its own: the delivery shows as failed in the webhook's history, where you
+can replay it ([When a delivery fails](#when-a-delivery-fails)). Answering 204 there would drop real
 work during an outage behind a response indistinguishable from a stranger being correctly refused.
 
 **Know what that looks like, because 403 lands there too.** Only two answers from the permission endpoint
@@ -186,9 +187,35 @@ belongs to an account that is not an admin of the repository (step 1), or lacks 
 fires and nothing is silently dropped: the receiver logs `forgejo_permission_lookup_failed` with a reason that
 names the variable to fix (`FORGEJO_PERMISSION_TOKEN` when it is set; otherwise it says to set it) and answers
 **503**, so the delivery shows as failed in the webhook's delivery history rather than as delivered. That is
-deliberate. A retry cannot fix a 403, but it costs nothing (nothing is minted or spent before this answer),
+deliberate. A replay cannot fix a 403, but it costs nothing (nothing is minted or spent before this answer),
 while answering 204 would record every trigger as delivered while none ran. The receiver also logs, at boot,
 which variable the lookup uses (`forgejo_permission_token`). Fix the account, then trigger again whatever you still want run.
+
+## When a delivery fails
+
+Forgejo sends each delivery once and does not retry it, whatever the answer. It waits 5 seconds for one (its
+`[webhook] DELIVER_TIMEOUT`), and a slower answer is a failure too. The receiver answers **503** when it cannot
+finish a delivery: the permission lookup above failed (`forgejo_permission_lookup_failed`), or the enqueue failed,
+for example while Valkey is down (`enqueue_failed`; on a trigger with `replicas`, the line says how many were
+`queued` of the `replicas` before the failure, and those stay queued). Each line names the delivery id. The
+delivery does not run unless you replay it.
+
+**Replaying one.** In the repository's settings, Webhooks, open the hook: its recent deliveries are listed there
+(Forgejo keeps them 7 days by default), each with a **Replay** button.
+
+**A replay is a new delivery.** Forgejo sends it with a new `X-GitHub-Delivery` id, so the receiver cannot tell it
+from new work by its id. Within 10 minutes of the original it is still coalesced with whatever that delivery
+queued, by the 10-minute window on the issue or pull request and flow (answered `202 {"status":"deduplicated"}`),
+except where that window was released: a run that [parked](triggers.md) releases it, so a replay starts a new run,
+and a steer-armed comment replayed while its run is live steers that run again
+([steering](steering.md#steering-from-a-comment)). After 10 minutes it queues and runs again. So replay only what
+did not run: check the run history first, above all for a delivery Forgejo marked failed only because the answer
+took longer than its timeout, which may well have queued. On a trigger with `replicas` whose fanout failed part
+way, a replay after 10 minutes queues every replica again beside the ones already queued, so cancel those first.
+
+**Where you see failures.** The log lines above, the hook's recent deliveries, and the console's Connections page,
+which counts `lookup-failed` and `enqueue-failed` per forge over the last 24 UTC hours and warns when either is above
+zero. It counts answers, so a replay that succeeds later does not lower it.
 
 ## The scope trade-off
 

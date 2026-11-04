@@ -437,9 +437,10 @@ test("a replicas: 2 trigger enqueues TWICE from one delivery, with distinct ids,
 	assert.equal(logs.find((l) => l.event === "enqueued")?.replicas, 2, "the log says how many, so a pair is explainable from the receiver's own output");
 });
 
-test("a throw on the SECOND replica answers 503 and leaves the first enqueued -- the retry is idempotent by construction", async () => {
-	// No compensating logic exists and none is needed: GitHub redelivers, replica 1 dedups on its own
-	// now-taken jobId, and replica 2 enqueues. The retry converges on exactly two jobs, never three.
+test("a throw on the SECOND replica answers 503 and leaves the first enqueued, with no compensation", async () => {
+	// GitHub never resends the 503 on its own, so replica 1 runs alone unless someone redelivers by hand.
+	// A redelivery keeps the GUID: replica 1 dedups on its own now-taken jobId and replica 2 enqueues, so it
+	// converges on exactly two jobs, never three.
 	const delivery = "d-replicas-fail";
 	const raw = JSON.stringify(LABELED_PAYLOAD);
 	const calls = [];
@@ -454,8 +455,55 @@ test("a throw on the SECOND replica answers 503 and leaves the first enqueued --
 	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: replicaCfg, log: () => {} });
 	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
 
-	assert.equal(res.statusCode, 503, "retryable, so GitHub redelivers");
+	assert.equal(res.statusCode, 503, "a failed delivery in the hook's history, for a hand redelivery");
 	assert.deepEqual(calls, [`gh-${delivery}-r1`], "replica 1 is already in the queue and stays there");
+});
+
+test("a fanout failing at replica 2 of 3 answers 503 and its enqueue_failed line says 1 of the 3 was queued", async () => {
+	// On a forge nobody redelivers from, that one job is all that runs, so the line an operator reads before
+	// redelivering (or, on Forgejo, before replaying under a new id) says how far the fanout got.
+	const delivery = "d-replicas-2of3";
+	const raw = JSON.stringify(LABELED_PAYLOAD);
+	const cfg3 = { ...replicaCfg, triggers: forgeTriggers({ label: [{ ...replicaCfg.triggers.github.label[0], replicas: 3 }], comment: replicaCfg.triggers.github.comment, pullRequest: [], knownFlows: replicaCfg.triggers.knownFlows }) };
+	const calls = [];
+	const cause = new Error("valkey down");
+	const queue = {
+		add: async (name, data, opts) => {
+			calls.push(opts.jobId);
+			if (data.replica === 2) throw cause;
+			return { id: opts.jobId };
+		},
+	};
+	const logs = [];
+	const res = mockRes();
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: cfg3, log: (e) => logs.push(e) });
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(res.statusCode, 503);
+	assert.deepEqual(JSON.parse(res.body), { error: "enqueue-failed" });
+	assert.deepEqual(calls, [`gh-${delivery}-r1`, `gh-${delivery}-r2`], "replica 3 is never tried after replica 2 threw");
+	assert.deepEqual(logs, [{ event: "enqueue_failed", delivery, reason: "valkey down", queued: 1, replicas: 3 }]);
+});
+
+test("a non-Error thrown past one replica leaves `reason` out of its enqueue_failed line, as a single enqueue's does", async () => {
+	// The fanout wraps what replica 2 threw to say how far it got; the reason is still the thrown value's own
+	// `message`, which a string has none of, never the wrapper's empty one.
+	const delivery = "d-replicas-string";
+	const raw = JSON.stringify(LABELED_PAYLOAD);
+	const queue = {
+		add: async (name, data, opts) => {
+			if (data.replica === 2) throw "valkey down";
+			return { id: opts.jobId };
+		},
+	};
+	const logs = [];
+	const res = mockRes();
+	const handler = makeReceiver({ queue, selfId: SELF_ID, cfg: replicaCfg, log: (e) => logs.push(e) });
+	await drive(handler, mockReq({ headers: headersFor("issues", delivery, raw) }), res, raw);
+
+	assert.equal(res.statusCode, 503);
+	assert.deepEqual(logs, [{ event: "enqueue_failed", delivery, reason: undefined, queued: 1, replicas: 2 }]);
+	assert.equal(JSON.stringify(logs[0]), JSON.stringify({ event: "enqueue_failed", delivery, queued: 1, replicas: 2 }), "no `reason` in the written line");
 });
 
 // --- the `/` route exists only where github is served (issue #99) ----------------------------------
@@ -614,9 +662,10 @@ test("an unauthorized closer is dropped 204, and the LOG says the closer gate re
 	assert.deepEqual(logs.at(-1), { event: "dropped", delivery, reason: "closer-not-allowed" });
 });
 
-test("an indeterminate lookup is 503 permission-lookup-failed (redeliverable), never 204, and the log names the lookup", async () => {
+test("an indeterminate lookup is 503 permission-lookup-failed, never 204, and the log names the lookup", async () => {
 	// 204 would drop real work during an outage, and on the wire it is indistinguishable from a stranger
-	// being correctly refused. GitHub redelivers; the GUID jobId coalesces the retry.
+	// being correctly refused. GitHub never resends the 503 on its own; a hand redelivery keeps the GUID,
+	// so the jobId queues it at most once.
 	const delivery = "d-close-indet";
 	const raw = JSON.stringify(closedPayload());
 	const { calls, queue } = recordingQueue();
@@ -716,7 +765,7 @@ test("a delivery the semantic window swallowed logs `deduplicated` with the surv
 	const res = mockRes();
 	await drive(handler, req, res, raw);
 
-	assert.equal(res.statusCode, 202, "still a 2xx: a non-2xx would trigger a redelivery storm for a handled delivery");
+	assert.equal(res.statusCode, 202, "still a 2xx: a non-2xx would record a handled delivery as failed, and Azure would resend it");
 	assert.deepEqual(JSON.parse(res.body), { status: "deduplicated" }, "but no longer 'queued' -- nothing was created");
 	assert.ok(!logs.some((l) => l.event === "enqueued"), "enqueued means created, and nothing was");
 	const dedup = logs.filter((l) => l.event === "deduplicated");

@@ -106,7 +106,7 @@ test("an actor absent from a listing that ENDS is a determinate refusal", async 
 test("a listing that keeps offering pages is INDETERMINATE at the cap, never a refusal", async () => {
 	// The distinction this fix exists for: the search was abandoned, not completed. Answering `false` here
 	// would bury an exhausted crawl inside a 204 that reads exactly like a stranger being turned away;
-	// indeterminate makes the receiver answer 503 so Azure redelivers.
+	// indeterminate makes the receiver answer 503, which Azure resends for about 3 minutes, then on probation.
 	const g = fakeGraph({ pageFor: (i) => ({ users: [{ mailAddress: `nobody-${i}@example.com`, descriptor: `aad.n${i}` }], continuation: `TOKEN-${i + 1}` }) });
 	const verdict = await resolver(g.fetchFn)(PROJECT, { email: EMAIL });
 	assert.equal(verdict.authorized, undefined, "no boolean verdict is invented");

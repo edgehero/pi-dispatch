@@ -140,9 +140,9 @@ test("an unconfigured forgejo endpoint is 404, never 401 -- 401 reads as 'armed 
 	assert.equal(calls.length, 0);
 });
 
-test("an indeterminate permission lookup is 503 (redeliverable), never 204", async () => {
+test("an indeterminate permission lookup is 503, never 204", async () => {
 	// 204 would drop real work during an outage, and on the wire it is indistinguishable from a stranger
-	// being correctly refused. Forgejo redelivers, and the stable GUID dedups the retry.
+	// being correctly refused. Forgejo never resends the 503; it shows failed in the hook's history, to replay.
 	const logs = [];
 	const { handler, calls } = build({ resolve: async () => ({ indeterminate: "collaborator permission lookup returned 500" }), logs });
 	const res = mockRes();
@@ -320,9 +320,10 @@ test("forgejo: a replicas: 2 trigger enqueues TWICE from one delivery, with dist
 	assert.equal(logs.find((l) => l.event === "enqueued")?.replicas, 2, "the log says how many, so a pair is explainable from the receiver's own output");
 });
 
-test("forgejo: a throw on the SECOND replica answers 503 and leaves the first enqueued", async () => {
-	// No compensating logic exists and none is needed: the forge redelivers, replica 1 dedups on its own
-	// now-taken jobId and replica 2 enqueues. The retry converges on exactly two jobs, never three.
+test("forgejo: a throw on the SECOND replica answers 503, leaves the first enqueued, and logs 1 of 2 queued", async () => {
+	// No compensation: Forgejo never resends the 503, so replica 1 runs alone unless someone replays it. A
+	// replay is a new GUID: inside the 10-minute window replica 1 coalesces on its `:r1` key and replica 2
+	// enqueues, two jobs; after it both replicas queue again beside replica 1, three.
 	const seen = [];
 	const queue = {
 		add: async (name, data, opts) => {
@@ -331,12 +332,14 @@ test("forgejo: a throw on the SECOND replica answers 503 and leaves the first en
 			return { id: opts.jobId };
 		},
 	};
-	const { handler } = build({ cfg: replicaCfg, queue });
+	const { handler, logs } = build({ cfg: replicaCfg, queue });
 	const res = mockRes();
 	await drive(handler, mockReq({ raw: LABELLED }), res, LABELLED);
 
 	assert.equal(res.statusCode, 503);
 	assert.deepEqual(seen, [`fj-fj-guid-1-r1`], "replica 1 is already in the queue and stays there");
+	// What an operator reads before replaying under a new id: how many of the replicas are already queued.
+	assert.deepEqual(logs.filter((l) => l.event === "enqueue_failed"), [{ event: "enqueue_failed", delivery: "fj-guid-1", reason: "valkey down", queued: 1, replicas: 2 }]);
 });
 
 test("forgejo: an unflagged trigger still enqueues EXACTLY once, with no replica key and today's jobId", async () => {

@@ -19,7 +19,8 @@
  *   - it runs AFTER verification, so an unauthenticated flood cannot make this project call Forgejo;
  *   - it returns a two-armed verdict, because "not a collaborator" and "could not tell" are different
  *     answers. A 404 is determinate and refuses; anything else is INDETERMINATE and the receiver answers
- *     503, so Forgejo redelivers and the stable `X-GitHub-Delivery` GUID dedups the retry. Collapsing
+ *     503. Forgejo never resends that on its own, and its replay is a new delivery id (receiver.mjs, WHAT A
+ *     503 MEANS), so a person replays what still needs to run. Collapsing
  *     indeterminate to "deny" would drop real work during an outage behind a 204 that looks exactly like a
  *     stranger being correctly refused.
  *
@@ -91,8 +92,8 @@ export function makeResolveForgejoAuthority({ apiUrl, token, tokenVar = "FORGEJO
 			// collaborators can query only their own"}; the same account raised to repo admin gets 200). The
 			// other 403s this route can give are the token's scope (`token does not have at least one of
 			// required scope(s)`, `token scope is limited to public repos`), so the dedicated token's reason names its scope too.
-			// Still indeterminate, and that is a decision, not an oversight. A retry cannot heal it, but the
-			// retry costs nothing (no token is minted and nothing spends before this answer), while the
+			// Still indeterminate, and that is a decision, not an oversight. A replay cannot heal it, but the
+			// replay costs nothing (no token is minted and nothing spends before this answer), while the
 			// alternative is worse in the way this file's header names: a determinate refusal answers 204, which
 			// Forgejo records as a successful delivery, so the one place the operator looks would show every
 			// trigger "delivered" while nothing ran. A 503 marks each delivery failed there, the log line below

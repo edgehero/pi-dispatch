@@ -605,8 +605,8 @@ export function wantsCloserAuthority(eventName, subset, group, selfId) {
 	// Filter's own step-0/1 guards, replicated FIRST and in the same order (fail-closed identity, then
 	// the unconditional bot-loop guard): the harness closing its own issue -- the natural last act of
 	// the very flow a close trigger arms -- must not cost a lookup, and an INDETERMINATE lookup on a
-	// self-delivery would 503 (so: redeliver, retry, loop) traffic the filter would only ever drop as
-	// `self`.
+	// self-delivery would answer 503 (a failed delivery in the hook's history and a `lookup-failed` count on the
+	// Connections page) for traffic the filter would only ever drop as `self`.
 	if (typeof subset?.sender?.id !== "number") return false;
 	if (subset.sender.id === selfId) return false;
 	if (eventName === "issues" && subset.action === CLOSE_ACTION) {

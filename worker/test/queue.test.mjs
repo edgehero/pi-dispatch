@@ -590,9 +590,9 @@ test("same delivery GUID twice -> one job (exact redelivery dedup)", { skip }, a
 		const id1 = await enqueueGitHubJob(q, { ...base, trigger });
 		const id2 = await enqueueGitHubJob(q, { ...base, trigger }); // redelivery -> same jobId
 		assert.equal(id1.jobId, id2.jobId);
-		// The GUID layer's silence is a FEATURE, pinned (issue #289): a forge retry of a delivery that IS
-		// queued deserves the answer "queued", and bullmq's jobId collision hands back the SAME id, so the
-		// return comparison cannot and must not flag it.
+		// The GUID layer's silence is a FEATURE, pinned (issue #289): a resend of a delivery that IS queued
+		// (a GitHub or GitLab redelivery by hand, or Azure's own resend) deserves the answer "queued", and
+		// bullmq's jobId collision hands back the SAME id, so the return comparison cannot and must not flag it.
 		assert.equal(id2.deduplicated, false, "a GUID replay is the shield working, never a swallow");
 		const counts = await q.getJobCounts("waiting");
 		assert.equal(counts.waiting, 1, "the redelivery must be ignored");

@@ -2342,9 +2342,13 @@ these extra file/lease reads.
   The receiver start qualifies coverage: earlier hours say not observed, and the first partial hour names its start.
   Receiver names stay complete at phone widths, including unreadable observations. Unserved routes retain their
   last taken/refused times even after their 24-hour counts reach zero; routes without
-  history stay hidden. Warnings name an armed forge without a reported receiver,
-  unauthorized-only deliveries (check the webhook secret on both sides), and deliveries reaching an unconfigured
-  route. Unknown or incomplete reads never mean zero or healthy. The window is the current UTC hour plus the
+  history stay hidden. Warnings name an armed forge without a reported receiver, unauthorized-only deliveries (check
+  the webhook secret on both sides), deliveries reaching an unconfigured route, and a forge the receiver answered 503
+  in the window (a lookup or an enqueue it could not finish): the count, that the forge does not send those
+  deliveries again (Azure DevOps does, for about 3 minutes, then retries one still failing on probation for about 36
+  hours while it sends no new events), and where to redeliver them, linked to that forge's page. It counts answers,
+  so it reads "at least" after an incomplete read and a later redelivery that succeeds does not lower it. Unknown or
+  incomplete reads never mean zero or healthy. The window is the current UTC hour plus the
   preceding 23; last-event times are kept independently. Queued, deduplicated, held and steered count as taken;
   filter drops are separate. The forge's delivery history still identifies individual deliveries.
 - **Egress:** policy posture, listed hosts and exact model endpoints, then each host's proxy check with its

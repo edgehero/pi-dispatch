@@ -235,9 +235,17 @@ function pathOf(url) {
  * Absent `replicas` is `1` and the call below is byte-identical to the single enqueue it replaced: no
  * `replica` key on the job, so the jobId, the dedup id and `data` are exactly what they were.
  *
- * PARTIAL FAILURE IS IDEMPOTENT BY CONSTRUCTION, which is why there is no compensating logic here: if
- * replica k throws, the caller's catch answers 503, the forge redelivers, replicas 1..k-1 dedup on their
- * own now-taken jobIds and k..n enqueue. The retry converges on exactly n jobs rather than n + (k-1).
+ * A PARTIAL FAILURE LEAVES REPLICAS 1..k-1 QUEUED, and nothing here takes them back. If replica k throws,
+ * the caller answers 503 (`answerEnqueueFailed`), and what happens next is the forge's (WHAT A 503 MEANS,
+ * below): on GitHub, GitLab and Forgejo nothing, so k-1 of the n jobs run and the rest never queue unless
+ * someone sends the delivery again. A GitHub or GitLab redelivery by hand, or Azure's own resend, keeps the
+ * delivery id, so replicas 1..k-1 dedup on their taken jobIds, k..n enqueue, and it converges on exactly n.
+ * A Forgejo replay is a NEW delivery id: inside the 10-minute semantic window the queued replicas coalesce
+ * on their `:r<i>` keys and it still converges on n, but after it all n queue again beside the k-1, so
+ * cancel those first. Compensating here was rejected: removing 1..k-1 needs the Valkey that just failed,
+ * and one of them may already be running. So the failure says how far it got instead: past one replica,
+ * the error that goes up carries `queued` (k-1, created or swallowed by the window) and `replicas` (n) for
+ * the `enqueue_failed` line. A single enqueue's error goes up untouched, so its line is byte-identical.
  *
  * `enqueue` is a callback because the four arms spell their enqueue differently (a named github/gitlab
  * wrapper, or `enqueueForgeJob` with an explicit kind); the fanout itself is forge-blind.
@@ -253,11 +261,58 @@ async function fanout(job, enqueue) {
 	let created = 0;
 	const deduplicated = [];
 	for (let i = 1; i <= replicas; i++) {
-		const r = await enqueue(replicas > 1 ? { ...job, replica: i } : job);
+		let r;
+		try {
+			r = await enqueue(replicas > 1 ? { ...job, replica: i } : job);
+		} catch (err) {
+			if (replicas === 1) throw err;
+			throw Object.assign(new Error(err?.message, { cause: err }), { queued: i - 1, replicas });
+		}
 		if (r && typeof r === "object" && r.deduplicated === true) deduplicated.push({ jobId: r.jobId, survivingJobId: r.survivingJobId });
 		else created += 1;
 	}
 	return { replicas, created, deduplicated };
+}
+
+/**
+ * WHAT A 503 MEANS FOR EACH FORGE. Every arm answers 503 when it cannot finish a delivery it would otherwise
+ * queue: an INDETERMINATE author lookup (and the GitHub arm's unwired resolver), or an enqueue that throws.
+ * The delivery is not queued, and the answer is kept because it is the true one: a 204 would read as a
+ * stranger correctly refused, and a 202 would say "queued". What happens to the delivery is the forge's:
+ *   - GitHub never resends a failed delivery on its own (docs.github.com, "Handling failed webhook
+ *     deliveries"). It is lost unless someone redelivers it from the hook's Recent Deliveries or the REST
+ *     API within 3 days; that keeps `X-GitHub-Delivery`, so it queues at most once.
+ *   - GitLab never resends a 5xx or a timeout either, and after 4 failures in a row it disables the hook
+ *     for a while (on gitlab.com, and a group hook anywhere; on a self-managed instance a project hook only
+ *     where the `auto_disabling_web_hooks` feature flag is on). A "Resend Request" (Recent events, 2 days;
+ *     the API's resend since 17.4) keeps the `Idempotency-Key` and is signed afresh, so it queues at most
+ *     once and the replay window holds.
+ *   - Forgejo makes one attempt (`services/webhook/deliver.go`). Its replay, from the UI, is a NEW hook task
+ *     with a NEW delivery id: inside the 10-minute semantic window it coalesces with what did queue, after
+ *     the window it runs again, which matters for a delivery Forgejo saw fail only because the answer came
+ *     after its 5 s `DELIVER_TIMEOUT`, when the job had in fact queued.
+ *   - Azure DevOps treats a 503 as transient and resends the notification up to 8 times over about 3
+ *     minutes. It resends the same notification, so it carries the same payload `id` and queues at most
+ *     once. Past that the subscription goes on probation: Azure retries the failed notification up to 7
+ *     more times over about 36 hours, and new events are lost meanwhile. So a delivery someone re-triggers
+ *     by hand in that time (a new event, a new `id`) can run twice: a probation retry that lands outside the
+ *     10-minute semantic window is not coalesced with it. A 500 is an enduring failure at once.
+ * The receiver logs each 503 with the delivery id an operator redelivers by, and the Connections page counts
+ * `lookup-failed` and `enqueue-failed` per forge and warns when either is above 0.
+ *
+ * This function is the enqueue-failure answer, shared by the four arms for the four-copies reason `fanout`
+ * gives. Their own try/catch exists so a Valkey-down enqueue is this 503 and not verify's outer 500, which
+ * Azure would count as an enduring failure. The `enqueue_failed` line names the delivery and the reason; past
+ * one replica it adds how many of the `replicas` were `queued` before the failure (`fanout`), which is what an
+ * operator needs before redelivering, and on Forgejo before replaying.
+ */
+function answerEnqueueFailed({ log, res, delivery, err }) {
+	// Past one replica `err` is `fanout`'s wrapper, and the reason is its cause's: a thrown non-Error has no
+	// `message`, so its line keeps leaving `reason` out instead of logging the wrapper's empty one.
+	const fanned = err?.replicas > 1;
+	const partial = fanned ? { queued: err.queued, replicas: err.replicas } : {};
+	log?.({ event: "enqueue_failed", delivery, reason: (fanned ? err.cause : err)?.message, ...partial });
+	return respond(res, 503, { error: "enqueue-failed" });
 }
 
 /**
@@ -297,7 +352,8 @@ async function steerOrEnqueue({ steer, res, kind, delivery, job, target }) {
  * CREATED, with `replicas` meaning jobs that now exist; every semantic-window swallow gets its own
  * `deduplicated` line naming the surviving job's id (every field forge- or worker-minted, no payload
  * text); and a delivery that created NOTHING answers `202 {status:"deduplicated"}` -- still a 2xx,
- * because a non-2xx would trigger a redelivery storm for a delivery that was handled, but no longer
+ * because a non-2xx would record a delivery that was handled as failed in the forge's own history, count
+ * toward GitLab disabling the hook, and make Azure resend it, but no longer
  * "queued", because a receiver that logs the swallow while answering success on the wire would be the
  * honest-log/lying-wire split this project refuses. Each arm passes its own target grammar.
  */
@@ -383,7 +439,8 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 			if (!resolveAuthority) {
 				// Defensive only: unreachable in a wired receiver -- start.mjs hard-fails on github auth
 				// before `/` is ever mounted, and the resolver is built over that same auth object. Fail
-				// closed but RETRYABLE, because a wiring fault must not read on the wire as a stranger
+				// closed with a 503, a failed delivery in the hook's history that can be redelivered once
+				// the wiring is fixed, because a wiring fault must not read on the wire as a stranger
 				// being correctly refused.
 				return respond(res, 503, { error: "permission-lookup-failed" });
 			}
@@ -392,10 +449,11 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 				// The reason names the lookup, never the actor -- `sender.login` is personal data and exists
 				// here only to have been asked about (no-pii-in-logs).
 				log?.({ event: "github_permission_lookup_failed", delivery, reason: resolved.indeterminate });
-				// 503: GitHub redelivers, the GUID jobId coalesces the retry. GitHub's auto-redelivery is
-				// weaker than GitLab's, so a lookup outage outlasting the window can lose a webhook-only
-				// deployment's close -- the polling transport's closed source is the backstop where the
-				// poller runs, with its own bounded retry against the same lookup.
+				// 503, and GitHub never resends it on its own (WHAT A 503 MEANS, above `answerEnqueueFailed`):
+				// the close is lost unless someone redelivers it within 3 days, which keeps the GUID jobId and
+				// so queues it at most once. The polling transport's closed source is the backstop on a repo
+				// the poller already polls, with its own bounded retry against the same lookup; a
+				// webhook-only deployment has none.
 				return respond(res, 503, { error: "permission-lookup-failed" });
 			}
 			closerAuthorized = resolved.authorized;
@@ -425,9 +483,8 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 		try {
 			outcome = await fanout(job, async (j) => await enqueueGitHubJob(await routeTo("github", j), j));
 		} catch (err) {
-			// Own try/catch so a Valkey-down enqueue is a 503 (retryable), not verify's outer 500.
-			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
-			return respond(res, 503, { error: "enqueue-failed" }); // GitHub redelivers; dedup by GUID coalesces
+			// Lost unless redelivered by hand within 3 days; the redelivery keeps the GUID (WHAT A 503 MEANS).
+			return answerEnqueueFailed({ log, res, delivery, err });
 		}
 
 		return await answerEnqueueOutcome({ steer, kind: "github", log, res, delivery, job, target, outcome });
@@ -441,9 +498,11 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
  *
  * That resolution is a network call, and its three outcomes are deliberately not two:
  *   - a determinate verdict (authorized or not) is handed to the gate, which decides;
- *   - an INDETERMINATE lookup is a 503, so GitLab redelivers and the stable `webhook-id` dedups the
- *     retry. Answering 204 would drop real work during an outage, and it would look on the wire exactly
- *     like a stranger being correctly refused.
+ *   - an INDETERMINATE lookup is a 503. GitLab never resends it on its own (WHAT A 503 MEANS, above
+ *     `answerEnqueueFailed`), so the delivery waits for a "Resend Request", which keeps the `webhook-id`
+ *     and so queues at most once. Answering 204 would drop real work during an outage behind a success
+ *     nobody would think to resend, and it would look on the wire exactly like a stranger being correctly
+ *     refused.
  * The lookup runs only for events that could still fire -- after verification, and after the payload has
  * been projected -- so an unauthenticated flood cannot make this project call GitLab at all.
  */
@@ -461,6 +520,7 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 			// The reason names the lookup, never the actor -- `user.username` is personal data and exists
 			// only to have been asked about (no-pii-in-logs).
 			log?.({ event: "gitlab_access_lookup_failed", delivery, reason: resolved.indeterminate });
+			// Lost unless resent from Recent events within 2 days (WHAT A 503 MEANS): GitLab never resends.
 			return respond(res, 503, { error: "access-lookup-failed" });
 		}
 
@@ -490,8 +550,8 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 		try {
 			outcome = await fanout(job, async (j) => await enqueueGitLabJob(await routeTo("gitlab", j), j));
 		} catch (err) {
-			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
-			return respond(res, 503, { error: "enqueue-failed" }); // GitLab redelivers; dedup by webhook-id coalesces
+			// Lost unless resent by hand within 2 days; the resend keeps the webhook-id (WHAT A 503 MEANS).
+			return answerEnqueueFailed({ log, res, delivery, err });
 		}
 
 		return await answerEnqueueOutcome({ steer, kind: "gitlab", log, res, delivery, job, target, outcome });
@@ -506,7 +566,8 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
  * Forgejo signs the raw body with HMAC-SHA256 and sends `X-Hub-Signature-256`, `X-GitHub-Delivery` and
  * `X-GitHub-Event`, which is byte-for-byte what `makeVerifiedHandler` already reads. So
  * CONST-HMAC-OVER-RAW-BODY is satisfied here by EXISTING code rather than new code, and
- * REQ-DEDUP-BY-DELIVERY-GUID transfers with no adaptation at all. What Forgejo needs is its own SECRET,
+ * REQ-DEDUP-BY-DELIVERY-GUID's mechanism transfers with no adaptation at all (what it cannot see is a replay,
+ * which Forgejo sends under a new GUID: WHAT A 503 MEANS). What Forgejo needs is its own SECRET,
  * which is why it is a separate handler and a separate path: `makeVerifiedHandler` closes over one secret
  * per construction, and serving two sources from one would mean either sharing a secret between forges or
  * letting the request choose which one it was checked against.
@@ -525,6 +586,7 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 			// The reason names the lookup, never the actor -- `sender.login` is personal data and exists here
 			// only to have been asked about (no-pii-in-logs).
 			log?.({ event: "forgejo_permission_lookup_failed", delivery, reason: resolved.indeterminate });
+			// Lost unless replayed from the hook's history (WHAT A 503 MEANS): Forgejo makes one attempt.
 			return respond(res, 503, { error: "permission-lookup-failed" });
 		}
 
@@ -551,8 +613,8 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 		try {
 			outcome = await fanout(job, async (j) => await enqueueForgeJob(await routeTo("forgejo", j), "forgejo", j));
 		} catch (err) {
-			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
-			return respond(res, 503, { error: "enqueue-failed" }); // Forgejo redelivers; dedup by GUID coalesces
+			// Lost unless replayed by hand, and a replay is a new GUID: only the semantic window coalesces it.
+			return answerEnqueueFailed({ log, res, delivery, err });
 		}
 
 		return await answerEnqueueOutcome({ steer, kind: "forgejo", log, res, delivery, job, target, outcome });
@@ -595,6 +657,8 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 			// The reason names the lookup, never the actor -- an email address is personal data and exists
 			// here only to have been asked about (no-pii-in-logs).
 			log?.({ event: "azure_membership_lookup_failed", delivery, reason: resolved.indeterminate });
+			// Azure resends the same notification up to 8 times over about 3 minutes, so with the same `id`,
+			// then retries it on probation for about 36 hours (WHAT A 503 MEANS).
 			return respond(res, 503, { error: "membership-lookup-failed" });
 		}
 
@@ -624,8 +688,9 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 		try {
 			outcome = await fanout(job, async (j) => await enqueueForgeJob(await routeTo("azure", j), "azure", j));
 		} catch (err) {
-			log?.({ event: "enqueue_failed", delivery, reason: err?.message });
-			return respond(res, 503, { error: "enqueue-failed" });
+			// Azure resends the same notification, so the same `id`, for about 3 minutes, then on probation
+			// for about 36 hours, losing new events meanwhile (WHAT A 503 MEANS).
+			return answerEnqueueFailed({ log, res, delivery, err });
 		}
 
 		return await answerEnqueueOutcome({ steer, kind: "azure", log, res, delivery, job, target, outcome });

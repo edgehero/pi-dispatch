@@ -245,7 +245,7 @@ test("a re-label inside the semantic window answers 202 deduplicated on a REAL V
 
 		assert.equal(first.statusCode, 202);
 		assert.deepEqual(JSON.parse(first.body), { status: "queued" });
-		assert.equal(second.statusCode, 202, "still 2xx -- a non-2xx would trigger a redelivery storm");
+		assert.equal(second.statusCode, 202, "still 2xx -- a non-2xx would record a handled delivery as failed, and Azure would resend it");
 		assert.deepEqual(JSON.parse(second.body), { status: "deduplicated" }, "the re-label created nothing, and the wire now says so");
 		const dedup = logs.filter((l) => l.event === "deduplicated");
 		assert.equal(dedup.length, 1);

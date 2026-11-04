@@ -188,7 +188,7 @@ test("decodeSigningToken strips the whsec_ prefix and base64-decodes the rest", 
 
 test("a delivery with no webhook-id or Idempotency-Key is 400 and names the minimum GitLab version", async () => {
 	// Refused rather than served on a synthesised key: a key derived from the payload is not stable across
-	// a retry, so it would dedup some redeliveries and bill for the rest.
+	// a resend, so it would dedup some redeliveries and bill for the rest.
 	const res = mockRes();
 	const headers = sigHeaders(RAW);
 	delete headers["webhook-id"];

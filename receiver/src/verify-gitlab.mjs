@@ -72,12 +72,13 @@ export function makeGitLabVerifiedHandler({ mode, secret, bodyLimit = 2 * 1024 *
 				return respond(res, 400, { error: "missing gitlab event header" });
 			}
 
-			// The delivery id is stable across GitLab's own retries, which is exactly the property dedup
-			// needs (REQ-DEDUP-BY-DELIVERY-GUID). `webhook-id` is the Standard Webhooks name (19.0+);
+			// The delivery id is the one GitLab keeps when a delivery is resent by hand ("Resend Request" or the
+			// API; GitLab never resends on its own), which is exactly the property dedup needs
+			// (REQ-DEDUP-BY-DELIVERY-GUID). `webhook-id` is the Standard Webhooks name (19.0+);
 			// `Idempotency-Key` is the same value under its original name (17.4+).
 			//
 			// An instance too old for either is REFUSED rather than served on a synthesised key. A key
-			// derived from the payload -- object id plus action, say -- is not stable across a retry that
+			// derived from the payload -- object id plus action, say -- is not stable across a resend that
 			// changes nothing an operator can see, so it would dedup some redeliveries and bill for the
 			// rest. Naming the minimum version is a message; a weaker key would be a silent second charge.
 			delivery = req.headers["webhook-id"] ?? req.headers["idempotency-key"];

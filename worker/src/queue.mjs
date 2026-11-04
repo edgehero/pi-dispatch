@@ -301,7 +301,8 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 }
 
 // Coalesces rapid re-label spam; the GUID jobId + its retention (`FORGE_JOB_RETENTION_S`) handle exact redelivery, so
-// this window only needs to absorb burst re-labels, not the full redelivery window.
+// this window only needs to absorb burst re-labels, not the full redelivery window. A Forgejo replay is the exception:
+// it carries a new delivery id, so this window is the only layer that coalesces one, and only inside it.
 const SEMANTIC_WINDOW_MS = 10 * 60 * 1000;
 
 /**
@@ -434,8 +435,9 @@ export async function enqueueForgeJob(queue, kind, fields, { dataVersions } = {}
 	// Issue #289: WHICH of the two dedup layers spoke is readable off `queue.add`'s return, and only one
 	// of them is. Verified at bullmq 5.80.4's own Lua: a jobId collision (the GUID shield,
 	// REQ-DEDUP-BY-DELIVERY-GUID) returns THE SAME id -- structurally invisible here, and correctly so,
-	// because a forge retry of a delivery that IS queued deserves the answer "queued" -- while the
-	// `deduplication` option (the 10-minute semantic window) returns the EXISTING job's DIFFERENT id.
+	// because a resend of a delivery that IS queued (a hand redelivery, or Azure's own resend) deserves
+	// the answer "queued" -- while the `deduplication` option (the 10-minute semantic window) returns the
+	// EXISTING job's DIFFERENT id.
 	// So `added.id !== jobId` means this delivery was swallowed by the window and created nothing, which
 	// the receiver used to log as `enqueued` and answer as success. A defensive undefined (a fake queue
 	// predating the comparison) reads as not-deduplicated, today's behaviour exactly.

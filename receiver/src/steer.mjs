@@ -36,7 +36,8 @@
  * fall-through that reached Valkey asks for it first: present, the delivery is answered as steered (`redelivered`) and
  * never enqueued.
  * Set AFTER a push succeeded, never before: a marker for a comment that was then enqueued would be harmless while the
- * enqueue holds, but one whose enqueue failed (a 503 the forge redelivers) would swallow the redelivery, a lost job.
+ * enqueue holds, but one whose enqueue failed (a 503, later redelivered by hand or resent by Azure) would swallow that
+ * redelivery, a lost job.
  *
  * WHAT COUNTS AS STEERED. Any `ok` or `dup`. `dup` is a redelivered webhook GUID the run already holds (the id is the
  * GUID's digest), so the comment was handled the first time and enqueueing it now would double it. Everything else

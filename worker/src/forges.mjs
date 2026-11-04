@@ -75,9 +75,11 @@ export const FORGES = {
 	},
 	forgejo: {
 		// Forgejo's webhook transport is byte-compatible with GitHub's -- it signs the raw body HMAC-SHA256
-		// and sends X-Hub-Signature-256, X-GitHub-Delivery and X-GitHub-Event. So the delivery id is a GUID
-		// with the same across-retry stability GitHub's has, and REQ-DEDUP-BY-DELIVERY-GUID transfers
-		// unchanged. Only the PREFIX differs, and only so the id spaces stay disjoint.
+		// and sends X-Hub-Signature-256, X-GitHub-Delivery and X-GitHub-Event. So the delivery id is a GUID,
+		// one per delivery, and REQ-DEDUP-BY-DELIVERY-GUID transfers unchanged. Forgejo never sends a delivery
+		// again on its own, and its replay, unlike a GitHub redelivery, is a NEW GUID, so only the semantic
+		// window coalesces one (receiver/src/receiver.mjs, WHAT A 503 MEANS). Only the PREFIX differs, and only
+		// so the id spaces stay disjoint.
 		jobIdPrefix: "fj-",
 		deliveryIdName: "X-GitHub-Delivery GUID",
 		// Forgejo numbers issues and pull requests from ONE per-repository sequence, exactly as GitHub does

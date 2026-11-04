@@ -72,3 +72,36 @@ credentials step:
    fresh poller starts from now and never replays old labels. Name the repositories in `POLL_REPOS`. Or
    run under `GITHUB_AUTH_SOURCE=app` and let the App installation name them
    ([`docs/polling.md`](polling.md)).
+
+## When a delivery fails
+
+GitHub sends each delivery once. It does not send it again on its own, whatever the receiver answered, and it marks a
+delivery failed when the answer is not a 2xx or takes longer than 10 seconds. The receiver answers **503** when it
+cannot finish a delivery, in two cases:
+
+- **The enqueue failed**, for example while Valkey is down. The receiver logs `enqueue_failed` with the delivery id.
+  On a trigger with `replicas`, the line also says how many replicas were queued before the failure (`queued` of
+  `replicas`). Those stay queued and run; the rest were never queued.
+- **The permission lookup for a close failed** (close triggers only, see [triggers.md](triggers.md)). The receiver
+  logs `github_permission_lookup_failed` with the delivery id. Nothing was queued.
+
+Either way the delivery does not run unless someone redelivers it, and GitHub keeps deliveries for that for 3 days.
+
+**Redelivering one.** Open the webhook's **Recent Deliveries**: for the App that `pi-dispatch setup github` made, the
+App's settings, **Advanced**; for a repository or organization webhook, its **Webhooks** settings. Pick the delivery
+whose id the log line names and choose **Redeliver**. With the REST API, list the deliveries
+(`GET /app/hook/deliveries` for the App, `GET /repos/{owner}/{repo}/hooks/{hook_id}/deliveries` for a repository
+webhook), find the entry whose `guid` is the logged id, and `POST` to that entry's `/attempts`
+(`/app/hook/deliveries/{delivery_id}/attempts`).
+
+A redelivery carries the same `X-GitHub-Delivery` id, so it is queued at most once: a delivery that did queue (one
+GitHub marked failed only because the answer was slow, say) is not queued again, since its job id is already in the
+queue, and on a replica trigger the replicas already queued stay one job each while the rest queue.
+
+**Where you see failures.** The two log lines, and the console's Connections page, which counts `lookup-failed` and
+`enqueue-failed` per forge over the last 24 UTC hours and warns when either is above zero. It counts answers, so a
+redelivery that succeeds later does not lower it.
+
+**A close has one backstop.** The polling transport (`pi-dispatch-receiver poll`, [polling.md](polling.md)) reads
+closes from the events feed with its own ids and retries a failed lookup itself for a while, so it catches a close
+the webhook answered 503 for, on a repository it polls. On any other repository a close answered 503 needs a redelivery.

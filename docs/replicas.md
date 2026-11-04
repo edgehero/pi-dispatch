@@ -44,11 +44,29 @@ replica 1 kept `pi/issue-7` would make the pair read as an original and a duplic
 that makes people stop comparing them.
 
 **Redelivery still dedups**, by the same two mechanisms an unreplicated job uses. An *exact* redelivery
-(the same webhook guid) is stopped by the job id: `<prefix><id>-r<i>` is already in the queue's history,
+(the same webhook guid: a GitHub or GitLab delivery redelivered by hand, or Azure DevOps resending one) is stopped
+by the job id: `<prefix><id>-r<i>` is already in the queue's history,
 which is retained for 31 days. The 10-minute semantic window does a different job: it coalesces
-*distinct* guids landing on the same `repo#7:fix-issue`, which is what absorbs re-label bursts. The
+*distinct* guids landing on the same `repo#7:fix-issue`, which is what absorbs re-label bursts, and it is the
+only layer that coalesces a Forgejo replay, which carries a new guid. The
 `:r<i>` suffix is added to that semantic key *only* when a replica is set, so each replica coalesces
 against **itself**, never against its sibling.
+
+**A fanout that fails part way leaves what it queued.** The receiver queues the replicas one at a time. If
+queueing replica *k* fails (Valkey went down, say), it answers **503** and logs `enqueue_failed` with `queued`
+(*k*-1) and `replicas` (*n*). Replicas 1 to *k*-1 stay queued and run; nothing takes them back, because that
+would need the Valkey that just failed, and one may already be running. What happens next depends on the forge,
+since GitHub, GitLab and Forgejo never send the delivery again on their own:
+
+- **Nobody sends it again:** *k*-1 jobs run, not *n*.
+- **A GitHub or GitLab redelivery by hand, or Azure's own resend:** the same guid, so the queued replicas already
+  hold their job ids and are not queued twice, and the rest queue. *n* jobs in all.
+- **A Forgejo replay:** a new guid. Within 10 minutes the queued replicas coalesce on their own `:r<i>` keys and
+  the rest queue, *n* in all; after that all *n* queue again beside the *k*-1, so cancel those first.
+
+Each forge's page says how to send a delivery again ([GitHub](github.md#when-a-delivery-fails),
+[GitLab](gitlab.md#when-a-delivery-fails), [Forgejo](forgejo.md#when-a-delivery-fails),
+[Azure DevOps](azure-devops.md#when-a-delivery-fails)).
 
 ## The budget arithmetic
 

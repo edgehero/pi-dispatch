@@ -13,7 +13,8 @@
  *     API calls on an attacker's behalf.
  *   - It distinguishes "not a member" from "could not tell", and those are different answers. A 404 is
  *     determinate and yields `authorized: false`, which the gate refuses. Anything else -- a 5xx, a dead
- *     socket, a revoked token -- is INDETERMINATE, and the receiver answers 503 so GitLab redelivers.
+ *     socket, a revoked token -- is INDETERMINATE, and the receiver answers 503. GitLab never resends that on
+ *     its own (receiver.mjs, WHAT A 503 MEANS); a "Resend Request" keeps the id, so it queues at most once.
  *     Collapsing indeterminate to "deny" would silently drop legitimate work during an outage, with a 204
  *     that reads exactly like a correctly-refused stranger.
  *

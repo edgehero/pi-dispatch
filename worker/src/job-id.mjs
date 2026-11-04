@@ -77,9 +77,9 @@ export function chainedJobId({ parentJobId, flow, task }) {
 
 /**
  * The deterministic jobId for a GitHub-triggered job: the `X-GitHub-Delivery` GUID, prefixed.
- * BullMQ's dedup is `EXISTS jobId`, so a redelivered webhook (GitHub retries on timeout) carries
- * the same GUID, resolves to the same id, and the duplicate paid run is rejected --
- * REQ-DEDUP-BY-DELIVERY-GUID.
+ * BullMQ's dedup is `EXISTS jobId`, so a redelivered webhook (GitHub never resends one on its own; a
+ * person redelivers it from the hook's Recent Deliveries or the REST API) carries the same GUID, resolves
+ * to the same id, and the duplicate paid run is rejected -- REQ-DEDUP-BY-DELIVERY-GUID.
  *
  * Kept free of any bullmq import (mirrors localJobId) so the dedup key is derivable everywhere, not
  * only where the queue's dependencies are installed. A missing GUID is a caller bug -- the receiver
@@ -92,9 +92,9 @@ export function deliveryJobId(guid) {
 
 /**
  * The same thing for a GitLab-triggered job: the `webhook-id` (or its older name `Idempotency-Key`),
- * prefixed `gl-`. GitLab keeps that value CONSTANT across its own retries, which is the exact property
- * REQ-DEDUP-BY-DELIVERY-GUID needs, so the guarantee is the same one -- and retention-bounded in the same
- * way.
+ * prefixed `gl-`. GitLab keeps that value CONSTANT when a delivery is resent ("Resend Request" or the API;
+ * GitLab never resends on its own), which is the exact property REQ-DEDUP-BY-DELIVERY-GUID needs, so the
+ * guarantee is the same one -- and retention-bounded in the same way.
  */
 export function gitlabDeliveryJobId(id) {
 	return forgeDeliveryJobId("gitlab", id);

@@ -158,10 +158,11 @@ decides what happens to a comment that arrives too late (see [Late messages](#la
 - **Which run.** Every running job of a steer-armed trigger on that same issue or pull request takes the comment,
   up to four (replicas of one start each get it), whichever trigger started it: steering is per issue or pull
   request, not per trigger. A job on another issue never does.
-- **A redelivery is not a new comment.** If the forge delivers the same comment again (a retry, a manual redeliver),
-  it is not run a second time: while the run is going the run already has it, and afterwards the receiver
-  remembers for 31 days that it steered that delivery and answers `202 {"status":"steered","runs":0}` without
-  starting anything.
+- **A redelivery is not a new comment.** If the forge delivers the same comment again (someone redelivers it by
+  hand on GitHub or GitLab, or Azure DevOps resends one it got no 2xx for), it is not run a second time: while the
+  run is going the run already has it, and afterwards the receiver remembers for 31 days that it steered that
+  delivery and answers `202 {"status":"steered","runs":0}` without starting anything. A Forgejo replay is the
+  exception: Forgejo sends it under a new delivery id, so it counts as a new comment.
 - **When there is no running job** (it has not started yet, it already finished, or it is a different trigger's
   job without `steer`), the comment does what it always did: it starts a job, or is coalesced with one that was just
   started on the same issue.

@@ -270,7 +270,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   any digit groups and a capital `E` taken as well. The scan reads one line at a time and misses every other spelling
   (`8.64e+7`, a BigInt) and a product split across lines.
 - **Why**: a delivery can arrive again: on GitHub when someone redelivers it by hand (within 3 days, never on its own;
-  see the correction below), on GitLab through its own retries. A redelivered job is a second paid agent run **and** a second
+  see the correction below), on GitLab when someone resends it (Recent events, 2 days, or the API; never on its own
+  either), and on Azure DevOps when it resends a transient failure such as a 503 (up to 8 times over about 3 minutes,
+  then on probation up to 7 more times over about 36 hours, while new events are lost). Azure resends the same
+  notification, so a resend carries the same payload `id`; but a probation resend that lands more than 10 minutes
+  after someone re-triggered the work by hand (a new event, a new id) runs beside it.
+  CORRECTED 2026-11-04 (#809): this said GitLab redelivered through retries of its own, which it does not make. A
+  Forgejo replay is the exception the GUID cannot cover: Forgejo sends it as a new delivery with a new id, so only the
+  semantic window below coalesces one, and only inside its 10 minutes. A redelivered job is a second paid agent run **and** a second
   pull request on one issue — visible, embarrassing, and billed. The GUID rather than `repo#issue`
   because it is exactly-per-delivery and GitHub-generated, so no coordination is needed and the queue
   can reject the duplicate without a lookup. Semantic dedup on `repo#issue:flow` is a separate, additive
@@ -286,12 +293,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   days stay: they are comfortably longer than any forge's redelivery window, and every marker derived from them keeps
   its meaning. Retention is not
   housekeeping here — **it *is* the dedup window**, and shortening it silently shortens the guarantee.
-  **GitLab keeps `webhook-id` constant across its own retries**, which is exactly the property this
-  requirement needs, so the guarantee transfers unchanged — and so does the retention bound.
+  **GitLab keeps `webhook-id` constant when a delivery is resent** (CORRECTED 2026-11-04, #809, from retries GitLab
+  never makes: a resend is by hand, and it carries "the same data and the same `Idempotency-Key` header"), which is
+  exactly the property this requirement needs, so the guarantee transfers unchanged, and so does the retention bound.
   `Idempotency-Key` is the same value under its original name and requires **GitLab 17.4 or later**; an
   older instance is **refused at the receiver with 400**, naming the version, rather than served on a key
   synthesised from the payload. A synthesised key — object id plus action, say — is not stable across a
-  retry that changed nothing an operator can see, so it would dedup some redeliveries and bill for the
+  resend that changed nothing an operator can see, so it would dedup some redeliveries and bill for the
   rest: a weaker guarantee wearing this requirement's name, which is worse than a clear refusal.
   The **semantic** window's key gains a target-type discriminator on GitLab, where issues and merge
   requests are separate per-project sequences: `project#5` and `project!5` are different objects that one
@@ -312,8 +320,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   returns `{ jobId, deduplicated, survivingJobId? }`; the receiver logs one `deduplicated` line per
   swallow (delivery id, computed id, surviving id -- all forge- or worker-minted, never payload text),
   logs `enqueued` only when something was CREATED with `replicas` meaning jobs that now exist, and a
-  delivery that created nothing answers `202 {status:"deduplicated"}` -- still a 2xx (a non-2xx would
-  trigger a redelivery storm for a handled delivery), but no longer "queued", because a receiver that
+  delivery that created nothing answers `202 {status:"deduplicated"}` -- still a 2xx (a non-2xx would record a
+  handled delivery as failed in the forge's history, count toward GitLab disabling the hook and make Azure resend it;
+  CORRECTED 2026-11-04, #809, from a storm of resends three of the four forges never send), but no longer "queued", because a receiver that
   logs the swallow while answering success on the wire would be an honest log behind a lying wire.
   Before this, re-labelling an issue inside the window did nothing, with no feedback anywhere.
   **A run that PARKS closes its own window** (`REQ-AWAIT-INPUT`, `DES-AWAIT-INPUT-ENDS-THE-JOB`). The window
@@ -431,9 +440,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   lookup happens in the **receiver** — after verification, before the gate — and its result is passed in
   as a plain number, occupying the slot `author_association` holds on the GitHub side. Its three outcomes
   are deliberately not two: a level (including 0 for a determinate 404) goes to the gate; an
-  **indeterminate** lookup is a **503**, so GitLab redelivers and the stable `webhook-id` dedups the
-  retry. Answering 204 there would drop real work during an outage and look identical on the wire to a
-  stranger being correctly refused.
+  **indeterminate** lookup is a **503**. GitLab does not resend it on its own (CORRECTED 2026-11-04, #809), so
+  the delivery waits for a hand resend, which keeps the `webhook-id` and so queues at most once. Answering 204
+  there would drop real work during an outage and look identical on the wire to a stranger being correctly refused.
 - **Traces to**: `CONST-TRIGGER-AUTHOR-GATE`, `CONST-HMAC-OVER-RAW-BODY`, `OQ-013`, `OQ-020`
 - **Acceptance**: Given `@pi fix this` with `author_association: NONE`, 204 and zero jobs. Given a
   comment from our own App id, 204 and zero jobs. Given a GitLab issue opened by a Guest with the trigger
@@ -2652,8 +2661,14 @@ writes retain their existing interactive confirmation. This adds no unattended p
     names its start. UTC bucket labels remain UTC in the browser. Expanded hourly tables retain whole labels and values in a named,
     focusable horizontal scroll region whose ArrowRight pans the table without widening the page. Receiver identities remain complete and readable within their section at phone widths, including valid 64-character names and unreadable observations; named links retain the complete identity. Unserved routes with traffic remain visible, including retained last taken/refused times after all window counts expire. Unserved routes without history remain hidden. An armed forge without a reported live receiver warns
     only over a complete read; a nonempty window containing only unauthorized warns to check the webhook secret on
-    both sides; any not-configured count warns about the route. Incomplete observations remain unknown, never zero
-    or healthy. A request adds no telemetry Valkey command; records contain no delivery or payload value.
+    both sides; any not-configured count warns about the route; and a forge with a `lookup-failed` or
+    `enqueue-failed` count above 0 (AMENDED 2026-11-04, #809) warns that the receiver answered 503 that many times
+    ("at least" over an incomplete read), that the forge does not resend those deliveries (Azure DevOps does, for
+    about 3 minutes, then retries one still failing on probation up to 7 more times over about 36 hours while it
+    sends no new events), and where to send them again, linked to that forge's "When a delivery fails" section; the
+    count is of answers, so a later redelivery that succeeds does not lower it. Incomplete observations remain
+    unknown, never zero or healthy. A request adds no telemetry Valkey command; records contain no delivery or
+    payload value.
     The forge delivery history remains available for individual deliveries. Egress gives one concise PI_EGRESS posture fact, the allowlist's first hosts/count and each host's
     doctor proxy state/time/age. A missing check and an unavailable doctor result remain distinct, with their shared
     explanation below the table. Linked operator documentation explains ports 443/80, exact model endpoints,
@@ -7219,8 +7234,13 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   the admin console's bundled copy — naming the field and the reason, and a running receiver keeps its
   previously loaded rules. Given a replica job whose image does not declare
   `replicas`, then it refuses pre-spend with `job-image-replicas-unsupported`, comments on the issue, and
-  spends nothing. Given a failure enqueueing replica *k*, then the receiver answers 503 with replicas
-  `1..k-1` queued, and the redelivery converges on exactly *n* jobs rather than *n + k − 1*.
+  spends nothing. Given a failure enqueueing replica *k*, then the receiver answers 503 with replicas `1..k-1`
+  queued, and its `enqueue_failed` line names the delivery with `queued: k-1` and `replicas: n` (AMENDED 2026-11-04,
+  #809). What that leaves (CORRECTED 2026-11-04, #809, where this assumed a redelivery that GitHub, GitLab and
+  Forgejo never send on their own): *k-1* jobs while nobody sends the delivery again; exactly *n* after a GitHub or
+  GitLab hand redelivery or Azure's own resend, which keep the delivery id; and after a Forgejo replay, which is a
+  new id, *n* inside the 10-minute semantic window and *k-1+n* after it, so the *k-1* are cancelled first. Nothing
+  compensates: removing `1..k-1` needs the Valkey that just failed, and one of them may already be running.
 
 ## REQ-TRIGGER-SECRETS
 
@@ -8502,6 +8522,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-04 (#809) | What a 503 means for each forge. **`REQ-DEDUP-BY-DELIVERY-GUID` CORRECTED**: its Why said a delivery arrives again on GitLab through retries of its own, and that GitLab keeps `webhook-id` constant across them. GitLab never resends on its own; a person resends from Recent events (2 days) or the API (17.4 or later), with the same `Idempotency-Key`, and a synthesised key is now said to be unstable across such a resend, where it said a retry. Azure DevOps resends a transient failure such as a 503 up to 8 times over about 3 minutes; Microsoft says it "attempts to resend the notification", so a resend is the same notification and carries the same payload `id`; after them the subscription is on probation, where Azure resends the failed one up to 7 more times over about 36 hours and new events are lost, so a delivery someone re-triggers by hand meanwhile can run twice when a probation resend lands outside the 10-minute window. A Forgejo replay is a new delivery with a new id, so only the semantic window coalesces one, inside its 10 minutes. The deduplicated answer stays a 2xx, now because a non-2xx would record a handled delivery as failed, count toward GitLab disabling the hook and make Azure resend it, where it said a storm of resends. **`REQ-TRIGGER-AUTHOR-GATE` CORRECTED**: an indeterminate GitLab lookup is a 503 that waits for a hand resend, where it said GitLab redelivered it. **`REQ-REPLICA-RUNS` CORRECTED and AMENDED**, its last acceptance case. AMENDED: a failure enqueueing replica *k* answers 503 with `1..k-1` queued and an `enqueue_failed` line that adds the new fields `queued: k-1` and `replicas: n` (an unreplicated line is unchanged). CORRECTED: what that leaves is stated per forge: *k-1* jobs while nobody sends the delivery again, *n* after a GitHub or GitLab hand redelivery or Azure's resend, and after a Forgejo replay *n* inside the 10-minute window and *k-1+n* after it; nothing compensates, because removing `1..k-1` needs the Valkey that just failed. Where it said the redelivery converges on exactly *n*, assuming one. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, the Connections warnings: a forge with a `lookup-failed` or `enqueue-failed` count above 0 in 24 UTC hours warns that the receiver answered 503 that many times ("at least" over an incomplete read), that the forge does not resend them (Azure DevOps for about 3 minutes, then on probation up to 7 more times over about 36 hours while it sends no new events), and where to send them again, linked to that forge's doc; it counts answers, so a later successful redelivery does not lower it. **Code evidence**: receiver/src/receiver.mjs -> fanout, answerEnqueueFailed; admin/src/console/panels/connections.mjs -> receiverWarnings, RESEND_ADVICE; receiver/test/forge-resend-claims.test.mjs -> CLAIMS. |
 | 2026-11-04 (#807) | `REQ-SPEND-CAPS-MULTI-WINDOW` UNCHANGED, checked: the windows, their caps, the reservation and its enforcement are as before; only which run records the Spend page sets against today's counter moved (`DES-COST-FOLD-BY-SCAN`). `REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked: (e)'s Spend clause still holds as written, settled money from run records, the held part from live reservations, never counter minus records, and counter differences named separately; which records are today's is the fold's rule. **Code evidence**: admin/src/insights-assembly.mjs -> spendSummaryOf; admin/test/insights-views.test.mjs. |
 | 2026-11-04 (#808) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED and CORRECTED**, the audit page's filters. AMENDED: the entry names the `role` filter, which #766 added without it: one of the roles a row is written with, exactly the roles of `INT-CONSOLE-AUDIT-LOG`'s list, with `none` (a row written without a session: a failed sign-in, a refused link or request, a rate-limit row, a sign-out with no session to end) shown as "Role: none (no session)", where the filter offered `anonymous`, the name of that row's actor and no row's role, so filtering by role for failed sign-ins found nothing. CORRECTED: the quoted `seq` refusal is the code's, "seq must not be combined with who, role, action, outcome or q: it opens its row's own page, unfiltered", where it lacked `role`. The search, its bounds, damaged entries under every filter and refusals by the parameter's name UNCHANGED, checked. **Code evidence**: admin/src/console/audit-view.mjs -> AUDIT_ACTOR_ROLES, parseAuditQuery; admin/src/console/panels/audit.mjs -> auditFilter, ROLE_WORDS; admin/test/console-server.test.mjs; admin/test/console-panels.test.mjs. |
 | 2026-11-03 (#804) | `service restart --drain` covers this host's queues. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, a dated sentence in its Scope and a dated acceptance paragraph: the drain pauses, waits for and resumes the queues this host's worker drains, the shared `pi-jobs` and, when the deployment declares `PI_WORKER_NAME` (this shell's, else the `.env`'s, as `pi-dispatch run` reads it), `pi-jobs@<name>`; a disagreement or a name the worker refuses exits 1 before any queue is opened; only the queues that were running are paused and only those are resumed, so a queue paused before the drain stays paused, and a job active on it is still waited for; each queue is opened only once the one before it answered; a timeout, a failed stop or start, or a Valkey failure after a pause names the queues this drain left paused and says that `pi-dispatch resume` resumes every queue, one paused before the drain included; it is not the fleet's pause. Where it said only `restart [--drain]`, and the code drained `pi-jobs` alone, so a named host could restart under a cron, chained or manual run from its own queue and abort it as `worker-abort`. Two residuals are stated: a name only this shell sets leaves that queue's meta key, so `pause`, `resume` and `status` list it afterwards; and the name read is the one the next worker will run, not the running worker's, so a `PI_WORKER_NAME` renamed or removed in the `.env` just before `--drain` leaves the old host queue unwatched, and a name the `--env-setup` script sets is invisible to it, as it is to `pi-dispatch run`. The `VALKEY_URL` clause (the drain reads it as the CLI verbs do) UNCHANGED, checked. **`REQ-MULTI-HOST-COORDINATION` UNCHANGED, checked**: the drain takes the identity by its rule as written (a declared name the worker refuses is refused, never repaired) and reads nothing from the registry. **Code evidence**: worker/src/service.mjs -> doRestart, runService (`queueFor`); worker/src/service-env.mjs -> cliDeploymentEnv (moved from cli.mjs, which re-exports it); worker/src/config.mjs -> workerName; worker/src/queue.mjs -> QUEUE, hostQueueName. |
