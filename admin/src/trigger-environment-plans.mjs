@@ -53,6 +53,7 @@ const plain = (value) => value !== null && typeof value === "object" && !Array.i
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const refuse = (refusal, status = 400, state = null) => ({ refusal, status, ...(state ? { state } : {}) });
 const denied = { refusal: "Only a person in the operator console can change what a trigger's jobs get.", status: 403 };
+const unreadableFile = () => refuse("The triggers file could not be read, so this change could not be judged. Nothing is written over a file this page cannot read.", 409, "changed");
 const authority = (ctx) => ctx?.surface === "console" && ctx?.role === "operator";
 const money = (micros) => `$${formatMicros(micros)}`;
 const sha = (text) => createHash("sha256").update(text).digest("hex");
@@ -452,7 +453,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       beforeText = fs.readFileSync(paths.triggersPath, "utf8");
       doc = JSON.parse(beforeText);
     } catch {
-      return refuse("The triggers file could not be read, so this change could not be judged. Nothing is written over a file this page cannot read.", 409, "changed");
+      return unreadableFile();
     }
     const newer = triggersFileVersionProblem(doc, { supported: triggersTables.supported });
     if (newer?.newer) return refuse(`${newer.message}, so nothing was written and nothing in it was lost; change it with that release.`, 409);
@@ -500,6 +501,8 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     } catch (error) {
       return refuse(`the change could not be checked (${typeof error?.code === "string" ? error.code : "error"}); nothing was changed`);
     }
+    // The read inside the funnel can fail where the one above did not, and says what the one above says.
+    if (result?.unreadable) return unreadableFile();
     if (result?.invalid) return refuse(`rejected: ${result.invalid}`, result.newer ? 409 : 400);
     const afterText = dry.files.get(paths.triggersPath);
     const afterDoc = JSON.parse(afterText);

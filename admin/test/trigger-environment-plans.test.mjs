@@ -93,6 +93,121 @@ test("a preview writes nothing, and leaves no lock or temporary file beside the 
   assert.notEqual(out.afterText, before);
 });
 
+// ---- a read that fails ------------------------------------------------------------------------------------------------
+
+/** A real fs whose `target`-th read, of any file, fails once: every read before and after it succeeds. Stats and listings count. */
+function failingOnce(target) {
+  let n = 0;
+  const failAt = (name) => (...args) => {
+    n += 1;
+    if (n === target) throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+    return nodeFs[name](...args);
+  };
+  return { ...nodeFs, readFileSync: failAt("readFileSync"), statSync: failAt("statSync"), lstatSync: failAt("lstatSync"), readdirSync: failAt("readdirSync"), existsSync: nodeFs.existsSync, get count() { return n; } };
+}
+/** One planner over one real file, its `fs` swapped per call: what the service holds is what the worker's writer gets. */
+function failingFixture() {
+  let current = nodeFs;
+  const fs = new Proxy({}, { get: (_, key) => current[key] });
+  const f = fixture({ deps: { fs } });
+  return { ...f, use: (next) => { current = next; } };
+}
+
+test("the Confirm: every read failing once leaves the file whole or exactly as previewed, and never empties it", async () => {
+  const f = failingFixture();
+  const before = f.read();
+  const planned = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
+  assert.ok(planned.plan);
+  const counting = failingOnce(0);
+  f.use(counting);
+  assert.deepEqual(await f.service.apply(planned, operator), { ok: true });
+  const reads = counting.count;
+  const landed = f.read();
+  assert.notEqual(landed, before);
+  assert.ok(reads >= 3, `the judgement, the dry run and the write each read the file (${reads} reads)`);
+  let refused = 0;
+  for (let target = 1; target <= reads; target += 1) {
+    nodeFs.writeFileSync(f.paths.triggersPath, before);
+    f.use(failingOnce(target));
+    const res = await f.service.apply(planned, operator);
+    const now = f.read();
+    if (res.ok === true) assert.equal(now, landed, `read ${target} failed, and the write that landed is the one previewed`);
+    else {
+      refused += 1;
+      assert.equal(typeof res.invalid, "string", `read ${target}: ${JSON.stringify(res)}`);
+      assert.equal(now, before, `read ${target} failed: refused, with every trigger still in the file`);
+    }
+    assert.deepEqual(nodeFs.readdirSync(f.dir).sort(), ["overlay", "settings.json", "triggers.json"], `read ${target}: no lock and no tmp file`);
+  }
+  assert.ok(refused >= 3, `the file's own reads each refuse (${refused})`);
+});
+
+test("the Confirm, its own write's read failing: the writer's words, nothing written", async () => {
+  const f = failingFixture();
+  const before = f.read();
+  const planned = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
+  // The apply's reads of the triggers file, the last but one of which is the writer's (the last is its re-check).
+  const seen = [];
+  f.use({ ...nodeFs, readFileSync: (p, ...rest) => { if (p === f.paths.triggersPath) seen.push(p); return nodeFs.readFileSync(p, ...rest); } });
+  assert.deepEqual(await f.service.apply(planned, operator), { ok: true });
+  nodeFs.writeFileSync(f.paths.triggersPath, before);
+  let n = 0;
+  f.use({ ...nodeFs, readFileSync: (p, ...rest) => {
+    if (p === f.paths.triggersPath && ++n === seen.length - 1) throw Object.assign(new Error("EIO"), { code: "EIO" });
+    return nodeFs.readFileSync(p, ...rest);
+  } });
+  const res = await f.service.apply(planned, operator);
+  assert.equal(res.invalid, `the triggers file ${f.paths.triggersPath} could not be read (EIO), so its triggers cannot be kept; nothing was written`);
+  assert.equal(f.read(), before);
+});
+
+test("the preview: every read failing once answers, and writes nothing; the file's own say this page could not read it", async () => {
+  const f = failingFixture();
+  const before = f.read();
+  const body = ask(f, { mcp: ["docs"] });
+  const counting = failingOnce(0);
+  f.use(counting);
+  assert.ok((await f.service.preview(body, operator)).plan);
+  const reads = counting.count;
+  const words = new Set();
+  for (let target = 1; target <= reads; target += 1) {
+    f.use(failingOnce(target));
+    // No throw: a throw here is a page saying its log has the reason, for a failed read that has one sentence.
+    const out = await f.service.preview(body, operator);
+    assert.ok(out.plan || out.refusal, `read ${target}: ${JSON.stringify(out)}`);
+    if (out.refusal) words.add(out.refusal);
+    assert.equal(f.read(), before, `read ${target}`);
+    assert.deepEqual(nodeFs.readdirSync(f.dir).sort(), ["overlay", "settings.json", "triggers.json"], `read ${target}`);
+  }
+  assert.ok(words.has("The triggers file could not be read, so this change could not be judged. Nothing is written over a file this page cannot read."), [...words].join(" | "));
+});
+
+test("the preview, the dry run's own read failing: the same sentence, by the same state, not a broken page", async () => {
+  const f = failingFixture();
+  const body = ask(f, { mcp: ["docs"] });
+  // Reads of the triggers file in a preview: the snapshot, the judgement's, then the funnel's and its re-check.
+  let n = 0;
+  f.use({ ...nodeFs, readFileSync: (p, ...rest) => {
+    if (p === f.paths.triggersPath && ++n === 3) throw Object.assign(new Error("EIO"), { code: "EIO" });
+    return nodeFs.readFileSync(p, ...rest);
+  } });
+  const out = await f.service.preview(body, operator);
+  assert.equal(n >= 3, true);
+  assert.deepEqual([out.refusal, out.status, out.state], ["The triggers file could not be read, so this change could not be judged. Nothing is written over a file this page cannot read.", 409, "changed"]);
+});
+
+for (const [what, method, code] of [["the tmp file's write", "writeFileSync", "ENOSPC"], ["the rename", "renameSync", "EIO"]]) {
+  test(`the Confirm, ${what} failing: it throws for the pipeline's own sentence, and the old file is whole`, async () => {
+    const f = failingFixture();
+    const before = f.read();
+    const planned = await f.service.preview(ask(f, { mcp: ["docs"] }), operator);
+    f.use({ ...nodeFs, [method]: () => { throw Object.assign(new Error(code), { code }); } });
+    await assert.rejects(f.service.apply(planned, operator), (e) => e.code === code);
+    assert.equal(f.read(), before);
+    assert.deepEqual(nodeFs.readdirSync(f.dir).sort(), ["overlay", "settings.json", "triggers.json"]);
+  });
+}
+
 // One row per field the card writes: what is sent, and the entry's `run` it must leave, every other byte of the file the same.
 const EVERY_FIELD = {
   kind: "github", flow: "fix", provider: "anthropic", model: "claude-haiku-4-5", steer: true, models: [HAIKU, SONNET], instructions: "Use pnpm", fallbackModels: [SONNET], mcp: ["docs", "forge"], packages: false, secrets: { T: "op://v/r" }, excludeTools: ["bash", "write"], maxCostUsd: "2.50", progress: true,

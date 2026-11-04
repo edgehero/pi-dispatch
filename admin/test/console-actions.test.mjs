@@ -188,7 +188,7 @@ after(async () => {
 });
 
 /** A running console over `paths` with the real tickets and audit log; `actionDeps` overrides go in `a`. */
-async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false } = {}) {
+async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false, fs = nodeFs } = {}) {
   const tokenFile = structuredClone(FILE);
   let t = T0;
   const now = () => t;
@@ -231,6 +231,7 @@ async function start({ paths, a = {}, readOnly = false, hub = null, realSessions
     readTokens: () => ({ file: tokenFile }),
     findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha256(presented)) ?? null,
     consumeLoginCode: () => ({ refusal: "unknown" }),
+    fs,
     writePauseWindows: RM.writePauseWindows,
     actionDeps: { rm: RM, plans: WP, paths, env: {}, urlShown: (u) => u.replace(/\/\/[^@]*@/, "//"), readJobsData, host: "console-test", ...a },
     pageDeps: { fleet: a.fleet ?? { snapshot: async () => ({}) } },
@@ -3437,6 +3438,38 @@ test("a role edit uses the actual ticket/audit/CAS pipeline, exact Undo and pers
   assert.equal((await readOnly.act("model-role-edit", params)).status, 403);
   assert.equal(previews, before);
 });
+
+// Only a missing file may start from nothing. One read fails, at the Confirm, and every read after it succeeds: the re-check
+// against the preview then passes, which is how a file went from every row to none on a green banner.
+for (const [name, body, field] of [
+  ["trigger-add", { trigger: { kind: "comment", phrase: "@pi", flow: "fix" } }, "triggersPath"],
+  ["trigger-edit", { index: 0, flow: "review" }, "triggersPath"],
+  ["trigger-delete", { index: 0 }, "triggersPath"],
+  ["pause-window-add", { scope: "acme/web", from: "22:00", to: "23:00" }, "pauseWindowsPath"],
+  ["pause-window-delete", { index: 0 }, "pauseWindowsPath"],
+]) {
+  test(`${name}: a read failing at the Confirm refuses in words that say so, with every row still in the file`, async () => {
+    const { paths } = deployment();
+    const target = paths[field];
+    const before = read(target);
+    let armed = false;
+    const fs = { ...nodeFs, readFileSync: (path, ...rest) => {
+      if (armed && path === target) {
+        armed = false;
+        throw Object.assign(new Error("EIO"), { code: "EIO" });
+      }
+      return nodeFs.readFileSync(path, ...rest);
+    } };
+    const c = await start({ paths, fs });
+    const p = await c.act(name, body);
+    assert.equal(p.status, 200, p.text);
+    armed = true;
+    const done = await c.confirm(name, p.json().ticket);
+    assert.equal(done.status, 409, done.text);
+    assert.match(done.json().error, /could not be read \(EIO\), so its (triggers|windows) cannot be kept; nothing was written/);
+    assert.equal(read(target), before);
+  });
+}
 
 test("a person's change to what a trigger's jobs get: the real pipeline, audited as trigger-edit by that person, with its Undo", async () => {
   const { paths } = deployment();

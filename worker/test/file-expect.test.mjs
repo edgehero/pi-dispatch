@@ -25,6 +25,17 @@ test("fileSnapshot: text, null for a missing file only, and a marker no file can
 	assert.match(expectRefusal(realFs, [{ path: p, text: "y\n" }]), /changed after this change was built from it .*nothing was written/);
 });
 
+test("a difference one side of which is a failed read says so, and never blames a session that did not run", () => {
+	const dir = tempDir("pd-eio-expect-");
+	const p = join(dir, "f.json");
+	realFs.writeFileSync(p, "x\n");
+	const failing = { readFileSync: () => { throw Object.assign(new Error("EIO"), { code: "EIO" }); } };
+	const sentence = `${p} could not be read (EIO) when this change was checked against it; nothing was written. Look again and retry`;
+	assert.equal(expectRefusal(failing, [{ path: p, text: "x\n" }]), sentence, "it fails now");
+	assert.equal(expectRefusal(realFs, [{ path: p, text: fileSnapshot(failing, p) }]), sentence, "it failed when the change was built");
+	assert.equal(expectRefusal(failing, [{ path: p, text: fileSnapshot(failing, p) }]), null, "no difference: the writer's own read is what refuses this file");
+});
+
 test("writeTriggers with expect: a file changed since the preview refuses inside the lock, writes nothing and leaves no tmp", () => {
 	const dir = tempDir("pd-642-trig-");
 	const path = join(dir, "triggers.json");
