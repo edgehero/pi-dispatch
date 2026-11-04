@@ -245,7 +245,7 @@ function getsWorld({ env = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-
   nodeFs.writeFileSync(paths.settingsFile, "{}");
   nodeFs.mkdirSync(paths.globalPiDir);
   nodeFs.writeFileSync(join(paths.globalPiDir, "mcp.json"), JSON.stringify(GETS_MCP_JSON));
-  const triggerEnvironment = createTriggerEnvironmentActions({ paths, env, now: () => NOW, deploymentDir: dir, readHosts: async () => ({ hosts: ["build3", "mini1", "mini2"].map((name) => ({ name, triggersVersion: "2", jobDataVersion: "2" })) }), readHostLoads: async () => getsHostLoads(), readRunRecords: async () => [LOADED_SAMPLES.everything()], readSkew: async () => ({ rows: [{ jobId: "gh-c9e1", queue: "pi-jobs", field: inLineLacks }], incomplete: false }) });
+  const triggerEnvironment = createTriggerEnvironmentActions({ paths, env, now: () => NOW, deploymentDir: dir, readHosts: async () => ({ hosts: ["build3", "mini1", "mini2"].map((name) => ({ name, triggersVersion: "2", jobDataVersion: "3" })) }), readHostLoads: async () => getsHostLoads(), readRunRecords: async () => [LOADED_SAMPLES.everything()], readSkew: async () => ({ rows: [{ jobId: "gh-c9e1", queue: "pi-jobs", field: inLineLacks }], incomplete: false }) });
   return { world: actionWorld({ triggerEnvironment }), body: (change) => ({ index: 2, pageDigest: triggerEntryDigest(GETS_ENTRY), ...change }) };
 }
 
