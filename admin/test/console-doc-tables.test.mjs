@@ -368,11 +368,10 @@ test("the sentences the docs quote of the preview are the real preview's, and no
   const planner = read("admin/src/trigger-environment-plans.mjs");
   assert.match(planner, /const SKEW_NAMED_MAX = 5;/);
   assert.match(consoleDoc, /named up to five/);
-  // A change that says the same to a job is none, in the two spellings the section names.
+  // A change that says the same to a job is none, in the spelling the section names.
   const held = plannerWorld({ run: { maxCostUsd: 1.5 } });
   assert.match((await held.preview({ maxCostUsd: "1.50" })).unchanged, /already says this/);
-  assert.match((await plannerWorld().preview({ packages: true })).unchanged, /already says this/);
-  assert.match(consoleDoc, /`1\.5` and `"1\.50"` are one cap, and `true` is what no `packages` key already means/);
+  assert.match(consoleDoc, /`1\.5` and `"1\.50"` are one cap/);
 });
 
 /** What the hosts published, written by the real builder and read back by the real reader beside what its host beats out. */

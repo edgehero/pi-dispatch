@@ -102,13 +102,14 @@ function dollars(value) {
 }
 
 /**
- * Whether two values of a key say one thing to a job. `null` is absent (the loader's rule for the model keys), `true` is what no
- * `packages` already means, and a cap is its amount: `1.5` and `"1.50"` are one cap, so neither is a change to say, to write or to
- * undo. A value that does not parse stays itself, for the funnel to refuse.
+ * Whether two values of a key say one thing. `null` is absent (the loader's rule for the model keys), and a cap is its amount: `1.5`
+ * and `"1.50"` are one cap, so neither is a change to say, to write or to undo. A value that does not parse stays itself, for the
+ * funnel to refuse. REJECTED: reading `run.packages: true` as no key. A job loads the staged packages under either, but `true` is an
+ * operator's word that this flow needs them, and doctor fails a host with none staged only on that word (`requiring`), so the page
+ * could not clear it, nor put it back.
  */
 function sameToAJob(key, before, after) {
   const read = (value) => {
-    if (key === "packages" && value === true) return undefined;
     if (key !== "maxCostUsd") return value;
     try {
       return parseUsdMicros(value, "run.maxCostUsd");
@@ -179,7 +180,9 @@ function changeWords(key, before, after, facts, effective = null) {
       return { line: d.reordered ? "MCP: the same servers in a new order." : moved.length > 0 ? `MCP: ${moved.join(", ")}.` : "MCP: the empty list the file held removed.", addedServers: d.added };
     }
     case "packages": {
-      return after !== false ? { line: "Staged packages: on.", widening: "This widens what its jobs load: every package staged on the host that runs them." } : { line: "Staged packages: off." };
+      if (after === false) return { line: "Staged packages: off." };
+      if (before === false) return { line: "Staged packages: on.", widening: "This widens what its jobs load: every package staged on the host that runs them." };
+      return { line: after === true ? "Staged packages: stay on, and the file now says this flow needs them, so doctor fails a host with none staged." : "Staged packages: stay on, and the file no longer says this flow needs them, so doctor stops failing a host with none staged." };
     }
     case "excludeTools": {
       const raw = delta(before, after);

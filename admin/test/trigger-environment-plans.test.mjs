@@ -1260,12 +1260,35 @@ test("two spellings of one amount are no change: nothing to say, write or undo, 
   assert.match((await bad.service.preview(ask(bad, { maxCostUsd: "heaps" }), operator)).refusal, /^rejected: /);
 });
 
-test("what no packages key already means is no change: the switch reads on either way", async () => {
-  for (const [run, change] of [[{}, { packages: true }], [{ packages: true }, { packages: null }], [{}, { packages: null }]]) {
+test("no packages key and `true` load the same packages and are not one file: each can be cleared and put back, and says what moves", async () => {
+  // What a job does, from the file each one leaves: the loader keeps `true` and `requiring` counts it, and nothing else reads it.
+  const stays = /^Staged packages: stay on, /;
+  const off = fixture({ run: { packages: true, resume: true } });
+  const before = off.read();
+  const cleared = await off.service.preview(ask(off, { packages: null }), operator);
+  assert.deepEqual(cleared.plan.changes, [{ key: "packages", line: "Staged packages: stay on, and the file no longer says this flow needs them, so doctor stops failing a host with none staged." }], "no widening: a job loads what it loaded");
+  assert.match(cleared.plan.changes[0].line, stays);
+  assert.deepEqual(await off.service.apply(cleared, operator), { ok: true });
+  assert.equal(Object.hasOwn(off.entry().run, "packages"), false, "the key is gone from the file");
+  assert.equal(parseTriggers(off.read(), off.paths.triggersPath)[1].run.packages, undefined);
+  // Its Undo writes it back, in its place, byte for byte.
+  const back = await off.service.preview(undoBody(cleared.plan.inverse), operator);
+  assert.ok(back.plan, JSON.stringify(back));
+  assert.deepEqual(back.plan.changes, [{ key: "packages", line: "Staged packages: stay on, and the file now says this flow needs them, so doctor fails a host with none staged." }]);
+  assert.deepEqual(await off.service.apply(back, operator), { ok: true });
+  assert.equal(off.read(), before);
+  // What the file already says, either way, is still no change.
+  for (const [run, change] of [[{ packages: true }, { packages: true }], [{}, { packages: null }], [{ packages: false }, { packages: false }]]) {
     const f = fixture({ run });
-    const before = f.read();
+    const held = f.read();
     assert.deepEqual(await f.service.preview(ask(f, change), operator), { unchanged: "trigger row 2 already says this." }, JSON.stringify([run, change]));
-    assert.equal(f.read(), before);
+    assert.equal(f.read(), held);
+  }
+  // A real switch: `false` to on widens by either way of saying it, and neither is what `true` to on says.
+  for (const on of [null, true]) {
+    const f = fixture({ run: { packages: false } });
+    const out = await f.service.preview(ask(f, { packages: on }), operator);
+    assert.deepEqual(out.plan.changes[0], { key: "packages", line: "Staged packages: on.", widening: "This widens what its jobs load: every package staged on the host that runs them." });
   }
 });
 
