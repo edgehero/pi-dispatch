@@ -17,6 +17,10 @@ construction, so they are not merely inactive, they are absent. An extension cal
 carries exclusions logs a `tools_excluded` line with the tool list read back from the live session,
 so the enforcement is visible in the job log, not taken on faith.
 
+A role child (the job's `subagent` tool, [model-roles.md](model-roles.md)) loses the same tools: it runs pi's own
+CLI, which reads no job setting, so the runner puts the list on the child's command line, and it beats the agent's
+own `tools`. An agent that lists `read` and `bash` gets `read` on a trigger that removes `bash`.
+
 ## What you can exclude
 
 The built-in tools of the pinned pi, and nothing else: `read`, `bash`, `powershell`, `edit`, `write`,
@@ -98,5 +102,6 @@ from a current tree and the refusal disappears.
 | Panel | the trigger drill-in's `excludeTools` row beside `image` (`full pinned tool set` when absent); no panel key, no AI tool |
 | Console | a chip per tool on the trigger's page, on meaning not removed, for a person only ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)) |
 | Chaining | inherited from the parent's job data, less MCP tool names; the request file cannot set or drop it |
+| Role children | the same list on each child's command line (`--exclude-tools`), which beats an agent's own `tools` |
 | Version floor | worker 2.0.0, receiver 2.0.0, admin 2.0.0, plus the 2.0.0 job image (`ghcr.io/edgehero/pi-job:2.0.0`) or one rebuilt from the same tree |
 | Related | [job image](job-image.md), [global pi overlay](global-pi-overlay.md), [workflows](workflows.md) |

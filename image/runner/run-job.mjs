@@ -423,7 +423,7 @@ async function main() {
 	const requestApproval = cfg.approvalGates.length ? createRequestApproval(cfg.approvalGates) : null;
 	// The tool a job armed with run.progress reports its phases with (issue #644), on the same terms.
 	const reportProgress = cfg.reportProgress ? createReportProgress() : null;
-	const roleSubagents = roleInputs ? createRoleSubagents(roleInputs) : null;
+	const roleSubagents = roleInputs ? createRoleSubagents(roleInputs, { excludeTools: cfg.excludeTools }) : null;
 	if (roleSubagents) roleExitFields = () => ({ modelRoles: roleSubagents.snapshot() });
 	// The run's inbox (issue #646, src/inbox.mjs), on the same terms. The acks are signed with the exit key and name the
 	// run by PI_JOB_ID, the exact string the worker verifies them against (its container name for this job: the worker's

@@ -106,7 +106,8 @@ The `subagent` tool accepts one of these forms:
 
 Parallel batches allow at most four tasks; chains allow at most sixteen. The complete batch's agent
 names and models are checked before any child starts. A chain stops on a failed result. Children use
-the existing parent model policy, token accounting and dollar guards. This does not enable pi's
+the existing parent model policy, token accounting and dollar guards, and they lose the tools the trigger's
+`run.excludeTools` removes, whatever the agent's own `tools` say ([exclude-tools.md](exclude-tools.md)). This does not enable pi's
 experimental virtual-model routing or add the inline subagent tool recursively to child sessions.
 
 An unknown agent, unknown role or off-list model returns a named tool error before child startup;

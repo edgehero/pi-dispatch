@@ -166,6 +166,32 @@ test("child failure and excessive stdout return errors and clean the temporary p
 });
 
 
+test("a child's command line carries the job's exclusions as one flag, before the task, and a job with none adds no flag", async () => {
+	const argsOf = async (call) => {
+		let seen;
+		await runRoleChild({ agent, task: "find", model: "test/small", cwd: "/workspace", ...call }, { spawnChild: (_command, args) => {
+			seen = args;
+			const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => {};
+			queueMicrotask(() => child.emit("close", 0));
+			return child;
+		} });
+		return seen;
+	};
+	assert.ok(!(await argsOf({})).includes("--exclude-tools"), "no list, no flag: pi reads an empty one as a list");
+	assert.ok(!(await argsOf({ excludeTools: [] })).includes("--exclude-tools"));
+	const args = await argsOf({ excludeTools: ["bash", "lint_run"] });
+	assert.equal(args[args.indexOf("--exclude-tools") + 1], "bash,lint_run");
+	assert.ok(args.indexOf("--exclude-tools") < args.indexOf("--"), "after `--` it would be a message");
+	assert.equal(args.filter((arg) => arg === "--exclude-tools").length, 1, "pi's flag is last-wins, so a second would replace the first");
+});
+
+test("the tool hands a child the job's exclusions, each time, and takes none from the call", async () => {
+	const calls = [];
+	const { tool } = toolFor({ excludeTools: ["bash"], runChild: async (call) => { calls.push(call); return { text: "found", exitCode: 0 }; } });
+	await tool.execute("id", { agent: "scout", task: "find it" }, undefined, undefined, context);
+	assert.deepEqual(calls[0].excludeTools, ["bash"]);
+});
+
 test("the pinned CLI keeps leading @ task text literal instead of reading an attached file", async () => {
 	const { parseArgs } = await import(new URL("./cli/args.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
 	let captured;
