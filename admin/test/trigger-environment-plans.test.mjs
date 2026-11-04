@@ -524,8 +524,8 @@ test("a cap that clears the floor and not a short task previews, with a warning 
   assert.ok(out.summary.includes("anthropic/claude-opus-5-5 clears this $2.62144 job cap only for the smallest first call: a short task's needs $2.654295, so most jobs that call it would be refused before they spend. Choose another model, or a job cap of at least $2.654295; a longer task needs more."), out.summary.join("\n"));
   assert.deepEqual(await f.service.apply(out, operator), { ok: true }, "a warning, not a refusal: the person has read it");
   // Under a deployment's cap no value here clears it, and the warning says so instead of offering one.
-  const held = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5" }, settings: { maxCostUsd: "2.63" } });
-  const said = await held.service.preview(ask(held, { flow: "review", model: "claude-opus-5-5", provider: "anthropic" }), operator);
+  const held = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "2.63" } });
+  const said = await held.service.preview(ask(held, { model: "claude-opus-5-5" }), operator);
   assert.ok(said.summary.includes("anthropic/claude-opus-5-5 clears this $2.63 job cap only for the smallest first call: a short task's needs $2.654295, so most jobs that call it would be refused before they spend. A trigger can only lower the deployment's job cap: choose another model. The deployment's own cap belongs to its settings, not to this page."), said.summary.join("\n"));
   // A listed model that only just fits is said too, and one that fits is not.
   const listed = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } });
@@ -829,7 +829,6 @@ const WORDS = [
   ["packages off", { resume: true }, { packages: false }, ["Staged packages: off."]],
   ["packages back on by null", { packages: false }, { packages: null }, ["Staged packages: on.", "This widens what its jobs load: every package staged on the host that runs them."]],
   ["packages back on by true", { packages: false }, { packages: true }, ["Staged packages: on.", "This widens what its jobs load: every package staged on the host that runs them."]],
-  ["packages true where the default said so", { resume: true }, { packages: true }, ["Staged packages: stay on; only what the file says changes."]],
   ["a tool off", { resume: true }, { excludeTools: ["bash"] }, ["Tools: bash off."]],
   ["a tool back on", { excludeTools: ["bash", "write"] }, { excludeTools: ["write"] }, ["Tools: bash on.", "This widens what its jobs can do: bash back on."]],
   ["every removal gone", { excludeTools: ["bash"] }, { excludeTools: null }, ["Tools: bash on.", "This widens what its jobs can do: bash back on."]],
@@ -846,6 +845,60 @@ for (const [what, run, change, want] of WORDS) {
     for (const line of out.summary) assert.doesNotMatch(line, /->|→|=>/);
   });
 }
+
+test("a key held as null reads as absent, in the loader's rule, so no sentence quotes it and deleting it is no change", async () => {
+  for (const [held, change] of [[{ model: null }, { model: null }], [{ provider: null }, { provider: null }], [{ maxCostUsd: null }, { maxCostUsd: null }], [{ models: null }, { models: null }], [{ fallbackModels: null }, { fallbackModels: null }], [{ mcp: null }, { mcp: null }], [{ excludeTools: null }, { excludeTools: null }]]) {
+    const f = fixture({ run: held });
+    const before = f.read();
+    assert.deepEqual(await f.service.preview(ask(f, change), operator), { unchanged: "trigger row 2 already says this." }, JSON.stringify(held));
+    assert.equal(f.read(), before, "and writes nothing");
+  }
+  for (const [held, change, line] of [
+    [{ maxCostUsd: null }, { maxCostUsd: "1" }, "Job cap: $1.00, where this trigger set none."],
+    [{ model: null }, { model: "claude-sonnet-5-5" }, "Model: the deployment's to claude-sonnet-5-5."],
+    [{ provider: null }, { provider: "anthropic" }, "Provider: the deployment's to anthropic."],
+    [{ models: null }, { models: [HAIKU] }, `Allowed models: ${HAIKU}, where this trigger listed none.`],
+    [{ models: [HAIKU], fallbackModels: null }, { fallbackModels: [HAIKU] }, `Fallback models: ${HAIKU}, where this trigger listed none.`],
+    [{ mcp: null }, { mcp: ["docs"] }, "MCP: docs on."],
+    [{ excludeTools: null }, { excludeTools: ["bash"] }, "Tools: bash off."],
+  ]) {
+    const f = fixture({ run: held });
+    const out = await f.service.preview(ask(f, change), operator);
+    assert.ok(out.plan, JSON.stringify(out));
+    assert.equal(out.plan.changes[0].line, line);
+    assert.doesNotMatch(out.summary.join("\n"), /\bnull\b/, JSON.stringify(held));
+  }
+});
+
+test("two spellings of one amount are no change: nothing to say, write or undo, and the file keeps the one it had", async () => {
+  for (const [held, sent] of [[1.5, "1.50"], ["1.50", 1.5], ["2", "2.00"], [2, "2"]]) {
+    const f = fixture({ run: { maxCostUsd: held } });
+    const before = f.read();
+    assert.deepEqual(await f.service.preview(ask(f, { maxCostUsd: sent }), operator), { unchanged: "trigger row 2 already says this." }, JSON.stringify([held, sent]));
+    assert.equal(f.read(), before);
+  }
+  const f = fixture({ run: { maxCostUsd: 1.5 } });
+  const out = await write(f, { maxCostUsd: "1.50", packages: false });
+  assert.deepEqual(out.plan.changes.map((change) => change.key), ["packages"]);
+  assert.equal(f.entry().run.maxCostUsd, 1.5, "beside a real change, the same amount is still not written");
+  assert.deepEqual(Object.keys(out.plan.inverse.body).sort(), ["index", "packages", "pageDigest"]);
+  // A different amount is a change, and a bad one is the funnel's.
+  const g = fixture({ run: { maxCostUsd: 1.5 } });
+  assert.equal((await g.service.preview(ask(g, { maxCostUsd: "1.51" }), operator)).plan.changes[0].line, "Job cap: $1.50 to $1.51.");
+  assert.match((await refusal(g, { maxCostUsd: "lots" })).refusal, /^rejected: /);
+  // Two values neither of which parses are not one amount: the funnel names what is wrong, and no sentence says it is fine.
+  const bad = fixture({ doc: { triggers: [cron, comment({ maxCostUsd: "lots" })] } });
+  assert.match((await bad.service.preview(ask(bad, { maxCostUsd: "heaps" }), operator)).refusal, /^rejected: /);
+});
+
+test("what no packages key already means is no change: the switch reads on either way", async () => {
+  for (const [run, change] of [[{}, { packages: true }], [{ packages: true }, { packages: null }], [{}, { packages: null }]]) {
+    const f = fixture({ run });
+    const before = f.read();
+    assert.deepEqual(await f.service.preview(ask(f, change), operator), { unchanged: "trigger row 2 already says this." }, JSON.stringify([run, change]));
+    assert.equal(f.read(), before);
+  }
+});
 
 test("what a widening reads against: the job's cap and list, not the trigger's own", async () => {
   // Above the deployment's it would refuse; here the cap moves within it, and it runs under the deployment's when removed.

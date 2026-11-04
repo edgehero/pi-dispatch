@@ -96,6 +96,24 @@ function dollars(value) {
   }
 }
 
+/**
+ * Whether two values of a key say one thing to a job. `null` is absent (the loader's rule for the model keys), `true` is what no
+ * `packages` already means, and a cap is its amount: `1.5` and `"1.50"` are one cap, so neither is a change to say, to write or to
+ * undo. A value that does not parse stays itself, for the funnel to refuse.
+ */
+function sameToAJob(key, before, after) {
+  const read = (value) => {
+    if (key === "packages" && value === true) return undefined;
+    if (key !== "maxCostUsd") return value;
+    try {
+      return parseUsdMicros(value, "run.maxCostUsd");
+    } catch {
+      return value;
+    }
+  };
+  return same(read(before) ?? null, read(after) ?? null);
+}
+
 /** What a list gained and lost, and whether only its order moved. */
 function delta(before, after) {
   const was = Array.isArray(before) ? before : [];
@@ -114,15 +132,14 @@ function delta(before, after) {
 function changeWords(key, before, after, facts) {
   const removedKey = after === undefined;
   const addedKey = before === undefined;
-  const has = (value) => value !== undefined && value !== null;
   switch (key) {
     case "flow":
-      return { line: `Flow: ${has(before) ? before : "none"} to ${after}.` };
+      return { line: `Flow: ${before ?? "none"} to ${after}.` };
     case "provider":
     case "model": {
       const word = key === "provider" ? "Provider" : "Model";
       if (removedKey) return { line: `${word}: ${before} removed, so its jobs use the deployment's.` };
-      return { line: `${word}: ${has(before) ? before : "the deployment's"} to ${after}.` };
+      return { line: `${word}: ${before ?? "the deployment's"} to ${after}.` };
     }
     case "maxCostUsd": {
       const was = facts.capOf(before);
@@ -154,10 +171,7 @@ function changeWords(key, before, after, facts) {
       return { line: d.reordered ? "MCP: the same servers in a new order." : `MCP: ${[...d.added.map((name) => `${name} on`), ...d.removed.map((name) => `${name} off`)].join(", ")}.`, addedServers: d.added };
     }
     case "packages": {
-      const was = before !== false;
-      const will = after !== false;
-      if (was === will) return { line: `Staged packages: stay ${will ? "on" : "off"}; only what the file says changes.` };
-      return { line: `Staged packages: ${will ? "on" : "off"}.`, ...(will ? { widening: "This widens what its jobs load: every package staged on the host that runs them." } : {}) };
+      return after !== false ? { line: "Staged packages: on.", widening: "This widens what its jobs load: every package staged on the host that runs them." } : { line: "Staged packages: off." };
     }
     case "excludeTools": {
       const d = delta(before, after);
@@ -428,8 +442,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const problem = shapeProblem(body);
     if (problem) return refuse(problem);
     if (!paths?.triggersPath) return refuse("This console does not name its triggers file.", 409);
-    const sent = CARD_FIELDS.filter((key) => body[key] !== undefined);
-    if (sent.length === 0) return refuse("Send at least one field to change.");
+    if (!CARD_FIELDS.some((key) => body[key] !== undefined)) return refuse("Send at least one field to change.");
     const expect = writeInputs({ paths: [paths.triggersPath], fs });
     let doc;
     let beforeText;
@@ -449,6 +462,8 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     if (triggerEntryDigest(entry) !== body.pageDigest) return refuse("This trigger changed since the page drew it, so nothing was changed. Reload the page and make the change again.", 409, "changed");
 
     // What the trigger edit's own body judges: a value, by the loader's words. The rest, and a null, this planner applies.
+    const sent = CARD_FIELDS.filter((key) => body[key] !== undefined && !sameToAJob(key, entry.run[key], body[key]));
+    if (sent.length === 0) return { unchanged: `${row} already says this.` };
     const coreKeys = ["flow", "provider", "model"].filter((key) => typeof body[key] === "string");
     const restKeys = sent.filter((key) => !coreKeys.includes(key));
     const withRest = (run) => {
@@ -536,7 +551,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     }
     const undo = inverse !== null ? `Put ${row} back as it was` : heldNull !== undefined ? `Edit ${row} back by hand: the file held run.${heldNull} as null, which this page cannot write` : `Edit ${row} back by hand: this page would refuse what it said before. ${backRefused}`;
 
-    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key], nextEntry.run[key], facts) }));
+    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key] ?? undefined, nextEntry.run[key] ?? undefined, facts) }));
     if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
       const before = policyOf({ entry, text: afterText, facts });
       const after = policyOf({ entry: nextEntry, text: afterText, facts });
