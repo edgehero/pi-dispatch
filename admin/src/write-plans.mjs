@@ -54,11 +54,11 @@ import {
 import { escapeInterpreted } from "./panel.mjs";
 import { sizeBits } from "./render.mjs";
 import { fieldNamed } from "./words.mjs";
-import { backendRefusal, blessedBackends, changeText, confirmOf, optStr, planTriggerEditCore, progressRefusal, progressRun, recoverVenueRefusal, refusalOf, rowName, triggerList } from "./trigger-edit-core.mjs";
+import { backendRefusal, blessedBackends, changeText, confirmOf, optStr, planTriggerEditCore, progressRefusal, progressRun, recoverVenueRefusal, refusalOf, rowName, triggerAt } from "./trigger-edit-core.mjs";
 
 // Every planner here and every caller of this module reads these where they always were. `planTriggerEditCore` is not among
 // them: `tool-actions.mjs` hands a tool this module's every export.
-export { backendRefusal, blessedBackends, changeText, optStr, recoverVenueRefusal, rowName, triggerList };
+export { backendRefusal, blessedBackends, changeText, optStr, recoverVenueRefusal, rowName };
 
 // ---- small field readers, shared by the dialogs and the tools ----
 
@@ -443,10 +443,8 @@ export function planTriggerEdit({ params, paths, env, tool = "dispatch_trigger_e
  */
 export function planTriggerDelete({ index, paths, surface = "tool", fs = nodeFs }) {
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
-  const { list, refusal: unlisted } = triggerList(paths, fs);
+  const { cur, refusal: unlisted } = triggerAt(paths, index, surface, fs);
   if (unlisted) return { refusal: unlisted };
-  const cur = list.find((t) => t.index === index); // the file's position, `planTriggerEditCore`'s rule and for its reason
-  if (!cur) return { refusal: surface === "console" ? `no trigger at row ${index + 1} (have ${list.length})` : `no trigger at index ${index} (have ${list.length})` };
   const row = rowName("trigger", index, surface);
   return {
     plan: {

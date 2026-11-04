@@ -570,8 +570,13 @@ test("an edit and a delete name the row the file holds at that position, where a
   const edit = plans.planTriggerEdit({ params: { index: 1, flow: "next" }, paths, env: {} });
   assert.deepEqual(edit.plan.changes, [["flow", "one", "next"]]);
   assert.match(plans.planTriggerDelete({ index: 1, paths, surface: "console" }).plan.summary.join(" "), /flow: one/);
-  assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "next" }, paths, env: {} }).refusal, "no trigger at index 0 (have 2)", "the entry it cannot use is no row to change");
-  assert.equal(plans.planTriggerDelete({ index: 0, paths, surface: "console" }).refusal, "no trigger at row 1 (have 2)");
+  // The entry it cannot use is no row to change, and no count: the file holds three here, and the list two.
+  assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "next" }, paths, env: {} }).refusal, "trigger #1 is not one this can change: the file's entry there is not a usable trigger; nothing was changed");
+  assert.equal(plans.planTriggerDelete({ index: 0, paths, surface: "console" }).refusal, "trigger row 1 is not one this can change: the file's entry there is not a usable trigger; nothing was changed");
+  // Past the end of the file, what the file holds.
+  assert.equal(plans.planTriggerDelete({ index: 9, paths, surface: "console" }).refusal, "no trigger at row 10 (have 3)");
+  assert.equal(plans.planTriggerEdit({ params: { index: 9, flow: "next" }, paths, env: {} }).refusal, "no trigger at index 9 (have 3)");
+  assert.ok(!/have 2/.test(JSON.stringify([plans.planTriggerDelete({ index: 0, paths, surface: "console" }), plans.planTriggerDelete({ index: 9, paths, surface: "console" })])), "two rows is the list's count, and false of the file");
 });
 
 test("every refusal sentence in write-plans.mjs is asserted word for word, and a scan finds each one in the table", () => {
@@ -609,6 +614,7 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["no trigger field", plans.planTriggerEdit({ params: { index: 0 }, paths, env }).refusal, "send at least one trigger field to edit"],
       ["blank flow", plans.planTriggerEdit({ params: { index: 0, flow: "  " }, paths, env }).refusal, "flow must be non-empty"],
       ["trigger delete index", plans.planTriggerDelete({ index: 9, paths }).refusal, "no trigger at index 9 (have 1)"],
+      ["an entry it cannot use", plans.planTriggerDelete({ index: 0, paths, fs: { readFileSync: () => JSON.stringify({ triggers: [null] }) } }).refusal, "trigger #1 is not one this can change: the file's entry there is not a usable trigger; nothing was changed"],
       ["triggers file unread", plans.planTriggerDelete({ index: 0, paths, fs: { readFileSync: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } } }).refusal, "the triggers file could not be read (EACCES); nothing was changed"],
       ["triggers file broken", plans.planTriggerDelete({ index: 0, paths, fs: { readFileSync: () => "{ not json" } }).refusal, "the triggers file does not load (triggers file is not valid JSON); nothing was changed"],
       ["tool unknown key", plans.planSettingChange({ key: "nope", value: "1", paths, env }).refusal, `unknown key 'nope'. valid keys: ${keys}`],

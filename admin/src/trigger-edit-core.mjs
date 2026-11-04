@@ -150,11 +150,28 @@ export function progressRefusal(params, onType, at, path, command = undefined) {
  * `{ refusal }` for a file that is there and gives no list. Counting those as no rows said "no trigger at row 3 (have 0)" of
  * a file holding 13.
  */
-export function triggerList(paths, fs = nodeFs) {
+function triggerList(paths, fs = nodeFs) {
   const t = readTriggers({ triggersPath: paths.triggersPath, fs });
   if (t?.unreadable) return { refusal: `the triggers file could not be read (${t.unreadable}); nothing was changed` };
   if (t?.invalid) return { refusal: `the triggers file does not load (${t.invalid}); nothing was changed` };
-  return { list: Array.isArray(t?.triggers) ? t.triggers : [] };
+  const list = Array.isArray(t?.triggers) ? t.triggers : [];
+  return { list, count: Number.isSafeInteger(t?.count) ? t.count : list.length };
+}
+
+/**
+ * The trigger at the file's `index`, which is what a plan's `mutate` writes to and what a page's row number counts: `{ cur }` or
+ * `{ refusal }`. Never by its place in the display list, which drops an entry it cannot use, so that place can name the row after the
+ * one being changed. A position the file holds with such an entry is no missing row, and a count of the list beside it would be false
+ * of the file. REJECTED: letting a delete take that row, which finding it by that place did by accident while naming the row below it: a
+ * person who has not read the entry should not remove it on a sentence about another.
+ */
+export function triggerAt(paths, index, surface, fs = nodeFs) {
+  const { list, count, refusal } = triggerList(paths, fs);
+  if (refusal) return { refusal };
+  const cur = list.find((t) => t.index === index);
+  if (cur) return { cur };
+  if (index < count) return { refusal: `${rowName("trigger", index, surface)} is not one this can change: the file's entry there is not a usable trigger; nothing was changed` };
+  return { refusal: surface === "console" ? `no trigger at row ${index + 1} (have ${count})` : `no trigger at index ${index} (have ${count})` };
 }
 
 /**
@@ -169,12 +186,8 @@ export function triggerList(paths, fs = nodeFs) {
  */
 export function planTriggerEditCore({ params, paths, env, surface, fs = nodeFs, baseRun = null }) {
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
-  const { list, refusal: unlisted } = triggerList(paths, fs);
+  const { cur, refusal: unlisted } = triggerAt(paths, params.index, surface, fs);
   if (unlisted) return { refusal: unlisted };
-  // By the file's position, which is what `mutate` writes to and what a page's row number counts. The display list drops an
-  // unusable entry, so its own position can name the row after the one being changed.
-  const cur = list.find((t) => t.index === params.index);
-  if (!cur) return { refusal: surface === "console" ? `no trigger at row ${params.index + 1} (have ${list.length})` : `no trigger at index ${params.index} (have ${list.length})` };
   const row = rowName("trigger", params.index, surface);
   const flow = params.flow === undefined ? undefined : String(params.flow).trim();
   if (flow === "") return { refusal: "flow must be non-empty" };

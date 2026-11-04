@@ -312,6 +312,7 @@ const CORE_NOT_IN_THE_TABLE = Object.freeze({
   "flow must be non-empty": "unreachable",
   // An entry the display list drops gets no digest, so no form, and the digest is compared first: the same entry reads the same to both.
   "no trigger at row": "unreachable",
+  "${rowName(\"trigger\", index, surface)} is not one this can change": "unreachable",
   // A tool's words, for its zero-based index and its call that sends no field. The form's own empty change is "already says this".
   "no trigger at index": "a tool's",
   "send at least one trigger field to edit": "a tool's",
