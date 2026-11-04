@@ -1,4 +1,5 @@
 import { answerRuleConfigDigest } from "@edgehero/pi-dispatch/answerer";
+import { FORGE_KINDS } from "@edgehero/pi-dispatch/forges";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -74,6 +75,17 @@ test("completed drafts remain bound to the current configured HTTPS forge base f
       assert.ok(!problem.includes(scenario.source), "The refusal never includes a private forge URL");
     }
   }
+});
+
+test("a draft's source is a forge exactly when FORGE_KINDS names it, and the source check holds no copy of the list", async () => {
+  for (const kind of ["local", "bitbucket", "constructor", "GitHub"]) {
+    const { service } = setup({ source: { kind } });
+    assert.equal((await service.read({ role: "operator", runId: fixture.privateDraft.meta.runId })).privateDraftProblem, "source-unavailable", kind);
+  }
+  // Two forge names side by side are a copy of the list, which a forge added to FORGES would not reach: every draft of
+  // that forge would read as source-unavailable.
+  const names = FORGE_KINDS.join("|");
+  assert.doesNotMatch(readFileSync(new URL("../src/answerer-data.mjs", import.meta.url), "utf8"), new RegExp(`\\b(?:${names})\\b\\W+\\b(?:${names})\\b`));
 });
 
 test("standing adoption previews exact scoped text and refuses stale, duplicate, unscoped or nonperson writes", () => {

@@ -3,6 +3,7 @@ import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
 import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { loadGitLabAuth, loadForgejoAuth, loadAzureAuth } from "@edgehero/pi-dispatch/config";
+import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { makeAnswerDraftStore, answerStandingSource, answerRuleConfigDigest, answerApiRoot } from "@edgehero/pi-dispatch/answerer";
@@ -46,7 +47,7 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
       const rule = document.answerRules.find(rule => rule.id === draft.meta.ruleId);
       if (!input || input.runId !== runId || input.ruleId !== draft.meta.ruleId || !rule || rule.mode !== "draft" || !rule.projects.includes(input.project) || input.configDigest !== answerRuleConfigDigest(document, rule)) return { draft: null, problem: "config-changed" };
       if (!rule.categories.includes(draft.meta.category) || !Number.isFinite(draft.meta.confidence) || !Number.isFinite(draft.meta.answerableConfidence) || draft.meta.confidence < rule.confidence || draft.meta.answerableConfidence < rule.confidence || !Array.isArray(draft.sources) || !draft.sources.length) return { draft: null, problem: "output-invalid" };
-      if (!input.source || typeof input.source.repo !== "string" || !["github", "gitlab", "forgejo", "azure"].includes(input.source.kind) || input.source.target?.type !== "issue") return { draft: null, problem: "source-unavailable" };
+      if (!input.source || typeof input.source.repo !== "string" || !isForgeKind(input.source.kind) || input.source.target?.type !== "issue") return { draft: null, problem: "source-unavailable" };
       // A completed body belongs to the instance that supplied its sources. Same repository/issue ids on
       // a newly configured host cannot authorize prefill or send; the worker separately rechecks the account.
       const root = configuredApiRoot(input.source.kind);

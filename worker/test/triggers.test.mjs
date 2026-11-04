@@ -3,11 +3,11 @@ import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS } from "../src/config.mjs";
-import { FORGE_HOST_VARS, MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "../src/forges.mjs";
+import { FORGE_HOST_VARS, FORGE_KINDS, MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS, forgeSpec } from "../src/forges.mjs";
 import { PROVIDER_STEERING_VARS } from "../src/provider-steering.mjs";
 import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "../src/reserved-env.mjs";
 import { DEFER_ID_RE } from "../src/defer-reasons.mjs";
-import { CRON_ID_MAX, PR_ACTIONS, parseTriggers } from "../src/triggers.mjs";
+import { CRON_ID_MAX, ISSUE_ACTIONS, PR_ACTIONS, forgeActions, parseTriggers, parseTriggersDocument } from "../src/triggers.mjs";
 
 // parseTriggers is pure over the file TEXT -- no fs, no bullmq. `parse` serializes triggers and feeds
 // them through with a stable path for the "names the path" assertions.
@@ -1315,6 +1315,59 @@ test("an azure issue trigger refuses as NOT YET COVERED -- the payload subset ca
 		() => parse([{ on: { type: "issue", action: ["closed"] }, run: { kind: "azure", flow: "deploy" } }]),
 		(e) => isConfigError(e) && e.message.includes("azure") && e.message.includes("not yet covered"),
 	);
+});
+
+// Issue #810: the per-forge tables are looked up by `run.kind`, which is a known forge by then, so the only way to reach
+// a missing row is a forge added to FORGES without one. The walk holds every forge to a row or a refusal of its own.
+test("every forge kind has a pull_request action list, an issue one or the issue refusal that names it, and a standing answer prefix", () => {
+	for (const kind of FORGE_KINDS) {
+		assert.ok(Object.hasOwn(PR_ACTIONS, kind), `${kind}: PR_ACTIONS has no row, so no pull_request trigger of this forge can load`);
+		for (const action of PR_ACTIONS[kind]) {
+			// The forge's label action needs a label to wait for; every other action is refused one.
+			const on = { type: "pull_request", action: [action], ...(action === forgeSpec(kind).prLabelAction ? { any: ["pi:review"] } : {}) };
+			assert.deepEqual(parse([{ on, run: { kind, flow: "review" } }])[0].on.action, [action], `${kind} pull_request ${action}`);
+		}
+		if (Object.hasOwn(ISSUE_ACTIONS, kind)) {
+			for (const action of ISSUE_ACTIONS[kind]) assert.deepEqual(parse([{ on: { type: "issue", action: [action] }, run: { kind, flow: "deploy" } }])[0].on.action, [action], `${kind} issue ${action}`);
+		} else {
+			// Azure's sentence says why its issue type is not covered. The missing-row refusal does not count: it says only
+			// that a row is missing, which is the gap this walk exists to catch.
+			assert.throws(
+				() => parse([{ on: { type: "issue", action: ["closed"] }, run: { kind, flow: "deploy" } }]),
+				(e) => isConfigError(e) && e.message.includes(`for ${kind}`) && !e.message.includes("no action list"),
+				`${kind}: an issue trigger needs an ISSUE_ACTIONS row or a refusal that names the forge and says why`,
+			);
+		}
+		const standing = { id: "tests", title: "Test command", text: "Run npm test.", projects: ["web"], repo: `${kind}:acme/web` };
+		assert.deepEqual(parseTriggersDocument(JSON.stringify({ triggers: [], standingAnswers: [standing] }), PATH).standingAnswers, [standing], `${kind}: a standing answer of this forge loads`);
+	}
+});
+
+test("a forge missing from an action table refuses the entry, naming the trigger, its type and the forge, never a bare TypeError", () => {
+	const missing = (at, type, kind) => (e) => isConfigError(e) && e.message === `${at}: a ${type} trigger has no action list for ${kind}, so this build cannot check its on.action: ${PATH}`;
+	for (const kind of FORGE_KINDS) {
+		for (const type of ["pull_request", "issue"]) assert.throws(() => forgeActions({}, kind, "trigger at index 2", type, PATH), missing("trigger at index 2", type, kind), `${type} ${kind}`);
+	}
+	assert.equal(forgeActions(PR_ACTIONS, "github", "trigger at index 0", "pull_request", PATH), PR_ACTIONS.github);
+	// An own row only: a name the prototype answers, or an array that coerces to a forge's key, is no row.
+	for (const kind of ["constructor", "toString", "__proto__", ["github"]]) assert.throws(() => forgeActions(PR_ACTIONS, kind, "trigger at index 0", "pull_request", PATH), isConfigError, String(kind));
+	// Both normalizers ask through it. No shipped table lacks a row, so one is taken out for the call and put back in
+	// its place, since other tests read the tables in order.
+	const entries = [
+		[PR_ACTIONS, "forgejo", { on: { type: "pull_request", action: ["opened"] }, run: { kind: "forgejo", flow: "review" } }],
+		[ISSUE_ACTIONS, "gitlab", { on: { type: "issue", action: ["close"] }, run: { kind: "gitlab", flow: "deploy" } }],
+	];
+	for (const [table, kind, entry] of entries) {
+		const rows = Object.entries(table);
+		delete table[kind];
+		try {
+			assert.throws(() => parse([CRON, entry]), missing("trigger at index 1", entry.on.type, kind), `${entry.on.type} ${kind}`);
+		} finally {
+			for (const [name] of rows) delete table[name];
+			for (const [name, row] of rows) table[name] = row;
+		}
+		assert.deepEqual(Object.entries(table), rows, "the table is as it was");
+	}
 });
 
 test("a close-only pull_request rule loads on the three forges with a close word, gaining number and once", () => {

@@ -39,7 +39,9 @@ export function normalizeWatchOn(on, sources) {
 	on.fingerprint.forEach(field);
 	const match = on.match ?? {};
 	object(match, "match"); keys(match, ["severity", "labels"], "match");
-	if (match.severity !== undefined && (!Array.isArray(match.severity) || !match.severity.length || match.severity.length > 5 || match.severity.some(x => !WATCH_SEVERITIES.includes(x)))) fail("invalid match severity");
+	// Unique members bound it at WATCH_SEVERITIES.length; a count written as a number would refuse a rule naming every
+	// severity once the list grew past it.
+	if (match.severity !== undefined && (!Array.isArray(match.severity) || !match.severity.length || new Set(match.severity).size !== match.severity.length || match.severity.some(x => !WATCH_SEVERITIES.includes(x)))) fail("invalid match severity");
 	const labels = match.labels ?? {}; object(labels, "match labels");
 	if (Object.keys(labels).length > 16) fail("too many match labels");
 	for (const [key, values] of Object.entries(labels)) { field(key); if (!Array.isArray(values) || !values.length || values.length > 16 || values.some(x => typeof x !== "string" || Buffer.byteLength(x) > 256)) fail("invalid match label values"); }
@@ -78,7 +80,10 @@ export function normalizeWatchRule(on, sources) {
 export function normalizeWatchPullConfig(value) {
 	object(value, "pull");
 	const common = ["kind", "fields", "severity", "contains", "intervalSeconds"];
-	const extra = { file: ["path"], journald: ["unit"], loki: ["url", "query", "secretEnv"] }[value.kind];
+	const kinds = { file: ["path"], journald: ["unit"], loki: ["url", "query", "secretEnv"] };
+	// An own key, of a string: a plain index finds `constructor` or `__proto__` on the prototype (a bare TypeError a line
+	// later), and ["file"] coerces to "file" and skips the path check below, as ["loki"] skips the HTTPS one.
+	const extra = typeof value.kind === "string" && Object.hasOwn(kinds, value.kind) ? kinds[value.kind] : null;
 	if (!extra) fail("pull kind must be file, journald or loki");
 	keys(value, [...common, ...extra], "pull");
 	object(value.fields, "pull fields");

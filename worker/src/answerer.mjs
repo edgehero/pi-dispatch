@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { FORGE_KINDS } from "./forges.mjs";
 import { PROJECT_ID_RE } from "./project-id.mjs";
 import { SKILL_NAME_RE } from "./flow-gate.mjs";
 import { parseUsdMicros } from "./money.mjs";
@@ -15,6 +16,9 @@ const only = (v, keys) => object(v) && Object.keys(v).every(k => keys.includes(k
 const bounded = (v, n) => typeof v === "string" && Buffer.byteLength(v) <= n && !/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(v);
 const projects = v => Array.isArray(v) && v.length > 0 && v.length <= 100 && new Set(v).size === v.length && v.every(p => typeof p === "string" && PROJECT_ID_RE.test(p));
 const model = v => typeof v === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./:@~+-]{1,128}$/.test(v);
+/** A standing answer's `<forge>:<owner>/<name>`, its forge prefix built from FORGE_KINDS: a copy of the list here would
+ * refuse the whole triggers file for a standing answer of a forge added to FORGES. */
+const STANDING_REPO_RE = new RegExp(`^(?:${FORGE_KINDS.join("|")}):[A-Za-z0-9_.-]+\\/[A-Za-z0-9_./-]+$`);
 /** Captured forge identity is an HTTPS instance base; host constructors append their own API prefix.
  * Keep the pathname: stripping /api/v4 or /api/v1 would equate different reviewed instance bases. */
 export function answerApiRoot(value) {
@@ -54,7 +58,7 @@ export function validateStandingAnswers(value) {
 	if (!Array.isArray(value) || value.length > 1000) fail("standingAnswers must be an array of at most 1000 reviewed answers");
 	const ids = new Set();
 	for (const a of value) {
-		if (!only(a, ["id", "title", "text", "projects", "repo", "adoptedAt"]) || !ANSWER_ID_RE.test(a.id ?? "") || ids.has(a.id) || !bounded(a.title, 160) || !a.title.trim() || !bounded(a.text, 8192) || !a.text.trim() || !projects(a.projects) || typeof a.repo !== "string" || !/^(?:github|gitlab|forgejo|azure):[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+$/.test(a.repo)) fail("standingAnswers requires unique ids, title, bounded text, project scope and a forge-qualified repository");
+		if (!only(a, ["id", "title", "text", "projects", "repo", "adoptedAt"]) || !ANSWER_ID_RE.test(a.id ?? "") || ids.has(a.id) || !bounded(a.title, 160) || !a.title.trim() || !bounded(a.text, 8192) || !a.text.trim() || !projects(a.projects) || typeof a.repo !== "string" || !STANDING_REPO_RE.test(a.repo)) fail("standingAnswers requires unique ids, title, bounded text, project scope and a forge-qualified repository");
 		if (a.adoptedAt !== undefined && (typeof a.adoptedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(a.adoptedAt) || !Number.isFinite(Date.parse(a.adoptedAt)) || new Date(a.adoptedAt).toISOString() !== a.adoptedAt)) fail("standingAnswers adoptedAt must be a canonical UTC instant");
 		if (/[\r\n\t]/.test(a.title)) fail("standingAnswers title must fit on one line");
 		ids.add(a.id);
