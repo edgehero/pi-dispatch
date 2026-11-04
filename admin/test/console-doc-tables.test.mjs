@@ -227,7 +227,6 @@ const MODEL_RUN = Object.freeze({ provider: "anthropic", model: "claude-haiku-4-
  * what a page cannot send (a list that is not a list, a blank where the form sends null) refuses too, and that is the planner's test.
  */
 const REFUSALS = Object.freeze({
-  "Send at least one field to change": () => plannerWorld().preview({}),
   "This trigger changed since the page drew it": () => plannerWorld().preview({ packages: false }, { pageDigest: "a".repeat(64) }),
   "There is no trigger at row": () => plannerWorld().preview({ packages: false }, { index: 9 }),
   "The triggers file could not be read": () => { const w = plannerWorld(); const pageDigest = w.digest(); nodeFs.writeFileSync(w.paths.triggersPath, "{ not json"); return w.preview({ packages: false }, { pageDigest }); },
@@ -237,18 +236,35 @@ const REFUSALS = Object.freeze({
   "rejected:": () => plannerWorld().preview({ models: ["nope"] }),
   "A trigger's job cap can only lower the deployment's": () => plannerWorld({ settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ maxCostUsd: "7" }),
   "needs at least": () => plannerWorld({ run: MODEL_RUN, settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ model: "claude-opus-5-5", maxCostUsd: "2" }),
-  "is a model this deployment does not know": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-typo" }),
-  "declares fallback models the allowed list does not name": () => plannerWorld({ run: { provider: "anthropic", model: "claude-fable-5" } }).preview({ models: ["anthropic/claude-fable-5"] }),
-  "is not on the models this trigger's jobs may call": () => plannerWorld({ run: MODEL_RUN, env: { PI_ALLOWED_MODELS: SONNET } }).preview({ maxCostUsd: "5" }),
-  "Every fallback must be on the allowed list": () => plannerWorld({ run: MODEL_RUN }).preview({ fallbackModels: [SONNET] }),
   "could not be resolved": () => plannerWorld({ doc: { modelRoles: { default: { cheap: HAIKU } }, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", model: "role:cheap" } }] } }).preview({ model: "role:nobody" }),
   "has no verified local cost bound": () => plannerWorld({ settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ provider: "radius", model: "balanced" }),
   "travels as max_completion_tokens": () => plannerWorld({ overlay: LOCAL_MODEL, settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ provider: "ollama", model: "local" }),
+  "On every host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["linear"], excludeTools: ["codemode", "tool_search", "mcp__linear__*", "read_mcp_resource"] }),
   "The deployment's settings file is invalid": () => plannerWorld({ settings: "{ not json" }).preview({ maxCostUsd: "1" }),
   "PI_ALLOWED_MODELS is invalid": () => plannerWorld({ env: { PI_ALLOWED_MODELS: "not a list!" } }).preview({ maxCostUsd: "1" }),
   "The deployment's job cap could not be read": () => plannerWorld({ env: { PI_MAX_COST_USD: "lots" } }).preview({ maxCostUsd: "1" }),
   "The trigger's project or role policy could not be read": () => plannerWorld({ projects: "{ not json" }).preview({ maxCostUsd: "1" }),
-  "The overlay's models.json could not be read just now": () => plannerWorld({ overlay: LOCAL_MODEL, failing: "models.json" }).preview({ maxCostUsd: "1" }),
+});
+
+/**
+ * What the table of warnings quotes, each met through the real planner, which then still plans: a warning leaves the Confirm. A row can quote
+ * several kinds of one sentence, so one meeting stands for the quote, and the scan below holds every warning the planner can say to a quote.
+ */
+const WARNINGS = Object.freeze({
+  "is a model this deployment does not know": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-typo" }),
+  "declares fallback models the allowed list does not name": () => plannerWorld({ run: { provider: "anthropic", model: "claude-fable-5" } }).preview({ models: ["anthropic/claude-fable-5"] }),
+  "is not on the models they may call here": () => plannerWorld({ run: { provider: "anthropic", model: "claude-sonnet-5-5" }, env: { PI_ALLOWED_MODELS: SONNET } }).preview({ model: "claude-haiku-4-5" }),
+  "every fallback must be on the allowed list": () => plannerWorld({ run: MODEL_RUN }).preview({ fallbackModels: [SONNET] }),
+  "this trigger's model could not be resolved": () => { const projects = JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }, { id: "api", members: ["github:acme/api"] }] }); return plannerWorld({ projects, doc: { modelRoles: { web: { oai: "openai/gpt-4o" } }, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", model: "role:oai" } }] } }).preview({ flow: "review", maxCostUsd: "5" }); },
+  "would be refused as": () => plannerWorld({ env: { PI_FORWARD_ENV: "" } }).preview({ mcp: ["linear"] }),
+  "On this host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["docs"], excludeTools: ["codemode"] }),
+  "clears this": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-opus-5-5", maxCostUsd: "2.62144" }),
+  "could not be bounded here": () => plannerWorld({ overlay: { providers: { free: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "x", models: [{ id: "m" }] } } }, run: MODEL_RUN, env: { PI_MAX_COST_USD: "5" } }).preview({ provider: "free", model: "m" }),
+  "could not be read just now": () => plannerWorld({ run: MODEL_RUN, overlay: LOCAL_MODEL, failing: "models.json" }).preview({ model: "claude-sonnet-5-5" }),
+  "the worker's pickup check could not": () => plannerWorld({ deps: { readHostEnv: () => { throw new Error("no"); } } }).preview({ mcp: ["linear"] }),
+  "still reach a server could not be judged here": () => plannerWorld({ run: { mcp: ["linear"] }, failing: "mcp.json" }).preview({ excludeTools: ["write"] }),
+  "its line in the .env could not be read": () => plannerWorld({ deps: { readHostEnv: (keys) => ({ env: { PI_EGRESS: "0", PI_FORWARD_ENV: "LINEAR_API_KEY" }, unread: keys.includes("LINEAR_API_KEY") ? ["LINEAR_API_KEY"] : [] }) } }).preview({ mcp: ["linear"] }),
+  "The model catalog could not judge": () => plannerWorld({ run: MODEL_RUN, deps: { checkModelsKnown: () => ({}) } }).preview({ model: "claude-sonnet-5-5" }),
 });
 
 /**
@@ -262,8 +278,6 @@ const NOT_IN_THE_TABLE = Object.freeze({
   "This trigger's keys changed since the edit being undone": "unreachable",
   // `readOverlay` turns a failed read into `invalid`, which has its own row.
   "The deployment's settings could not be read": "unreachable",
-  // The catalog's check answers every shape it is asked, and only a fake says nothing.
-  "The model catalog did not judge this change": "unreachable",
   // A belt around the dry run, whose file system holds every write: a read that fails comes back as one of the table's two rows.
   "the change could not be checked": "unreachable",
   "The live hosts could not be read": "version",
@@ -271,6 +285,7 @@ const NOT_IN_THE_TABLE = Object.freeze({
 });
 
 const REFUSAL_HEADER = "| It says | Why | What to do |";
+const PICKUP_TAIL = "This reads this host's .env and overlay; what the worker's own service environment sets cannot be seen from here.";
 
 test("docs/console.md's table of what the trigger's preview refuses: each quote is the start of what the real planner says, in the table's order", async () => {
   const rows = tableRows(read("docs/console.md"), REFUSAL_HEADER);
@@ -284,6 +299,32 @@ test("docs/console.md's table of what the trigger's preview refuses: each quote 
     assert.ok(typeof out?.refusal === "string", `${quote}: ${JSON.stringify(out?.summary ?? out)}`);
     assert.ok(out.refusal.includes(quote), `${quote}: the planner says ${JSON.stringify(out.refusal)}`);
   }
+});
+
+test("docs/console.md's table of what the preview warns of: each quote is in what the real planner says, and a warning leaves the Confirm", async () => {
+  const rows = tableRows(read("docs/console.md"), REFUSAL_HEADER);
+  const [, warned] = (() => { const doc = read("docs/console.md"); const parts = doc.split("**What it warns of.**"); return [parts[0], tableRows(parts[1], REFUSAL_HEADER)]; })();
+  assert.deepEqual(warned.flatMap(([says]) => spans(says)), Object.keys(WARNINGS), "the table's quotes, and the scenarios that meet them");
+  assert.ok(rows.length > 0);
+  for (const [says, why, todo] of warned) assert.ok(says && why && todo, `${says} says why and what to do`);
+  for (const [quote, meet] of Object.entries(WARNINGS)) {
+    const out = await meet();
+    assert.ok(out?.plan, `${quote}: a warning still plans: ${JSON.stringify(out)}`);
+    assert.ok(out.summary.some((line) => line.includes(quote)), `${quote}: the preview says ${JSON.stringify(out.summary)}`);
+  }
+  assert.ok(flat(read("docs/console.md")).includes(`"${PICKUP_TAIL}"`), "the line a pickup warning stands beside");
+  const tailed = await WARNINGS["would be refused as"]();
+  assert.equal(tailed.plan.warnings.at(-1), PICKUP_TAIL);
+});
+
+test("every warning the planner can say is in that table: a new sentence has to choose", async () => {
+  const source = read("admin/src/trigger-environment-plans.mjs");
+  // A template inside a template ends the match early, so the one sentence that opens with a choice of words is held by its own words below.
+  const literals = [...source.matchAll(/(?:\bwarnings\.(?:push|add)\((?:\[|failedRead \? )?|\bcould\(|\bnotRead = |\bonHost\("[^"]+", )(?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => literal !== "" && !literal.includes("sentence") && !literal.startsWith("${unresolved.project"));
+  assert.ok(source.includes("this trigger's model could not be resolved (${unresolved.reason})"));
+  assert.ok(literals.length >= 14, `the scan finds the planner's sentences (${literals.length})`);
+  const quotes = Object.keys(WARNINGS);
+  for (const literal of literals) assert.ok(quotes.some((quote) => literal.includes(quote)), `no row for: ${literal}`);
 });
 
 test("every refusal the planner can say is in that table or named here with why: a new sentence has to choose", async () => {
@@ -346,19 +387,26 @@ test("docs/console.md's table of the hosts' pills: a row for every word the pill
   const rows = tableRows(read("docs/console.md"), "| The pill says | When |");
   const a = { packages: [{ name: "pi-lint", version: "1.4.2" }] };
   const b = { packages: [{ name: "pi-test", version: "0.9.0" }] };
-  assert.deepEqual(rows.map(([word]) => word), ["`the same`", "`the only host`", "`the only one known`", "`also …; without …; its flow …`", "`unknown`"]);
-  assert.deepEqual(await pillWords({ one: a, two: a }), { one: "the same", two: "the same" });
+  assert.deepEqual(rows.map(([word]) => word), ["`the same`", "`the only host`", "`the only one known`", "`also …; without …; … defined differently; its flow …; runs …`", "`no answer for its flow`, `its flow …`, `its image unknown`", `\`${W.pillOrder}\``, "`unknown`"]);
+  const flows = (tier) => [{ trigger: 2, flow: "fix", tier, package: null, repo: "unknown" }];
+  const same = { ...a, flows: flows("repository") };
+  assert.deepEqual(await pillWords({ one: same, two: same }), { one: "the same", two: "the same" });
   assert.deepEqual(await pillWords({ one: a }), { one: "the only host" });
   assert.deepEqual(await pillWords({ one: a, silent: null }), { one: "the only one known", silent: "unknown" });
-  const flows = (tier) => [{ trigger: 2, flow: "fix", tier, package: null, repo: "unknown" }];
   const differ = await pillWords({ one: { ...a, flows: flows("repository") }, two: { ...b, flows: flows("overlay") } });
   assert.match(differ.one, /^also pi-lint 1\.4\.2; without pi-test 0\.9\.0; its flow from the repository$/);
+  assert.deepEqual(await pillWords({ one: same, two: a }), { one: "its flow from the repository", two: "no answer for its flow" });
+  const order = await pillWords({ one: { flows: flows("repository"), packages: [...a.packages, ...b.packages] }, two: { flows: flows("repository"), packages: [...b.packages, ...a.packages] } });
+  assert.deepEqual(order, { one: W.pillOrder, two: W.pillOrder });
   // The card has no other word: a pill's word is one of these literals, or the differences joined.
   const source = read("admin/src/trigger-gets-view.mjs");
   const body = source.slice(source.indexOf("function hostPills("), source.indexOf("/** How old each host's answer is"));
   const words = [...body.matchAll(/word: (?:rows\.length === 1 \? )?"([^"]+)"(?: : "([^"]+)")?/g)].flatMap((m) => m.slice(1).filter(Boolean));
-  assert.deepEqual([...words].sort(), rows.map(([word]) => word.slice(1, -1)).filter((word) => !word.includes("…")).sort(), "the literal words a pill takes are the table's");
-  assert.match(body, /word: parts\.join\("; "\)/, "and one where it says the differences");
+  assert.deepEqual([...words].sort(), ["the only host", "the only one known", "the same", "unknown"], "the literal words a pill takes are the table's");
+  for (const word of words) assert.ok(rows.some(([cell]) => cell.includes(`\`${word}\``)), word);
+  assert.match(body, /word: \[\.\.\.differs, \.\.\.unsaid\]\.join\("; "\)/, "and one where it says the differences");
+  assert.match(body, /word: unsaid\.join\("; "\)/, "and one where it says what it cannot");
+  for (const word of ['"no answer for its flow"', '"its image unknown"', "`its flow ${mine.flow}`"]) assert.ok(body.includes(word), word);
 });
 
 test("docs/console.md's table of the card's rows: its rows are the page's, in order, and each names exactly the controls that row draws", async () => {
@@ -415,7 +463,14 @@ test("docs/console.md's table of who reads what: each row is what the real page 
   const newer = await trigger({ fs: fileOnlyFs(JSON.stringify({ version: 999, triggers: JSON.parse(getsFile()).triggers })) });
   expectRow("A triggers file a newer release wrote, or one the page cannot read", newer, { form: false, card: false });
   assert.ok(textOf(panelOf(newer.whole, "p-trigger-on")).includes("The triggers file does not load; run pi-dispatch doctor for the reason."), "What starts it says why");
-  assert.equal(rows.size, 8, "and no state the table names goes untried");
+  // Valkey down: the snapshot read fails, and the file it does not need is read all the same.
+  const fs = fileOnlyFs(getsFile());
+  const downParsed = parsePageQuery("trigger", "index=2");
+  const downData = await loadPageData("trigger", downParsed.query, { now: () => PLANNER_NOW, env: {}, paths: { triggersPath: TRIGGER_GETS_PATH }, fs, fleet: { snapshot: async () => { throw new Error("down"); } }, hostLoads: async () => null, triggerEditor: () => ({}) }, { role: "operator" });
+  const downWhole = String((await renderPage("trigger", { query: downParsed.query, session: { name: "someone", role: "operator" }, data: downData })).html);
+  expectRow("A page whose Valkey read failed", { whole: downWhole, card: panelOf(downWhole, "p-trigger-gets"), how: panelOf(downWhole, "p-trigger-gets-how") }, { form: true, word: `${W.fileSays} ${W.historyUnread}` });
+  assert.ok(textOf(panelOf(downWhole, "p-trigger-change")).includes(straight(W.othersUnread)), "Before you change it says what is unread");
+  assert.equal(rows.size, 9, "and no state the table names goes untried");
 });
 
 test("docs/console.md says what a tool cannot reach, and names the fields a tool may not set and how many it keeps", () => {

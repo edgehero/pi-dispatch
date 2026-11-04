@@ -240,7 +240,7 @@ updates by itself ([updates](docs/console.md#updates)).
 **A trigger:** what starts it, what it has cost and [what its jobs get](#what-a-job-gets) on each machine, which you can change right there.
 A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
-![What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, the staged packages, the outside systems with linear switched on, pi's own tools with bash off, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard](docs/images/console/console-trigger.png?v=2026-11-04-800)
+![What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, the staged packages, the outside systems with linear switched on, pi's own tools with bash off, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard](docs/images/console/console-trigger.png?v=2026-11-04-800b)
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
 unless you set it up otherwise, so reaching it from a phone takes a private tunnel
@@ -307,7 +307,7 @@ jobs more than they had. It says when the change takes effect and which jobs alr
 machine, and says how to undo it. One
 **Confirm** writes it, the console records who did, and **Undo** puts it back, or says what to edit by hand where it cannot.
 
-![The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, one job in line that would be refused, what a machine without linear does, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button](docs/images/console/console-trigger-change.png?v=2026-11-04-800)
+![The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a job in line that a machine reading the file would refuse, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button](docs/images/console/console-trigger-change.png?v=2026-11-04-800b)
 
 **It refuses what would only fail later, for free.** A job cap can only lower the one you set for everything, and a model too expensive for one
 call under the cap is refused here, with the amount a short task needs, not after a job has started. If the page is out of date, it asks you
