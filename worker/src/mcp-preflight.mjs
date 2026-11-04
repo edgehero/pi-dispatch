@@ -35,7 +35,7 @@
  */
 import { allowlistEntryFor, egressRefusalFor, packageRunnerHosts } from "./egress-allowlist.mjs";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, forgeMcpEgressUrl, forgeMcpServer, gitlabUrlProblem, jobMcpDocument, MCP_SERVER_NAME_RE, readOverlayMcp } from "./mcp-config.mjs";
-import { MCP_SERVERS_MAX, mcpServerToolPattern } from "./triggers.mjs";
+import { MCP_SERVERS_MAX, RESERVED_ENV_NAMES, mcpServerToolPattern } from "./triggers.mjs";
 
 /**
  * Errnos a read of the overlay may pass on a second try. Restated from model-catalog.mjs `OVERLAY_TRANSIENT_READ_CODES`
@@ -76,6 +76,23 @@ export function jobProviders(job, { defaultProvider = null, allowedModels = null
 	const list = Array.isArray(job?.models) ? job.models : Array.isArray(allowedModels) ? allowedModels : null;
 	const listed = list === null ? everyProvider : list.map((ref) => (typeof ref === "string" ? ref.split("/")[0] : ref?.provider));
 	return [...new Set([job?.provider ?? defaultProvider, ...listed].filter((p) => typeof p === "string" && p !== ""))];
+}
+
+/**
+ * The names a job's own container holds for itself, which no server may be handed: what `makeMcpCheck`'s `reserved` answers,
+ * one function for the worker's pickup and the console's preview. `readModels` reads the overlay models.json. A read that may
+ * pass on a retry is thrown to the check, which retries the job; any other failure adds no overlay names, and the model gates,
+ * which run first, refuse every job such a file breaks.
+ */
+export function reservedJobNames(job, { readModels, defaultProvider = null, allowedModels = null, everyProvider = [], candidatesOf = () => [] }) {
+	let overlayModels = null;
+	try {
+		overlayModels = readModels();
+	} catch (error) {
+		if (MCP_TRANSIENT_READ_CODES.has(error?.code)) throw error;
+	}
+	const providers = jobProviders(job, { defaultProvider, allowedModels, everyProvider });
+	return new Set([...RESERVED_ENV_NAMES, ...providerKeyNames({ providers, candidatesOf, overlayModels })]);
 }
 
 /**

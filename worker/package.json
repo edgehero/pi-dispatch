@@ -118,6 +118,7 @@
     "./live-probes": "./src/live-probes.mjs",
     "./triggers": "./src/triggers.mjs",
     "./mcp-config": "./src/mcp-config.mjs",
+    "./mcp-preflight": "./src/mcp-preflight.mjs",
     "./triggers-file": "./src/triggers-file.mjs",
     "./packages": "./src/packages.mjs",
     "./updates": "./src/updates.mjs",

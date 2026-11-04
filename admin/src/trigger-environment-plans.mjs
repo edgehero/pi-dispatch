@@ -22,21 +22,27 @@
  */
 import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
-import { basename } from "node:path";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
+import { basename, join } from "node:path";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom, forwardEnvList } from "@edgehero/pi-dispatch/config";
+import { egressArmed } from "@edgehero/pi-dispatch/egress";
+import { parseAllowlist } from "@edgehero/pi-dispatch/egress-allowlist";
 import { jobDataVersionFor } from "@edgehero/pi-dispatch/job-data-version";
 import { FIRST_CALL_SHORT_TASK_BYTES, boundModelOf, builtinChatModels as catalogChatModels, builtinModel as catalogModel, checkModelsKnown as catalogCheck, firstCallBoundMicros, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
+import { readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
+import { makeMcpCheck, reservedJobNames } from "@edgehero/pi-dispatch/mcp-preflight";
 import { readOverlayModels } from "@edgehero/pi-dispatch/model-endpoints";
 import { RADIUS_COST_CAP_FIX, RADIUS_COST_CAP_LABEL } from "@edgehero/pi-dispatch/model-observation";
-import { modelOnList, splitModelEntry } from "@edgehero/pi-dispatch/model-ref";
+import { failoverListUsable, modelOnList, splitModelEntry } from "@edgehero/pi-dispatch/model-ref";
 import { effectiveCostCapMicros, formatMicros, optionalUsdMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { outputCapView, outputUnboundable } from "@edgehero/pi-dispatch/output-cap";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
+import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 import { readOverlay } from "@edgehero/pi-dispatch/runtime-settings";
 import { parseTriggers, parseTriggersDocument, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
 import { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
 import { dryRunFs } from "./console/actions.mjs";
 import { collectModelPolicies } from "./models-view.mjs";
+import { PROVIDER_KEY_NAMES, providerKeyNames } from "./provider-key-names.mjs";
 import { writeInputs } from "./read-model.mjs";
 import { CARD_FIELDS, TRIGGER_ENVIRONMENT_EDIT_FIELDS, planTriggerEditCore, rowName, triggerEntryDigest } from "./trigger-edit-core.mjs";
 import { fieldNamed } from "./words.mjs";
@@ -52,6 +58,8 @@ const STRING_FIELDS = Object.freeze(["provider", "model"]);
 const LIST_FIELDS = Object.freeze(["models", "fallbackModels", "mcp", "excludeTools"]);
 /** The fields whose change is judged against what a job may call and spend (`judgeModels`), and only then. */
 const MODEL_OR_CAP = Object.freeze(["provider", "model", "models", "fallbackModels", "maxCostUsd"]);
+/** The fields a pickup's MCP check reads, besides the run's servers themselves: an edit of any of them is judged by it. */
+const MCP_CHECK_FIELDS = Object.freeze(["mcp", "excludeTools", "provider", "model", "models"]);
 /** The most job ids a preview names. A queue can hold 200 in view, and the sentence stays a sentence. */
 const SKEW_NAMED_MAX = 5;
 /** How long the preview waits for the jobs in line, `SNAPSHOT_TIMEOUT_MS`'s bound and for its reason. */
@@ -233,9 +241,98 @@ function modelFacts({ paths, env, fs }) {
   return { deployment, deploymentCap, ceiling, envList, capOf: (value) => effectiveCostCapMicros(value, deployment.maxCostUsd) };
 }
 
-export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, builtinModel = catalogModel, builtinChatModels = catalogChatModels, readHosts = async () => ({ unreachable: "the live hosts are not wired" }), readHostLoads = async () => ({ hosts: [] }), readSkew = async () => ({ rows: [], incomplete: true }), versionTables = {}, jobsReadMs = JOBS_READ_MS } = {}) {
+export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, builtinModel = catalogModel, builtinChatModels = catalogChatModels, readHosts = async () => ({ unreachable: "the live hosts are not wired" }), readHostLoads = async () => ({ hosts: [] }), readSkew = async () => ({ rows: [], incomplete: true }), versionTables = {}, jobsReadMs = JOBS_READ_MS, deploymentDir = ".", readHostEnv = () => env, readEndpoints = () => [] } = {}) {
   const triggersTables = versionTables.triggers ?? {};
   const jobDataTables = versionTables.jobData ?? {};
+
+  /** One judgement's read of the overlay models.json: at most once, and a read that failed is not asked again. */
+  const overlayReader = () => {
+    let overlayRead = false;
+    let overlay = null;
+    return () => {
+      if (!overlayRead) {
+        overlayRead = true;
+        overlay = readOverlayModels(paths.globalPiDir, { readFileSync: (...args) => fs.readFileSync(...args), lstatSync: (...args) => fs.lstatSync(...args) });
+      }
+      return overlay;
+    };
+  };
+
+  /** What a job of this entry resolves to under the file's role map and the projects, as the worker resolves it. */
+  function policyOf({ entry, text, facts }) {
+    let roles;
+    let projects;
+    try {
+      roles = parseTriggersDocument(text, paths.triggersPath, triggersTables).modelRoles;
+      projects = paths.projectsFile ? parseProjects(fs.readFileSync(paths.projectsFile, "utf8"), paths.projectsFile) : [];
+    } catch {
+      return refuse("The trigger's project or role policy could not be read; correct those files before changing its model or cap.", 409);
+    }
+    return { resolved: collectModelPolicies({ entries: [entry], modelRoles: roles, projects, deployment: facts.deployment, envList: facts.envList, resolveFolder: (path) => fs.realpathSync(path) }) };
+  }
+
+  /**
+   * The worker's own pickup check (`makeMcpCheck`), asked of the PROPOSED entry with what this host holds: its overlay, its
+   * `.env`, its egress allowlist and its endpoints. A copy of the check would drift from what refuses the job, and a sentence
+   * that says jobs connect while the next one is refused is the worst thing a Confirm can say. REJECTED: a line that warns and
+   * lets it through, since every job of the trigger on this host would then refuse in public on the forge.
+   */
+  function judgeMcp({ entry, index, text, facts }) {
+    let run;
+    try {
+      run = parseTriggers(text, paths.triggersPath, triggersTables)[index]?.run;
+    } catch {
+      return refuse("This trigger does not load as it stands, so the worker's pickup check could not be run. Nothing was written.", 409);
+    }
+    const policy = policyOf({ entry, text, facts });
+    if (policy.refusal) return policy;
+    const couldNot = refuse("This host's .env could not be read as the worker reads it, so the worker's pickup check could not be run. Nothing was written.", 409);
+    let check;
+    try {
+      const host = readHostEnv(["PI_FORWARD_ENV", "PI_EGRESS", "GITLAB_URL"]);
+      const egress = egressArmed(host);
+      const forwardEnv = forwardEnvList(host.PI_FORWARD_ENV, egress);
+      const readOverlayDoc = overlayReader();
+      check = makeMcpCheck({
+        globalPiDir: paths.globalPiDir,
+        forwardEnv,
+        hostEnv: readHostEnv(forwardEnv),
+        egress,
+        // The worker's is null where it serves no GitLab, and such a host refuses the job for that; this host cannot tell.
+        gitlabUrl: host.GITLAB_URL ?? "https://gitlab.com",
+        read: (dir) => readOverlayMcp(dir, { readFileSync: (...args) => fs.readFileSync(...args), lstatSync: (...args) => fs.lstatSync(...args) }),
+        reserved: (job) => reservedJobNames(job, { readModels: readOverlayDoc, defaultProvider: facts.deployment.provider, allowedModels: facts.envList, everyProvider: Object.keys(PROVIDER_KEY_NAMES), candidatesOf: providerKeyNames }),
+        allowlist: () => {
+          try {
+            return parseAllowlist(fs.readFileSync(join(deploymentDir, "egress-allowlist.conf"), "utf8"));
+          } catch (error) {
+            if (error?.code === "ENOENT") return [];
+            throw error;
+          }
+        },
+        endpoints: readEndpoints,
+      });
+    } catch {
+      return couldNot;
+    }
+    const jobs = policy.resolved.runs.length > 0 ? policy.resolved.runs : [{ provider: facts.deployment.provider, model: facts.deployment.model }];
+    for (const job of jobs) {
+      const list = job.models ?? facts.envList ?? null;
+      let answer;
+      try {
+        answer = check({ ...run, provider: job.provider, model: job.model, ...(list === null ? {} : { models: list }) });
+      } catch {
+        return couldNot;
+      }
+      if (answer.unavailable) return refuse("An overlay file the worker's pickup check reads could not be read just now, so this change could not be judged; try again.", 409);
+      if (answer.refused) {
+        // What to do is the reason's own line (`docs/reasons.md`). This one's way out is also not on this page, so it says where.
+        const elsewhere = answer.refused === "mcp-secret-unmapped" ? " `run.secrets` is set in the triggers file, not on this page, and a value only the worker's own service environment holds cannot be seen from here." : "";
+        return refuse(`On this host every job of this trigger would be refused as ${answer.refused}, before it spends. ${answer.name ?? "The list"}: ${answer.why}. ${explainReason(answer.refused).next ?? ""}${elsewhere}`);
+      }
+    }
+    return null;
+  }
 
   /**
    * What a job of this entry would call under the deployment's cap (issue #800): judged only when the edit sends a model field
@@ -256,24 +353,10 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       // so a value above reads as allowing more than it does, and above the env's it refuses the whole file at load.
       if (asked > facts.ceiling) return refuse(`A trigger's job cap can only lower the deployment's: ${money(asked)} is above its ${money(facts.ceiling)}. Set ${money(facts.ceiling)} or less here, or remove this trigger's cap to run under the deployment's. The deployment's own cap belongs to its settings, not to this page.`);
     }
-    let overlayRead = false;
-    let overlay = null;
-    const readOverlayDoc = () => {
-      if (!overlayRead) {
-        overlayRead = true;
-        overlay = readOverlayModels(paths.globalPiDir, { readFileSync: (...args) => fs.readFileSync(...args), lstatSync: (...args) => fs.lstatSync(...args) });
-      }
-      return overlay;
-    };
-    let roles;
-    let projects;
-    try {
-      roles = parseTriggersDocument(text, paths.triggersPath, triggersTables).modelRoles;
-      projects = paths.projectsFile ? parseProjects(fs.readFileSync(paths.projectsFile, "utf8"), paths.projectsFile) : [];
-    } catch {
-      return refuse("The trigger's project or role policy could not be read; correct those files before changing its model or cap.", 409);
-    }
-    const resolved = collectModelPolicies({ entries: [entry], modelRoles: roles, projects, deployment: facts.deployment, envList: facts.envList, resolveFolder: (path) => fs.realpathSync(path) });
+    const readOverlayDoc = overlayReader();
+    const policy = policyOf({ entry, text, facts });
+    if (policy.refusal) return policy;
+    const { resolved } = policy;
     if (resolved.checks.length > 0) return refuse(`This trigger's model could not be resolved (${resolved.checks[0].reason}): every job would be refused before it spends. Correct its model or its role.`);
     const unjudged = new Set();
     const thin = new Set();
@@ -289,7 +372,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       if (known?.ok !== true) return refuse("The model catalog did not judge this change; nothing was written.", 409);
       if (Array.isArray(list) && !modelOnList(list, main.provider, main.id)) return refuse(`${mainName} is not on the models this trigger's jobs may call, so every job would be refused as model-not-allowed. Add it to the list, or choose another model.`);
       const fallbacks = refsOf(job.fallbackModels);
-      const offList = fallbacks.find((ref) => !Array.isArray(list) || !modelOnList(list, ref.provider, ref.id));
+      const offList = fallbacks.find((ref) => !failoverListUsable({ models: list, fallbackModels: [`${ref.provider}/${ref.id}`] }));
       if (offList) return refuse(`Every fallback must be on the allowed list (run.models, or PI_ALLOWED_MODELS when the trigger has none), and ${offList.provider}/${offList.id} is not, so every job would be refused as model-failover-no-candidate.`);
       const cap = facts.capOf(job.maxCostUsd);
       if (cap === null) continue;
@@ -405,13 +488,28 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       unjudged = judged.unjudged;
       thin = judged.thin;
     }
+    // Only a change that reaches this check, so nobody is refused over a server they did not touch.
+    const reachesPickup = sent.some((key) => MCP_CHECK_FIELDS.includes(key));
+    if (reachesPickup && Array.isArray(nextEntry.run.mcp)) {
+      facts ??= modelFacts({ paths, env, fs });
+      if (facts.refusal) return facts;
+      const refused = judgeMcp({ entry: nextEntry, index: body.index, text: afterText, facts });
+      if (refused !== null) return refused;
+    }
 
     // Undo: the keys it touched, as the file held them. A key the file held as null is the one value `null` cannot say (it
     // means delete), and a trigger the same judgement would refuse today is one this page would refuse to put back, so each of
     // those is said by hand rather than offered as a button that refuses.
     const afterDigest = triggerEntryDigest(nextEntry);
     const heldNull = touched.find((key) => entry.run[key] === null);
-    const backRefused = heldNull === undefined && touched.some((key) => MODEL_OR_CAP.includes(key)) ? judgeModels({ entry, text: beforeText, facts }).refusal ?? null : null;
+    let backRefused = null;
+    if (heldNull === undefined) {
+      if (touched.some((key) => MODEL_OR_CAP.includes(key))) backRefused = judgeModels({ entry, text: beforeText, facts }).refusal ?? null;
+      if (backRefused === null && reachesPickup && Array.isArray(entry.run.mcp)) {
+        facts ??= modelFacts({ paths, env, fs });
+        backRefused = facts.refusal ?? judgeMcp({ entry, index: body.index, text: beforeText, facts })?.refusal ?? null;
+      }
+    }
     let inverse = null;
     if (heldNull === undefined && backRefused === null) {
       const fields = Object.fromEntries(touched.map((key) => [key, entry.run[key] ?? null]));

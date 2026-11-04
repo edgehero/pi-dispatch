@@ -134,6 +134,19 @@ export function validateModelRef(run, at, path) {
 	return out;
 }
 
+/**
+ * Whether a job's fallbacks can be tried at all: each must be on its allowed list, the trigger's or else the deployment's, and
+ * with no list none is. Without this a job with fallbacks is refused as `model-failover-no-candidate`, before it spends. One
+ * rule for the failover's selection and the console's preview.
+ */
+export function failoverListUsable(job) {
+	if (modelListProblem(job?.fallbackModels) !== null || modelListProblem(job?.models) !== null) return false;
+	return job.fallbackModels.every((ref) => {
+		const split = splitModelEntry(ref);
+		return split !== null && modelOnList(job.models, split.provider, split.model);
+	});
+}
+
 /** The most entries an allowed-model list may carry (issue #502). Past this a list is a catalog, not a policy. */
 export const MAX_ALLOWED_MODELS = 16;
 

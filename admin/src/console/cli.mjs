@@ -688,6 +688,15 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       readHosts: () => m.readModel.readHosts({ url: side.paths.valkeyUrl, now }),
       readHostLoads: () => pageDeps.hostLoads(),
       readSkew: async (index, proposedFs) => fleet.triggerSkew(index, (await fleet.snapshot({ waiting: true }))?.waiting, { fs: proposedFs }),
+      // What the worker's pickup check reads on this host. Each key by the service's own rule, and a file another account can
+      // change gives nothing: the check then says it could not run, rather than judging a job by a shell's values alone.
+      deploymentDir: config.dir,
+      readHostEnv: (keys) => {
+        const read = m.serviceEnv.deploymentServiceEnv({ env: shellEnv, dir: config.dir, keys, fs, platform: io.platform ?? process.platform, uid });
+        if (read.unreadable || read.untrusted) throw new Error("the deployment's .env cannot be read");
+        return read.env;
+      },
+      readEndpoints: () => endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.()?.endpoints ?? [],
     });
     actionDeps = {
       updates: { read: readUpdatesFacts, setDesired: (row) => m.updates.setDesired(redis, row) },

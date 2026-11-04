@@ -6,6 +6,7 @@ import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { makeMcpCheck } from "@edgehero/pi-dispatch/mcp-preflight";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
 import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
@@ -25,7 +26,11 @@ const comment = (run = {}) => ({ on: { type: "comment", phrase: "@pi" }, run: { 
 const cron = { on: { type: "cron", id: "daily", pattern: "0 6 * * *" }, run: { kind: "local", folder: "/nowhere", flow: "tidy", task: "PRIVATE TASK" } };
 const text = (doc) => `${JSON.stringify(doc, null, 2)}\n`;
 
-function fixture({ run = {}, doc = null, settings = {}, env = {}, overlay = null, deps = {} } = {}) {
+/** A real overlay's servers, and what lets each be judged clean: egress off, and the one key linear reads forwarded with a value. */
+const MCP_JSON = { mcpServers: { linear: { url: "https://mcp.example.com/mcp", description: "Linear", headers: { Authorization: "Bearer ${LINEAR_API_KEY}" } }, docs: { url: "https://docs.example.com/mcp", description: "Docs" }, x: { url: "https://x.example.com/mcp", description: "X" } } };
+const HOST_ENV = { PI_EGRESS: "0", PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "a value" };
+
+function fixture({ run = {}, doc = null, settings = {}, env = {}, overlay = null, mcpJson = MCP_JSON, deps = {} } = {}) {
   const dir = tempDir("pd-800-env-");
   const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), projectsFile: null, globalPiDir: join(dir, "overlay") };
   const original = doc ?? { retained: { kept: true }, triggers: [cron, comment(run)] };
@@ -33,7 +38,8 @@ function fixture({ run = {}, doc = null, settings = {}, env = {}, overlay = null
   nodeFs.writeFileSync(paths.settingsFile, JSON.stringify(settings));
   nodeFs.mkdirSync(paths.globalPiDir);
   if (overlay) nodeFs.writeFileSync(join(paths.globalPiDir, "models.json"), JSON.stringify(overlay));
-  const service = createTriggerEnvironmentActions({ paths, env: { PI_PROVIDER: "anthropic", PI_MODEL: "claude-haiku-4-5", ...env }, now: () => NOW, ...deps });
+  if (mcpJson !== null) nodeFs.writeFileSync(join(paths.globalPiDir, "mcp.json"), typeof mcpJson === "string" ? mcpJson : JSON.stringify(mcpJson));
+  const service = createTriggerEnvironmentActions({ paths, env: { PI_PROVIDER: "anthropic", PI_MODEL: "claude-haiku-4-5", ...HOST_ENV, ...env }, now: () => NOW, deploymentDir: dir, ...deps });
   const read = () => nodeFs.readFileSync(paths.triggersPath, "utf8");
   const entry = (index = 1) => JSON.parse(read()).triggers[index];
   const digest = (index = 1) => triggerEntryDigest(entry(index));
@@ -658,6 +664,142 @@ test("settings or a list it cannot read refuse a model or cap edit, and leave ev
   assert.match((await refusal(silent, { maxCostUsd: "1" })).refusal, /did not judge this change/);
 });
 
+// ---- the worker's own pickup check --------------------------------------------------------------------------------------
+
+const HELD = { secrets: { LINEAR_API_KEY: "op://vault/linear" } };
+/** The real check, as the worker's wiring builds it, for a job with this `run`: what the next job of the trigger would meet. */
+const pickup = (f, job, { egress = false, forwardEnv = [], hostEnv = {} } = {}) => makeMcpCheck({ globalPiDir: f.paths.globalPiDir, forwardEnv, hostEnv, egress })({ kind: "github", provider: "anthropic", ...job });
+
+test("a server whose key the trigger does not pass refuses at the preview, in the worker's own reason, with what to do", async () => {
+  const f = fixture({ env: { PI_FORWARD_ENV: "" } });
+  const before = f.read();
+  assert.equal(pickup(f, { mcp: ["linear"] }).refused, "mcp-secret-unmapped", "what the real check says of the next job");
+  const out = await refusal(f, { mcp: ["linear"] });
+  assert.equal(out.refusal, "On this host every job of this trigger would be refused as mcp-secret-unmapped, before it spends. linear: it references LINEAR_API_KEY, which the trigger does not pass (run.secrets, or a PI_FORWARD_ENV name the worker holds a value for). Pass the credential the server needs in the trigger's `run.secrets`. `run.secrets` is set in the triggers file, not on this page, and a value only the worker's own service environment holds cannot be seen from here.");
+  assert.equal(out.status, 400);
+  assert.equal(f.read(), before);
+});
+
+test("what passes the real check passes the preview: a key the trigger passes, or one forwarded with a value on this host", async () => {
+  const held = fixture({ run: HELD, env: { PI_FORWARD_ENV: "" } });
+  assert.ok((await held.service.preview(ask(held, { mcp: ["linear"] }), operator)).plan);
+  const forwarded = fixture({ env: { PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "a value" } });
+  assert.ok((await forwarded.service.preview(ask(forwarded, { mcp: ["linear"] }), operator)).plan);
+  // Named in PI_FORWARD_ENV with no value here: the worker's rule, since `buildContainerEnv` forwards only what it holds.
+  const empty = fixture({ env: { PI_FORWARD_ENV: "LINEAR_API_KEY", LINEAR_API_KEY: "" } });
+  assert.match((await refusal(empty, { mcp: ["linear"] })).refusal, /refused as mcp-secret-unmapped/);
+});
+
+test("removing every way to a server refuses at the preview as the check refuses it, whichever of the two the edit sent", async () => {
+  const excluded = ["mcp__linear__*", "read_mcp_resource"];
+  const f = fixture({ run: { ...HELD, mcp: ["linear"] } });
+  assert.equal(pickup(f, { ...HELD, mcp: ["linear"], excludeTools: excluded }).refused, "mcp-excluded");
+  const out = await refusal(f, { excludeTools: excluded });
+  assert.equal(out.refusal, "On this host every job of this trigger would be refused as mcp-excluded, before it spends. linear: run.excludeTools removes every tool that reaches it (its own, the discovery tools that reach them, and read_mcp_resource). Remove the server from `run.mcp`, or keep a tool that reaches it out of `run.excludeTools`.");
+  assert.ok((await f.service.preview(ask(f, { excludeTools: ["mcp__linear__*"] }), operator)).plan, "one way left in is a way in, as the check says");
+  // The server added to a trigger whose exclusions already leave it no way in, sent with the list it needs.
+  const g = fixture({ run: HELD });
+  assert.match((await refusal(g, { mcp: ["linear"], excludeTools: excluded })).refusal, /refused as mcp-excluded/);
+});
+
+test("each of the check's other refusals is said, by the reason it would refuse with", async () => {
+  const f = fixture({ env: {} });
+  assert.match((await refusal(f, { mcp: ["nobody"] })).refusal, /^On this host every job of this trigger would be refused as mcp-server-unknown, before it spends\. nobody: the overlay's mcp\.json does not offer it\. Declare the server in the overlay `mcp\.json`, or fix the name in `run\.mcp`\.$/);
+  const off = fixture({ mcpJson: { mcpServers: { docs: { url: "https://docs.example.com/mcp", description: "Docs", enabled: false } } } });
+  assert.match((await refusal(off, { mcp: ["docs"] })).refusal, /refused as mcp-server-unknown.*docs: the overlay's mcp\.json turns it off/);
+  const none = fixture({ mcpJson: null });
+  assert.match((await refusal(none, { mcp: ["docs"] })).refusal, /refused as mcp-config-invalid.*The list: the overlay holds no mcp\.json/);
+  const broken = fixture({ mcpJson: "{ not json" });
+  assert.match((await refusal(broken, { mcp: ["docs"] })).refusal, /refused as mcp-config-invalid.*cannot be read whole/);
+  assert.ok((await none.service.preview(ask(none, { mcp: ["forge"] }), operator)).plan, "the forge's own server needs no overlay file");
+  const reserved = fixture({ mcpJson: { mcpServers: { k: { url: "https://k.example.com/mcp", description: "K", headers: { Authorization: "Bearer ${ANTHROPIC_API_KEY}" } } } }, run: { secrets: { ANTHROPIC_API_KEY: "op://v/r" } } });
+  assert.match((await refusal(reserved, { mcp: ["k"] })).refusal, /refused as mcp-secret-reserved.*k: it references ANTHROPIC_API_KEY, which this deployment uses for the job's own credentials\. Give the server's credential a variable of its own\./);
+});
+
+test("the egress rules are this host's: its PI_EGRESS, its allowlist file and its declared endpoints", async () => {
+  const armed = { env: { PI_EGRESS: "" } };
+  const f = fixture(armed);
+  assert.match((await refusal(f, { mcp: ["docs"] })).refusal, /refused as mcp-egress-unreachable.*docs: /);
+  nodeFs.writeFileSync(join(f.dir, "egress-allowlist.conf"), "docs.example.com\n");
+  assert.ok((await f.service.preview(ask(f, { mcp: ["docs"] }), operator)).plan, "the host on its allowlist is reachable");
+  // A declared endpoint at the server's own host and port is the other way through the proxy.
+  const declared = fixture({ ...armed, deps: { readEndpoints: () => [{ id: "docs", host: "docs.example.com", port: 443 }] } });
+  assert.ok((await declared.service.preview(ask(declared, { mcp: ["docs"] }), operator)).plan);
+  const elsewhere = fixture({ ...armed, deps: { readEndpoints: () => [{ id: "other", host: "other.example.com", port: 443 }] } });
+  assert.match((await refusal(elsewhere, { mcp: ["docs"] })).refusal, /refused as mcp-egress-unreachable/);
+  const runner = fixture({ env: { PI_EGRESS: "" }, mcpJson: { mcpServers: { r: { command: "npx", args: ["-y", "some-server@1.0.0"], allowPackageRunner: true, description: "R" } } } });
+  assert.match((await refusal(runner, { mcp: ["r"] })).refusal, /refused as mcp-package-runner.*r: it fetches its server from /);
+});
+
+test("a host's .env it cannot read as the worker does, or a bad value in it, says the check could not run and writes nothing", async () => {
+  const sentence = "This host's .env could not be read as the worker reads it, so the worker's pickup check could not be run. Nothing was written.";
+  for (const deps of [{ readHostEnv: () => { throw new Error("untrusted"); } }]) {
+    const f = fixture({ deps });
+    assert.deepEqual(await f.service.preview(ask(f, { mcp: ["docs"] }), operator), { refusal: sentence, status: 409 });
+  }
+  const badEgress = fixture({ env: { PI_EGRESS: "banana" } });
+  assert.equal((await badEgress.service.preview(ask(badEgress, { mcp: ["docs"] }), operator)).refusal, sentence);
+  const badForward = fixture({ env: { PI_FORWARD_ENV: "GITHUB_TOKEN" } });
+  assert.equal((await badForward.service.preview(ask(badForward, { mcp: ["docs"] }), operator)).refusal, sentence);
+  const throwing = fixture({ env: { PI_EGRESS: "" }, deps: { readEndpoints: () => { throw new Error("no"); } } });
+  assert.equal((await throwing.service.preview(ask(throwing, { mcp: ["docs"] }), operator)).refusal, sentence);
+});
+
+test("a read that may pass on a second try says try again, and asks for no refusal the worker would not make", async () => {
+  const f = fixture();
+  const flaky = { ...nodeFs, readFileSync: (path, ...rest) => { if (String(path).endsWith("mcp.json")) throw Object.assign(new Error("busy"), { code: "EIO" }); return nodeFs.readFileSync(path, ...rest); } };
+  const service = createTriggerEnvironmentActions({ paths: f.paths, env: HOST_ENV, fs: flaky, now: () => NOW });
+  assert.deepEqual(await service.preview(ask(f, { mcp: ["docs"] }), operator), { refusal: "An overlay file the worker's pickup check reads could not be read just now, so this change could not be judged; try again.", status: 409 });
+});
+
+test("the check runs only for a change that reaches it, with the job's real provider, and a Confirm asks it again", async () => {
+  const run = { provider: "anthropic", model: "claude-haiku-4-5", mcp: ["linear"] };
+  const noKey = { env: { PI_FORWARD_ENV: "" } };
+  // The file already says something the check refuses. An edit of something it does not read is no reason to refuse a person.
+  for (const change of [{ flow: "review" }, { packages: false }, { maxCostUsd: "1" }, { fallbackModels: null }]) {
+    const f = fixture({ run, ...noKey });
+    const out = await f.service.preview(ask(f, change), operator);
+    assert.ok(out.plan ?? out.unchanged, JSON.stringify([change, out]));
+  }
+  for (const change of [{ excludeTools: ["bash"] }, { model: "claude-sonnet-5-5" }, { provider: "anthropic", model: "claude-sonnet-5-5" }, { models: [HAIKU] }]) {
+    const f = fixture({ run, ...noKey });
+    assert.match((await refusal(f, change)).refusal, /refused as mcp-secret-unmapped/, JSON.stringify(change));
+  }
+  // A model edit moves which keys the job keeps for itself: a key the job now needs can no longer be handed to a server.
+  const mcpJson = { mcpServers: { k: { url: "https://k.example.com/mcp", description: "K", headers: { Authorization: "Bearer ${OPENAI_API_KEY}" } } } };
+  const moved = fixture({ mcpJson, run: { provider: "anthropic", model: "claude-haiku-4-5", mcp: ["k"], secrets: { OPENAI_API_KEY: "op://v/r" } } });
+  assert.match((await refusal(moved, { provider: "openai", model: "gpt-4o" })).refusal, /refused as mcp-secret-reserved/);
+  const byProvider = fixture({ mcpJson, run: { model: "gpt-4o", mcp: ["k"], secrets: { OPENAI_API_KEY: "op://v/r" } } });
+  assert.match((await refusal(byProvider, { provider: "openai" })).refusal, /refused as mcp-secret-reserved/, "the provider alone moves it");
+  // The job as the worker resolves it: a role's model reaches its provider's key, though the file names neither.
+  const roles = fixture({ mcpJson, doc: { modelRoles: { default: { oai: "openai/gpt-4o" } }, triggers: [cron, comment({ model: "role:oai", secrets: { OPENAI_API_KEY: "op://v/r" } })] }, env: { PI_ALLOWED_MODELS: HAIKU } });
+  assert.match((await refusal(roles, { mcp: ["k"] })).refusal, /refused as mcp-secret-reserved/);
+  // Settings it cannot read leave the check nothing to judge a job by: said, and not a crash.
+  const unsettled = fixture();
+  nodeFs.writeFileSync(unsettled.paths.settingsFile, "{ not json");
+  assert.match((await refusal(unsettled, { mcp: ["docs"] })).refusal, /settings file is invalid/);
+  // Removing the servers leaves nothing to check.
+  const gone = fixture({ run, ...noKey });
+  assert.ok((await gone.service.preview(ask(gone, { mcp: null }), operator)).plan);
+  // The overlay moved between the two: the Confirm meets what the next job would.
+  const later = fixture({ run: HELD });
+  const planned = await later.service.preview(ask(later, { mcp: ["linear"] }), operator);
+  assert.ok(planned.plan);
+  nodeFs.writeFileSync(join(later.paths.globalPiDir, "mcp.json"), JSON.stringify({ mcpServers: {} }));
+  const before = later.read();
+  assert.match((await later.service.apply(planned, operator)).invalid, /refused as mcp-server-unknown/);
+  assert.equal(later.read(), before);
+});
+
+test("what the page would refuse today has no Undo button: removing a server the check refuses says by hand why", async () => {
+  const f = fixture({ run: { mcp: ["linear"] }, env: { PI_FORWARD_ENV: "" } });
+  const out = await write(f, { mcp: null });
+  assert.equal(out.plan.inverse, null);
+  assert.match(out.plan.undo, /^Edit trigger row 2 back by hand: this page would refuse what it said before\. On this host every job of this trigger would be refused as mcp-secret-unmapped/);
+  const fine = fixture({ run: { ...HELD, mcp: ["linear"] } });
+  assert.deepEqual((await write(fine, { mcp: null })).plan.inverse.body.mcp, ["linear"]);
+});
+
 // ---- the words --------------------------------------------------------------------------------------------------------
 
 const WORDS = [
@@ -897,7 +1039,7 @@ test("the worker's check reads through the dry run: it sees the proposed bytes, 
   // The seam `readTriggerSkew` depends on, against the real dry run rather than a stub of one.
   const f = fixture();
   let dry = null;
-  const svc = createTriggerEnvironmentActions({ paths: f.paths, now: () => NOW, readSkew: async (_i, fs) => { dry = fs; return { rows: [], incomplete: false }; } });
+  const svc = createTriggerEnvironmentActions({ paths: f.paths, env: HOST_ENV, now: () => NOW, readSkew: async (_i, fs) => { dry = fs; return { rows: [], incomplete: false }; } });
   await svc.preview(ask(f, { mcp: ["linear"] }), operator);
   const check = makeCheckWaitSkew({ triggersPath: f.paths.triggersPath, fs: dry });
   assert.deepEqual(await check({ kind: "github", flow: "fix", trigger: { matched: { index: 1, type: "comment" } } }), { skewed: true, field: "mcp" });

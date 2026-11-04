@@ -1,6 +1,6 @@
 import { resolveBackendName } from "./backend-registry.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
-import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
+import { failoverListUsable, modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { modelDollarRows } from "./scoped-limits.mjs";
 import { dayKey, weekKey, monthKey } from "./budget.mjs";
 import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
@@ -85,7 +85,7 @@ async function modelWindowHasRoom(redis, ref, job, limits, at) {
 
 /** Only opt-in jobs enter here. Every candidate has a singleton executable policy beneath the reviewed ceiling. */
 export async function selectFailoverJob(job, { redis, id, retry = false, recoveryModel = null, retryNeverStarted = false, models = null, limits = [], now = () => Date.now(), checkCandidate, subscriptionCheck = null, reservationFor = (candidate) => candidate.maxCostMicros, acquireEndpoints = async () => true, modelView = (ref) => failoverModelView(ref, { models }), log = () => {} } = {}) {
-	if (!Array.isArray(job.fallbackModels) || modelListProblem(job.fallbackModels) !== null || modelListProblem(job.models) !== null || !Array.isArray(job.models) || !job.fallbackModels.every((ref) => { const s = splitModelEntry(ref); return s && modelOnList(job.models, s.provider, s.model); })) return { refused: "model-failover-no-candidate" };
+	if (!failoverListUsable(job)) return { refused: "model-failover-no-candidate" };
 	const primary = `${job.provider}/${job.model}`;
 	const previous = retry ? await readModelAttempt(redis, id) : null;
 	if (retry && !previous && !retryNeverStarted && !recoveryModel) return { refused: "model-failover-no-candidate" };

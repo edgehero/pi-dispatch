@@ -1006,6 +1006,20 @@ test("the console's own command is what wires a person's trigger change, each re
   await options.readHosts();
   assert.deepEqual(asks.at(-1), ["hosts", captured.actionDeps.paths.valkeyUrl]);
   assert.equal(await options.readHostLoads(), await captured.pageDeps.hostLoads(), "the page's own read of what each host published");
+  // What the worker's pickup check reads on this host: each key by the service's own rule, and a file it cannot trust gives nothing.
+  assert.equal(options.deploymentDir, dep.dir);
+  const envAsked = [];
+  modules.serviceEnv = { deploymentServiceEnv: (args) => (envAsked.push([args.dir, args.keys]), { env: { PI_EGRESS: "0" } }) };
+  assert.deepEqual(options.readHostEnv(["PI_EGRESS"]), { PI_EGRESS: "0" });
+  assert.deepEqual(envAsked, [[dep.dir, ["PI_EGRESS"]]]);
+  for (const state of [{ unreadable: "EACCES" }, { untrusted: "group-writable" }]) {
+    modules.serviceEnv = { deploymentServiceEnv: () => ({ env: { PI_EGRESS: "0" }, ...state }) };
+    assert.throws(() => options.readHostEnv(["PI_EGRESS"]));
+  }
+  modules.modelEndpoints = { loadModelEndpoints: () => [{ id: "e", host: "h", port: 443 }], readOverlayModels: () => null };
+  assert.deepEqual(options.readEndpoints(), [{ id: "e", host: "h", port: 443 }]);
+  modules.modelEndpoints = undefined;
+  assert.deepEqual(options.readEndpoints(), []);
   const real = await loadModules();
   assert.equal(typeof real.triggerEnvironmentPlans.createTriggerEnvironmentActions, "function");
 });

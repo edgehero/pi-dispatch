@@ -3444,7 +3444,10 @@ test("a person's change to what a trigger's jobs get: the real pipeline, audited
   writeFileSync(paths.triggersPath, `${JSON.stringify(original, null, 2)}\n`);
   const bytes = read(paths.triggersPath);
   let previews = 0;
-  const real = createTriggerEnvironmentActions({ paths, env: {}, now: () => T0 });
+  // A real overlay: the worker's own pickup check judges the server this edit turns on.
+  const globalPiDir = tempDir("console-actions-overlay-");
+  writeFileSync(join(globalPiDir, "mcp.json"), JSON.stringify({ mcpServers: { linear: { url: "https://mcp.example.com/mcp", description: "Linear", headers: { Authorization: "Bearer ${LINEAR_API_KEY}" } } } }));
+  const real = createTriggerEnvironmentActions({ paths: { ...paths, globalPiDir }, env: { PI_EGRESS: "0" }, now: () => T0 });
   const triggerEnvironment = { preview: (...args) => { previews++; return real.preview(...args); }, apply: (...args) => real.apply(...args) };
   const c = await start({ paths, a: { triggerEnvironment } });
   const seen = triggerEntryDigest(original.triggers[0]);

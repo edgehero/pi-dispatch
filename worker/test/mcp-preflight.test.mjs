@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MCP_REFUSAL_COMMENT, MCP_TRANSIENT_READ_CODES, jobProviders, makeMcpCheck, providerKeyNames } from "../src/mcp-preflight.mjs";
+import { MCP_REFUSAL_COMMENT, MCP_TRANSIENT_READ_CODES, jobProviders, makeMcpCheck, providerKeyNames, reservedJobNames } from "../src/mcp-preflight.mjs";
+import { RESERVED_ENV_NAMES } from "../src/triggers.mjs";
 import { parseOverlayMcp } from "../src/mcp-config.mjs";
 import { OVERLAY_TRANSIENT_READ_CODES } from "../src/model-catalog.mjs";
 import { packageRunnerHosts } from "../src/egress-allowlist.mjs";
@@ -135,6 +136,18 @@ test("providerKeyNames: the builtin key variables of the providers given, and ev
 	assert.deepEqual([...names].sort(), ["ANTHROPIC_API_KEY", "BRACED_KEY", "CORP_KEY", "KEY_PART_A", "KEY_PART_B", "MODEL_KEY", "MY_PROVIDER_KEY", "OPENAI_API_KEY", "OVERRIDE_KEY"]);
 	assert.ok(!names.has("HF_TOKEN"), "a provider the job cannot call is not counted");
 	assert.deepEqual([...providerKeyNames({ overlayModels: { providers: [] } })], []);
+});
+
+test("reservedJobNames: the names every job keeps, its providers' keys and the overlay's references, as the pickup and the preview ask", () => {
+	const seams = { defaultProvider: "anthropic", allowedModels: null, everyProvider: ["anthropic", "openai"], candidatesOf: (provider) => [`${provider.toUpperCase()}_KEY`] };
+	const names = reservedJobNames({ provider: "openai", models: ["openai/m"] }, { ...seams, readModels: () => ({ providers: { own: { apiKey: "$OWN_KEY" } } }) });
+	for (const name of RESERVED_ENV_NAMES) assert.ok(names.has(name), name);
+	assert.ok(names.has("OPENAI_KEY") && names.has("OWN_KEY"));
+	assert.ok(!names.has("ANTHROPIC_KEY"), "a provider the job's list does not reach is not this job's");
+	assert.ok(reservedJobNames({}, { ...seams, readModels: () => null }).has("ANTHROPIC_KEY"), "no list: every provider it could call");
+	// A read that may pass again is the check's to retry. Any other read fault adds no name: the model gates refuse such a file.
+	assert.throws(() => reservedJobNames({}, { ...seams, readModels: () => { throw Object.assign(new Error("busy"), { code: "EIO" }); } }), { code: "EIO" });
+	assert.ok(reservedJobNames({}, { ...seams, readModels: () => { throw Object.assign(new Error("no"), { code: "EACCES" }); } }).has("ANTHROPIC_KEY"));
 });
 
 test("jobProviders: the job's own provider and each on its model list, the trigger's before the deployment's", () => {

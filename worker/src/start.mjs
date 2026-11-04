@@ -113,8 +113,7 @@ import { makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observ
 import { makeRunContainer } from "./run-container.mjs";
 import { piProviders, providerKeyCandidates, resolveProviderCredential } from "./env-allowlist.mjs";
 import { parseAllowlist } from "./egress-allowlist.mjs";
-import { MCP_TRANSIENT_READ_CODES, jobProviders, makeMcpCheck, providerKeyNames } from "./mcp-preflight.mjs";
-import { RESERVED_ENV_NAMES } from "./triggers.mjs";
+import { makeMcpCheck, reservedJobNames } from "./mcp-preflight.mjs";
 import { makeSecretsResolver, realExecutable } from "./secrets.mjs";
 import { servableSecretProfiles } from "./secret-profiles.mjs";
 import { buildRecord, EXIT_OOM_KILLED, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, newerRecord, recordOfThisJob, recordReadable, RUNNER_POLICY_REASONS, sanitizeJobId, UNREADABLE_RECORD } from "./run-history.mjs";
@@ -3158,19 +3157,8 @@ export async function startWorker(
 				egress: config.egress,
 				// DES-FORGE-MCP: the GitLab a gitlab job's forge server calls, the same URL its clone and its glab use.
 				gitlabUrl: config.gitlab?.apiUrl ?? null,
-				// The credentials the job is set up to spend with (providerKeyNames). A read of the overlay models.json that
-				// may pass on a retry is thrown to the check, which retries the job; any other failure adds no overlay
-				// names, and the model gates, which ran first, refuse every job such a file breaks.
-				reserved: (job) => {
-					let overlayModels = null;
-					try {
-						overlayModels = readOverlayModels(config.globalPiDir);
-					} catch (error) {
-						if (MCP_TRANSIENT_READ_CODES.has(error?.code)) throw error;
-					}
-					const providers = jobProviders(job, { defaultProvider: config.provider, allowedModels: config.allowedModels, everyProvider: piProviders() });
-					return new Set([...RESERVED_ENV_NAMES, ...providerKeyNames({ providers, candidatesOf: providerKeyCandidates, overlayModels })]);
-				},
+				// The credentials the job is set up to spend with (`reservedJobNames`, which the console's preview asks too).
+				reserved: (job) => reservedJobNames(job, { readModels: () => readOverlayModels(config.globalPiDir), defaultProvider: config.provider, allowedModels: config.allowedModels, everyProvider: piProviders(), candidatesOf: providerKeyCandidates }),
 				allowlist: readEgressAllowlist,
 				endpoints: () => modelEndpoints.current,
 			}),

@@ -173,7 +173,7 @@ const WORKER_ONLY_WHY = Object.freeze({
  */
 export const EGRESS_ENV_VARS = new Set(["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"]);
 
-function forwardEnvList(raw, egressArmed = false) {
+export function forwardEnvList(raw, egressArmed = false) {
 	const names = commaList(raw);
 	const minted = names.filter((n) => MINTED_TOKEN_VARS.has(n));
 	if (minted.length > 0) {
