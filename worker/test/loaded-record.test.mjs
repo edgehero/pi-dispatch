@@ -8,7 +8,7 @@ import * as runnerLoaded from "../../image/runner/src/loaded.mjs";
 import { createExitWriter } from "../../image/runner/src/exit-line.mjs";
 import { maximalLoaded } from "../../image/runner/test/helpers/maximal-loaded.mjs";
 import * as record from "../src/loaded-record.mjs";
-import { makeRedactor } from "../src/redact-secrets.mjs";
+import { makeRedactor, secretValuesOf } from "../src/redact-secrets.mjs";
 import { buildRecord, makeLogSink } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -321,20 +321,84 @@ test("a hostile name never reaches the record: the bytes of a whole record, thro
 	}
 });
 
-test("a tool name that is the job's own secret, or a known token's shape, is invalid though it fits the shape", () => {
-	const forge = (name) => {
+test("one forwarded value costs one name: a tool name the job's redactor would change is withheld, and everything else stays", () => {
+	const job = { id: "gh-1", name: "github", attemptsMade: 0, data: { kind: "github", repo: "acme/web", target: { number: 7 } } };
+	// A value of no secrecy at all, which the redactor must still take for one: every env value outside the structural allowlist.
+	const forwarded = makeRedactor({ values: secretValuesOf({ SEARCH_INDEX: "docs_search" }, []) });
+	const docs = structuredClone(line());
+	docs.tools.active += 1;
+	docs.tiers.package[4] += 1;
+	docs.packages[0][4] += 1;
+	docs.extTools.p[0].push("docs_search");
+	const words = [];
+	const counted = [];
+	const loaded = rebuildLoaded(docs, { ...KNOWN, redact: forwarded, onViolation: (word) => words.push(word), onWithheld: (count) => counted.push(count) });
+	assert.equal(loaded.runner, "reported", "nothing was forged");
+	assert.deepEqual(words, [], "and no check failed");
+	assert.deepEqual(counted, [1], "the log hears how many");
+	assert.deepEqual(source(loaded, "package").toolNames, ["lint_run"], "the name goes alone");
+	assert.equal(source(loaded, "package").tools, 2, "the row's count stays: it now holds fewer names than it counts");
+	assert.deepEqual(source(loaded, "overlay").namedTools, [{ name: "git-guard.ts", tools: ["guard_check"] }]);
+	assert.deepEqual(loaded.cut, { form: "full", packages: 0, servers: 0, names: 1, counts: 0 }, "counted, as a name the record does not keep");
+	assert.deepEqual(loaded.problems, { failed: 1, dropped: 1, mcp: 0 }, "the problems stay");
+	assert.equal(loaded.tools.active, 8);
+	assert.deepEqual(recordedLoaded(loaded), loaded, "and the record's own door keeps it");
+
+	// What is really a secret takes the same road, and no part of it reaches the record.
+	const redact = makeRedactor({ values: ["hunter2hunter2"] });
+	for (const name of ["hunter2hunter2", "prefix_hunter2hunter2", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"]) {
 		const forged = structuredClone(line());
 		forged.extTools.p[0].push(name);
-		return forged;
-	};
-	const redact = makeRedactor({ values: ["hunter2hunter2"] });
-	const words = [];
-	for (const name of ["hunter2hunter2", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"]) {
-		assert.equal(rebuildLoaded(forge(name), { ...KNOWN, redact, onViolation: (word) => words.push(word) }).runner, "invalid", name);
+		const held = rebuildLoaded(forged, { ...KNOWN, redact });
+		assert.equal(held.runner, "reported", name);
+		assert.deepEqual(source(held, "package").toolNames, ["lint_run"], name);
+		assert.equal(held.cut.names, 1, name);
+		const bytes = JSON.stringify(buildRecord({ job, result: { outcome: "completed", exitCode: 0, loaded: held } }));
+		for (const piece of ["hunter2hunter2", "ghp_abcdefghij"]) assert.ok(!bytes.includes(piece), `${piece} reached the record`);
 	}
-	assert.deepEqual(words, ["ext-tools-secret", "ext-tools-secret"]);
-	assert.equal(rebuildLoaded(forge("lint_fix"), { ...KNOWN, redact }).runner, "reported");
-	assert.equal(rebuildLoaded(forge("lint_fix"), { ...KNOWN, redact: () => "" }).runner, "invalid", "a redactor that could not be built judges nothing fine");
+
+	// Every name of a row, on either side: a package keeps its row with no names, and an overlay extension has no tools row to show.
+	const all = structuredClone(line());
+	all.extTools.p[0] = [0, "hunter2hunter2"];
+	all.extTools.o[0] = [0, "hunter2hunter2"];
+	const empty = rebuildLoaded(all, { ...KNOWN, redact });
+	assert.equal(empty.runner, "reported");
+	assert.deepEqual(source(empty, "package").toolNames, []);
+	assert.equal(source(empty, "package").tools, 1);
+	assert.deepEqual(source(empty, "overlay").namedTools, []);
+	assert.equal(source(empty, "overlay").tools, 1);
+	assert.equal(empty.cut.names, 2);
+	assert.deepEqual(recordedLoaded(empty), empty);
+
+	// It is counted beside what the line says it cut and a package past the row cap, and it still counts against the line's cap.
+	const beside = structuredClone(line());
+	beside.cut.names = 3;
+	beside.extTools.p[0].push("hunter2hunter2");
+	assert.equal(rebuildLoaded(beside, { ...KNOWN, redact }).cut.names, 4);
+	const crowded = structuredClone(line());
+	crowded.extTools.p[0] = [0, ...Array.from({ length: 24 }, (_, i) => `name_${i}`), "hunter2hunter2"];
+	const capWords = [];
+	assert.equal(rebuildLoaded(crowded, { ...KNOWN, redact, onViolation: (word) => capWords.push(word) }).runner, "invalid");
+	assert.deepEqual(capWords, ["ext-tools-cap"]);
+
+	// A name out of shape is still a lie, whatever the redactor makes of it.
+	const shape = structuredClone(line());
+	shape.extTools.p[0].push("hunter2hunter2 quoted");
+	const shapeWords = [];
+	assert.equal(rebuildLoaded(shape, { ...KNOWN, redact, onViolation: (word) => shapeWords.push(word) }).runner, "invalid");
+	assert.deepEqual(shapeWords, ["ext-tools-name"]);
+
+	// A clean name changes nothing, a log that throws costs nothing, and a redactor that could not be built keeps no name at all.
+	const clean = rebuildLoaded(line(), { ...KNOWN, redact, onWithheld: () => assert.fail("nothing was withheld") });
+	assert.equal(clean.cut, null);
+	const thrown = structuredClone(line());
+	thrown.extTools.p[0].push("hunter2hunter2");
+	assert.equal(rebuildLoaded(thrown, { ...KNOWN, redact, onWithheld: () => { throw new Error("log down"); } }).runner, "reported");
+	assert.equal(rebuildLoaded({ ...line(), pi: "1.5.0" }, { ...KNOWN, redact: () => "" }).runner, "invalid", "a `pi` it cannot judge is the violation it always was");
+	const blind = rebuildLoaded({ ...line(), pi: null }, { ...KNOWN, redact: () => "" });
+	assert.equal(blind.runner, "reported");
+	assert.deepEqual(source(blind, "package").toolNames, []);
+	assert.deepEqual(source(blind, "overlay").namedTools, []);
 });
 
 test("a forged list length and a forged tool name each fail their own check, and an unknown key is never read", () => {
@@ -427,8 +491,7 @@ test("`pi` is three dotted numbers: a version's tail is free text, so a job's se
 	assert.equal(rebuildLoaded({ ...line(), pi: "12345678.0.0" }, { ...KNOWN, redact: makeRedactor({ values: ["12345678"] }), onViolation: (word) => words.push(word) }).runner, "invalid");
 	assert.deepEqual(words, ["pi-secret"]);
 	assert.equal(rebuildLoaded({ ...line(), pi: "12345678.0.0" }, { ...KNOWN, redact: makeRedactor({ values: ["87654321"] }) }).runner, "reported", "a long version that is no secret");
-	assert.equal(rebuildLoaded({ ...line(), pi: null }, { ...KNOWN, redact: () => "" }).runner, "invalid", "a redactor that could not be built fails the tools; with none, a null pi");
-	assert.equal(rebuildLoaded({ ...buildLoaded({ at: "start", pi: "1.5.0" }) }, { ...KNOWN, redact: () => "" }).runner, "invalid", "and it judges no version fine either");
+	assert.equal(rebuildLoaded({ ...buildLoaded({ at: "start", pi: "1.5.0" }) }, { ...KNOWN, redact: () => "" }).runner, "invalid", "a redactor that could not be built judges no version fine");
 
 	// A genuine runner on a pre-release says nothing of its version, and its line stays whole.
 	const pre = rebuildLoaded(line({ pi: "1.6.0-rc.1" }), KNOWN);
@@ -936,7 +999,7 @@ test("run-container: a signed line with no room for the field reads as `cut`, th
 	assert.equal(result.code, 0, "and the run is what it was");
 });
 
-test("run-container: the job's own token is what a tool name is checked against, off this attempt's env", { skip }, async () => {
+test("run-container: the job's own token is what a tool name is checked against, off this attempt's env: it is withheld, and the record stays", { skip }, async () => {
 	const forged = structuredClone(line());
 	forged.extTools.p[0].push("sekretAPIkeyvalue1234");
 	const { result, logs } = await runWith({
@@ -945,9 +1008,13 @@ test("run-container: the job's own token is what a tool name is checked against,
 		makeOptions: { hostEnv: { ANTHROPIC_API_KEY: "sekretAPIkeyvalue1234" } },
 		spawnOptions: { noted: forged },
 	});
-	assert.equal(result.loaded.runner, "invalid");
-	assert.equal(logs.find((row) => row.event === "loaded_invalid")?.why, "ext-tools-secret");
+	assert.equal(result.loaded.runner, "reported");
+	assert.deepEqual(source(result.loaded, "package").toolNames, ["lint_run"]);
+	assert.equal(result.loaded.cut.names, 1);
 	assert.ok(!JSON.stringify(result.loaded).includes("sekretAPIkeyvalue1234"));
+	assert.deepEqual(logs.filter((row) => row.event === "loaded_invalid"), []);
+	assert.deepEqual(logs.filter((row) => row.event === "loaded_names_withheld"), [{ event: "loaded_names_withheld", container: "pi-job-gh-1", count: 1 }], "how many and no name");
+	assert.ok(!JSON.stringify(logs).includes("sekretAPIkeyvalue1234"));
 });
 
 test("run-container: a job's token in `pi` on a signed line is `invalid`, by the shape first and off this attempt's env for a number", { skip }, async () => {

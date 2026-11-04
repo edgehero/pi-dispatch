@@ -13,7 +13,8 @@ import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
  * here, in the worker's process, against a closed list, a closed pattern or what the worker itself knows (the packages it
  * handed over, the overlay's folder, the trigger's servers, pi's own tool names), and any one violation makes the whole
  * field `runner: "invalid"`: half of a line that lied about something is not a fact. What the worker knows by itself stays
- * either way. REJECTED: dropping only the bad part, which would let a forged line choose what the record is silent about.
+ * either way. REJECTED: dropping only the bad part, which would let a forged line choose what the record is silent about. The one
+ * exception is a tool's name the job's own redactor would change, withheld alone and counted (`readExtTools` says why).
  *
  * WHAT SURVIVES IT, said plainly. Three things the line alone says, which the worker holds to a shape because it has nothing
  * to compare them with, so a repository extension in the same process can forge each:
@@ -21,8 +22,8 @@ import { EXACT_VERSION_RE, NPM_NAME_RE } from "./package-names.mjs";
  *     chip made from such a name can only narrow what a job has, while a wrong one refuses the job.
  *   - `pi`, `PI_VERSION_RE`: three dotted numbers, at most 32 characters. Digits, then, and no word.
  *   - every count, an integer up to `LOADED_COUNT_MAX`. It can be wrong, and a forger can spell digits in a run of them.
- * A tool name or a `pi` holding one of the job's secrets or a known token's shape is refused anyway (`known.redact`); a secret
- * transformed, or cut across two values, or spelled in counts, is not, as everywhere the redactor stands (redact-secrets.mjs,
+ * A `pi` holding one of the job's secrets or a known token's shape is refused anyway, and such a tool name is withheld (`known.redact`); a secret
+ * transformed, or cut across two values, or spelled in counts, is not caught, as everywhere the redactor stands (redact-secrets.mjs,
  * NOT DEFENDED). Every other string kept is a closed word, a folder listing's name, or the worker's own: a package's name and
  * version off its stage manifest, a server's name off the trigger, the image, `leftOut` and the base commit. A package's version
  * keeps its pre-release tail because the line cannot choose it; it picks a row by position and the worker writes what is in
@@ -223,12 +224,19 @@ function readOverlay(raw, onDisk) {
 /**
  * `extTools` by source: `[[index, ...names]]`, each index in range once and every name in the shape, within the overall
  * cap. The shape admits a bare token (`ghp_...` is one word of letters and digits), and an extension in the signer's process
- * can read the job's environment, so a name holding one of this job's secrets or a known token's shape is a violation:
- * `redact` is the job's own redactor, the worker's only way to know a value when it sees one.
+ * can read the job's environment, so a name holding one of this job's secrets or a known token's shape never reaches the
+ * record: `redact` is the job's own redactor, the worker's only way to know a value when it sees one.
+ *
+ * Such a name is WITHHELD alone, and counted, where every other check here voids the field, because it is no sign of a lie. The
+ * redactor takes every env value outside the structural allowlist for a secret (`NON_SECRET_ENV_KEYS`, inverted on purpose), so
+ * `SEARCH_INDEX=docs_search` forwarded through `PI_FORWARD_ENV`, beside a staged package that registers `docs_search`, read every
+ * run of that trigger as `invalid`, all its counts and problems lost, with nothing forged. A forged line gains nothing from this:
+ * it could leave any name off anyway, and the row's count still says how many there were.
  */
 function readExtTools(raw, packageCount, overlayCount, redact) {
 	if (!isObject(raw) || !Array.isArray(raw.p) || !Array.isArray(raw.o)) refuse("ext-tools");
 	let total = 0;
+	let withheld = 0;
 	const side = (rows, limit) => {
 		const out = new Map();
 		for (const row of rows) {
@@ -236,16 +244,17 @@ function readExtTools(raw, packageCount, overlayCount, redact) {
 			const [index, ...names] = row;
 			if (!isCount(index) || index >= limit || out.has(index)) refuse("ext-tools-index");
 			if (!names.every(isToolName)) refuse("ext-tools-name");
-			if (names.some((name) => holdsSecret(name, redact))) refuse("ext-tools-secret");
 			total += names.length;
-			out.set(index, names);
+			const kept = names.filter((name) => !holdsSecret(name, redact));
+			withheld += names.length - kept.length;
+			out.set(index, kept);
 		}
 		return out;
 	};
 	const p = side(raw.p, packageCount);
 	const o = side(raw.o, overlayCount);
 	if (total > LOADED_MAX_EXT_TOOLS) refuse("ext-tools-cap");
-	return { p, o };
+	return { p, o, withheld };
 }
 
 function readMcp(raw, servers) {
@@ -327,13 +336,20 @@ function readLine(raw, known) {
 
 	const rows = readPackageRows(raw.packages, packages);
 	const overlay = readOverlay(raw.overlay, new Set(Array.isArray(known?.overlayExtensions) ? known.overlayExtensions : []));
-	const extTools = live ? readExtTools(raw.extTools, packages.length, overlay.loaded.length, known?.redact) : { p: new Map(), o: new Map() };
+	const extTools = live ? readExtTools(raw.extTools, packages.length, overlay.loaded.length, known?.redact) : { p: new Map(), o: new Map(), withheld: 0 };
 	// A package past the row cap can still name tools: the line indexes the worker's whole list. It has no row to hold them
-	// here, so they are counted as cut, the runner's own word for a name the record does not keep.
+	// here, so they are counted as cut, the runner's own word for a name the record does not keep, as a withheld name is.
 	const rowless = [...extTools.p].reduce((sum, [index, names]) => sum + (index >= rows.length ? names.length : 0), 0);
-	if (rowless > 0) runner.cut = { ...cut, names: cut.names + rowless };
+	if (rowless + extTools.withheld > 0) runner.cut = { ...cut, names: cut.names + rowless + extTools.withheld };
+	if (extTools.withheld > 0) {
+		try {
+			known?.onWithheld?.(extTools.withheld);
+		} catch {
+			// a log that throws costs the line, never the field
+		}
+	}
 	const packageRows = rows.map((row, index) => ({ tier: "package", name: packages[index]?.name ?? null, version: packages[index]?.version ?? null, ...rowFields(row), toolNames: extTools.p.get(index) ?? [] }));
-	const namedTools = [...extTools.o].sort(([a], [b]) => a - b).map(([index, names]) => ({ name: overlay.loaded[index], tools: names }));
+	const namedTools = [...extTools.o].filter(([, names]) => names.length > 0).sort(([a], [b]) => a - b).map(([index, names]) => ({ name: overlay.loaded[index], tools: names }));
 	runner.sources = tierSources(tiers, { packageRows, overlay: { names: overlay.loaded, failedNames: overlay.failed, namedTools } });
 	return runner;
 }
@@ -349,8 +365,9 @@ function readLine(raw, known) {
  *   known.servers            the trigger's server names, in PI_MCP_SERVERS order
  *   known.ownTools           pi's own tool names (`EXCLUDABLE_TOOL_NAMES`)
  *   known.leftOut            `leftOutOf`, which the worker alone can say
- *   known.redact             this job's own redactor (`makeRedactor`), which a tool name must come through unchanged
+ *   known.redact             this job's own redactor (`makeRedactor`): a tool's name kept comes through it unchanged
  *   known.onViolation        hears the fixed word of a check that failed, for the worker's log. Never line text
+ *   known.onWithheld         hears how many tool names `redact` kept off the record, for the worker's log. Never a name
  */
 export function rebuildLoaded(raw, known = {}) {
 	const facts = { leftOut: isObject(known?.leftOut) ? known.leftOut : null };

@@ -355,6 +355,8 @@ export function makeRunContainer({
 			leftOut: leftOutOf(job, { allowGlobalExtensions }),
 			// A word from a closed list, never line text: the line is what is not trusted here.
 			onViolation: (why) => log("loaded_invalid", { container: name, why }),
+			// How many and no name: the record says only that a name was left out, and this says why.
+			onWithheld: (count) => log("loaded_names_withheld", { container: name, count }),
 		};
 		const env = beforeSpawn(() => buildContainerEnv({
 			size,
@@ -440,8 +442,8 @@ export function makeRunContainer({
 			observableRunner: observableRunner === true,
 		}));
 		// Issue #800: a tool name is the one string on the line nothing here can compare with anything, so at least it must
-		// not hold this job's own secrets. Built off THIS job's env, as the transcript's is below. If it cannot be built, the
-		// names cannot be judged: they read as invalid rather than as fine.
+		// not hold this job's own secrets. Built off THIS job's env, as the transcript's is below. If it cannot be built, nothing
+		// can be judged: every name reads as one it would change and is withheld, and a `pi` reads as invalid, rather than as fine.
 		try {
 			loadedKnown.redact = makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) }) });
 		} catch {

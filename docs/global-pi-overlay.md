@@ -86,6 +86,10 @@ to do about it. The record holds, by tier:
   (`PI_GLOBAL_ALLOW_EXTENSIONS=0` on its host, or a canary's replay) and a kind of job that never gets the overlay. Each is
   said as chosen, never as missing.
 
+A tool's name that holds one of the job's own values is left off the record and counted, because the job's redactor treats
+everything you forward with `PI_FORWARD_ENV` as a secret: `SEARCH_INDEX=docs_search` beside a package's `docs_search` tool is
+enough. The row's count of tools stays, and the worker's log says `loaded_names_withheld` with how many.
+
 **What the host's publication says.** Each host also says what its jobs can load. Every doctor run writes
 `doctor:loads:<host>` beside its results, for 7 days (`INT-DOCTOR-RESULTS-KEY`): the overlay's extensions and skills by name;
 each MCP server's name, transport, where it runs, how its tools are reached, whether it is on and the names of the
