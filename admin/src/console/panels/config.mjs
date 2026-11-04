@@ -47,8 +47,9 @@ export function fileTrouble(v, what, s = null) {
   if (v.unset) return `No ${what} is configured.`;
   if (v.missing) return `The ${what} does not exist.`;
   if (v.invalid) return doctorReason(s, what);
+  // An agent's copy holds only that the read failed (`agentReadProjection`), so there is no code to name, and REJECTED is printing what it holds: "(true)".
   if (v.unreadable)
-    return `The ${what} cannot be read (${String(v.unreadable)}).`;
+    return `The ${what} cannot be read${typeof v.unreadable === "string" ? ` (${v.unreadable})` : ""}.`;
   return null;
 }
 

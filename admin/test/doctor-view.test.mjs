@@ -1,11 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NAMED_CHECK_IDS } from "@edgehero/pi-dispatch/doctor-results";
 import { DOCTOR_FILE_CHECKS, FIRST_RUN_COMMANDS, FIRST_RUN_COMMAND_HINTS, FIRST_RUN_STATES, FIRST_RUN_STEPS, doctorQuote, doctorStale, firstRunCommandHint, firstRunState, stepSentenceText } from "../src/doctor-view.mjs";
 import { BEAT_FRESH_MS, configPauseWindows, configSettings, configTriggers, fleetDoctor } from "../src/console/panels.mjs";
+import { agentReadProjection } from "../src/agent-read.mjs";
+import { readTriggers } from "../src/read-model.mjs";
 import { stripAnsi, visibleLen } from "../src/style.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { cardDocument, cardText } from "./helpers/card-structure.mjs";
 
 /**
@@ -403,6 +408,17 @@ test("first run: the forge step is optional without a forge trigger, else the wo
   assert.equal(forgeOf(label, [{ id: "github.1", level: "ok" }, { id: "forges.2", level: "warn", label: "gitlab token expires soon" }]).state, "check");
   assert.equal(forgeOf(label, [{ id: "github.12-2", level: "fail", label: "no app id" }]).state, "not-yet");
   assert.equal(forgeOf(label, [{ id: "node.1", level: "ok" }]).state, "to-do");
+});
+
+test("first run: a file that cannot be read says so to whoever reads it, with the code only where the read holds one", () => {
+  const triggersPath = join(tempDir("first-run-"), "triggers.json");
+  mkdirSync(triggersPath);
+  const read = readTriggers({ triggersPath });
+  const said = (triggers) => stepOf(firstRunState(firstRun({ triggers })), "trigger");
+  assert.deepEqual(said(read).sentence, ["The triggers file could not be read here (EISDIR), so this cannot say which triggers it holds."]);
+  assert.equal(said(read).state, "not-yet");
+  assert.deepEqual(said(agentReadProjection(read)).sentence, ["The triggers file could not be read here, so this cannot say which triggers it holds."]);
+  assert.equal(said(agentReadProjection(read)).state, "not-yet", "an agent's copy, which asked for a first trigger while the projection dropped the code");
 });
 
 test("first run: a trigger file that does not load is not yet; one trigger is ready", () => {

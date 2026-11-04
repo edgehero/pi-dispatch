@@ -54,7 +54,9 @@ export function agentReadProjection(value, key = "", depth = 0) {
     if (field === "loaded") { const note = outcomeNote(value); if (note !== null) out.note = note; continue; }
     if (PRIVATE.has(field)) continue;
     if (field === "invalid" && Array.isArray(v)) { out.invalid = v.filter((name) => ["maxCostUsd", "dailyCostUsd", "weeklyCostUsd", "monthlyCostUsd"].includes(name)); continue; }
-    if (["invalid", "unreachable", "refusal", "refused", "countersUnreachable", "recordsUnreachable"].includes(field) && typeof v === "string") { out[field] = true; continue; }
+    // A yes or no about a read, in place of what it said. `unreadable` holds an OS code or a sentence about a record, and with it dropped a file that
+    // could not be read arrived as an empty object, which a page read as a file with nothing wrong and nothing in it.
+    if (["invalid", "unreachable", "unreadable", "refusal", "refused", "countersUnreachable", "recordsUnreachable"].includes(field) && typeof v === "string") { out[field] = true; continue; }
     const projected = agentReadProjection(v, field, depth + 1);
     if (projected !== undefined) out[field] = projected;
   }
