@@ -1112,6 +1112,45 @@ test("run-container: a name this host holds neither way is said, only where both
 	assert.deepEqual([noOverlay.result.loaded.leftOut.extensions, noOverlay.result.loaded.leftOut.extensionsNotHere], [["pi-lint"], ["git-guard.ts", "typo"]]);
 });
 
+test("run-container: an overlay of packages alone has no extensions folder, which is an answer: a typo is not here, and a read that failed otherwise still says nothing", { skip }, async () => {
+	const job = { ...BASE_JOB, excludeExtensions: ["pi-lint", "typo"] };
+	const known = { packagePaths: resolver({ [LINT]: KNOWN.packages[0] }) };
+	const noFolder = tempDir("pi-global-");
+	mkdirSync(join(noFolder, "packages"), { recursive: true });
+	const none = await runWith({ known, job, makeOptions: { globalPiDir: noFolder, readOverlayExtensions: undefined }, spawnOptions: {} });
+	assert.deepEqual([none.result.loaded.leftOut.extensions, none.result.loaded.leftOut.extensionsNotHere], [["pi-lint"], ["typo"]], "the real readdirSync, on a folder that is not there");
+	const empty = tempDir("pi-global-");
+	mkdirSync(join(empty, "extensions"), { recursive: true });
+	const same = await runWith({ known, job, makeOptions: { globalPiDir: empty, readOverlayExtensions: undefined }, spawnOptions: {} });
+	assert.deepEqual(same.result.loaded.leftOut, none.result.loaded.leftOut, "and it reads as an empty folder does");
+	const notAFolder = tempDir("pi-global-");
+	writeFileSync(join(notAFolder, "extensions"), "a file\n");
+	const failed = await runWith({ known, job, makeOptions: { globalPiDir: notAFolder, readOverlayExtensions: undefined }, spawnOptions: {} });
+	assert.deepEqual([failed.result.loaded.leftOut.extensions, failed.result.loaded.leftOut.extensionsNotHere], [["pi-lint", "typo"], undefined], "ENOTDIR holds nothing to vouch for");
+	for (const code of ["EACCES", "EIO", undefined]) {
+		const denied = await runWith({ known, job, makeOptions: { readOverlayExtensions: () => { throw Object.assign(new Error("no"), { code }); } }, spawnOptions: {} });
+		assert.deepEqual([denied.result.loaded.leftOut.extensions, denied.result.loaded.leftOut.extensionsNotHere], [["pi-lint", "typo"], undefined], String(code));
+	}
+});
+
+test("run-container: a manifest that did not read names nothing as not here, a package's real name among them, and the record leaves each as could-not-say", { skip }, async () => {
+	const job = { ...BASE_JOB, excludeExtensions: ["pi-lint", "typo"] };
+	const unread = () => [];
+	unread.rowOf = () => null;
+	unread.stageRead = () => false;
+	const { result, recorder } = await runWith({ known: { packagePaths: unread }, job, spawnOptions: {} });
+	assert.deepEqual([result.loaded.leftOut.extensions, result.loaded.leftOut.extensionsNotHere], [["pi-lint", "typo"], undefined]);
+	assert.equal(recorder.args.some((a) => String(a).startsWith("PI_PACKAGES")), false, "the premise: such a job gets no package");
+	// The same resolver over a stage that read and holds nothing does know: that is what a host with no manifest answers.
+	const read = () => [];
+	read.rowOf = () => null;
+	read.stageRead = () => true;
+	const nothing = await runWith({ known: { packagePaths: read }, job, spawnOptions: {} });
+	assert.deepEqual([nothing.result.loaded.leftOut.extensions, nothing.result.loaded.leftOut.extensionsNotHere], [undefined, ["pi-lint", "typo"]]);
+	const silent = await runWith({ known: { packagePaths: resolver({}) }, job, spawnOptions: {} });
+	assert.deepEqual(silent.result.loaded.leftOut, nothing.result.loaded.leftOut, "a resolver that says nothing either way stands as read");
+});
+
 test("run-container: a path no name can be told for is refused before the container, never loaded against the file", { skip }, async () => {
 	for (const packagePaths of [[LINT], () => [LINT]]) {
 		await assert.rejects(runWith({ known: { packagePaths }, job: { ...BASE_JOB, excludeExtensions: ["pi-lint"] }, spawnOptions: {} }), (error) => error.piDispatchConfig === true && /cannot tell which staged package/.test(error.message));

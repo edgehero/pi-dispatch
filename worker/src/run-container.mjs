@@ -57,8 +57,9 @@ export function makeRunContainer({
 	// once per job (issue #102): the wired worker passes a resolver so a re-stage lands on the next job with
 	// no restart, while the array form stays valid for every caller that has a fixed set.
 	// Issue #800: a resolver may carry `rowOf(path)`, the `{ name, version }` its last read holds for a path, which names
-	// the runner's positional rows. On the resolver, not a second option, because every venue passes this one function
-	// through untouched, and a second option could reach a venue without it and record a job's packages with no names.
+	// the runner's positional rows, and `stageRead()`, false when this read could not say what is staged. On the resolver,
+	// not a second option, because every venue passes this one function through untouched, and a second option could reach a
+	// venue without it and record a job's packages with no names.
 	packagePaths = [],
 	// Issue #800: the names in `<overlay>/extensions`, which an overlay name on the exit line has to be one of. A seam for
 	// the tests. A folder that cannot be read holds nothing the worker can vouch for, so a name then reads as invalid.
@@ -354,13 +355,17 @@ export function makeRunContainer({
 		let overlayListed = true;
 		try {
 			overlayExtensions = globalPiDir ? readOverlayExtensions(join(globalPiDir, "extensions")) : [];
-		} catch {
+		} catch (error) {
 			overlayExtensions = [];
-			overlayListed = false;
+			// No folder is no extensions, as `readOverlayExtensionRows` reads it: an overlay of packages alone holds none, so a typo there is a name this host does
+			// not hold, and reading it as could-not-say would record it as left out. Only a read that failed some other way holds nothing to vouch for.
+			overlayListed = error?.code === "ENOENT";
 		}
 		// Issue #800: which of those names this host holds neither way, for the record. Only where both sides were read: a job with its packages
-		// withheld never reads the stage, and a folder that could not be listed holds nothing this can vouch for, so neither says a name is absent.
-		const excludedNotHere = job.packages !== false && overlayListed ? extensionsNotHere(excludedNames, { packages: everyStaged.map(stagedRowOf), overlay: overlayExtensions }) : [];
+		// withheld never reads the stage, a manifest that did not read says nothing is staged only by accident, and a folder that could not be listed
+		// holds nothing this can vouch for, so none of them says a name is absent. `=== false`, so an array of paths or a resolver with no such word stands as read.
+		const stageRead = typeof packagePaths !== "function" || packagePaths.stageRead?.() !== false;
+		const excludedNotHere = job.packages !== false && overlayListed && stageRead ? extensionsNotHere(excludedNames, { packages: everyStaged.map(stagedRowOf), overlay: overlayExtensions }) : [];
 		const excludedTools = Array.isArray(job.excludeExtensionTools) ? job.excludeExtensionTools : [];
 		// Whether a name in run.excludeExtensionTools that no staged package or overlay extension brought stops this job (`exclude-tool-not-loaded`): only one that should have
 		// held every extension it could. A trigger withholding packages or leaving one out, a host with the overlay shut, a chained child (its

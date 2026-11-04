@@ -68,7 +68,7 @@ import { unenforcedSizeFlags } from "./job-size.mjs";
 import { makeCollectChain } from "./outbox.mjs";
 import { makeCollectPlan } from "./outbox-plan.mjs";
 import { makePortfolioSnapshot } from "./portfolio-snapshot.mjs";
-import { containerPackagePaths, readStageManifest } from "./packages.mjs";
+import { containerPackagePaths, PACKAGES_SUBDIR, readStageManifest, STAGE_MANIFEST } from "./packages.mjs";
 import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare.mjs";
 import { listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, sandboxSyncRefusal } from "./sandbox.mjs";
 import { createSandboxPreparer } from "./sandbox-prepare.mjs";
@@ -2177,6 +2177,18 @@ export async function startWorker(
 	// Issue #800: the name and version each path of the last good read stood for, so the rows a job's record names are the
 	// read that chose its paths. Beside last-known-good, and replaced with it.
 	let stagedRowByPath = new Map();
+	// Issue #800: whether the set this returned says what is staged here, which the record needs before it calls a name absent. `readStageManifest` answers null
+	// for a manifest that is not there and for one that does not read, and only the first is a stage with nothing in it: with no last-good set the second returns
+	// [] too, and a package's real name would be recorded as one this host does not hold.
+	let stageRead = true;
+	const manifestIsAbsent = () => {
+		try {
+			statSync(join(config.globalPiDir, PACKAGES_SUBDIR, STAGE_MANIFEST));
+			return false;
+		} catch (error) {
+			return error?.code === "ENOENT";
+		}
+	};
 	const getPackagePaths = () => {
 		if (!config.globalPiDir) return [];
 		const staged = readStageManifest({ globalPiDir: config.globalPiDir });
@@ -2186,8 +2198,10 @@ export async function startWorker(
 				return lastGoodPackagePaths;
 			}
 			notePackageKey("");
+			stageRead = manifestIsAbsent();
 			return [];
 		}
+		stageRead = true;
 		const paths = containerPackagePaths(staged);
 		notePackageKey(paths.join(":"));
 		lastGoodPackagePaths = paths;
@@ -2195,6 +2209,7 @@ export async function startWorker(
 		return paths;
 	};
 	getPackagePaths.rowOf = (path) => stagedRowByPath.get(path) ?? null;
+	getPackagePaths.stageRead = () => stageRead;
 	// One read at boot, for the same log line the boot read always emitted, and to seed last-known-good.
 	if (config.globalPiDir && !readStageManifest({ globalPiDir: config.globalPiDir })) log("packages_manifest_absent", { overlay: config.globalPiDir });
 	getPackagePaths();

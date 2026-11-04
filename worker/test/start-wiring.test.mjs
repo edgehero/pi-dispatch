@@ -1306,8 +1306,51 @@ test("staged packages: a manifest that goes unreadable after boot keeps the last
 		const torn = whileCapturingLogs(() => resolve());
 		assert.deepEqual(torn.value, ["/opt/pi-global/packages/a__b"], "a torn read keeps the last set rather than silently running toolless");
 		assert.ok(torn.logs.some((l) => l.event === "packages_manifest_unreadable"), "and it is never silent");
+		assert.equal(resolve.stageRead(), true, "and that set is what the record names against: a read chose those paths");
 	} finally {
 		rmSync(overlay, { recursive: true, force: true });
+	}
+});
+
+// Issue #800: `[]` from a manifest that is not there and `[]` from one that does not read are different statements, and a run's record must not call a real package's name absent over the second.
+test("staged packages: the resolver says whether it read a stage: no manifest is a stage with nothing in it, and one that does not read with nothing kept says nothing", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const overlay = tempDir("pi-global-");
+	try {
+		mkdirSync(join(overlay, "packages"), { recursive: true });
+		writeFileSync(join(overlay, "packages", "packages.json"), "{ this is not json");
+		const { runContainerCalls } = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay }, makeAuth, makeHost: () => fakeHost() });
+		const resolve = runContainerCalls[0].packagePaths;
+		assert.deepEqual(resolve(), [], "unreadable at boot, with nothing to keep");
+		assert.equal(resolve.stageRead(), false);
+		rmSync(join(overlay, "packages", "packages.json"));
+		assert.deepEqual(resolve(), []);
+		assert.equal(resolve.stageRead(), true, "no manifest: nothing is staged here, and that is an answer");
+		writeFileSync(join(overlay, "packages", "packages.json"), "{ this is not json");
+		resolve();
+		assert.equal(resolve.stageRead(), false, "and it goes back with the file");
+		writeFileSync(join(overlay, "packages", "packages.json"), JSON.stringify({ stagedAt: null, packages: [] }));
+		assert.deepEqual(resolve(), []);
+		assert.equal(resolve.stageRead(), true, "a manifest that reads and holds nothing");
+		writeFileSync(join(overlay, "packages", "packages.json"), "{ this is not json");
+		resolve();
+		assert.equal(resolve.stageRead(), false, "an empty last read keeps nothing, so a torn one says nothing either");
+		writeFileSync(join(overlay, "packages", "packages.json"), JSON.stringify({ stagedAt: null, packages: [{ name: "@a/b", version: "1.0.0", dir: "a__b" }] }));
+		assert.deepEqual(resolve(), ["/opt/pi-global/packages/a__b"]);
+		assert.equal(resolve.stageRead(), true);
+	} finally {
+		rmSync(overlay, { recursive: true, force: true });
+	}
+	// A manifest this host cannot even stat is no absent one: `packages` is a file here, so the path fails ENOTDIR.
+	const blocked = tempDir("pi-global-");
+	try {
+		writeFileSync(join(blocked, "packages"), "not a folder");
+		const { runContainerCalls } = await runStart({ env: { PI_GLOBAL_PI_DIR: blocked }, makeAuth, makeHost: () => fakeHost() });
+		const resolve = runContainerCalls[0].packagePaths;
+		assert.deepEqual(resolve(), []);
+		assert.equal(resolve.stageRead(), false);
+	} finally {
+		rmSync(blocked, { recursive: true, force: true });
 	}
 });
 
