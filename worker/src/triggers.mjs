@@ -1952,35 +1952,52 @@ function validateMaxCostUsd(run, at, path) {
  * toolsOff): that is the general unknown-key sweep this file's forward-compatibility posture rejects.
  */
 export function excludeToolsNearMiss(key) {
+	return nearMissOf(["excludetools", "excludetool", "excludedtools"], key);
+}
+
+/** Whether `a` becomes `b` in at most `limit` single edits. */
+function withinEdits(a, b, limit) {
+	let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+	for (let i = 1; i <= a.length; i++) {
+		const row = [i];
+		for (let j = 1; j <= b.length; j++) row[j] = Math.min(previous[j] + 1, row[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+		previous = row;
+	}
+	return previous[b.length] <= limit;
+}
+
+/**
+ * The one body of every exclusion key's sweep: a case or separator variant of a target, or a key outside plain ASCII whose letters
+ * are a target's in order, which can be drawn exactly like it. `slips` adds a key that many edits from a target. Only on a key new enough
+ * that no file holds one: `excludeToolz` stays a key the loader ignores, as it was, since refusing it now would stop a service on a
+ * file it read yesterday.
+ */
+function nearMissOf(targets, key, { slips = 0 } = {}) {
 	const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
-	const targets = ["excludetools", "excludetool", "excludedtools"];
 	const isSubsequence = (needle, hay) => {
 		let i = 0;
 		for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
 		return i === needle.length;
 	};
-	return /^[\x20-\x7E]*$/.test(key) ? targets.includes(normalized) : normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
+	if (!/^[\x20-\x7E]*$/.test(key)) return normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
+	return targets.some((t) => t === normalized || (slips > 0 && withinEdits(normalized, t, slips)));
 }
 
-/** One sweep's rule, `excludeToolsNearMiss`'s: a case or separator variant, or a homoglyph spelling of a target. */
-function nearMissOf(targets, key) {
-	const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
-	const isSubsequence = (needle, hay) => {
-		let i = 0;
-		for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
-		return i === needle.length;
-	};
-	return /^[\x20-\x7E]*$/.test(key) ? targets.includes(normalized) : normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
-}
+/**
+ * How far a spelling of these two keys may be from the name and still mean it. Two: a key this long holds a slip in each of its words
+ * (`exludeExtentions`), and a participle comes with a plural (`excludedExtension`, `excludeExtensionsTools`), where a list of each word's forms
+ * would be a list of misspellings. Nothing else the loader reads comes within two; a test holds every key against that.
+ */
+const EXTENSION_KEY_SLIPS = 2;
 
-/** Whether `key` spells `run.excludeExtensions` or nearly does, the exact name included, `excludeToolsNearMiss`'s rule. */
+/** Whether `key` spells `run.excludeExtensions` or nearly does, the exact name and the word cut short (`excludeExt`) included: the caller decides where an exact name is legal, `excludeToolsNearMiss`'s rule. */
 export function excludeExtensionsNearMiss(key) {
-	return nearMissOf(["excludeextensions", "excludeextension", "excludedextensions"], key);
+	return nearMissOf(["excludeextensions", "excludeext"], key, { slips: EXTENSION_KEY_SLIPS });
 }
 
-/** Whether `key` spells `run.excludeExtensionTools` or nearly does, the exact name included, `excludeToolsNearMiss`'s rule. */
+/** Whether `key` spells `run.excludeExtensionTools` or nearly does, the exact name and the word cut short (`excludeExtTools`) included: the caller decides where an exact name is legal, `excludeToolsNearMiss`'s rule. */
 export function excludeExtensionToolsNearMiss(key) {
-	return nearMissOf(["excludeextensiontools", "excludeextensiontool", "excludedextensiontools"], key);
+	return nearMissOf(["excludeextensiontools", "excludeexttools"], key, { slips: EXTENSION_KEY_SLIPS });
 }
 
 /**

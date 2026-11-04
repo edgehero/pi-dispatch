@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { enqueueForgeJob, enqueueLateForgeJob, enqueueLocalJob } from "../src/queue.mjs";
@@ -17,6 +17,7 @@ import { isSubscriptionAdapter } from "../src/updates-subscription-adapters.mjs"
 import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, TRIGGER_RUN_FIELD_VERSIONS, TRIGGERS_FILE_VERSION, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, parseTriggers, triggersFileVersionFor, withoutMcpExclusions } from "../src/triggers.mjs";
 import { AUTHORED_NARROWING_FIELDS, makeCheckWaitSkew, writeTriggers } from "../src/triggers-file.mjs";
 import { overlayEntryNamed as runnerNamed } from "../../image/runner/src/loaded.mjs";
+import { CARD_FIELDS } from "../../admin/src/trigger-edit-core.mjs";
 import { secretValuesOf } from "../src/redact-secrets.mjs";
 import { collectChecks } from "./helpers/doctor.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -83,8 +84,9 @@ test("a tool with another key or no extension behind it refuses, saying where it
 
 test("a near miss of either key refuses under run, every spelling refuses under on, and neither reads as a near miss of the other or of run.excludeTools", () => {
 	for (const [field, misses] of [
-		["excludeExtensions", ["exclude_extensions", "exclude-extensions", "EXCLUDEEXTENSIONS", "excludeExtension", "excludedExtensions", "excludeExtensiоns"]],
-		["excludeExtensionTools", ["exclude_extension_tools", "exclude-extension-tools", "EXCLUDEEXTENSIONTOOLS", "excludeExtensionTool", "excludedExtensionTools"]],
+		// Case and separators, then a plural or a participle, the word cut short, and a slip of a letter, of two letters and of the two crossed.
+		["excludeExtensions", ["exclude_extensions", "exclude-extensions", "EXCLUDEEXTENSIONS", "excludeExtension", "excludedExtensions", "excludeExtensiоns", "excludedExtension", "excludeExt", "excludeExts", "exclude_ext", "excludedExt", "excludeExtentions", "exludeExtensions", "excludeExtensoins", "excludesExtensions", "excludeExtensionss", "exludeExtentions", "excludedExtentions"]],
+		["excludeExtensionTools", ["exclude_extension_tools", "exclude-extension-tools", "EXCLUDEEXTENSIONTOOLS", "excludeExtensionTool", "excludedExtensionTools", "excludeExtensionsTools", "excludedExtensionTool", "excludedExtensionsTools", "excludeExtTools", "excludeExtTool", "excludeExtsTools", "exclude_ext_tools", "excludeExtensionTols", "exludeExtensionTools", "excludeExtentionTools", "exludeExtentionTools"]],
 	]) {
 		for (const miss of misses) assert.throws(() => parse([KINDS[1][1]({ [miss]: ["x"] })]), new RegExp(`did you mean run\\.${field}`), miss);
 		assert.throws(() => parse([KINDS[1][1]({}, { [field]: ["x"] })]), new RegExp(`on\\.${field} is not a field`));
@@ -93,7 +95,32 @@ test("a near miss of either key refuses under run, every spelling refuses under 
 	assert.equal(excludeExtensionsNearMiss("excludeExtensionTools"), false);
 	assert.equal(excludeExtensionToolsNearMiss("excludeExtensions"), false);
 	assert.equal(excludeExtensionsNearMiss("excludeTools"), false);
+	assert.equal(excludeExtensionToolsNearMiss("excludeTools"), false);
+	assert.equal(excludeToolsNearMiss("excludeToolz"), false, "run.excludeTools' sweep takes no slips: a file of that key loads today, and must load tomorrow");
+	for (const key of ["exclude", "excluded", "excludes", "extensions", "tools", "excludeList", "excludeFiles", "excluder", "extensionTools", "denyExtensions"]) {
+		assert.equal(excludeExtensionsNearMiss(key), false, key);
+		assert.equal(excludeExtensionToolsNearMiss(key), false, key);
+	}
 	assert.deepEqual(parse([KINDS[1][1]({ excludeTools: ["bash"], excludeExtensions: ["a"], excludeExtensionTools: ["b"] })])[0].run.excludeTools, ["bash"], "all three together");
+});
+
+test("no key the loader or a worker reads is a near miss of an exclusion's: every run and on key, against all three sweeps", () => {
+	// Every `run.<key>` and `on.<key>` any worker or receiver module reads, the lenient superset store-versions-files.test.mjs uses for the version tables, and the console's own list of what it edits.
+	const keys = new Set(CARD_FIELDS);
+	for (const dir of ["worker", "receiver"]) {
+		for (const name of readdirSync(new URL(`../../${dir}/src/`, import.meta.url))) {
+			if (!name.endsWith(".mjs")) continue;
+			for (const m of readFileSync(new URL(`../../${dir}/src/${name}`, import.meta.url), "utf8").matchAll(/\b(?:run|on)\??\.(\w+)/g)) keys.add(m[1]);
+		}
+	}
+	for (const key of ["excludeTools", "excludeExtensions", "excludeExtensionTools", "models", "fallbackModels", "maxCostUsd", "packages", "image", "skillsDir", "type", "action"]) assert.ok(keys.has(key), `${key} was found`);
+	const sweeps = { excludeTools: excludeToolsNearMiss, excludeExtensions: excludeExtensionsNearMiss, excludeExtensionTools: excludeExtensionToolsNearMiss };
+	for (const key of keys) {
+		for (const [field, sweep] of Object.entries(sweeps)) assert.equal(sweep(key), key === field, `${key} against run.${field}'s sweep`);
+	}
+	// And in the file: a real key beside either exclusion loads, rather than reading as a misspelling of it.
+	const [entry] = parse([KINDS[1][1]({ excludeTools: ["bash"], excludeExtensions: ["a"], excludeExtensionTools: ["b"], packages: false, image: "pi-job:x", models: ["anthropic/claude-haiku-4-5"] })]);
+	assert.deepEqual(entry.run.excludeExtensions, ["a"]);
 });
 
 test("each field needs file version 2 by itself: an older loader would drop it, so one written by hand with no stamp refuses, and the writer stamps it", () => {
