@@ -260,11 +260,33 @@ function serverHosts(name, hosts) {
   return parts.join("; ");
 }
 
+/** The keys a job's models and cap read from a worker's environment. */
+const MODEL_FACT_KEYS = Object.freeze(["PI_PROVIDER", "PI_MODEL", "PI_MAX_COST_USD", "PI_ALLOWED_MODELS"]);
+
+/**
+ * The deployment's `.env` as far as a model edit needs it, or what could not be read of it: `{ env, note }`. The file and not the
+ * console's own environment, for `judgeMcp`'s reason and with more at stake: that environment is built once at the console's
+ * start with its shell winning, so it could pass a cap above the one in the file, and `loadSchedules` refuses the whole file over
+ * that. A file it cannot vouch for leaves those keys unjudged and says so, since another host may read its own.
+ */
+function modelEnv(readHostEnv) {
+  const cannot = "so the deployment's job cap and its list of models could not be judged here.";
+  let read;
+  try {
+    read = readHostEnv(MODEL_FACT_KEYS);
+  } catch {
+    return { env: {}, note: `This host's .env could not be read as the worker reads it, ${cannot}` };
+  }
+  if (read.unread.length > 0) return { env: read.env, note: `This host's .env holds ${listed(read.unread)} in a line that could not be read as the worker reads it, ${cannot}` };
+  return { env: read.env, note: null };
+}
+
 /**
  * What the deployment says of a job's models and cap, read fresh for each judgement, or the refusal that it cannot say:
  * `deployment` as a job resolves it (overlay over env), `deploymentCap` the merged cap, `ceiling` the most a trigger's may be.
  */
-function modelFacts({ paths, env, fs }) {
+function modelFacts({ paths, readHostEnv, fs }) {
+  const { env, note } = modelEnv(readHostEnv);
   let settings;
   try {
     settings = paths.settingsFile ? readOverlay(paths.settingsFile, { fs }) : { overlay: {} };
@@ -291,23 +313,30 @@ function modelFacts({ paths, env, fs }) {
   } catch {
     return refuse("The deployment's job cap could not be read; correct it before changing a trigger's model or cap.", 409);
   }
-  return { deployment, deploymentCap, ceiling, envList, capOf: (value) => effectiveCostCapMicros(value, deployment.maxCostUsd) };
+  return { deployment, deploymentCap, ceiling, envList, note, capOf: (value) => effectiveCostCapMicros(value, deployment.maxCostUsd) };
 }
 
 export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, builtinModel = catalogModel, builtinChatModels = catalogChatModels, readHosts = async () => ({ unreachable: "the live hosts are not wired" }), readHostLoads = async () => ({ hosts: [] }), readSkew = async () => ({ rows: [], incomplete: true }), versionTables = {}, jobsReadMs = JOBS_READ_MS, deploymentDir = ".", readHostEnv = () => ({ env, unread: [] }), readEndpoints = () => [] } = {}) {
   const triggersTables = versionTables.triggers ?? {};
   const jobDataTables = versionTables.jobData ?? {};
 
-  /** One judgement's read of the overlay models.json: at most once, and a read that failed is not asked again. */
+  /**
+   * One judgement's read of the overlay models.json: at most once, and a read that failed stays failed for every model asked of
+   * it. Answering null to the next one read as an overlay with nothing in it, so that model was priced from the builtin table
+   * and judged known or unknown without the file that may define it.
+   */
   const overlayReader = () => {
-    let overlayRead = false;
-    let overlay = null;
+    let read = null;
     return () => {
-      if (!overlayRead) {
-        overlayRead = true;
-        overlay = readOverlayModels(paths.globalPiDir, { readFileSync: (...args) => fs.readFileSync(...args), lstatSync: (...args) => fs.lstatSync(...args) });
+      if (read === null) {
+        try {
+          read = { overlay: readOverlayModels(paths.globalPiDir, { readFileSync: (...args) => fs.readFileSync(...args), lstatSync: (...args) => fs.lstatSync(...args) }) };
+        } catch (error) {
+          read = { error };
+        }
       }
-      return overlay;
+      if (Object.hasOwn(read, "error")) throw read.error;
+      return read.overlay;
     };
   };
 
@@ -469,10 +498,11 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
    *
    * What pickup refuses for free and this host's overlay or `.env` decides (a model it does not know, a list that comes from its
    * PI_ALLOWED_MODELS) is a warning: another host may hold what this one lacks, `judgeMcp`'s rule. What stays a refusal costs
-   * more than a free refusal: a cap above the deployment's refuses the whole file at the loader, and a cap no call can clear
-   * refuses every call inside a paid container, so those are stopped here (CONST-BUDGET-BEFORE-TOKENS). A list the file itself
-   * contradicts on every host is the loader's to refuse, in the funnel. One that clears only the smallest possible request is said
-   * out loud (`thin`).
+   * more than a free refusal: a cap above the deployment's refuses the whole file at the loader, and a cap the MAIN model cannot
+   * clear refuses a job's every call inside a paid container, so those are stopped here (CONST-BUDGET-BEFORE-TOKENS). A listed or
+   * fallback model that cannot clear it is a warning: the job starts on its main model, and the cost guard refuses a call to that
+   * one only if the job makes it, which stops the job as `cost-cap`. A list the file itself contradicts on every host is the
+   * loader's to refuse, in the funnel. One that clears only the smallest possible request is said out loud (`thin`).
    */
   function judgeModels({ entry, was, text, facts, touched }) {
     const run = entry.run;
@@ -534,6 +564,12 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       const named = capTouched ? [main, ...refsOf(run.models), ...fallbacks] : [...(mainTouched ? [main] : []), ...addedRefs("models"), ...addedRefs("fallbackModels")];
       for (const ref of new Map(named.map((one) => [`${one.provider}/${one.id}`, one])).values()) {
         const name = `${ref.provider}/${ref.id}`;
+        // What this model's failing means for a job: it cannot start at all, or it starts on its main model and stops at a call to this one.
+        const stopped = (sentence) => {
+          if (name === mainName) return refuse(sentence);
+          warnings.add(`${sentence} A job still starts on ${mainName}, and a call to this one stops it as cost-cap.`);
+          return null;
+        };
         // A models.json that cannot be read now was said above, and an amount read without it would be a guess.
         let overlay;
         try {
@@ -543,8 +579,16 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
           continue;
         }
         const view = outputCapView({ models: overlay, provider: ref.provider, modelId: ref.id, builtinModel, builtinChatModels });
-        if (view?.api === "pi-messages" || (view?.api === undefined && ref.provider === "radius")) return refuse(`${name}: ${RADIUS_COST_CAP_LABEL}. ${RADIUS_COST_CAP_FIX}.`);
-        if (outputUnboundable(view)) return refuse(`${name}'s output cap travels as max_completion_tokens to a server that may ignore it, so the runner counts every call to it unboundable and refuses it under a job cap. Set "compat": { "maxTokensField": "max_tokens" } on it in models.json, or choose another model: docs/egress.md, "Local model servers".`);
+        if (view?.api === "pi-messages" || (view?.api === undefined && ref.provider === "radius")) {
+          const refused = stopped(`${name}: ${RADIUS_COST_CAP_LABEL}. ${RADIUS_COST_CAP_FIX}.`);
+          if (refused) return refused;
+          continue;
+        }
+        if (outputUnboundable(view)) {
+          const refused = stopped(`${name}'s output cap travels as max_completion_tokens to a server that may ignore it, so the runner counts every call to it unboundable and refuses it under a job cap. Set "compat": { "maxTokensField": "max_tokens" } on it in models.json, or choose another model: docs/egress.md, "Local model servers".`);
+          if (refused) return refused;
+          continue;
+        }
         const priced = boundModelOf(ref, { builtinModel, overlay });
         const floor = firstCallFloorMicros(priced);
         if (floor === null) {
@@ -560,7 +604,11 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
         const out = room ? `Choose another model, or a job cap of at least ${money(shortTask)}; a repository's context files and a longer task need more.` : "A trigger can only lower the deployment's job cap: choose another model. The deployment's own cap belongs to its settings, not to this page.";
         // "At least", because the bound is a lower one for any larger request: it grows with the whole of it, and a repository's
         // context files go in the system prompt before any task does (`FIRST_CALL_SHORT_TASK_BYTES` holds none).
-        if (floor > cap) return refuse(`${name} needs at least ${money(shortTask)} for a short task's first call, above ${room ? "this trigger's" : "the deployment's"} ${money(room ? cap : facts.ceiling)} job cap, so the runner would refuse every call to it before it is sent. ${out}`);
+        if (floor > cap) {
+          const refused = stopped(`${name} needs at least ${money(shortTask)} for a short task's first call, above ${room ? "this trigger's" : "the deployment's"} ${money(room ? cap : facts.ceiling)} job cap, so the runner would refuse every call to it before it is sent. ${out}`);
+          if (refused) return refused;
+          continue;
+        }
         thin.add(`${name} clears this ${money(cap)} job cap only for the smallest first call: a short task's needs ${money(shortTask)}, so most jobs that call it would be refused before they spend. ${out}`);
       }
     }
@@ -661,19 +709,19 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     let thin = [];
     let warnings = [];
     if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
-      facts = modelFacts({ paths, env, fs });
+      facts = modelFacts({ paths, readHostEnv, fs });
       if (facts.refusal) return facts;
       const judged = judgeModels({ entry: nextEntry, was: entry, text: afterText, facts, touched });
       if (judged.refusal) return judged;
       unjudged = judged.unjudged;
       thin = judged.thin;
-      warnings = judged.warnings;
+      warnings = [...(facts.note ? [facts.note] : []), ...judged.warnings];
     }
     // Only an edit of the servers or the exclusions: a model edit would be told about a server nobody touched.
     const reachesPickup = touched.some((key) => MCP_CHECK_FIELDS.includes(key));
     let pickupWarned = false;
     if (reachesPickup) {
-      facts ??= modelFacts({ paths, env, fs });
+      facts ??= modelFacts({ paths, readHostEnv, fs });
       const judged = judgeMcp({ was: wasRun, run: nowRun, entry: nextEntry, text: afterText, facts });
       if (judged.refusal) return judged;
       pickupWarned = judged.warnings.length > 0;

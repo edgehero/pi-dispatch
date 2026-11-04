@@ -331,7 +331,8 @@ test("every refusal the planner can say is in that table or named here with why:
   const source = read("admin/src/trigger-environment-plans.mjs");
   // Not the pickup check's own sentences. The docs do not quote them or list which refuse, and say only that a preview warns about what
   // would stop this trigger's jobs on this host and refuses what the file alone decides. The check's reasons are `docs/mcp.md`'s to list.
-  const literals = [...source.matchAll(/\brefuse\((?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => !/answer\.|pickup check/.test(literal));
+  // `stopped(` refuses of a job's main model, and warns of any other.
+  const literals = [...source.matchAll(/\b(?:refuse|stopped)\((?:`((?:[^`\\]|\\.)*)`|"((?:[^"\\]|\\.)*)")/g)].map((m) => m[1] ?? m[2]).filter((literal) => !/answer\.|pickup check/.test(literal));
   assert.ok(literals.length >= 20, `the scan finds the planner's sentences (${literals.length})`);
   const said = await Promise.all(Object.values(REFUSALS).map(async (meet) => (await meet()).refusal));
   for (const literal of literals) {

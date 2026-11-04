@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeMcpCheck } from "@edgehero/pi-dispatch/mcp-preflight";
+import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { resolveModelRoles } from "@edgehero/pi-dispatch/model-roles";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
 import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
@@ -743,19 +744,120 @@ test("the bound is judged only when the edit sends a model field or the cap", as
   assert.match((await refusal(bad, { provider: "anthropic" })).refusal, /needs at least/, "the provider alone is a model field");
 });
 
-test("a listed model and a fallback above the cap refuse by name; the deployment's own list and a role map's others do not", async () => {
+test("a listed model and a fallback above the cap warn by name, since a job still starts on its main model", async () => {
+  const stops = "A job still starts on anthropic/claude-haiku-4-5, and a call to this one stops it as cost-cap.";
   const listed = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "2" } });
-  assert.match((await refusal(listed, { models: [HAIKU, OPUS] })).refusal, /^anthropic\/claude-opus-5-5 needs at least/);
+  const words = await warned(listed, { models: [HAIKU, OPUS] });
+  assert.match(words, /^anthropic\/claude-opus-5-5 needs at least \$2\.654295 for a short task's first call, above the deployment's \$2\.00 job cap, so the runner would refuse every call to it before it is sent\./);
+  assert.ok(words.endsWith(stops), words);
+  const listedSummary = (await listed.service.preview(ask(listed, { models: [HAIKU, OPUS] }), operator)).summary.join(" ");
+  assert.ok(!listedSummary.includes("clears this"), "said once: a model that cannot clear the cap is not also one that barely does");
   const fallback = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, OPUS] }, settings: { maxCostUsd: "5" } });
-  assert.match((await refusal(fallback, { fallbackModels: [OPUS], maxCostUsd: "2" })).refusal, /^anthropic\/claude-opus-5-5 needs at least/);
+  assert.ok((await warned(fallback, { fallbackModels: [OPUS], maxCostUsd: "2" })).includes(stops));
   // A fallback this trigger names off the deployment's list counts as named, though no list of its own holds it.
   const envFallback = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${OPUS}` } });
-  assert.match((await refusal(envFallback, { fallbackModels: [OPUS], maxCostUsd: "2" })).refusal, /^anthropic\/claude-opus-5-5 needs at least/);
+  assert.ok((await warned(envFallback, { fallbackModels: [OPUS], maxCostUsd: "2" })).includes(stops));
+  // What the runtime does with such a cap, on the real guard: the job's main model gets its first call, and the listed one is refused it.
+  const cap = parseUsdMicros("2", "cap");
+  assert.equal(admits(cap, builtinModel("anthropic", "claude-haiku-4-5"), FIRST_CALL_SHORT_TASK_BYTES), true);
+  assert.equal(admits(cap, builtinModel("anthropic", "claude-opus-5-5"), FIRST_CALL_SHORT_TASK_BYTES), false);
+  // And it can be confirmed: nothing about a model a job may never call stops a person.
+  const planned = await listed.service.preview(ask(listed, { models: [HAIKU, OPUS] }), operator);
+  assert.deepEqual(await listed.service.apply(planned, operator), { ok: true });
+  assert.deepEqual(listed.entry().run.models, [HAIKU, OPUS]);
+  // The main model above it is a job that cannot start, and that still refuses.
+  assert.match((await refusal(fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", models: [HAIKU, OPUS] } }), { maxCostUsd: "1" })).refusal, /^anthropic\/claude-opus-5-5 needs at least/);
   // The deployment allows a dear model this trigger never named: lowering this trigger's cap is no fault of that model's.
   const envList = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${OPUS}` } });
-  assert.ok((await envList.service.preview(ask(envList, { maxCostUsd: "1" }), operator)).plan);
+  await quiet(envList, { maxCostUsd: "1" });
   const roles = fixture({ doc: { modelRoles: { default: { architect: OPUS } }, triggers: [cron, comment({ provider: "anthropic", model: "claude-haiku-4-5" })] } });
-  assert.ok((await roles.service.preview(ask(roles, { maxCostUsd: "1" }), operator)).plan);
+  await quiet(roles, { maxCostUsd: "1" });
+});
+
+test("a listed model no cap can bound warns too, where a main one refuses: the job still starts", async () => {
+  const overlay = { providers: { ollama: { baseUrl: "http://127.0.0.1:11434/v1", api: "openai-completions", apiKey: "x", models: [{ id: "local", cost: { input: 100000, output: 100000, cacheRead: 0, cacheWrite: 0 }, maxTokens: 100, contextWindow: 1000 }] } } };
+  const run = { provider: "anthropic", model: "claude-haiku-4-5" };
+  const unbound = await warned(fixture({ overlay, run, settings: { maxCostUsd: "5" } }), { models: [HAIKU, "ollama/local"] });
+  assert.match(unbound, /^ollama\/local's output cap travels as max_completion_tokens/);
+  assert.ok(unbound.endsWith("A job still starts on anthropic/claude-haiku-4-5, and a call to this one stops it as cost-cap."), unbound);
+  assert.equal(unbound.split("A job still starts").length, 2, "said once");
+  const radiusFixture = fixture({ run, settings: { maxCostUsd: "5" } });
+  const radius = await warned(radiusFixture, { models: [HAIKU, "radius/not-in-its-catalog"] });
+  assert.match(radius, /radius\/not-in-its-catalog: Radius \(pi-messages\) has no verified local cost bound.* A job still starts on anthropic\/claude-haiku-4-5, and a call to this one stops it as cost-cap\./);
+  const said = (await radiusFixture.service.preview(ask(radiusFixture, { models: [HAIKU, "radius/not-in-its-catalog"] }), operator)).summary.join(" ");
+  assert.ok(!said.includes("could not be bounded"), "and not also as one this page could not judge");
+});
+
+test("an overlay models.json that cannot be read stays unread for every model the edit names: none is priced or judged without it", async () => {
+  const overlay = { providers: { anthropic: { models: [{ id: "claude-opus-5-5", cost: { input: 0.01, output: 0.01, cacheRead: 0, cacheWrite: 0 }, maxTokens: 100, contextWindow: 1000 }] } } };
+  let armed = false;
+  const fs = { ...nodeFs, readFileSync: (path, ...rest) => {
+    if (armed && String(path).endsWith("models.json")) throw Object.assign(new Error("EIO"), { code: "EIO" });
+    return nodeFs.readFileSync(path, ...rest);
+  } };
+  const run = { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] };
+  const f = fixture({ run, overlay, deps: { fs } });
+  armed = true;
+  const out = await f.service.preview(ask(f, { maxCostUsd: "1", models: [HAIKU, SONNET, OPUS] }), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  for (const name of [SONNET, OPUS]) assert.ok(out.plan.warnings.includes(`The overlay's models.json could not be read just now, so whether this deployment knows ${name} could not be judged here; a pickup asks again.`), out.plan.warnings.join(" | "));
+  // Under a $1 cap the builtin table would say opus cannot clear it: with the file unread no amount is claimed, in either direction.
+  assert.ok(out.summary.includes(`The first call on ${HAIKU}, ${SONNET} and ${OPUS} could not be bounded here, so the runner judges it when a job runs.`), out.summary.join("\n"));
+  assert.ok(!out.summary.join(" ").includes("$2.654295"), out.summary.join("\n"));
+  // One failed read, and the next would have answered: the judgement holds to what it read, for the second model as for the first.
+  let failures = 1;
+  const once = { ...nodeFs, readFileSync: (path, ...rest) => {
+    if (String(path).endsWith("models.json") && failures > 0) {
+      failures -= 1;
+      throw Object.assign(new Error("EIO"), { code: "EIO" });
+    }
+    return nodeFs.readFileSync(path, ...rest);
+  } };
+  const g = fixture({ run, overlay, deps: { fs: once } });
+  const onceOut = await g.service.preview(ask(g, { models: [HAIKU, SONNET, OPUS] }), operator);
+  for (const name of [SONNET, OPUS]) assert.ok(onceOut.plan.warnings.includes(`The overlay's models.json could not be read just now, so whether this deployment knows ${name} could not be judged here; a pickup asks again.`), onceOut.plan.warnings.join(" | "));
+});
+
+// The real reader over a real file, as the console's own wiring reads it (`cli.mjs`): the shell never reaches this.
+const envFile = (f, text) => {
+  nodeFs.writeFileSync(join(f.dir, ".env"), text, { mode: 0o600 });
+  return (keys) => {
+    const read = deploymentServiceEnv({ env: {}, dir: f.dir, keys, fs: nodeFs });
+    if (read.unreadable || read.untrusted) throw new Error("no");
+    return { env: read.env, unread: [...read.unread.map((row) => row.key), ...read.hazardSkipped], hazardLine: read.hazardSkipped.length > 0 ? read.hazard?.line ?? null : null };
+  };
+};
+const withEnvFile = (run, text, env = {}) => {
+  const base = fixture({ run, env });
+  const readHostEnv = envFile(base, text);
+  return { ...base, service: createTriggerEnvironmentActions({ paths: base.paths, env: { PI_MAX_COST_USD: "9", PI_PROVIDER: "anthropic", PI_MODEL: "claude-opus-5-5", ...env }, now: () => NOW, deploymentDir: base.dir, readHostEnv }) };
+};
+
+test("a deployment's cap and model come from its file: a console started from a shell that says otherwise changes nothing", async () => {
+  // The shell (the console's own environment) says $9 and the file $2, so a worker's loader refuses a $5 trigger cap, and the whole file with it.
+  const f = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "PI_MAX_COST_USD=2\nPI_PROVIDER=anthropic\nPI_MODEL=claude-haiku-4-5\n");
+  assert.match((await refusal(f, { maxCostUsd: "5" })).refusal, /^A trigger's job cap can only lower the deployment's: \$5\.00 is above its \$2\.00\./);
+  await quiet(f, { maxCostUsd: "1.50" });
+  // The other way round: the file says nothing of a cap, so the shell's lower one does not refuse anything.
+  const open = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "PI_PROVIDER=anthropic\n", { PI_MAX_COST_USD: "1" });
+  await quiet(open, { maxCostUsd: "4" });
+  // The list is the file's too.
+  const listed = withEnvFile({ provider: "anthropic", model: "claude-sonnet-5-5" }, `PI_ALLOWED_MODELS=${SONNET}\n`);
+  assert.match(await warned(listed, { model: "claude-haiku-4-5" }), /refused as model-not-allowed/);
+  // And the job's main model: the shell's opus could not clear a $1 cap, and the file's haiku does.
+  await quiet(withEnvFile({}, "PI_PROVIDER=anthropic\nPI_MODEL=claude-haiku-4-5\n"), { maxCostUsd: "1" });
+});
+
+test("a deployment's file it cannot vouch for leaves the cap unjudged, says so, and stops nobody", async () => {
+  const note = (head) => `${head} so the deployment's job cap and its list of models could not be judged here.`;
+  const unread = withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "PI_MAX_COST_USD=ab$cd\n");
+  assert.equal(await warned(unread, { maxCostUsd: "5" }), note("This host's .env holds PI_MAX_COST_USD in a line that could not be read as the worker reads it,"));
+  const untrusted = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, deps: { readHostEnv: () => { throw new Error("untrusted"); } } });
+  assert.equal(await warned(untrusted, { maxCostUsd: "5" }), note("This host's .env could not be read as the worker reads it,"));
+  const planned = await untrusted.service.preview(ask(untrusted, { maxCostUsd: "5" }), operator);
+  assert.deepEqual(await untrusted.service.apply(planned, operator), { ok: true });
+  // A value the file holds that the worker refuses is the file saying something, and that still refuses.
+  assert.match((await refusal(withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "PI_MAX_COST_USD=lots\n"), { maxCostUsd: "1" })).refusal, /The deployment's job cap could not be read/);
 });
 
 test("a role resolves first: the bound and the catalog judge the model it names", async () => {
