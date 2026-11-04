@@ -499,7 +499,8 @@ test("the project, envelope, secret-profile and priorities plans", async () => {
 // in write-plans.mjs (`refusal:`, `unchanged:`, a thrown template, and the strings the `*Refusal` helpers return) and
 // requires each to be produced, and asserted, by one row of the table below. A new refusal sentence with no row fails.
 
-const PLANS_SRC = readFileSync(fileURLToPath(new URL("../src/write-plans.mjs", import.meta.url)), "utf8");
+// With the module the trigger edit's body moved to (issue #800): its sentences are this module's refusals, and stay held here.
+const PLANS_SRC = ["../src/write-plans.mjs", "../src/trigger-edit-core.mjs"].map((file) => readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8")).join("\n");
 
 /** Read one JS string or template literal starting at `src[i]` (a quote or backtick): `{ parts, end }`, holes as null. */
 function readLiteral(src, i) {
