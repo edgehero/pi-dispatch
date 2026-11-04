@@ -12,7 +12,7 @@ import { makeRedactor, secretValuesOf } from "../src/redact-secrets.mjs";
 import { buildRecord, makeLogSink } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
-const { LOADED_BASE_SHA_RE, LOADED_COUNT_MAX, LOADED_RECORD_MAX_BYTES, leavesOut, leftOutOf, loadedWithBase, loadedWithImage, rebuildLoaded, recordedLoaded } = record;
+const { imageFactsOf, LOADED_BASE_SHA_RE, LOADED_COUNT_MAX, LOADED_RECORD_MAX_BYTES, leavesOut, leftOutOf, loadedWithBase, loadedWithImage, rebuildLoaded, recordedLoaded } = record;
 const { buildLoaded, fitLoaded } = runnerLoaded;
 
 // Issue #800, INT-RUN-HISTORY-FILE-CONTRACT's `loaded`: the worker's half. The lines here come out of the runner's own
@@ -636,12 +636,12 @@ function maximal() {
 		ownTools: OWN,
 		leftOut: { tools: Array.from({ length: 32 }, (_, i) => `mcp__${String(i).padStart(2, "0")}${"y".repeat(41)}*`), packages: false, overlayExtensions: false, restricted: false },
 	};
-	const img = { image: `ghcr.io/${"i".repeat(504)}`, imageDigest: `sha256:${"f".repeat(64)}`, piVersion: piLongest };
+	const img = { image: `ghcr.io/${"i".repeat(504)}`, imageDigest: `sha256:${"f".repeat(64)}`, piVersion: piLongest, fromJob: true };
 	return { forged, known, img, baseSha: "e".repeat(64) };
 }
 
 /** Measured off `maximal` below, and said in INT-RUN-HISTORY-FILE-CONTRACT. A new cap moves this and the spec together. */
-const WORST_RECORD_BYTES = 15_951;
+const WORST_RECORD_BYTES = 15_971;
 
 test("the record stays under 16 KiB at every cap, and the worst case is measured and pinned", () => {
 	const { forged, known, img, baseSha } = maximal();
@@ -653,6 +653,7 @@ test("the record stays under 16 KiB at every cap, and the worst case is measured
 	const bytes = Buffer.byteLength(JSON.stringify(kept), "utf8");
 	assert.equal(kept.sources.filter((row) => row.tier === "package").length, 16);
 	assert.equal(kept.image.length, 512);
+	assert.equal(kept.imageFromJob, true, "the key that is there only sometimes");
 	assert.equal(kept.mcp.length, 8);
 	assert.equal(kept.leftOut.tools.length, 32);
 	assert.equal(kept.tools.job.length, record.LOADED_JOB_TOOLS.length);
@@ -704,9 +705,10 @@ test("past the bound it reads as `cut` and keeps the worker's facts: a key that 
 	assert.deepEqual([built.loaded.image, built.loaded.imageDigest, built.loaded.imagePi], [img.image, img.imageDigest, img.piVersion]);
 	assert.deepEqual(built.loaded.leftOut, known.leftOut);
 	assert.equal(built.loaded.baseSha, baseSha, "and the commit, which is the worker's too");
+	assert.equal(built.loaded.imageFromJob, true, "and that the image was the job's own");
 	const bytes = Buffer.byteLength(JSON.stringify(built.loaded), "utf8");
 	assert.ok(bytes <= LOADED_RECORD_MAX_BYTES, "what is left fits, and it is the most the worker alone can say");
-	assert.equal(bytes, 2_599);
+	assert.equal(bytes, 2_619);
 	assert.deepEqual(recordedLoaded(built.loaded), built.loaded, "and it reads back as itself");
 	assert.deepEqual(Object.keys(built).slice(-2), ["loaded", "v"]);
 	// The bound itself, to the byte. A name costs its length, two quotes and a comma, less the one comma the first has none of.
@@ -738,14 +740,14 @@ test("the record's key table names every key the field holds, a row of its own f
 		const [, head, body] = /^ {2}\| (.+?) \| (.*) \|$/.exec(text);
 		return { keys: [...head.matchAll(/`([A-Za-z]+)`/g)].map((match) => match[1]), body };
 	});
-	const loaded = recordedLoaded(loadedWithBase(loadedWithImage(rebuildLoaded(line(), KNOWN), { image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0" }), "a".repeat(40)));
+	const loaded = recordedLoaded(loadedWithBase(loadedWithImage(rebuildLoaded(line(), KNOWN), { image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0", fromJob: true }), "a".repeat(40)));
 	// Not `v`, the field's own version, which the JSON above the table shows.
 	assert.deepEqual(rows.flatMap((row) => row.keys).filter((key, i, all) => all.indexOf(key) === i).sort(), Object.keys(loaded).filter((key) => key !== "v").sort(), "every key of the field, and no other");
 	// `at`, `cut` and `pi` read in the runner's table (INT-RUNNER-EXIT-CODE-PROTOCOL) and the image's three in one row of their own, so they
 	// have no separate rows. Everything else is this contract's to explain, and the row that lists all the runner's part says only when
 	// each is null. So a row of its own, or deleting one would stay green on that list. A hand-kept list because the relation is a choice of how to
 	// write the table, which nothing derives.
-	const OWN_ROW = ["runner", "flow", "sources", "mcp", "tools", "problems", "baseSha", "leftOut"];
+	const OWN_ROW = ["runner", "flow", "sources", "mcp", "tools", "problems", "imageFromJob", "baseSha", "leftOut"];
 	const rowOf = (key) => rows.find((row) => row.keys.length === 1 && row.keys[0] === key);
 	for (const key of OWN_ROW) assert.ok(rowOf(key), `the table has no row of its own for \`${key}\``);
 	assert.deepEqual(rows.filter((row) => row.keys.length === 1).map((row) => row.keys[0]).sort(), [...OWN_ROW].sort());
@@ -827,6 +829,32 @@ test("`absent`, `invalid` and `cut` carry no runner part, whatever the source sa
 		assert.deepEqual(kept.leftOut, good.leftOut, "what the worker said stays");
 	}
 	for (const bad of [null, "x", [], { v: 2, runner: "absent" }, { v: 1, runner: "fine" }, { v: 1, runner: "reported", at: "ready" }]) assert.equal(recordedLoaded(bad), null, JSON.stringify(bad));
+});
+
+test("that an image was the job's own is the worker's alone, present only then, and every field the worker adds it to keeps it", () => {
+	const img = { image: "pi-job:gpu", imageDigest: null, piVersion: "1.5.0", fromJob: true };
+	// A line cannot claim it: a repository's extension could otherwise take its host out of every comparison.
+	for (const raw of [{ ...line(), imageFromJob: true }, { imageFromJob: true }, { v: 99, imageFromJob: true }]) assert.equal(Object.hasOwn(rebuildLoaded(raw, KNOWN), "imageFromJob"), false);
+	assert.equal(rebuildLoaded({ ...line(), imageFromJob: true }, KNOWN).runner, "reported", "the premise: the line held up, and the key it invented is dropped by never being read");
+	const own = recordedLoaded(loadedWithImage(rebuildLoaded(line(), KNOWN), img));
+	assert.equal(own.imageFromJob, true);
+	// With no image of a job's, a record is byte-identical to what it was.
+	const { fromJob: _fromJob, ...plain } = img;
+	const before = recordedLoaded(loadedWithImage(rebuildLoaded(line(), KNOWN), plain));
+	assert.equal(Object.hasOwn(before, "imageFromJob"), false);
+	assert.equal(JSON.stringify(own), JSON.stringify(before).replace('"imagePi":"1.5.0",', '"imagePi":"1.5.0","imageFromJob":true,'), "and the key is that key's bytes and no others");
+	// One value: anything else is no key, as a commit that fails its shape is, and costs the field nothing.
+	for (const bad of [false, null, "true", 1, {}, []]) {
+		const kept = recordedLoaded({ ...before, imageFromJob: bad });
+		assert.equal(kept.runner, "reported", JSON.stringify(bad));
+		assert.equal(Object.hasOwn(kept, "imageFromJob"), false, JSON.stringify(bad));
+	}
+	assert.equal(Object.hasOwn(recordedLoaded({ ...before, image: null, imageFromJob: true }), "imageFromJob"), false, "nothing to qualify");
+	// A refusal between the preflight and the container says so too, and a retried attempt's line takes the worker's facts whole.
+	const refused = loadedWithImage(null, img);
+	assert.equal(recordedLoaded(refused).imageFromJob, true);
+	assert.deepEqual(imageFactsOf(refused), { image: "pi-job:gpu", imageDigest: null, imagePi: "1.5.0", imageFromJob: true });
+	assert.deepEqual(imageFactsOf(loadedWithImage(null, plain)), { image: "pi-job:gpu", imageDigest: null, imagePi: "1.5.0" });
 });
 
 test("the base commit is the worker's alone: a line that names one is not read, whatever form the field takes", () => {

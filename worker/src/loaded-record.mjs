@@ -391,12 +391,19 @@ export function rebuildLoaded(raw, known = {}) {
  * image alone when the container's own field is null (it was refused, or never reported anything). `imageDigest` is the
  * runtime's local image id (`{{.Id}}`): two local builds of one tag differ, so it is THIS HOST'S id for what ran and never
  * a thing to compare across hosts. `null` when the preflight named no image, which keeps a record with no image at all
- * byte-identical to what it was.
+ * byte-identical to what it was. `imageFromJob` is present only on a run on an image its job named rather than this host's
+ * default, so its pi and image say nothing of what the host runs everything else on. REJECTED: reading that from the trigger
+ * as it stands now, which may have changed since the run, and a CLI job's `--image` has no trigger.
  */
 export function loadedWithImage(loaded, img) {
 	if (typeof img?.image !== "string") return loaded ?? null;
-	const facts = { image: img.image, imageDigest: img.imageDigest ?? null, imagePi: img.piVersion ?? null };
+	const facts = { image: img.image, imageDigest: img.imageDigest ?? null, imagePi: img.piVersion ?? null, ...(img.fromJob === true ? { imageFromJob: true } : {}) };
 	return { ...(loaded ?? workerOnly("absent")), ...facts };
+}
+
+/** The worker's own image facts on a field, for a field the container's line made that has yet to carry them. */
+export function imageFactsOf(loaded) {
+	return { image: loaded.image, imageDigest: loaded.imageDigest, imagePi: loaded.imagePi, ...(loaded.imageFromJob === true ? { imageFromJob: true } : {}) };
 }
 
 /**
@@ -522,6 +529,9 @@ export function recordedLoaded(value) {
 	const image = typeof value.image === "string" && value.image.length <= IMAGE_MAX && imageRefProblem(value.image) === null ? value.image : null;
 	const imageDigest = typeof value.imageDigest === "string" && IMAGE_DIGEST_RE.test(value.imageDigest) ? value.imageDigest : null;
 	const imagePi = isPiVersion(value.imagePi) ? value.imagePi : null;
+	// Conditional for the reason `baseSha` is, just below: an image no job named has nothing to say here, and a key on every
+	// record would change the bytes of all of them. Beside the facts it qualifies, and meaningless with no image to qualify.
+	const fromJob = value.imageFromJob === true && image !== null ? { imageFromJob: true } : {};
 	// A CONDITIONAL key, the last of the field. Null, as `image` is, would change the bytes of every record written before the
 	// workspace was prepared, and those have nothing to say about a commit.
 	const base = typeof value.baseSha === "string" && LOADED_BASE_SHA_RE.test(value.baseSha) ? { baseSha: value.baseSha } : {};
@@ -533,7 +543,7 @@ export function recordedLoaded(value) {
 		if (runnerPart === undefined) return null;
 	}
 	const { at, cut, pi, flow, sources, mcp, tools, problems } = runnerPart;
-	const out = { v: LOADED_RECORD_VERSION, runner: value.runner, at, cut, image, imageDigest, imagePi, pi, flow, sources, mcp, tools, problems, leftOut, ...base };
+	const out = { v: LOADED_RECORD_VERSION, runner: value.runner, at, cut, image, imageDigest, imagePi, ...fromJob, pi, flow, sources, mcp, tools, problems, leftOut, ...base };
 	if (Buffer.byteLength(JSON.stringify(out), "utf8") <= LOADED_RECORD_MAX_BYTES) return out;
 	// No job's line gets here today (the tests measure the worst one); a cap that grows would. REJECTED: null, as this read before.
 	// The bound falls after the image's facts are added, so a line that had passed every check then

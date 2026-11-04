@@ -7,7 +7,7 @@ import { recordedLoaded } from "../../worker/src/loaded-record.mjs";
 import { buildRecord } from "../../worker/src/run-history.mjs";
 import { HOSTS_OFFERED, LOADED_STATES, LOADED_WORDS, hostLoadsRow, hostPiFor, isOutcomeNote, loadedFold, loadedOf, loadedProblems, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, projectLoadsOf, runningVerdict, sandboxFreshLine, sandboxRunLine, wordsText } from "../src/loaded-words.mjs";
 import { outcomeKey } from "../src/words.mjs";
-import { recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
+import { failedOverlayEntries, heldBackOverlay, recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
 import { HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, SCRIPT, billingRecords, incompleteRecords, loadedField, loadedRecord, source, webRecords } from "./helpers/loaded-samples.mjs";
 
 // Issue #800, the words every surface reads for what a run loaded. The cards draw these lines (RunLoaded, LoadedStates,
@@ -145,7 +145,7 @@ test("a run that stopped did not run: its line says what was found and what fail
   assert.equal(extensionLine.also[0].bold, "The extension from acme/web failed to load.");
   assert.equal(extensionLine.also[0].rest, "");
   // Stopped at the loader, with nothing about a server to say so.
-  const atLoader = (over) => loadedRecord({ outcome: "failed", reason: "container-infra-exit", exitCode: 1, loaded: loadedField({ at: "loader", mcp: null, tools: null, ...over }) });
+  const atLoader = (over) => loadedRecord({ outcome: "failed", reason: "container-infra-exit", exitCode: 1, tokens: null, loaded: loadedField({ at: "loader", mcp: null, tools: null, ...over }) });
   const loaderFlow = loadedVerdict(atLoader(noFlow));
   assert.equal(lineOf(loaderFlow), "Its flow was found nowhere. pi found no skill named fix: not in acme/web at its base commit, nor in a skills folder, the overlay or a staged package.");
   assert.deepEqual(fixLabels(loaderFlow), ["Open trigger 3", BASE_BUTTON]);
@@ -164,20 +164,26 @@ test("a run that stopped did not run: its line says what was found and what fail
 
 // Each exit-2 path after the `ready` note in `run-job.mjs`, by what its line carries. The runner's reason is often not the record's: the worker keeps
 // only `RUNNER_POLICY_REASONS`, so `command-unregistered` and `turn_budget` both read `runner-policy`, told apart only by the turns on the line.
+/** The `tokens` of an exit line, as the real meter's snapshot holds them. */
+const meterSnapshot = (calls, total) => ({ input: total, output: 0, total, cost: 0, metered: true, rootTotal: total, otherTotal: 0, looseTotal: 0, sessions: 1, calls, unresolved: 0, unpriced: 0, costUnreported: 0 });
+
 const AFTER_READY_EXIT_2 = Object.freeze([
   // Its catch path writes no turns, so the record holds null.
   { name: "a command no extension registers", exit: { code: 2, reason: "command-unregistered", message: "no such command" }, record: { reason: "runner-policy", turns: null }, wentOn: false },
+  // The same, after a call an extension made while it loaded, which that line carries so the spend is not hidden (`meteredExitFields`).
+  { name: "a command no extension registers, after a call at load", exit: { code: 2, reason: "command-unregistered", message: "no such command", tokens: meterSnapshot(1, 300) }, record: { reason: "runner-policy", turns: null }, wentOn: false },
   // A stop made by a call an extension made while it loaded: the prompt is never sent (`decideExit`'s meterStop, with no turn taken).
-  { name: "a cost cap at load", exit: { code: 2, reason: "cost-cap", message: "over" }, turnsOnLine: 0, record: { reason: "cost-cap", turns: 0 }, wentOn: false },
-  { name: "a model refused at load", exit: { code: 2, reason: "model-not-allowed", message: "no" }, turnsOnLine: 0, record: { reason: "model-not-allowed", turns: 0 }, wentOn: false },
-  // A provider that refuses the credential on the first prompt: sent, and no turn came of it.
-  { name: "a credential refused on the first prompt", exit: { code: 2, reason: "provider-auth-refused", message: "401" }, turnsOnLine: 0, record: { reason: "provider-auth-refused", turns: 0 }, wentOn: false },
-  // These took turns, so they went on.
-  { name: "the turn budget", exit: { code: 2, reason: "turn_budget", message: "over" }, turnsOnLine: 20, record: { reason: "runner-policy", turns: 20 }, wentOn: true },
-  { name: "a cost cap mid-run", exit: { code: 2, reason: "cost-cap", message: "over" }, turnsOnLine: 9, record: { reason: "cost-cap", turns: 9 }, wentOn: true },
+  { name: "a cost cap at load", exit: { code: 2, reason: "cost-cap", message: "over", tokens: meterSnapshot(1, 300) }, turnsOnLine: 0, record: { reason: "cost-cap", turns: 0 }, wentOn: false },
+  { name: "a model refused at load", exit: { code: 2, reason: "model-not-allowed", message: "no", tokens: meterSnapshot(1, 0) }, turnsOnLine: 0, record: { reason: "model-not-allowed", turns: 0 }, wentOn: false },
+  // A provider that refuses the credential on the first prompt, as pi's own loop at the pin, the real `attachTurnBudget` and the real
+  // meter write it: the turn started and the call went out, so both count, and no token came back.
+  { name: "a credential refused on the first prompt", exit: { code: 2, reason: "provider-auth-refused", message: "401", tokens: meterSnapshot(1, 0) }, turnsOnLine: 1, record: { reason: "provider-auth-refused", turns: 1 }, wentOn: false },
+  // These took turns and got answers, so they went on.
+  { name: "the turn budget", exit: { code: 2, reason: "turn_budget", message: "over", tokens: meterSnapshot(20, 90_000) }, turnsOnLine: 20, record: { reason: "runner-policy", turns: 20 }, wentOn: true },
+  { name: "a cost cap mid-run", exit: { code: 2, reason: "cost-cap", message: "over", tokens: meterSnapshot(9, 40_000) }, turnsOnLine: 9, record: { reason: "cost-cap", turns: 9 }, wentOn: true },
 ]);
 
-test("every exit-2 path after ready, as a real record: only a run that took a turn reads as having loaded everything, and none reads as stopped by its reason", async () => {
+test("every exit-2 path after ready, as a real record: only a run that took a turn a provider answered reads as having loaded everything, and none reads as stopped by its reason", async () => {
   const runner = readFileSync(new URL("../../image/runner/run-job.mjs", import.meta.url), "utf8");
   const readyAt = runner.indexOf('loaded.record("ready", liveTools);');
   const promptAt = runner.indexOf("await session.prompt(prompt);");
@@ -198,7 +204,7 @@ test("every exit-2 path after ready, as a real record: only a run that took a tu
     } else {
       assert.equal(v.state, "stopped", path.name);
       assert.equal(v.tone, "idle", path.name);
-      assert.equal(v.rest, "It stopped after loading. The outcome above says why.", path.name);
+      assert.equal(v.rest, "It stopped after loading. The outcome above says what can stop a run this way.", path.name);
     }
   }
   // What a problem says of the same paths: said as found and failed, with nothing of going on, until a turn shows it.
@@ -209,7 +215,7 @@ test("every exit-2 path after ready, as a real record: only a run that took a tu
   const lost = await recordThroughPipeline({ exit: { code: 2, reason: "command-unregistered", message: "no such command" }, failures: failure });
   assert.equal(lost.loaded.problems.failed, 1);
   assert.doesNotMatch([loadedVerdict(lost).bold, loadedVerdict(lost).rest].join(" "), /went on|Ran without/);
-  const ranThenStopped = await recordThroughPipeline({ exit: { code: 2, reason: "cost-cap", message: "over" }, turnsOnLine: 3, flowFound: false });
+  const ranThenStopped = await recordThroughPipeline({ exit: { code: 2, reason: "cost-cap", message: "over", tokens: meterSnapshot(3, 12_000) }, turnsOnLine: 3, flowFound: false });
   assert.equal(loadedVerdict(ranThenStopped).bold, LOADED_WORDS.ranWithoutFlow);
 });
 
@@ -266,7 +272,7 @@ test("a run that went on with its list stuck at an earlier stage says it went on
   assert.equal(loadedVerdict(pending).state, "everything");
   assert.equal(wordsText(loadedRows(pending).find((row) => row.label === "MCP").value), "linear was still connecting when this was noted");
   assert.equal(wordsText(loadedFold(pending).find((row) => row.kind === "MCP server").from), "was still connecting when this was noted");
-  assert.equal(wordsText(loadedRows({ ...pending, turns: null, outcome: "failed" }).find((row) => row.label === "MCP").value), "linear had not connected");
+  assert.equal(wordsText(loadedRows({ ...pending, turns: null, tokens: null, outcome: "failed" }).find((row) => row.label === "MCP").value), "linear had not connected");
 });
 
 test("a name leads no sentence, so none takes a capital that is not its spelling: the commonest failure, on each tier", () => {
@@ -304,16 +310,16 @@ test("what no card names keeps saying the truth: off, pending, a stage that load
   assert.equal(loadedVerdict(off).state, "invalid");
   assert.deepEqual(loadedRows(off), []);
   assert.equal(outcomeNote(off), null);
-  const connecting = loadedVerdict(loadedRecord({ outcome: "failed", exitCode: 1, reason: "container-infra-exit", loaded: loadedField({ at: "session", mcp: [{ name: "linear", state: "pending", tools: 0 }] }) }));
+  const connecting = loadedVerdict(loadedRecord({ outcome: "failed", exitCode: 1, reason: "container-infra-exit", tokens: null, loaded: loadedField({ at: "session", mcp: [{ name: "linear", state: "pending", tools: 0 }] }) }));
   assert.equal(connecting.state, "stopped");
   assert.equal(connecting.rest, LOADED_WORDS.stoppedServers);
   // A `-shadowed` refusal comes before the servers start, though their rows read pending: run-job.mjs throws first.
   assert.equal(loadedVerdict(S.stoppedBeforeServers()).state, "stopped");
   assert.equal(loadedVerdict(S.stoppedBeforeServers()).rest, "It stopped before its MCP servers started.");
   for (const reason of ["approval-shadowed", "await-input-shadowed", "report-progress-shadowed", "model-roles-shadowed"]) assert.equal(loadedVerdict({ ...S.stoppedBeforeServers(), reason }).rest, LOADED_WORDS.stoppedBeforeServers, reason);
-  assert.equal(lineOf(loadedVerdict(loadedRecord({ outcome: "failed", exitCode: 1, loaded: loadedField({ at: "loader", mcp: null, tools: null }) }))), LOADED_WORDS.stoppedLoader);
+  assert.equal(lineOf(loadedVerdict(loadedRecord({ outcome: "failed", exitCode: 1, tokens: null, loaded: loadedField({ at: "loader", mcp: null, tools: null }) }))), LOADED_WORDS.stoppedLoader);
   // Before anything loaded, "failed: 0" would be a claim, and "everything loaded" a false one.
-  const early = (at) => loadedRecord({ outcome: "failed", exitCode: 1, loaded: loadedField({ at, flow: null, sources: [], mcp: null, tools: null, problems: null }) });
+  const early = (at) => loadedRecord({ outcome: "failed", exitCode: 1, tokens: null, loaded: loadedField({ at, flow: null, sources: [], mcp: null, tools: null, problems: null }) });
   assert.equal(loadedVerdict(early("start")).rest, LOADED_WORDS.stoppedStart);
   assert.equal(loadedVerdict(early("none")).rest, LOADED_WORDS.noAgent);
   assert.deepEqual(loadedRows(early("start")).map((row) => row.label), ["pi"]);
@@ -696,7 +702,7 @@ test("a host reading unknown never counts as the same: a host with no readable r
   const noPackages = loadedRecord({ jobId: "gh-n", loaded: loadedField({ sources: [source("overlay"), source("repository"), source("trigger"), source("other")] }) });
   const open = projectLoadsOf([noPackages, cutOnMini2]);
   assert.equal(open.state, "incomplete", "a fact no run could show is unknown, not empty");
-  assert.deepEqual(open.small, ["The records of mini2 were cut to fit and keep no names to compare."]);
+  assert.deepEqual(open.small, ["The records of mini2 were cut to fit, so they keep no whole list to compare."]);
 });
 
 test("a difference two hosts it read show is said however few it read, and says how few", () => {
@@ -814,7 +820,7 @@ test("a host's fact comes from the newest of its runs able to show that fact, so
   const cutBeside = projectLoadsOf([run("a", 2), compact("b", 1)]);
   assert.equal(cutBeside.state, "incomplete");
   assert.equal(wordsText(cutBeside.rows.find((row) => row.label === "Extensions").value), "pi-lint 1.4.3");
-  assert.deepEqual(cutBeside.small, ["The records of b were cut to fit and keep no names to compare."]);
+  assert.deepEqual(cutBeside.small, ["The records of b were cut to fit, so they keep no whole list to compare."]);
   assert.equal(wordsText(projectLoadsOf([compact("a", 1), compact("b", 2)]).rows.find((row) => row.label === "Extensions").value), "not kept");
   // No extension at all, and none shared.
   assert.equal(wordsText(projectLoadsOf([run("a", 2, { packages: [] }), run("b", 1, { packages: [] })]).rows.find((row) => row.label === "Extensions").value), "none");
@@ -823,9 +829,200 @@ test("a host's fact comes from the newest of its runs able to show that fact, so
   assert.match(wordsText(shared.rows.find((row) => row.label === "Extensions").more), /and pi-a 1\.0\.0 on a and pi-b 1\.0\.0 on b$/);
 });
 
+// A real run of a host, `hours` before one fixed instant: `projectLoadsOf` reads no clock.
+const realRun = (host, hours, over = {}) => recordThroughPipeline({ jobId: `gh-${host}-${hours}`, host, hostImage: "pi-job:4.3.1", endedAt: new Date(Date.parse("2026-07-16T12:00:00Z") - hours * 3_600_000).toISOString(), exit: { code: 0, reason: "stop", tokens: meterSnapshot(5, 9_000) }, turnsOnLine: 5, ...over });
+const rowValue = (card, label) => wordsText(card.rows.find((row) => row.label === label).value);
+
+test("a run on an image its job named says nothing of its host's, whichever trigger ran last, and its own page still names what it used", async () => {
+  const OWN = { hostImage: "pi-job:4.3.1" };
+  const GPU = { ...OWN, jobImage: "pi-job:gpu" };
+  const gpu = await realRun("mini1", 1, GPU);
+  assert.equal(gpu.loaded.image, "pi-job:gpu");
+  assert.equal(gpu.loaded.imageFromJob, true);
+  assert.equal(loadedOf(gpu).imageFromJob, true, "and it survives being read back");
+  assert.equal(wordsText(loadedRows(gpu).find((row) => row.label === "pi").value), "pi 1.5.0 in pi-job:gpu");
+  assert.equal(Object.hasOwn((await realRun("mini1", 5, OWN)).loaded, "imageFromJob"), false);
+  // Two healthy hosts, and which trigger ran last on each flipped what this card said.
+  for (const records of [
+    [await realRun("mini1", 1, GPU), await realRun("mini1", 5, OWN), await realRun("mini2", 2, OWN), await realRun("mini2", 6, GPU)],
+    [await realRun("mini1", 5, GPU), await realRun("mini1", 1, OWN), await realRun("mini2", 6, OWN), await realRun("mini2", 2, GPU)],
+  ]) {
+    const card = projectLoadsOf(records);
+    assert.equal(card.state, "same", card.top);
+    assert.equal(card.tone, "ok");
+    assert.equal(card.top, "Runs load the same on each host: mini1 and mini2.");
+    assert.deepEqual(card.links, []);
+    assert.equal(rowValue(card, "pi"), "pi 1.5.0 in pi-job:4.3.1 in 2; pi 1.5.0 in pi-job:gpu in 2", "counted by run, each what that run used");
+  }
+  // A host really behind is still found, under the same trigger's runs on both.
+  const behind = { hostImage: "pi-job:4.2.0", imagePi: "1.4.0", pi: "1.4.0" };
+  const apart = projectLoadsOf([await realRun("mini1", 1, GPU), await realRun("mini1", 5, OWN), await realRun("mini2", 2, { ...behind, jobImage: "pi-job:gpu" }), await realRun("mini2", 6, behind)]);
+  assert.equal(apart.state, "differs");
+  assert.equal(apart.top, "Runs differ by host: mini1 runs pi 1.5.0 in pi-job:4.3.1; mini2 runs pi 1.4.0 in pi-job:4.2.0.");
+  // With no run on a host's own image there is nothing to compare and nothing is claimed, and the line says why it will not say the same.
+  const mixed = projectLoadsOf([await realRun("mini1", 1, OWN), await realRun("mini2", 2, GPU)]);
+  assert.equal(mixed.state, "incomplete");
+  assert.deepEqual(mixed.small, ["Every run on mini2 used an image its job named, so none says what pi or image the host runs otherwise."]);
+  const both = projectLoadsOf([await realRun("mini1", 1, GPU), await realRun("mini2", 2, GPU)]);
+  assert.equal(both.state, "incomplete");
+  assert.deepEqual(both.small, ["Every run on mini1 and mini2 used an image its job named, so none says what pi or image the host runs otherwise."]);
+  assert.equal(projectLoadsOf([await realRun("mini1", 1, GPU)]).state, "same", "one host has nothing to differ from");
+  // A job naming its host's own default ran on the host's own image.
+  const named = await realRun("mini1", 1, { ...OWN, jobImage: "pi-job:4.3.1" });
+  assert.equal(Object.hasOwn(named.loaded, "imageFromJob"), false);
+  assert.equal(projectLoadsOf([named, await realRun("mini2", 2, OWN)]).state, "same");
+  // Every way out keeps it: a run the queue will retry throws, and its record comes from what it threw.
+  const retried = await realRun("mini1", 1, { ...GPU, exit: { code: 1, reason: "infra", message: "lost" }, turnsOnLine: undefined });
+  assert.equal(retried.outcome, "failed");
+  assert.equal(retried.loaded.imageFromJob, true);
+  assert.equal(retried.loaded.at, "ready", "with what the container said, the worker's facts added");
+  const wrapperGaveUp = await realRun("mini1", 1, { ...GPU, containerThrows: true });
+  assert.deepEqual([wrapperGaveUp.outcome, wrapperGaveUp.loaded.at, wrapperGaveUp.loaded.image, wrapperGaveUp.loaded.imageFromJob], ["failed", "ready", "pi-job:gpu", true]);
+});
+
+test("an unknown pi version is no difference, and each sentence says only what it knows", async () => {
+  const unlabelled = { hostImage: "pi-job:4.3.1", imagePi: null };
+  const said = await realRun("a", 1, unlabelled);
+  const silent = await realRun("b", 2, { ...unlabelled, stages: [] });
+  assert.equal(said.loaded.imagePi, null);
+  assert.equal(said.loaded.pi, "1.5.0");
+  assert.deepEqual([silent.loaded.runner, silent.loaded.imagePi, silent.loaded.pi], ["absent", null, null]);
+  const card = projectLoadsOf([said, silent]);
+  assert.equal(card.state, "incomplete", card.top);
+  assert.doesNotMatch(card.top, /differ by host/);
+  assert.ok(card.small.includes("No run on b says which pi it ran."), card.small.join(" | "));
+  // A run that names no image leaves that open the same way, and says so.
+  const noImage = { hostImage: null };
+  assert.deepEqual(projectLoadsOf([await realRun("a", 1, noImage), await realRun("b", 2, noImage)]).small, ["No run on a and b says which image it ran in."]);
+  // A difference elsewhere does not make it one: the sentence names what differs, and no version beside an unknown one.
+  const elsewhere = projectLoadsOf([await realRun("a", 1, { ...unlabelled, packages: [{ name: "p1", version: "1.0.0" }] }), await realRun("b", 2, { ...unlabelled, pi: "unknown", packages: [{ name: "p2", version: "1.0.0" }] })]);
+  assert.equal(elsewhere.top, "Runs differ by host: a also loads p1 1.0.0; b also loads p2 1.0.0.");
+  // Two known versions differ, on the same image too.
+  const versions = projectLoadsOf([await realRun("a", 1, unlabelled), await realRun("b", 2, { ...unlabelled, pi: "1.4.0" })]);
+  assert.equal(versions.top, "Runs differ by host: a runs pi 1.5.0 in pi-job:4.3.1; b runs pi 1.4.0 in pi-job:4.3.1.");
+  // Two known images differ, and the host with no version says only its image. "runs pi in" is no sentence.
+  const images = projectLoadsOf([said, await realRun("b", 2, { hostImage: "pi-job:4.2.0", imagePi: null, stages: [] })]);
+  assert.equal(images.top, "Runs differ by host: a runs pi 1.5.0 in pi-job:4.3.1; b runs in pi-job:4.2.0.");
+  // The version of an older image is not this image's: a host's newest image with no version leaves its version unknown.
+  const older = await realRun("b", 9, { hostImage: "pi-job:4.2.0", imagePi: "1.4.0", pi: "1.4.0" });
+  const noneOnNewest = await realRun("b", 2, { ...unlabelled, stages: [] });
+  const stale = projectLoadsOf([said, older, noneOnNewest]);
+  assert.equal(stale.state, "incomplete", stale.top);
+  // A run that names none on the same image leaves the newest that does.
+  const same = await realRun("b", 9, unlabelled);
+  assert.equal(projectLoadsOf([said, same, noneOnNewest]).state, "same");
+});
+
+test("a list past its cap cannot show that kind, so it is neither the same as another host's nor different from it", async () => {
+  const many = (n) => Array.from({ length: n }, (_, i) => ({ name: `p${i}`, version: "1.0.0" }));
+  const long = await realRun("a", 1, { packages: many(18) });
+  assert.equal(long.loaded.cut.packages, 2);
+  assert.equal(long.loaded.sources.filter((row) => row.tier === "package").length, 16);
+  const packagesCard = projectLoadsOf([long, await realRun("b", 2, { packages: many(16) })]);
+  assert.equal(packagesCard.state, "incomplete", packagesCard.top);
+  assert.deepEqual(packagesCard.small, ["The records of a were cut to fit, so they keep no whole list to compare."]);
+  const names = Array.from({ length: 20 }, (_, i) => `e${i}.ts`);
+  const longNames = await realRun("a", 1, { packages: [], overlay: names });
+  assert.equal(longNames.loaded.cut.names, 4);
+  assert.ok(!longNames.loaded.sources.find((row) => row.tier === "overlay").names.includes("e19.ts"), "the premise: the name it has is past the cap");
+  const namesCard = projectLoadsOf([longNames, await realRun("b", 2, { packages: [], overlay: ["e19.ts"] })]);
+  assert.equal(namesCard.state, "incomplete", namesCard.top);
+  assert.doesNotMatch(namesCard.top, /also loads/);
+  // No whole list of it anywhere reads as not kept, and never as none: an empty overlay beside it is not "no extensions".
+  assert.equal(rowValue(projectLoadsOf([long, await realRun("b", 2, { packages: many(18) })]), "Extensions"), "not kept");
+  // The newest run able to show it: an older whole list stands against a newer cut one.
+  assert.equal(projectLoadsOf([await realRun("a", 1, { packages: many(18) }), await realRun("a", 5, { packages: many(16) }), await realRun("b", 2, { packages: many(16) })]).state, "same");
+  // `cut.names` also counts a tool's name, which leaves the list of extensions whole.
+  const toolCut = await realRun("a", 1, { packages: [], overlay: ["guard.ts"], tools: [{ name: "not a tool name", path: "/opt/pi-global/extensions/guard.ts" }] });
+  assert.equal(toolCut.loaded.cut.names, 1);
+  assert.equal(projectLoadsOf([toolCut, await realRun("b", 2, { packages: [], overlay: ["guard.ts"] })]).state, "same");
+  // Two entries of one folder count twice under one name, and nothing was cut.
+  const folder = await realRun("a", 1, { packages: [], overlay: ["tools/a.js", "tools/b.js"] });
+  assert.deepEqual([folder.loaded.sources.find((row) => row.tier === "overlay").extensions, folder.loaded.sources.find((row) => row.tier === "overlay").names], [2, ["tools"]]);
+  assert.equal(folder.loaded.cut, null);
+  assert.equal(projectLoadsOf([folder, await realRun("b", 2, { packages: [], overlay: ["tools/a.js"] })]).state, "same");
+});
+
+test("whether a run went on, off each way out of the runner: the catch path's metered calls, and a stage of its own that stays where it was", async () => {
+  // The catch path writes no turns, and its calls are all that shows the run had gone on.
+  const thrown = { code: 1, reason: "infra", message: "lost", tokens: meterSnapshot(7, 9_000) };
+  const atSession = await recordThroughPipeline({ brokenAt: ["ready"], exit: thrown });
+  assert.deepEqual([atSession.loaded.at, atSession.outcome, atSession.turns, atSession.tokens.calls], ["session", "failed", null, 7]);
+  assert.equal(loadedVerdict(atSession).state, "everything");
+  assert.deepEqual(loadedVerdict(atSession).small, [LOADED_WORDS.notedEarly]);
+  const atReady = await recordThroughPipeline({ exit: thrown });
+  assert.equal(loadedVerdict(atReady).state, "everything");
+  assert.deepEqual(loadedVerdict(atReady).small, []);
+  // No call, or none on a line with no meter, is a run that stopped where its stage says.
+  for (const tokens of [undefined, meterSnapshot(0, 0)]) {
+    const exit = { code: 1, reason: "infra", message: "lost", ...(tokens ? { tokens } : {}) };
+    assert.equal(loadedVerdict(await recordThroughPipeline({ brokenAt: ["ready"], exit })).rest, LOADED_WORDS.stoppedSession);
+    assert.equal(loadedVerdict(await recordThroughPipeline({ exit })).rest, LOADED_WORDS.stoppedAfterLoading);
+  }
+  // A refusal on that path may hold an extension's call from while it loaded, so its calls say nothing of the agent.
+  const refused = await recordThroughPipeline({ brokenAt: ["ready"], exit: { code: 2, reason: "command-unregistered", message: "no", tokens: meterSnapshot(3, 900) } });
+  assert.deepEqual([refused.outcome, refused.turns, refused.tokens.calls], ["policy", null, 3]);
+  assert.equal(loadedVerdict(refused).rest, LOADED_WORDS.stoppedSession);
+  // A turn with no token back is a provider's refusal or one that reports no usage, and of either "it stopped after loading" is true.
+  const noUsage = await recordThroughPipeline({ exit: { code: 1, reason: "error", message: "503", tokens: meterSnapshot(4, 0) }, turnsOnLine: 4 });
+  assert.equal(loadedVerdict(noUsage).rest, LOADED_WORDS.stoppedAfterLoading);
+  // A line with turns and no tokens at all took those turns.
+  assert.equal(loadedVerdict(await recordThroughPipeline({ exit: { code: 2, reason: "cost-cap", message: "over" }, turnsOnLine: 4 })).state, "everything");
+  // "While its servers were connecting" is said only of a row that is pending.
+  const servers = { servers: ["docs"], exit: { code: 2, reason: "command-unregistered", message: "no" } };
+  const pending = await recordThroughPipeline({ ...servers, brokenAt: ["ready"], mcpAt: () => [["pending", 0]] });
+  assert.equal(loadedVerdict(pending).rest, LOADED_WORDS.stoppedServers);
+  const connected = await recordThroughPipeline({ ...servers, brokenAt: ["ready"], mcpAt: () => [["connected", 3]] });
+  assert.deepEqual([connected.loaded.at, connected.loaded.mcp], ["session", [{ name: "docs", state: "connected", tools: 3 }]]);
+  assert.equal(loadedVerdict(connected).rest, LOADED_WORDS.stoppedSession);
+});
+
+test("a list stuck at start on a run that went on is not a run that stopped before anything loaded, on its page or its project's", async () => {
+  const silent = await realRun("mini2", 1, { brokenAt: ["loader", "session", "ready"] });
+  assert.deepEqual([silent.outcome, silent.turns, silent.loaded.at], ["completed", 5, "start"]);
+  assert.equal(loadedVerdict(silent).state, "absent");
+  const card = projectLoadsOf([await realRun("mini1", 2), silent]);
+  assert.equal(card.state, "incomplete");
+  assert.deepEqual(card.small, ["1 did not load or was not recorded: 1 whose runner did not say."], "what its own page says");
+  assert.equal(card.read, 1);
+  // A run that did stop there still says so, read through the same path.
+  const stopped = await realRun("mini2", 1, { stages: ["start"], exit: { code: 1, reason: "infra", message: "lost" }, turnsOnLine: undefined });
+  assert.equal(loadedVerdict(stopped).state, "stopped");
+  assert.deepEqual(projectLoadsOf([await realRun("mini1", 2), stopped]).small, ["1 run on mini2 stopped before anything loaded."]);
+});
+
+test("an overlay that failed with no name may have been held back whole, and the record cannot tell, so each surface says what is true of both", async () => {
+  const held = await realRun("mini1", 1, { packages: [], failures: heldBackOverlay() });
+  const nameless = await realRun("mini1", 1, { packages: [], failures: failedOverlayEntries(["has a space.ts"]) });
+  const row = (record) => record.loaded.sources.find((source_) => source_.tier === "overlay");
+  for (const key of ["failed", "extensions", "failedNames"]) assert.deepEqual(row(held)[key], row(nameless)[key], `the premise: ${key} is the same on both`);
+  assert.deepEqual([row(held).failed, row(held).extensions, row(held).failedNames], [1, 0, []]);
+  for (const record of [held, nameless]) {
+    const v = loadedVerdict(record);
+    assert.equal(v.state, "extension-failed");
+    assert.equal(v.bold, "The overlay on mini1 failed to load or was held back, and the job’s log says which.");
+    assert.equal(v.rest, "The run went on without its extensions.");
+    assert.deepEqual(fixLabels(v), ["Open mini1"]);
+    assert.deepEqual(outcomeBanner(record).sentences, ["The overlay on mini1 failed to load or was held back, and the job’s log says which. The run went on without its extensions. Read what it did before you trust it."]);
+    assert.equal(wordsText(loadedFold(record).find((entry) => entry.kind === "Extension failed").from), "mini1’s overlay; failed to load or held back, and the job’s log says which");
+  }
+  const stopped = await realRun("mini1", 1, { packages: [], failures: heldBackOverlay(), exit: { code: 2, reason: "command-unregistered", message: "no" }, turnsOnLine: undefined });
+  assert.equal(loadedVerdict(stopped).bold, "The overlay on mini1 failed to load or was held back, and the job’s log says which.");
+  assert.equal(loadedVerdict(stopped).rest, "", "and nothing of going on");
+  const beside = await realRun("mini1", 1, { packages: [], failures: [...heldBackOverlay(), { root: "/workspace/.pi/extensions", kind: "load" }] });
+  assert.equal(`${loadedVerdict(beside).bold} ${loadedVerdict(beside).rest}`, "2 of this run’s extensions failed to load. 1 from mini1’s overlay (failed to load or held back, and the job’s log says which) and 1 from acme/web. The run went on.");
+  // A name, a second failure or an extension that loaded each rule the whole overlay out, and those keep their words.
+  const named = await realRun("mini1", 1, { packages: [], failures: failedOverlayEntries(["guard.ts"]) });
+  assert.deepEqual(row(named).failedNames, ["guard.ts"]);
+  assert.equal(loadedVerdict(named).bold, "The extension from mini1’s overlay failed to load.");
+  assert.equal(wordsText(loadedFold(named).find((entry) => entry.kind === "Extension failed").from), "mini1’s overlay; a path and its kind stay in the job’s log");
+  assert.equal(loadedVerdict(await realRun("mini1", 1, { packages: [], failures: failedOverlayEntries(["a b.ts", "c d.ts"]) })).bold, "All 2 extensions from mini1’s overlay failed to load.");
+  assert.equal(loadedVerdict(await realRun("mini1", 1, { packages: [], overlay: ["kept.ts"], failures: failedOverlayEntries(["a b.ts"]) })).bold, "1 of mini1’s overlay extensions failed to load.");
+});
+
 test("a run with no agent is left out of a project's card, and a sentence counts only the runs it is true of", () => {
   const noList = (host, at, i = 1, over = {}) => loadedRecord({ jobId: `gh-${host}-${at}-${i}`, host, ...over, loaded: loadedField({ at, flow: null, sources: [], mcp: null, tools: null, problems: null }) });
-  const stoppedRun = (host, i) => noList(host, "start", i, { outcome: "failed", exitCode: 1 });
+  const stoppedRun = (host, i) => noList(host, "start", i, { outcome: "failed", exitCode: 1, tokens: null });
   const left = "Leaves out 1 run with no agent, which loads nothing.";
   // A host whose only run has no agent is in no comparison and no count.
   const agentless = projectLoadsOf([loadedRecord({ jobId: "a", host: "mini2" }), noList("mini1", "none")]);
@@ -845,7 +1042,7 @@ test("a run with no agent is left out of a project's card, and a sentence counts
   const only = projectLoadsOf([noList("mini1", "none"), noList("mini1", "none", 2)]);
   assert.equal(only.state, "none");
   assert.deepEqual(only.small, ["Leaves out 2 runs with no agent, which load nothing."]);
-  assert.equal(projectLoadsOf([noList("mini1", "start")]).rows.find((row) => row.label === "Extensions").value, "not kept");
+  assert.equal(projectLoadsOf([stoppedRun("mini1", 1)]).rows.find((row) => row.label === "Extensions").value, "not kept");
 });
 
 test("the sample package canary is the shape a real one is: fired by hand from a cron trigger, on a folder", () => {
@@ -929,7 +1126,7 @@ test("the project's counts agree with themselves in the singular, and every way 
   assert.equal(wordsText(history.rows.find((row) => row.label === "Extensions").more), "from each host’s newest run able to show them");
   const hostless = projectLoadsOf([loadedRecord(), { ...loadedRecord({ jobId: "gh-3" }), host: null }]);
   assert.deepEqual(hostless.small, ["1 run names no host, so it cannot be compared."]);
-  const silent = projectLoadsOf([loadedRecord(), loadedRecord({ jobId: "gh-4", host: "mini2", loaded: loadedField({ at: "start", flow: null, sources: [], mcp: null, tools: null, problems: null }) })]);
+  const silent = projectLoadsOf([loadedRecord(), loadedRecord({ jobId: "gh-4", host: "mini2", outcome: "failed", exitCode: 1, tokens: null, loaded: loadedField({ at: "start", flow: null, sources: [], mcp: null, tools: null, problems: null }) })]);
   assert.deepEqual(silent.small, ["1 run on mini2 stopped before anything loaded."]);
   // A host whose runs only withheld its packages leaves them open, and says so.
   const withheld = projectLoadsOf([loadedRecord(), { ...S.leftOut(), host: "mini2" }]);
@@ -939,7 +1136,7 @@ test("the project's counts agree with themselves in the singular, and every way 
   const two = projectLoadsOf([loadedRecord(), { ...S.cut(), jobId: "gh-5", host: "mini2" }, older], { historyIncomplete: true });
   assert.ok(two.small.some((line) => line.startsWith("1 did not load or was not recorded")));
   assert.ok(two.small.includes("The run history could not be read completely."));
-  assert.ok(two.small.includes("The records of mini2 were cut to fit and keep no names to compare."));
+  assert.ok(two.small.includes("The records of mini2 were cut to fit, so they keep no whole list to compare."));
   // Words of the plural stay plural, and "all" counts more than one.
   assert.match(wordsText(projectLoadsOf([...billingRecords()]).rows[0].more), /^all 21 recorded runs$/);
   const single = projectLoadsOf([onlyRecorded(), { ...older, jobId: "gh-6", host: "mini1" }]);

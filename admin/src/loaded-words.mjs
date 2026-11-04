@@ -32,9 +32,9 @@
  *     record knows only that pi found none. REJECTED: "has no fix skill", which claims what the repository holds.
  *   - Whether a run went on, which the stage does not show. The runner notes `ready`, then can refuse a command no extension
  *     registers or skip the prompt for a stop at load, and a repository's extension that breaks its report leaves an earlier stage on a
- *     run that carries on. So what happened is read from the outcome and the turns first (`wentOn`), and the stage only says how far a
- *     run that did not go on got. "Ran", "went on" and "everything" are said only of a run that went on. REJECTED: a list of reasons the
- *     runner refuses for, which the worker's vocabulary folds into `runner-policy` and a real record never holds.
+ *     run that carries on. So what happened is read from the outcome, the turns and the meter first (`wentOn`), and the stage only says
+ *     how far a run that did not go on got. "Ran", "went on" and "everything" are said only of a run that went on. REJECTED: a list of
+ *     reasons the runner refuses for, which the worker's vocabulary folds into `runner-policy` and a real record never holds.
  *   - A failed MCP server stops the run (`mcp.mjs` `start`: `mcp-unavailable`, exit 2, or `mcp-unreachable`, exit 1), so it is
  *     never a completed run's note and no line says the run went on.
  *   - `leftOut.overlayExtensions` is this job's switch, and not the host's: a host's PI_GLOBAL_ALLOW_EXTENSIONS=0 closes it
@@ -75,7 +75,7 @@ export const LOADED_WORDS = Object.freeze({
   stoppedServers: "It stopped while its MCP servers were connecting.",
   stoppedBeforeServers: "It stopped before its MCP servers started.",
   stoppedSession: "It stopped after its extensions and skills loaded, before the agent started.",
-  stoppedAfterLoading: "It stopped after loading. The outcome above says why.",
+  stoppedAfterLoading: "It stopped after loading. The outcome above says what can stop a run this way.",
   notedEarly: "This record’s list was last noted before the run started, so it may be out of date.",
   notedEarlyRow: "this record’s list was last noted before that",
   running: "Shown when it ends, from its record.",
@@ -308,6 +308,16 @@ function failedTierOf(source, facts, baseSha = null) {
   return { whose: "this run’s", from: "elsewhere", fix: null };
 }
 
+/**
+ * An overlay that counts one failure, names none and has no extension loaded: `overlay_extensions_withheld` held the whole overlay
+ * back (`createLoadTee` keeps it as one failure with no name), or the one entry it held failed with a name the line would not carry.
+ * The record cannot tell those two apart, nothing loaded in either, and the log line of the first holds a reason and a root where the
+ * second's holds a path and a kind. So what is said of it is true of both. Any other count, or an extension that did load, rules the
+ * first one out.
+ */
+const heldBackOrFailed = (source) => source.tier === "overlay" && source.failed === 1 && source.extensions === 0 && !(source.failedNames?.length > 0);
+const HELD_BACK_WORDS = "failed to load or held back, and the job’s log says which";
+
 /** What the banner says of a tier's failed extensions: "without" only where none of them can have stayed loaded. */
 function failedBannerWords(count, without) {
   const [noun, they, it] = count === 1 ? ["extension", "it", "it"] : ["extensions", "they", "them"];
@@ -326,11 +336,14 @@ function failedLine(loaded, facts, ran = true) {
   const joined = (...parts) => parts.filter(Boolean).join(" ");
   if (rows.length === 0) return { bold: `${plural(failed, "extension")} failed to load.`, rest: joined(wentOn, "This record was cut to fit, so it does not say which."), fixes: [], banner: failedBannerWords(failed, false) };
   if (rows.length > 1) {
-    const named = rows.map((source) => `${source.failed} from ${failedTierOf(source, facts).from}`);
+    const named = rows.map((source) => `${source.failed} from ${failedTierOf(source, facts).from}${heldBackOrFailed(source) ? ` (${HELD_BACK_WORDS})` : ""}`);
     return { bold: `${failed} of this run’s extensions failed to load.`, rest: joined(`${andList(named)}.`, wentOn), fixes: fixesOf(...rows.map((source) => failedTierOf(source, facts, loaded.baseSha).fix)), banner: failedBannerWords(failed, false) };
   }
   const [source] = rows;
   const { whose, from, fix } = failedTierOf(source, facts, loaded.baseSha);
+  if (heldBackOrFailed(source)) {
+    return { bold: `The overlay on ${facts.host ?? "this host"} failed to load or was held back, and the job’s log says which.`, rest: ran ? "The run went on without its extensions." : "", fixes: fixesOf(fix), banner: `The run went on without its extensions. ${LOADED_WORDS.readFirst}` };
+  }
   const names = source.tier === "overlay" && Array.isArray(source.failedNames) && source.failedNames.length > 0 ? `${andList(source.failedNames)}.` : "";
   const banner = failedBannerWords(source.failed, source.extensions === 0);
   const fixes = fixesOf(fix);
@@ -467,8 +480,24 @@ function hostDifferenceLine(difference, facts) {
 
 const verdict = (fields, record = null) => ({ tone: "idle", icon: "minus", lead: null, bold: null, rest: null, then: [], small: [], outcome: outcomeNote(record), fixes: [], also: [], ...fields });
 
-/** Whether the record shows the agent went on past what loaded: it completed, or it took a turn. See this file's header. */
-const wentOn = (record) => record?.outcome === "completed" || (isCount(record?.turns) && record.turns > 0);
+/**
+ * Whether the record shows the agent went on past what loaded (see this file's header). Each way out of the runner leaves something
+ * different on its line, and each thing it leaves is a claim only in some of them:
+ *   - Completed went on, whatever else it holds: a `run.command` can complete with no turn at all.
+ *   - A line with a count of turns is the decided path. `turns` rises as a turn STARTS, so a provider's 401 on the first prompt holds
+ *     `turns: 1`. `calls` rises before the provider answers too, so it holds `calls: 1`, measured at the pi pin through the real budget
+ *     and meter; only `total: 0` shows nothing came back. A provider that reports no usage reads the same way on a run that did not
+ *     complete, and the card then says less of it, never anything false: it did stop after loading.
+ *   - A line with no turns is the outer catch, whose only trace of a run that had gone on is its metered calls. A policy exit there
+ *     is a refusal, nearly always before the prompt, and its calls can be an extension's while it loaded (`meteredExitFields`
+ *     names that very case), so it is not read as having gone on. REJECTED: any call on any line, which would read a cost cap at load
+ *     (`turns: 0`, and the call that crossed it) as having run.
+ */
+const wentOn = (record) => {
+  if (record?.outcome === "completed") return true;
+  if (isCount(record?.turns)) return record.turns > 0 && record.tokens?.total !== 0;
+  return record?.outcome !== "policy" && isCount(record?.tokens?.calls) && record.tokens.calls > 0;
+};
 
 /**
  * The top line of a run's Loaded card. `{ state, tone, icon, lead, bold, rest, then, small, outcome, fixes, also }`:
@@ -699,7 +728,7 @@ export function loadedFold(record) {
   }
   const failedRows = loaded.sources.filter((row) => row.failed > 0);
   if (failedRows.length === 0) add("Extension failed", "0", "", LOADED_WORDS.failedRow);
-  for (const row of failedRows) add("Extension failed", String(row.failed), "", `${failedTierOf(row, facts).from}; a path and its kind stay in the job’s log`);
+  for (const row of failedRows) add("Extension failed", String(row.failed), "", heldBackOrFailed(row) ? `${failedTierOf(row, facts).from}; ${HELD_BACK_WORDS}` : `${failedTierOf(row, facts).from}; a path and its kind stay in the job’s log`);
   const droppedRows = loaded.sources.filter((row) => row.dropped > 0);
   if (droppedRows.length === 0) add("Extension dropped", "0", "", LOADED_WORDS.droppedRow);
   for (const row of droppedRows) add("Extension dropped", String(row.dropped), "", `${failedTierOf(row, facts).from}, by the recursion guard; names stay in the job’s log`);
@@ -837,6 +866,8 @@ function notReadWhy(record) {
   }
   if (loaded.runner === "invalid") return "invalid";
   if (loaded.runner === "cut") return "cut";
+  // What the run's page says of it: a list stuck at `start` on a run that went on says nothing of what it had.
+  if (loaded.at === "start" && wentOn(record)) return "absent";
   return null;
 }
 
@@ -866,6 +897,13 @@ const overlayShutByKind = (record, loaded) => Boolean(record?.canary) || loaded?
 /** Whether a run speaks for its host's staged packages: a withholding trigger and either canary each differ on purpose. */
 const showsHostPackages = (record, loaded) => loaded?.leftOut?.packages !== true && !record?.packageCanary && !record?.canary;
 
+/**
+ * Whether a record's overlay list is short of what the run loaded. `cut.names` alone cannot say: it also counts tool names kept off
+ * the record, which leave this list whole. So the row decides too, when it counts more extensions than it names. A folder holding two
+ * entries under one name counts the same way, so beside a cut tool name that reads as cut, which is the side that claims nothing.
+ */
+const overlayNamesCut = (loaded, row) => (loaded.cut?.names ?? 0) > 0 && (row?.extensions ?? 0) > (row?.names?.length ?? 0);
+
 /** When a record ended, for "the newest". A record with no readable time is never the newest of anything else. */
 function endOf(record) {
   const at = Date.parse(record?.endedAt ?? record?.startedAt ?? "");
@@ -874,39 +912,53 @@ function endOf(record) {
 
 /**
  * WHAT A HOST HAS IS WHAT THE NEWEST OF ITS RUNS ABLE TO SHOW IT HAD, fact by fact, in one pass over its runs: pi and its image from
- * its newest run; its staged packages from its newest run that did not withhold them, was no canary and kept their names; its overlay from
- * its newest run with the overlay open and names kept. A host can have run 1.4.2 and then 1.4.3 inside the window, and a rare trigger may not
+ * its newest run on its own image; its staged packages from its newest run that did not withhold them, was no canary and kept their whole
+ * list; its overlay from its newest run with the overlay open and its whole list kept. A host can have run 1.4.2 and then 1.4.3 inside the window, and a rare trigger may not
  * have run since, so REJECTED: the union of a host's runs, and its newest run per trigger, each of which calls a routine Adopt a difference
  * until the old run leaves the window. Packages and the overlay are the host's: a trigger chooses only all or nothing, which is
  * `leftOut`. A fact no run could show stays null, which is unknown, never empty: a record cut past its names is no evidence of none.
- * What a flow or a server did belongs to a trigger, and the card counts those by run, so it compares neither.
+ * What a flow or a server did belongs to a trigger, and the card counts those by run, so it compares neither. A list past its cap is cut
+ * short of what the run had, so it cannot show that kind either: its first 16 names beside another host's are neither the same nor different.
  */
 function hostFacts(records) {
-  const facts = { image: null, packages: null, overlay: null, cut: false, shut: false, withheld: false, stopped: 0 };
+  const facts = { pi: null, image: null, packages: null, overlay: null, cut: false, shut: false, withheld: false, jobImage: false, stopped: 0 };
   const newest = { image: Number.NEGATIVE_INFINITY, packages: Number.NEGATIVE_INFINITY, overlay: Number.NEGATIVE_INFINITY };
   const take = (slot, at, value) => {
     if (facts[slot] !== null && at <= newest[slot]) return;
     facts[slot] = value;
     newest[slot] = at;
   };
+  // A version per image, so a run that names none on a newer image leaves that image's pi unknown and not an older image's.
+  const versions = new Map();
   for (const record of records) {
     const loaded = loadedOf(record);
     if (loaded === null) continue;
     const at = endOf(record);
-    const version = loaded.pi ?? loaded.imagePi;
-    if (version !== null || loaded.image !== null) take("image", at, JSON.stringify([version, loaded.image]));
+    // A run on an image its job named cannot show the host's, whichever trigger ran last. The run's own page still names what it used.
+    if (loaded.imageFromJob === true) facts.jobImage = true;
+    else {
+      if (loaded.image !== null) take("image", at, loaded.image);
+      const version = loaded.pi ?? loaded.imagePi;
+      const known = versions.get(loaded.image);
+      if (version !== null && (known === undefined || at > known.at)) versions.set(loaded.image, { version, at });
+    }
     if (loaded.runner !== "reported") continue;
-    if (!saysWhatLoaded(loaded)) { facts.stopped += 1; continue; }
+    if (!saysWhatLoaded(loaded)) {
+      // The run's own page reads one that went on as not recorded, and it did not stop before anything loaded.
+      if (!wentOn(record)) facts.stopped += 1;
+      continue;
+    }
     const kept = loaded.sources.length > 0;
-    const names = sourcesOf(loaded, "overlay")[0]?.names;
+    const overlayRow = sourcesOf(loaded, "overlay")[0];
     if (overlayShutByKind(record, loaded)) facts.shut = true;
-    else if (!kept || names === null) facts.cut = true;
-    else take("overlay", at, names ?? []);
+    else if (!kept || overlayRow?.names === null || overlayNamesCut(loaded, overlayRow)) facts.cut = true;
+    else take("overlay", at, overlayRow?.names ?? []);
     const rows = sourcesOf(loaded, "package");
     if (!showsHostPackages(record, loaded)) facts.withheld = true;
-    else if (!kept || rows.some((row) => row.name === null)) facts.cut = true;
+    else if (!kept || rows.some((row) => row.name === null) || (loaded.cut?.packages ?? 0) > 0) facts.cut = true;
     else take("packages", at, rows.map((row) => `${row.name} ${row.version}`));
   }
+  facts.pi = versions.get(facts.image)?.version ?? null;
   return facts;
 }
 
@@ -920,9 +972,11 @@ const agreeRow = (list) => ({ state: list !== null ? "current" : "unknown", unre
 /** What one host has that some other host, able to say, does not, in a sentence's words. */
 function hostExtras(name, facts, others) {
   const lacking = (part, value) => others.some((other) => other[part] !== null && !other[part].includes(value));
-  const images = facts.image !== null && others.some((other) => other.image !== null && other.image !== facts.image) ? [JSON.parse(facts.image)] : [];
+  // Unknown on either side is no difference: only two values that are both known can differ, and each sentence says only what is known.
+  const differsOn = (part) => facts[part] !== null && others.some((other) => other[part] !== null && other[part] !== facts[part]);
+  const runs = [facts.pi !== null ? `pi ${facts.pi}` : null, facts.image !== null ? `in ${facts.image}` : null].filter(Boolean).join(" ");
   const parts = [
-    ...images.map(([version, image]) => `runs ${version !== null ? `pi ${version}` : "pi"}${image !== null ? ` in ${image}` : ""}`),
+    differsOn("pi") || differsOn("image") ? `runs ${runs}` : null,
     ...[["overlay", " from its overlay"], ["packages", ""]].map(([part, from]) => {
       const extra = (facts[part] ?? []).filter((value) => lacking(part, value));
       return extra.length > 0 ? `also loads ${andList(extra)}${from}` : null;
@@ -982,7 +1036,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
     byHost.set(name, [...(byHost.get(name) ?? []), record]);
   }
   const hosts = [...byHost].sort((a, b) => a[0].localeCompare(b[0])).map(([name, list]) => ({ name, list, facts: hostFacts(list), recorded: list.filter((record) => notReadWhy(record) === null).length }));
-  const PARTS = [["image", (value) => [value]], ["packages", (value) => value], ["overlay", (value) => value]];
+  const PARTS = [["pi", (value) => [value]], ["image", (value) => [value]], ["packages", (value) => value], ["overlay", (value) => value]];
   const hostless = runs.filter((record) => matched(record.host, WORKER_NAME_RE) === null).length;
   const asRow = (host, part, list) => agreeRow(host.facts[part] === null ? null : list(host.facts[part]));
   // Any host's reading is a part of "the same", so a bounded history cannot be read as every host's. One host has nothing to differ from.
@@ -1018,13 +1072,15 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
   const common = [...intersect(knownLists("packages")), ...intersect(knownLists("overlay"))];
   const anyKnown = knownLists("packages").length + knownLists("overlay").length > 0;
   const nothingAnywhere = [...knownLists("packages"), ...knownLists("overlay")].every((list) => list.length === 0);
+  // A kind whose list was cut is no evidence of none: empty lists beside it do not make the row "none".
+  const notKept = !anyKnown || (nothingAnywhere && hosts.some(({ facts }) => facts.cut && (facts.packages === null || facts.overlay === null)));
   const someOnly = hosts.flatMap((host) => [...(host.facts.packages ?? []), ...(host.facts.overlay ?? [])].filter((name) => !common.includes(name)).map((name) => `${name} on ${host.name}`));
-  const extensionMore = !anyKnown ? "no run here could show them" : [
+  const extensionMore = notKept ? "no run here could show them" : [
     `from ${hosts.length === 1 ? "its" : "each host’s"} newest run able to show them`,
     ...(someOnly.length > 0 ? [`, and ${andList(someOnly)}`] : []),
     ...(unread.length > 0 ? [`; ${notReadCount(unread.length)}`] : []),
   ];
-  const extensionsRowOf = { icon: "layers", label: "Extensions", value: common.length > 0 ? common.join(", ") : !anyKnown ? "not kept" : nothingAnywhere ? "none" : "none on every host", more: extensionMore };
+  const extensionsRowOf = { icon: "layers", label: "Extensions", value: common.length > 0 ? common.join(", ") : notKept ? "not kept" : nothingAnywhere ? "none" : "none on every host", more: extensionMore };
 
   const flows = tally(read, (record) => factsOf(record).flow !== null && loadedOf(record).flow !== null ? factsOf(record).flow : null);
   const flowFromOf = (flow) => {
@@ -1101,15 +1157,21 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
     const cutHosts = hostsWhere((facts) => facts.cut && (facts.packages === null || facts.overlay === null));
     const shutHosts = hostsWhere((facts) => facts.shut && facts.overlay === null);
     const withheldHosts = hostsWhere((facts) => facts.withheld && facts.packages === null);
+    const jobImageHosts = hostsWhere((facts) => facts.jobImage && facts.image === null);
+    const noVersionHosts = hostsWhere((facts) => facts.image !== null && facts.pi === null);
+    const noImageHosts = hostsWhere((facts) => facts.pi !== null && facts.image === null);
     const stopped = hosts.filter(({ facts }) => facts.stopped > 0 && facts.packages === null && facts.overlay === null).map(({ name, facts }, at) => `${at === 0 ? plural(facts.stopped, "run") : facts.stopped} on ${name}`);
     const small = [
       unreadSentence,
       historyIncomplete ? "The run history could not be read completely." : null,
       hostless > 0 ? `${hostless === 1 ? "1 run names" : `${hostless} runs name`} no host, so ${hostless === 1 ? "it" : "they"} cannot be compared.` : null,
-      cutHosts.length > 0 ? `The records of ${andList(cutHosts)} were cut to fit and keep no names to compare.` : null,
+      cutHosts.length > 0 ? `The records of ${andList(cutHosts)} were cut to fit, so they keep no whole list to compare.` : null,
       stopped.length > 0 ? `${andList(stopped)} stopped before anything loaded.` : null,
       shutHosts.length > 0 ? `The runs on ${andList(shutHosts)} had the overlay shut, as a model canary and a restricted run do, so they say nothing of its extensions.` : null,
       withheldHosts.length > 0 ? `The runs on ${andList(withheldHosts)} withheld the staged packages or were canaries, so they say nothing of them.` : null,
+      jobImageHosts.length > 0 ? `Every run on ${andList(jobImageHosts)} used an image its job named, so none says what pi or image the host runs otherwise.` : null,
+      noVersionHosts.length > 0 ? `No run on ${andList(noVersionHosts)} says which pi it ran.` : null,
+      noImageHosts.length > 0 ? `No run on ${andList(noImageHosts)} says which image it ran in.` : null,
       ...leftOutLine,
     ].filter(Boolean);
     return { state, tone: "attention", icon: "attention", total, read: read.length, sub, top: `${readFrom}, so runs may differ in ways this does not show.`, small, rows: [piRowOf(), extensionsRowOf, missingRow], hosts: [], links: [], foot: null };

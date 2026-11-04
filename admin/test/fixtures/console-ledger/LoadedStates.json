@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "0a38468c03bdd25d53f04c9a3c8afe5cb9f21a947211f10f0ab82accc1224c27",
+  "words": "869b34d3c9ab3fb02565c05fd627d071209460cefded3d0ce20f9dfd561d2e6b",
   "elements": [
     {
       "el": "p-loaded",
@@ -362,7 +362,7 @@
       "golden": [
         "panels/run-loaded-stopped-after-loading.operator"
       ],
-      "shows": "It stopped after loading. The outcome above says why."
+      "shows": "It stopped after loading. The outcome above says what can stop a run this way."
     },
     {
       "el": "No record (gh-c3f8)",

@@ -209,6 +209,7 @@ export function caseInput(name) {
 						image: "pi-job:4.3.1",
 						imageDigest: `sha256:${hex(64, "7")}`,
 						imagePi: "1.5.0",
+						imageFromJob: true,
 						pi: "1.5.0",
 						flow: { tier: "package", package: "pi-lint" },
 						sources: [

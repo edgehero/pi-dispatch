@@ -17,7 +17,7 @@ import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { mergeBundleSecrets } from "./secret-bundles.mjs";
 import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { RESERVED_ENV_NAMES } from "./triggers.mjs";
-import { loadedWithBase, loadedWithImage } from "./loaded-record.mjs";
+import { imageFactsOf, loadedWithBase, loadedWithImage } from "./loaded-record.mjs";
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
 import { CONTAINER_EXIT_UNKNOWN, CONTAINER_INFRA_EXIT } from "./record-reason.mjs";
@@ -360,7 +360,7 @@ export async function runJob(job, deps) {
 			const ran = error.loaded ?? null;
 			// A throw that already holds what the container said (`InfraRetry`'s `loaded`) came out of the run's own wrapper before
 			// the processor could note it, so what is noted here is the worker's own facts alone. The line stands, with them added.
-			if (ran !== null && canaryFacts.loaded !== null) error.loaded = loadedWithBase({ ...ran, image: canaryFacts.loaded.image, imageDigest: canaryFacts.loaded.imageDigest, imagePi: canaryFacts.loaded.imagePi }, canaryFacts.loaded.baseSha);
+			if (ran !== null && canaryFacts.loaded !== null) error.loaded = loadedWithBase({ ...ran, ...imageFactsOf(canaryFacts.loaded) }, canaryFacts.loaded.baseSha);
 			else if (ran === null && canaryFacts.loaded !== null) error.loaded = canaryFacts.loaded;
 		}
 		if (touches.length && error && typeof error === "object") error.touches = touches;

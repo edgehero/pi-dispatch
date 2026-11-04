@@ -51,6 +51,14 @@ test("resolveJobImage prefers the job's own image and falls back to the deployme
 	assert.equal(resolveJobImage(undefined, "pi-job:latest"), "pi-job:latest", "and a jobless call still resolves");
 });
 
+test("a run on an image its job named is marked, since only this function holds both images to tell", async () => {
+	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn([], { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7\n`) });
+	assert.equal((await preflight({ image: "my-python:1.2.0" })).fromJob, true);
+	assert.equal(Object.hasOwn(await preflight({ image: "pi-job:latest" }), "fromJob"), false, "a job naming this host's own default ran on this host's own image");
+	assert.equal(Object.hasOwn(await preflight({ image: null }), "fromJob"), false, "a job with no image of its own");
+	assert.equal(Object.hasOwn(await preflight({}), "fromJob"), false);
+});
+
 test("an image that inspects clean is ok, and costs exactly ONE spawn", async () => {
 	const calls = [];
 	const preflight = makeImagePreflight({ image: "pi-job:latest", spawnFn: fakeSpawn(calls, { image: 0, info: 0 }, `sha256:abc${FIELD_SEP}0.80.7\n`) });

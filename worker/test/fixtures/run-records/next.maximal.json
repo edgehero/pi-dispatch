@@ -282,6 +282,7 @@
     "image": "pi-job:4.3.1",
     "imageDigest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
     "imagePi": "1.5.0",
+    "imageFromJob": true,
     "pi": "1.5.0",
     "flow": {
       "tier": "package",
