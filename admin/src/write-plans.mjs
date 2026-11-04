@@ -445,7 +445,7 @@ export function planTriggerDelete({ index, paths, surface = "tool", fs = nodeFs 
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
   const { list, refusal: unlisted } = triggerList(paths, fs);
   if (unlisted) return { refusal: unlisted };
-  const cur = list[index];
+  const cur = list.find((t) => t.index === index); // the file's position, `planTriggerEditCore`'s rule and for its reason
   if (!cur) return { refusal: surface === "console" ? `no trigger at row ${index + 1} (have ${list.length})` : `no trigger at index ${index} (have ${list.length})` };
   const row = rowName("trigger", index, surface);
   return {

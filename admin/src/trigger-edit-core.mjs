@@ -39,16 +39,6 @@ export function triggerEntryDigest(entry) {
   return createHash("sha256").update(JSON.stringify(entry)).digest("hex");
 }
 
-/** The digest of the entry at `index` as the file holds it now, or null when there is none, for a page to draw. */
-export function readTriggerEntryDigest({ triggersPath, index, fs = nodeFs }) {
-  try {
-    const entry = JSON.parse(fs.readFileSync(triggersPath, "utf8"))?.triggers?.[index];
-    return entry === undefined ? null : triggerEntryDigest(entry);
-  } catch {
-    return null;
-  }
-}
-
 /** A trimmed non-empty string, or undefined (so a blank optional field drops out of the written JSON). */
 export function optStr(x) {
   const s = String(x ?? "").trim();
@@ -181,7 +171,9 @@ export function planTriggerEditCore({ params, paths, env, surface, fs = nodeFs, 
   const expect = writeInputs({ paths: [paths.triggersPath], fs });
   const { list, refusal: unlisted } = triggerList(paths, fs);
   if (unlisted) return { refusal: unlisted };
-  const cur = list[params.index];
+  // By the file's position, which is what `mutate` writes to and what a page's row number counts. The display list drops an
+  // unusable entry, so its own position can name the row after the one being changed.
+  const cur = list.find((t) => t.index === params.index);
   if (!cur) return { refusal: surface === "console" ? `no trigger at row ${params.index + 1} (have ${list.length})` : `no trigger at index ${params.index} (have ${list.length})` };
   const row = rowName("trigger", params.index, surface);
   const flow = params.flow === undefined ? undefined : String(params.flow).trim();

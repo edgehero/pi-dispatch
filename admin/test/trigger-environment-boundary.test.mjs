@@ -68,7 +68,7 @@ test("no source a tool loads imports the planner, by the plain text of its impor
 });
 
 test("write-plans hands a tool nothing of the person's: no planner, no core, no field list", () => {
-  for (const name of ["planTriggerEditCore", "createTriggerEnvironmentActions", "CARD_FIELDS", "TRIGGER_ENVIRONMENT_EDIT_FIELDS", "triggerEntryDigest", "readTriggerEntryDigest"]) assert.equal(plans[name], undefined, name);
+  for (const name of ["planTriggerEditCore", "createTriggerEnvironmentActions", "CARD_FIELDS", "TRIGGER_ENVIRONMENT_EDIT_FIELDS", "triggerEntryDigest"]) assert.equal(plans[name], undefined, name);
   // `toolPlans = { ...writePlans }` is every export, so what follows is the whole of what a tool can call.
   const callable = Object.keys(plans).filter((key) => /environment|card/i.test(key));
   assert.deepEqual(callable, []);

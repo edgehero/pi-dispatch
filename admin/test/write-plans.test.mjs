@@ -559,6 +559,21 @@ function refusalLiterals() {
 }
 const literalRe = (parts) => new RegExp(`^${parts.map((p) => (p === null ? "[\\s\\S]*?" : p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).join("")}$`);
 
+// The display list drops an entry it cannot use, so its position and the file's differ. Each plan writes by the file's position,
+// and each of its sentences must name that row and no other.
+test("an edit and a delete name the row the file holds at that position, where an unusable entry above moves the display list", () => {
+  const dir = tempDir("pd-raw-index-");
+  const triggersPath = join(dir, "triggers.json");
+  const row = (flow) => ({ on: { type: "label", any: ["x"] }, run: { kind: "github", flow } });
+  writeFileSync(triggersPath, `${JSON.stringify({ triggers: [null, row("one"), row("two")] }, null, 2)}\n`);
+  const paths = { triggersPath };
+  const edit = plans.planTriggerEdit({ params: { index: 1, flow: "next" }, paths, env: {} });
+  assert.deepEqual(edit.plan.changes, [["flow", "one", "next"]]);
+  assert.match(plans.planTriggerDelete({ index: 1, paths, surface: "console" }).plan.summary.join(" "), /flow: one/);
+  assert.equal(plans.planTriggerEdit({ params: { index: 0, flow: "next" }, paths, env: {} }).refusal, "no trigger at index 0 (have 2)", "the entry it cannot use is no row to change");
+  assert.equal(plans.planTriggerDelete({ index: 0, paths, surface: "console" }).refusal, "no trigger at row 1 (have 2)");
+});
+
 test("every refusal sentence in write-plans.mjs is asserted word for word, and a scan finds each one in the table", () => {
   const { paths, restore } = deployment();
   try {

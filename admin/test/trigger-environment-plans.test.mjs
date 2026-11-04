@@ -15,7 +15,7 @@ import { createCostGuard } from "../../image/runner/src/usage-meter.mjs";
 import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { createFleetReader, readTriggerSkew } from "../src/read-model.mjs";
 import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
-import { CARD_FIELDS, readTriggerEntryDigest, triggerEntryDigest } from "../src/trigger-edit-core.mjs";
+import { CARD_FIELDS, triggerEntryDigest } from "../src/trigger-edit-core.mjs";
 import { createTriggerEnvironmentActions } from "../src/trigger-environment-plans.mjs";
 import { doneBannerHtml } from "../src/console/confirm-view.mjs";
 
@@ -407,9 +407,6 @@ test("a console that names no triggers file says so", async () => {
 test("the page's digest: a stale entry refuses with 409 at the preview, and nothing else's edit does", async () => {
   const f = fixture();
   const seen = f.digest();
-  assert.equal(readTriggerEntryDigest({ triggersPath: f.paths.triggersPath, index: 1 }), seen, "the reader a page draws it with");
-  assert.equal(readTriggerEntryDigest({ triggersPath: f.paths.triggersPath, index: 9 }), null);
-  assert.equal(readTriggerEntryDigest({ triggersPath: join(f.dir, "absent.json"), index: 1 }), null);
 
   // Another trigger moves under the page: this one's entry is the same, so the person is not sent back.
   const other = JSON.parse(f.read());
