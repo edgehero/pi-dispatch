@@ -86,7 +86,7 @@ An `.cast` file can also be uploaded to asciinema.org and embedded (autoplaying)
 - **README**: add the GIF near the top, under the existing SVG panel images.
 - **Social preview** (GitHub → Settings → General → Social preview): export a single crisp PNG frame of the
   panel — reuse `docs/images/dispatch-dashboard.svg` rendered to PNG until the GIF exists.
-- **pi.dev gallery card**: `admin/package.json` already carries `pi.image` (the banner PNG) next to
+- **pi.dev gallery card**: `admin/package.json` already carries `pi.image` (the banner's still PNG) next to
   `pi.extensions` and `pi.skills`; repoint it at a panel frame, or add a `pi.video` field with a hosted
   `.mp4`/`.gif` URL. `pi.video` would be **new** here (nothing in this repo sets it today), so check pi's own
   manifest schema before relying on it. The rest of the manifest is described in

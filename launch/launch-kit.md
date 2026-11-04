@@ -148,7 +148,7 @@ registers what it names:
 "pi": {
   "extensions": ["./dist/index.mjs"],
   "skills": ["./skills"],
-  "image": "https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-04"
+  "image": "https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner-still.png?v=2026-11-04b"
 }
 ```
 
