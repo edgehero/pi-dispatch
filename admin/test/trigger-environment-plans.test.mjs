@@ -1412,11 +1412,17 @@ test("no packages key and `true` load the same packages and are not one file: ea
   const off = fixture({ run: { packages: true, resume: true } });
   const before = off.read();
   const cleared = await off.service.preview(ask(off, { packages: null }), operator);
-  assert.deepEqual(cleared.plan.changes, [{ key: "packages", line: "Staged packages: stay on, and the file no longer says this flow needs them, so doctor stops failing a host with none staged." }], "no widening: a job loads what it loaded");
+  assert.deepEqual(cleared.plan.changes, [{ key: "packages", line: "Staged packages: stay on, and the file no longer says this flow needs them." }], "no widening: a job loads what it loaded");
   assert.match(cleared.plan.changes[0].line, stays);
   assert.deepEqual(await off.service.apply(cleared, operator), { ok: true });
   assert.equal(Object.hasOwn(off.entry().run, "packages"), false, "the key is gone from the file");
   assert.equal(parseTriggers(off.read(), off.paths.triggersPath)[1].run.packages, undefined);
+  // Of this row alone, since doctor counts them all: a second row's `true` keeps its check failing, and the sentence does not say it stops.
+  const other = fixture({ doc: { triggers: [cron, comment({ packages: true }), { on: { type: "label", any: ["x"] }, run: { kind: "github", flow: "fix", packages: true } }] } });
+  const one = await other.service.preview(ask(other, { packages: null }), operator);
+  assert.doesNotMatch(one.summary.join(" "), /doctor/);
+  assert.deepEqual(await other.service.apply(one, operator), { ok: true });
+  assert.equal(parseTriggers(other.read(), other.paths.triggersPath).filter((t) => t.run.packages === true).length, 1, "doctor's `requiring`, by its own filter, still counts the other row");
   // Its Undo writes it back, in its place, byte for byte.
   const back = await off.service.preview(undoBody(cleared.plan.inverse), operator);
   assert.ok(back.plan, JSON.stringify(back));
@@ -1565,6 +1571,7 @@ test("a read of the publications that failed says that it failed, and not that n
     assert.ok(line.endsWith(failed), line);
     assert.ok(!out.summary.join(" ").includes("No host has published"));
     assert.equal(out.plan.changes[0].widening, "This widens what its jobs reach: a job that reaches its container connects to linear.");
+    assert.deepEqual(out.plan.warnings, [], "an edit of a server says it on that server's line, and no flow is in question");
   }
   // Live hosts it can name, whose publications it could not read: each reads unknown, by name.
   const named = fixture({ deps: { readHostLoads: () => readHostLoadsView({}, { readHosts: async () => ({ hosts: [{ name: "mini1" }, { name: "build3" }] }), readLoads: async () => { throw new Error("down"); } }) } });
@@ -1600,11 +1607,11 @@ const flowFixture = (hosts, run = {}) => fixture({ run, deps: { readHostLoads: a
 test("a flow the hosts that answered do not hold warns, names them, and leaves the Confirm: a repository can gain it", async () => {
   const f = flowFixture([LOADED_HOST("mini1"), LOADED_HOST("build3")]);
   const out = await f.service.preview(ask(f, { flow: "no-such-flow" }), operator);
-  assert.deepEqual(out.plan.warnings, ["build3 and mini1 have no skill named no-such-flow in their overlay. A job there finds it only in its repository, the trigger's skills folder or a staged package, and runs without its flow if none holds it."]);
+  assert.deepEqual(out.plan.warnings, ["build3 and mini1 have no skill named no-such-flow in their overlay. A job there runs without its flow unless something else it loads holds it, such as its repository."]);
   assert.ok(out.summary.includes(out.plan.warnings[0]));
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   assert.equal(f.entry().run.flow, "no-such-flow");
-  assert.equal(await warned(flowFixture([LOADED_HOST("mini1")]), { flow: "no-such-flow" }), "mini1 has no skill named no-such-flow in its overlay. A job there finds it only in its repository, the trigger's skills folder or a staged package, and runs without its flow if none holds it.");
+  assert.equal(await warned(flowFixture([LOADED_HOST("mini1")]), { flow: "no-such-flow" }), "mini1 has no skill named no-such-flow in its overlay. A job there runs without its flow unless something else it loads holds it, such as its repository.");
 });
 
 test("a flow says nothing of a host that holds it, and only the hosts without it are named", async () => {
@@ -1612,6 +1619,8 @@ test("a flow says nothing of a host that holds it, and only the hosts without it
   await quiet(flowFixture([LOADED_HOST("mini1", { flows: [{ trigger: 0, flow: "review", tier: "overlay", package: null, repo: "absent" }] })]), { flow: "review" });
   await quiet(flowFixture([LOADED_HOST("mini1", { flows: [{ trigger: 0, flow: "review", tier: "package", package: "pkg", repo: "absent" }] })]), { flow: "review" });
   assert.match(await warned(flowFixture([LOADED_HOST("mini1", { skills: ["review"] }), LOADED_HOST("build3")]), { flow: "review" }), /^build3 has no skill named review/);
+  // On a row that withholds the packages, no sentence offers one as where a job may find it.
+  assert.doesNotMatch(await warned(flowFixture([LOADED_HOST("mini1")], { packages: false }), { flow: "review" }), /package/);
   // A package this trigger withholds is no skill it gets, and another trigger's repository or skills folder is not its own.
   assert.match(await warned(flowFixture([LOADED_HOST("mini1", { flows: [{ trigger: 0, flow: "review", tier: "package", package: "pkg", repo: "absent" }] })], { packages: false }), { flow: "review" }), /^mini1 has no skill named review/);
   for (const tier of ["repository", "trigger"]) assert.match(await warned(flowFixture([LOADED_HOST("mini1", { flows: [{ trigger: 0, flow: "review", tier, package: null, repo: "present" }] })]), { flow: "review" }), /^mini1 has no skill named review/);
@@ -1624,9 +1633,14 @@ test("a flow claims no host's answer when none answered: no publication, an old 
     [{ name: "mini1", state: "unknown", why: "absent" }],
     [LOADED_HOST("mini1", { unread: ["skills"] })],
     [LOADED_HOST("mini1", { more: { skills: 3 } })],
-    { unreachable: true, hosts: [] },
   ]) await quiet(flowFixture(hosts), { flow: "no-such-flow" });
-  await quiet(fixture({ deps: { readHostLoads: async () => { throw new Error("down"); } } }), { flow: "no-such-flow" });
+  // A read that failed says so, as it does of a server: "What the hosts published could not be read".
+  for (const readHostLoads of [async () => ({ unreachable: true, hosts: [] }), async () => { throw new Error("down"); }, async () => null, () => readHostLoadsView({}, { readHosts: async () => { throw new Error("down"); }, readLoads: async () => { throw new Error("down"); } })]) {
+    const f = fixture({ deps: { readHostLoads } });
+    const out = await f.service.preview(ask(f, { flow: "no-such-flow" }), operator);
+    assert.deepEqual(out.plan.warnings, ["What the hosts published could not be read, so which of them have no-such-flow is unknown."]);
+    assert.ok(out.summary.includes(out.plan.warnings[0]));
+  }
   // A flow it did not touch reads no host at all.
   let reads = 0;
   const f = fixture({ deps: { readHostLoads: async () => { reads += 1; return { hosts: [LOADED_HOST("mini1")] }; } } });

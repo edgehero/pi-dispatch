@@ -273,6 +273,7 @@ const WARNINGS = Object.freeze({
   "On this host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["docs"], excludeTools: ["codemode"] }),
   "stops the job as cost-cap": () => plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" }),
   "no skill named": () => plannerWorld({ deps: { readHostLoads: () => published({ mini1: {} }) } }).preview({ flow: "review" }),
+  "What the hosts published could not be read": () => plannerWorld({ deps: { readHostLoads: async () => { throw new Error("down"); } } }).preview({ flow: "review" }),
   "clears this": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-opus-5-5", maxCostUsd: "2.62144" }),
   "could not be bounded here": () => plannerWorld({ overlay: { providers: { free: { baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "x", models: [{ id: "m" }] } } }, run: MODEL_RUN, env: { PI_MAX_COST_USD: "5" } }).preview({ provider: "free", model: "m" }),
   "of this host's .env could not be read as the worker reads it, so the deployment's job cap": () => plannerWorld({ deps: { readHostEnv: () => ({ env: {}, unread: [], hazardLine: 3 }) } }).preview({ maxCostUsd: "5" }),
@@ -348,6 +349,7 @@ const WARNING_TODO = Object.freeze({
   "On this host this trigger's jobs would be refused as mcp-excluded": { says: /Remove the server from `run\.mcp`, or keep a tool that reaches it out of `run\.excludeTools`/, shared: true },
   "stops the job as cost-cap": { says: /Choose another model/i, shared: true },
   "no skill named": { says: /Check the flow's name/ },
+  "What the hosts published could not be read": { says: /Doctor's run on each host/ },
   "clears this": { says: /Choose another model/i, shared: true },
   "could not be bounded here": { says: /Read it, and decide/ },
   "of this host's .env could not be read as the worker reads it, so the deployment's job cap": { says: /Correct the line it names/ },
@@ -503,7 +505,7 @@ test("the sentences the docs quote of the preview are the real preview's, and no
   const overTrue = panelOf(await triggerGetsPage({ entry: { on: COMMENT_ON, run: { kind: "github", flow: "fix", packages: true } } }), "p-trigger-gets");
   assert.match(overTrue, /<input type="checkbox" checked data-gets-flag="packages"/, "drawn on over true");
   assert.match(consoleDoc, /switch writes `"packages": false` when it goes off, and removes that when it goes on\. It is drawn on over a file that says `true`/);
-  assert.match(consoleDoc, /`true` and no key are not one value: a job loads the staged packages under either, and doctor fails a host with none staged only on `true`/);
+  assert.match(consoleDoc, /`true` and no key are not one value: a job loads the staged packages under either, and doctor fails a host with none staged while any trigger says `true`/);
   assert.match(read("worker/src/doctor.mjs"), /\$\{requiring\} trigger\(s\) require staged packages \(run\.packages: true\) but nothing is staged/);
   assert.doesNotMatch(consoleDoc, /Staged packages: stay on/, "a form cannot reach that line");
 });

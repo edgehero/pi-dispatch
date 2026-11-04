@@ -185,7 +185,8 @@ function changeWords(key, before, after, facts, effective = null) {
     case "packages": {
       if (after === false) return { line: "Staged packages: off." };
       if (before === false) return { line: "Staged packages: on.", widening: "This widens what its jobs load: every package staged on the host that runs them." };
-      return { line: after === true ? "Staged packages: stay on, and the file now says this flow needs them, so doctor fails a host with none staged." : "Staged packages: stay on, and the file no longer says this flow needs them, so doctor stops failing a host with none staged." };
+      // Of this row alone: doctor counts every row (`requiring`), so clearing one says nothing of what it does while another says `true`.
+      return { line: after === true ? "Staged packages: stay on, and the file now says this flow needs them, so doctor fails a host with none staged." : "Staged packages: stay on, and the file no longer says this flow needs them." };
     }
     case "excludeTools": {
       const raw = delta(before, after);
@@ -937,7 +938,12 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     // of warnings could not know about another's.
     const said = changes.map((change) => (change.addedServers?.length > 0 ? { ...change, widening: `This widens what its jobs reach: a job that reaches its container connects to ${listed(reach)}.` } : change));
     const lacking = flowChange ? hostsWithoutFlow(judged.body.flow, hosts, judged.nextRun?.packages !== false) : [];
-    const warnings = [...judged.warnings, ...(lacking.length > 0 ? [`${hostsNamed(lacking)} ${lacking.length === 1 ? "has" : "have"} no skill named ${judged.body.flow} in ${lacking.length === 1 ? "its" : "their"} overlay. A job there finds it only in its repository, the trigger's skills folder or a staged package, and runs without its flow if none holds it.`] : [])];
+    const warnings = [
+      ...judged.warnings,
+      // No list of where else a job looks: a row can withhold the staged packages, and a sentence naming them would offer what it does not load.
+      ...(lacking.length > 0 ? [`${hostsNamed(lacking)} ${lacking.length === 1 ? "has" : "have"} no skill named ${judged.body.flow} in ${lacking.length === 1 ? "its" : "their"} overlay. A job there runs without its flow unless something else it loads holds it, such as its repository.`] : []),
+      ...(flowChange && hostsUnread ? [`What the hosts published could not be read, so which of them have ${judged.body.flow} is unknown.`] : []),
+    ];
     // A schedule's and a watch rule's jobs carry no matched index, so the skew check has nothing to compare them with: it answers
     // `ok` for every one (`makeCheckWaitSkew`). Nothing to read, and nothing to say about what could not be read.
     const noSkew = judged.type === "cron" || judged.type === "watch";
