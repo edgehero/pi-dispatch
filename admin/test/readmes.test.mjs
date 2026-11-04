@@ -123,7 +123,9 @@ test("the words the root README's new section leans on are in its glossary", () 
 test("What a job gets says what the trigger's page does: the card by its name, the buttons by theirs, what it refuses, and the preview shown", () => {
   const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## How to use it\n"));
   const words = section.replaceAll("**", "").replace(/\s+/g, " ");
-  for (const said of [TRIGGER_GETS_WORDS.title, "Preview the change", "Confirm", "Undo", "job cap", "reads unknown, never the same", "can only lower"]) assert.ok(words.includes(said), said);
+  for (const said of [TRIGGER_GETS_WORDS.title, "Preview the change", "Confirm", "Undo", "job cap", "is marked unknown", "can only lower"]) assert.ok(words.includes(said), said);
+  // Each of these had no referent for someone new to this, and each has plain words now.
+  for (const stumble of ["for free", "the one you set for everything", "Nothing is written", "as before", "would get the same"]) assert.ok(!words.includes(stumble), stumble);
   assert.ok(section.includes("console/console-trigger-change.png"), "the section shows the preview it describes");
   // The card itself is shown where the READMEs list the console's pages, and the line there sends a reader here.
   const item = ROOT.slice(ROOT.indexOf("**A trigger:**"), ROOT.indexOf("**Your phone:**"));
@@ -163,4 +165,25 @@ test("the admin README's list of what a person changes on a trigger's page is CA
   for (const [field, name] of Object.entries(plain)) assert.ok(sentence.includes(name), `${field} is said as ${name}`);
   assert.ok(admin.includes(TRIGGER_GETS_WORDS.title), "the card by its name");
   assert.ok(!admin.includes("which neither the console nor a model callable tool makes for you"), "the staged packages switch exists now");
+});
+
+test("both READMEs say what no tool can set as the six fields it cannot, and neither overreaches to what a job may spend or reach", () => {
+  const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(read("admin/src/write-plans.mjs"))[1];
+  const fields = [...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort();
+  const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## How to use it\n")).replace(/\s+/g, " ");
+  const said = /No AI tool can set a trigger's (.*?), even if you would confirm/.exec(section)?.[1];
+  assert.ok(said, "the root README's sentence");
+  const plain = { maxCostUsd: "job cap", models: "allowed models", fallbackModels: "fallbacks", mcp: "outside systems", excludeTools: "the tools it removes", packages: "loads your packages" };
+  assert.deepEqual(Object.keys(plain).sort(), fields, "one plain name per field");
+  for (const [field, name] of Object.entries(plain)) assert.ok(said.includes(name), `${field} is said as ${name}`);
+  const admin = read("admin/README.md").replace(/\s+/g, " ");
+  const adminPlain = { maxCostUsd: "job cap", models: "allowed models", fallbackModels: "fallbacks", mcp: "MCP servers", excludeTools: "tool exclusions", packages: "staged packages" };
+  assert.deepEqual(Object.keys(adminPlain).sort(), fields);
+  for (const sentence of [/A trigger's (job cap[^.]*?) are changed by a person, on its page in the web console or in the file, never by a tool/, /a trigger's (job cap[^.]*?) remain person actions/]) {
+    const list = sentence.exec(admin)?.[1];
+    assert.ok(list, String(sentence));
+    for (const [field, name] of Object.entries(adminPlain)) assert.ok(list.includes(name), `${field} is said as ${name}`);
+  }
+  // `dispatch_set` and `dispatch_trigger_edit` each move a job's spend behind a confirm, so neither README may say no tool can.
+  for (const [path, text] of [["README.md", ROOT], ["admin/README.md", read("admin/README.md")]]) assert.doesNotMatch(text.replace(/\s+/g, " "), /(?:change|what) (?:what )?a (?:trigger's )?jobs? may spend or reach/, path);
 });

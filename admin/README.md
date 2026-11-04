@@ -85,8 +85,8 @@ default and goes through an allowlist proxy, and the allowed hosts are yours to 
 ## Triggers: what starts a job
 
 Every trigger is one `{ on, run }` entry in a single `triggers.json`. The worker reads it live for cron,
-the receiver reads it live for forge webhooks, and the panel and the web console can edit it. What a trigger's jobs may
-spend or reach is changed by a person, on its page in the web console or in the file, never by a tool. **`on` is what fires it;
+the receiver reads it live for forge webhooks, and the panel and the web console can edit it. A trigger's job cap, allowed models,
+fallbacks, MCP servers, tool exclusions and staged packages are changed by a person, on its page in the web console or in the file, never by a tool. **`on` is what fires it;
 `run` is the skill it runs.**
 
 | `on.type` | Fires on | What the agent gets as its task |
@@ -232,8 +232,8 @@ One command puts a live terminal view over the whole deployment:
   actions. That includes explicit cap decreases, adding ordinary restrictive limit rows and pauses,
   turning existing run flags off, cancellation, failed-job removal and bounded priorities. Scope, size,
   minimums, inherited limits and mixed widening requests stay confirmed. The deployment file and pointer
-  cannot grant this authority. Answers, draft decisions, standing-answer adoption, forge reruns and what a trigger's jobs may spend or
-  reach remain person actions. Tool writes are audited as agents; human-confirmed intervention is tracked separately.
+  cannot grant this authority. Answers, draft decisions, standing-answer adoption, forge reruns and a trigger's job cap, allowed models,
+  fallbacks, MCP servers, tool exclusions and staged packages remain person actions. Tool writes are audited as agents; human-confirmed intervention is tracked separately.
 - **Paid starts stay bounded.** `dispatch_run`, Fire now and local or cron reruns need explicit valid
   `PI_DISPATCH_RUN_ROOTS` in the pi process environment. Fire now and reruns also require an explicit valid
   `PI_DISPATCH_RUN_PER_HOUR`. `dispatch_run` keeps its default of three starts per hour when that value is

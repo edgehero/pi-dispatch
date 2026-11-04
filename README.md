@@ -240,7 +240,7 @@ updates by itself ([updates](docs/console.md#updates)).
 **A trigger:** what starts it, what it has cost and [what its jobs get](#what-a-job-gets) on each machine, which you can change right there.
 A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
-![What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, the staged packages, the outside systems with linear switched on, pi's own tools with bash off, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard](docs/images/console/console-trigger.png?v=2026-11-04-800b)
+![What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, the staged packages, the outside systems with linear switched on, pi's own tools with bash off, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard](docs/images/console/console-trigger.png?v=2026-11-04-800c)
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
 unless you set it up otherwise, so reaching it from a phone takes a private tunnel
@@ -298,21 +298,23 @@ ended before it could report, or one from an older release, says its list was no
 
 **You can change what a trigger's jobs get from its page.** The further out of the loop you go, the more this matters, because it is how you
 decide what a job may use without watching it. Its **What its jobs get** card has a line for each thing: the model and the most
-one job may spend (its job cap), the flow, your packages, the outside systems, the tools. Each machine says whether its jobs would get
-the same, and a machine that has not said reads unknown, never the same. Under each line is what a recent run really had, so a setting and what it did sit
-together. Nothing is written while you click: your changes collect in one bar, and you can discard them.
+one job may spend (its job cap), the flow, your packages, the outside systems, the tools. Each machine gets a label saying whether its jobs would
+start with the same things as on your other machines, and one that has not reported is marked unknown, so silence never passes for a match. Under each
+line is what a recent run really had, so a setting and what it did sit together. Nothing is saved while you click: your changes collect in one bar, and
+you can discard them.
 
 **You see it in words first, and confirm once.** **Preview the change** says each change in a sentence, and says so when it gives
 jobs more than they had. It says when the change takes effect and which jobs already in line would be refused, warns about what would stop these jobs on this
 machine, and says how to undo it. One
-**Confirm** writes it, the console records who did, and **Undo** puts it back, or says what to edit by hand where it cannot.
+**Confirm** saves it, the console records who did, and **Undo** puts it back, or says what to edit by hand where it cannot.
 
-![The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a job in line that a machine reading the file would refuse, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button](docs/images/console/console-trigger-change.png?v=2026-11-04-800b)
+![The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a job in line that a machine reading the file would refuse, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button](docs/images/console/console-trigger-change.png?v=2026-11-04-800c)
 
-**It refuses what would only fail later, for free.** A job cap can only lower the one you set for everything, and a model too expensive for one
-call under the cap is refused here, with the amount a short task needs, not after a job has started. If the page is out of date, it asks you
-to reload rather than write over someone else's change. No AI tool can change what a job may spend or reach, even behind your
-confirm: that stays with a person. Your technical person can still edit the file by hand, as before ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
+**It stops what would only fail later, before it costs you anything.** A job cap can only lower the limit you set for all jobs, and if the model a job
+starts on is too expensive for one call under the cap, the page says no here, with the amount a short task needs, rather than after a job has started. If
+the page is out of date, it asks you to reload rather than write over someone else's change. No AI tool can set a trigger's job cap, its allowed models or
+fallbacks, its outside systems, the tools it removes or whether it loads your packages, even if you would confirm: those stay with a person. Your
+technical person can still change them by editing the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
 
 ## How to use it
 
@@ -361,7 +363,7 @@ happening ends it sooner. After that, you need your token or a new link, which `
 | **Repository** | A project's code and its history, on a forge or in a folder (a "git repository") |
 | **Base commit** | The version of a repository a job started from |
 | **Staged** | Set up on a machine, ready for its jobs to load |
-| **Job cap** | The most one job may spend, in dollars. A trigger can only lower the one you set for everything |
+| **Job cap** | The most one job may spend, in dollars. A trigger can only lower the limit you set for all jobs |
 | **Fallback model** | The model a job tries on its next attempt when the one before it is rate limited or out of quota |
 | **Doctor** | pi-dispatch's own check of a machine's setup, which also says what that machine's jobs can load |
 | **Pull request** | A proposed change to a repository, for a person to review |
