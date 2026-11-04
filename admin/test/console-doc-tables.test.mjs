@@ -134,7 +134,8 @@ test("each row of that table says what to do on the page its line's own buttons 
   // Words a state's sentences lean on that the code holds.
   assert.match(rows.get("mcp-stopped").says, /only where the queue holds the job again or the record is a later attempt/);
   assert.match(rows.get("stopped").says, /after loading with no answered turn/);
-  assert.match(rows.get("stopped").says, /A run that completed, took a turn a provider answered, or holds metered calls on a failure that counts no turns never reads as this/);
+  assert.match(rows.get("stopped").says, /A run that completed, counts a turn a provider answered, or holds metered calls on a failure whose line has no count of turns never reads as this/);
+  assert.match(rows.get("stopped").says, /A stopped run that shows a turn or a call, or reads `runner-policy` with its list at `session`, says only that it stopped after loading/);
   assert.match(rows.get("stopped").todo, /`runner-policy`, what can stop a run this way/);
   assert.match(rows.get("extension-failed").says, /failed to load or was held back, and the job's log says which/);
   assert.ok(read("docs/console.md").includes(`A list past its cap (${LOADED_MAX_PACKAGES} packages, ${LOADED_MAX_OVERLAY_NAMES} overlay names)`), "the caps the card's comparison leans on");

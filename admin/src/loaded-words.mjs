@@ -337,7 +337,7 @@ function failedLine(loaded, facts, ran = true) {
   if (rows.length === 0) return { bold: `${plural(failed, "extension")} failed to load.`, rest: joined(wentOn, "This record was cut to fit, so it does not say which."), fixes: [], banner: failedBannerWords(failed, false) };
   if (rows.length > 1) {
     const named = rows.map((source) => `${source.failed} from ${failedTierOf(source, facts).from}${heldBackOrFailed(source) ? ` (${HELD_BACK_WORDS})` : ""}`);
-    return { bold: `${failed} of this run’s extensions failed to load.`, rest: joined(`${andList(named)}.`, wentOn), fixes: fixesOf(...rows.map((source) => failedTierOf(source, facts, loaded.baseSha).fix)), banner: failedBannerWords(failed, false) };
+    return { bold: `${failed} of this run’s extensions failed to load.`, rest: joined(`${andList(named)}.`, wentOn), fixes: fixesOf(...rows.map((source) => failedTierOf(source, facts, loaded.baseSha).fix)), banner: rows.some(heldBackOrFailed) ? `One may have been held back and not failed, and the job’s log says which. The run went on. ${LOADED_WORDS.readFirst}` : failedBannerWords(failed, false) };
   }
   const [source] = rows;
   const { whose, from, fix } = failedTierOf(source, facts, loaded.baseSha);
@@ -500,6 +500,17 @@ const wentOn = (record) => {
 };
 
 /**
+ * Whether the stage this list stopped at can be taken as where the run stopped. A turn or a metered call may have come after it (a report
+ * that broke, a provider that reports no usage, a stop that wins over a throw), and nothing says when they came, so where either shows, no
+ * sentence or row names the stage: "while connecting" would send a person to Connections over a server that had long answered. `runner-policy`
+ * with a list at `session` is the same: it is what the worker folds a refusal it has no word for into, a command no extension registers among
+ * them, which comes after the servers answered, while a refusal for a server keeps a reason of its own. REJECTED: `runner-policy` at any stage,
+ * since a bad model or a missing credential folds into it at `start` too, where "before anything loaded" is true and says more. Weaker than
+ * `wentOn`, which says the agent ran, on purpose: this only stops a sentence claiming more than the list knows.
+ */
+const movedPastStage = (record) => wentOn(record) || (record?.reason === "runner-policy" && loadedOf(record)?.at === "session") || (isCount(record?.turns) && record.turns > 0) || (isCount(record?.tokens?.calls) && record.tokens.calls > 0);
+
+/**
  * The top line of a run's Loaded card. `{ state, tone, icon, lead, bold, rest, then, small, outcome, fixes, also }`:
  * the line reads `lead`, then `bold`, then `rest`, then each of `then`; `small` goes under it; `fixes` are the ways to where it is
  * fixed, in order; `also` holds any further problem, each with its own `fixes`; `outcome` is `outcomeNote`. `hostLoads` is what the hosts published
@@ -521,7 +532,7 @@ export function loadedVerdict(record, hostLoads = null, { jobState = null } = {}
   if (loaded.runner === "cut") return verdict({ state: "cut", rest: LOADED_WORDS.noRoom }, record);
   if (loaded.at === "none") return verdict({ state: "no-agent", rest: LOADED_WORDS.noAgent }, record);
   // A list that never got past `start` on a run that went on says nothing of what it had, which is what `absent` says.
-  if (loaded.at === "start") return wentOn(record) ? verdict({ state: "absent", rest: LOADED_WORDS.absent }, record) : verdict({ state: "stopped", rest: LOADED_WORDS.stoppedStart }, record);
+  if (loaded.at === "start") return movedPastStage(record) ? verdict({ state: "absent", rest: LOADED_WORDS.absent }, record) : verdict({ state: "stopped", rest: LOADED_WORDS.stoppedStart }, record);
 
   const small = cutWords(loaded);
   const problems = [];
@@ -542,7 +553,7 @@ export function loadedVerdict(record, hostLoads = null, { jobState = null } = {}
   if (!ran) {
     // A `-shadowed` refusal comes before the servers start (run-job.mjs), and their rows read `pending` all the same.
     const pending = serversIn(loaded, ["pending"]).length > 0;
-    const rest = loaded.at === "loader" ? LOADED_WORDS.stoppedLoader : pending ? (/-shadowed$/.test(record.reason ?? "") ? LOADED_WORDS.stoppedBeforeServers : LOADED_WORDS.stoppedServers) : loaded.at === "session" ? LOADED_WORDS.stoppedSession : LOADED_WORDS.stoppedAfterLoading;
+    const rest = movedPastStage(record) ? LOADED_WORDS.stoppedAfterLoading : loaded.at === "loader" ? LOADED_WORDS.stoppedLoader : pending ? (/-shadowed$/.test(record.reason ?? "") ? LOADED_WORDS.stoppedBeforeServers : LOADED_WORDS.stoppedServers) : loaded.at === "session" ? LOADED_WORDS.stoppedSession : LOADED_WORDS.stoppedAfterLoading;
     return verdict({ state: "stopped", rest, small }, record);
   }
   const connected = (loaded.mcp ?? []).filter((row) => row.state === "connected");
@@ -661,8 +672,11 @@ const SERVER_STATE_WORDS = Object.freeze({
   timeout: "did not answer in time",
   pending: "had not connected",
 });
-/** A server's state. `pending` on a run that went on is an early note, since it would have stopped otherwise: it says that. */
-const stateWords = (row, ran) => (row.state === "connected" ? `connected, with ${plural(row.tools, "tool")}` : row.state === "pending" && ran ? "was still connecting when this was noted" : SERVER_STATE_WORDS[row.state]);
+/**
+ * A server's state. `pending` on a run that shows a turn or a call is an early note, and says so. Not "still connecting": a `-shadowed`
+ * refusal comes before any server starts, and its calls can be an extension's at load.
+ */
+const stateWords = (row, ran) => (row.state === "connected" ? `connected, with ${plural(row.tools, "tool")}` : row.state === "pending" && ran ? "had not connected when this was noted" : SERVER_STATE_WORDS[row.state]);
 const serverWords = (row, ran) => `${row.name ?? "a server"} ${stateWords(row, ran)}`;
 
 function mcpRow(loaded, facts, ran) {
@@ -698,7 +712,7 @@ export function loadedRows(record) {
   if (loaded === null) return [];
   const facts = factsOf(record);
   if (loaded.runner !== "reported" || !saysWhatLoaded(loaded)) return loaded.image !== null || loaded.pi !== null ? [piRow(loaded, facts)] : [];
-  const ran = wentOn(record);
+  const ran = movedPastStage(record);
   return [piRow(loaded, facts), modelRow(facts), extensionsRow(loaded, facts), skillsRow(loaded, facts), mcpRow(loaded, facts, ran), toolsRow(loaded, ran)];
 }
 
@@ -753,7 +767,7 @@ export function loadedFold(record) {
   }
   for (const row of countRows(loaded, "prompts", "Prompt template", facts)) add(row.kind, row.name, row.version, row.from);
   for (const row of countRows(loaded, "themes", "Theme", facts)) add(row.kind, row.name, row.version, row.from);
-  for (const server of loaded.mcp ?? []) add("MCP server", code(server.name ?? "a server"), "", stateWords(server, wentOn(record)));
+  for (const server of loaded.mcp ?? []) add("MCP server", code(server.name ?? "a server"), "", stateWords(server, movedPastStage(record)));
   if (Array.isArray(loaded.tools?.own) && loaded.tools.own.length > 0) add("Tools", loaded.tools.own.join(", "), "", "pi");
   for (const row of sourcesOf(loaded, "package")) if (row.toolNames?.length > 0) add("Tools", row.toolNames.join(", "), "", row.name ?? "a staged package");
   for (const row of overlay?.namedTools ?? []) add("Tools", row.tools.join(", "), "", `${row.name}, ${host}’s overlay`);
@@ -867,7 +881,7 @@ function notReadWhy(record) {
   if (loaded.runner === "invalid") return "invalid";
   if (loaded.runner === "cut") return "cut";
   // What the run's page says of it: a list stuck at `start` on a run that went on says nothing of what it had.
-  if (loaded.at === "start" && wentOn(record)) return "absent";
+  if (loaded.at === "start" && movedPastStage(record)) return "absent";
   return null;
 }
 
@@ -945,7 +959,7 @@ function hostFacts(records) {
     if (loaded.runner !== "reported") continue;
     if (!saysWhatLoaded(loaded)) {
       // The run's own page reads one that went on as not recorded, and it did not stop before anything loaded.
-      if (!wentOn(record)) facts.stopped += 1;
+      if (!movedPastStage(record)) facts.stopped += 1;
       continue;
     }
     const kept = loaded.sources.length > 0;
@@ -1100,10 +1114,12 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
   for (const record of read) for (const row of loadedOf(record).mcp ?? []) {
     const name = row.name ?? "a server";
     const had = serversOf.get(name) ?? new Map();
-    had.set(row.state, (had.get(row.state) ?? 0) + 1);
+    // As the run's own page reads it: the same record must not send a person to Connections from here.
+    const state = row.state === "pending" && movedPastStage(record) ? "noted" : row.state;
+    had.set(state, (had.get(state) ?? 0) + 1);
     serversOf.set(name, had);
   }
-  const serverWordsOf = ([name, states]) => `${name} ${[...states].map(([state, n]) => `${state === "connected" ? "connected" : SERVER_STATE_WORDS[state]} in ${n}`).join(", ")}`;
+  const serverWordsOf = ([name, states]) => `${name} ${[...states].map(([state, n]) => `${state === "connected" ? "connected" : state === "noted" ? "had not connected when noted" : SERVER_STATE_WORDS[state]} in ${n}`).join(", ")}`;
   const mcpRowOf = { icon: "plug", label: "MCP", value: serversOf.size === 0 ? "none" : [...serversOf].map(serverWordsOf).join("; "), more: serversOf.size === 0 ? "no recorded run names a server" : null };
 
   const noFlow = read.filter((record) => flowMissing(loadedOf(record)));
@@ -1157,7 +1173,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
     const cutHosts = hostsWhere((facts) => facts.cut && (facts.packages === null || facts.overlay === null));
     const shutHosts = hostsWhere((facts) => facts.shut && facts.overlay === null);
     const withheldHosts = hostsWhere((facts) => facts.withheld && facts.packages === null);
-    const jobImageHosts = hostsWhere((facts) => facts.jobImage && facts.image === null);
+    const jobImageHosts = hostsWhere((facts) => facts.jobImage && facts.image === null && facts.pi === null);
     const noVersionHosts = hostsWhere((facts) => facts.image !== null && facts.pi === null);
     const noImageHosts = hostsWhere((facts) => facts.pi !== null && facts.image === null);
     const stopped = hosts.filter(({ facts }) => facts.stopped > 0 && facts.packages === null && facts.overlay === null).map(({ name, facts }, at) => `${at === 0 ? plural(facts.stopped, "run") : facts.stopped} on ${name}`);
@@ -1169,12 +1185,15 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
       stopped.length > 0 ? `${andList(stopped)} stopped before anything loaded.` : null,
       shutHosts.length > 0 ? `The runs on ${andList(shutHosts)} had the overlay shut, as a model canary and a restricted run do, so they say nothing of its extensions.` : null,
       withheldHosts.length > 0 ? `The runs on ${andList(withheldHosts)} withheld the staged packages or were canaries, so they say nothing of them.` : null,
-      jobImageHosts.length > 0 ? `Every run on ${andList(jobImageHosts)} used an image its job named, so none says what pi or image the host runs otherwise.` : null,
-      noVersionHosts.length > 0 ? `No run on ${andList(noVersionHosts)} says which pi it ran.` : null,
+      jobImageHosts.length > 0 ? `No recorded run on ${andList(jobImageHosts)} used the host’s own image, so none says what pi or image the host runs otherwise.` : null,
+      noVersionHosts.length > 0 ? `No run on ${andList(noVersionHosts)} on the host’s own image says which pi it ran.` : null,
       noImageHosts.length > 0 ? `No run on ${andList(noImageHosts)} says which image it ran in.` : null,
       ...leftOutLine,
     ].filter(Boolean);
-    return { state, tone: "attention", icon: "attention", total, read: read.length, sub, top: `${readFrom}, so runs may differ in ways this does not show.`, small, rows: [piRowOf(), extensionsRowOf, missingRow], hosts: [], links: [], foot: null };
+    // Attention is for what someone could look into. A trigger that names its image, or jobs that withhold the packages, leave this open for
+    // good with nothing wrong, and a card that always warns gets skipped on the day it has something to say. It still will not say the same.
+    const chosenOnly = read.length === total && missingParts.length === 0 && !historyIncomplete && hostless === 0 && cutHosts.length === 0 && stopped.length === 0 && noVersionHosts.length === 0 && noImageHosts.length === 0 && (shutHosts.length > 0 || withheldHosts.length > 0 || jobImageHosts.length > 0);
+    return { state, tone: chosenOnly ? "idle" : "attention", icon: chosenOnly ? "minus" : "attention", total, read: read.length, sub, top: `${readFrom}, so runs may differ in ways this does not show.`, small, rows: [piRowOf(), extensionsRowOf, missingRow], hosts: [], links: [], foot: null };
   }
   if (state === "same") {
     const names = hosts.map(({ name }) => name);
