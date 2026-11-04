@@ -1077,7 +1077,7 @@ test("taking a row's fallbacks off, or moving its main, says what the worker the
   assert.match(await warned(listed, { model: "claude-sonnet-5-5" }), /refused as model-not-allowed, before they spend: anthropic\/claude-fable-5 declares fallback models the allowed list does not name/);
 });
 
-test("a model the preview said a job cannot use has no bound asked of it: two sentences of one model do not disagree", async () => {
+test("a bound that cannot be computed is not said of a model a job cannot use, and a model it does not start on gets no amount: two sentences of one model do not disagree", async () => {
   const typoWords = `On this host this trigger's jobs would be refused as model-unknown, before they spend: ${TYPO} is a model this deployment does not know (not-in-catalog). Choose one from the catalog, or declare it in the overlay's models.json.`;
   const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } });
   const out = await f.service.preview(ask(f, { model: "claude-typo", maxCostUsd: "1" }), operator);
@@ -1088,16 +1088,48 @@ test("a model the preview said a job cannot use has no bound asked of it: two se
   const failoverOut = await failover.service.preview(ask(failover, { model: "claude-typo", models: [TYPO, SONNET], maxCostUsd: "5" }), operator);
   assert.deepEqual(failoverOut.plan.warnings, [`On this host a job cannot use ${TYPO} (model-unknown).`]);
   assert.ok(!failoverOut.summary.join(" ").includes("could not be bounded"), failoverOut.summary.join(" | "));
-  // Off the list and under the cap: said once, as off the list, and neither an amount nor a refusal beside it.
-  const off = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: HAIKU } });
-  const offOut = await off.service.preview(ask(off, { model: "claude-opus-5-5", maxCostUsd: "1" }), operator);
-  assert.deepEqual(offOut.plan.warnings, [`On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${OPUS} is not on the models they may call here. Add it to the list, or choose another model.`]);
+  // A main passed over for being off this host's list, on a job with a fallback it starts on instead: no amount beside that, and no refusal.
+  const passed = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [HAIKU] }, env: { PI_ALLOWED_MODELS: HAIKU } });
+  const passedOut = await passed.service.preview(ask(passed, { model: "claude-opus-5-5", maxCostUsd: "1" }), operator);
+  assert.deepEqual(passedOut.plan.warnings, [`On this host a job cannot use ${OPUS} (model-not-allowed).`]);
+  assert.ok(!passedOut.summary.join(" ").includes("$2.654295"), passedOut.summary.join(" | "));
   // Said as a model whose own fallbacks the list leaves out: no amount either.
   const declared = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] } });
   assert.deepEqual((await declared.service.preview(ask(declared, { models: [HAIKU, FABLE], maxCostUsd: "0.5" }), operator)).plan.warnings, [`On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${FABLE} declares fallback models the allowed list does not name. Add them to the list, or remove it.`]);
   // A model with nothing said of it is still judged, in the same edit.
   const other = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] } });
   assert.deepEqual((await other.service.preview(ask(other, { models: [HAIKU, OPUS, TYPO], fallbackModels: [TYPO], maxCostUsd: "1" }), operator)).plan.warnings, [`On this host a job cannot use ${TYPO} (model-unknown).`, `${OPUS} needs at least $2.654295 for a short task's first call, so a job cannot use it under this cap.`]);
+});
+
+test("a known main off this host's list, under a cap below its first call, refuses: another host's list may hold it, and a job there pays for a container and stops at that call", async () => {
+  const run = { provider: "anthropic", model: "claude-haiku-4-5" };
+  const change = { model: "claude-opus-5-5", maxCostUsd: "1" };
+  const opusRefused = /^anthropic\/claude-opus-5-5 needs at least \$2\.654295 for a short task's first call, above this trigger's \$1\.00 job cap/;
+  // This host's list leaves it off, and the host whose list holds it answers the same.
+  assert.match((await refusal(fixture({ run, env: { PI_ALLOWED_MODELS: HAIKU } }), change)).refusal, opusRefused);
+  assert.match((await refusal(fixture({ run, env: { PI_ALLOWED_MODELS: `${HAIKU},${OPUS}` } }), change)).refusal, opusRefused);
+  // What a job on that host meets: its list lets the model through, and the real guard admits no call at this cap, the smallest included.
+  assert.equal(modelOnList([HAIKU, OPUS], "anthropic", "claude-opus-5-5"), true);
+  const opus = builtinModel("anthropic", "claude-opus-5-5");
+  assert.ok(firstCallFloorMicros(opus) > 1_000_000);
+  assert.equal(admits(1_000_000, opus, FIRST_CALL_SHORT_TASK_BYTES), false);
+  assert.equal(admits(1_000_000, opus, DEFAULT_CONTEXT_BYTES), false);
+  // Taking a row's fallbacks off leaves it the model a job starts on.
+  assert.match((await refusal(fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", fallbackModels: [SONNET], maxCostUsd: "1" }, env: { PI_ALLOWED_MODELS: SONNET } }), { fallbackModels: null })).refusal, opusRefused);
+  // With every candidate held against, the main is what another host's job starts on, and this host's `model-failover-no-candidate` does not stand in for it.
+  assert.match((await refusal(fixture({ run: { ...run, fallbackModels: ["radius/balanced"] }, env: { PI_ALLOWED_MODELS: "radius/balanced" } }), change)).refusal, opusRefused);
+  // No cap can bound it either, and the catalog or the overlay says so whatever the list says.
+  assert.match((await refusal(fixture({ run, env: { PI_ALLOWED_MODELS: HAIKU } }), { provider: "radius", model: "balanced", maxCostUsd: "5" })).refusal, /^radius\/balanced: Radius \(pi-messages\) has no verified local cost bound/);
+  const overlay = { providers: { ollama: { baseUrl: "http://127.0.0.1:11434/v1", api: "openai-completions", apiKey: "x", models: [{ id: "local", cost: { input: 100000, output: 100000, cacheRead: 0, cacheWrite: 0 }, maxTokens: 100, contextWindow: 1000 }] } } };
+  assert.match((await refusal(fixture({ overlay, run, env: { PI_ALLOWED_MODELS: HAIKU } }), { provider: "ollama", model: "local", maxCostUsd: "5" })).refusal, /^ollama\/local's output cap travels as max_completion_tokens/);
+  // Between the floor and a short task's amount it previews, as a host whose list holds it does, and says both.
+  const thin = fixture({ run, env: { PI_ALLOWED_MODELS: HAIKU } });
+  const thinOut = await thin.service.preview(ask(thin, { model: "claude-opus-5-5", maxCostUsd: "2.62144" }), operator);
+  assert.deepEqual(thinOut.plan.warnings, [`On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${OPUS} is not on the models they may call here. Add it to the list, or choose another model.`]);
+  assert.ok(thinOut.summary.some((line) => line.startsWith(`${OPUS} clears this $2.62144 job cap only for the smallest first call`)), thinOut.summary.join(" | "));
+  // A cap it clears, off the list: only the list speaks.
+  const clears = fixture({ run, env: { PI_ALLOWED_MODELS: HAIKU } });
+  assert.equal(await warned(clears, { model: "claude-opus-5-5", maxCostUsd: "3" }), `On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${OPUS} is not on the models they may call here. Add it to the list, or choose another model.`);
 });
 
 test("the model the cap is judged by is the first the file and this host hold nothing against, and that is never named", async () => {

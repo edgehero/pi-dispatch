@@ -236,7 +236,7 @@ It judges this only when the change sends the model, the provider, a list or the
 none of them, and then it asks of each of those models, since the entry as it will be is what a job runs on. It judges what the
 trigger itself names, and not the deployment's list or a role map's other models: a job under a cap simply cannot call one that does
 not fit. A model no cap can bound (a local server whose output limit may be ignored, Radius) is refused under any cap as the model a job
-starts on, and warned of as any other model: a job cannot use it under this cap. A model the preview has said a job cannot use on this host gets no amount beside that. A price it cannot read fails open, and the preview says which: "The first call on ollama/free could not be
+starts on, and warned of as any other model: a job cannot use it under this cap. Any other model the preview has said a job cannot use on this host gets no amount beside that. The model a job starts on is judged whatever this host's list says, because another host's list may hold it, and a job there would start a paid container and stop at its first call. A price it cannot read fails open, and the preview says which: "The first call on ollama/free could not be
 bounded here, so the runner judges it when a job runs."
 
 ### One run, end to end

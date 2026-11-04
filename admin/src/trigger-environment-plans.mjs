@@ -554,8 +554,11 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
    * that cannot clear it is a warning that a job cannot use it under this cap. A list the file itself contradicts on every host is the
    * loader's to refuse, in the funnel. One that clears only the smallest possible request is said out loud (`thin`).
    *
-   * A model already said to be one a job cannot use has no bound asked of it: "could not be bounded, so the runner judges it when a job
-   * runs" beside "a job cannot use it" is two sentences that disagree.
+   * Of a model already said to be one a job cannot use, a bound that cannot be computed is not said: "could not be bounded, so the runner
+   * judges it when a job runs" beside "a job cannot use it" is two sentences that disagree. Any other such model gets no amount beside it.
+   * The model a job starts on is still judged where the amount is known, whatever this host's list says: the file and the catalog decide
+   * that, and another host whose list holds it starts a paid container and stops at the first call. REJECTED: skipping the bound of every
+   * model said to be unusable, which dropped that refusal to a warning about this host alone.
    */
   async function judgeModels({ entry, text, facts, touched }) {
     const run = entry.run;
@@ -656,7 +659,8 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       // cap simply cannot call one it does not fit, and lowering this trigger's cap is no fault of a model it never asked for.
       for (const ref of new Map([main, ...refsOf(run.models), ...fallbacks].map((one) => [`${one.provider}/${one.id}`, one])).values()) {
         const name = `${ref.provider}/${ref.id}`;
-        if (unusable.has(name)) continue;
+        const said = unusable.has(name);
+        if (said && name !== startName) continue;
         // The model a job starts on cannot make a call, inside a container it paid for. Any other is one a job cannot use.
         const stopped = (refusal, warning) => {
           if (name === startName) return refuse(refusal);
@@ -685,7 +689,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
         const priced = boundModelOf(ref, { builtinModel, overlay });
         const floor = firstCallFloorMicros(priced);
         if (floor === null) {
-          unjudged.add(name);
+          if (!said) unjudged.add(name);
           continue;
         }
         // The amount a person is told is a short task's, never the floor's: a cap at the floor admits a request no job sends,
