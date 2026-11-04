@@ -51,7 +51,7 @@ import { recordedLoaded } from "@edgehero/pi-dispatch/loaded-record";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { refusedBeforeSpend, repoOfTarget } from "./costs.mjs";
-import { fromNewerRelease } from "./newer-release.mjs";
+import { NEWER_RECORD_SENTENCE, fromNewerRelease } from "./newer-release.mjs";
 import { outcomeKey } from "./words.mjs";
 
 /** The panel's fixed sentences, exported so a card's ledger can cite each one. */
@@ -291,11 +291,11 @@ export function outcomeNote(record) {
 
 // ---- the problems, in words ------------------------------------------------------------------------------------------
 
-function noFlowSentence(loaded, facts) {
+function noFlowSentence(loaded, facts, { past = false } = {}) {
   const found = facts.flow === null ? "pi found no such skill" : `pi found no skill named ${facts.flow}`;
   const first = facts.forge ? `not in ${facts.repo ?? "this repository"} at its base commit` : "not in this folder";
   // A trigger that withholds the staged packages did not look in them, so "nor in a staged package" would be a guess.
-  if (loaded.leftOut?.packages === true) return `${found}: ${first}, nor in a skills folder or the overlay. The trigger withholds the staged packages.`;
+  if (loaded.leftOut?.packages === true) return `${found}: ${first}, nor in a skills folder or the overlay. ${past ? "That run withheld" : "The trigger withholds"} the staged packages.`;
   return `${found}: ${first}, nor in a skills folder, the overlay or a staged package.`;
 }
 
@@ -517,7 +517,7 @@ const movedPastStage = (record) => wentOn(record) || (record?.reason === "runner
  * (`readHostLoadsView`), and a missing or failed read is no line at all, never "the same". `jobState` is the queue's word for the
  * job (`chatFactsOf`), or null where it has none, which the record alone cannot say: an infra failure writes a record per attempt.
  */
-export function loadedVerdict(record, hostLoads = null, { jobState = null } = {}) {
+export function loadedVerdict(record, hostLoads = null, { jobState = null, past = false } = {}) {
   if (record === null || typeof record !== "object") return null;
   const facts = factsOf(record);
   const loaded = loadedOf(record);
@@ -541,14 +541,14 @@ export function loadedVerdict(record, hostLoads = null, { jobState = null } = {}
   const ran = stop === null && wentOn(record);
   // It went on, and a report that broke left an earlier stage. A failed server would have stopped it, so nothing it asks for is missing.
   if (ran && loaded.at !== "ready") small.push(LOADED_WORDS.notedEarly);
-  if (flowMissing(loaded)) problems.push({ state: "no-flow", tone: "attention", icon: "attention", bold: ran ? LOADED_WORDS.ranWithoutFlow : LOADED_WORDS.flowNowhere, rest: noFlowSentence(loaded, facts), fixes: noFlowFixes(loaded, facts) });
+  if (flowMissing(loaded)) problems.push({ state: "no-flow", tone: "attention", icon: "attention", bold: ran ? LOADED_WORDS.ranWithoutFlow : LOADED_WORDS.flowNowhere, rest: noFlowSentence(loaded, facts, { past }), fixes: noFlowFixes(loaded, facts) });
   if (failedCountOf(loaded) > 0) {
     const line = failedLine(loaded, facts, ran);
     problems.push({ state: "extension-failed", tone: "failed", icon: "failed", bold: line.bold, rest: line.rest, fixes: line.fixes });
   }
   if (problems.length > 0) {
     const [first, ...others] = problems;
-    return verdict({ ...first, small: [...(first.small ?? []), ...small], also: others.map(({ tone, icon, bold, rest, fixes }) => ({ tone, icon, bold, rest, fixes })) }, record);
+    return verdict({ ...first, small: [...(first.small ?? []), ...small], also: others.map(({ state, tone, icon, bold, rest, fixes }) => ({ state, tone, icon, bold, rest, fixes })) }, record);
   }
   if (!ran) {
     // A `-shadowed` refusal comes before the servers start (run-job.mjs), and their rows read `pending` all the same.
@@ -609,7 +609,7 @@ function modelRow(facts) {
   return { icon: "bolt", label: "Model", value: facts.model !== null ? `${facts.provider !== null ? `${facts.provider} / ` : ""}${facts.model}` : "not recorded", more: facts.calls !== null ? plural(facts.calls, "call") : null };
 }
 
-function extensionsRow(loaded, facts) {
+function extensionsRow(loaded, facts, past) {
   const named = sourcesOf(loaded, "package").filter((row) => row.name !== null);
   const unnamed = sourcesOf(loaded, "package").find((row) => row.name === null);
   const overlay = sourcesOf(loaded, "overlay")[0];
@@ -627,8 +627,8 @@ function extensionsRow(loaded, facts) {
     named.length > 0 ? `staged on ${facts.host ?? "this host"}` : null,
     (overlay?.names?.length ?? 0) > 0 ? `${andList(overlay.names)} from ${facts.host ?? "this host"}’s overlay` : null,
     ...(names.length > 0 ? counted : []),
-    loaded.leftOut?.packages ? `${facts.subject} withholds the staged packages` : null,
-    loaded.leftOut?.overlayExtensions ? "this job left out the overlay’s extensions" : null,
+    loaded.leftOut?.packages ? (past ? "it withheld the staged packages" : `${facts.subject} withholds the staged packages`) : null,
+    loaded.leftOut?.overlayExtensions ? (past ? "it left out the overlay’s extensions" : "this job left out the overlay’s extensions") : null,
   ].filter(Boolean);
   const value = names.length > 0 ? names.join(", ") : counted.length > 0 ? counted.join(", ") : "none";
   return { icon: "layers", label: "Extensions", value, more: said.length > 0 ? commaAnd(said) : null };
@@ -646,7 +646,7 @@ function flowFrom(flow, facts) {
 /** Whether a source's skill count holds the flow, so the count beside the flow's own line can take it back out. */
 const holdsFlow = (flow, row) => flow !== null && flow.tier === row.tier && (row.tier !== "package" || row.name === null || flow.package === null || row.name === flow.package);
 
-function skillsRow(loaded, facts) {
+function skillsRow(loaded, facts, past) {
   const flow = loaded.flow;
   const name = facts.flow ?? "its flow";
   if (loaded.sources.length === 0) {
@@ -662,7 +662,8 @@ function skillsRow(loaded, facts) {
   }).filter((row) => row.count > 0);
   const total = counted.reduce((sum, row) => sum + row.count, 0);
   const others = counted.map((row) => `${row.count} from ${row.label}`).join(", ");
-  if (flow === null) return { icon: "skill", label: "Skills", value: total > 0 ? plural(total, "skill") : "none", more: total > 0 ? `${others}; the trigger names no flow` : "the trigger names no flow" };
+  const noFlow = past ? "it named no flow" : "the trigger names no flow";
+  if (flow === null) return { icon: "skill", label: "Skills", value: total > 0 ? plural(total, "skill") : "none", more: total > 0 ? `${others}; ${noFlow}` : noFlow };
   const value = flow.tier === "none" ? [strong(name), ", the flow, found nowhere"] : [strong(name), `, the flow, from ${flowFrom(flow, facts)}`];
   return { icon: "skill", label: "Skills", value, more: total > 0 ? `and ${total} more: ${others}` : "and no others" };
 }
@@ -679,14 +680,14 @@ const SERVER_STATE_WORDS = Object.freeze({
 const stateWords = (row, ran) => (row.state === "connected" ? `connected, with ${plural(row.tools, "tool")}` : row.state === "pending" && ran ? "had not connected when this was noted" : SERVER_STATE_WORDS[row.state]);
 const serverWords = (row, ran) => `${row.name ?? "a server"} ${stateWords(row, ran)}`;
 
-function mcpRow(loaded, facts, ran) {
+function mcpRow(loaded, facts, ran, past) {
   const row = (value, more = null) => ({ icon: "plug", label: "MCP", value, more });
   if (loaded.mcp === null) {
     if (isCount(loaded.problems?.mcp) && loaded.problems.mcp > 0) return row(`${plural(loaded.problems.mcp, "server")} could not be used`, "this record was cut to fit");
     return row("not kept", loaded.at !== "loader" ? "this record was cut to fit" : ran ? LOADED_WORDS.notedEarlyRow : "the run stopped before its servers started");
   }
   const left = loaded.cut?.servers > 0 ? `and ${plural(loaded.cut.servers, "more server")} past this record’s bound` : null;
-  if (loaded.mcp.length === 0) return row("none", left ?? `${facts.subject} names no server`);
+  if (loaded.mcp.length === 0) return row("none", left ?? (past ? "it named no server" : `${facts.subject} names no server`));
   return row(loaded.mcp.map((server) => serverWords(server, ran)).join("; "), left);
 }
 
@@ -705,15 +706,16 @@ function toolsRow(loaded, ran) {
 
 /**
  * The card's one line per kind, or an empty list where the record says nothing about them. `{ icon, label, value, more }`,
- * each of `value` and `more` a line's parts.
+ * each of `value` and `more` a line's parts. `past` is for a surface beside today's triggers file: what a trigger "names" there is what
+ * the file says now, and a record cannot speak for that, so each such word says what the run did.
  */
-export function loadedRows(record) {
+export function loadedRows(record, { past = false } = {}) {
   const loaded = loadedOf(record);
   if (loaded === null) return [];
   const facts = factsOf(record);
   if (loaded.runner !== "reported" || !saysWhatLoaded(loaded)) return loaded.image !== null || loaded.pi !== null ? [piRow(loaded, facts)] : [];
   const ran = movedPastStage(record);
-  return [piRow(loaded, facts), modelRow(facts), extensionsRow(loaded, facts), skillsRow(loaded, facts), mcpRow(loaded, facts, ran), toolsRow(loaded, ran)];
+  return [piRow(loaded, facts), modelRow(facts), extensionsRow(loaded, facts, past), skillsRow(loaded, facts, past), mcpRow(loaded, facts, ran, past), toolsRow(loaded, ran)];
 }
 
 /** One tier's count as a row of the fold, by the words `from` gives it. */
@@ -779,6 +781,54 @@ export function loadedFold(record) {
   if (loaded.leftOut?.restricted) add("Left out", "the overlay’s extensions", "", "this kind of run");
   else if (loaded.leftOut?.overlayExtensions) add("Left out", "the overlay’s extensions", "", "this job’s overlay switch: off on its host (PI_GLOBAL_ALLOW_EXTENSIONS=0), or for a model canary’s replay");
   return rows;
+}
+
+// ---- a trigger -------------------------------------------------------------------------------------------------------
+
+/** Each problem a run's line can name, by the row of a trigger's card it belongs under. */
+const PROBLEM_ROW = Object.freeze({ "no-flow": "Skills", "extension-failed": "Extensions", "mcp-stopped": "MCP", "mcp-failed": "MCP" });
+
+/**
+ * What a trigger's page quotes of its runs, from their records, newest first: `{ newest, quoted }`. A run's record says what THAT run had,
+ * which is not what the next job gets, so a surface says whose it is. `newest` is the last run it started, `{ id, said }`, `said` this
+ * file's own sentence of what its record says. `quoted` is the newest run able to say what it loaded (`saysWhatLoaded`), which may be
+ * older: a refusal before its container or a record an older release wrote has nothing to put under a row, and the page says why it
+ * quotes another. `{ id, host, record, rows, problems, sources, tools, jobTools }`, `rows` being `loadedRows` by label and `problems` the
+ * top line's and `also`'s by the same labels. A record a newer release wrote is its core alone, and says so.
+ */
+export function triggerLastRun(records, hostLoads = null) {
+  const all = Array.isArray(records) ? records.filter((record) => record !== null && typeof record === "object") : [];
+  if (all.length === 0) return { newest: null, quoted: null };
+  const [first] = all;
+  const verdictOf = (record) => loadedVerdict(record, hostLoads, { past: true });
+  const firstSaid = fromNewerRelease(first) ? `${NEWER_RECORD_SENTENCE}.` : (() => {
+    const v = verdictOf(first);
+    return [v.bold, v.rest].filter(Boolean).join(" ");
+  })();
+  const newest = { id: runIdOf(first), said: firstSaid };
+  const record = all.find((candidate) => {
+    const loaded = loadedOf(candidate);
+    return loaded !== null && loaded.runner === "reported" && saysWhatLoaded(loaded);
+  });
+  if (record === undefined) return { newest, quoted: null };
+  const loaded = loadedOf(record);
+  const facts = factsOf(record);
+  const v = verdictOf(record);
+  const problems = {};
+  for (const entry of [v, ...v.also]) {
+    const row = PROBLEM_ROW[entry.state];
+    if (row !== undefined) problems[row] = entry;
+  }
+  const overlay = sourcesOf(loaded, "overlay")[0];
+  const tools = [
+    ...sourcesOf(loaded, "package").filter((row) => row.toolNames?.length > 0).map((row) => ({ from: row.name ?? "a staged package", names: [...row.toolNames] })),
+    ...(overlay?.namedTools ?? []).map((row) => ({ from: `${row.name}, ${facts.host ?? "this host"}’s overlay`, names: [...row.tools] })),
+  ];
+  const sources = [...sourcesOf(loaded, "package"), ...(overlay?.names ?? []).map((name) => ({ name, version: null, tools: overlay.namedTools?.find((row) => row.name === name)?.tools.length ?? 0, skills: 0, prompts: 0 }))];
+  return {
+    newest,
+    quoted: { id: runIdOf(record), host: facts.host, record, rows: Object.fromEntries(loadedRows(record, { past: true }).map((row) => [row.label, row])), problems, sources, tools, jobTools: [...(loaded.tools?.job ?? [])] },
+  };
 }
 
 // ---- a sandbox -------------------------------------------------------------------------------------------------------

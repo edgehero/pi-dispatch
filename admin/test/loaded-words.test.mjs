@@ -5,7 +5,7 @@ import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
 import { manualCanaryJobId } from "../../worker/src/job-id.mjs";
 import { recordedLoaded } from "../../worker/src/loaded-record.mjs";
 import { buildRecord } from "../../worker/src/run-history.mjs";
-import { HOSTS_OFFERED, LOADED_STATES, LOADED_WORDS, hostLoadsRow, hostPiFor, isOutcomeNote, loadedFold, loadedOf, loadedProblems, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, projectLoadsOf, runningVerdict, sandboxFreshLine, sandboxRunLine, wordsText } from "../src/loaded-words.mjs";
+import { HOSTS_OFFERED, LOADED_STATES, LOADED_WORDS, hostLoadsRow, hostPiFor, isOutcomeNote, loadedFold, loadedOf, loadedProblems, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, projectLoadsOf, runningVerdict, sandboxFreshLine, sandboxRunLine, wordsText, triggerLastRun } from "../src/loaded-words.mjs";
 import { outcomeKey } from "../src/words.mjs";
 import { failedOverlayEntries, heldBackOverlay, recordThroughPipeline } from "./helpers/loaded-pipeline.mjs";
 import { HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, SCRIPT, billingRecords, incompleteRecords, loadedField, loadedRecord, source, webRecords } from "./helpers/loaded-samples.mjs";
@@ -1205,4 +1205,63 @@ test("the project's counts agree with themselves in the singular, and every way 
   const cutWords = projectLoadsOf([loadedRecord(), { ...older, jobId: "gh-9" }, { ...older, jobId: "gh-10" }, { ...cut, jobId: "gh-11" }, { ...cut, jobId: "gh-12" }]);
   assert.match(cutWords.small[0], /2 with no room for what they loaded/);
   assert.match(cutWords.small[0], /2 from an older release/);
+});
+
+// ---- beside today's triggers file (the trigger page's What its jobs get) --------------------------------------------
+
+test("beside today's file, each word that speaks of a trigger speaks of the run instead, and a run page keeps its own", async () => {
+  const clean = await recordThroughPipeline({ exit: { code: 0, reason: "stop" }, turnsOnLine: 3 });
+  const mcpMore = (record, options) => loadedRows(record, options).find((row) => row.label === "MCP").more;
+  assert.equal(mcpMore(clean), "trigger 3 names no server");
+  assert.equal(mcpMore(clean, { past: true }), "it named no server");
+  const withheld = S.leftOut();
+  const extensionsMore = (options) => loadedRows(withheld, options).find((row) => row.label === "Extensions").more;
+  assert.ok(extensionsMore().includes("withholds the staged packages"));
+  assert.ok(extensionsMore({ past: true }).includes("it withheld the staged packages") && !extensionsMore({ past: true }).includes("withholds"));
+  const flowless = loadedRecord({ jobId: "gh-w2", flow: null, loaded: loadedField({ flow: null }) });
+  const skillsMore = (options) => loadedRows(flowless, options).find((row) => row.label === "Skills").more;
+  assert.ok(skillsMore().includes("the trigger names no flow"));
+  assert.ok(skillsMore({ past: true }).includes("it named no flow"));
+  const overlayOff = S.leftOutOverlay();
+  assert.ok(loadedRows(overlayOff, { past: true }).find((row) => row.label === "Extensions").more.includes("it left out the overlay’s extensions"));
+  const noFlowWithheld = loadedRecord({ jobId: "gh-w1", loaded: loadedField({ flow: { tier: "none", package: null }, sources: [source("overlay"), source("repository"), source("trigger"), source("other")], leftOut: { tools: [], packages: true, overlayExtensions: false, restricted: false } }) });
+  assert.ok(loadedVerdict(noFlowWithheld).rest.endsWith("The trigger withholds the staged packages."));
+  assert.ok(loadedVerdict(noFlowWithheld, null, { past: true }).rest.endsWith("That run withheld the staged packages."));
+  // And a problem past the first keeps which it is, so a surface can put it where it belongs.
+  assert.deepEqual([loadedVerdict(S.bothLacked()).state, loadedVerdict(S.bothLacked()).also[0].state], ["no-flow", "extension-failed"]);
+});
+
+test("what a trigger's page quotes: the newest run able to say what it loaded, and what the newest it started says of itself", async () => {
+  const good = await recordThroughPipeline({ jobId: "gh-good", exit: { code: 0, reason: "stop" }, turnsOnLine: 3 });
+  assert.deepEqual(triggerLastRun([]), { newest: null, quoted: null });
+  assert.deepEqual(triggerLastRun(null), { newest: null, quoted: null });
+  assert.deepEqual(triggerLastRun([null, "x"]), { newest: null, quoted: null }, "what is no record is not a run");
+  const alone = triggerLastRun([good]);
+  assert.equal(alone.newest.id, "gh-good");
+  assert.equal(alone.quoted.id, "gh-good");
+  assert.equal(alone.quoted.host, "mini1");
+  assert.equal(alone.quoted.record, good);
+  assert.deepEqual(Object.keys(alone.quoted.rows), ["pi", "Model", "Extensions", "Skills", "MCP", "Tools"]);
+  const refused = triggerLastRun([S.refused(), good]);
+  assert.equal(refused.newest.id, "gh-e9a0");
+  assert.equal(refused.newest.said, LOADED_WORDS.refused);
+  assert.equal(refused.quoted.id, "gh-good");
+  const newer = triggerLastRun([{ ...S.everything(), jobId: "gh-newer", v: 2 }]);
+  assert.ok(newer.newest.said.startsWith("Written by a newer pi-dispatch"), "and never that an older release wrote it");
+  assert.equal(newer.quoted, null);
+  // The names a card's row shows are the record's own, with who brought them.
+  const named = triggerLastRun([S.hostDiffers()]).quoted;
+  assert.deepEqual(named.tools.map((row) => row.from), ["pi-lint", "pi-test-runner"]);
+  assert.deepEqual(named.tools[0].names, ["lint_file", "lint_fix"]);
+  assert.ok(named.sources.some((row) => row.name === "git-guard" && row.version === null), "an overlay entry has no version");
+  assert.deepEqual(named.jobTools, ["report_progress"]);
+  const toolsOfOverlay = loadedRecord({ jobId: "gh-t1", host: "build3", loaded: loadedField({ sources: [source("overlay", { names: ["git-guard"], extensions: 1, tools: 1, namedTools: [{ name: "git-guard", tools: ["guard_push"] }] }), source("repository"), source("trigger"), source("other")] }) });
+  const overlay = triggerLastRun([toolsOfOverlay]).quoted;
+  assert.deepEqual(overlay.tools, [{ from: "git-guard, build3’s overlay", names: ["guard_push"] }]);
+  assert.equal(overlay.sources.find((row) => row.name === "git-guard").tools, 1);
+  // A problem goes under the row it belongs to, the first as well as the rest.
+  assert.deepEqual(Object.keys(triggerLastRun([S.bothLacked()]).quoted.problems), ["Skills", "Extensions"]);
+  assert.deepEqual(Object.keys(triggerLastRun([S.mcpFailed()]).quoted.problems), ["MCP"]);
+  assert.deepEqual(Object.keys(triggerLastRun([S.mcpTimeout()]).quoted.problems), ["MCP"]);
+  assert.deepEqual(triggerLastRun([S.everything()]).quoted.problems, {});
 });
