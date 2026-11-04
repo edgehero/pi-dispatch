@@ -7526,11 +7526,9 @@ function forgeBase(kind, env) {
  * fixed in the repository (issue #800), through `forgeBaseLinkOf`.
  */
 export function forgeRepoLinkOf(record, env = {}) {
-  const kind = record?.kind;
-  const target = record?.target;
-  if (!isForgeKind(kind) || typeof target !== "string" || target.length > 300 || hasControls(target)) return null;
-  const repo = /^(.+)[#!]\d{1,12}$/.exec(target)?.[1];
-  if (repo === undefined || !FORGE_REPO_RE[kind]?.test(repo) || repo.split("/").some((seg) => seg === "." || seg === "..")) return null;
+  const parts = forgeTargetParts(record);
+  if (parts === null) return null;
+  const { kind, repo } = parts;
   if (kind === "github") return `https://github.com/${repo}`;
   const base = forgeBase(kind, env);
   if (base === null) return null;
@@ -7557,7 +7555,11 @@ export function forgeBaseLinkOf(record, env = {}) {
   return `${repository}${FORGE_COMMIT_PATH[record.kind] ?? "/commit/"}${sha}`;
 }
 
-export function forgeLinkOf(record, env = {}) {
+/**
+ * A run's forge target as a link may read it: `{ kind, repo, sep, n }`, or null. The one reading of a target for a link, so a repository's
+ * link and an issue's cannot disagree about which targets are safe to build one from.
+ */
+function forgeTargetParts(record) {
   const kind = record?.kind;
   const target = record?.target;
   if (!isForgeKind(kind) || typeof target !== "string" || target.length > 300 || hasControls(target)) return null;
@@ -7566,6 +7568,13 @@ export function forgeLinkOf(record, env = {}) {
   const [, repo, sep, n] = m;
   // A `.` or `..` segment would walk the link's path out of the repository on the forge's own host.
   if (!FORGE_REPO_RE[kind]?.test(repo) || repo.split("/").some((seg) => seg === "." || seg === "..")) return null;
+  return { kind, repo, sep, n };
+}
+
+export function forgeLinkOf(record, env = {}) {
+  const parts = forgeTargetParts(record);
+  if (parts === null) return null;
+  const { kind, repo, sep, n } = parts;
   const request = sep === "!";
   if (request && FORGES[kind].pullRequestSep !== "!") return null; // a separator this forge never writes
   if (kind === "github") return `https://github.com/${repo}/issues/${n}`;

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { SANDBOX_DRAW, SANDBOX_HOSTS_FIXTURE, sandboxFixture } from "./helpers/sandbox-goldens.mjs";
 import { NOW } from "../../launch/fixture-deployment.mjs";
@@ -12,6 +13,9 @@ import { PAGES, loadPageData, parsePageQuery, renderPage } from "../src/console/
 import { PAGE_CSS, pageCss } from "../src/console/page-css.mjs";
 import { chromeLaunchArgs } from "../../.github/scripts/console-width-check.mjs";
 import { sandboxBrowserLink } from "../src/console/sandbox-links.mjs";
+import { RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, readRunById } from "../src/read-model.mjs";
+import { LOADED_SAMPLES } from "./helpers/loaded-samples.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 test("both console browser checks keep the local Chrome sandbox and use the established CI startup flags without bypassing document security", () => {
   assert.deepEqual(chromeLaunchArgs(), ["--use-mock-keychain"]);
@@ -143,6 +147,37 @@ test("What opens says a shell has no overlay first, and an unread record or publ
   const missing = await loadPageData("sandboxes", parsed.query, { ...failing, fleet: { parkedCount: async () => 1, runById: async () => ({ missing: true }) } }, { role: "operator", readOnly: false });
   assert.equal(missing.sandboxRunUnread, undefined);
   assert.match(String((await renderPage("sandboxes", { data: missing, query: parsed.query, session: { role: "operator", name: "ops" }, readOnly: false })).html), /What <a [^>]*>gh-9575<\/a> itself loaded is not recorded\./);
+});
+
+test("What opens says a record could not be read for each way the real reader says so, and not recorded only where both places were read (#800)", async () => {
+  const parsed = parsePageQuery("sandboxes", "id=gh-9575&host=mini1");
+  const line = async (runById) => {
+    const deps = { now: () => NOW, fleet: { parkedCount: async () => 1, runById }, sandboxes: { hosts: () => ({ config: SANDBOX_HOSTS_FIXTURE }), read: async () => sandboxFixture() }, hostLoads: async () => null };
+    const data = await loadPageData("sandboxes", parsed.query, deps, { role: "operator", readOnly: false });
+    return { data, html: String((await renderPage("sandboxes", { data, query: parsed.query, session: { role: "operator", name: "ops" }, readOnly: false })).html) };
+  };
+  const unread = /What <a [^>]*>gh-9575<\/a> itself loaded could not be read\./;
+  // `readRunById` never throws for these, so the reader's own answers are what this page must read. No client to ask the mirror: `unreadable`.
+  const logsDir = tempDir("sandbox-run-");
+  const real = await readRunById(null, { logsDir, jobId: "gh-9575" });
+  assert.equal(real.unreadable, RUN_MIRROR_UNREAD, "the premise: this is what the reader answers");
+  assert.match((await line(async (id) => readRunById(null, { logsDir, jobId: id }))).html, unread);
+  // A file that is there and is not a record.
+  writeFileSync(join(logsDir, "gh-9575.json"), "{ not a record");
+  const fileAnswer = await readRunById({ get: async () => null }, { logsDir, jobId: "gh-9575" });
+  assert.equal(fileAnswer.unreadable, RUN_FILE_UNREADABLE, "the premise: a file that is not a record");
+  assert.match((await line(async () => fileAnswer)).html, unread);
+  const invalid = await readRunById(null, { logsDir, jobId: "not a run id" });
+  assert.ok(invalid.invalid, "the premise: an id outside the charset");
+  assert.match((await line(async () => invalid)).html, unread);
+  // Both places read and holding none.
+  const missing = await line(async () => ({ missing: true }));
+  assert.equal(missing.data.sandboxRunUnread, undefined);
+  assert.match(missing.html, /What <a [^>]*>gh-9575<\/a> itself loaded is not recorded\./);
+  // A record is a record.
+  const found = await line(async () => ({ record: LOADED_SAMPLES.everything(), source: "local" }));
+  assert.equal(found.data.sandboxRunUnread, undefined);
+  assert.ok(found.html.includes("itself also loaded pi-lint 1.4.2"));
 });
 
 test("a sandbox's pi version is the host's only for the image that host booted on: a kept older image holds its own (#800)", async () => {

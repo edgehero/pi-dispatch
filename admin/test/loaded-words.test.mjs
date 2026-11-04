@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
 import { recordedLoaded } from "../../worker/src/loaded-record.mjs";
-import { LOADED_STATES, LOADED_WORDS, hostLoadsRow, hostPiFor, isOutcomeNote, loadedFold, loadedOf, loadedProblems, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, projectLoadsOf, runningVerdict, sandboxFreshLine, sandboxRunLine, wordsText } from "../src/loaded-words.mjs";
+import { LOADED_STATES, LOADED_WORDS, REFUSED_AFTER_READY, hostLoadsRow, hostPiFor, isOutcomeNote, loadedFold, loadedOf, loadedProblems, loadedRows, loadedVerdict, outcomeBanner, outcomeNote, projectLoadsOf, runningVerdict, sandboxFreshLine, sandboxRunLine, wordsText } from "../src/loaded-words.mjs";
 import { outcomeKey } from "../src/words.mjs";
 import { HOST_LOADS, HOSTILE_LOADED, LOADED_SAMPLES as S, SCRIPT, billingRecords, incompleteRecords, loadedField, loadedRecord, source, webRecords } from "./helpers/loaded-samples.mjs";
 
@@ -98,6 +98,21 @@ test("a failed overlay extension goes to its host, a package's to Updates, and s
   assert.deepEqual(minimal.fixes, []);
 });
 
+test("a retry is claimed only where the record or the queue shows one", () => {
+  const first = { ...S.mcpTimeout(), attempt: 1 };
+  const small = (record, jobState = null) => loadedVerdict(record, null, { jobState }).small;
+  // The queue holds the job again, or is running it: it was retried.
+  for (const jobState of ["waiting", "delayed", "prioritized", "paused", "active"]) assert.deepEqual(small(first, jobState), [LOADED_WORDS.retried], jobState);
+  // A later attempt is itself a retry, whatever the queue no longer says.
+  assert.deepEqual(small(S.mcpTimeout()), [LOADED_WORDS.retried]);
+  // The queue says it failed. Of a first attempt that is no retry, only that the attempts are over.
+  assert.deepEqual(small(first, "failed"), ["This was its last attempt."]);
+  assert.deepEqual(small(S.mcpTimeout(), "failed"), [LOADED_WORDS.retriedLast]);
+  // Neither shows one: the job is gone from the queue, or the read failed. It says what the queue does, and nothing of this run.
+  for (const jobState of [null, "completed", "unknown"]) assert.deepEqual(small(first, jobState), ["The queue retries an infrastructure failure while it has attempts left."], String(jobState));
+  assert.deepEqual(small({ ...first, attempt: undefined }), [LOADED_WORDS.retriedRule], "a record with no attempt");
+});
+
 test("a failed MCP server stops the run: never a completed run's note, and no line says the run went on", () => {
   for (const record of [S.mcpFailed(), S.mcpTimeout()]) {
     assert.equal(outcomeNote(record), null);
@@ -107,7 +122,7 @@ test("a failed MCP server stops the run: never a completed run's note, and no li
   }
   // "Its last attempt" only when the queue says so: an infrastructure failure writes a record per attempt.
   assert.deepEqual(loadedVerdict(S.mcpTimeout()).small, ["Retried, as any infrastructure failure."]);
-  assert.deepEqual(loadedVerdict(S.mcpTimeout(), null, { jobEnded: true }).small, ["Retried, as any infrastructure failure; this was its last attempt."]);
+  assert.deepEqual(loadedVerdict(S.mcpTimeout(), null, { jobState: "failed" }).small, ["Retried, as any infrastructure failure; this was its last attempt."]);
   // A record cut to its minimal form still says, by its outcome, which of the two it was.
   const minimal = (over) => loadedRecord({ ...over, loaded: loadedField({ at: "session", cut: { form: "minimal", packages: 0, servers: 0, names: 0, counts: 0 }, sources: [], mcp: null, tools: null, problems: { failed: 0, dropped: 0, mcp: 1 } }) });
   assert.equal(loadedVerdict(minimal({ outcome: "failed", reason: "container-infra-exit", exitCode: 1 })).state, "mcp-stopped");
@@ -139,11 +154,60 @@ test("a run that stopped did not run: its line says what was found and what fail
     const words = [lineOf(v), ...v.also.flatMap((entry) => [entry.bold, entry.rest])].join(" ");
     assert.doesNotMatch(words, /went on|Ran without/, words);
   }
-  // Ready, and the agent did start: whatever the outcome then, it ran without it.
-  assert.equal(loadedVerdict(loadedRecord({ outcome: "failed", reason: "timeout", exitCode: 124, loaded: loadedField(noFlow) })).bold, LOADED_WORDS.ranWithoutFlow);
-  assert.match(lineOf(loadedVerdict(loadedRecord({ outcome: "failed", reason: "timeout", exitCode: 124, loaded: loadedField({ ...failed, problems: { failed: 1, dropped: 0, mcp: 0 } }) }))), /The run went on without it\.$/);
+  // `ready` is not "ran": the runner notes it, then can refuse a command or skip the prompt for a stop at load.
+  const noMcp = { ...failed, problems: { failed: 1, dropped: 0, mcp: 0 } };
+  const atReady = (over, field) => loadedRecord({ outcome: "policy", exitCode: 2, tokens: null, ...over, loaded: loadedField(field) });
+  const stops = [
+    loadedVerdict(atReady({ reason: "command-unregistered" }, { sources: [source("package", { name: "pi-lint", version: "1.4.2", failed: 1 }), source("overlay"), source("repository"), source("trigger"), source("other")], problems: { failed: 1, dropped: 0, mcp: 0 } })),
+    loadedVerdict(atReady({ reason: "cost-cap" }, noFlow)),
+    loadedVerdict(atReady({ reason: "cost-cap" }, noMcp)),
+    loadedVerdict(atReady({ reason: "model-not-allowed", turns: 0 }, noFlow)),
+    loadedVerdict(atReady({ reason: "cost-cap", turns: null }, noFlow)),
+  ];
+  assert.equal(lineOf(stops[0]), "The extension from pi-lint failed to load.");
+  assert.equal(stops[1].bold, LOADED_WORDS.flowNowhere);
+  assert.equal(lineOf(stops[2]), "The extension from acme/web failed to load.");
+  for (const v of stops) assert.doesNotMatch(lineOf(v), /went on|Ran without/, lineOf(v));
+  // Known to have gone on: it completed, or it took a turn before it stopped.
+  assert.equal(loadedVerdict(loadedRecord({ loaded: loadedField(noFlow) })).bold, LOADED_WORDS.ranWithoutFlow);
+  assert.equal(loadedVerdict(loadedRecord({ reason: "awaiting-input", loaded: loadedField(noFlow) })).bold, LOADED_WORDS.ranWithoutFlow);
+  assert.equal(loadedVerdict(atReady({ reason: "cost-cap", turns: 3 }, noFlow)).bold, LOADED_WORDS.ranWithoutFlow);
+  assert.match(lineOf(loadedVerdict(loadedRecord({ outcome: "failed", reason: "timeout", exitCode: 124, turns: 7, loaded: loadedField(noMcp) }))), /The run went on without it\.$/);
+  assert.equal(lineOf(loadedVerdict(loadedRecord({ outcome: "failed", reason: "timeout", exitCode: 124, turns: 0, loaded: loadedField(noMcp) }))), "The extension from acme/web failed to load.");
 });
 
+test("a run refused for what loaded, or stopped before ready, never reads as everything", () => {
+  const clean = (at, reason) => loadedRecord({ outcome: "policy", exitCode: 2, tokens: null, reason, loaded: loadedField({ at }) });
+  // Every refusal the runner has between its two notes and after `ready`, read from the runner itself, so a new one fails here until it is said.
+  const runner = readFileSync(new URL("../../image/runner/run-job.mjs", import.meta.url), "utf8");
+  const sessionAt = runner.indexOf('loaded.record("session", liveTools);');
+  const readyAt = runner.indexOf('loaded.record("ready", liveTools);');
+  const promptAt = runner.indexOf("await session.prompt(prompt);");
+  assert.ok(sessionAt > 0 && sessionAt < readyAt && readyAt < promptAt, "the runner's notes are where this test reads them");
+  const reasons = (from, to) => [...runner.slice(from, to).matchAll(/configError\(\s*(?:`[^`]*`|"[^"]*"),\s*"([a-z-]+)",?\s*\)/g)].map((match) => match[1]);
+  const beforeReady = reasons(sessionAt, readyAt);
+  const afterReady = reasons(readyAt, promptAt);
+  assert.deepEqual([...new Set(beforeReady)].sort(), ["approval-shadowed", "await-input-shadowed", "mcp-shadowed", "model-roles-shadowed", "report-progress-shadowed"]);
+  assert.deepEqual(afterReady, [...REFUSED_AFTER_READY], "a refusal after `ready` that this list does not hold reads as everything");
+  for (const reason of beforeReady) {
+    const v = loadedVerdict(clean("session", reason));
+    assert.equal(v.state, "stopped", reason);
+    assert.equal(v.rest, "It stopped after its extensions and skills loaded, before the agent started.", reason);
+  }
+  for (const reason of afterReady) {
+    const v = loadedVerdict(clean("ready", reason));
+    assert.equal(v.state, "stopped", reason);
+    assert.equal(v.tone, "idle", reason);
+    assert.equal(v.rest, "It stopped after loading, before its prompt was sent. The outcome above says why.", reason);
+  }
+  // A problem it also has still comes first, and says nothing of going on.
+  assert.equal(loadedVerdict(loadedRecord({ outcome: "policy", exitCode: 2, tokens: null, reason: "command-unregistered", loaded: loadedField({ flow: { tier: "none", package: null } }) })).state, "no-flow");
+  // Everything loaded and the run failed later is still true: only what stopped it for what loaded is not "everything".
+  assert.equal(loadedVerdict(clean("ready", "cost-cap")).state, "everything");
+  // The same at `session` whatever brought it there, a stop with no reason to read included.
+  assert.equal(loadedVerdict(loadedRecord({ outcome: "failed", reason: "container-infra-exit", exitCode: 1, loaded: loadedField({ at: "session" }) })).state, "stopped");
+  assert.equal(Object.hasOwn(loadedVerdict(S.stoppedBeforeServers()), "short"), false, "nothing printed it, so a word about a run has one less place to be wrong");
+});
 test("a name leads no sentence, so none takes a capital that is not its spelling: the commonest failure, on each tier", () => {
   const thrown = (tier, over = {}) => {
     const sources = ["overlay", "repository", "trigger", "other"].map((name) => (name === tier ? source(name, { failed: 1, ...over }) : source(name)));
@@ -340,16 +404,16 @@ test("an overlay file can load beside the job's switch being off: both are said,
   assert.ok(loadedFold(record).some((row) => row.kind === "Left out" && wordsText(row.from).includes("PI_GLOBAL_ALLOW_EXTENSIONS=0")));
 });
 
-test("the overlay switch is this job's, so its words are true of a host's setting and of a canary's replay alike", () => {
+test("the overlay switch is this job's, so its words are true of a host's setting and of a model canary's replay alike", () => {
   const off = { tools: [], packages: false, overlayExtensions: true, restricted: false };
-  for (const over of [{}, { packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" } }]) {
+  for (const over of [{}, { canary: { sourceJobId: "gh-1", role: "default", candidate: "anthropic/claude-sonnet-5-5" } }]) {
     const record = loadedRecord({ ...over, host: "mini2", loaded: loadedField({ leftOut: off }) });
     const said = [lineOf(loadedVerdict(record)), wordsText(loadedRows(record).find((row) => row.label === "Extensions").more)].join(" ");
-    assert.doesNotMatch(said, /host asks|mini2 leaves out/, "no line says the host asked: on a canary's replay it did not");
+    assert.doesNotMatch(said, /host asks|mini2 leaves out/, "no line says the host asked: on a model canary's replay it did not");
     assert.match(said, /Left out for this job: the overlay’s extensions\./);
     const from = wordsText(loadedFold(record).find((row) => row.kind === "Left out").from);
     assert.match(from, /PI_GLOBAL_ALLOW_EXTENSIONS=0/, "the fold names the host's setting");
-    assert.match(from, /or for a canary’s replay/, "and never as the only cause");
+    assert.match(from, /or for a model canary’s replay/, "and never as the only cause");
   }
   // A restricted run's switch is closed too, and one thing gets one line.
   const restricted = loadedRecord({ loaded: loadedField({ leftOut: { ...off, restricted: true } }) });
@@ -441,7 +505,10 @@ test("the card's rows: one line per kind, in the card's words", () => {
   assert.deepEqual(loadedFold(minimal), []);
   // A bound on a full form, said as what it left out.
   const full = loadedRecord({ loaded: loadedField({ cut: { form: "full", packages: 2, servers: 1, names: 3, counts: 1 } }) });
-  assert.deepEqual(loadedVerdict(full).small, ["Cut to fit: this record leaves out 2 packages, 1 server, 3 names and the exact value of 1 count."]);
+  assert.deepEqual(loadedVerdict(full).small, ["This record leaves out 2 packages, 1 server, 3 names and the exact value of 1 count."]);
+  // A name can be left out for what it held as well as for space, so the line says neither.
+  const oneName = loadedRecord({ loaded: loadedField({ cut: { form: "full", packages: 0, servers: 0, names: 1, counts: 0 } }) });
+  assert.deepEqual(loadedVerdict(oneName).small, ["This record leaves out 1 name."]);
 });
 
 test("a sandbox's line: a shell has no overlay, so that goes first, then what the run had, or what a job would load, or unknown", () => {
@@ -609,35 +676,175 @@ test("Missing counts a run an MCP server stopped, and a card with anything Missi
   assert.equal(projectLoadsOf([stopped("h1", 1), stopped("h2", 2)]).rows.some((row) => row.label === "MCP"), true);
 });
 
-test("a canary or a restricted run has the overlay shut by its kind, so it says nothing of its host's overlay, and a host's own switch does", () => {
+test("a model canary or a restricted run has the overlay shut by its kind, while a package canary and a host's own switch speak for the host", () => {
   const onHost = (names, host = "h1", i = 1) => loadedRecord({ jobId: `gh-${host}-${i}`, host, loaded: loadedField({ sources: [source("overlay", { names, extensions: names.length }), source("repository"), source("trigger"), source("other")] }) });
   const shut = (host, over, leftOut) => loadedRecord({ jobId: `gh-shut-${host}`, host, ...over, loaded: loadedField({ sources: [source("overlay"), source("repository"), source("trigger"), source("other")], leftOut: { tools: [], packages: false, overlayExtensions: false, restricted: false, ...leftOut } }) });
-  const canary = shut("h2", { packageCanary: { name: "pi-a", version: "1.0.0", load: "loaded" } }, { overlayExtensions: true });
+  const modelCanary = { sourceJobId: "gh-1", role: "default", candidate: "anthropic/claude-sonnet-5-5" };
+  const canary = shut("h2", { canary: modelCanary }, { overlayExtensions: true });
   const restricted = shut("h2", {}, { restricted: true });
   for (const record of [canary, restricted]) {
     const l = projectLoadsOf([onHost(["extra.ts"]), record]);
     assert.notEqual(l.state, "differs", record.jobId);
     assert.equal(l.state, "incomplete", "it cannot say the same either: h2 said nothing of its overlay");
-    assert.deepEqual(l.small, ["The runs on h2 had the overlay shut, as canaries and restricted runs do, so they say nothing of its extensions."], record.jobId);
+    assert.deepEqual(l.small, ["The runs on h2 had the overlay shut, as a model canary and a restricted run do, so they say nothing of its extensions."], record.jobId);
     // Once h2 has a run that can say, it says, whatever else it ran.
     assert.equal(projectLoadsOf([onHost(["extra.ts"]), record, onHost([], "h2", 2)]).state, "differs", record.jobId);
     assert.equal(projectLoadsOf([onHost(["extra.ts"]), record, onHost(["extra.ts"], "h2", 2)]).state, "same", record.jobId);
   }
   // Nothing differs here, and that is no answer either: h2's runs did not say.
   assert.equal(projectLoadsOf([onHost([]), canary]).state, "incomplete");
+  // A package canary is an ordinary job on its host's switch. Its overlay names are its host's, and it says no such thing as shut.
+  const packageCanary = { name: "pi-a", version: "1.0.0", load: "loaded" };
+  const named = (names, host) => loadedRecord({ jobId: `gh-pc-${host}`, host, packageCanary, loaded: loadedField({ sources: [source("overlay", { names, extensions: names.length }), source("repository"), source("trigger"), source("other")] }) });
+  const agrees = projectLoadsOf([onHost(["git-guard"]), named(["git-guard"], "build3")]);
+  assert.equal(agrees.state, "same");
+  assert.deepEqual(agrees.small, []);
+  const lacks = projectLoadsOf([onHost(["git-guard"]), named([], "build3")]);
+  assert.equal(lacks.state, "differs", "a host's overlay read off its canary is its overlay");
+  assert.equal(lacks.top, "Runs differ by host: h1 also loads git-guard from its overlay.");
+  // A package canary's candidate stays out, as a model canary's staged nothing does.
+  const pkg = (host, over, name, version) => loadedRecord({ jobId: `gh-pk-${host}`, host, ...over, loaded: loadedField({ sources: [...(name ? [source("package", { name, version, extensions: 1 })] : []), source("overlay"), source("repository"), source("trigger"), source("other")] }) });
+  const onA = pkg("h1", {}, "pi-a", "1.0.0");
+  assert.notEqual(projectLoadsOf([onA, pkg("h2", { packageCanary }, "pi-a", "1.0.1")]).state, "differs");
+  assert.notEqual(projectLoadsOf([onA, pkg("h2", { canary: modelCanary, loaded: undefined }), { ...pkg("h2", { canary: modelCanary }), jobId: "gh-mc" }]).state, "differs", "a model canary is handed no staged package");
   // A host's own PI_GLOBAL_ALLOW_EXTENSIONS=0 is the host's, and it is a difference.
   const hostSwitch = shut("h2", {}, { overlayExtensions: true });
   assert.equal(projectLoadsOf([onHost(["extra.ts"]), hostSwitch]).state, "differs");
   // A project on one host has nothing to differ from, and a kind that shut the overlay leaves no question open there.
   assert.equal(projectLoadsOf([shut("h1", {}, { restricted: true })]).state, "same");
-  // A record cut past its names does not leave the host's answer open if it was a canary's: it never spoke for the host.
-  const compactCanary = loadedRecord({ jobId: "gh-cc", host: "h1", packageCanary: { name: "pi-a", version: "1.0.0", load: "loaded" }, loaded: S.cut().loaded });
-  assert.equal(projectLoadsOf([onHost([]), compactCanary]).state, "same");
+  // A record cut past its names leaves no question open if its overlay was shut anyway, and does if it spoke for the host.
+  const compactOf = (over) => loadedRecord({ jobId: "gh-cc", host: "h1", endedAt: new Date(Date.parse(onHost([]).endedAt) + 60_000).toISOString(), ...over, loaded: S.cut().loaded });
+  assert.equal(projectLoadsOf([onHost([]), compactOf({ canary: modelCanary })]).state, "same");
+  assert.equal(projectLoadsOf([onHost([]), compactOf({ packageCanary })]).state, "incomplete");
   // The row's own "every recorded run" holds: what every other run loaded is said as that, with the restricted one named.
   const names = ["git-guard"];
   const row = projectLoadsOf([onHost(names), onHost(names, "h1", 2), shut("h1", {}, { restricted: true })]).rows.find((entry) => entry.label === "Extensions");
   assert.equal(wordsText(row.value), "git-guard");
   assert.match(wordsText(row.more), /but for 1 run of a kind that leaves out the overlay’s extensions$/);
+});
+
+test("a fleet update is no host difference: each host is read by its newest run of each trigger, for names as well as versions", () => {
+  const start = Date.parse("2026-10-08T15:00:00Z");
+  const hoursAgo = (hours) => new Date(start - hours * 3_600_000).toISOString();
+  let seq = 0;
+  const run = (host, hours, { packages = [["pi-lint", "1.4.3"]], overlay = [], triggerIndex = 2, ...field } = {}) => loadedRecord({ jobId: `gh-${seq += 1}`, host, triggerIndex, startedAt: hoursAgo(hours + 1), endedAt: hoursAgo(hours), loaded: loadedField({ sources: [...packages.map(([name, version]) => source("package", { name, version, extensions: 1 })), source("overlay", { names: overlay, extensions: overlay.length }), source("repository"), source("trigger"), source("other")], ...field }) });
+  const old = [["pi-lint", "1.4.2"]];
+  // mini1 ran 1.4.2 and then 1.4.3, in either order in the list, and mini2 only 1.4.3.
+  for (const records of [[run("mini1", 30, { packages: old }), run("mini1", 2), run("mini2", 1)], [run("mini1", 2), run("mini1", 30, { packages: old }), run("mini2", 1)]]) {
+    const updated = projectLoadsOf(records);
+    assert.equal(updated.state, "same", updated.top);
+    assert.equal(updated.foot, "Compares each host’s newest run of each trigger, so an update every host took is no difference.");
+    const row = updated.rows.find((entry) => entry.label === "Extensions");
+    assert.equal(wordsText(row.value), "pi-lint 1.4.3");
+    assert.equal(wordsText(row.more), "each host’s newest run of each trigger", "not every recorded run: one held the old version");
+  }
+  // An image upgrade the same way, and a name taken off a host the same way.
+  const older = { pi: "1.4.0", imagePi: "1.4.0", image: "pi-job:4.2.0" };
+  assert.equal(projectLoadsOf([run("mini1", 30, older), run("mini1", 2), run("mini2", 1)]).state, "same");
+  assert.equal(projectLoadsOf([run("mini1", 30, { overlay: ["git-guard"] }), run("mini1", 2), run("mini2", 1)]).state, "same");
+  assert.equal(projectLoadsOf([run("mini1", 30, { packages: [["pi-old", "1.0.0"], ["pi-lint", "1.4.3"]] }), run("mini1", 2), run("mini2", 1)]).state, "same");
+  // A host behind is what this card is for, however few runs show it.
+  const behind = projectLoadsOf([run("mini1", 3, { packages: old }), run("mini2", 1)]);
+  assert.equal(behind.state, "differs");
+  assert.equal(behind.top, "Runs differ by host: mini1 also loads pi-lint 1.4.2; mini2 also loads pi-lint 1.4.3.");
+  assert.match(behind.foot, /comparing each host’s newest run of each trigger/);
+  assert.equal(projectLoadsOf([run("mini1", 1, { packages: old }), run("mini1", 3), run("mini2", 2)]).state, "differs", "the newest went backwards, and that is a difference");
+  // Two triggers on one host add up: neither supersedes the other.
+  const lint = [["pi-lint", "1.4.3"]], docs = [["pi-docs", "1.0.0"]];
+  const addsUp = projectLoadsOf([run("mini1", 2, { packages: lint, triggerIndex: 1 }), run("mini1", 1, { packages: docs, triggerIndex: 2 }), run("mini2", 2, { packages: lint, triggerIndex: 1 }), run("mini2", 1, { packages: docs, triggerIndex: 2 })]);
+  assert.equal(addsUp.state, "same");
+  const lacksOne = projectLoadsOf([run("mini1", 2, { packages: lint, triggerIndex: 1 }), run("mini1", 1, { packages: docs, triggerIndex: 2 }), run("mini2", 1, { packages: docs, triggerIndex: 2 })]);
+  assert.equal(lacksOne.state, "differs");
+  assert.match(lacksOne.top, /mini1 also loads pi-lint 1\.4\.3/);
+  // A cron trigger is its id, which its job id names, and an older cut record is superseded by a newer whole one but not the other way.
+  const cron = (host, hours, id, over) => ({ ...run(host, hours, over), jobId: `repeat:${id}:${1_000 + hours}`, triggerIndex: null });
+  assert.equal(projectLoadsOf([cron("mini1", 30, "nightly", { packages: old }), cron("mini1", 2, "nightly"), cron("mini2", 1, "nightly")]).state, "same");
+  const compact = (host, hours) => ({ ...S.cut(), jobId: `gh-c${hours}`, host, triggerIndex: 2, endedAt: hoursAgo(hours) });
+  assert.equal(projectLoadsOf([compact("mini1", 30), run("mini1", 2), run("mini2", 1)]).state, "same");
+  assert.equal(projectLoadsOf([run("mini1", 30), compact("mini1", 2), run("mini2", 1)]).state, "incomplete");
+});
+
+test("no run with a list means nothing about a list: an agentless run has nothing to load, and a stopped run recorded none", () => {
+  const noList = (host, at, over = {}) => loadedRecord({ jobId: `gh-${host}-${at}`, host, ...over, loaded: loadedField({ at, flow: null, sources: [], mcp: null, tools: null, problems: null }) });
+  const agentless = projectLoadsOf([loadedRecord({ jobId: "a", host: "mini2" }), noList("mini1", "none")]);
+  assert.deepEqual(agentless.small, ["The runs on mini1 have no agent, so they load nothing to compare."]);
+  assert.equal(wordsText(agentless.rows.find((row) => row.label === "Extensions").more), "the 1 recorded", "an agentless run is not an unknown");
+  const stopped = projectLoadsOf([loadedRecord({ jobId: "a", host: "mini2" }), noList("mini1", "start", { outcome: "failed", exitCode: 1 })]);
+  assert.deepEqual(stopped.small, ["The runs on mini1 stopped before anything loaded."]);
+  assert.equal(wordsText(stopped.rows.find((row) => row.label === "Extensions").more), "the 1 recorded; unknown for the other 1");
+  // On one host beside a run with a list, the row counts those with one, and Missing does too.
+  const mixed = projectLoadsOf([loadedRecord({ jobId: "a", host: "mini1" }), noList("mini1", "start", { outcome: "failed", exitCode: 1 }), loadedRecord({ jobId: "b", host: "mini2" })]);
+  assert.equal(mixed.state, "same");
+  assert.equal(wordsText(mixed.rows.find((row) => row.label === "Extensions").more), "the 2 runs with a list");
+  const one = projectLoadsOf([loadedRecord({ jobId: "a", host: "mini1" }), noList("mini1", "none")]);
+  assert.equal(wordsText(one.rows.find((row) => row.label === "Extensions").more), "the 1 run with a list");
+  const differs = projectLoadsOf([loadedRecord({ jobId: "a", host: "mini1", loaded: loadedField({ pi: "1.4.0", imagePi: "1.4.0" }) }), noList("mini1", "none"), loadedRecord({ jobId: "b", host: "mini2" })]);
+  assert.equal(differs.state, "differs");
+  assert.match(wordsText(differs.rows.find((row) => row.label === "Missing").more), /^every run with a list found its flow/);
+  const nothing = projectLoadsOf([noList("mini1", "none"), noList("mini2", "start", { outcome: "failed", exitCode: 1 })]);
+  assert.equal(nothing.state, "incomplete");
+  assert.equal(wordsText(nothing.rows.find((row) => row.label === "Extensions").more), "no run here recorded a list");
+  assert.deepEqual(nothing.small, ["The runs on mini1 have no agent, so they load nothing to compare.", "The runs on mini2 stopped before anything loaded."]);
+});
+
+test("a scheduled run names its trigger by its id, and offers the list that trigger is on", () => {
+  const cron = (over = {}) => loadedRecord({ jobId: "repeat:nightly-report:1791000000000", kind: "local", target: "local:site", triggerIndex: null, triggerType: null, loaded: loadedField({ flow: { tier: "none", package: null } }), ...over });
+  const v = loadedVerdict(cron());
+  assert.deepEqual(v.fixes, [{ kind: "trigger", label: "Find nightly-report in Triggers", icon: "config", href: "/triggers?kind=schedule" }]);
+  assert.deepEqual(outcomeBanner(cron()).fixes, v.fixes);
+  assert.equal(lineOf(loadedVerdict(cron({ loaded: loadedField() }))), "Everything cron trigger nightly-report asks for loaded.");
+  assert.equal(wordsText(loadedRows(cron()).find((row) => row.label === "MCP").more), "cron trigger nightly-report names no server");
+  // A run fired by hand is that trigger's too. A skills folder's failure on one goes to the same place.
+  assert.deepEqual(fixLabels(loadedVerdict(cron({ jobId: "manual:nightly-report:1791000000000" }))), ["Find nightly-report in Triggers"]);
+  const folder = cron({ loaded: loadedField({ sources: [source("overlay"), source("repository"), source("trigger", { failed: 1 }), source("other")], problems: { failed: 1, dropped: 0, mcp: 0 } }) });
+  assert.deepEqual(fixLabels(loadedVerdict(folder)), ["Find nightly-report in Triggers"]);
+  // A cron trigger that withholds the staged packages is said by its id on a project's page, where a row would be.
+  const withholds = cron({ loaded: loadedField({ leftOut: { tools: [], packages: true, overlayExtensions: false, restricted: false } }) });
+  const row = projectLoadsOf([loadedRecord({ jobId: "gh-a" }), withholds]).rows.find((entry) => entry.label === "Extensions");
+  assert.match(wordsText(row.more), /but for cron trigger nightly-report’s, which withhold them$/);
+  // A row beats an id, and a job id that names nothing offers nothing.
+  assert.deepEqual(fixLabels(loadedVerdict(cron({ triggerIndex: 4 }))), ["Open trigger 5"]);
+  assert.deepEqual(loadedVerdict(cron({ jobId: "gh-1" })).fixes, []);
+  assert.deepEqual(loadedVerdict(cron({ jobId: `repeat:${"x".repeat(201)}:1` })).fixes, [], "an id no scheduler holds is no name");
+});
+
+test("a host that differs offers the host that has it and the host behind it, a button each and named", () => {
+  const v = loadedVerdict(S.hostDiffers(), HOST_LOADS);
+  assert.deepEqual(v.fixes.map((fix) => [fix.label, fix.href]), [["Open build3", "/fleet/host?name=build3"], ["Open mini1", "/fleet/host?name=mini1"]]);
+  // A host that published nothing is not known to be behind, so it gets words and no button. Past a few, the words name the rest.
+  assert.ok(!fixLabels(v).includes("Open mini2"));
+  const many = { hosts: [HOST_LOADS.hosts[0], ...["a", "b", "c", "d", "e"].map((name) => ({ ...HOST_LOADS.hosts[1], name }))] };
+  const crowded = loadedVerdict(S.hostDiffers(), many);
+  assert.deepEqual(fixLabels(crowded), ["Open build3", "Open a", "Open b", "Open c"]);
+  assert.match(crowded.rest, /a, b, c, d and e do not have it/);
+});
+
+test("a pattern in run.excludeTools reads as a person says it: one server's tools", () => {
+  const record = loadedRecord({ loaded: loadedField({ leftOut: { tools: ["mcp__linear__*", "bash"], packages: false, overlayExtensions: false, restricted: false } }) });
+  assert.equal(lineOf(loadedVerdict(record)), "Everything trigger 3 asks for loaded. Left out, as it asks: linear’s tools and bash.");
+  assert.match(wordsText(loadedRows(record).find((row) => row.label === "Tools").more), /linear’s tools and bash removed$/);
+});
+
+test("loadedOf answers once per record, frozen, and reads again a record whose field was replaced", () => {
+  const record = S.everything();
+  const first = loadedOf(record);
+  assert.equal(loadedOf(record), first, "the same answer, not a second rebuild");
+  assert.notEqual(loadedOf({ ...record }), first, "another record is another reading");
+  assert.deepEqual(loadedOf({ ...record }), first);
+  // Shared, so nobody may write to it: at any depth.
+  for (const part of [first, first.sources, first.sources[0], first.tools, first.tools.own, first.leftOut]) assert.ok(Object.isFrozen(part), JSON.stringify(part).slice(0, 40));
+  assert.throws(() => first.sources.push({}), TypeError);
+  assert.throws(() => { first.at = "start"; }, TypeError);
+  // A field replaced after the first read is what the next read reads, hostile included.
+  record.loaded = loadedField({ pi: "1.4.0" });
+  assert.equal(loadedOf(record).pi, "1.4.0");
+  record.loaded = HOSTILE_LOADED[0];
+  assert.equal(loadedOf(record).runner, "invalid");
+  // Every surface reads a frozen answer without writing: each of these walks the whole of it.
+  for (const sample of Object.values(S)) {
+    const r = sample();
+    assert.doesNotThrow(() => { loadedVerdict(r, HOST_LOADS); loadedRows(r); loadedFold(r); outcomeBanner(r); outcomeNote(r); sandboxRunLine(r, "gh-x"); projectLoadsOf([r, r]); });
+  }
 });
 
 test("the project's counts agree with themselves in the singular, and every way it will not say the same gives a reason", () => {

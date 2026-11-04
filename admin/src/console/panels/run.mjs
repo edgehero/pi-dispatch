@@ -678,6 +678,20 @@ function skipRows(r, view) {
 }
 
 /**
+ * The Run card's MCP row: what today's triggers file names, and only where nothing better is on the page. A record whose `loaded.mcp`
+ * says what connected is the Loaded card's, and today's file beside it could disagree. Every other record says nothing of it (older,
+ * `absent`, `invalid`, `cut`, stopped at the loader), so the row stands. An agent's copy has no field at all, whatever the record holds,
+ * so "the record does not say" would be false of it: the row says only where its words come from.
+ */
+function triggerServersRow(view, r) {
+  const trigger = view.data?.trigger;
+  if (!trigger) return null;
+  const servers = trigger.mcp?.length ? trigger.mcp.join(", ") : "none";
+  if (view.role === "agent") return `${servers} (as the triggers file says now)`;
+  return Array.isArray(loadedOf(r)?.mcp) ? null : `${servers} (as the triggers file says now; the record does not say which connected)`;
+}
+
+/**
  * The run summary's OpenShell rows (issue #712): "Sandbox policy" (the mode, the credential providers and placeholders
  * the sandbox was given) and "Rule hosts" (the hosts its policy admitted, with the count of any the record does not
  * list), the worker's rebuild (`recordOpenshell`: hosts held to the host-name charset), escaped by the renderer; and
@@ -764,8 +778,7 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Provider reset", providerFailureOf(r.providerFailure)?.resetAt !== undefined ? timeHtml(r.providerFailure.resetAt) : null],
     ["Turns", `${cell(r.turns)}${Number.isSafeInteger(r.maxTurns) ? ` of ${r.maxTurns}` : ""}`],
     ["Trigger", r.triggerIndex !== null && r.triggerIndex !== undefined ? html`<a href="/config">row ${r.triggerIndex + 1}</a> (${cell(r.triggerType)})${view.data?.trigger ? `: ${[view.data.trigger.phrase, view.data.trigger.label, view.data.trigger.pattern].filter(Boolean).join(", ")} (as the triggers file says now)` : ""}` : "-"],
-    // Only with no `loaded`: a record that says what connected is the Loaded card's, and today's file beside it could disagree.
-    ["MCP", view.data?.trigger && loadedOf(r) === null ? `${view.data.trigger.mcp?.length ? view.data.trigger.mcp.join(", ") : "none"} (as the triggers file says now; the record does not say which connected)` : null],
+    ["MCP", triggerServersRow(view, r)],
     ["Replica", Number.isInteger(r.replica) ? html`${r.replica} of ${cell(r.replicas)}${view.data?.siblings?.length ? html` · ${view.data.siblings.map((s) => html`${runLink(s.jobId)} ${ui.outcomeBadge(s.outcome, recordReason(s))} `)}` : null}` : null],
     ["Queued", Number.isFinite(msOf(r.queuedAt)) ? timeHtml(msOf(r.queuedAt)) : null],
     ["Wait for a slot", Number.isFinite(msOf(r.queuedAt)) && Number.isFinite(started) ? ageText(started - msOf(r.queuedAt)) : null],
@@ -889,7 +902,7 @@ export function runLoaded(view) {
   if (view.role === "agent") return html``;
   const r = recordOf(view);
   if (!r && !runningWithoutRecord(view)) return html``;
-  const v = r ? loadedVerdict(r, view.data?.hostLoads ?? null, { jobEnded: view.data?.chat?.jobState === "failed" }) : runningVerdict(view.data?.activeRun?.triggerIndex);
+  const v = r ? loadedVerdict(r, view.data?.hostLoads ?? null, { jobState: view.data?.chat?.jobState ?? null }) : runningVerdict(view.data?.activeRun?.triggerIndex);
   const operator = view.role === "operator";
   const repositoryHref = r ? forgeBaseLinkOf(r, view.env) : null;
   const fix = (entry) => (operator ? entry.fixes.map((one) => fixButton(one, { repositoryHref })) : null);

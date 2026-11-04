@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { agentReadProjection } from "../src/agent-read.mjs";
 import { LOADED_CSS, LOADED_CSS_SHA256 } from "../src/console/loaded-css.mjs";
-import { renderPage } from "../src/console/pages.mjs";
+import { parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { PAGE_CSS } from "../src/console/page-css.mjs";
 import { outcomeCell } from "../src/console/panels/common.mjs";
 import { loadedList, wordsHtml } from "../src/console/panels/loaded-parts.mjs";
@@ -166,10 +166,21 @@ test("the viewer reads the same lines as an operator, with no button, in every s
   }
 });
 
-test("the old MCP line stays only when a record has no `loaded`, and a read that failed is no error page", async () => {
+test("the Run card's MCP row stands wherever the record does not say what connected, and a read that failed is no error page", async () => {
   const trigger = { mcp: ["linear"], phrase: "@pi" };
-  assert.ok((await pageOf(S.notRecorded(), "operator", { trigger })).includes("the record does not say which connected"));
-  assert.ok(!(await pageOf(S.mcpConnected(), "operator", { trigger })).includes("the record does not say which connected"));
+  const clause = "the record does not say which connected";
+  // Every record whose `loaded.mcp` is not a list says nothing of them: the page would otherwise say nothing of the trigger's servers at all.
+  for (const record of [S.notRecorded(), S.absent(), S.invalid(), S.noRoom(), S.stopped()]) assert.ok((await pageOf(record, "operator", { trigger })).includes(clause), record.jobId);
+  // A record that lists them is the Loaded card's, connected or not, and a viewer reads the same.
+  for (const record of [S.mcpConnected(), S.mcpFailed(), S.everything()]) {
+    assert.ok(!(await pageOf(record, "operator", { trigger })).includes(clause), record.jobId);
+    assert.ok(!(await pageOf(record, "viewer", { trigger })).includes(clause), record.jobId);
+  }
+  // An agent's copy has no field whatever the record holds, so "the record does not say" would be false of it. It says where its words come from.
+  const agentPage = async (record) => String((await renderPage("run", { query: { id: record.jobId }, session: { name: "agent", role: "agent" }, data: { ...agentReadProjection({ now: Date.parse(record.endedAt) + 60_000, env: {}, run: { record, source: "local" }, chat: { state: "finished", mode: "none", jobState: "completed" }, transcript: { exists: false }, children: [], childrenSearched: 50 }), trigger } })).html);
+  const agent = await agentPage(S.mcpConnected());
+  assert.ok(!agent.includes(clause));
+  assert.ok(agent.includes("linear (as the triggers file says now)"));
   const failed = await pageOf(S.hostDiffers(), "operator", { hostLoads: null });
   assert.ok(failed.includes("Everything trigger 3 asks for loaded."));
   assert.ok(!failed.includes("does not have it"));
@@ -281,6 +292,24 @@ test("a repository extension's problem opens the commit that ran: an operator's 
   assert.deepEqual(loadedVerdict(local).fixes, []);
 });
 
+test("a host that differs draws a button for each host it names, for an operator and none for a viewer", async () => {
+  const at = (page) => page.slice(page.indexOf('id="p-loaded" data-panel'), page.indexOf("</section>", page.indexOf('id="p-loaded" data-panel')));
+  const operator = at(await pageOf(S.hostDiffers(), "operator", { hostLoads: HOST_LOADS }));
+  assert.ok(operator.includes('href="/fleet/host?name=build3"') && operator.includes('href="/fleet/host?name=mini1"'));
+  const viewer = at(await pageOf(S.hostDiffers(), "viewer", { hostLoads: HOST_LOADS }));
+  assert.ok(!viewer.includes("/fleet/host"));
+});
+
+test("a scheduled run's flow not found opens the list its trigger is on, from the card and the banner", async () => {
+  const record = { ...S.noFlow(), jobId: "repeat:nightly-report:1791000000000", kind: "local", target: "local:site", triggerIndex: null, triggerType: null };
+  const page = await pageOf(record);
+  const panel = page.slice(page.indexOf('id="p-loaded" data-panel'), page.indexOf("</section>", page.indexOf('id="p-loaded" data-panel')));
+  assert.ok(panel.includes('href="/triggers?kind=schedule"') && panel.includes("Find nightly-report in Triggers"));
+  const banner = page.slice(page.indexOf('id="p-outcome" data-panel'), page.indexOf('id="p-workspace" data-panel'));
+  assert.ok(banner.includes('href="/triggers?kind=schedule"'));
+  assert.equal(parsePageQuery("triggers", "kind=schedule").refusal, undefined, "the query the link holds is one the page takes");
+});
+
 test("every way a line offers is a button: a flow not found has two, failures in two tiers one each, on the card and in the banner", async () => {
   const panel = (page) => page.slice(page.indexOf('id="p-loaded" data-panel'), page.indexOf("</section>", page.indexOf('id="p-loaded" data-panel')));
   const banner = (page) => page.slice(page.indexOf('id="p-outcome" data-panel'), page.indexOf('id="p-workspace" data-panel'));
@@ -299,12 +328,31 @@ test("every way a line offers is a button: a flow not found has two, failures in
   assert.ok(!panel(viewer).includes("/config/updates") && !banner(viewer).includes("/config/updates"), "a viewer has none");
 });
 
+test("each loaded card's design status holds at Built: a status is a claim about this repository", () => {
+  for (const card of ["RunLoaded", "LoadedStates", "ProjectLoads"]) {
+    assert.match(cardPreview(card), /aria-label="Design status: Built"/, card);
+    assert.doesNotMatch(cardPreview(card), /aria-label="Design status: (?:Planned|Proposed|Needs a decision)"/, card);
+  }
+  assert.ok(cardPreview("LoadedStates").includes("a trigger's last run comes with part 2"), "it says what it does not build");
+  const markers = readFileSync(new URL("../../design/tools/fix_markers.py", import.meta.url), "utf8");
+  assert.match(markers, /for n in \["RunLoaded", "ProjectLoads"\]\},/);
+  assert.match(markers, /"LoadedStates": \(BUILT, /);
+});
+
+test("the requirements name every golden of what a run loaded, and name no other", () => {
+  const specs = readFileSync(new URL("../../specs/requirements.md", import.meta.url), "utf8");
+  const start = specs.indexOf("## REQ-OPERATOR-CONSOLE-SCREENS");
+  const entry = specs.slice(start, specs.indexOf("\n## ", start + 1));
+  const named = new Set([...entry.matchAll(/`((?:run-loaded|runs-loaded|sandbox-loaded|project-loads)[\w-]*\.(?:operator|viewer))`/g)].map((match) => match[1]));
+  assert.deepEqual([...named].sort(), [...LOADED_PANEL_STATES].sort());
+});
+
 test("each of LOADED_STATES has a golden that draws it, and the fresh sandbox's is a fresh sandbox", async () => {
   assert.deepEqual(Object.keys(LOADED_STATE_GOLDENS).sort(), [...LOADED_STATES].sort());
   for (const [state, { golden, sample }] of Object.entries(LOADED_STATE_GOLDENS)) {
     assert.ok(LOADED_PANEL_STATES.includes(golden), golden);
     if (sample === null) continue;
-    const v = loadedVerdict(S[sample](), HOST_LOADS, { jobEnded: S[sample]().outcome === "failed" });
+    const v = loadedVerdict(S[sample](), HOST_LOADS, { jobState: S[sample]().outcome === "failed" ? "failed" : null });
     assert.equal(v.state, state, `${golden} draws ${state}`);
     const page = await LOADED_DRAW[golden]();
     for (const words of [v.bold, v.rest].filter(Boolean)) assert.ok(page.includes(String(words).replaceAll("'", "&#39;")), `${golden}: ${words}`);
@@ -346,7 +394,7 @@ test("the cards draw what the console says: each line from the cards' own sample
 
   const states = [S.everything(), S.leftOut(), S.leftOutOverlay(), S.mcpConnected(), S.dropped(), S.cut(), S.noFlow(), S.extensionFailed(), S.extensionThrown(), S.mcpFailed(), S.mcpTimeout(), S.hostDiffers(), S.notRecorded(), S.refused()];
   for (const record of states) {
-    const v = loadedVerdict(record, HOST_LOADS, { jobEnded: record.outcome === "failed" });
+    const v = loadedVerdict(record, HOST_LOADS, { jobState: record.outcome === "failed" ? "failed" : null });
     holds("LoadedStates", lineOf(v), record.jobId);
     for (const small of v.small) holds("LoadedStates", small, `${record.jobId}'s small line`);
     for (const fix of v.fixes) holds("LoadedStates", fix.label, `${record.jobId}'s button`);

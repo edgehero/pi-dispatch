@@ -9,7 +9,7 @@ A completed run's **Loaded** card: what the job had when it started, one line pe
   - **Skills:** the flow and where it was found (repository, the trigger's skills folder, the overlay or a staged package), and how many more loaded, by tier.
   - **MCP:** each server the trigger names, its state and how many tools it brought.
   - **Tools:** how many were active, pi's own and the job's own by name, and which the trigger removed. A run's `report_progress` counts here: `run.progress` registers it (`image/runner/run-job.mjs`), so gh-9575's 10 are pi's 4, the extensions' 5 and that one.
-- **What was left out on purpose** is said as such, never as missing: tools a trigger removes (`run.excludeTools`), staged packages a trigger withholds (`"packages": false`) and the overlay's extensions where this job's switch is off (`PI_GLOBAL_ALLOW_EXTENSIONS=0` on its host, or a canary's replay).
+- **What was left out on purpose** is said as such, never as missing: tools a trigger removes (`run.excludeTools`), staged packages a trigger withholds (`"packages": false`) and the overlay's extensions where this job's switch is off (`PI_GLOBAL_ALLOW_EXTENSIONS=0` on its host, or a model canary's replay).
 - **Each item, and where it came from** folds a table with every name and count, its version and its source. That includes what no top line mentions: the skills a package had replaced, the themes and the extensions the guard dropped. On a phone a row reads kind, then name or count, with *Version* only where there is one.
 
 **Panels.** `p-outcome`, `p-run`, `p-loaded`, `p-cost`, `p-resources`, `p-session`.

@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "014dfadbd750cacc47dd1240138d6b4c60857c084f0bfb9b23b8e31cc85c8664",
+  "words": "28029f5381b3750731a084b6572f70db5f65938388d96fd49cc48501285e20f7",
   "elements": [
     {
       "el": "p-loaded",
@@ -304,7 +304,7 @@
       "status": "new",
       "panel": "p-loaded",
       "source": "admin/src/loaded-words.mjs#loadedVerdict",
-      "holds": "jobEnded",
+      "holds": "jobState",
       "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.retriedLast",
       "golden": [
         "panels/run-loaded-mcp-stopped.operator"
@@ -322,7 +322,8 @@
       "shows": [
         "Also loaded git-guard",
         "from build3’s overlay. mini1 does not have it; mini2 has published nothing.",
-        "Open build3"
+        "Open build3",
+        "Open mini1"
       ]
     },
     {
@@ -338,6 +339,18 @@
         "Shown when it ends, from its record. Trigger 3 says what it asks for.",
         "Open trigger 3"
       ]
+    },
+    {
+      "el": "Stopped: never Everything loaded",
+      "kind": "state",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedVerdict",
+      "sentence": "admin/src/loaded-words.mjs#LOADED_WORDS.stoppedLoader",
+      "golden": [
+        "panels/run-loaded-stopped.operator"
+      ],
+      "shows": "It stopped after its extensions and skills loaded, before its tools were ready."
     },
     {
       "el": "No record (gh-c3f8)",

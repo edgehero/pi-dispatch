@@ -1,7 +1,7 @@
 {
   "card": "ProjectLoads",
   "pr": 800,
-  "words": "94496b68112408e84c071782d85e2bc082d58d14fcd26711066a4fc237cf0b38",
+  "words": "a743ce525d8561ccb4632011fdaaf750b1b77db5d89091769eec6ed97b667922",
   "elements": [
     {
       "el": "p-proj-loads",
@@ -37,7 +37,10 @@
       "golden": [
         "panels/project-loads-same.operator"
       ],
-      "shows": "Runs load the same on each host: mini1 and mini2."
+      "shows": [
+        "Runs load the same on each host: mini1 and mini2.",
+        "Compares each host’s newest run of each trigger, so an update every host took is no difference."
+      ]
     },
     {
       "el": "p-proj-loads-none",
@@ -188,7 +191,7 @@
       "golden": [
         "panels/project-loads.operator"
       ],
-      "shows": "From the records of its runs in the last 7 days."
+      "shows": "From the records of its runs in the last 7 days, comparing each host’s newest run of each trigger."
     },
     {
       "el": "Nothing new beyond RunLoaded's loaded field: the page groups its runs' records by host",

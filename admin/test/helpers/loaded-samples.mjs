@@ -103,8 +103,8 @@ export function billingRecords() {
 export function webRecords() {
   const run = (i, host) => loadedRecord({ jobId: `gh-w${String(i).padStart(3, "0")}`, target: `acme/web#${500 + i}`, host, startedAt: at((i + 2) * HOUR), endedAt: at((i + 1) * HOUR) });
   const withheld = loadedRecord({ jobId: "gh-8251-r2", target: "acme/web#408", flow: "frontend-fix", host: "mini2", triggerIndex: 1, loaded: LOADED_SAMPLES.leftOut().loaded });
-  // A canary always replays with the overlay shut (worker/src/canary-runtime.mjs), so its record says so.
-  const canary = loadedRecord({ jobId: "gh-c0a7", target: "acme/web#493", packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" }, loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.3", extensions: 1, prompts: 1, tools: 2, toolNames: ["lint_file", "lint_fix"] }), PI_TEST_RUNNER, source("overlay"), source("repository", { skills: 3 }), source("trigger"), source("other")], leftOut: { tools: [], packages: false, overlayExtensions: true, restricted: false } }) });
+  // A package canary is an ordinary job on its host's overlay switch, so nothing is left out of it but its candidate's older version.
+  const canary = loadedRecord({ jobId: "gh-c0a7", target: "acme/web#493", packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" }, loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.3", extensions: 1, prompts: 1, tools: 2, toolNames: ["lint_file", "lint_fix"] }), PI_TEST_RUNNER, source("overlay"), source("repository", { skills: 3 }), source("trigger"), source("other")] }) });
   return [...Array.from({ length: 6 }, (_, i) => run(i, i % 2 === 0 ? "mini1" : "mini2")), withheld, canary];
 }
 

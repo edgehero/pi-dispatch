@@ -782,9 +782,13 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     if (name === "sandboxes") {
       try { data.sandboxes = await deps.sandboxes.read(q); } catch { data.sandboxes = null; data.readFailed = true; }
       // The run a kept workspace came from, for what opens: its record's `loaded`, unknown when it cannot be read. A read that
-      // failed is not a record with nothing in it, so it says so rather than "not recorded".
+      // failed is not a record with nothing in it, so it says so rather than "not recorded". `readRunById` answers that and does not
+      // throw: `{ unreadable }` or `{ invalid }`, and only `{ missing }` means both places were read and hold none.
       if (typeof q.id === "string" && typeof deps.fleet?.runById === "function") {
-        try { data.sandboxRun = (await deps.fleet.runById(q.id))?.record ?? null; } catch { data.sandboxRun = null; data.sandboxRunUnread = true; }
+        let found = null;
+        try { found = await deps.fleet.runById(q.id); } catch { found = { unreadable: true }; }
+        data.sandboxRun = found?.record ?? null;
+        if (found?.unreadable || found?.invalid) data.sandboxRunUnread = true;
       }
     }
   }
