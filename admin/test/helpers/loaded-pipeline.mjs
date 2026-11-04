@@ -8,7 +8,7 @@ import { EventEmitter } from "node:events";
 import { createExitWriter } from "../../../image/runner/src/exit-line.mjs";
 import { createLoadedRecorder, createLoadTee } from "../../../image/runner/src/loaded.mjs";
 import { makeImagePreflight } from "../../../worker/src/image-preflight.mjs";
-import { rebuildLoaded } from "../../../worker/src/loaded-record.mjs";
+import { leftOutOf, rebuildLoaded } from "../../../worker/src/loaded-record.mjs";
 import { InfraRetry, runJob } from "../../../worker/src/processor.mjs";
 import { buildRecord, makeLogSink } from "../../../worker/src/run-history.mjs";
 import { EXCLUDABLE_TOOL_NAMES } from "../../../worker/src/triggers.mjs";
@@ -40,12 +40,12 @@ function fakeRedis() {
 }
 
 /** The runtime's CLI as the real preflight reads it: an inspect that answers with the id and the pi label, and no other label. */
-const fakeImageInspect = (piVersion) => () => {
+const fakeImageInspect = (piVersion, capabilities = null) => () => {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
   child.stdout.setEncoding = () => {};
   queueMicrotask(() => {
-    child.stdout.emit("data", `sha256:${"7".repeat(64)}|${piVersion ?? "<no value>"}|<no value>|<no value>\n`);
+    child.stdout.emit("data", `sha256:${"7".repeat(64)}|${piVersion ?? "<no value>"}|<no value>|${capabilities ?? "<no value>"}\n`);
     child.emit("close", 0);
   });
   return child;
@@ -59,15 +59,17 @@ const fakeImageInspect = (piVersion) => () => {
  * `jobImage` the job's own `image`, read by the real preflight, whose inspect answers with `imagePi`. No `hostImage`, no image facts.
  * `containerThrows` is a run whose container wrapper gave up with what the container said, so the worker's facts are added on the way out.
  * `tools` are further tools the session holds, `{ name, path }`. `servers` are the trigger's server names and `mcpAt(stage)` their `[state, tools]` rows.
+ * `jobFields` are the trigger's fields the job carries, from which the real `leftOutOf` says what it left out, `excludedNotHere` the names of them this host holds
+ * neither way, and `unmatched` the positions in `run.excludeExtensionTools` the runner says matched nothing. `imageCapabilities` is the image's capabilities label.
  */
-export async function recordThroughPipeline({ jobId = "gh-1c40", stages = ["start", "loader", "session", "ready"], brokenAt = [], exit, flowFound = true, failures = [], turnsOnLine = undefined, packages = [{ name: "pi-lint", version: "1.4.2" }], overlay = [], hostImage = null, jobImage = undefined, imagePi = "1.5.0", host = "mini1", endedAt = "2026-07-16T10:01:00.000Z", pi = "1.5.0", tools = [], servers = [], mcpAt = () => [], containerThrows = false } = {}) {
+export async function recordThroughPipeline({ jobId = "gh-1c40", stages = ["start", "loader", "session", "ready"], brokenAt = [], exit, flowFound = true, failures = [], turnsOnLine = undefined, packages = [{ name: "pi-lint", version: "1.4.2" }], overlay = [], hostImage = null, jobImage = undefined, imagePi = "1.5.0", host = "mini1", endedAt = "2026-07-16T10:01:00.000Z", pi = "1.5.0", tools = [], servers = [], mcpAt = () => [], containerThrows = false, jobFields = {}, excludedNotHere = [], unmatched = [], imageCapabilities = null } = {}) {
   const out = [];
   const writer = createExitWriter({ key: KEY, jobId, write: (line) => out.push(line), exit: () => {} });
   const recorder = createLoadedRecorder({ pi, note: (loaded) => writer.note({ loaded }), log: () => {} });
   const packageRoots = packages.map(({ name }) => `${OVERLAY_ROOT}/packages/${name}`);
   const extensions = [...packageRoots.map((root) => `${root}/ext.js`), ...overlay.map((name) => `${OVERLAY_EXTENSIONS}/${name}`)];
   const loaderFacts = () => ({ roots: { ...ROOTS, packages: packageRoots }, flow: "fix", extensions, skills: flowFound ? [REPOSITORY_FLOW] : [], prompts: [], themes: [], failures, drops: [], shadowed: [] });
-  const liveTools = (stage) => () => ({ tools: [{ name: "read", path: "builtin:read" }, ...tools], active: ["read"], ownNames: ["read"], mcp: mcpAt(stage) });
+  const liveTools = (stage) => () => ({ tools: [{ name: "read", path: "builtin:read" }, ...tools], active: ["read"], ownNames: ["read"], mcp: mcpAt(stage), ...(stage === "ready" ? { unmatched } : {}) });
   const broken = () => { throw new Error("an extension broke the report"); };
   for (const stage of stages) {
     const facts = stage === "start" ? undefined : stage === "loader" ? loaderFacts : liveTools(stage);
@@ -78,12 +80,12 @@ export async function recordThroughPipeline({ jobId = "gh-1c40", stages = ["star
   const sink = makeLogSink({ logsDir: "/nonexistent", enabled: false, fs: { mkdirSync() {} } })(jobId, { exitKey: KEY });
   sink.write(out[0]);
   const closed = await sink.close();
-  const loaded = rebuildLoaded(closed.loaded, { packages, overlayExtensions: [...new Set([...overlay.map((path) => path.split("/")[0]), ...failures.flatMap((failure) => failure.name ?? [])])], servers, ownTools: EXCLUDABLE_TOOL_NAMES, leftOut: { tools: [], packages: false, overlayExtensions: false, restricted: false } });
+  const loaded = rebuildLoaded(closed.loaded, { packages, overlayExtensions: [...new Set([...overlay.map((path) => path.split("/")[0]), ...failures.flatMap((failure) => failure.name ?? [])])], servers, ownTools: EXCLUDABLE_TOOL_NAMES, leftOut: leftOutOf(jobFields, { excludedNotHere }), excludeExtensionTools: jobFields.excludeExtensionTools ?? [] });
 
-  const job = { ...(jobImage === undefined ? {} : { image: jobImage }), kind: "github", repo: "acme/web", target: { type: "issue", number: 490 }, provider: "anthropic", model: "claude-sonnet-5-5", maxTurns: 20, flow: "fix", trigger: { matched: { index: 2, type: "comment" } } };
+  const job = { ...jobFields, ...(jobImage === undefined ? {} : { image: jobImage }), kind: "github", repo: "acme/web", target: { type: "issue", number: 490 }, provider: "anthropic", model: "claude-sonnet-5-5", maxTurns: 20, flow: "fix", trigger: { matched: { index: 2, type: "comment" } } };
   const deps = {
     redis: fakeRedis(), caps: { day: 10, week: null, month: null }, softHoldPct: null,
-    ...(hostImage === null ? {} : { imagePreflight: makeImagePreflight({ image: hostImage, spawnFn: fakeImageInspect(imagePi) }) }),
+    ...(hostImage === null ? {} : { imagePreflight: makeImagePreflight({ image: hostImage, spawnFn: fakeImageInspect(imagePi, imageCapabilities) }) }),
     mintToken: async () => "tok", isDefaultBranchProtected: async () => true, prepareWorkspace: async () => ({ workspaceDir: "/w", jobDir: "/j", sha: "a".repeat(40) }),
     runContainer: async () => {
       if (containerThrows) throw new InfraRetry("the container's wrapper gave up", { reason: "container-infra-exit", budgetReserved: true, loaded });

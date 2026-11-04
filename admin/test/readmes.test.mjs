@@ -277,7 +277,7 @@ test("What a job gets says what the trigger's page does: the card by its name, t
   for (const [row, name] of Object.entries(plain)) assert.ok(words.includes(name), `${row} is said as ${name}`);
 });
 
-test("nothing promises what is not built: no switch per extension, however it is put, and no field still to come", () => {
+test("nothing promises what is not built: no switch per extension, however it is put", () => {
   // The words a switch or a chip for one extension could be put in. "One switch for all the staged packages" is what is built, and matches none.
   const perExtension = /\b(?:switch|toggle|chip)(?:es)?\b[^.|]{0,40}\b(?:per|for each|for every|each|every|one)[\s-]+(?:staged\s+)?(?:package|extension|overlay)\b|\b(?:each|every|one|per)[\s-]+(?:staged\s+)?(?:package|extension)\b[^.|]{0,40}\b(?:switch|toggle|chip)(?:es)?\b/i;
   for (const said of ["with a switch per extension", "each extension has its own switch", "a per-extension toggle", "one chip per staged package"]) assert.match(said, perExtension, said);
@@ -285,7 +285,6 @@ test("nothing promises what is not built: no switch per extension, however it is
   for (const path of ["README.md", "admin/README.md", "docs/console.md"]) {
     const text = read(path).replace(/\s+/g, " ");
     assert.doesNotMatch(text, perExtension, path);
-    for (const later of ["excludeExtensions", "excludeExtensionTools", "exclude-tool-not-loaded"]) assert.ok(!text.includes(later), `${path} promises ${later}`);
   }
 });
 
