@@ -25,7 +25,7 @@
 import * as nodeFs from "node:fs";
 import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
-import { ISSUE_ACTIONS, isModelRolesField, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, excludeToolsNearMiss, isModelRolesField, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
@@ -255,19 +255,24 @@ function unknownTriggerField(params, kind) {
 
 /**
  * The trigger fields NO tool may set (issue #501, part 7): `run.maxCostUsd` (a trigger's per-job dollar cap),
- * `run.models` (the models its jobs may call), `run.fallbackModels` (their reviewed retry order) and
- * `run.mcp` (the MCP servers they connect, below). Each one decides
+ * `run.models` (the models its jobs may call), `run.fallbackModels` (their reviewed retry order),
+ * `run.mcp` (the MCP servers they connect, below), and since issue #800 `run.excludeTools` (the tools they lose) and
+ * `run.packages` (whether they load the staged packages). Each one decides
  * what a trigger's jobs can spend or reach, and removing or widening it is a widening, so it is written by hand in the
- * reviewed triggers file and never by a model's call, even behind a confirm. Neither tool's schema names them, and
+ * reviewed triggers file or by a person on the trigger's page (`trigger-environment-plans.mjs`), and never by a model's call,
+ * even behind a confirm. Neither tool's schema names them, and
  * that alone is not the guard: a schema does not refuse extra keys, and a field silently dropped would let the model
- * report a narrowing that never landed. So a call that carries one is REFUSED, loudly, before any confirm, and so is
+ * report a narrowing that never landed, which is what `planTriggerEdit` did with the last two until issue #800. So a call
+ * that carries one is REFUSED, loudly, before any confirm, and so is
  * a NEAR MISS of any of them (`MaxCostUsd`, `max_cost_usd`, `allowedModels`, a homoglyph), at the top level and
- * under a `run` or `on` object the model may have nested: the loader's own sweeps (`runModelFieldNearMiss`, and
- * `mcpFieldNearMiss` below), so the console and the loader agree on what a near miss is. An existing value is never
- * touched: the add tool builds entries without these keys and the edit tool spreads the entry's own `run` under the
- * fields it sets.
+ * under a `run` or `on` object the model may have nested: the loader's own sweeps (`runModelFieldNearMiss`,
+ * `excludeToolsNearMiss`, and `mcpFieldNearMiss` below), so the console and the loader agree on what a near miss is. An
+ * existing value is never touched: the add tool builds entries without these keys and the edit tool spreads the entry's own
+ * `run` under the fields it sets.
  */
-const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.mcp"]);
+const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.mcp", "run.excludeTools", "run.packages"]);
+/** Each tool-proof field as its refusal says it. */
+const TOOL_PROOF_WORDS = Object.freeze({ "run.maxCostUsd": "per-job dollar cap", "run.models": "allowed-model list", "run.fallbackModels": "fallback-model list", "run.mcp": "list of MCP servers", "run.excludeTools": "list of removed tools", "run.packages": "staged-package switch" });
 /**
  * `run.mcp` (REQ-MCP-OPERATOR-SERVERS) is tool-proof for the same reason: which outside systems a trigger's jobs act
  * on, with which credentials, is the operator's to write. Its near misses are the loader's own (`isMcpNearMiss`: the
@@ -276,6 +281,25 @@ const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallback
  */
 function mcpFieldNearMiss(key) {
   return key === "mcp" || isMcpNearMiss(key) ? "run.mcp" : null;
+}
+/**
+ * `run.excludeTools` and the two names the loader refuses beside it (`run.tools`, `run.noTools`), which the sweep's targets
+ * share no letters with and which a model reaching for a tool switch is as likely to send.
+ */
+function excludeToolsFieldNearMiss(key) {
+  return excludeToolsNearMiss(key) || ["tools", "notools"].includes(key.replace(/[^a-z0-9]/gi, "").toLowerCase()) ? "run.excludeTools" : null;
+}
+/**
+ * `run.packages`, in the shape of the sweeps above. Here and not in the loader: the loader has never swept this key, a
+ * `run.package` there loads clean and means nothing, and refusing it at load would turn a working file into one that stops
+ * the service over a change this one does not need. What a model's call may carry is a stricter question than what a file may.
+ */
+function packagesFieldNearMiss(key) {
+  const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (/^[\x20-\x7E]*$/.test(key)) return ["packages", "package"].includes(normalized) ? "run.packages" : null;
+  let i = 0;
+  for (const ch of "packages") if (i < normalized.length && normalized[i] === ch) i++;
+  return normalized.length >= 4 && i === normalized.length ? "run.packages" : null;
 }
 
 /** The refusal for a call that carries a tool-proof field or a near miss of one (see `TOOL_PROOF_FIELDS`), or null. */
@@ -307,11 +331,9 @@ export function wideningFieldRefusal(params, tool) {
   for (const [label, source] of objects) {
     if (source === null || typeof source !== "object" || Array.isArray(source)) continue;
     for (const key of Object.keys(source)) {
-      const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key);
+      const meant = runModelFieldNearMiss(key) ?? mcpFieldNearMiss(key) ?? excludeToolsFieldNearMiss(key) ?? packagesFieldNearMiss(key);
       if (meant === null || !TOOL_PROOF_FIELDS.has(meant)) continue;
-      const what =
-        meant === "run.fallbackModels" ? "fallback-model list" : meant === "run.models" ? "allowed-model list" : meant === "run.mcp" ? "list of MCP servers" : "per-job dollar cap";
-      return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${what} is set by hand in the triggers file, never by a tool`;
+      return `${tool} cannot set ${meant} (sent as ${label}${key}): a trigger's ${TOOL_PROOF_WORDS[meant]} is set by hand in the triggers file, never by a tool`;
     }
   }
   return null;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { EXCLUDABLE_TOOL_NAMES, parseTriggers } from "../src/triggers.mjs";
+import { EXCLUDABLE_TOOL_NAMES, excludeToolsNearMiss, parseTriggers } from "../src/triggers.mjs";
 
 /**
  * `run.excludeTools` at the loader (issue #291). The field's whole hazard class is the SILENT half:
@@ -131,4 +131,11 @@ test("run.secrets cannot bind PI_EXCLUDE_TOOLS -- the variable is reserved by na
 		() => parse([KINDS[1][1]({ secrets: { PI_EXCLUDE_TOOLS: "op://vault/x" } })]),
 		(e) => e.piDispatchConfig === true && /PI_EXCLUDE_TOOLS/.test(e.message),
 	);
+});
+
+test("the near-miss sweep, as the loader and the console's trigger tools ask it (issue #800)", () => {
+	for (const key of ["excludeTools", "exclude_tools", "exclude-tools", "EXCLUDETOOLS", "excludeTool", "excludedTools", "Exclude Tools"]) assert.equal(excludeToolsNearMiss(key), true, key);
+	// A key outside plain ASCII that keeps only the field's own letters can be drawn exactly like it: Cyrillic e, a, c here.
+	for (const key of ["\u0435xcludeTools", "ex\u0441ludeTools", "exclude\u0422ools"]) assert.equal(excludeToolsNearMiss(key), true, key);
+	for (const key of ["denyTools", "toolsOff", "tools", "exclude", "flow", "excludeToolz", "\u00e9t\u00e9", "\u0444\u0430\u0439\u043b\u043f"]) assert.equal(excludeToolsNearMiss(key), false, key);
 });

@@ -1928,6 +1928,28 @@ function validateMaxCostUsd(run, at, path) {
 }
 
 /**
+ * Whether `key` spells `run.excludeTools` or nearly does, the exact name included: the CALLER decides whether an exact name
+ * is legal where it found it, `runModelFieldNearMiss`'s rule (the loader allows it under `run`, never under `on`; the
+ * console's trigger tools refuse it in any spelling, issue #800). One sweep, so the two cannot disagree on what a near miss is.
+ *
+ * Three targets. The first catches every case and separator variant (exclude_tools, exclude-tools, EXCLUDETOOLS). The
+ * SINGULAR is the likeliest miss of all: an operator removing one tool writes `excludeTool` the way English does, and unlike
+ * `backend` there is no env-var mnemonic anchoring the right form. The past participle is how the field reads back in prose
+ * ("the excluded tools"), one grammatical step with no other plausible meaning. Deliberately NOT a synonym hunt (denyTools,
+ * toolsOff): that is the general unknown-key sweep this file's forward-compatibility posture rejects.
+ */
+export function excludeToolsNearMiss(key) {
+	const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+	const targets = ["excludetools", "excludetool", "excludedtools"];
+	const isSubsequence = (needle, hay) => {
+		let i = 0;
+		for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
+		return i === needle.length;
+	};
+	return /^[\x20-\x7E]*$/.test(key) ? targets.includes(normalized) : normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
+}
+
+/**
  * `run.excludeTools` -- pi tool names this trigger's session must NOT have (issue #291).
  *
  * The first field here that changes what the agent CAN DO inside the container rather than what the
@@ -1957,24 +1979,7 @@ function validateExcludeTools(on, run, at, path) {
 	]) {
 		for (const key of Object.keys(source ?? {})) {
 			if (exactIsLegal && key === "excludeTools") continue;
-			// Three targets. The first catches every case and separator variant (exclude_tools,
-			// exclude-tools, EXCLUDETOOLS). The SINGULAR is the likeliest miss of all: an operator
-			// removing one tool writes `excludeTool` the way English does, and unlike `backend` there is
-			// no env-var mnemonic anchoring the right form. The past participle is how the field reads
-			// back in prose ("the excluded tools"), one grammatical step with no other plausible meaning.
-			// Deliberately NOT a synonym hunt (denyTools, toolsOff): that is the general unknown-key
-			// sweep this file's forward-compatibility posture rejects.
-			const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
-			const targets = ["excludetools", "excludetool", "excludedtools"];
-			const isSubsequence = (needle, hay) => {
-				let i = 0;
-				for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
-				return i === needle.length;
-			};
-			const suspicious = /^[\x20-\x7E]*$/.test(key)
-				? targets.includes(normalized)
-				: normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
-			if (!suspicious) continue;
+			if (!excludeToolsNearMiss(key)) continue;
 			throw configError(`${at}: ${label}.${key} is not a field -- did you mean run.excludeTools? An exclusion the loader drops runs the job WITH the tool while the file reads as though it was off, so a near miss is refused rather than dropped: ${path}`);
 		}
 	}

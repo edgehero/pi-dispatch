@@ -633,6 +633,9 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["tool-proof dollar cap", plans.wideningFieldRefusal({ maxCostUsd: "1" }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.maxCostUsd (sent as maxCostUsd): a trigger's per-job dollar cap is set by hand in the triggers file, never by a tool"],
       ["tool-proof model list", plans.wideningFieldRefusal({ run: { models: ["a/b"] } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.models (sent as run.models): a trigger's allowed-model list is set by hand in the triggers file, never by a tool"],
       ["tool-proof mcp", plans.wideningFieldRefusal({ mcp: [] }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.mcp (sent as mcp): a trigger's list of MCP servers is set by hand in the triggers file, never by a tool"],
+      ["tool-proof fallback list", plans.wideningFieldRefusal({ fallbackModels: [] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.fallbackModels (sent as fallbackModels): a trigger's fallback-model list is set by hand in the triggers file, never by a tool"],
+      ["tool-proof exclusions", plans.wideningFieldRefusal({ excludeTools: ["bash"] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.excludeTools (sent as excludeTools): a trigger's list of removed tools is set by hand in the triggers file, never by a tool"],
+      ["tool-proof packages", plans.wideningFieldRefusal({ run: { packages: false } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.packages (sent as run.packages): a trigger's staged-package switch is set by hand in the triggers file, never by a tool"],
       ["memory size", thrown(() => plans.sizeFieldsOf({ memory: "12q" })), { prefix: "memory: " }],
       ["cpus size", thrown(() => plans.sizeFieldsOf({ cpus: "lots" })), { prefix: "cpus: " }],
     ];
