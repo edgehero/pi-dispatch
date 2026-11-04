@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "d4413e69262c8a008c31f2ebd3f78bc874712e47e9f30ef02b7dcbb0d044d532",
+  "words": "94a08ddc24745d22d2c2d536b6b1fc9abf5033172d49b2208c1bd0571038bd3a",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -159,7 +159,7 @@
       ],
       "shows": [
         "data-gets-flag=\"packages\"",
-        "One extension cannot be turned off on its own yet: a trigger takes all the staged packages, or none.",
+        "A trigger cannot turn off one extension: it takes all the staged packages, or none.",
         "The repository’s own"
       ]
     },

@@ -176,7 +176,7 @@ def gets_card():
   {item(True, "git-guard", "in the overlay on build3, not on mini1, unknown on mini2", locked=True)}
   {item(True, "The repository’s own", ".pi/extensions at the base commit, merge-gated. Changed in the repository, not here.", locked=True)}
 </div>
-<p class="te-note">{ic("info", "ic ic--sm")}<span>One extension cannot be turned off on its own yet: a trigger takes all the staged packages, or none. A new extension, or another version, is staged first, for every trigger. <a class="link" href="#">Open Updates</a></span></p>""",
+<p class="te-note">{ic("info", "ic ic--sm")}<span>A trigger cannot turn off one extension: it takes all the staged packages, or none. A new extension, or another version, is staged first, for every trigger. <a class="link" href="#">Open Updates</a></span></p>""",
         "Last run on mini1, gh-9575: pi-lint 1.4.2, pi-test-runner 0.9.0; staged on mini1.")
 
     mcp = sec("plug", "MCP servers", "outside systems it reaches", f"""<div class="te-items">
@@ -191,7 +191,7 @@ def gets_card():
 <p class="te-note">{ic("info", "ic ic--sm")}<span>On means not removed. powershell, grep, find and ls stay off unless an extension turns them on, so a trigger can remove them too.</span></p>
 <div><p class="te-sub">From pi-lint, as gh-9575 loaded it on mini1</p><div class="te-chips"><span class="te-chip te-chip--ro">lint_file</span><span class="te-chip te-chip--ro">lint_fix</span></div></div>
 <div><p class="te-sub">From pi-test-runner, as gh-9575 loaded it on mini1</p><div class="te-chips"><span class="te-chip te-chip--ro">run_tests</span><span class="te-chip te-chip--ro">test_report</span><span class="te-chip te-chip--ro">test_coverage</span></div></div>
-<p class="te-note">{ic("info", "ic ic--sm")}<span>A tool an extension adds cannot be removed on its own yet. A repository’s tools stay a count, so they have no chip here.</span></p>
+<p class="te-note">{ic("info", "ic ic--sm")}<span>A trigger cannot remove a tool an extension adds. A repository’s tools stay a count, so they have no chip here.</span></p>
 <p class="te-note">{ic("info", "ic ic--sm")}<span>A server’s tools are offered once this trigger names it: turn it on and confirm first.</span></p>
 <div><p class="te-sub">The job’s own</p><div class="te-chips"><span class="te-chip te-chip--ro">report_progress</span></div></div>
 <p class="te-note">{ic("info", "ic ic--sm")}<span>report_progress comes with run.progress, in the Edit form: no list removes it.</span></p>""",

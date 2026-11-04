@@ -347,7 +347,7 @@ test("extensions: each is shown and not switched, says where it is, and what is 
   const panel = panelOf(await triggerGetsPage(), "p-trigger-gets");
   assert.ok(!panel.includes('data-gets-value="pi-lint"') && !panel.includes('data-gets-list="excludeExtensions"'), "no switch per extension");
   assert.ok(textOf(panel).includes(W.oneExtension), "and it says so, with no date");
-  assert.doesNotMatch(W.oneExtension, /soon|next|release|pull request/i);
+  for (const sentence of [W.oneExtension, W.extensionTools]) assert.doesNotMatch(sentence, /\byet\b|soon|next|release|pull request/i);
   const text = textOf(panel);
   assert.ok(text.includes("pi-lint 1.4.2 staged on build3 and mini1, unknown on mini2 · 2 tools, 1 prompt template, as gh-9575 loaded it"), text.slice(0, 2000));
   assert.ok(text.includes("git-guard in the overlay on build3, not on mini1, unknown on mini2"));
