@@ -2585,13 +2585,40 @@ writes retain their existing interactive confirmation. This adds no unattended p
     a linked summary. Secrets and Connections navigation and every project row resolve to the pages below.
     Their full panels and forms live only on their own page, keeping Configuration concise.
   - (g1) **One trigger** (`/config/trigger?index=`, page `trigger`, viewer, not live). The title identifies kind,
-    phrase, flow, forge and row. Panels `p-trigger-on`, `p-trigger-runs`, `p-trigger-run`, `p-trigger-edit`,
-    `p-trigger-trust`, `p-trigger-kinds` and `p-trigger-change` explain selectors, authorization, last-24-hour count
-    and metered spend, last five runs, jobs in line, every run field and its fallback, trust, cron health, one-shot
-    state and the worker's actual trigger-skew refusals. Editable fields are flow, backend, provider, model, maxTurns,
-    progress, statusComment, steer and recover; cron leaves out statusComment and recover. Other fields are By hand.
-    **AMENDED 2026-11-04 (#800)**: the person-only write for a trigger's `CARD_FIELDS` is `trigger-environment-edit`
-    (`REQ-OPERATOR-CONSOLE-ACTIONS`). No panel on this page calls it yet, so what the Edit form does not offer stays By hand here.
+    phrase, flow, forge and row. Panels `p-trigger-on`, `p-trigger-runs`, `p-trigger-gets`, `p-trigger-gets-how`,
+    `p-trigger-run`, `p-trigger-edit`, `p-trigger-trust`, `p-trigger-kinds` and `p-trigger-change` explain selectors,
+    authorization, last-24-hour count and metered spend, last five runs, jobs in line, what its jobs get, every other
+    run field and its fallback, trust, cron health, one-shot state and the worker's actual trigger-skew refusals.
+    The Edit form's fields are backend, maxTurns, progress, statusComment, steer and recover; cron leaves out
+    statusComment and recover. The other fields that are not `CARD_FIELDS` are By hand.
+    **AMENDED 2026-11-04 (#800)**: **What its jobs get** (`p-trigger-gets`, above What it runs) is where a person changes a
+    trigger's `CARD_FIELDS`, through the person-only `trigger-environment-edit` (`REQ-OPERATOR-CONSOLE-ACTIONS`). So no key
+    has two editors: the Edit form offers `EDIT_FIELDS` alone, and What it runs lists neither. Image, secrets and
+    `skillsDir` stay where they are.
+    - **The hosts.** One pill per live host that can run the trigger. "The same" is said only when two or more hosts can
+      say and agree on what this trigger loads from: its staged packages unless it withholds them, the overlay's extensions
+      where the host allows them, the servers it names, and where doctor found its flow. A host alone says so. A difference
+      says what a host has over another and what it goes without. A host that published nothing, whose record is old or
+      cannot be read (a newer release's reads so), or that left out part of what this trigger loads from, reads unknown.
+    - **The rows.** Model, flow and skills, extensions, MCP servers, tools, and image and secrets. A row's control says what
+      the next job gets, from the triggers file, read once with the digest of that entry. Under it is what a run had, from
+      its record, in that run's own past words, by its id and host: the newest run whose record says what it loaded, and
+      when a newer one could not say, that run and why. A trigger with no run reads "No run in the available history",
+      and a history that could not be read says that instead. A run's problem goes under the row it belongs to.
+    - **The form.** One `<form>`, read by the script's one submit handler, sending the digest and only what differs from
+      what the page drew, with `null` for a blank box or an emptied list. One bar counts the changes, in the server's
+      words, with Preview the change and Discard, which is the form's own reset and closes a preview of what it discards.
+      The browser judges no money or policy. With no script the page reads the same, every control disabled and the bar
+      hidden. The digest covers the entry's prompt and secret references, so it reaches an operator's form alone.
+    - **What is shown and not switched.** Staged packages have one switch, all or nothing. Each staged package and overlay
+      extension is shown, with where it is, and a tool an extension adds is shown from the run's record: turning off one is
+      not built, and the row says so without a date. pi's own tools and a named server's are chips, on meaning not
+      removed. Removing a server's last way in is refused at pickup as `mcp-excluded`, and the preview refuses it as this
+      host's overlay routes it: the row says both, and that another host's overlay may route it another way.
+    - **Who reads what.** A viewer and a read-only console read the same rows with no control and no digest. An agent's page
+      draws no card, and its data holds none of it. A watch rule's `run` takes only some of these fields, so it gets the rows
+      with no form. A row the file does not give back gets no form either, and says so. A file a newer release wrote
+      draws no card. A page reached from a refused run says a change on this card is not linked to that refusal.
     Sandbox facts come from venue declarations: blessing, transcript, steering, recovery, shell, retention, OpenShell
     copy/bind and egress, replicas and secret profile/bundle names. The configured stall threshold is shown.
     Operators alone read escaped task/instruction text or see edit/delete/fire controls. A viewer sees presence only.
@@ -8877,3 +8904,4 @@ instead of drifting.
 | 2026-11-04 (#800, a job's own image) | **`REQ-OPERATOR-CONSOLE-SCREENS` CORRECTED**. (g7): pi and its image are a host's fact only from a run on the host's own image, so a trigger's `run.image` is no difference between hosts, and a list past its cap cannot show its kind, where 16 of 18 packages read as the same and 16 of 20 overlay names as a difference. A version or image no run shows differs from nothing, and no line says "runs pi in". (c): a turn counts as going on only where a token came back, since a provider's 401 on the first prompt holds `turns: 1`, and on a failure with no turns on its line a metered call shows the run went on. The acceptance rows, the destructive actions and the golden names: UNCHANGED, checked. |
 | 2026-11-04 (#800, part 2, the write) | **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**: NEW `trigger-environment-edit`, free and person-only, audited as `trigger-edit`, with what its preview says and judges and what its Undo does. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: `run.excludeTools` and `run.packages` join the fields no tool may set, each with its near misses, refused by name before any plan, where only the tool adapter's field check stood behind `planTriggerEdit`. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED** in (g1): the write exists, no panel calls it yet, and what the Edit form does not offer stays By hand. UNCHANGED, checked: the tool enumeration (this adds no tool); `dispatch_trigger_edit`'s nine fields; `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, whose "any model-callable surface" clause this makes louder and no wider; the destructive actions, since this one is not one (it has its Undo); the triggers file's version. **Code evidence**: admin/src/trigger-environment-plans.mjs, admin/src/console/actions.mjs -> triggerEnvironmentActions, admin/src/action-policy.mjs. |
 | 2026-11-04 (#800, part 2, what a person reads) | **`REQ-OPERATOR-CONSOLE-ACTIONS` CORRECTED** in `trigger-environment-edit`, each where the preview said something a job then contradicted. The amount a refusal offered was the first-call floor, and a cap of exactly that refused every real job on the cost guard: it now names what a short task's first call needs, and a cap between the two previews with a warning. A server the worker's pickup check would refuse previewed as "connect to": `makeMcpCheck` now runs on the proposed entry, and what it refuses is refused here in its reason, with what to do. "New deliveries use this" was false of a fleet with per-host files: when a change takes effect is said only as far as is true of this file on this host. A key that says the same to a job is no change. "The one thing" a first write changes was three: its layout, a `"version": 1` and how JSON reads a number. It is the deployment's cap that no refusal offers to raise. **`REQ-ADMIN-VIA-PI-EXTENSION` CORRECTED**: no report of a narrowing that never landed was reachable, since the tool adapter's field check threw first; what was true is that only that check stood behind `planTriggerEdit`. A test now holds its list of six and the two counts. UNCHANGED, checked: (g1)'s sentence that no panel calls the action yet; `REQ-MCP-OPERATOR-SERVERS` and the pickup check's verdicts; `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`; the tool enumeration. **Code evidence**: admin/src/trigger-environment-plans.mjs -> judgeMcp, judgeModels, callableWidening, sameToAJob; worker/src/model-catalog.mjs -> firstCallBoundMicros; worker/src/mcp-preflight.mjs -> reservedJobNames. |
+| 2026-11-04 (#800, part 2, the card) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED** in (g1): the page gains What its jobs get and How a change applies; the hosts, the rows, the one form and who reads what are stated. The sentence that said no panel calls `trigger-environment-edit` yet was true until this and is gone. The Edit form narrows to `EDIT_FIELDS` and By hand gives up what the card sets, so no key has two editors. (g2) UNCHANGED, checked: the add form keeps flow, provider and model, since a new trigger has no card, and its sentence on what stays by hand now says where the cap, the list and the servers are changed once it exists. **`REQ-OPERATOR-CONSOLE-ACTIONS` UNCHANGED, checked**: the action is as stated. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: no tool reaches it, and `dispatch_trigger_edit` keeps its scope. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the digest reaches an operator's form alone, and the CSP is the same string. |
