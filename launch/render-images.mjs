@@ -86,7 +86,7 @@ const USAGE = `usage: node launch/render-images.mjs [--png] [--console [--all | 
   --console  the operator console's images, from the committed goldens (needs Google Chrome, no server):
            the READMEs' picks into docs/images/console, or with --all every golden at 1440 and 375, light and
            dark, into docs/images/console/all, or with --only <golden> that one golden there
-  --explain  the READMEs' explaining pictures, light and dark, into docs/images/explain (needs Google Chrome, no server)
+  --explain  the READMEs' explaining pictures, light and dark, into docs/images/explain, and the banner beside them (needs Google Chrome, no server)
   --out    the directory to write to (default docs/images)
   --url    an existing, empty Valkey database to seed instead of starting valkey-server or redis-server
            from PATH; it is emptied again at the end`;
@@ -543,9 +543,11 @@ async function mainConsole() {
  * so a loop comes out the same however busy the machine is, and closes on itself. A wall clock could do neither.
  */
 async function mainExplain() {
-	const { EXPLAIN_FPS, EXPLAIN_SCALE, explainShots, explainSources } = await import("./explainers.mjs");
+	const { EXPLAIN_FPS, EXPLAIN_SCALE, bannerShot, explainShots, explainSources } = await import("./explainers.mjs");
 	const { encodeApng } = await import("./apng.mjs");
-	const shots = explainShots();
+	const shots = [...explainShots(), bannerShot()];
+	// The banner lives beside the folder, because the READMEs and pi's gallery load it from there. A review's own --out keeps it inside.
+	const homeOf = (shot) => (shot.name === "banner" && opts.out === join(REPO, "docs", "images", "explain") ? join(REPO, "docs", "images") : opts.out);
 	const pipe = await openChromePipe({ chrome, work, children, Refusal, stepMs: CDP_STEP_MS, env: { HOME: process.env.HOME } });
 	browserPipe = pipe;
 	try {
@@ -566,11 +568,12 @@ async function mainExplain() {
 			};
 			const loop = [];
 			for (let frame = 0; frame < shot.frames; frame++) loop.push(await at(frame / EXPLAIN_FPS));
-			writeFileSync(join(opts.out, shot.file), encodeApng(loop, { fps: EXPLAIN_FPS }));
-			writeFileSync(join(opts.out, shot.still), await at(shot.stillAt * shot.seconds));
+			writeFileSync(join(homeOf(shot), shot.file), encodeApng(loop, { fps: EXPLAIN_FPS }));
+			writeFileSync(join(homeOf(shot), shot.still), await at(shot.stillAt * shot.seconds));
+			if (shot.name === "banner") writeFileSync(join(homeOf(shot), "banner.svg"), shot.svg);
 			await close();
-			console.log(join(opts.out, shot.file));
-			console.log(join(opts.out, shot.still));
+			console.log(join(homeOf(shot), shot.file));
+			console.log(join(homeOf(shot), shot.still));
 		}
 	} finally {
 		await pipe.close();

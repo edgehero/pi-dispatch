@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { crc32, deflateSync, inflateSync } from "node:zlib";
 import { decodePng, encodeApng } from "../../launch/apng.mjs";
-import { EXPLAIN_FPS, EXPLAIN_MIN_TEXT, EXPLAIN_THEMES, EXPLAIN_WIDTH, EXPLAINERS, explainerFile, explainerSvg, explainerWords, explainShots, explainSources } from "../../launch/explainers.mjs";
+import { BANNER_ALT, bannerShot, bannerSvg, EXPLAIN_FPS, EXPLAIN_MIN_TEXT, EXPLAIN_THEMES, EXPLAIN_WIDTH, EXPLAINERS, explainerFile, explainerSvg, explainerWords, explainShots, explainSources } from "../../launch/explainers.mjs";
 import { TOP_HALF_BANNED } from "./helpers/plain-words.mjs";
 
 // Issue #820: the READMEs' explaining pictures. A picture is a hand-written restatement like any table (AGENTS.md), and
@@ -151,7 +151,7 @@ test("the folder holds exactly the planned files, and no PNG is older than the p
   assert.deepEqual(readdirSync(`${REPO}${DIR}`).sort(), planned, `${DIR} holds exactly the pictures: run node launch/render-images.mjs --explain`);
   // PNGs are Chrome's rendering and are not held to bytes, so this is what stands between a changed word and a picture
   // still showing the old one with every test green.
-  assert.deepEqual(JSON.parse(read(`${DIR}/sources.json`)), explainSources(shots), "a picture changed: run node launch/render-images.mjs --explain");
+  assert.deepEqual(JSON.parse(read(`${DIR}/sources.json`)), explainSources([...shots, bannerShot()]), "a picture changed: run node launch/render-images.mjs --explain");
 });
 
 test("what is committed plays: every loop is an animated PNG that repeats for ever and is light enough to keep, and every still is not animated", () => {
@@ -167,6 +167,49 @@ test("what is committed plays: every loop is an animated PNG that repeats for ev
     assert.ok(chunks.findIndex((c) => c.type === "acTL") < chunks.findIndex((c) => c.type === "IDAT"), `${shot.file}: a reader must meet the animation before the first frame`);
     assert.equal(chunksOf(readFileSync(`${REPO}${DIR}/${shot.still}`)).some((c) => c.type === "acTL"), false, `${shot.still} holds still`);
   }
+});
+
+test("the banner plays, starts on the dark floor, and each README shows it with the words it was drawn with", () => {
+  const shot = bannerShot();
+  // The first frame is what a place that does not animate a PNG shows, and the dark floor is the point.
+  assert.match(shot.svg, /@keyframes bn-lights\{0%\{opacity:0\}/);
+  assert.equal(read("docs/images/banner.svg"), bannerSvg(), "the banner changed: run node launch/render-images.mjs --explain");
+  const allowed = new Set(tokens.color.tokens.flatMap((token) => EXPLAIN_THEMES.map((theme) => token.value[theme].toLowerCase())));
+  for (const [, colour] of shot.svg.matchAll(/(?:fill|stroke)="(#[0-9a-fA-F]{3,8})"/g)) assert.ok(allowed.has(colour.toLowerCase()), `${colour} is not a design token`);
+  for (const [, name, body] of shot.svg.matchAll(/@keyframes ([a-z0-9-]+)\{(.*?\})\}/g)) assert.match(body, /100%\{/, `${name} does not reach the end of the loop`);
+  // A job's progress has its own speed, which has to divide the loop or a bar jumps where the loop starts over.
+  for (const [, seconds] of shot.svg.matchAll(/animation:bn-work ([\d.]+)s/g)) {
+    const laps = shot.seconds / Number(seconds);
+    assert.ok(Math.abs(laps - Math.round(laps)) < 0.001, `a bar of ${seconds}s does not close a loop of ${shot.seconds}s`);
+  }
+  for (const banned of TOP_HALF_BANNED) assert.doesNotMatch(BANNER_ALT, new RegExp(`\\b${banned}(?![a-z])`, "i"), banned);
+  const loop = readFileSync(`${REPO}docs/images/${shot.file}`);
+  assert.ok(loop.length < 1024 * 1024, `${shot.file} is ${Math.round(loop.length / 1024)} KB`);
+  assert.equal(chunksOf(loop).find((c) => c.type === "acTL")?.data.readUInt32BE(4), 0, "it loops for ever");
+  assert.equal(chunksOf(readFileSync(`${REPO}docs/images/${shot.still}`)).some((c) => c.type === "acTL"), false, "the still holds still");
+  const root = read("README.md");
+  const block = root.slice(root.indexOf("<picture>"), root.indexOf("</picture>"));
+  assert.ok(block.indexOf('media="(prefers-reduced-motion: reduce)" srcset="docs/images/banner-still.png') > 0, "a reader who asked for less motion gets the still");
+  assert.ok(block.indexOf("banner-still.png") < block.indexOf('<img src="docs/images/banner.png'), "the first source that matches wins");
+  assert.ok(block.includes(`alt="${BANNER_ALT}"`), "the root README's alt text");
+  assert.ok(read("admin/README.md").includes(`alt="${BANNER_ALT}"`), "the npm page's alt text");
+  // A gallery card is not a place to move: pi's own gallery gets the still.
+  assert.match(JSON.parse(read("admin/package.json")).pi.image, /\/docs\/images\/banner-still\.png\?v=/);
+});
+
+test("the Zero touch picture says what the page counts, and that the number moves nobody", () => {
+  const explainer = EXPLAINERS.find((e) => e.name === "when-to-step-back");
+  const words = wordsOf(explainer).join(" ");
+  // Per project, because that is what the page counts. "Kind of work" would be a measure it does not have.
+  assert.match(words, /per project/);
+  assert.doesNotMatch(words, /kind of work/i);
+  // Only what the page says, at its thresholds: a rate of 30 or more is High.
+  const rule = /row\.rate < (\d+) \? "Under goal" : row\.rate < (\d+) \? "Above goal" : "High"/.exec(read("admin/src/console/panels/zero-touch.mjs"));
+  assert.deepEqual([rule[1], rule[2]], ["5", "30"], "the rows' sample rates and their words follow these");
+  assert.match(words, /guide, not permission: you decide/);
+  const readme = flat(read("README.md"));
+  assert.ok(readme.includes("Nothing moves a project for you: the number tells you, and you decide."), "the caption");
+  assert.ok(readme.includes("It counts per project and repository, not per kind of work"), "the words beside it");
 });
 
 test("the encoder plays back exactly what went in, stores only what changed, and merges a frame that changed nothing", () => {

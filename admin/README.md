@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-04" alt="pi-dispatch: go from sitting next to one AI coding agent to running many in the background" width="880">
+  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-04b" alt="An animation of the pi-dispatch banner: go from sitting next to one AI coding agent to running many in the background. In the loop, near the loop, out of the loop, dark engineering. On a lit floor you stand beside one agent. As the lights go off, more agents start, and you walk away to the one page that stays lit, whose counts follow the floor. Spending limits that hold, a sealed box for every job, and you decide what ships." width="880">
 </p>
 
 # pi-dispatch: go from sitting next to one AI coding agent to running many in the background

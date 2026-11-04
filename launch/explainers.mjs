@@ -695,6 +695,137 @@ function manyAtOnce(c) {
 }
 
 /**
+ * Picture 6: when to step back. It is the one question words answered badly ("when a kind of work rarely needs you": how
+ * rarely?), so it shows what the Zero touch page gives you to judge by, over time. Each row is a project, not a kind of work,
+ * because that is what the page counts (`REQ-ZERO-TOUCH-RATE`). The words under each number are the page's own, at the page's
+ * own thresholds (`admin/src/console/panels/zero-touch.mjs`). THE NUMBER DOES NOT MOVE ANYONE. Nothing in the product moves a
+ * project when it crosses the marker, and a project under the marker is a guide and not permission (`docs/zero-touch.md`). A
+ * first draft ringed the row in green and then moved you, and a cold reader took that for the software doing it, so there is no
+ * ring now: the number crosses, nothing happens, the words say it is your choice, and only then do you step. One line goes up, because a rate can, and then nobody steps anywhere. It starts and
+ * ends on the finished state, so a reader who sees one frame sees the whole answer. One shared scale for all three rows, and
+ * no number on any point but the last.
+ */
+function whenToStepBack(c) {
+	const seconds = 10;
+	const height = 672;
+	const WEEKS = 8;
+	const ROWS = [
+		{ name: "ops", rates: [12, 10, 9, 7, 6, 5, 4, 3], stage: 1 },
+		{ name: "web", rates: [28, 27, 25, 24, 22, 20, 18, 16], stage: 1 },
+		{ name: "billing", rates: [22, 24, 23, 26, 28, 28, 30, 32], stage: 0 },
+	];
+	const STAGES = [["In the loop", "running"], ["Near the loop", "parked"], ["Out of the loop", "ok"]];
+	const statusOf = (rate) => (rate < 5 ? ["Under goal", "done", "ok", 168] : rate < 30 ? ["Above goal", "attention", "attention", 172] : ["High", "attention", "failed", 100]);
+	const rowH = 116;
+	const rowY = (i) => 192 + i * (rowH + 10);
+	const plotX = 176;
+	const plotW = 464;
+	const xOf = (week) => plotX + week * (plotW / (WEEKS - 1));
+	const yOf = (i, rate) => rowY(i) + 14 + ((40 - rate) / 40) * 88;
+	// The loop: the finished state, gone, then eight weeks drawn, then your step, then the finished state again.
+	const heldUntil = 19.5;
+	const drawFrom = 22;
+	const drawTo = 66;
+	const tOf = (week) => drawFrom + week * ((drawTo - drawFrom) / (WEEKS - 1));
+	const choiceFrom = 70;
+	const stepFrom = 78;
+	const stepTo = 84;
+	const lengths = (i) => {
+		const rates = ROWS[i].rates;
+		const parts = rates.slice(1).map((rate, w) => Math.hypot(xOf(w + 1) - xOf(w), yOf(i, rate) - yOf(i, rates[w])));
+		const total = parts.reduce((a, b) => a + b, 0);
+		let sum = 0;
+		return [0, ...parts.map((part) => (sum += part) / total)];
+	};
+	/** While each value holds: the last one also holds through the start of the loop. Equal neighbours are one window. */
+	const valueWindows = (keyOf, i) => {
+		const windows = new Map();
+		const rates = ROWS[i].rates;
+		const last = keyOf(rates.at(-1));
+		windows.set(last, [[0, heldUntil]]);
+		rates.forEach((rate, w) => {
+			const key = keyOf(rate);
+			const from = tOf(w);
+			const to = w + 1 < WEEKS ? tOf(w + 1) : 100;
+			const list = windows.get(key) ?? [];
+			if (list.length > 0 && list.at(-1)[1] === from) list.at(-1)[1] = to;
+			else list.push([from, to]);
+			windows.set(key, list);
+		});
+		return windows;
+	};
+	const digit = (windows) => holding(windows.map(([from, to]) => [from > 0 ? from + 0.05 : from, to]), 0.05);
+	const slug = (words) => String(words).toLowerCase().replace(/[^a-z0-9]+/g, "");
+	const numbers = ROWS.map((_, i) => valueWindows((rate) => `${rate}%`, i));
+	const statuses = ROWS.map((_, i) => valueWindows((rate) => statusOf(rate)[0], i));
+	const trackX = (stage) => 908 + stage * 100;
+	const css = [
+		frames("zs-fade", [[0, "opacity:1"], [18.5, "opacity:1"], [20, "opacity:0"], [21, "opacity:0"], [drawFrom, "opacity:1"], [100, "opacity:1"]]),
+		...ROWS.map((row, i) => {
+			const cum = lengths(i);
+			return frames(`zs-line-${i}`, [[0, "stroke-dashoffset:0"], [20, "stroke-dashoffset:0"], [20.1, "stroke-dashoffset:100"], [drawFrom, "stroke-dashoffset:100"], ...cum.slice(1).map((share, w) => [tOf(w + 1), `stroke-dashoffset:${(1 - share) * 100}`]), [100, "stroke-dashoffset:0"]]);
+		}),
+		...ROWS.map((row, i) => {
+			const at = (w) => `transform:translate(${xOf(w)}px,${yOf(i, row.rates[w])}px)`;
+			return frames(`zs-dot-${i}`, [[0, at(WEEKS - 1)], [20, at(WEEKS - 1)], [20.1, at(0)], [drawFrom, at(0)], ...row.rates.slice(1).map((_, w) => [tOf(w + 1), at(w + 1)]), [100, at(WEEKS - 1)]]);
+		}),
+		...numbers.flatMap((map, i) => [...map].map(([key, windows]) => frames(`zs-n-${i}-${slug(key)}`, digit(windows)))),
+		...statuses.flatMap((map, i) => [...map].map(([key, windows]) => frames(`zs-s-${i}-${slug(key)}`, digit(windows)))),
+		// Your step, on the one row that crossed the marker. It comes after the number, and is yours.
+		frames("zs-you", [[0, "transform:translateX(100px);opacity:1"], [18.5, "transform:translateX(100px);opacity:1"], [20, "transform:translateX(100px);opacity:0"], [20.1, "transform:translateX(0);opacity:0"], [21.5, "transform:translateX(0);opacity:1"], [stepFrom, "transform:translateX(0);opacity:1"], [stepTo, "transform:translateX(100px);opacity:1"], [100, "transform:translateX(100px);opacity:1"]]),
+		frames("zs-near", digit([[20.1, choiceFrom]])),
+		frames("zs-choice", digit([[choiceFrom, stepTo]])),
+		frames("zs-out", digit([[0, 20], [stepTo, 100]])),
+		`.zs-fade{animation:${steady("zs-fade", seconds)}}.zs-you{animation:${eased("zs-you", seconds)}}.zs-near{animation:${steady("zs-near", seconds)}}.zs-out{animation:${steady("zs-out", seconds)}}.zs-choice{animation:${steady("zs-choice", seconds)}}`,
+		ROWS.map((_, i) => `.zs-line-${i}{animation:${steady(`zs-line-${i}`, seconds)}}.zs-dot-${i}{animation:${steady(`zs-dot-${i}`, seconds)}}`).join(""),
+		numbers.flatMap((map, i) => [...map.keys()].map((key) => `.zs-n-${i}-${slug(key)}{animation:${steady(`zs-n-${i}-${slug(key)}`, seconds)}}`)).join(""),
+		statuses.flatMap((map, i) => [...map.keys()].map((key) => `.zs-s-${i}-${slug(key)}{animation:${steady(`zs-s-${i}-${slug(key)}`, seconds)}}`)).join(""),
+	].join("");
+	const stops = (y) => [
+		`<path d="M${trackX(0)} ${y}H${trackX(2)}" stroke="${c("surface-3")}" stroke-width="6" stroke-linecap="round"/>`,
+		...STAGES.map(([, tone], stage) => `<circle cx="${trackX(stage)}" cy="${y}" r="9" fill="${c(tone)}"/>`),
+	].join("");
+	const you = (x, y) => `<circle cx="${x}" cy="${y}" r="28" fill="${c("surface")}"/>${mark(x, y, 25, "you", c("primary"), c("on-primary"), 22)}`;
+	const stageWord = (y, words) => text(trackX(1), y, words, { size: 22, weight: 650, fill: c("ink"), anchor: "middle" });
+	const body = [
+		text(plotX, 174, "Runs that needed a person, last 8 weeks", { size: 22, weight: 650, fill: c("ink-muted") }),
+		text(668, 174, "Now", { size: 22, weight: 650, fill: c("ink-muted") }),
+		text(trackX(0) - 24, 174, "You choose how close", { size: 22, weight: 650, fill: c("ink-muted") }),
+		...ROWS.flatMap((row, i) => {
+			const top = rowY(i);
+			const points = row.rates.map((rate, w) => `${w === 0 ? "M" : "L"}${xOf(w)} ${yOf(i, rate)}`).join("");
+			return [
+				cardAt(44, top, 1112, rowH, c, "surface", 22),
+				text(68, top + 66, row.name, { size: 26, weight: 650, fill: c("ink") }),
+				`<path d="M${plotX} ${yOf(i, 5)}H${plotX + plotW}" stroke="${c("ok")}" stroke-width="2" stroke-dasharray="6 7"/>`,
+				`<g class="zs-fade"><path class="zs-line-${i}" d="${points}" pathLength="100" fill="none" stroke="${c("ink")}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="100 100"/></g>`,
+				`<g class="zs-fade"><g class="zs-dot-${i}"><circle r="7" fill="${c("ink")}" stroke="${c("surface")}" stroke-width="2"/></g></g>`,
+				...[...numbers[i].keys()].map((key) => `<g class="zs-n-${i}-${slug(key)}">${text(668, top + 46, key, { size: 36, weight: 800, fill: c("ink"), track: "-0.02em" })}</g>`),
+				...[...statuses[i].keys()].map((key) => {
+					const [words, glyph, tone, width] = statusOf(row.rates.find((rate) => statusOf(rate)[0] === key));
+					return `<g class="zs-s-${i}-${slug(key)}">${badge(664, top + 62, width, words, glyph, c, tone)}</g>`;
+				}),
+				stops(top + 42),
+			];
+		}),
+		// You, and the word for where you are.
+		`<g class="zs-you">${you(trackX(1), rowY(0) + 42)}</g>`,
+		`<g class="zs-near">${stageWord(rowY(0) + 96, STAGES[1][0])}</g>`,
+		`<g class="zs-out">${stageWord(rowY(0) + 96, STAGES[2][0])}</g>`,
+		`<g class="zs-choice">${box(trackX(1) - 72, rowY(0) + 74, 144, 32, 16, `fill="${c("primary")}"`)}${text(trackX(1), rowY(0) + 97, "Your choice", { size: 22, weight: 700, fill: c("on-primary"), anchor: "middle" })}</g>`,
+		you(trackX(1), rowY(1) + 42),
+		stageWord(rowY(1) + 96, STAGES[1][0]),
+		you(trackX(0), rowY(2) + 42),
+		stageWord(rowY(2) + 96, STAGES[0][0]),
+		// The sentence the picture exists to say.
+		cardAt(44, rowY(2) + rowH + 12, 1112, 66, c, "surface", 22),
+		icon("flag", 66, rowY(2) + rowH + 32, 26, c("ink-muted")),
+		text(104, rowY(2) + rowH + 53, "Aim for zero. The dashed line at 5% is a guide, not permission: you decide.", { size: 24, weight: 600, fill: c("ink") }),
+	].join("");
+	return { height, seconds, stillAt: 0.1, css, body: page(height, c, "Step back when the numbers say you can", "Zero touch shows how often runs needed a person, per project. Sample data.", body) };
+}
+
+/**
  * Every picture, with its alt text (which the READMEs use unchanged) and its claims: `says` is words the picture holds,
  * and `needle` the sentence in `source` that makes them true. A picture is a restatement like any table, so
  * `admin/test/explainers.test.mjs` holds both ends: reword either and the test sends you to look at the other.
@@ -767,6 +898,20 @@ export const EXPLAINERS = Object.freeze([
 			{ says: "Each agent in its own box", source: "docs/replicas.md", needle: "Neither replica knows what the other did" },
 		],
 	}),
+	Object.freeze({
+		name: "when-to-step-back",
+		alt: "An animation of three projects under the headline: step back when the numbers say you can. Zero touch shows how often runs needed a person, per project, over the last 8 weeks, with a dashed line at 5 percent. This is sample data. The rate for ops falls to 3 percent, which reads under goal. Nothing happens by itself: after a pause the words say your choice, and only then do you step from near the loop to out of the loop. The rate for web falls to 16 percent, above goal, and you stay near the loop. The rate for billing rises to 32 percent, which reads high, and you stay in the loop. Aim for zero. The dashed line at 5 percent is a guide, not permission: you decide.",
+		build: whenToStepBack,
+		claims: [
+			{ says: "how often runs needed a person, per project", source: "README.md", needle: "how often runs needed a person, per project" },
+			{ says: "Aim for zero", source: "docs/zero-touch.md", needle: "The goal is zero touches" },
+			{ says: "a guide, not permission", source: "docs/zero-touch.md", needle: "the 5% marker is a guide rather than permission to act" },
+			{ says: "Under goal", source: "admin/src/console/panels/zero-touch.mjs", needle: 'row.rate < 5 ? "Under goal" : row.rate < 30 ? "Above goal" : "High"' },
+			{ says: "Above goal", source: "admin/src/console/panels/zero-touch.mjs", needle: 'row.rate < 5 ? "Under goal" : row.rate < 30 ? "Above goal" : "High"' },
+			{ says: "High", source: "admin/src/console/panels/zero-touch.mjs", needle: 'row.rate < 5 ? "Under goal" : row.rate < 30 ? "Above goal" : "High"' },
+			{ says: "last 8 weeks", source: "specs/requirements.md", needle: "the weekly trend" },
+		],
+	}),
 ]);
 
 /** The words a picture shows, one string per line of text, as a reader sees them. */
@@ -796,6 +941,153 @@ export function explainShots(explainers = EXPLAINERS) {
  * `sources.json`: each picture's file against the hash of the SVG it was shot from. PNGs are Chrome's rendering and are not
  * held to bytes, so without this a changed word would leave a picture saying the old one with every test green.
  */
-export function explainSources(shots = explainShots()) {
+export function explainSources(shots = [...explainShots(), bannerShot()]) {
 	return Object.fromEntries(shots.map((shot) => [shot.file, createHash("sha256").update(shot.svg).digest("hex")]));
+}
+
+/**
+ * The banner: from one agent on a lit floor to many in the dark, while you walk from the floor to the one page that stays lit.
+ * It carries "dark engineering", which is a metaphor the words can only explain, in the first seconds a reader spends here.
+ * It is not an explainer: it holds no claim of its own past the README's first lines, it has one look in both themes (dark
+ * ground, light console, as it always had), and no README's rule for pictures of how things work applies to its small console.
+ *
+ * IT STARTS DARK. The first frame is what a place that does not animate a PNG shows, and the dark floor is the point, so the
+ * loop begins and ends there and only passes through the lit floor. The floor's lights go off in steps rather than a long fade,
+ * so most frames change only what moves and the loop stays light. Who stands where follows `how-close-you-stay`: beside the
+ * agent, then near it, then gone from the floor. The word for the last stage stays in the same row of pills as the three it
+ * follows, because it is where they lead and not a fourth setting.
+ */
+export const BANNER_ALT = "An animation of the pi-dispatch banner: go from sitting next to one AI coding agent to running many in the background. In the loop, near the loop, out of the loop, dark engineering. On a lit floor you stand beside one agent. As the lights go off, more agents start, and you walk away to the one page that stays lit, whose counts follow the floor. Spending limits that hold, a sealed box for every job, and you decide what ships.";
+export const BANNER_WIDTH = 1200;
+export const BANNER_HEIGHT = 420;
+
+function bannerParts() {
+	const dark = paletteOf("dark");
+	const light = paletteOf("light");
+	const seconds = 14;
+	// The stages, in percent of the loop. The dark floor holds across the end and the start.
+	const STAGE = { in: [18, 36], near: [36, 54], out: [54, 72], dark: [72, 100] };
+	const stations = 16;
+	const stationX = (i) => 49 + i * 70;
+	const floorY = 312;
+	const floorH = 86;
+	const stationY = floorY + 17;
+	const startOf = (i) => (i === 0 ? null : i < 3 ? STAGE.near[0] + i * 1.2 : i < 8 ? STAGE.out[0] + (i - 3) * 1.2 : STAGE.dark[0] + (i - 8) * 1.2);
+	const tones = (i) => (i === 1 ? "parked" : i === 6 || i === 13 ? "ok" : "running");
+	// Station 1 asks from the near stage on, so it needs you and is not running. Everything else that has started runs.
+	const COUNTS = {
+		running: { 1: [[14, STAGE.in[1]]], 2: [STAGE.near], 7: [STAGE.out], 15: [[0, 14], STAGE.dark] },
+		needs: { 0: [[14, STAGE.in[1]]], 1: [[0, 14], [STAGE.near[0], 100]] },
+	};
+	const count = (windows) => holding(windows.map(([from, to]) => [from > 0 ? from + 0.05 : from, to]), 0.05);
+	const pill = (x, width, words, fill, ink, klass) => [
+		box(x, 222, width, 34, 17, `fill="${fill}"`),
+		box(x - 3, 219, width + 6, 40, 20, `class="${klass}" fill="none" stroke="${ink}" stroke-width="2"`),
+		text(x + width / 2, 244, words, { size: 16, weight: 650, fill: ink, anchor: "middle" }),
+	].join("");
+	const arrow = (x) => `<path d="M${x} 239h14m-5-5 5 5-5 5" fill="none" stroke="${dark("ink-faint")}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+	// Beside an agent, on open floor. There are no empty boxes: a first draft had them, and "you" standing in one read as a job in line.
+	const youFloor = (i) => [stationX(i + 1) + 26, floorY + floorH / 2];
+	const at = ([x, y]) => `transform:translate(${x}px,${y}px)`;
+	const css = [
+		// The lights, in steps: on, then lower, lower, off. They come back all at once, as the loop starts over.
+		frames("bn-lights", [[0, "opacity:0"], [14, "opacity:0"], [16, "opacity:1"], [STAGE.near[0], "opacity:1"], [STAGE.near[0] + 2, "opacity:.5"], [STAGE.out[0], "opacity:.5"], [STAGE.out[0] + 2, "opacity:.14"], [STAGE.dark[0], "opacity:.14"], [STAGE.dark[0] + 2, "opacity:0"], [100, "opacity:0"]]),
+		frames("bn-pill-in", holding([STAGE.in])),
+		frames("bn-pill-near", holding([STAGE.near])),
+		frames("bn-pill-out", holding([STAGE.out])),
+		frames("bn-pill-dark", holding([[0, 14], STAGE.dark])),
+		// You: at the page in the dark; back beside the first agent as the lights come on; then away.
+		frames("bn-you", [[0, `${at([772, 150])};opacity:1`], [13, `${at([772, 150])};opacity:1`], [14.5, `${at([772, 150])};opacity:0`], [14.6, `${at(youFloor(0))};opacity:0`], [17, `${at(youFloor(0))};opacity:1`], [STAGE.near[0], `${at(youFloor(0))};opacity:1`], [STAGE.near[0] + 4, `${at(youFloor(2))};opacity:1`], [STAGE.out[0], `${at(youFloor(2))};opacity:1`], [STAGE.out[0] + 6, `${at([772, floorY + floorH / 2])};opacity:1`], [STAGE.out[0] + 12, `${at([772, 150])};opacity:1`], [100, `${at([772, 150])};opacity:1`]]),
+		...Array.from({ length: stations }, (_, i) => (i === 0 ? "" : frames(`bn-s-${i}`, holding([[0, 14], [startOf(i), 100]])))),
+		frames("bn-work", [[0, "transform:scaleX(0)"], [100, "transform:scaleX(1)"]]),
+		// The small console counts what the floor holds, so it cannot say 4 running over 16 boxes.
+		...Object.entries(COUNTS.running).map(([n, windows]) => frames(`bn-run-${n}`, count(windows))),
+		...Object.entries(COUNTS.needs).map(([n, windows]) => frames(`bn-need-${n}`, count(windows))),
+		`.bn-lights{animation:${steady("bn-lights", seconds)}}.bn-you{animation:${eased("bn-you", seconds)}}.bn-work{transform-box:fill-box;transform-origin:0 50%}`,
+		Object.keys(COUNTS.running).map((n) => `.bn-run-${n}{animation:${steady(`bn-run-${n}`, seconds)}}`).join(""),
+		Object.keys(COUNTS.needs).map((n) => `.bn-need-${n}{animation:${steady(`bn-need-${n}`, seconds)}}`).join(""),
+		["in", "near", "out", "dark"].map((name) => `.bn-pill-${name}{animation:${steady(`bn-pill-${name}`, seconds)}}`).join(""),
+		Array.from({ length: stations }, (_, i) => (i === 0 ? "" : `.bn-s-${i}{animation:${steady(`bn-s-${i}`, seconds)}}`)).join(""),
+	].join("");
+	// A job's progress, at a speed that closes the loop: 14 seconds divides into each of these.
+	const speeds = [7, 14 / 3, 3.5, 14 / 5, 7 / 3];
+	const station = (i) => {
+		const x = stationX(i);
+		const y = stationY;
+		const tone = tones(i);
+		const glyph = tone === "parked"
+			? `<circle cx="${x + 26}" cy="${y + 22}" r="15" fill="${dark("parked")}"/>${icon("parked", x + 16, y + 12, 20, dark("on-parked"))}`
+			: `<circle cx="${x + 26}" cy="${y + 22}" r="15" fill="${dark(tone)}"/>${text(x + 26, y + 28, "pi", { size: 16, weight: 800, fill: dark(`on-${tone}`), anchor: "middle" })}`;
+		// A job that asked is waiting, and no bar moves while it waits.
+		const work = tone === "parked" ? "" : `<rect class="bn-work" x="${x + 6}" y="${y + 44}" width="40" height="4" rx="2" fill="${dark(tone)}" style="animation:bn-work ${speeds[i % speeds.length].toFixed(4)}s linear infinite"/>`;
+		return [
+			`<g${i === 0 ? "" : ` class="bn-s-${i}"`}>${box(x, y, 52, 52, 12, `fill="${dark("surface-2")}" stroke="${dark(tone)}" stroke-width="2"`)}${glyph}${work}</g>`,
+		].join("");
+	};
+	const consoleX = 812;
+	const consoleY = 28;
+	const scale = 0.84;
+	const miniPill = (x, width, words, active = false) => `${box(x, 44, width, 20, 10, `fill="${light(active ? "primary" : "surface")}"`)}<text x="${x + width / 2}" y="58" text-anchor="middle" fill="${light(active ? "on-primary" : "ink-muted")}">${esc(words)}</text>`;
+	const miniTile = (x, title, big, bigFill, small, smallFill = light("ink-muted"), bigSize = 24) => `${box(x, 120, 94, 72, 12, `fill="${light("surface")}"`)}<text x="${x + 10}" y="138" font-size="10" font-weight="700" fill="${light("ink")}">${esc(title)}</text><text x="${x + 10}" y="166" font-size="${bigSize}" font-weight="800" fill="${bigFill}">${esc(big)}</text><text x="${x + 10}" y="182" font-size="10" fill="${smallFill}">${esc(small)}</text>`;
+	const miniConsole = [
+		`<g transform="translate(${consoleX} ${consoleY}) scale(${scale})">`,
+		box(0, 0, 424, 276, 16, `fill="${light("canvas")}"`),
+		box(14, 14, 86, 22, 11, `fill="${light("surface")}"`),
+		`<circle cx="26" cy="25" r="7" fill="${light("ink")}"/><text x="38" y="30" font-size="11" font-weight="700" fill="${light("ink")}">pi-dispatch</text>`,
+		box(350, 14, 60, 22, 11, `fill="${light("surface")}"`),
+		`<circle cx="363" cy="25" r="4" fill="${light("ok")}"/><text x="372" y="29" font-size="11" font-weight="650" fill="${light("ok-ink")}">Live</text>`,
+		`<g font-size="10" font-weight="650">${miniPill(14, 62, "Overview", true)}${miniPill(80, 42, "Runs")}${miniPill(126, 50, "Parked")}${miniPill(180, 44, "Fleet")}${miniPill(228, 46, "Spend")}</g>`,
+		`<text x="14" y="94" font-size="22" font-weight="800" letter-spacing="-.5" fill="${light("ink")}">Overview</text>`,
+		miniTile(14, "Needs you", "", light("parked"), "question"),
+		...Object.keys(COUNTS.needs).map((n) => `<g class="bn-need-${n}"><text x="24" y="166" font-size="24" font-weight="800" fill="${light("parked")}">${n}</text></g>`),
+		miniTile(114, "In line", "5", light("ink"), "waiting"),
+		miniTile(214, "Running", "", light("running"), "in 16 slots"),
+		...Object.keys(COUNTS.running).map((n) => `<g class="bn-run-${n}"><text x="224" y="166" font-size="24" font-weight="800" fill="${light("running")}">${n}</text></g>`),
+		miniTile(314, "Spend today", "$15.03", light("ink"), "60% of limit", light("ok-ink"), 20),
+		box(14, 198, 396, 66, 12, `fill="${light("surface")}"`),
+		box(58, 210, 84, 14, 7, `fill="${light("parked")}"`),
+		box(148, 210, 96, 14, 7, `fill="${light("running")}"`),
+		box(58, 230, 156, 14, 7, `fill="${light("surface-3")}"`),
+		box(220, 230, 60, 14, 7, `fill="${light("running")}"`),
+		box(58, 250, 110, 8, 4, `fill="${light("surface-3")}"`),
+		`<line x1="284" y1="204" x2="284" y2="260" stroke="${light("running")}" stroke-width="2"/>`,
+		box(292, 210, 108, 14, 7, `fill="none" stroke="${light("line-strong")}" stroke-width="1.5" stroke-dasharray="4 3"`),
+		box(292, 230, 72, 14, 7, `fill="none" stroke="${light("line-strong")}" stroke-width="1.5" stroke-dasharray="4 3"`),
+		`<text x="22" y="221" font-size="9" font-weight="700" fill="${light("ink-muted")}">api</text><text x="22" y="241" font-size="9" font-weight="700" fill="${light("ink-muted")}">web</text>`,
+		`</g>`,
+	].join("");
+	const body = [
+		box(1, 1, BANNER_WIDTH - 2, BANNER_HEIGHT - 2, 18, `fill="${dark("canvas")}" stroke="${dark("line-strong")}" stroke-width="2"`),
+		text(64, 104, "pi-dispatch", { size: 62, weight: 800, fill: dark("ink"), track: "-1.5" }),
+		text(66, 152, "Go from sitting next to one AI coding agent", { size: 24, fill: dark("ink-muted") }),
+		text(66, 184, "to running many in the background.", { size: 24, fill: dark("ink-muted") }),
+		pill(66, 118, "in the loop", dark("running-tint"), dark("running-ink"), "bn-pill-in"),
+		arrow(194),
+		pill(218, 134, "near the loop", dark("parked-tint"), dark("parked-ink"), "bn-pill-near"),
+		arrow(362),
+		pill(386, 142, "out of the loop", dark("ok-tint"), dark("ok-ink"), "bn-pill-out"),
+		arrow(538),
+		pill(562, 152, "dark engineering", dark("surface-3"), dark("ink"), "bn-pill-dark"),
+		text(66, 288, "Spending limits that hold, a sealed box for every job, and you decide what ships.", { size: 18, fill: dark("ink-muted") }),
+		miniConsole,
+		// The floor: dark underneath, and its lights over it.
+		box(24, floorY, BANNER_WIDTH - 48, floorH, 14, `fill="${dark("surface")}"`),
+		box(24, floorY, BANNER_WIDTH - 48, floorH, 14, `class="bn-lights" fill="${light("canvas")}"`),
+		...Array.from({ length: stations }, (_, i) => station(i)),
+		// A pale ring, because this mark crosses a lit floor and a dark one.
+		`<g class="bn-you"><circle r="20" fill="${dark("ink")}"/>${mark(0, 0, 18, "you", light("primary"), light("on-primary"), 16)}</g>`,
+	].join("");
+	return { css, body, seconds };
+}
+
+/** The banner as a whole SVG document, with its motion in its own style. It is written to `docs/images/banner.svg` by `--explain`. */
+export function bannerSvg() {
+	const { css, body } = bannerParts();
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="${BANNER_WIDTH}" height="${BANNER_HEIGHT}" viewBox="0 0 ${BANNER_WIDTH} ${BANNER_HEIGHT}" role="img" aria-label="${esc(BANNER_ALT)}" font-family="${esc(SANS)}"><style>${css}</style>${body}</svg>\n`;
+}
+
+/** The banner's shot for `render-images.mjs --explain`. It lives beside the folder, not in it: the READMEs and pi's gallery load it from there. */
+export function bannerShot() {
+	const { seconds } = bannerParts();
+	return { name: "banner", theme: "dark", file: "banner.png", still: "banner-still.png", svg: bannerSvg(), width: BANNER_WIDTH, height: BANNER_HEIGHT, seconds, stillAt: 0.05, frames: Math.round(seconds * EXPLAIN_FPS) };
 }

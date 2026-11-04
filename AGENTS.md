@@ -100,7 +100,7 @@ Two consequences worth internalising before you design anything:
   (`DES-OPERATOR-CONSOLE`, "The visual system").
 - **Render to look, not only to pin.** A golden holds bytes, not whether a page looks right. `node launch/render-images.mjs
   --console --only <golden>` draws any state, and `--console` re-renders the READMEs' images, which no test can tell are
-  stale, so re-render them in the pull request that changes the look. `--explain` draws the READMEs' explaining pictures from `launch/explainers.mjs` (animated PNGs in both themes, each with a still for reduced motion): edit the picture there, never a PNG, and look at it, since a test cannot say whether a loop reads.
+  stale, so re-render them in the pull request that changes the look. `--explain` draws the READMEs' explaining pictures and the banner from `launch/explainers.mjs` (animated PNGs, in both themes for a picture, each with a still for reduced motion): edit the picture there, never a PNG, and look at it, since a test cannot say whether a loop reads.
 - **A card's design status is a claim about this repository.** When a pull request builds a planned screen, move its
   card to *Built* in `STATUS` (`design/tools/fix_markers.py`) in the same pull request.
 

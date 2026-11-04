@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/images/banner.png?v=2026-11-04" alt="pi-dispatch: go from sitting next to one AI coding agent to running many in the background" width="880">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/images/banner-still.png?v=2026-11-04b">
+    <img src="docs/images/banner.png?v=2026-11-04b" alt="An animation of the pi-dispatch banner: go from sitting next to one AI coding agent to running many in the background. In the loop, near the loop, out of the loop, dark engineering. On a lit floor you stand beside one agent. As the lights go off, more agents start, and you walk away to the one page that stays lit, whose counts follow the floor. Spending limits that hold, a sealed box for every job, and you decide what ships." width="880">
+  </picture>
 </p>
 
 # pi-dispatch
@@ -175,8 +178,18 @@ results when it suits you. **Zero touch** tells you how far you have
 come: how often runs needed a person, per project, over the last 7, 30 or 90 days.
 ([Triggers](docs/triggers.md), [watching alerts](docs/watch.md), [Zero touch](docs/zero-touch.md))
 
-**To get here:** read **Zero touch** under Runs. When a kind of work rarely needs you, add a job that reviews each proposed change,
-let it run, and read what comes back. You are out of the loop for that work, and still in charge of what ships.
+**To get here:** read **Zero touch** under Runs. It counts per project and repository, not per kind of work, with a goal of zero
+and a marker at 5%. When a project rarely needs you, add a job that reviews each proposed change, let it run, and read what comes
+back. You are out of the loop for that work, and still in charge of what ships.
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/images/explain/when-to-step-back-dark-still.png?v=2026-11-04b">
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/images/explain/when-to-step-back-still.png?v=2026-11-04b">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/explain/when-to-step-back-dark.png?v=2026-11-04b">
+  <img src="docs/images/explain/when-to-step-back.png?v=2026-11-04b" alt="An animation of three projects under the headline: step back when the numbers say you can. Zero touch shows how often runs needed a person, per project, over the last 8 weeks, with a dashed line at 5 percent. This is sample data. The rate for ops falls to 3 percent, which reads under goal. Nothing happens by itself: after a pause the words say your choice, and only then do you step from near the loop to out of the loop. The rate for web falls to 16 percent, above goal, and you stay near the loop. The rate for billing rises to 32 percent, which reads high, and you stay in the loop. Aim for zero. The dashed line at 5 percent is a guide, not permission: you decide.">
+</picture>
+
+<sub>Sample data. Nothing moves a project for you: the number tells you, and you decide.</sub>
 
 ![The Zero touch page: how often runs needed a person, what the cause was, and which projects run without help](docs/images/console/console-zero-touch.png?v=2026-11-03)
 
