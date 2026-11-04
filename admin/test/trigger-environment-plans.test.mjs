@@ -15,7 +15,8 @@ import { readEnvAssignments } from "@edgehero/pi-dispatch/env-file";
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { resolveModelRoles } from "@edgehero/pi-dispatch/model-roles";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
-import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
+import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, checkModelsKnown, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
+import { modelOnList } from "@edgehero/pi-dispatch/model-ref";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { createCostGuard } from "../../image/runner/src/usage-meter.mjs";
 import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, parseTriggers } from "@edgehero/pi-dispatch/triggers";
@@ -750,19 +751,17 @@ test("the bound is judged only when the edit sends a model field or the cap", as
   assert.match((await refusal(bad, { provider: "anthropic" })).refusal, /needs at least/, "the provider alone is a model field");
 });
 
-test("a model a job does not start on warns by name above the cap: a call to it stops the job, and one failover moved there paid for a container", async () => {
-  const stops = "A call to this one stops the job as cost-cap, and a job moved to it starts a paid container first.";
+test("a model a job does not start on warns by name above the cap, and says only that a job cannot use it under this cap", async () => {
+  const opusUnder = "anthropic/claude-opus-5-5 needs at least $2.654295 for a short task's first call, so a job cannot use it under this cap.";
   const listed = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, settings: { maxCostUsd: "2" } });
-  const words = await warned(listed, { models: [HAIKU, OPUS] });
-  assert.match(words, /^anthropic\/claude-opus-5-5 needs at least \$2\.654295 for a short task's first call, above the deployment's \$2\.00 job cap, so the runner would refuse every call to it before it is sent\./);
-  assert.ok(words.endsWith(stops), words);
+  assert.equal(await warned(listed, { models: [HAIKU, OPUS] }), opusUnder);
   const listedSummary = (await listed.service.preview(ask(listed, { models: [HAIKU, OPUS] }), operator)).summary.join(" ");
   assert.ok(!listedSummary.includes("clears this"), "said once: a model that cannot clear the cap is not also one that barely does");
   const fallback = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, OPUS] }, settings: { maxCostUsd: "5" } });
-  assert.ok((await warned(fallback, { fallbackModels: [OPUS], maxCostUsd: "2" })).includes(stops));
+  assert.equal(await warned(fallback, { fallbackModels: [OPUS], maxCostUsd: "2" }), opusUnder);
   // A fallback this trigger names off the deployment's list counts as named, though no list of its own holds it.
   const envFallback = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${OPUS}` } });
-  assert.ok((await warned(envFallback, { fallbackModels: [OPUS], maxCostUsd: "2" })).includes(stops));
+  assert.equal(await warned(envFallback, { fallbackModels: [OPUS], maxCostUsd: "2" }), opusUnder);
   // What the runtime does with such a cap, on the real guard: the job's main model gets its first call, and the listed one is refused it.
   const cap = parseUsdMicros("2", "cap");
   assert.equal(admits(cap, builtinModel("anthropic", "claude-haiku-4-5"), FIRST_CALL_SHORT_TASK_BYTES), true);
@@ -783,15 +782,13 @@ test("a model a job does not start on warns by name above the cap: a call to it 
 test("a listed model no cap can bound warns too, where one a job starts on refuses", async () => {
   const overlay = { providers: { ollama: { baseUrl: "http://127.0.0.1:11434/v1", api: "openai-completions", apiKey: "x", models: [{ id: "local", cost: { input: 100000, output: 100000, cacheRead: 0, cacheWrite: 0 }, maxTokens: 100, contextWindow: 1000 }] } } };
   const run = { provider: "anthropic", model: "claude-haiku-4-5" };
-  const unbound = await warned(fixture({ overlay, run, settings: { maxCostUsd: "5" } }), { models: [HAIKU, "ollama/local"] });
-  assert.match(unbound, /^ollama\/local's output cap travels as max_completion_tokens/);
-  assert.ok(unbound.endsWith("A call to this one stops the job as cost-cap, and a job moved to it starts a paid container first."), unbound);
-  assert.equal(unbound.split("stops the job as cost-cap").length, 2, "said once");
-  const radiusFixture = fixture({ run, settings: { maxCostUsd: "5" } });
-  const radius = await warned(radiusFixture, { models: [HAIKU, "radius/not-in-its-catalog"] });
-  assert.match(radius, /radius\/not-in-its-catalog: Radius \(pi-messages\) has no verified local cost bound.* A call to this one stops the job as cost-cap, and a job moved to it starts a paid container first\./);
-  const said = (await radiusFixture.service.preview(ask(radiusFixture, { models: [HAIKU, "radius/not-in-its-catalog"] }), operator)).summary.join(" ");
-  assert.ok(!said.includes("could not be bounded"), "and not also as one this page could not judge");
+  assert.equal(await warned(fixture({ overlay, run, settings: { maxCostUsd: "5" } }), { models: [HAIKU, "ollama/local"] }), "ollama/local's output cap travels as max_completion_tokens to a server that may ignore it, so a job cannot use it under this cap.");
+  const radius = await warned(fixture({ run, settings: { maxCostUsd: "5" } }), { models: [HAIKU, "radius/balanced"] });
+  assert.match(radius, /^radius\/balanced: Radius \(pi-messages\) has no verified local cost bound.*, so a job cannot use it under this cap\.$/);
+  // One the catalog does not hold, on a cap edit that asks nothing of the catalog: a provider's own rule, and not one this page could not judge.
+  const radiusFixture = fixture({ run: { ...run, models: [HAIKU, "radius/not-in-its-catalog"] }, settings: { maxCostUsd: "5" } });
+  assert.match(await warned(radiusFixture, { maxCostUsd: "4" }), /^radius\/not-in-its-catalog: Radius \(pi-messages\) has no verified local cost bound/);
+  assert.ok(!(await radiusFixture.service.preview(ask(radiusFixture, { maxCostUsd: "4" }), operator)).summary.join(" ").includes("could not be bounded"));
 });
 
 test("an overlay models.json that cannot be read stays unread for every model the edit names: none is priced or judged without it", async () => {
@@ -807,9 +804,10 @@ test("an overlay models.json that cannot be read stays unread for every model th
   const out = await f.service.preview(ask(f, { maxCostUsd: "1", models: [HAIKU, SONNET, OPUS] }), operator);
   assert.ok(out.plan, JSON.stringify(out));
   for (const name of [SONNET, OPUS]) assert.ok(out.plan.warnings.includes(`The overlay's models.json could not be read just now, so whether this deployment knows ${name} could not be judged here; a pickup asks again.`), out.plan.warnings.join(" | "));
-  // Under a $1 cap the builtin table would say opus cannot clear it: with the file unread no amount is claimed, in either direction.
-  assert.ok(out.summary.includes(`The first call on ${HAIKU}, ${SONNET} and ${OPUS} could not be bounded here, so the runner judges it when a job runs.`), out.summary.join("\n"));
+  // Under a $1 cap the builtin table would say opus cannot clear it: with the file unread no amount is claimed, in either direction,
+  // and the file is what is said, not a bound the runner is left to judge.
   assert.ok(!out.summary.join(" ").includes("$2.654295"), out.summary.join("\n"));
+  assert.ok(!out.summary.join(" ").includes("could not be bounded"), out.summary.join("\n"));
   // One failed read, and the next would have answered: the judgement holds to what it read, for the second model as for the first.
   let failures = 1;
   const once = { ...nodeFs, readFileSync: (path, ...rest) => {
@@ -952,66 +950,161 @@ test("a deployment's file it cannot vouch for leaves the cap unjudged, says so, 
   assert.match((await refusal(withEnvFile({ provider: "anthropic", model: "claude-haiku-4-5" }, "PI_MAX_COST_USD=lots\n"), { maxCostUsd: "1" })).refusal, /The deployment's job cap could not be read/);
 });
 
-// ---- what the worker's own selection does with a trigger's fallbacks --------------------------------------------------------
+// ---- what a preview says of a trigger's fallbacks, held to the worker's own selection -------------------------------------------
 
-/** The worker's real selection, on the job as a pickup hands it over, with a cooldown only where a test sets one. */
-const realSelection = (job, { overlay = null, cooldowns = new Map() } = {}) => selectFailoverJob(job, {
-  redis: { get: async (key) => cooldowns.get(key) ?? null },
-  id: "gh-1",
-  models: overlay,
-  checkCandidate: (candidate) => checkFailoverCandidate(candidate, { models: overlay }),
-});
+/** The worker's real selection, on the job as a pickup hands it over, and what it passed over. A key, an egress entry or a cooldown is what a test gives it. */
+const realSelection = async (job, { overlay = null, cooldowns = new Map(), credential, egress = false, allowlist = [] } = {}) => {
+  const skipped = [];
+  const out = await selectFailoverJob(job, {
+    redis: { get: async (key) => cooldowns.get(key) ?? null },
+    id: "gh-1",
+    models: overlay,
+    log: (event, row) => {
+      if (event === "model_candidate_skipped") skipped.push(row);
+    },
+    checkCandidate: (candidate) => checkFailoverCandidate(candidate, { models: overlay, credential, egress, allowlist }),
+  });
+  return { ...out, skipped };
+};
+const FABLE = "anthropic/claude-fable-5"; // declares server-side fallbacks, which a job moved to it on a list of its own does not name
+const TYPO = "anthropic/claude-typo";
+const GPT = "openai/gpt-5.5";
+const noOpenAiKey = async (job) => ({ ok: job.provider !== "openai" });
+/** A main on cooldown, as `markModelCooldown` writes it. */
+const coolingDown = async (ref) => {
+  const cooldowns = new Map();
+  await markModelCooldown({ eval: async (_script, _keys, key, _until, value) => { cooldowns.set(key, value); } }, ref, { kind: "rate-limited" }, { now: () => Date.now() });
+  return cooldowns;
+};
 
-for (const [what, run, env, change, overlay, job, ref, skips] of [
-  ["a main this host does not know", { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET], fallbackModels: [SONNET] }, {}, { model: "claude-typo", models: ["anthropic/claude-typo", SONNET] }, null,
-    { provider: "anthropic", model: "claude-typo", models: ["anthropic/claude-typo", SONNET], fallbackModels: [SONNET] }, SONNET, "anthropic/claude-typo (model-unknown)"],
-  ["a main off this host's list", { provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: [SONNET] }, { PI_ALLOWED_MODELS: SONNET }, { model: "claude-opus-5-5" }, null,
-    { provider: "anthropic", model: "claude-opus-5-5", models: [SONNET], fallbackModels: [SONNET] }, SONNET, "anthropic/claude-opus-5-5 (model-not-allowed)"],
-  ["a fallback the worker will not price", { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] }, {}, { models: [HAIKU, "radius/balanced"], fallbackModels: ["radius/balanced"] }, null,
-    { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, "radius/balanced"], fallbackModels: ["radius/balanced"] }, HAIKU, "radius/balanced (model-unpriced)"],
-  ["a fallback this host does not know", { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] }, {}, { models: [HAIKU, "anthropic/claude-typo"], fallbackModels: ["anthropic/claude-typo"] }, null,
-    { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, "anthropic/claude-typo"], fallbackModels: ["anthropic/claude-typo"] }, HAIKU, "anthropic/claude-typo (model-unknown)"],
+for (const [what, run, env, change, model, why] of [
+  ["a main this host does not know", { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET], fallbackModels: [SONNET] }, {}, { model: "claude-typo", models: [TYPO, SONNET] }, TYPO, "model-unknown"],
+  ["a main off this host's list", { provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: [SONNET] }, { PI_ALLOWED_MODELS: SONNET }, { model: "claude-opus-5-5" }, OPUS, "model-not-allowed"],
+  ["a fallback the worker will not price", { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] }, {}, { models: [HAIKU, "radius/balanced"], fallbackModels: ["radius/balanced"] }, "radius/balanced", "model-unpriced"],
+  ["a fallback this host does not know", { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] }, {}, { models: [HAIKU, TYPO], fallbackModels: [TYPO] }, TYPO, "model-unknown"],
+  ["a fallback whose own fallbacks a job's list of one does not name", { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] }, {}, { models: [HAIKU, FABLE], fallbackModels: [FABLE] }, FABLE, "model-not-allowed"],
 ]) {
-  test(`${what}, on a trigger with fallbacks: the preview says what the worker's selection does, and refuses nothing`, async () => {
-    const f = fixture({ run, env, overlay });
+  test(`${what}, on a trigger with fallbacks: a job cannot use it, whatever else the job has, and no sentence says what the job does instead`, async () => {
+    const f = fixture({ run, env });
     const out = await f.service.preview(ask(f, change), operator);
-    assert.ok(out.plan, JSON.stringify(out));
-    assert.deepEqual(out.plan.warnings.filter((line) => line.includes("skips")), [`On this host a job of this trigger skips ${skips} and starts on ${ref}.`]);
-    assert.ok(!out.plan.warnings.some((line) => /would be refused as model-(?:unknown|not-allowed)/.test(line)), out.plan.warnings.join(" | "));
-    const real = await realSelection(job, { overlay });
-    assert.equal(real.ref, ref, "the model the sentence names is the one the worker's own selection starts the job on");
-    assert.deepEqual(real.job.models, [ref]);
+    assert.deepEqual(out.plan.warnings, [`On this host a job cannot use ${model} (${why}).`]);
+    assert.ok(!/\bstarts on\b|\bskips\b|\bmoved to\b/.test(out.summary.join(" ")), out.summary.join(" | "));
     assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+    // Whatever the other candidates are and whatever this preview cannot see of them, the worker never hands a job this model, and where
+    // its selection reaches the model the reason is the one the sentence gives.
+    const [provider, ...rest] = model.split("/");
+    const onList = !Object.hasOwn(env, "PI_ALLOWED_MODELS");
+    const [mainOf] = [provider, rest.join("/")];
+    const job = (first, others) => {
+      const [p, ...m] = first.split("/");
+      const candidates = [first, ...others];
+      return { provider: p, model: m.join("/"), models: candidates.filter((ref) => onList || ref !== model), fallbackModels: others };
+    };
+    const cooldowns = await coolingDown(HAIKU);
+    for (const others of [[HAIKU], [GPT], [HAIKU, GPT], ["anthropic/claude-nope"], [SONNET, HAIKU]]) {
+      for (const context of [{}, { credential: noOpenAiKey }, { cooldowns }, { egress: true, allowlist: [] }]) {
+        const first = await realSelection(job(model, others), context);
+        assert.notEqual(first.ref, model, `${mainOf}: first, beside ${others}`);
+        assert.deepEqual(first.skipped.find((row) => row.model === model), { model, reason: why }, "the reason the sentence gives");
+        const [next, ...more] = others;
+        const behind = await realSelection(job(next, [...more, model]), context);
+        assert.notEqual(behind.ref, model, `behind ${others}`);
+        const reached = behind.skipped.find((row) => row.model === model);
+        if (reached) assert.deepEqual(reached, { model, reason: why });
+      }
+    }
   });
 }
 
-test("no model of a trigger with fallbacks qualifying says that, by each one's reason, as the worker's selection refuses it", async () => {
-  const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: "anthropic/claude-typo,anthropic/claude-nope" } });
-  const words = await warned(f, { model: "claude-typo", fallbackModels: ["anthropic/claude-nope"] });
-  assert.equal(words, "On this host this trigger's jobs would be refused as model-failover-no-candidate, before they spend: a job skips anthropic/claude-typo (model-unknown) and anthropic/claude-nope (model-unknown) and has no model left.");
-  assert.deepEqual(await realSelection({ provider: "anthropic", model: "claude-typo", models: ["anthropic/claude-typo", "anthropic/claude-nope"], fallbackModels: ["anthropic/claude-nope"] }), { refused: "model-failover-no-candidate" });
+test("what the preview cannot see is why it names no model a job starts on: each of these has nothing against it here and is refused or passed over there", async () => {
+  // An unknown fallback behind a main with nothing against it is never reached at all.
+  assert.deepEqual(await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, TYPO], fallbackModels: [TYPO] }), { job: (await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, TYPO], fallbackModels: [TYPO] })).job, ref: HAIKU, skipped: [] });
+  // The next candidate holds no key this preview can read.
+  const keyless = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, GPT], fallbackModels: [GPT] } });
+  assert.deepEqual((await keyless.service.preview(ask(keyless, { model: "claude-typo", models: [TYPO, GPT] }), operator)).plan.warnings, [`On this host a job cannot use ${TYPO} (model-unknown).`]);
+  const noKey = await realSelection({ provider: "anthropic", model: "claude-typo", models: [TYPO, GPT], fallbackModels: [GPT] }, { credential: noOpenAiKey });
+  assert.equal(noKey.refused, "model-failover-no-candidate");
+  assert.deepEqual(noKey.skipped, [{ model: TYPO, reason: "model-unknown" }, { model: GPT, reason: "provider-unconfigured" }]);
+  // The next candidate's host is not on an egress allowlist this preview does not read for a model.
+  const overlay = { providers: { ollama: { baseUrl: "https://models.example.com/v1", api: "openai-completions", apiKey: "x", models: [{ id: "local", cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, compat: { maxTokensField: "max_tokens" }, maxTokens: 100, contextWindow: 1000 }] } } };
+  const hostless = fixture({ overlay, run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, "ollama/local"], fallbackModels: ["ollama/local"] } });
+  assert.deepEqual((await hostless.service.preview(ask(hostless, { model: "claude-typo", models: [TYPO, "ollama/local"] }), operator)).plan.warnings, [`On this host a job cannot use ${TYPO} (model-unknown).`]);
+  const noHost = await realSelection({ provider: "anthropic", model: "claude-typo", models: [TYPO, "ollama/local"], fallbackModels: ["ollama/local"] }, { overlay, egress: true, allowlist: [] });
+  assert.deepEqual(noHost.skipped, [{ model: TYPO, reason: "model-unknown" }, { model: "ollama/local", reason: "model-host-unlisted" }]);
+});
+
+test("no model of a trigger with fallbacks that a job can use on what the file and this host decide: the worker's refusal, by each one's reason", async () => {
+  const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: `${TYPO},anthropic/claude-nope` } });
+  assert.equal(await warned(f, { model: "claude-typo", fallbackModels: ["anthropic/claude-nope"] }), `On this host this trigger's jobs would be refused as model-failover-no-candidate, before they spend: a job cannot use ${TYPO} (model-unknown) and anthropic/claude-nope (model-unknown), and has no model left.`);
+  assert.equal((await realSelection({ provider: "anthropic", model: "claude-typo", models: [TYPO, "anthropic/claude-nope"], fallbackModels: ["anthropic/claude-nope"] })).refused, "model-failover-no-candidate");
   // A fallback off the list ends the selection before it looks at a model at all, and the sentence for that stands.
   const off = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: HAIKU } });
   const offWords = await warned(off, { fallbackModels: [SONNET] });
   assert.match(offWords, /refused as model-failover-no-candidate, before they spend: every fallback must be on the allowed list/);
   assert.ok(!offWords.includes("has no model left"), offWords);
-  assert.deepEqual(await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU], fallbackModels: [SONNET] }), { refused: "model-failover-no-candidate" });
+  assert.equal((await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU], fallbackModels: [SONNET] })).refused, "model-failover-no-candidate");
 });
 
-test("what a selection skipped before this edit, the edit does not speak of: it judges what it touched", async () => {
-  // The main is off this host's list already. Adding a fallback that qualifies says nothing of the main, and raises nothing new.
-  await quiet(fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", fallbackModels: [SONNET] }, env: { PI_ALLOWED_MODELS: `${SONNET},${HAIKU}` } }), { fallbackModels: [SONNET, HAIKU] });
-  await quiet(fixture({ run: { provider: "anthropic", model: "claude-typo", models: ["anthropic/claude-typo", SONNET], fallbackModels: [SONNET] } }), { flow: "review" });
-  // A cap edit moves no model, though none of this trigger's qualifies.
-  await quiet(fixture({ run: { provider: "anthropic", model: "claude-typo", models: ["anthropic/claude-typo", "anthropic/claude-nope"], fallbackModels: ["anthropic/claude-nope"] } }), { maxCostUsd: "1" });
+test("an edit of any model field judges the entry as it will be; an edit of none speaks of no model", async () => {
+  // The main is off this host's list already. Adding a fallback says so, since the entry it writes has that main.
+  assert.equal(await warned(fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", fallbackModels: [SONNET] }, env: { PI_ALLOWED_MODELS: `${SONNET},${HAIKU}` } }), { fallbackModels: [SONNET, HAIKU] }), `On this host a job cannot use ${OPUS} (model-not-allowed).`);
+  await quiet(fixture({ run: { provider: "anthropic", model: "claude-typo", models: [TYPO, SONNET], fallbackModels: [SONNET] } }), { flow: "review" });
+  // A cap edit moves no model, though a fallback is on no list.
+  await quiet(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: [HAIKU] } }), { maxCostUsd: "1" });
+  // Nor though none of this trigger's qualifies.
+  await quiet(fixture({ run: { provider: "anthropic", model: "claude-typo", models: [TYPO, "anthropic/claude-nope"], fallbackModels: ["anthropic/claude-nope"] } }), { maxCostUsd: "1" });
 });
 
-test("the model the cap is judged by is the one selection starts a job on, whichever that is", async () => {
+test("taking a row's fallbacks off, or moving its main, says what the worker then does, as a row with no fallbacks says it", async () => {
+  // A main off the list, which selection passed over, is now the only model: pickup's own question, and its answer.
+  const off = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", fallbackModels: [SONNET] }, env: { PI_ALLOWED_MODELS: SONNET } });
+  assert.equal(await warned(off, { fallbackModels: null }), `On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${OPUS} is not on the models they may call here. Add it to the list, or choose another model.`);
+  assert.equal(modelOnList([SONNET], "anthropic", "claude-opus-5-5"), false);
+  // An unknown main.
+  const unknown = fixture({ run: { provider: "anthropic", model: "claude-typo", models: [TYPO, SONNET], fallbackModels: [SONNET] } });
+  assert.equal(await warned(unknown, { fallbackModels: null }), `On this host this trigger's jobs would be refused as model-unknown, before they spend: ${TYPO} is a model this deployment does not know (not-in-catalog). Choose one from the catalog, or declare it in the overlay's models.json.`);
+  assert.equal(checkModelsKnown([{ provider: "anthropic", id: "claude-typo", main: true }]).why, "not-in-catalog");
+  // Moving the main of a row with no list its fallbacks can be on: selection refuses before it looks at either model.
+  const noList = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: [SONNET] } });
+  assert.equal(await warned(noList, { model: "claude-sonnet-5-5" }), `On this host this trigger's jobs would be refused as model-failover-no-candidate, before they spend: every fallback must be on the allowed list (run.models, or PI_ALLOWED_MODELS when the trigger has none), and ${SONNET} is not.`);
+  const real = await realSelection({ provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [SONNET] });
+  assert.deepEqual([real.refused, real.skipped], ["model-failover-no-candidate", []]);
+  // A main the cap cannot clear, once no fallback stands in front of a person's edit: a job would start on it, so that refuses.
+  const dear = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", models: [OPUS, HAIKU], fallbackModels: [HAIKU], maxCostUsd: "1" } });
+  assert.match((await refusal(dear, { fallbackModels: null })).refusal, /^anthropic\/claude-opus-5-5 needs at least \$2\.654295/);
+  // The list as it will be: a model whose own fallbacks it does not name, on a row a person moved the main of.
+  const listed = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET, FABLE] } });
+  assert.match(await warned(listed, { model: "claude-sonnet-5-5" }), /refused as model-not-allowed, before they spend: anthropic\/claude-fable-5 declares fallback models the allowed list does not name/);
+});
+
+test("a model the preview said a job cannot use has no bound asked of it: two sentences of one model do not disagree", async () => {
+  const typoWords = `On this host this trigger's jobs would be refused as model-unknown, before they spend: ${TYPO} is a model this deployment does not know (not-in-catalog). Choose one from the catalog, or declare it in the overlay's models.json.`;
+  const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } });
+  const out = await f.service.preview(ask(f, { model: "claude-typo", maxCostUsd: "1" }), operator);
+  assert.deepEqual(out.plan.warnings, [typoWords]);
+  assert.ok(!out.summary.join(" ").includes("could not be bounded"), out.summary.join(" | "));
+  // On a trigger with fallbacks, by selection's reason.
+  const failover = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET], fallbackModels: [SONNET] } });
+  const failoverOut = await failover.service.preview(ask(failover, { model: "claude-typo", models: [TYPO, SONNET], maxCostUsd: "5" }), operator);
+  assert.deepEqual(failoverOut.plan.warnings, [`On this host a job cannot use ${TYPO} (model-unknown).`]);
+  assert.ok(!failoverOut.summary.join(" ").includes("could not be bounded"), failoverOut.summary.join(" | "));
+  // Off the list and under the cap: said once, as off the list, and neither an amount nor a refusal beside it.
+  const off = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: HAIKU } });
+  const offOut = await off.service.preview(ask(off, { model: "claude-opus-5-5", maxCostUsd: "1" }), operator);
+  assert.deepEqual(offOut.plan.warnings, [`On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${OPUS} is not on the models they may call here. Add it to the list, or choose another model.`]);
+  // Said as a model whose own fallbacks the list leaves out: no amount either.
+  const declared = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] } });
+  assert.deepEqual((await declared.service.preview(ask(declared, { models: [HAIKU, FABLE], maxCostUsd: "0.5" }), operator)).plan.warnings, [`On this host this trigger's jobs would be refused as model-not-allowed, before they spend: ${FABLE} declares fallback models the allowed list does not name. Add them to the list, or remove it.`]);
+  // A model with nothing said of it is still judged, in the same edit.
+  const other = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU] } });
+  assert.deepEqual((await other.service.preview(ask(other, { models: [HAIKU, OPUS, TYPO], fallbackModels: [TYPO], maxCostUsd: "1" }), operator)).plan.warnings, [`On this host a job cannot use ${TYPO} (model-unknown).`, `${OPUS} needs at least $2.654295 for a short task's first call, so a job cannot use it under this cap.`]);
+});
+
+test("the model the cap is judged by is the first the file and this host hold nothing against, and that is never named", async () => {
   const env = { PI_ALLOWED_MODELS: `${HAIKU},${OPUS}` };
-  // A main passed over that could not clear the cap stops nothing at its start: the job starts on the fallback, which can.
+  // A main with something against it that could not clear the cap stops nothing: it warns.
   const passed = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [HAIKU] }, env: { PI_ALLOWED_MODELS: HAIKU } });
-  const words = await warned(passed, { maxCostUsd: "1" });
-  assert.match(words, /anthropic\/claude-sonnet-5-5 needs at least \$1\.327148.*A call to this one stops the job as cost-cap/);
+  assert.equal(await warned(passed, { maxCostUsd: "1" }), `${SONNET} needs at least $1.327148 for a short task's first call, so a job cannot use it under this cap.`);
   assert.equal((await realSelection({ provider: "anthropic", model: "claude-sonnet-5-5", models: [HAIKU], fallbackModels: [HAIKU] })).ref, HAIKU);
   // A fallback the job does start on, that cannot clear it: nothing it can do is left, so that refuses, as a main does.
   const starts = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [OPUS] }, env });
@@ -1019,17 +1112,83 @@ test("the model the cap is judged by is the one selection starts a job on, which
   assert.equal((await realSelection({ provider: "anthropic", model: "claude-sonnet-5-5", models: [HAIKU, OPUS], fallbackModels: [OPUS] })).ref, OPUS);
 });
 
-test("a job failover moves to a fallback starts a paid container first: selection asks nothing of the cap, and the guard refuses the first call there", async () => {
-  // The main on cooldown, as `markModelCooldown` writes it, and a $1 cap that a job on the fallback cannot make one call under.
-  const cooldowns = new Map();
-  await markModelCooldown({ eval: async (_script, _keys, key, _until, value) => { cooldowns.set(key, value); } }, HAIKU, { kind: "rate-limited" }, { now: () => Date.now() });
-  const moved = await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, OPUS], fallbackModels: [OPUS], maxCostMicros: 1_000_000 }, { cooldowns });
+test("under the cap, a job cannot use the model: true of each shape the worker treats differently, on its own selection and its own guard", async () => {
+  const stillTrue = (words) => assert.ok(!/stops the job|paid container|moved to it|still starts/.test(words), words);
+  // Selection asks nothing of the cap, so a cooldown can move a job to a model the guard then refuses every call to.
+  const moved = await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, OPUS], fallbackModels: [OPUS], maxCostMicros: 1_000_000 }, { cooldowns: await coolingDown(HAIKU) });
   assert.deepEqual([moved.ref, moved.job.models, moved.job.modelWhy], [OPUS, [OPUS], "fallback-cooldown"]);
   assert.equal(admits(1_000_000, builtinModel("anthropic", "claude-opus-5-5"), FIRST_CALL_SHORT_TASK_BYTES), false, "its first call never leaves the container");
-  const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, OPUS] } });
-  const words = await warned(f, { fallbackModels: [OPUS], maxCostUsd: "1" });
-  assert.ok(words.endsWith("A call to this one stops the job as cost-cap, and a job moved to it starts a paid container first."), words);
-  assert.ok(!words.includes("still starts"), words);
+  const movable = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, OPUS] } });
+  const movableWords = await warned(movable, { fallbackModels: [OPUS], maxCostUsd: "1" });
+  assert.equal(movableWords, `${OPUS} needs at least $2.654295 for a short task's first call, so a job cannot use it under this cap.`);
+  // A fallback selection answers `model-not-allowed`, on the job's list of one: no job is moved to it, and no call is made.
+  const single = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, FABLE], fallbackModels: [FABLE] } });
+  const singleWords = await warned(single, { maxCostUsd: "0.5" });
+  assert.match(singleWords, /^anthropic\/claude-fable-5 needs at least \$[\d.]+ for a short task's first call, so a job cannot use it under this cap\.$/);
+  stillTrue(singleWords);
+  assert.deepEqual((await realSelection({ provider: "anthropic", model: "claude-typo", models: [TYPO, FABLE], fallbackModels: [FABLE] })).skipped.at(-1), { model: FABLE, reason: "model-not-allowed" });
+  // A listed model on a job with fallbacks: selection tries the main and the fallbacks alone, and the job it hands over lists one model.
+  const listedOnly = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET, OPUS], fallbackModels: [SONNET] } });
+  const listedWords = await warned(listedOnly, { maxCostUsd: "2" });
+  assert.equal(listedWords, `${OPUS} needs at least $2.654295 for a short task's first call, so a job cannot use it under this cap.`);
+  assert.deepEqual((await realSelection({ provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET, OPUS], fallbackModels: [SONNET] })).job.models, [HAIKU]);
+  // A main off the list: selection passes over it, and no container is started on it.
+  const offMain = fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5", fallbackModels: [HAIKU] }, env: { PI_ALLOWED_MODELS: HAIKU } });
+  stillTrue(await warned(offMain, { maxCostUsd: "1" }));
+  assert.deepEqual((await realSelection({ provider: "anthropic", model: "claude-sonnet-5-5", models: [HAIKU], fallbackModels: [HAIKU] })).skipped, [{ model: SONNET, reason: "model-not-allowed" }]);
+  // A fallback no cap can bound, Radius or a local server: selection answers `model-unpriced`, so no job is moved to it either.
+  const radius = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, "radius/balanced"], fallbackModels: ["radius/balanced"] } });
+  const radiusWords = await warned(radius, { maxCostUsd: "1" });
+  assert.match(radiusWords, /^radius\/balanced: Radius \(pi-messages\) has no verified local cost bound.*, so a job cannot use it under this cap\.$/);
+  stillTrue(radiusWords);
+  assert.deepEqual((await realSelection({ provider: "anthropic", model: "claude-typo", models: [TYPO, "radius/balanced"], fallbackModels: ["radius/balanced"] })).skipped.at(-1), { model: "radius/balanced", reason: "model-unpriced" });
+  const overlay = { providers: { ollama: { baseUrl: "http://127.0.0.1:11434/v1", api: "openai-completions", apiKey: "x", models: [{ id: "local", cost: { input: 100000, output: 100000, cacheRead: 0, cacheWrite: 0 }, maxTokens: 100, contextWindow: 1000 }] } } };
+  const unboundable = fixture({ overlay, run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, "ollama/local"], fallbackModels: ["ollama/local"] } });
+  const unboundableWords = await warned(unboundable, { maxCostUsd: "1" });
+  assert.equal(unboundableWords, "ollama/local's output cap travels as max_completion_tokens to a server that may ignore it, so a job cannot use it under this cap.");
+  assert.deepEqual((await realSelection({ provider: "anthropic", model: "claude-typo", models: [TYPO, "ollama/local"], fallbackModels: ["ollama/local"] }, { overlay })).skipped.at(-1), { model: "ollama/local", reason: "model-unpriced" });
+});
+
+test("a read that failed says which file it was, and no more than is true of it", async () => {
+  const failing = (tail, code) => ({ ...nodeFs, readFileSync: (path, ...rest) => {
+    if (String(path).endsWith(tail)) throw Object.assign(new Error(code), { code });
+    return nodeFs.readFileSync(path, ...rest);
+  } });
+  const settingsWords = "The deployment's settings file could not be read, or is invalid; correct that before changing a trigger's model or cap.";
+  // A failed read and a file that does not hold are one answer from `readOverlay`, so one sentence holds of both.
+  assert.equal((await refusal(fixture({ deps: { fs: failing("settings.json", "EIO") } }), { maxCostUsd: "1" })).refusal, settingsWords);
+  const invalid = fixture();
+  nodeFs.writeFileSync(invalid.paths.settingsFile, "{ not json");
+  assert.equal((await refusal(invalid, { maxCostUsd: "1" })).refusal, settingsWords);
+  // The allowlist is no overlay file, and a read of it that may pass names it.
+  const allowlistHost = fixture({ env: { PI_EGRESS: "1" }, deps: { fs: failing("egress-allowlist.conf", "EIO") } });
+  const allowlist = await warned(allowlistHost, { mcp: ["docs"] });
+  assert.ok(allowlist.includes("This host's egress allowlist could not be read just now, so the worker's pickup check could not judge docs; a pickup asks again."), allowlist);
+  assert.ok(!allowlist.includes("An overlay file"), allowlist);
+  // An overlay file that fails the same way keeps its own words.
+  const overlayHost = fixture({ deps: { fs: failing("mcp.json", "EIO") } });
+  assert.ok((await warned(overlayHost, { mcp: ["docs"] })).includes("An overlay file the worker's pickup check reads could not be read just now, so it could not judge docs; a pickup asks again."));
+  // And which read failed is one check's: an allowlist that failed for one server does not take the blame for the overlay failing for the next.
+  let mcpReads = 0;
+  const thenOverlay = { ...nodeFs, readFileSync: (path, ...rest) => {
+    if (String(path).endsWith("egress-allowlist.conf")) throw Object.assign(new Error("EIO"), { code: "EIO" });
+    if (String(path).endsWith("mcp.json") && (mcpReads += 1) > 1) throw Object.assign(new Error("EIO"), { code: "EIO" });
+    return nodeFs.readFileSync(path, ...rest);
+  } };
+  const both = await warned(fixture({ env: { PI_EGRESS: "1" }, deps: { fs: thenOverlay } }), { mcp: ["docs", "x"] });
+  assert.ok(both.includes("This host's egress allowlist could not be read just now, so the worker's pickup check could not judge docs; a pickup asks again."), both);
+  assert.ok(both.includes("An overlay file the worker's pickup check reads could not be read just now, so it could not judge x; a pickup asks again."), both);
+  // A cap edit with models.json at a mode this host cannot read: the file, in the model edit's sentence, and no bound left to a runner.
+  const run = { provider: "anthropic", model: "claude-haiku-4-5" };
+  const denied = fixture({ run, overlay: { providers: {} }, deps: { fs: failing("models.json", "EACCES") } });
+  const capOut = await denied.service.preview(ask(denied, { maxCostUsd: "1" }), operator);
+  const modelOut = await denied.service.preview(ask(denied, { model: "claude-haiku-4-5", provider: "anthropic", models: [HAIKU] }), operator);
+  const deniedWords = `The overlay's models.json could not be read or used for ${HAIKU} (overlay-unreadable), so this host cannot run it. Fix that file, since another model may be refused the same way.`;
+  assert.deepEqual(capOut.plan.warnings, [deniedWords]);
+  assert.ok(modelOut.plan.warnings.includes(deniedWords), modelOut.plan.warnings.join(" | "));
+  assert.ok(!capOut.summary.join(" ").includes("could not be bounded"), capOut.summary.join(" | "));
+  const moment = fixture({ run, overlay: { providers: {} }, deps: { fs: failing("models.json", "EIO") } });
+  assert.deepEqual((await moment.service.preview(ask(moment, { maxCostUsd: "1" }), operator)).plan.warnings, [`The overlay's models.json could not be read just now, so whether this deployment knows ${HAIKU} could not be judged here; a pickup asks again.`]);
 });
 
 test("a models.json this host cannot read is said as that, and another model is no way out", async () => {
@@ -1052,9 +1211,20 @@ test("a models.json this host cannot read is said as that, and another model is 
   // The same on a trigger with fallbacks: no selection is claimed without the file.
   const withFallback = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET], fallbackModels: [SONNET] }, overlay, deps: { fs: unreadable } });
   const failover = await withFallback.service.preview(ask(withFallback, { model: "claude-sonnet-5-5" }), operator);
-  assert.deepEqual(failover.plan.warnings, [sentence("anthropic/claude-sonnet-5-5", "overlay-unreadable")]);
+  assert.deepEqual(failover.plan.warnings, [sentence(SONNET, "overlay-unreadable"), sentence(HAIKU, "overlay-unreadable")]);
+  // A fallback the entry names on the deployment's list alone is asked of too.
+  const envFallback = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: [SONNET] }, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` }, overlay, deps: { fs: unreadable } });
+  assert.ok((await warned(envFallback, { model: "claude-haiku-4-5", provider: "anthropic", fallbackModels: [SONNET, HAIKU] })).includes(sentence(SONNET, "overlay-unreadable")));
   // A model simply not in the catalog keeps its own way out.
   assert.match(await warned(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } }), { model: "claude-typo" }), /Choose one from the catalog/);
+});
+
+test("a job's main model is a chat model: an image model is one the catalog holds that no job starts on, and on a list it is known", async () => {
+  const { getBuiltinImageModels } = await import("@earendil-works/pi-ai/providers/all");
+  const image = getBuiltinImageModels("openrouter")[0];
+  const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5" } });
+  assert.match(await warned(f, { provider: "openrouter", model: image.id }), /refused as model-unknown, before they spend/);
+  await quiet(f, { models: [HAIKU, `openrouter/${image.id}`] });
 });
 
 test("a role resolves first: the bound and the catalog judge the model it names", async () => {
@@ -1093,14 +1263,19 @@ test("a list the file itself contradicts is the loader's to refuse, since that h
   await quiet(fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU, SONNET] } }), { fallbackModels: [SONNET] });
 });
 
-test("a model edit judges what it touches: an unknown model it did not touch says nothing, and its first call is not asked of", async () => {
+test("an edit of no model field asks nothing of a model, and a cap edit says nothing of the catalog", async () => {
   const f = fixture({ run: { provider: "anthropic", model: "claude-typo" } });
   assert.deepEqual((await f.service.preview(ask(f, { flow: "review" }), operator)).plan.warnings, []);
   const capped = await f.service.preview(ask(f, { maxCostUsd: "1" }), operator);
   assert.ok(!capped.summary.join(" ").includes("model-unknown"), capped.summary.join(" | "));
-  // An opus that a $1 cap cannot pay for is this edit's business only when the edit touches the cap or the model.
+  // Nor of a list: a main off this host's list on a cap edit is the model edit's to say.
+  await quiet(fixture({ run: { provider: "anthropic", model: "claude-sonnet-5-5" }, env: { PI_ALLOWED_MODELS: HAIKU } }), { maxCostUsd: "5" });
+  // An opus that a $1 cap cannot pay for is this edit's business when the edit touches the cap or any model field: that entry is what a job runs on.
   const opus = fixture({ run: { provider: "anthropic", model: "claude-opus-5-5", maxCostUsd: "1", models: [OPUS, HAIKU, SONNET] } });
-  await quiet(opus, { models: [OPUS, HAIKU] });
+  await quiet(opus, { flow: "review" });
+  // The form sends the model it drew: a model field that says the same is no change, and this edit moved only the flow.
+  await quiet(opus, { flow: "review", provider: "anthropic", model: "claude-opus-5-5" });
+  assert.match((await refusal(opus, { models: [OPUS, HAIKU] })).refusal, /needs at least \$2\.654295 for a short task's first call/);
   assert.match((await refusal(opus, { maxCostUsd: "0.99" })).refusal, /needs at least \$2\.654295 for a short task's first call/);
   // A cap this edit did not touch stays out of it, though the deployment's is lower: a person changing the model is not told to fix it.
   const above = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", maxCostUsd: "9" }, env: { PI_MAX_COST_USD: "5" } });
@@ -1150,7 +1325,7 @@ test("settings or a list it cannot read refuse a model or cap edit, and leave ev
 
   const invalid = fixture();
   nodeFs.writeFileSync(invalid.paths.settingsFile, "{ not json");
-  assert.match((await refusal(invalid, { maxCostUsd: "1" })).refusal, /settings file is invalid/);
+  assert.match((await refusal(invalid, { maxCostUsd: "1" })).refusal, /settings file could not be read, or is invalid/);
   assert.ok((await invalid.service.preview(ask(invalid, { flow: "review" }), operator)).plan);
 
   const unknownProjects = fixture();

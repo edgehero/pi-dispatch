@@ -228,15 +228,15 @@ These are at the pinned pi's prices. Against the cap a job would run under, the 
 
 | The cap is | The preview |
 |---|---|
-| Below the floor | Of the model a job starts on, refuses, because the runner would refuse every call to it before it is sent: "anthropic/claude-opus-5-5 needs at least $2.654295 for a short task's first call, above this trigger's $2.00 job cap". It tells you to choose another model or set that amount. If it is the deployment's cap that is too small, it says choose another model, since a trigger can only lower it. Of a listed or fallback model, previews, and adds to the same sentence: "A call to this one stops the job as cost-cap, and a job moved to it starts a paid container first." |
+| Below the floor | Of the model a job starts on, refuses, because the runner would refuse every call to it before it is sent: "anthropic/claude-opus-5-5 needs at least $2.654295 for a short task's first call, above this trigger's $2.00 job cap". It tells you to choose another model or set that amount. If it is the deployment's cap that is too small, it says choose another model, since a trigger can only lower it. Of a listed or fallback model, previews, and warns: "anthropic/claude-opus-5-5 needs at least $2.654295 for a short task's first call, so a job cannot use it under this cap." |
 | From the floor to just under a short task's amount | Previews, and warns: "anthropic/claude-opus-5-5 clears this $2.62144 job cap only for the smallest first call: a short task's needs $2.654295, so most jobs that call it would be refused before they spend." The Confirm still writes it, because you have read that. |
 | A short task's amount or more | Says nothing of it. A longer task can still be refused when a job runs. |
 
-It judges this only when the change sends the model, the provider, a list or the cap, so nobody is refused over a pairing they did not
-touch: a change of the cap asks it of each of those models, and a change of the model or a list only of what moved. It judges what the
+It judges this only when the change sends the model, the provider, a list or the cap, so nobody is refused over a change that moves
+none of them, and then it asks of each of those models, since the entry as it will be is what a job runs on. It judges what the
 trigger itself names, and not the deployment's list or a role map's other models: a job under a cap simply cannot call one that does
 not fit. A model no cap can bound (a local server whose output limit may be ignored, Radius) is refused under any cap as the model a job
-starts on, and warned of as any other model: a call to it stops the job as `cost-cap`, and a job failover moves to it starts a paid container first. A price it cannot read fails open, and the preview says which: "The first call on ollama/free could not be
+starts on, and warned of as any other model: a job cannot use it under this cap. A model the preview has said a job cannot use on this host gets no amount beside that. A price it cannot read fails open, and the preview says which: "The first call on ollama/free could not be
 bounded here, so the runner judges it when a job runs."
 
 ### One run, end to end

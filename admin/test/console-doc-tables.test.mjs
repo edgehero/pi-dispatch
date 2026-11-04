@@ -250,7 +250,7 @@ const REFUSALS = Object.freeze({
   "has no verified local cost bound": () => plannerWorld({ settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ provider: "radius", model: "balanced" }),
   "travels as max_completion_tokens": () => plannerWorld({ overlay: LOCAL_MODEL, settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ provider: "ollama", model: "local" }),
   "On every host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["linear"], excludeTools: ["codemode", "tool_search", "mcp__linear__*", "read_mcp_resource"] }),
-  "The deployment's settings file is invalid": () => plannerWorld({ settings: "{ not json" }).preview({ maxCostUsd: "1" }),
+  "The deployment's settings file could not be read, or is invalid": () => plannerWorld({ settings: "{ not json" }).preview({ maxCostUsd: "1" }),
   "PI_ALLOWED_MODELS is invalid": () => plannerWorld({ env: { PI_ALLOWED_MODELS: "not a list!" } }).preview({ maxCostUsd: "1" }),
   "The deployment's job cap could not be read": () => plannerWorld({ env: { PI_MAX_COST_USD: "lots" } }).preview({ maxCostUsd: "1" }),
   "The trigger's project or role policy could not be read": () => plannerWorld({ projects: "{ not json" }).preview({ maxCostUsd: "1" }),
@@ -268,12 +268,12 @@ const WARNINGS = Object.freeze({
   "declares fallback models the allowed list does not name": () => plannerWorld({ run: { provider: "anthropic", model: "claude-fable-5" } }).preview({ models: ["anthropic/claude-fable-5"] }),
   "is not on the models they may call here": () => plannerWorld({ run: { provider: "anthropic", model: "claude-sonnet-5-5" }, env: { PI_ALLOWED_MODELS: SONNET } }).preview({ model: "claude-haiku-4-5" }),
   "every fallback must be on the allowed list": () => plannerWorld({ run: MODEL_RUN }).preview({ fallbackModels: [SONNET] }),
-  "a job of this trigger skips": () => plannerWorld({ run: { provider: "anthropic", model: "claude-opus-5-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` } }).preview({ fallbackModels: [SONNET], model: "claude-typo" }),
+  "On this host a job cannot use": () => plannerWorld({ run: { provider: "anthropic", model: "claude-opus-5-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` } }).preview({ fallbackModels: [SONNET], model: "claude-typo" }),
   "and has no model left": () => plannerWorld({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: "anthropic/claude-typo,anthropic/claude-nope" } }).preview({ model: "claude-typo", fallbackModels: ["anthropic/claude-nope"] }),
   "this trigger's model could not be resolved": () => { const projects = JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }, { id: "api", members: ["github:acme/api"] }] }); return plannerWorld({ projects, doc: { modelRoles: { web: { oai: "openai/gpt-4o" } }, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", model: "role:oai" } }] } }).preview({ flow: "review", maxCostUsd: "5" }); },
   "would be refused as": () => plannerWorld({ env: { PI_FORWARD_ENV: "" } }).preview({ mcp: ["linear"] }),
   "On this host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["docs"], excludeTools: ["codemode"] }),
-  "stops the job as cost-cap": () => plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" }),
+  "so a job cannot use it under this cap": () => plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" }),
   "no skill named": () => plannerWorld({ deps: { readHostLoads: () => published({ mini1: {} }) } }).preview({ flow: "review" }),
   "What the hosts published could not be read": () => plannerWorld({ deps: { readHostLoads: async () => { throw new Error("down"); } } }).preview({ flow: "review" }),
   "clears this": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-opus-5-5", maxCostUsd: "2.62144" }),
@@ -340,7 +340,7 @@ const REFUSAL_TODO = Object.freeze({
   "could not be resolved": { says: /Correct its model or its role/, shared: true },
   "has no verified local cost bound": { says: /Choose another model/ },
   "On every host this trigger's jobs would be refused as mcp-excluded": { says: /Remove the server from `run\.mcp`, or keep a tool that reaches it out of `run\.excludeTools`/, shared: true },
-  "The deployment's settings file is invalid": { says: /Correct what it names/ },
+  "The deployment's settings file could not be read, or is invalid": { says: /Correct what it names/ },
   "this form cannot set": { says: /on that trigger's page or by hand in the triggers file/, shared: true },
 });
 const WARNING_TODO = Object.freeze({
@@ -348,11 +348,11 @@ const WARNING_TODO = Object.freeze({
   "could not be read or used for": { says: /Fix that file/, shared: true },
   "declares fallback models the allowed list does not name": { says: /Add (?:it|them) to the list/, shared: true },
   "every fallback must be on the allowed list": { says: /`?run\.models`?[^|]*`?PI_ALLOWED_MODELS`? when the trigger has (?:no list|none)/, shared: true },
-  "a job of this trigger skips": { says: /Correct the model it names/ },
+  "On this host a job cannot use": { says: /Correct the model it names/ },
   "this trigger's model could not be resolved": { says: /Correct its model or its role/, shared: true },
   "would be refused as": { says: /`?run\.secrets`? is set in the (?:triggers )?file, not on this page/, shared: true },
   "On this host this trigger's jobs would be refused as mcp-excluded": { says: /Remove the server from `run\.mcp`, or keep a tool that reaches it out of `run\.excludeTools`/, shared: true },
-  "stops the job as cost-cap": { says: /Choose another model/i, shared: true },
+  "so a job cannot use it under this cap": { says: /Choose another model/i },
   "no skill named": { says: /Check the flow's name/ },
   "What the hosts published could not be read": { says: /Doctor's run on each host/ },
   "clears this": { says: /Choose another model/i, shared: true },
@@ -388,10 +388,10 @@ test("docs/console.md's table of what the trigger's preview refuses: each quote 
   await holdTodo(rows.slice(0, Object.keys(REFUSAL_TODO).length), REFUSAL_TODO, REFUSALS, (out) => out.refusal);
   // Of the model a job starts on, and no other: a listed one under the same cap plans, and both rows say so.
   for (const [row] of [["needs at least"], ["has no verified local cost bound"]]) assert.match(rows.find(([says]) => says.includes(row))[1], /the model a job starts on[^|]*A listed or fallback model[^|]*warns/, row);
-  assert.ok((await WARNINGS["stops the job as cost-cap"]()).plan, "a listed model under the cap plans");
-  const radiusListed = await plannerWorld({ run: MODEL_RUN, settings: JSON.stringify({ maxCostUsd: "5" }), deps: { checkModelsKnown: () => ({ ok: true }) } }).preview({ fallbackModels: ["radius/balanced"], models: [HAIKU, "radius/balanced"] });
+  assert.ok((await WARNINGS["so a job cannot use it under this cap"]()).plan, "a listed model under the cap plans");
+  const radiusListed = await plannerWorld({ run: MODEL_RUN, settings: JSON.stringify({ maxCostUsd: "5" }), deps: { checkModelsKnown: () => ({ ok: true }) } }).preview({ models: [HAIKU, "radius/balanced"] });
   assert.ok(radiusListed.plan, JSON.stringify(radiusListed));
-  assert.ok(radiusListed.summary.some((line) => line.includes("has no verified local cost bound") && line.includes("stops the job as cost-cap")), radiusListed.summary.join("\n"));
+  assert.ok(radiusListed.summary.some((line) => line.includes("has no verified local cost bound") && line.includes("so a job cannot use it under this cap")), radiusListed.summary.join("\n"));
 });
 
 test("docs/console.md's table of what the preview warns of: each quote is in what the real planner says, and a warning leaves the Confirm", async () => {
@@ -431,7 +431,7 @@ test("every warning the planner can say is in that table: a new sentence has to 
   literals.push(...[...source.matchAll(/failedRead \? `[^`]*` : `((?:[^`\\]|\\.)*)`/g)].map((m) => m[1]));
   assert.ok(source.includes("this trigger's model could not be resolved (${unresolved.reason})"));
   // Each of these went unforced when the scan skipped a literal it could not read: held by name, so a scan that loses one says so.
-  for (const said of ["stops the job as cost-cap", "a job of this trigger skips", "could not be read or used for", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here", "The worker's pickup check could not judge"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
+  for (const said of ["On this host a job cannot use", "could not be read or used for", "no skill named", "so the deployment's job cap", "only for the smallest first call", "could not be bounded here", "The worker's pickup check could not judge"]) assert.ok(literals.some((literal) => literal.includes(said)), `the scan sees ${said}`);
   assert.ok(literals.length >= 20, `the scan finds the planner's sentences (${literals.length})`);
   const quotes = Object.keys(WARNINGS);
   for (const literal of literals) assert.ok(quotes.some((quote) => literal.includes(quote)), `no row for: ${literal}`);
@@ -807,11 +807,12 @@ test("docs/costs.md's amounts are the real bound's, at the pin, and each row of 
   assert.match(below[1], /^Of the model a job starts on, refuses/);
   assert.match(below[1], /Of a listed or fallback model, previews/);
   assert.match(text, /is refused under any cap as the model a job starts on, and warned of as any other model/);
-  // What a change of the model or a list asks: only what moved. The cap asks all of them.
+  // What a change of the model or a list asks: the entry as it will be, as the cap does.
   const held = plannerWorld({ run: { ...MODEL_RUN, models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" } });
   assert.ok(!(await held.preview({ flow: "review" })).summary.some((line) => line.includes("claude-opus-5-5")), "an edit that names no model asks of none");
   assert.ok((await held.preview({ maxCostUsd: "2.1" })).summary.some((line) => line.includes("claude-opus-5-5 needs at least")), "a change of the cap asks of each");
-  assert.match(text, /a change of the cap asks it of each of those models, and a change of the model or a list only of what moved/);
+  assert.ok((await held.preview({ model: "claude-sonnet-5-5", models: ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"] })).summary.some((line) => line.includes("claude-opus-5-5 needs at least")), "a change of the model asks of each too");
+  assert.match(text, /so nobody is refused over a change that moves none of them, and then it asks of each of those models/);
   // It can only lower the deployment's cap: the worker's own rule, and what the bold line says of it.
   assert.ok(text.includes("**It can only lower the deployment's cap.** A job runs under the smaller of the two"));
   assert.equal(effectiveCostCapMicros("7", "5"), 5_000_000);
