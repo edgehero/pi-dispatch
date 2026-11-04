@@ -199,7 +199,8 @@ Four deployment notes:
 writer (the panel, the console and the trigger tools) writes it, first in the file, only when an entry uses a `run`
 field, a top-level block or a value (a new `on.type`, a new `waitFor` condition, a new `run.kind`) that an older
 release would misread (a field whose absence would let a job run wider than the file says, or a value it would refuse
-as broken). Nothing needs one yet, so today's files have none and every write leaves them byte for byte as before. A
+as broken). Today that is a trigger with `run.excludeExtensions` or `run.excludeExtensionTools`, which needs version 2. Any other file has
+no `version`, and every write leaves it byte for byte as before. A
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 
 **A file written by a newer pi-dispatch** names the versions in its refusal ("triggers file written by a newer
@@ -275,9 +276,10 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
 - `"excludeExtensions": ["@acme/deploy-tools", "git-guard"]` leaves named extensions out of that trigger's jobs: a staged package by
   its manifest name, with its skills, prompts and themes, or an overlay extension by its file stem or folder name, before any of
   its code runs. `"excludeExtensionTools": ["deploy_preview"]` removes named tools an extension brings. Neither takes a watch rule.
-  Either makes the file `"version": 2`, which a writer stamps. A name not on a host is no refusal there, and a tool name that matched
-  nothing can stop a job before its prompt. These stop what a job loads on its own, not what an agent with a shell can reach
-  ([`docs/exclude-tools.md`](exclude-tools.md)).
+  Either makes the file `"version": 2`, which a writer stamps, and needs every host on a release that reads it
+  ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). A name not on a host is no refusal there, and a tool name
+  no staged package or overlay extension brought can stop a job before its prompt. Removing a tool does not stop its extension's code from running, and
+  neither key stops what an agent that can write files or run commands can reach ([what exclusion does not stop](exclude-tools.md#what-exclusion-does-not-stop)).
 
 - `"mcp": ["docs", "files"]` names MCP servers from the overlay's `mcp.json` for that trigger's jobs to
   connect ([`docs/mcp.md`](mcp.md)). Names only: the servers themselves, and the credentials they take, are the

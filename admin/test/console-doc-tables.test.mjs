@@ -305,7 +305,7 @@ const WARNINGS = Object.freeze({
 
 /**
  * Refusals the table leaves out, each with why, so a new one has to choose. The first group no page can meet. The second is the
- * paragraph under the table's, and it is held below by the planner reading no host.
+ * paragraph under the table's, and it is held below by a real refusal of a host of each kind, and by the planner reading no host.
  */
 const NOT_IN_THE_TABLE = Object.freeze({
   // No triggers file means no digest, and no digest means the page draws no form.
@@ -529,6 +529,16 @@ test("the sentences the docs quote of the preview are the real preview's, and a 
   const noHosts = await plannerWorld({ deps: { readHosts: async () => ({ hosts: [] }), readHostLoads: async () => ({ hosts: [] }) } }).preview({ excludeExtensions: ["pi-lint"] });
   const none = noHosts.summary.find((one) => one.startsWith("No host is live right now, so no host's release"));
   assert.ok(none && consoleDoc.includes(`"${none}"`), `${JSON.stringify(noHosts.summary ?? noHosts)}`);
+  // The refusal that paragraph describes, off the real preview: a host that reads less waits, and only one with no version drops a key and runs wider.
+  const older = await plannerWorld({ deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "1", jobDataVersion: "2" }, { name: "mini2" }] }), readHostLoads: async () => ({ hosts: [exclusionHost()] }) } }).preview({ excludeExtensions: ["pi-lint"] });
+  assert.match(older.refusal, /^This change needs the triggers file at version 2 and the job data at version 3\./);
+  assert.match(older.refusal, /mini1 reads less, and would hold every job this file touches/);
+  assert.match(older.refusal, /mini2 publishes no version, and would drop what it does not know, which can run a job wider on a clean record/);
+  assert.ok(consoleDoc.includes("need version 2 and job data version 3"));
+  assert.ok(consoleDoc.includes("A host that reads less would hold every job this file touches. A host that publishes no version is from before issue #761: it drops what it does not know and can run a job wider on a clean record."));
+  // What the run's Tools line says of such a name, as the `left-out` row quotes it.
+  assert.ok(flat(read("admin/src/loaded-words.mjs")).includes('no package or overlay extension brought ${unbrought.length === 1 ? "it" : "them"}'));
+  assert.ok(consoleDoc.includes('the Tools line says "no package or overlay extension brought it" of a tool\'s'));
   // What an Undo says of the bytes, each from the real preview that says it.
   const handFile = await plannerWorld({ text: `${JSON.stringify({ triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix" } }] })}\n` }).preview({ flow: "review" });
   assert.equal(handFile.plan.undo, "Put trigger row 2's values back; the file stays in the form the writer gives it");

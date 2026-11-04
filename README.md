@@ -405,7 +405,7 @@ A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800e" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool your extensions add, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
+  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800e" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool a recent run recorded, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
 </picture>
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
@@ -438,7 +438,7 @@ PI_GLOBAL_PI_DIR=/absolute/path/to/my-dispatch/pi-global
 | Your MCP servers, with credentials as references only | Secrets of any kind: the copy is read by jobs, so it holds none |
 
 **Read the list it prints.** An extension is code, and it runs in every job, beside work that may come from a stranger's issue text. Skip
-extensions with `--no-extensions`, or keep one trigger's jobs out of all your packages, or out of one package or extension, with the switches on its page
+extensions with `--no-extensions`. To keep all your packages, or one package or extension, out of one trigger's jobs, use the switches on that trigger's page
 (`"packages": false` and `"excludeExtensions"` in the triggers file).
 
 Your projects still win. A job layers your setup under the project's own `.pi/` folder, so a project's skill replaces yours of the same
@@ -476,9 +476,15 @@ start with the same things as on your other machines, and one that has not told 
 match. Under each line is what a recent run really had, so a setting and what it did sit together. Nothing is saved while you click: your changes collect
 at the foot of the card, and you can discard them.
 
-**You can turn off one thing and keep the rest.** On a trigger's page you can turn off one of your packages or extensions, or one tool they add, for that
-trigger's jobs alone. That stops a job from loading it by itself, and does not lock it away: an agent that can run commands or write files may still bring it
-back ([what this does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)).
+**You can turn off one thing and keep the rest.** On a trigger's page you can turn off one of your packages or extensions for that trigger's jobs alone, and those
+jobs no longer load it. You can also turn off a tool one of them adds: the tool is gone, and the rest of that extension still runs. A tool gets its switch once a run has
+recorded it, or once your triggers file names it.
+
+This limits what a job starts with, not what its agent can do next. An agent that can run commands or write files can bring back what you turned off, so if code must stay
+out of reach of a trigger's agent, turn those tools off as well ([what this does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)).
+
+This needs every machine on a release that knows how: one later than 5.0.0, so not 4.3.1. Until every machine runs one, the page refuses the change
+and names the machine to upgrade ([what a fleet needs](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)).
 
 **You see it in words first, and confirm once.** **Preview the change** says each change in a sentence, and says so when it gives
 jobs more than they had. It says when the change takes effect and which jobs already in line would be refused, warns about what would stop these jobs on the
@@ -495,10 +501,10 @@ expensive for even one request under its cap, the page refuses the change and na
 If the page is out of date, it asks you to reload rather than write over someone else's change.
 
 **Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models,
-its outside systems, which tools its jobs lose, which of an extension's tools they lose, whether they load your packages or which of your packages or extensions
-they leave out: one that tries is refused before you are asked. You set those on the page,
+its outside systems, which tools its jobs lose, pi's own or your extensions', whether they load your packages, or which of your packages and extensions
+they leave out. A command that tries is refused before you are asked. You set those on the page,
 or your technical person sets them in the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
-They can still move a trigger's flow, provider and model, and only after you confirm.
+Those commands can still move a trigger's flow, provider and model, and only after you confirm.
 
 ## Words used here
 
@@ -719,7 +725,7 @@ live, and which the console and the panel can edit, or you by hand. Each entry i
 - `packages`: opts out of the staged pi packages ([workflows](docs/workflows.md)).
 - `excludeTools`: removes named tools of pi's own or an MCP server's ([excluded tools](docs/exclude-tools.md)).
 - `excludeExtensions`: leaves named staged packages and overlay extensions out of its jobs ([leaving one out](docs/exclude-tools.md#leaving-an-extension-out-runexcludeextensions)).
-- `excludeExtensionTools`: removes named tools an extension adds, and a name nothing registered can stop the job ([an extension's tools](docs/exclude-tools.md#an-extensions-tools-runexcludeextensiontools)).
+- `excludeExtensionTools`: removes named tools an extension adds. If no staged package or overlay extension brought a name, the job can stop before its agent starts ([an extension's tools](docs/exclude-tools.md#an-extensions-tools-runexcludeextensiontools)).
 - `provider`, `model`: the model its jobs run on ([choosing the model](docs/triggers.md#choosing-the-model-and-the-turn-limit)).
 - `models`, `fallbackModels`, `maxCostUsd`: the models a job may call, the ones to try when one is rate limited, and its own dollar cap ([limiting models](docs/triggers.md#limiting-which-models-a-job-may-call), [fallback models](docs/model-failover.md), [a dollar cap](docs/triggers.md#a-dollar-cap-per-job)).
 - `replicas`: races independent sandboxes on one event ([replicas](docs/replicas.md)).
@@ -730,9 +736,11 @@ On a trigger's page in the console, a person changes `flow`, `provider`, `model`
 `excludeExtensionTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
 so on a fleet where each host keeps its own, a host keeps what it has until its copy changes. A few others have the page's Edit form. The rest change in the file, and editing the file works as it always has.
 
-`excludeExtensions` and `excludeExtensionTools` stop what a job loads on its own, not what an agent that can run commands or write files can reach
-([what exclusion does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)). A file that uses either needs `"version": 2`, so every host needs a release
-that reads a file's version first ([versions and older hosts](docs/exclude-tools.md#versions-and-older-hosts)).
+`excludeExtensions` keeps an extension's code out of a job. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs. Neither stops what an
+agent that can run commands or write files can reach ([what exclusion does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)). A file that uses either needs
+`"version": 2`, and its jobs need job data version 3, so every worker, receiver and console needs a release that reads both. The first comes after 5.0.0: 4.3.1 and earlier
+drop both keys and run the job wider than the file says, and 5.0.0 holds every job. While a live worker reads less, the page refuses the change and names it
+([what a fleet needs](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)).
 
 A whole project can get one environment from your secrets manager, granted once and read fresh at each job start. Quiet
 hours pause a repo or folder by weekday and timezone ([`docs/pause-windows.md`](docs/pause-windows.md)). The

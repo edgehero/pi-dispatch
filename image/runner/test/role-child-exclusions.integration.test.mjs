@@ -87,6 +87,11 @@ test("the exclusion beats an agent's own tools: `tools: [read, bash]` with bash 
 	assert.ok(!removed.all.includes("bash"));
 });
 
+test("an agent that lists only what the trigger removes still starts, and has no tools", { skip }, async () => {
+	const none = await child({ tools: ["bash"], excludeTools: ["bash"] });
+	assert.deepEqual(none.active, []);
+});
+
 /** The real job's model: its first call asks for the subagent, a child's call and the call after the child answer in words. Every request's tools are kept. */
 async function scriptedServer() {
 	const offered = [];
@@ -133,7 +138,7 @@ test("a whole job: the real runner hands PI_EXCLUDE_TOOLS to its role child, and
 	}
 });
 
-test("the boundary the docs state: exclusion stops what a job loads on its own, and an agent that writes pi's settings brings an excluded extension back in a child", { skip }, async () => {
+test("the boundary the docs state: exclusion stops what a job loads on its own, and pi's write tool, with no shell, brings an excluded extension back in a child", { skip }, async () => {
 	const server = await scriptedServer();
 	try {
 		const root = jobTree({ base: server.base });
@@ -144,8 +149,8 @@ test("the boundary the docs state: exclusion stops what a job loads on its own, 
 		writeFileSync(join(root, "home", ".pi", "agent", "models.json"), readFileSync(join(root, "opt", "pi-global", "models.json")));
 		const overlayFile = join(root, "opt", "pi-global", "extensions", "gone.js");
 		put(root, "/opt/pi-global/extensions/gone.js", `export default function (pi) { pi.registerTool({ name: "gone_tool", label: "t", description: "t", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [] }) }); }\n`);
-		// As an agent with a shell could, before it asks for a child: the file is writable in the image (0777, image/Dockerfile).
-		writeFileSync(join(root, "home", ".pi", "agent", "settings.json"), JSON.stringify({ extensions: [overlayFile] }));
+		// With pi's own `write` tool, as an agent with no shell could, before it asks for a child: the tool takes any path, and the folder is writable in the image (0777, image/Dockerfile).
+		await pi.createWriteTool(root).execute("write", { path: join(root, "home", ".pi", "agent", "settings.json"), content: JSON.stringify({ extensions: [overlayFile] }) });
 		const { exit, stderr } = await runRealJob(root, { PI_MODEL_ROLES_FILE: "/job/model-roles.json", PI_AGENTS_FILE: "/job/agents.json", PI_EXCLUDE_EXTENSIONS: "gone", PI_ALLOWED_MODELS: ref, PI_OFFLINE: "1" });
 		assert.equal(exit?.code, 0, `${JSON.stringify(exit)}\n${stderr}`);
 		const parentCall = server.offered.find((names) => names.includes("subagent"));
@@ -166,7 +171,7 @@ test("a whole job: an extension tool the trigger names is out of the child too, 
 		put(root, "/job/agents.json", JSON.stringify({ version: 1, agents: [{ name: "scout", description: "probe", content: "Probe." }] }));
 		mkdirSync(join(root, "home", ".pi", "agent", "extensions"), { recursive: true });
 		writeFileSync(join(root, "home", ".pi", "agent", "models.json"), readFileSync(join(root, "opt", "pi-global", "models.json")));
-		// In the child's own agent dir, as an agent with a shell could leave one: what its CLI loads, and a tool the trigger names.
+		// In the child's own agent dir, as an agent that can write files could leave one: what its CLI loads, and a tool the trigger names.
 		const tool = (name) => `pi.registerTool({ name: ${JSON.stringify(name)}, label: "t", description: "t", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [] }) });`;
 		writeFileSync(join(root, "home", ".pi", "agent", "extensions", "child-tools.js"), `export default function (pi) { ${tool("child_keep")} ${tool("child_gone")} }\n`);
 		const { exit, stderr } = await runRealJob(root, { PI_MODEL_ROLES_FILE: "/job/model-roles.json", PI_AGENTS_FILE: "/job/agents.json", PI_EXCLUDE_EXTENSION_TOOLS: "child_gone", PI_ALLOWED_MODELS: ref, PI_OFFLINE: "1" });

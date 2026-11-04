@@ -944,7 +944,7 @@ refactor apart.
   | `overlay` | `loaded` and `failed`: overlay extensions by first path segment, failed ones first when the cap is reached |
   | `mcp` | One `[state, tools]` per server, in `PI_MCP_SERVERS` order, with no name, every server the document names included. State is one of `connected`, `failed`, `timeout`, `pending`, `disabled`. `timeout` is a server still pending when the wait ran out; `pending` is one still waiting at a note, or when another's failure ended the wait. `tools` sums the pages of a tool list and starts over when pi retries the connection |
   | `tools` | `active`, the session's active count; `own`, the active tools that are pi's own by name and by source: an extension's tool of the same name is not pi's; and `job`, the active tools the job's own factories registered, by name from the closed `LOADED_JOB_TOOLS` and by an `<inline:` source (`report_progress`, the MCP discovery and resource tools, the watch and answer draft tools), which is how `active` adds up beside them. A server's direct tools are its row's count. Read again after the servers connect. `unmatched`, only when there is one (issue #800): the positions in `PI_EXCLUDE_EXTENSION_TOOLS` of the names no staged package or overlay extension registered, positions as a package's row is, so no name is on the line. Every form but the minimal one keeps it |
-  | `extTools` | The names of the tools a staged package or an overlay extension brought, for a later switch that excludes one: `p` rows of `[PI_PACKAGES position, ...names]`, `o` rows of `[overlay.loaded position, ...names]`, sorted, each name matching `^[A-Za-z][A-Za-z0-9_-]{0,47}$`. Read before the first prompt, so nothing the agent writes can reach it |
+  | `extTools` | The names of the tools a staged package or an overlay extension brought, which a trigger's page offers as chips that exclude one (`run.excludeExtensionTools`): `p` rows of `[PI_PACKAGES position, ...names]`, `o` rows of `[overlay.loaded position, ...names]`, sorted, each name matching `^[A-Za-z][A-Za-z0-9_-]{0,47}$`. Read before the first prompt, so nothing the agent writes can reach it |
   | `cut` | `form`, one of `full`, `compact`, `minimal`, and how many `packages` rows, `servers`, `names` and `counts` a cap took. Nothing is dropped silently |
 
   **The hostile-name rule: through ordinary API use, no string a repository chose reaches this field.** A repository's skills, extensions and
@@ -2175,7 +2175,7 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     `PI_EXCLUDE_TOOLS`, and a job carrying exclusions on an image without it is refused pre-spend
     (`job-image-exclude-tools-unsupported`), because an older runner would ignore the variable and run a "read-only"
     trigger with every tool the file says to remove: a permission quietly not enforced. `loadExclusions` (issue #800) declares that
-    it reads `PI_EXCLUDE_EXTENSIONS` and `PI_EXCLUDE_EXTENSION_TOOLS`, stops a strict job on a name that matched nothing and hands a role child the
+    it reads `PI_EXCLUDE_EXTENSIONS` and `PI_EXCLUDE_EXTENSION_TOOLS`, stops a strict job on a name no staged package or overlay extension brought and hands a role child the
     trigger's exclusions on its command line; a job carrying either field on an image without it, or `run.excludeTools` beside a role map (`job.modelRoles`,
     so a child can start), is refused pre-spend (`job-image-load-exclusions-unsupported`), and its evidence is a
     real offline job at a cap of 0: an excluded overlay module never runs beside a control that does, a strict typo exits 2 by name, and
@@ -4413,8 +4413,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `run` keys (`TRIGGER_RUN_FIELD_VERSIONS`), the top-level blocks (`TRIGGERS_BLOCK_VERSIONS`) and the VALUES of an
   entry's fields, of its `run` keys and of each block (`TRIGGER_VALUE_VERSIONS`, `TRIGGER_RUN_VALUE_VERSIONS`,
   `TRIGGERS_BLOCK_VALUE_VERSIONS`, `field -> (value) => version`, a block's rule handed the whole block) need, all five
-  frozen and empty today, first when added, in place when kept, and no key at all while that is 1 (a hand-written
-  `"version": 1` is dropped), so a file of today's content is written byte for byte as before. That text is
+  frozen, the first naming `excludeExtensions` and `excludeExtensionTools` at 2 and the other four empty today, first when added, in place when kept, and no key at all while that is 1 (a hand-written
+  `"version": 1` is dropped), so a file that uses neither field is written byte for byte as before. That text is
   `triggersFileText(next, nextDocument, versions)` (AMENDED 2026-11-04, #823), which the console's pre-checks call
   too: a standing answer, a model role, a zero-touch group name, an instruction sentence and its Undo are each
   previewed as those bytes over the change the plan hands the writer, and the current file, and the standing answer,
@@ -4425,13 +4425,13 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   worker's, the receiver's and the console's bundled copy, through `parseTriggersDocument`) judges it right after the
   duplicate-key check (so a repeated `version` is a broken file, never a newer one) and BEFORE the `triggers` array,
   because a newer file may have reshaped anything below it: a version above this build's throws a configError marked
-  `.newer` ("triggers file written by a newer pi-dispatch (version N; this build understands 1)"); a version that is not
+  `.newer` ("triggers file written by a newer pi-dispatch (version N; this build understands 2)"); a version that is not
   an integer of 1 or more, and a `run` key, block or value that needs more than the file declares ("run.<key> needs
   triggers file version N, and the file declares M"; "trigger at index I: on holds a value that needs triggers file
   version N, and the file declares M"; the same for `run.<key>` and for a top-level block), throw the ordinary one. So a
   newer file refuses a service's start like any file that does not load. Every release before this one ignored a
   top-level `version`, so one an operator wrote by hand now refuses a service's start when it is not an integer of 1 or
-  more, and reads as a newer release's file when it is above 1: remove it. On a live edit the worker keeps its running
+  more, and reads as a newer release's file when it is above what this build reads: remove it. On a live edit the worker keeps its running
   schedules (`schedules_reload_invalid`, as before) and also SETS a worker-wide state, logged `triggers_reload_newer`
   and cleared only by the next reload that loads (an edit that then breaks the file leaves it set); while it is set
   EVERY job, a cron job minted from the last good schedules included, defers `newer-release` at the head of the
@@ -4473,7 +4473,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `JOB_DATA_VALUE_VERSIONS`, the values of its top-level fields, frozen and empty). It is a JOB-level field, never
   inside `trigger`, so it never reaches `/job/event.json` or any other `/job` input (`INT-CONTAINER-JOB-INPUTS`), and
   every builder stamps it (`forgeJobOf`, `addLocalJob`, the cron template and the receiver's `fallbackJobOf`) only when
-  the data needs more than 1, so every job of today's fields is stored byte for byte as before. A builder handed input
+  the data needs more than 1, so a job with no field in that table is stored byte for byte as before. A builder handed input
   that already carries a `dataVersion` this build cannot read (above its own, or not an integer of 1 or more: a job a
   newer release stored, re-enqueued here, a held reply, a late message's fallback) throws a `RangeError` with
   `code: "newer-release"` ("job data carries a dataVersion this build cannot read (newer than 3, or not a whole number
@@ -4962,6 +4962,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   **Not model-callable** (AMENDED 2026-11-04, #800): a tool call carrying it or a near miss of it is refused before any
   confirm (`TOOL_PROOF_FIELDS`), by name, where the edit's planner read neither and only the adapter's field check stood behind it. A person changes it in the file or on the trigger's page
   (`trigger-environment-edit`). Those near misses are the tool sweep's alone: the loader has never swept this key.
+  **A chained child inherits it** (AMENDED 2026-11-04, #800): off the parent's job data, never the request file (`INT-OUTBOX-CONTRACT`). `run.excludeExtensions` withholds one package by name beside this all-or-nothing switch.
 - **`run.image` (ALL FOUR trigger kinds, optional non-empty string) — a selector, not an arming**: absent
   = the deployment default `PI_JOB_IMAGE`; present = the Docker image this trigger's job containers run in.
   It is **absent-stays-absent** in exactly the sense `provider`/`model`/`maxTurns` are (**Why**, below):
@@ -5178,10 +5179,10 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   (`TRIGGER_RUN_FIELD_VERSIONS`, `JOB_DATA_FIELD_VERSIONS`), and both are rows of `AUTHORED_NARROWING_FIELDS`, so a job that arrived without one
   its entry authors is refused `trigger-skew`. A chained child gets both whole, unlike `run.excludeTools`, whose server names are dropped: a
   child connects no server, and does load extensions. A role child gets the second on its command line. Watch rules refuse both as unknown run
-  keys, and watch, answer draft, question grouping and canary jobs are built by name and carry neither. No tool sets either, and today neither is
-  on the trigger's page: a tool call carrying one is refused by the adapter's field check, and a person writes them in the file. **Absent carries
-  no key at all**, so nothing about any existing job moves. Each stops what a job loads on its own, not what an agent with a shell can reach
-  (`DES-PER-TRIGGER-LOAD-EXCLUSIONS`, Residuals).
+  keys, and watch, answer draft, question grouping and canary jobs are built by name and carry neither. No tool sets either: a tool call carrying one is refused
+  before any confirm (`TOOL_PROOF_FIELDS`), and a person writes them in the file or on the trigger's page (`trigger-environment-edit`). **Absent carries
+  no key at all**, so nothing about any existing job moves. `run.excludeExtensions` stops what a job loads on its own, `run.excludeExtensionTools` takes a tool and leaves its extension's code running, and neither
+  stops what an agent that can write files or run commands can reach (`DES-PER-TRIGGER-LOAD-EXCLUSIONS`, Residuals; `docs/exclude-tools.md`, "What exclusion does not stop").
 
 - **`run.secrets` (ALL FOUR trigger kinds, optional map of env-var name to opaque reference) and
   `run.secretsProfile` (optional name)**: the environment variables this trigger's jobs receive, and which
@@ -6057,7 +6058,7 @@ validator rather than a second copy of it.
   verdict: half of a line that lied about something is not a fact.
 
   **Residual, stated: three things the line alone says survive the rebuild on their shape, because the worker has nothing to compare them with.** A merge-gated repository extension in
-  the same process can forge any of them. A tool name, `^[A-Za-z][A-Za-z0-9_-]{0,47}$`: no space, no markup, no path, though `ignore-all-previous` passes, and it reads as a package's or the overlay's. Nothing acts on it: it is shown to a person and decides nothing. A later switch that excludes a tool by name could only narrow what a job has, and a wrong name would refuse the job.
+  the same process can forge any of them. A tool name, `^[A-Za-z][A-Za-z0-9_-]{0,47}$`: no space, no markup, no path, though `ignore-all-previous` passes, and it reads as a package's or the overlay's. A person may act on it: the trigger's page offers it as a chip, and only a person's Confirm writes it into `run.excludeExtensionTools`. Doing so can only narrow what a job has, and a name no staged package or overlay extension brings stops a strict job (`exclude-tool-not-loaded`).
   `pi`, three dotted numbers: digits and no word. Each count, an integer within its bound: it can be wrong, and a run of them can spell digits.
   One thing a shape would admit stays off the record: a tool name or a `pi` holding one of this job's secret values or a known token's shape (the job's own `makeRedactor`).
   A `pi` is then a violation (`pi-secret`). A tool name is **withheld, alone**: its row goes without it, the row's `tools` count stays, so a row can hold fewer names than it counts, `cut.names` counts it, and the worker logs `loaded_names_withheld` with how many and no name. It is no violation because it is no sign of a lie: every env value outside the structural allowlist counts as a secret, so `SEARCH_INDEX=docs_search` forwarded through `PI_FORWARD_ENV`, beside a staged package that registers `docs_search`, would otherwise read every run of that trigger as `invalid`, its counts and problems lost, with nothing forged. A forged line gains nothing from this: it could leave any name off anyway, and the count still says how many there were. A secret under the redactor's eight-character floor, or transformed, or
@@ -10301,7 +10302,7 @@ job data it defers each such job until it is upgraded. The fix is "upgrade and r
 <writers>, to a release that reads version N", where `<writers>` is every panel and console that writes the store
 (one from before issue #761 drops a key it does not know when it writes), and, for job data, "every receiver and
 every console that queues these jobs (a receiver publishes no registry row, so doctor cannot see which receivers are
-older)". Nothing at all while every need is 1, which is every deployment while the version tables are empty. Hosts
+older)". Nothing at all while every need is 1, which is every deployment whose triggers use no field a version table names. Hosts
 are named, never a file's content. Nothing refuses on them. `collectChecks` takes a test-only seam, `versionTables`,
 that hands the store tables to these need paths, so a test drives a need above 1 through the real collection before
 a table has a row.
@@ -14022,9 +14023,10 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-04 (#800, a role child's tools) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED** in the `run.excludeTools` bullet: a role child gets the list on its command line and it beats an agent's own `tools`. It ignored the list. UNCHANGED, checked: `INT-CONTAINER-JOB-INPUTS`' `PI_EXCLUDE_TOOLS`, which the runner still reads and a child still does not. |
 | 2026-11-04 (#800, what a trigger leaves out) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a new bullet, `run.excludeExtensions` and `run.excludeExtensionTools`, and `TRIGGERS_FILE_VERSION` is 2 (`DES-STORE-VERSION-WHEN-NEEDED`). **CORRECTED** in the `run.excludeTools` bullet: an extension's tool has its own key, where it read as not excludable at all. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `PI_EXCLUDE_EXTENSIONS`, `PI_EXCLUDE_EXTENSION_TOOLS`, `PI_EXCLUDE_TOOLS_STRICT`, and the capability `loadExclusions`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a row for `exclude-tool-not-loaded`, and `tools.unmatched` on the line, by position. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reasons `exclude-tool-not-loaded`, `package-canary-excluded` and `job-image-load-exclusions-unsupported`; `leftOut` gains `extensions`, `extensionsNotHere` and `extensionTools`, `tools` gains `unmatched`, each conditional, so `v` stays 1 and no other record moves by a byte. `LOADED_RECORD_MAX_BYTES` is 24 KiB, 16 until these: the worst case rose from 15,971 to 21,145 bytes and past the bound a whole line would read as `cut`. **`INT-HOST-REGISTRY-CONTRACT` AMENDED** in one number. UNCHANGED, checked: `INT-OUTBOX-CONTRACT` (a request file can neither set nor drop either: `collectChain` reads them off job data, by name, as `run.excludeTools`); `INT-SDK-SESSION-OPTIONS` (the same `excludeTools` option carries the longer list). |
 | 2026-11-04 (#800, the job data version) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED**: `JOB_DATA_VERSION` is 3 and both exclusion fields need it, since a host that reads 2 knows `packageCanary` and neither of them. **`INT-HOST-REGISTRY-CONTRACT`** says the published value. UNCHANGED, checked: `INT-CONTAINER-JOB-INPUTS`, since `dataVersion` reaches no `/job` input. |
-| 2026-11-04 (#800, a chained child's packages) | **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits the parent's `packages` off job data, as it does `excludeExtensions`. A `"packages": false` parent chained a child with every staged package, because `addLocalJob`'s list had no such field. UNCHANGED, checked: `INT-TRIGGERS-FILE-CONTRACT`'s `run.packages` bullet, and no `JOB_DATA_FIELD_VERSIONS` row, since a worker at the tag reads `job.packages` at its container start and so honours such a child. |
+| 2026-11-04 (#800, a chained child's packages) | **`INT-OUTBOX-CONTRACT` AMENDED**: a chained child inherits the parent's `packages` off job data, as it does `excludeExtensions`. A `"packages": false` parent chained a child with every staged package, because `addLocalJob`'s list had no such field. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** in the `run.packages` bullet, which now says so. UNCHANGED, checked: no `JOB_DATA_FIELD_VERSIONS` row, since a worker at the tag reads `job.packages` at its container start and so honours such a child. |
 | 2026-11-04 (#800, a tool name's case) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED** in the `run.excludeExtensionTools` bullet: what it refuses as pi's, a server's or a job's own it refuses in any case. UNCHANGED, checked: `LOADED_TOOL_NAME_RE`, which still takes an upper-case letter in an extension's own tool name. |
 | 2026-11-04 (#800, a key that nearly names either) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED** in the `run.excludeExtensions` bullet: what a near miss of either key is. Five spellings and their kind were dropped at load. UNCHANGED, checked: the `run.excludeTools` bullet, whose sweep answers as it did. |
 | 2026-11-04 (#800, a role child on an older image) | **`INT-CONTAINER-RUNTIME-CONTRACT`**: `loadExclusions` also declares that a role child is handed the trigger's exclusions, and a job with `run.excludeTools` beside a role map needs it. UNCHANGED, checked: `job-image-load-exclusions-unsupported` as the reason, and the `excludeTools` token. |
 | 2026-11-04 (#800, a repository's tool of that name) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` CORRECTED**: `exclude-tool-not-loaded` and `tools.unmatched` count what a staged package or an overlay extension registered, read off each extension's own `tools`. **`INT-CONTAINER-RUNTIME-CONTRACT`** (`PI_EXCLUDE_TOOLS_STRICT`), **`INT-TRIGGERS-FILE-CONTRACT`** and **`INT-RUN-HISTORY-FILE-CONTRACT`** say the same. UNCHANGED, checked: the line's shape, positions only, and `rebuildLoaded`, which reads the positions off the worker's list as before. |
 | 2026-11-04 (#800, what a host could read) | **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED** in `leftOut`: what "could not say" holds: a manifest that does not read joins an unlistable folder, and no folder or no manifest leaves it. UNCHANGED, checked: the field's shape, and that a record from before keeps its bytes. |
+| 2026-11-04 (#800, what an exclusion does not stop, and what is no longer to come) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED**: `TRIGGER_RUN_FIELD_VERSIONS` is not empty; the newer file's refusal says this build understands 2; a hand-written `version` reads newer above what this build reads; a tool call carrying either exclusion is refused before any confirm and a person also writes them on the trigger's page, where the bullet said neither is on it; what each key stops, and that neither stops what an agent that can write files or run commands can reach. **AMENDED** in the `run.packages` bullet: a chained child inherits it, where an earlier row's "UNCHANGED, checked" of that bullet no longer held, and is corrected where it stands. **`INT-RUN-HISTORY-FILE-CONTRACT` CORRECTED** in two places: `extTools` and the residual of a tool name on the line each treated a switch as to come, where a trigger's page offers the name as a chip and only a person's Confirm writes it. **`INT-CONTAINER-RUNTIME-CONTRACT` CORRECTED** in one clause of `loadExclusions`: a name no staged package or overlay extension brought, not one that matched nothing. **`INT-HOST-REGISTRY-CONTRACT` CORRECTED** in one sentence: doctor stays silent while every need is 1, which is no longer every deployment. UNCHANGED, checked: `TRIGGERS_FILE_VERSION`, `JOB_DATA_FIELD_VERSIONS`, the line and the record, and every value a table names. |

@@ -82,7 +82,7 @@ to do about it. The record holds, by tier:
   have moved on from. A record that names no commit (an older worker's) opens the repository and says so.
 - **The flow:** the tier it was found in, or that none held it. It is still a report: a job with no flow runs and can exit 0,
   which is why the run's outcome says so.
-- **What was left out on purpose:** `run.excludeTools`, `"packages": false`, this job's overlay switch
+- **What was left out on purpose:** `run.excludeTools`, `run.excludeExtensionTools`, `run.excludeExtensions`, `"packages": false`, this job's overlay switch
   (`PI_GLOBAL_ALLOW_EXTENSIONS=0` on its host, or a model canary's replay) and a kind of job that never gets the overlay. Each is
   said as chosen, never as missing.
 
@@ -229,7 +229,7 @@ present but dormant is a deployment missing the setup its flows were written aga
    matcher, so a glob is **not** evaluated. The extension is copied and the command tells you which ones it
    could not decide about, rather than guessing in either direction.
 2. They load in every job unless you set `PI_GLOBAL_ALLOW_EXTENSIONS=0`, which keeps them staged but
-   dormant. Unset, empty and the legacy `1` all mean load, so an existing `.env` keeps working and still
+   dormant, or a trigger leaves one out by name ([`"excludeExtensions"`](exclude-tools.md#leaving-an-extension-out-runexcludeextensions)). Unset, empty and the legacy `1` all mean load, so an existing `.env` keeps working and still
    says what it always said. **Any other value fails loudly** — the worker refuses to boot, `doctor`
    reports it, the runner refuses the job — because the damaging misreading is now "I thought I had turned
    these off", where before a typo merely left them dormant. A run with them off reads so on its page, as
@@ -286,8 +286,8 @@ place, because two of them are easy to forget and #58 originally called the thir
 
 `"excludeExtensions"` stops what a job loads on its own. An overlay entry it names is taken off the runner's list before pi imports
 anything, and a package it names is left out whole, with its skills, prompts and themes. A name not on this host is no refusal: the
-run's record says so and doctor warns. Neither it nor `"packages": false` is a wall: an agent with a shell can write
-`~/.pi/agent/settings.json`, and a later role child then loads what was left out ([exclusions](exclude-tools.md#what-exclusion-does-not-stop)).
+run's record says so and doctor warns. Neither it nor `"packages": false` keeps code away from an agent that can write files or run commands
+([what exclusion does not stop](exclude-tools.md#what-exclusion-does-not-stop)).
 
 The third one surprises people, and it is deliberate. pi's normal discovery posture is on
 (`noExtensions: false`), and `/workspace` holds the **base repo's default-branch sha**, so what loads is

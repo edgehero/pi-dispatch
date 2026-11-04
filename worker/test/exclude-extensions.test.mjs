@@ -435,9 +435,33 @@ test("the docs' numbers and lists are the code's", () => {
 	for (const reason of ["exclude-tool-not-loaded", "package-canary-excluded", "job-image-load-exclusions-unsupported"]) {
 		assert.ok(reasons.includes(`### ${reason} ${explainReason(reason).sentence}`), reason);
 	}
-	// The boundary, in every place that promises what exclusion does.
-	for (const path of ["docs/exclude-tools.md", "docs/global-pi-overlay.md", "SECURITY.md"]) assert.ok(flat(path).includes("not what an agent") || flat(path).includes("an agent with a shell can write"), path);
-	assert.ok(doc.includes("`~/.pi/agent/settings.json`"));
+	// The boundary, in every place that promises what exclusion does, and said in full in one of them. "With a shell" undersold it: `write` alone reaches pi's settings.
+	for (const path of ["docs/exclude-tools.md", "docs/global-pi-overlay.md", "docs/triggers.md", "SECURITY.md", "specs/requirements.md", "specs/interfaces.md", "specs/design.md"]) {
+		const said = flat(path);
+		assert.ok(said.includes("an agent that can write files or run commands"), path);
+		assert.doesNotMatch(said, /an agent with a shell|also removes its shell/, path);
+	}
+	for (const path of ["docs/global-pi-overlay.md", "docs/triggers.md", "SECURITY.md"]) assert.ok(flat(path).includes("exclude-tools.md#what-exclusion-does-not-stop"), path);
+	const boundary = doc.slice(doc.indexOf("## What exclusion does not stop"), doc.indexOf("## Versions and older hosts"));
+	for (const said of ["`~/.pi/agent/settings.json`", "`~/.pi/agent/extensions/`", "`write` alone, with no shell", "Removing `bash` is not enough", "(`bash`, `powershell`, `write`)", "`/opt/pi-global`", "A third-party subagent package's own child", "A person's re-run of a chained child", "`tools: [bash]`", "`../outside.js`", "`import`"]) assert.ok(boundary.includes(said), said);
+	assert.doesNotMatch(boundary, /`edit`[^.]*(?:reaches|closes|writes)/, "no sentence claims a route for `edit`, which no test tried");
+	// "Stops what a job loads" is true of one key: removing a tool leaves its extension's code running.
+	assert.ok(boundary.includes("`run.excludeExtensionTools` and `run.excludeTools` take tools out of the session and stop nothing from loading"));
+	assert.doesNotMatch(doc, /Both of these keys stop what a job loads/);
+	// The versions, wherever a sentence said no file needs one yet, and what a fleet needs, off the tables themselves.
+	assert.doesNotMatch(flat("docs/triggers.md"), /Nothing needs one yet/);
+	assert.doesNotMatch(flat("docs/multi-host.md"), /Today no file needs more than version 1/);
+	const upgrading = flat("docs/upgrading.md");
+	assert.doesNotMatch(upgrading, /No field needs one yet|No file needs more than version 1 yet/);
+	const fleet = readFileSync(new URL("../../docs/upgrading.md", import.meta.url), "utf8");
+	const section = fleet.slice(fleet.indexOf("### What a fleet needs before a trigger leaves something out"), fleet.indexOf("## Valkey and BullMQ"));
+	assert.ok(section.includes(`\`triggers.json\` at version ${TRIGGER_RUN_FIELD_VERSIONS.excludeExtensions} and job data at version ${JOB_DATA_FIELD_VERSIONS.excludeExtensions}`), "the versions the section opens with");
+	assert.equal(TRIGGER_RUN_FIELD_VERSIONS.excludeExtensions, TRIGGER_RUN_FIELD_VERSIONS.excludeExtensionTools);
+	assert.equal(JOB_DATA_FIELD_VERSIONS.excludeExtensions, JOB_DATA_FIELD_VERSIONS.excludeExtensionTools);
+	const fleetRows = section.split("\n").filter((line) => line.startsWith("| ")).slice(1).map((line) => line.split(" | ")[0].slice(2));
+	assert.deepEqual(fleetRows, ["Worker", "Receiver", "Panel, console, `/dispatch`"], "who a fleet upgrades, each with what an older one does");
+	for (const said of ["`newer-release`", "`trigger-skew`", "`fleet.store-versions`", "`job-image-load-exclusions-unsupported`", "`loadExclusions`", "role map"]) assert.ok(section.includes(said), said);
+	assert.ok(fleet.indexOf("### What a fleet needs before a trigger leaves something out") > fleet.indexOf("## Mixed versions: what is safe"));
 	// The label and the row name the capability the same.
 	const label = /LABEL dev\.pi-dispatch\.capabilities="([^"]+)"/.exec(readFileSync(new URL("../../image/Dockerfile", import.meta.url), "utf8"))[1].split(",");
 	assert.ok(label.includes("loadExclusions"));

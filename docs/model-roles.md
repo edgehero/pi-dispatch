@@ -107,7 +107,9 @@ The `subagent` tool accepts one of these forms:
 Parallel batches allow at most four tasks; chains allow at most sixteen. The complete batch's agent
 names and models are checked before any child starts. A chain stops on a failed result. Children use
 the existing parent model policy, token accounting and dollar guards, and they lose the tools the trigger's
-`run.excludeTools` removes, whatever the agent's own `tools` say ([exclude-tools.md](exclude-tools.md)). This does not enable pi's
+`run.excludeTools` and `run.excludeExtensionTools` remove, whatever the agent's own `tools` say, so an agent that lists only `bash`, on a trigger
+that removes it, runs with no tools ([exclude-tools.md](exclude-tools.md)). Because of this, a job with `run.excludeTools` whose scope has a
+role map needs an image that declares `loadExclusions`, even if it never starts a child ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). This does not enable pi's
 experimental virtual-model routing or add the inline subagent tool recursively to child sessions.
 
 An unknown agent, unknown role or off-list model returns a named tool error before child startup;

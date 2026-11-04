@@ -92,6 +92,29 @@ test("a name that is no overlay entry's leaves the overlay whole, a repository's
 	}
 });
 
+test("what the docs say a name does not reach: a kept extension's import of an excluded file, and a root manifest's entry outside the folder", { skip }, async () => {
+	const server = await chatServer();
+	try {
+		const imports = jobTree({ base: server.base });
+		put(imports, "/opt/pi-global/extensions/gone.js", marked("gone", ["gone_tool"]));
+		put(imports, "/opt/pi-global/extensions/keeper.js", `import "./gone.js";\n${marked("keeper")}`);
+		const imported = await run(imports, { PI_EXCLUDE_EXTENSIONS: "gone" });
+		assert.equal(imported.exit?.code, 0, imported.stderr);
+		const marks = marksOf(imports);
+		assert.ok(marks.includes("module:gone"), `the name took the entry off the list and stopped no import: ${marks}`);
+		assert.ok(!marks.includes("factory:gone"), "and pi never called it as an extension");
+
+		const outside = jobTree({ base: server.base });
+		put(outside, "/opt/pi-global/extensions/package.json", JSON.stringify({ pi: { extensions: ["../outside.js"] } }));
+		put(outside, "/opt/pi-global/outside.js", marked("outside"));
+		const named = await run(outside, { PI_EXCLUDE_EXTENSIONS: "outside,outside.js" });
+		assert.equal(named.exit?.code, 0, named.stderr);
+		assert.ok(marksOf(outside).includes("factory:outside"), "no name means an entry that climbs out of the folder");
+	} finally {
+		await server.close();
+	}
+});
+
 test("a manifest entry the runner would have reported as skipped is no failure when the trigger names it", { skip }, async () => {
 	const server = await chatServer();
 	const tree = () => {
