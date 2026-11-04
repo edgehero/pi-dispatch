@@ -85,8 +85,7 @@ default and goes through an allowlist proxy, and the allowed hosts are yours to 
 ## Triggers: what starts a job
 
 Every trigger is one `{ on, run }` entry in a single `triggers.json`. The worker reads it live for cron,
-the receiver reads it live for forge webhooks, and the panel and the web console can edit it. A trigger's job cap, allowed models,
-fallbacks, MCP servers, tool exclusions and staged packages are changed by a person, on its page in the web console or in the file, never by a tool. **`on` is what fires it;
+the receiver reads it live for forge webhooks, and the panel and the web console can edit it. **`on` is what fires it;
 `run` is the skill it runs.**
 
 | `on.type` | Fires on | What the agent gets as its task |
@@ -138,7 +137,7 @@ One command puts a live terminal view over the whole deployment:
 
 - **MCP servers, read-only.** A trigger that names MCP servers says so on its row (`[mcp ...]`), and its
   drill-in shows each one as the overlay offers it now: where it runs, how its tools are reached, and the
-  variable names it is handed, or why every job of it would be refused. No tool and no panel key changes them: a person
+  variable names it is handed, or why every job of it would be refused. No `dispatch_*` tool and no panel key changes them: a person
   switches a trigger's servers on its page in the web console, or in the file.
 - **Status and spend.** Queue and worker state, day, week and month spend meters, a daily token counter,
   and the run history with tokens and cost per job. Each running job shows where it is: its turn, steps done and
@@ -232,8 +231,10 @@ One command puts a live terminal view over the whole deployment:
   actions. That includes explicit cap decreases, adding ordinary restrictive limit rows and pauses,
   turning existing run flags off, cancellation, failed-job removal and bounded priorities. Scope, size,
   minimums, inherited limits and mixed widening requests stay confirmed. The deployment file and pointer
-  cannot grant this authority. Answers, draft decisions, standing-answer adoption, forge reruns and a trigger's job cap, allowed models,
-  fallbacks, MCP servers, tool exclusions and staged packages remain person actions. Tool writes are audited as agents; human-confirmed intervention is tracked separately.
+  cannot grant this authority. Answers, draft decisions, standing-answer adoption and forge reruns remain person actions, and no
+  `dispatch_*` tool can set a trigger's job cap, allowed models, fallbacks, MCP servers, tool exclusions or staged packages. A pi process's own `bash`, `write` and
+  `edit` tools are outside this policy, so an unattended one must run with them disabled
+  ([`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md)). Tool writes are audited as agents; human-confirmed intervention is tracked separately.
 - **Paid starts stay bounded.** `dispatch_run`, Fire now and local or cron reruns need explicit valid
   `PI_DISPATCH_RUN_ROOTS` in the pi process environment. Fire now and reruns also require an explicit valid
   `PI_DISPATCH_RUN_PER_HOUR`. `dispatch_run` keeps its default of three starts per hour when that value is
@@ -341,7 +342,7 @@ page, a page per trigger and a structured editor for five trigger kinds. Edit an
 row, with a diff, confirmation and Undo. Human row numbers count from 1; tool indexes remain zero-based.
 The editor and its JSON fallback preserve the add tool's secret-bundle opt-out.
 
-**What its jobs get**, on a trigger's page, says what a job of it would start with on each host, a pill per host, and under each row what
+**What its jobs get**, on a trigger's page, says what a job of it would start with on each host, with a label for each host, and under each row what
 a recent run really had. There a person changes the flow, the provider and model, the job cap, the allowed models and fallbacks, the MCP
 servers, the tools and the all-or-nothing switch for staged packages, with one preview that says each change in words, one Confirm, and
 Undo. A viewer reads the same rows with no controls, an agent's page draws no card, and no tool reaches the action. The file works as it
