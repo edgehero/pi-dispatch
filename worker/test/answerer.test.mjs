@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { FORGE_KINDS } from "../src/forges.mjs";
 import { parseTriggersDocument } from "../src/triggers.mjs";
 import { ANSWER_CLASSIFICATIONS, validateAnswerRules, validateStandingAnswers, answerStandingSource, answerConfigDigest, makeAnswerDraftStore } from "../src/answerer.mjs";
 import { consoleDraftOf, answerTrailComment } from "../src/console-answer.mjs";
@@ -22,6 +23,17 @@ test("reviewed answer rules and standing answers have strict scope and execution
 	for (const adoptedAt of ["yesterday", "2026-10-31", "2026-10-31T12:00:00Z", "2026-02-30T12:00:00.000Z"]) assert.throws(() => validateStandingAnswers([{ ...standing, adoptedAt }]));
 	for (const key of ["answer_rules", "AnswerRules", "standing_answers"]) assert.throws(() => parseTriggersDocument(JSON.stringify({ triggers: [], [key]: [] }), "/config"));
 	const source = answerStandingSource(standing); assert.equal(source.id, answerConfigDigest({ kind: "standing", name: standing.title, revision: answerConfigDigest(standing) }));
+});
+
+test("a standing answer's forge prefix is FORGE_KINDS itself: every forge loads, anything else refuses, and no copy of the list is written out", () => {
+	for (const kind of FORGE_KINDS) assert.deepEqual(validateStandingAnswers([{ ...standing, repo: `${kind}:acme/web` }]), [{ ...standing, repo: `${kind}:acme/web` }], kind);
+	for (const repo of ["local:acme/web", "bitbucket:acme/web", "GitHub:acme/web", "constructor:acme/web", ":acme/web", "github:acme", "github:acme/web:x", "github:gitlab:acme/web"]) {
+		assert.throws(() => validateStandingAnswers([{ ...standing, repo }]), /a forge-qualified repository$/, repo);
+	}
+	// Two forge names side by side are a copy of the list: a forge added to FORGES would not reach it, and every
+	// standing answer of that forge would refuse the whole triggers file.
+	const names = FORGE_KINDS.join("|");
+	assert.doesNotMatch(readFileSync(new URL("../src/answerer.mjs", import.meta.url), "utf8"), new RegExp(`\\b(?:${names})\\b\\W+\\b(?:${names})\\b`));
 });
 
 test("only exact same-target real jobs answer a parent, and a partial pending scan cannot authorize a paid draft", async () => {

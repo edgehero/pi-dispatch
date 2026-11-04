@@ -204,8 +204,9 @@ Two consequences worth internalising before you design anything:
   job-data value tables; `ON_TYPES`, `PR_ACTIONS`, `ISSUE_ACTIONS` and `REVIEW_STATES`: `on` in the trigger value
   table; `EXCLUDABLE_TOOL_NAMES` and `MCP_EXCLUDABLE_TOOL_NAMES`: `excludeTools` in the trigger-run value table;
   `BACKEND_NAMES`: `backend` in the trigger-run and job-data value tables; `FORGE_MCP_KINDS`: `run` in the trigger
-  value table and `mcp` in the job-data value table; `ANSWER_CATEGORIES`: `answerRules` and `WATCH_SEVERITIES`:
-  `watchSources` in the triggers block value table, `WATCH_SEVERITIES` also `on` in the trigger value table;
+  value table and `mcp` in the job-data value table; `ANSWER_CATEGORIES`: `answerRules`, `FORGE_KINDS` as a
+  standing answer's prefix: `standingAnswers` and `WATCH_SEVERITIES`: `watchSources` in the triggers block value
+  table, `WATCH_SEVERITIES` also `on` in the trigger value table;
   `FORK_THINKING_LEVELS`: `thinkingLevel` in the job-data value table; `BUNDLE_FORMATS`: `secretBundles` in the
   settings value table), a list written inline being a residual of `DES-STORE-VERSION-WHEN-NEEDED`, and doctor's
   `STORE_FLEET_LINES` to the four version fields a worker publishes (`worker/test/store-version.test.mjs`,

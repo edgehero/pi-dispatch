@@ -167,6 +167,21 @@ export const ISSUE_ACTIONS = {
 };
 
 /**
+ * The row of a per-forge action table (`PR_ACTIONS`, `ISSUE_ACTIONS`) for the entry's forge, or a configError naming
+ * the trigger, its type and the forge. `run.kind` is a known forge by the time a normalizer asks, so only a forge
+ * added to FORGES without a row reaches the refusal; a plain index would hand the caller's spread `undefined`, a bare
+ * "allowed is not iterable" that names nothing. An own key, so no name finds a value on the prototype. Azure has no
+ * issue row and is refused by name before the issue normalizer asks, which says why; this says only that a row is
+ * missing.
+ *
+ * EXPORTED so a test can show the refusal for a table missing a row, which no shipped table is.
+ */
+export function forgeActions(table, kind, at, type, path) {
+	if (typeof kind === "string" && Object.hasOwn(table, kind)) return table[kind];
+	throw configError(`${at}: a ${type} trigger has no action list for ${kind}, so this build cannot check its on.action: ${path}`);
+}
+
+/**
  * The verdicts a submitted GitHub review can carry, in the webhook's own (lower-case) spelling, and the
  * vocabulary of the optional `on.reviewState` narrowing (issue #66).
  *
@@ -2331,7 +2346,7 @@ function normalizeIssue(on, run, index, path) {
 		throw configError(`${at}: issue on.action must be a non-empty array: ${path}`);
 	}
 	// Validated against THIS entry's forge, in that forge's own words -- normalizePullRequest's rule.
-	const allowed = ISSUE_ACTIONS[run.kind];
+	const allowed = forgeActions(ISSUE_ACTIONS, run.kind, at, "issue", path);
 	const expected = [...allowed].join("|");
 	for (const a of actions) {
 		if (!allowed.has(a)) {
@@ -2396,7 +2411,7 @@ function normalizePullRequest(on, run, index, path) {
 	}
 	// Validated against THIS entry's forge, in that forge's own words. A GitHub word on a GitLab trigger
 	// (or the reverse) is refused here rather than left to never match at run time.
-	const allowed = PR_ACTIONS[run.kind];
+	const allowed = forgeActions(PR_ACTIONS, run.kind, at, "pull_request", path);
 	const expected = [...allowed].join("|");
 	for (const a of actions) {
 		if (!allowed.has(a)) {

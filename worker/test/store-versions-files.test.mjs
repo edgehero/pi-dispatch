@@ -424,6 +424,19 @@ const OTHER_DOMAINS = Object.freeze([
 		widened: "policy",
 	},
 	{
+		// The loader builds a standing answer's `<forge>:<owner>/<name>` from FORGE_KINDS (issue #810), so a forge added to
+		// FORGES is a prefix this build takes and an older one refuses.
+		name: "FORGE_KINDS as a standing answer's prefix",
+		refused: "forge-qualified repository",
+		members: () => [...FORGE_KINDS],
+		baseline: FORGE_KINDS_BASELINE,
+		what: (m) => `the forge kind ${JSON.stringify(m)} as a standing answer's prefix`,
+		refusal: `${LOADER_REFUSES} when a standingAnswers entry's repo names it`,
+		// The kind is the head of one string, so the default rule's search for the kind in quotes never finds it.
+		probes: [{ table: "blockValueTable", field: "standingAnswers", doc: (m) => ({ triggers: [], standingAnswers: [{ id: "tests", title: "Test command", text: "Run npm test.", projects: ["web"], repo: `${m}:acme/web` }] }), rule: (kind) => (answers) => (Array.isArray(answers) && answers.some((a) => typeof a?.repo === "string" && a.repo.startsWith(`${kind}:`)) ? 2 : 1) }],
+		widened: "bitbucket",
+	},
+	{
 		name: "WATCH_SEVERITIES",
 		refused: "severity",
 		members: () => [...WATCH_SEVERITIES],
@@ -467,7 +480,7 @@ test("closed domains: every other exported list the triggers loader or the proce
 		for (const member of domain.baseline) assert.ok(members.includes(member), `${member} is still in ${domain.name}`);
 		assert.deepEqual(domainProblems(domain, members), [], domain.name);
 	}
-	for (const frozen of [BACKEND_NAMES, FORGE_MCP_KINDS, ANSWER_CATEGORIES, FORK_THINKING_LEVELS, WAIT_CONDITION_KEYS, WATCH_SEVERITIES]) assert.ok(Object.isFrozen(frozen));
+	for (const frozen of [BACKEND_NAMES, FORGE_MCP_KINDS, ANSWER_CATEGORIES, FORGE_KINDS, FORK_THINKING_LEVELS, WAIT_CONDITION_KEYS, WATCH_SEVERITIES]) assert.ok(Object.isFrozen(frozen));
 });
 
 test("closed domains: each of those checks refuses a widened list without a rule, and accepts it with one in every table it names", () => {
