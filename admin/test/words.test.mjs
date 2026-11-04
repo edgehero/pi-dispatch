@@ -473,6 +473,10 @@ test("capitalised: a sentence that opens with a word starts with a capital; one 
 
 test("capitalised keeps an id whose word is joined to the rest by @, as written", () => {
   assert.equal(capitalised("jobs@east is already paused"), "jobs@east is already paused");
+  // A name holding a slash is one name: a model, a repository. It keeps its spelling, and the word after it stays lower case.
+  assert.equal(capitalised("anthropic/claude-opus-5-5 needs at least $2.654295"), "anthropic/claude-opus-5-5 needs at least $2.654295");
+  assert.equal(capitalised("acme/web is paused"), "acme/web is paused");
+  assert.equal(capitalised("and/or a word"), "and/or a word");
 });
 
 test("capitalised keeps an id joined by a full stop with no space after it, as written", () => {

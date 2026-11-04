@@ -114,14 +114,15 @@ export function recordReason(record) {
 
 /**
  * A sentence's first letter in capitals: the planners write theirs in lower case, as the tools' errors read. Only when
- * it opens with a plain word: one that opens with an id (a job id's `gh-2f6a`, a queue's `pi-jobs@build3`) keeps the
- * id as it is written, since "Gh-2f6a" names no job.
+ * it opens with a plain word: one that opens with an id (a job id's `gh-2f6a`, a queue's `pi-jobs@build3`, a model's
+ * `anthropic/claude-opus-5-5`, a repository's `acme/web`) keeps the id as it is written, since "Gh-2f6a" names no job and
+ * "Anthropic/claude-opus-5-5" names no model.
  */
 export function capitalised(s) {
   const t = String(s ?? "");
-  // A word is letters up to a space or a sentence's own punctuation; a dash, an at sign, an underscore or a digit, or a
-  // colon or a full stop with no space after it, joins it into an id.
-  return /^[a-z]+(?![a-z0-9@_-]|[.:]\S)/.test(t) ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+  // A word is letters up to a space or a sentence's own punctuation; a dash, an at sign, an underscore, a slash or a digit,
+  // or a colon or a full stop with no space after it, joins it into an id.
+  return /^[a-z]+(?![a-z0-9@_/-]|[.:]\S)/.test(t) ? t.charAt(0).toUpperCase() + t.slice(1) : t;
 }
 
 /** A failed record with no reason (an older worker's untagged failure, or one whose reason was free text). */
