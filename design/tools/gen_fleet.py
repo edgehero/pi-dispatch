@@ -632,7 +632,7 @@ Rows are numbered 1 to 7 here, where the fixture numbered them 0 to 6 (#711: one
 # =====================================================================================
 def who(name, role):
     if name == "anonymous":
-        return f'<span class="au-who"><span class="avatar au-av">?</span><span>anonymous<small>no role</small></span></span>'
+        return f'<span class="au-who"><span class="avatar au-av">?</span><span>anonymous<small>none</small></span></span>'
     return f'<span class="au-who"><span class="avatar au-av">{name[:2]}</span><span>{name}<small>{role}</small></span></span>'
 
 AROWS = [
@@ -665,7 +665,7 @@ def arow(seq, at, wh, act, tgt, oc, reason):
 AUDIT_FILTERS = f"""<div class="filterbar">
   <label class="search">{ic('search')}<input type="search" placeholder="Search targets and reasons"></label>
   <button class="fpill" type="button">Who: <b>All</b>{ic('chev', 'ic ic--sm')}</button>
-  <label class="sr" for="audit-role">Actor role</label><select id="audit-role" class="select"><option>Role: all</option><option>Role: agent</option><option>Role: operator</option><option>Role: panel</option><option>Role: shell</option></select>
+  <label class="sr" for="audit-role">Actor role</label><select id="audit-role" class="select"><option>Role: all</option><option>Role: agent</option><option>Role: operator</option><option>Role: viewer</option><option>Role: panel</option><option>Role: shell</option><option>Role: none (no session)</option></select>
   <button class="fpill" type="button">Action: <b>All</b>{ic('chev', 'ic ic--sm')}</button>
   <button class="fpill" type="button">Outcome: <b>All</b>{ic('chev', 'ic ic--sm')}</button>
 </div>"""
@@ -706,7 +706,7 @@ The audit log lists every write, sign-in and refusal in a hash chain, and says f
 
 **How a person uses it.**
 - **Chain state.** The banner on top says how far the chain is verified. When a row is damaged, it says what that means and what to do: keep the file, compare it with a backup.
-- **Filters.** A search for targets and reasons, plus closed lists for who, actor role, action and outcome. The agent role finds applied receipts and refused or compensated attempts without hiding damaged rows.
+- **Filters.** A search for targets and reasons, plus closed lists for who, actor role, action and outcome. The agent role finds applied receipts and refused or compensated attempts without hiding damaged rows. The role *none (no session)* finds the rows written without a session, which show `none` under the name `anonymous`: failed sign-ins, refused links and requests, and sign-outs with no session to end.
 - **The table.** Seq, At (UTC), Who (name and role), Action, Target, Outcome (a badge with a glyph and a word: ok, refused, damaged, not verified) and Reason.
 - **A damaged row** is tinted red with its sentence inline. Rows after it are marked *not verified*.
 - **About this log.** A side card summarises rows, verified range and who can see the page (operators only).

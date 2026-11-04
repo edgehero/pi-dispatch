@@ -821,6 +821,19 @@ test("the audit panels: filters as a GET form, the pager keeps them, a seq page,
   assert.deepEqual(viewer, { chain: "", filter: "", log: `<p class="muted">${AUDIT_OPERATORS_ONLY}</p>`, about: "" });
 });
 
+test("the audit role filter: none finds the rows written without a session, worded as such; anonymous, a name, is no role (issue #808)", async () => {
+  // A real log: a failed sign-in is written with the actor of a request without a session, whose role is none.
+  const log = auditLogDir(5, (i) => (i === 3 ? { actor: { name: "anonymous", role: "none", session: null }, action: "login-failed", target: "/login", outcome: "refused", reason: "no token matched" } : { actor: OPS, action: "login", outcome: "ok" }));
+  const q = parseAuditQuery("role=none").query;
+  const view = await readAuditView({ read: log.read, verify: log.verify, query: q });
+  assert.deepEqual(view.rows.map((x) => [x.entry.seq, x.entry.action, x.entry.actor.name]), [[3, "login-failed", "anonymous"]]);
+  const panels = auditPanels(view, q);
+  assert.ok(panels.log.includes('<span class="au-who">anonymous<small>none</small></span>'), "the row shows the role the filter names");
+  // The select, literal: every role a row is written with, none worded so it does not read as no filter, and chosen.
+  assert.ok(panels.filter.includes('<label class="sr" for="au-role">Role</label><select id="au-role" class="select" name="role"><option value="">Role: all</option><option value="agent">Role: agent</option><option value="operator">Role: operator</option><option value="viewer">Role: viewer</option><option value="panel">Role: panel</option><option value="shell">Role: shell</option><option value="none" selected>Role: none (no session)</option></select>'), panels.filter);
+  assert.equal(parseAuditQuery("role=anonymous").refusal, "role must be one of agent, operator, viewer, panel, shell, none");
+});
+
 test("the audit panels: an edited outcome is never shown as verified; the banner, the rows and About say what the chain vouches for", async () => {
   // A tamper on a real log: a refused sign-in's outcome edited
   // to ok. Its own line still parses and its seq still follows, so what breaks is the NEXT row's prev; the page must

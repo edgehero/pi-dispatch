@@ -537,15 +537,20 @@ row, as they always could one with a word this console knows ([`SECURITY.md`](..
 that is not a word of that shape is still damage. A console from before this release calls such a row damaged; upgrade
 it.
 
-The filters are a search over targets, reasons and a watch's driver name (at most 64 characters) and three lists: who, the action and the
-outcome; the search matches in any case. A filtered view is a plain link. It searches 500 rows at a time and stops
-after 2,000, saying once how many rows matched among how many it searched ("20 rows match among the 2,000 rows
-searched", "from here" on an Older page); its Older link searches on from there, so a search never claims "no match"
-for rows it did not read. A damaged line or row is shown under every filter, in its place, and is not counted as a
-match: the chain does not vouch for what it says, and a filtered view that hid it would look clean. A filter value
-outside its list or its characters is refused by the parameter's name, never repeated back. The action and outcome
-lists are this console's own, so a row with an action or outcome they do not hold is found unfiltered, and under
-who, role and the search.
+The filters are a search over targets, reasons and a watch's driver name (at most 64 characters) and four lists: who,
+the role, the action and the outcome; the search matches in any case. The role list holds the roles a row is written
+with, `agent`, `operator`, `viewer`, `panel`, `shell` and `none`: a token's role is one of the first three (the
+extension's tools write `agent` too), `panel` is the `/dispatch` panel's, `shell` is `pi-dispatch-console`'s on the
+host, and `none`, shown as "Role: none (no session)", is the role of a row written without a session, which shows
+`none` under the name `anonymous`: a failed sign-in, a refused link or request, a rate-limit row, or a sign-out with
+no session to end. So `?role=none` is where the failed sign-ins are found. A filtered view is a plain link. It
+searches 500 rows at a time and stops after 2,000, saying once how many rows matched among how many it searched ("20
+rows match among the 2,000 rows searched", "from here" on an Older page); its Older link searches on from there, so a
+search never claims "no match" for rows it did not read. A damaged line or row is shown under every filter, in its
+place, and is not counted as a match: the chain does not vouch for what it says, and a filtered view that hid it would
+look clean. A filter value outside its list or its characters is refused by the parameter's name, never repeated back.
+The action and outcome lists are this console's own, so a row with an action or outcome they do not hold is found
+unfiltered, and under who, role and the search.
 
 Watch opening and ending rows name the watcher as actor and the browser driver separately. The **Who** filter
 matches either person on these rows. Ordinary audit rows retain their existing fields and meaning. Terminal input,

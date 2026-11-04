@@ -18,6 +18,7 @@ import { makeSessionStore, readSessionCookies } from "../src/console/sessions.mj
 import { CONSOLE_CSS } from "../src/console/style.mjs";
 import { writePauseWindows as realWritePauseWindows } from "../src/read-model.mjs";
 import { findToken as realFindToken, parseTokensFile } from "@edgehero/pi-dispatch/console-tokens";
+import { makeConsoleAudit, readConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 import { STATUS_KINDS } from "../src/words.mjs";
 
 // The console's dispatcher over a real node:http server on 127.0.0.1:0 (issue #640, REQ-CONSOLE-SECURITY). Requests
@@ -222,7 +223,7 @@ async function start(overrides = {}) {
   const dir = tempDir("console-server-");
   let t = T0;
   const now = () => t;
-  const audit = fakeAudit();
+  const audit = overrides.audit ?? fakeAudit();
   const sessions = overrides.sessionsOf ? overrides.sessionsOf(now) : fakeSessions();
   const tickets = fakeTickets(now);
   const writes = [];
@@ -1795,6 +1796,25 @@ test("a viewer's /audit is the operators-only page with the viewer's nav; a 400 
   const stream = await c.send({ path: `/api/events?page=insights&range=${MARK}`, headers: { cookie: op.cookie, accept: HTML_ACCEPT } });
   assert.equal(stream.status, 400);
   assert.match(stream.headers["content-type"], /^application\/json/);
+});
+
+test("a failed sign-in is listed by /audit?role=none, the role of a row written without a session; role=anonymous is refused (issue #808)", async () => {
+  // The real writer, reader, verifier and pages, so the row's role is the one the server writes for a request without
+  // a session, and the page is the one an operator gets.
+  const logsDir = tempDir("console-server-audit-");
+  const pageDeps = { fleet: { snapshot: async () => ({}) }, now: T0, audit: (a) => readConsoleAudit({ logsDir, ...a }), auditVerify: () => verifyConsoleAudit({ logsDir, withLast: true }) };
+  const c = await start({ audit: makeConsoleAudit({ logsDir, now: () => T0, alive: () => true }), pages: realPages, pageDeps });
+  assert.equal((await c.login(`pdc_${"w".repeat(43)}`)).res.status, 401);
+  const op = await c.login();
+  const none = await c.send({ path: "/audit?role=none", headers: { cookie: op.cookie, accept: HTML_ACCEPT } });
+  assert.equal(none.status, 200);
+  const log = panelText(none.text, "p-audit");
+  assert.deepEqual([...log.matchAll(/<tr id="seq-(\d+)"/g)].map((m) => m[1]), ["1"], "the failed sign-in alone, not the operator's sign-in after it");
+  assert.ok(log.includes('<span class="au-who">anonymous<small>none</small></span></td><td data-l="Action"><span class="code">login-failed</span>'), log);
+  assert.ok(panelText(none.text, "p-audit-filter").includes('<option value="none" selected>Role: none (no session)</option>'));
+  const anonymous = await c.send({ path: "/audit?role=anonymous", headers: { cookie: op.cookie, accept: HTML_ACCEPT } });
+  assert.equal(anonymous.status, 400);
+  assert.match(panelText(anonymous.text, "p-error"), /<span class="code">role<\/span> must be one of agent, operator, viewer, panel, shell, none/);
 });
 
 test("a 500 is a page for a browser and the fixed JSON otherwise, with the headers on both; the error's text leaves neither", async () => {
