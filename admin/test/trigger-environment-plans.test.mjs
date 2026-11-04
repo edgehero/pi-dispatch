@@ -2200,7 +2200,7 @@ for (const [change, field] of IN_LINE) {
     // A job that carries the list, so the one thing it lacks is what this row adds.
     const carried = "fallbackModels" in change ? { models: [HAIKU, SONNET] } : {};
     // A narrowing that needs version 2 asks each live host, and this one reads it.
-    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "2" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], unread: [], more: {} }] }) } });
+    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "3" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], unread: [], more: {} }] }) } });
     const out = await f.service.preview(ask(f, change), operator);
     assert.ok(out.plan, JSON.stringify(out));
     assert.deepEqual(out.plan.skew.rows, field === null ? [] : [{ jobId: "gh-1", queue: "pi-jobs", field }], JSON.stringify(change));
@@ -2281,13 +2281,13 @@ test("the worker's check reads through the dry run: it sees the proposed bytes, 
 
 const narrowed = comment({ excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] });
 const needingTwo = { version: 2, triggers: [cron, narrowed] };
-const reads = (name, version = "2") => ({ name, triggersVersion: version, jobDataVersion: "2" });
+const reads = (name, version = "2") => ({ name, triggersVersion: version, jobDataVersion: "3" });
 
 test("this build's own tables: an edit beside a real version 2 field reads the live hosts, and goes through when each reads it", async () => {
   const f = fixture({ doc: needingTwo, deps: { readHosts: async () => ({ hosts: [reads("mini1")] }) } });
   const out = await f.service.preview(ask(f, { flow: "review" }), operator);
   assert.ok(out.plan, JSON.stringify(out));
-  assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 2 }, "the file's own fields need it, whichever field this edit touches");
+  assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 3 }, "the file's own fields need it, whichever field this edit touches");
   assert.ok(out.summary.includes("mini1 reads what this change needs."), JSON.stringify(out.summary));
   // The edit's own part goes through planTriggerEditCore, which reads with this build's constant: at 2 a version 2 file is one it reads, and it keeps both keys.
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });

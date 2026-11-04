@@ -250,7 +250,7 @@ const REFUSALS = Object.freeze({
   "has no verified local cost bound": () => plannerWorld({ settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ provider: "radius", model: "balanced" }),
   "travels as max_completion_tokens": () => plannerWorld({ overlay: LOCAL_MODEL, settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ provider: "ollama", model: "local" }),
   "On every host this trigger's jobs would be refused as mcp-excluded": () => plannerWorld().preview({ mcp: ["linear"], excludeTools: ["codemode", "tool_search", "mcp__linear__*", "read_mcp_resource"] }),
-  "No live host holds": () => plannerWorld({ deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "2" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", overlayExtensionsAllowed: true, packages: [], extensions: [], skills: [], flows: [], mcp: [], unread: [], more: {} }] }) } }).preview({ excludeExtensions: ["pi-linter"] }),
+  "No live host holds": () => plannerWorld({ deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "3" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", overlayExtensionsAllowed: true, packages: [], extensions: [], skills: [], flows: [], mcp: [], unread: [], more: {} }] }) } }).preview({ excludeExtensions: ["pi-linter"] }),
   "The deployment's settings file could not be read, or is invalid": () => plannerWorld({ settings: "{ not json" }).preview({ maxCostUsd: "1" }),
   "PI_ALLOWED_MODELS is invalid": () => plannerWorld({ env: { PI_ALLOWED_MODELS: "not a list!" } }).preview({ maxCostUsd: "1" }),
   "The deployment's job cap could not be read": () => plannerWorld({ env: { PI_MAX_COST_USD: "lots" } }).preview({ maxCostUsd: "1" }),
@@ -263,9 +263,9 @@ const REFUSALS = Object.freeze({
  * What the table of warnings quotes, each met through the real planner, which then still plans: a warning leaves the Confirm. A row can quote
  * several kinds of one sentence, so one meeting stands for the quote, and the scan below holds every warning the planner can say to a quote.
  */
-/** A live host at version 2 that publishes pi-lint, for what a preview says of a name the file would leave out. */
+/** A live host that reads what the two fields need and publishes pi-lint, for what a preview says of a name the file would leave out. */
 const exclusionHost = (over = {}) => ({ name: "mini1", state: "current", overlayExtensionsAllowed: true, packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], skills: [], flows: [], mcp: [], unread: [], more: {}, ...over });
-const exclusionWorld = ({ live = ["mini1"], loads = [exclusionHost()], run = {}, doc = null } = {}) => plannerWorld({ run, doc, deps: { readHosts: async () => ({ hosts: live.map((name) => ({ name, triggersVersion: "2", jobDataVersion: "2" })) }), readHostLoads: async () => ({ hosts: loads }) } });
+const exclusionWorld = ({ live = ["mini1"], loads = [exclusionHost()], run = {}, doc = null } = {}) => plannerWorld({ run, doc, deps: { readHosts: async () => ({ hosts: live.map((name) => ({ name, triggersVersion: "2", jobDataVersion: "3" })) }), readHostLoads: async () => ({ hosts: loads }) } });
 
 const WARNINGS = Object.freeze({
   "is a model this deployment does not know": () => plannerWorld({ run: MODEL_RUN }).preview({ model: "claude-typo" }),
@@ -508,7 +508,7 @@ test("the sentences the docs quote of the preview are the real preview's, and no
   const consoleDoc = flat(read("docs/console.md"));
   assert.ok(consoleDoc.includes("A file that needs no more than version 1 asks no host, and any change to it keeps every other key's bytes."));
   // And the three things the section says a write does to the stamp, each off the real preview of a real file.
-  const needing = (run, doc = null) => plannerWorld({ run, doc, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "2" }] }), readHostLoads: async () => ({ hosts: [exclusionHost()] }) } });
+  const needing = (run, doc = null) => plannerWorld({ run, doc, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "3" }] }), readHostLoads: async () => ({ hosts: [exclusionHost()] }) } });
   const stamps = await needing({}).preview({ excludeExtensions: ["pi-lint"] });
   const stays = await needing({}, { version: 2, triggers: [{ ...CRON, run: { ...CRON.run, excludeExtensions: ["pi-lint"] } }, { on: COMMENT_ON, run: { kind: "github", flow: "fix" } }] }).preview({ flow: "review" });
   const leaves = await needing({}, { version: 2, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", excludeExtensions: ["pi-lint"] } }] }).preview({ excludeExtensions: null });

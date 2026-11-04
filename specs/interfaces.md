@@ -4468,14 +4468,14 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   there too, never newer, judged on the text by `triggersFileNewer` ("triggers file has a duplicate key, so it is
   broken, not newer: JSON keeps the last value, so the file that was reviewed and the file that runs are not the same
   file"); a repeated key whose version does not read newer is shown as leniently as before. `dataVersion` is the same
-  rule for a queued job's data (`worker/src/job-data-version.mjs`: `JOB_DATA_VERSION` 2 since #796, `JOB_DATA_FIELD_VERSIONS` naming `packageCanary`, `excludeExtensions` and `excludeExtensionTools`, and
+  rule for a queued job's data (`worker/src/job-data-version.mjs`: `JOB_DATA_VERSION` 3 since #800, `JOB_DATA_FIELD_VERSIONS` naming `packageCanary` at 2 and `excludeExtensions` and `excludeExtensionTools` at 3, and
   `JOB_DATA_VALUE_VERSIONS`, the values of its top-level fields, frozen and empty). It is a JOB-level field, never
   inside `trigger`, so it never reaches `/job/event.json` or any other `/job` input (`INT-CONTAINER-JOB-INPUTS`), and
   every builder stamps it (`forgeJobOf`, `addLocalJob`, the cron template and the receiver's `fallbackJobOf`) only when
   the data needs more than 1, so every job of today's fields is stored byte for byte as before. A builder handed input
   that already carries a `dataVersion` this build cannot read (above its own, or not an integer of 1 or more: a job a
   newer release stored, re-enqueued here, a held reply, a late message's fallback) throws a `RangeError` with
-  `code: "newer-release"` ("job data carries a dataVersion this build cannot read (newer than 1, or not a whole number
+  `code: "newer-release"` ("job data carries a dataVersion this build cannot read (newer than 3, or not a whole number
   of 1 or more), so it cannot rebuild it") rather than rebuild it without the fields it does not know, and its caller
   answers with a reply. The processor DEFERS a job whose `dataVersion` it cannot read first, before any gate reads the
   data. A malformed one (`null`, `"1"`, `1.5`, `0`), which no release writes, is held the same way: `newer-release`,
@@ -5172,7 +5172,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   exclusions; `run.excludeTools` stays closed. **Refused at load**: a shape that fails, a duplicate, more than 16, a near miss of either key
   (under `on` every spelling), and for the second a name of pi's own or a server's, which belong on `run.excludeTools`, and a tool the job itself
   offers (`LOADED_JOB_TOOLS`), which another run field arms. A name that matched nothing is `INT-RUNNER-EXIT-CODE-PROTOCOL`'s
-  `exclude-tool-not-loaded` on a job that held nothing back, and said on any other. **Both need file version 2 and job data version 2**
+  `exclude-tool-not-loaded` on a job that held nothing back, and said on any other. **Both need file version 2 and job data version 3**
   (`TRIGGER_RUN_FIELD_VERSIONS`, `JOB_DATA_FIELD_VERSIONS`), and both are rows of `AUTHORED_NARROWING_FIELDS`, so a job that arrived without one
   its entry authors is refused `trigger-skew`. A chained child gets both whole, unlike `run.excludeTools`, whose server names are dropped: a
   child connects no server, and does load extensions. A role child gets the second on its command line. Watch rules refuse both as unknown run
@@ -10273,7 +10273,7 @@ refuses on it.
 
 **`settingsVersion`, `pauseWindowsVersion`, `triggersVersion` and `jobDataVersion` are integers** (AMENDED 2026-11-02,
 #761, `DES-STORE-VERSION-WHEN-NEEDED`): the build's `SETTINGS_VERSION`, `PAUSE_WINDOWS_VERSION`, `TRIGGERS_FILE_VERSION`
-and `JOB_DATA_VERSION`, all 1 at #761, the last 2 since #796 and `TRIGGERS_FILE_VERSION` 2 since #800, on `limitsVersion`'s model, so a row without them is a worker from before #761.
+and `JOB_DATA_VERSION`, all 1 at #761, the last 2 since #796 and 3 since #800 and `TRIGGERS_FILE_VERSION` 2 since #800, on `limitsVersion`'s model, so a row without them is a worker from before #761.
 Beside the console's `trigger-environment-edit` (AMENDED 2026-11-04, #800), whose preview and Confirm read each live host's
 `triggersVersion` and `jobDataVersion` when the proposed file needs a version above 1, and REFUSE on a lower one, none, or a
 registry they cannot read, and read no host while the need is 1, only `doctor` reads them (`doctor.mjs -> fleetStoreVersionChecks`, the named check `fleet.store-versions`,
@@ -14015,3 +14015,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-04 (#800, a display read that fails) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: the console's display read (`readTriggers`) answers `{ unreadable: <code> }` for a file that is there and cannot be read, and `{ missing: true }` on ENOENT only, `readProjects`' shape. It answered missing for both, so a page said the file does not exist, an edit said "no trigger at row 3 (have 0)" of a file holding 13, and a bundle's removal said no project's jobs depend on it. Every caller was read for what it does with the shape. A row is found by the file's position (`t.index`), since the display list drops an entry it cannot use. `dispatch_triggers` returns the shape as it stands. UNCHANGED, checked: the writers' refusals, `readGraphTriggers` and `readTriggerSkew`. |
 | 2026-11-04 (#800, a role child's tools) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED** in the `run.excludeTools` bullet: a role child gets the list on its command line and it beats an agent's own `tools`. It ignored the list. UNCHANGED, checked: `INT-CONTAINER-JOB-INPUTS`' `PI_EXCLUDE_TOOLS`, which the runner still reads and a child still does not. |
 | 2026-11-04 (#800, what a trigger leaves out) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a new bullet, `run.excludeExtensions` and `run.excludeExtensionTools`, and `TRIGGERS_FILE_VERSION` is 2 (`DES-STORE-VERSION-WHEN-NEEDED`). **CORRECTED** in the `run.excludeTools` bullet: an extension's tool has its own key, where it read as not excludable at all. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: `PI_EXCLUDE_EXTENSIONS`, `PI_EXCLUDE_EXTENSION_TOOLS`, `PI_EXCLUDE_TOOLS_STRICT`, and the capability `loadExclusions`. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a row for `exclude-tool-not-loaded`, and `tools.unmatched` on the line, by position. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the reasons `exclude-tool-not-loaded`, `package-canary-excluded` and `job-image-load-exclusions-unsupported`; `leftOut` gains `extensions`, `extensionsNotHere` and `extensionTools`, `tools` gains `unmatched`, each conditional, so `v` stays 1 and no other record moves by a byte. `LOADED_RECORD_MAX_BYTES` is 24 KiB, 16 until these: the worst case rose from 15,971 to 21,145 bytes and past the bound a whole line would read as `cut`. **`INT-HOST-REGISTRY-CONTRACT` AMENDED** in one number. UNCHANGED, checked: `INT-OUTBOX-CONTRACT` (a request file can neither set nor drop either: `collectChain` reads them off job data, by name, as `run.excludeTools`); `INT-SDK-SESSION-OPTIONS` (the same `excludeTools` option carries the longer list). |
+| 2026-11-04 (#800, the job data version) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED**: `JOB_DATA_VERSION` is 3 and both exclusion fields need it, since a host that reads 2 knows `packageCanary` and neither of them. **`INT-HOST-REGISTRY-CONTRACT`** says the published value. UNCHANGED, checked: `INT-CONTAINER-JOB-INPUTS`, since `dataVersion` reaches no `/job` input. |

@@ -188,7 +188,7 @@ async function form(over = {}, options = {}) {
   nodeFs.writeFileSync(paths.triggersPath, text());
   nodeFs.writeFileSync(paths.settingsFile, "{}");
   nodeFs.mkdirSync(paths.globalPiDir);
-  const service = createTriggerEnvironmentActions({ paths, env: { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-5-5", PI_EGRESS: "0" }, now: () => NOW, deploymentDir: dir, readHosts: async () => ({ hosts: ["build3", "mini1", "mini2"].map((name) => ({ name, triggersVersion: "2", jobDataVersion: "2" })) }), readHostLoads: async () => getsHostLoads(), readRunRecords: async () => [S.everything()] });
+  const service = createTriggerEnvironmentActions({ paths, env: { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-5-5", PI_EGRESS: "0" }, now: () => NOW, deploymentDir: dir, readHosts: async () => ({ hosts: ["build3", "mini1", "mini2"].map((name) => ({ name, triggersVersion: "2", jobDataVersion: "3" })) }), readHostLoads: async () => getsHostLoads(), readRunRecords: async () => [S.everything()] });
   const w = runConsoleScript(CONSOLE_SCRIPT, await triggerGetsPage({ entry, ...options }));
   const element = w.document.querySelector('form[data-action="trigger-environment-edit"]');
   const operator = { surface: "console", role: "operator", name: "ops" };

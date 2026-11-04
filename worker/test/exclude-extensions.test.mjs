@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { enqueueForgeJob, enqueueLocalJob } from "../src/queue.mjs";
-import { JOB_DATA_FIELD_VERSIONS, jobDataVersionFor } from "../src/job-data-version.mjs";
+import { enqueueForgeJob, enqueueLateForgeJob, enqueueLocalJob } from "../src/queue.mjs";
+import { JOB_DATA_FIELD_VERSIONS, jobDataNewer, jobDataVersionFor, withJobDataVersion } from "../src/job-data-version.mjs";
 import { extensionsNotHere, LEFT_OUT_NAMES_MAX, leftOutOf, overlayEntryNamed, recordedLoaded, leavesOut } from "../src/loaded-record.mjs";
 import { TERMINAL_COMMENTS } from "../src/comment-tables.mjs";
 import { dollarSettlement, FLOOR_COUNTERS } from "../src/dollar-budget.mjs";
@@ -97,7 +97,7 @@ test("each field needs file version 2 by itself: an older loader would drop it, 
 		assert.ok(AUTHORED_NARROWING_FIELDS.some((row) => row.key === field), field);
 		assert.equal(AUTHORED_NARROWING_FIELDS.find((row) => row.key === field).authored(["x"]), true);
 		assert.equal(AUTHORED_NARROWING_FIELDS.find((row) => row.key === field).authored([]), false, "an empty list narrows nothing");
-		assert.equal(JOB_DATA_FIELD_VERSIONS[field], 2);
+		assert.equal(JOB_DATA_FIELD_VERSIONS[field], 3);
 		const path = join(tempDir("exclude-extensions-"), "triggers.json");
 		writeFileSync(path, JSON.stringify({ triggers: [] }));
 		assert.deepEqual(writeTriggers({ triggersPath: path, mutate: () => [entry] }), { ok: true });
@@ -124,7 +124,7 @@ test("a watch rule refuses both keys by the rule it always had: its data is buil
 	for (const field of ["excludeExtensions", "excludeExtensionTools"]) assert.throws(() => parseTriggers(doc({ [field]: ["x"] }), "/t"), /unsupported run field/, field);
 });
 
-test("job data: each field rides conditionally, stamps version 2, and an unflagged job's bytes do not move", async () => {
+test("job data: each field rides conditionally, stamps version 3, and an unflagged job's bytes do not move", async () => {
 	const fake = () => {
 		const adds = [];
 		return { adds, add: async (_name, data, opts) => (adds.push(data), { id: opts.jobId }) };
@@ -137,11 +137,49 @@ test("job data: each field rides conditionally, stamps version 2, and an unflagg
 	await enqueueLocalJob(q, { folder: "/srv", flow: "tidy", task: "t", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] });
 	const [plain, ext, tool, local] = q.adds.map((data) => JSON.parse(JSON.stringify(data)));
 	assert.equal("excludeExtensions" in plain || "dataVersion" in plain, false);
-	assert.deepEqual([ext.excludeExtensions, ext.dataVersion, "excludeExtensionTools" in ext], [["pi-lint"], 2, false], "one alone is not folded into the other's conditional");
-	assert.deepEqual([tool.excludeExtensionTools, tool.dataVersion, "excludeExtensions" in tool], [["lint_run"], 2, false]);
-	assert.deepEqual([local.excludeExtensions, local.excludeExtensionTools, local.dataVersion], [["pi-lint"], ["lint_run"], 2]);
+	assert.deepEqual([ext.excludeExtensions, ext.dataVersion, "excludeExtensionTools" in ext], [["pi-lint"], 3, false], "one alone is not folded into the other's conditional");
+	assert.deepEqual([tool.excludeExtensionTools, tool.dataVersion, "excludeExtensions" in tool], [["lint_run"], 3, false]);
+	assert.deepEqual([local.excludeExtensions, local.excludeExtensionTools, local.dataVersion], [["pi-lint"], ["lint_run"], 3]);
 	assert.ok(!JSON.stringify(ext.trigger).includes("pi-lint"), "at job level, never in `trigger`, which becomes /job/event.json");
 	assert.equal(jobDataVersionFor({ excludeTools: ["bash"] }), 1);
+});
+
+/**
+ * What a host at the tag this work waits on holds of the job data table. Written out, because the point is the bytes of that release and not this one's:
+ * a later row moving the real table must leave this standing for that host.
+ */
+const AT_THE_TAG = Object.freeze({ supported: 2, table: Object.freeze({ packageCanary: 2 }) });
+
+test("a host that reads only version 2 knows a canary and not these two: such a job waits there, and a stored message is not rebuilt without them", async () => {
+	const fake = () => {
+		const adds = [];
+		return { adds, add: async (_name, data, opts) => (adds.push(data), { id: opts.jobId }) };
+	};
+	const forge = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", trigger: { deliveryId: "d-tag", sender: { id: 1 } } };
+	assert.equal(jobDataNewer({ ...forge, excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"], dataVersion: 2 }, AT_THE_TAG), null, "the premise: stamped 2, that host reads such a job as its own, and ignores both fields");
+	for (const [field, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensionTools", ["lint_run"]]]) {
+		const q = fake();
+		await enqueueForgeJob(q, "github", { ...forge, [field]: value });
+		const stored = q.adds[0];
+		assert.deepEqual(jobDataNewer(stored, AT_THE_TAG), { version: 3 }, `${field}: it waits, spending nothing, for a worker that can read it`);
+		assert.equal(jobDataNewer(stored), null, `${field}: and this build reads what it wrote`);
+		// A message stored for later, picked up by that host: its builder refuses, and the caller answers with a reply rather than a job with the field gone.
+		await assert.rejects(enqueueLateForgeJob(q, "github", stored, { dataVersions: AT_THE_TAG }), (e) => e.code === "newer-release", field);
+		assert.equal(q.adds.length, 1, `${field}: nothing was queued there`);
+	}
+	const canary = withJobDataVersion({ ...forge, packageCanary: { name: "a", version: "1.0.0" } });
+	assert.equal(canary.dataVersion, 2, "a canary is still what that host reads");
+	assert.equal(jobDataNewer(canary, AT_THE_TAG), null);
+	assert.equal(withJobDataVersion({ ...canary, excludeExtensions: ["pi-lint"] }).dataVersion, 3, "and beside one of these, the higher need is the job's");
+	assert.equal(jobDataVersionFor({ excludeTools: ["bash"], packages: false }), 1, "and a job of what that host already knows stays unstamped");
+});
+
+test("a job data field added after the tag takes a version that host cannot read", () => {
+	// The whole of the defect in one line: a row at or below what a running host reads turns that host's gate off for exactly the field it would drop.
+	for (const [field, version] of Object.entries(JOB_DATA_FIELD_VERSIONS)) {
+		if (Object.hasOwn(AT_THE_TAG.table, field)) assert.equal(version, AT_THE_TAG.table[field], `${field} keeps the version that host reads it at`);
+		else assert.ok(version > AT_THE_TAG.supported, `${field} is at ${version}, which that host reads as its own and then drops`);
+	}
 });
 
 test("an MCP tool name is what a chained child drops, and an extension's is never one", () => {
@@ -262,6 +300,7 @@ test("doctor names a live host that cannot read the file's need, from this build
 	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_TRIGGERS_FILE: triggersFile }, seams);
 	const labels = checks.filter((c) => c.id?.startsWith("fleet.store-versions")).map((c) => c.label);
 	assert.ok(labels.some((label) => /^mini2 reads the triggers file only below version 2/.test(label)), JSON.stringify(labels));
+	assert.ok(labels.some((label) => /^mini2 reads the jobs this host's triggers queue only below version 3/.test(label)), JSON.stringify(labels));
 	assert.ok(labels.some((label) => /^mini3 publishes no version for the triggers file/.test(label)), JSON.stringify(labels));
 	assert.ok(labels.some((label) => /^mini3 publishes no version for the jobs this host's triggers queue/.test(label)), JSON.stringify(labels));
 });

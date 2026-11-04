@@ -24,7 +24,8 @@ const comment = (run = {}) => ({ on: { type: "comment", phrase: "@pi" }, run: { 
 const FOLDER = tempDir("pd-800-exclude-folder-");
 const cron = (run = {}) => ({ on: { type: "cron", id: "daily", pattern: "0 6 * * *" }, run: { kind: "local", folder: FOLDER, flow: "tidy", task: "Tidy it.", ...run } });
 const writerText = (doc) => `${JSON.stringify(doc, null, 2)}\n`;
-const reads = (name, version = "2") => ({ name, triggersVersion: version, jobDataVersion: version });
+/** A host that reads what these two fields need, the triggers file at 2 and job data at 3, or one that reads `older` of each. */
+const reads = (name, older = null) => ({ name, triggersVersion: older ?? "2", jobDataVersion: older ?? "3" });
 const host = (name, over = {}) => ({ name, state: "current", overlayExtensionsAllowed: true, packages: [], extensions: [], skills: [], flows: [], mcp: [], unread: [], more: {}, ...over });
 const PI_LINT = Object.freeze({ name: "pi-lint", version: "1.4.2" });
 const FILE_GUARD = Object.freeze({ name: "git-guard.ts", kind: "file" });
@@ -314,7 +315,7 @@ for (const [key, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensi
     const before = w.read();
     assert.equal(JSON.parse(before).version, undefined);
     const out = await w.write({ [key]: value });
-    assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 2 });
+    assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 3 });
     assert.ok(out.summary.includes("Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."), out.summary.join("\n"));
     assert.ok(out.summary.includes("mini1 reads what this change needs."));
     const stamped = w.read();
@@ -350,8 +351,11 @@ for (const [key, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensi
       assert.equal(w.read(), before);
       return out;
     };
-    assert.equal((await refused(async () => ({ hosts: [reads("mini1"), reads("mini2", "1")] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 2. mini2 reads less, and would hold every job this file touches. Upgrade that host first.");
-    assert.equal((await refused(async () => ({ hosts: [reads("mini1"), { name: "old" }] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 2. old publishes no version, and would drop what it does not know, which can run a job wider on a clean record. Upgrade that host first.");
+    assert.equal((await refused(async () => ({ hosts: [reads("mini1"), reads("mini2", "1")] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 3. mini2 reads less, and would hold every job this file touches. Upgrade that host first.");
+    assert.equal((await refused(async () => ({ hosts: [reads("mini1"), { name: "old" }] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 3. old publishes no version, and would drop what it does not know, which can run a job wider on a clean record. Upgrade that host first.");
+    // A host at the tag this work waits on reads a canary's job data at 2, and neither of these: 2 is not enough, whatever it says of the file.
+    assert.equal((await refused(async () => ({ hosts: [reads("mini1"), { name: "tag", triggersVersion: "1", jobDataVersion: "2" }] }))).refusal, "This change needs the triggers file at version 2 and the job data at version 3. tag reads less, and would hold every job this file touches. Upgrade that host first.");
+    assert.match((await refused(async () => ({ hosts: [{ name: "half", triggersVersion: "2", jobDataVersion: "2" }] }))).refusal, /^This change needs the triggers file at version 2 and the job data at version 3\. half reads less/);
     assert.equal((await refused(async () => { throw new Error("down"); })).refusal, "The live hosts could not be read, so nothing says each reads what this change needs. Nothing was written; try again.");
     // The Confirm asks again: a host that moved between the two refuses there.
     let hosts = [reads("mini1")];
@@ -367,7 +371,7 @@ for (const [key, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensi
     await w.write({ [key]: value }, 0);
     const [schedule] = loadSchedules({ triggersFile: w.paths.triggersPath });
     assert.deepEqual(schedule.data[key], value);
-    assert.equal(schedule.data.dataVersion, 2, "the job says what it needs");
+    assert.equal(schedule.data.dataVersion, 3, "the job says what it needs");
     await w.write({ [key]: null }, 0);
     const [plain] = loadSchedules({ triggersFile: w.paths.triggersPath });
     assert.equal(plain.data[key], undefined);

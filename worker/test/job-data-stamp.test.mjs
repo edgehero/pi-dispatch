@@ -43,10 +43,10 @@ function fakeQueue(request = null) {
 const FORGE = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", trigger: { deliveryId: "d-761", sender: { id: 1 } } };
 const LOCAL = { folder: "/srv/site", flow: "tidy", task: "t", now: new Date("2026-11-02T09:00:00Z") };
 
-test("the shipped table names what an older worker would misread, and this build reads version 2", () => {
+test("the shipped table names what an older worker would misread, and this build reads version 3", () => {
 	// Issue #796: an older worker would run a plain paid job in a canary's place. Issue #800: it would run the job with what its trigger takes away.
-	assert.deepEqual(JOB_DATA_FIELD_VERSIONS, { packageCanary: 2, excludeExtensions: 2, excludeExtensionTools: 2 });
-	assert.equal(JOB_DATA_VERSION, 2);
+	assert.deepEqual(JOB_DATA_FIELD_VERSIONS, { packageCanary: 2, excludeExtensions: 3, excludeExtensionTools: 3 });
+	assert.equal(JOB_DATA_VERSION, 3);
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 });
 
@@ -90,7 +90,7 @@ test("an input's own version is kept when its fields need less (a stored job re-
 
 test("input from a newer release (or a version nothing wrote) throws newer-release before anything is queued", async () => {
 	const newerRelease = (e) => e instanceof RangeError && e.code === "newer-release" && !/PD-1/.test(e.message);
-	for (const dataVersion of [3, "3", 0, null]) {
+	for (const dataVersion of [4, "4", 0, null]) {
 		const q = fakeQueue();
 		await assert.rejects(enqueueForgeJob(q, "github", { ...FORGE, waitFor: WAIT, dataVersion }), newerRelease, String(dataVersion));
 		await assert.rejects(enqueueLateForgeJob(q, "github", { ...FORGE, dataVersion }), newerRelease);
@@ -103,7 +103,7 @@ test("input from a newer release (or a version nothing wrote) throws newer-relea
 test("a malformed dataVersion (present, not a whole number of 1 or more) is held like a newer one, and its words never say 'above'", async () => {
 	// No release writes one. The processor's gate defers such a job (`jobDataNewer` answers for it), which spends nothing
 	// and which an operator can cancel; running it would guess at data nothing here wrote. A builder refuses to rebuild it.
-	const words = "job data carries a dataVersion this build cannot read (newer than 2, or not a whole number of 1 or more), so it cannot rebuild it";
+	const words = "job data carries a dataVersion this build cannot read (newer than 3, or not a whole number of 1 or more), so it cannot rebuild it";
 	for (const dataVersion of [null, "1", 1.5, 0]) {
 		assert.deepEqual(jobDataNewer({ ...FORGE, dataVersion }), { version: null }, JSON.stringify(dataVersion));
 		assert.throws(() => withJobDataVersion({ ...FORGE, dataVersion }), (e) => e instanceof RangeError && e.message === words, JSON.stringify(dataVersion));
@@ -112,18 +112,18 @@ test("a malformed dataVersion (present, not a whole number of 1 or more) is held
 		assert.equal(q.adds.length, 0, "nothing queued");
 	}
 	// A newer one says the same, with this build's version in it.
-	assert.throws(() => withJobDataVersion({ ...FORGE, dataVersion: 4 }, { supported: 3 }), (e) => e.message === words.replace("newer than 2", "newer than 3"));
+	assert.throws(() => withJobDataVersion({ ...FORGE, dataVersion: 5 }, { supported: 4 }), (e) => e.message === words.replace("newer than 3", "newer than 4"));
 });
 
 test("with an injected value table, the builders stamp a wider value of an existing field and leave an ordinary one byte-identical", async () => {
 	// A condition kind this build does not have stands in for one a later release adds to `waitFor`.
-	const valueTable = Object.freeze({ waitFor: (conditions) => (Array.isArray(conditions) && conditions.some((c) => Object.hasOwn(c ?? {}, "issueClosed")) ? 3 : 1) });
+	const valueTable = Object.freeze({ waitFor: (conditions) => (Array.isArray(conditions) && conditions.some((c) => Object.hasOwn(c ?? {}, "issueClosed")) ? 4 : 1) });
 	const q = fakeQueue();
-	await enqueueForgeJob(q, "github", { ...FORGE, waitFor: [...WAIT, { issueClosed: 12 }] }, { dataVersions: { valueTable, supported: 3 } });
-	assert.equal(q.adds[0].data.dataVersion, 3);
+	await enqueueForgeJob(q, "github", { ...FORGE, waitFor: [...WAIT, { issueClosed: 12 }] }, { dataVersions: { valueTable, supported: 4 } });
+	assert.equal(q.adds[0].data.dataVersion, 4);
 	assert.equal(Object.keys(q.adds[0].data).at(-1), "dataVersion");
-	assert.deepEqual(jobDataNewer(q.adds[0].data), { version: 3 }, "a worker of this build's version defers it");
-	await enqueueForgeJob(q, "github", { ...FORGE, waitFor: WAIT, trigger: { ...FORGE.trigger, deliveryId: "d-plain" } }, { dataVersions: { valueTable, supported: 3 } });
+	assert.deepEqual(jobDataNewer(q.adds[0].data), { version: 4 }, "a worker of this build's version defers it");
+	await enqueueForgeJob(q, "github", { ...FORGE, waitFor: WAIT, trigger: { ...FORGE.trigger, deliveryId: "d-plain" } }, { dataVersions: { valueTable, supported: 4 } });
 	assert.equal(JSON.stringify(q.adds[1].data), '{"kind":"github","repo":"acme/web","target":{"type":"issue","number":7},"flow":"fix","trigger":{"deliveryId":"d-plain","sender":{"id":1}},"waitFor":[{"profile":"jira","ticket":"PD-1"}]}');
 	await enqueueLocalJob(q, { ...LOCAL, models: ["anthropic/m"] }, { dataVersions: { valueTable: Object.freeze({ models: (m) => (m.length > 0 ? 3 : 1) }), supported: 3 } });
 	assert.equal(q.adds[2].data.dataVersion, 3, "and the local builder");
