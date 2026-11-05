@@ -67,7 +67,7 @@ import { DEFER_BUCKET_WORDS, DEFER_DUE_SENTENCE, DEFER_WHY_RE, DEFER_WHYS } from
 import { formatMicros } from "@edgehero/pi-dispatch/money";
 import { hostQueueName } from "@edgehero/pi-dispatch/queue";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
-import { PAUSE_WINDOW_FIELDS, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
+import { PAUSE_WINDOW_FIELDS, heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 import { auditedWrite } from "../audited-write.mjs";
 import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
 import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
@@ -660,16 +660,12 @@ const pauseWindowsWhole = {
     const path = ctx.config.pauseWindowsPath;
     const snap = readNow(ctx.fs, path);
     if (snap.refusal) return snap;
-    let before = [];
-    let doc = null;
-    try {
-      doc = JSON.parse(snap.text ?? "null");
-      if (Array.isArray(doc?.windows)) before = doc.windows;
-    } catch {
-      // An unparseable file reads as empty, as writePauseWindows reads it; the write repairs it.
-    }
+    // As writePauseWindows reads it: a preview that read a stray comma as no windows said "0 windows now" over a full file.
+    const held = heldPauseWindows(snap.text, path);
+    const { doc, windows: before } = held;
     const newer = pauseWindowsNewerRefusal(doc, path);
     if (newer) return { refusal: newer, status: 409 };
+    if (held.problem) return { refusal: `${held.problem}; nothing was changed. Fix the file, or move it aside to start from an empty one` };
     const afterText = pauseWindowsText(doc, body.windows);
     try {
       parsePauseWindows(afterText, path);
@@ -1887,8 +1883,8 @@ function settingDone(out) {
 }
 
 /**
- * The whole pause-windows list's way back: the list as it was. A file that held no list it could read (not JSON, or no
- * `windows` array) read as empty, and an empty list is not what it said, so that one is put back by hand.
+ * The whole pause-windows list's way back: the list as it was. A file with no `windows` array read as empty, and an empty
+ * list is not what it said, so that one is put back by hand.
  */
 function pauseListBack(out) {
   const unread = typeof out.beforeText === "string" && !Array.isArray(jsonOf(out.beforeText)?.windows);

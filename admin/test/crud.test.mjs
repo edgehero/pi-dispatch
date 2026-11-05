@@ -1,7 +1,7 @@
 import { withOperatorDiagnosis } from "./helpers/tool-diagnosis.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -1618,4 +1618,24 @@ test("/dispatch secrets remove --bundle on a triggers file it cannot read says i
   };
   assert.match(await shownFor({ code: "EACCES" }), /The triggers file could not be read, so the jobs of any bundle naming it are refused pre-spend/);
   assert.match(await shownFor({ code: "ENOENT" }), /No bundle in triggers\.json names it/, "the control: no file strands nothing");
+});
+
+test("the panel's pause window dialogs say a file does not load, and never that it has no windows", async () => {
+  const dir = tempDir("pi-crud-pause-");
+  const pauseWindowsPath = join(dir, "pause-windows.json");
+  const window = { scope: "*", from: "01:00", to: "02:00" };
+  for (const text of ['{ "windows": [,] }\n', `{ "windows": [${JSON.stringify(window)}], "windows": [] }\n`, `{ "windows": [{ "scope": "x", "from": "09:00", "to": "09:00" }] }\n`]) {
+    writeFileSync(pauseWindowsPath, text);
+    for (const action of ["Edit a pause window", "Delete a pause window"]) {
+      const said = [];
+      const ui = { select: async () => action, input: async () => { throw new Error("no dialog past the refusal"); }, confirm: async () => { throw new Error("no dialog past the refusal"); }, notify: (message, level) => said.push([message, level]) };
+      await handleDashboardAction({ action: "managePauses" }, { pauseWindowsPath }, { ui, hasUI: true });
+      assert.deepEqual(said, [["the pause-windows file does not load, so one window of it cannot be changed; nothing was changed. Fix the file, or move it aside to start from an empty one", "error"]], `${action} on ${text}`);
+      assert.equal(readFileSync(pauseWindowsPath, "utf8"), text);
+    }
+  }
+  rmSync(pauseWindowsPath);
+  const said = [];
+  await handleDashboardAction({ action: "managePauses" }, { pauseWindowsPath }, { ui: { select: async () => "Edit a pause window", input: async () => null, confirm: async () => false, notify: (message, level) => said.push([message, level]) }, hasUI: true });
+  assert.deepEqual(said, [["no pause windows to edit", "info"]], "a file that is not there has none");
 });

@@ -72,6 +72,7 @@ import {
   secretBundlesView,
   modelRunRecord,
   withoutOperatorOnly,
+  pauseWindowChangeRefusal,
   readPauseWindows,
   readScopedLimits,
   readScopedBudget,
@@ -2348,6 +2349,8 @@ async function addPauseWindowViaDialogs(paths: any, ui: any, notify: Notify): Pr
 /** Edit a pause window: select which, then re-prompt each field with its current value — a blank answer keeps
  * it, so you only re-type what you change. Validated + live through the same `writePauseWindows`. */
 async function editPauseWindowViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const refused = pauseWindowChangeRefusal({ pauseWindowsPath: paths.pauseWindowsPath });
+  if (refused) { notify?.(refused, "error"); return; }
   const p = readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath });
   const list: any[] = Array.isArray(p?.windows) ? p.windows : [];
   if (list.length === 0) { notify?.("no pause windows to edit", "info"); return; }
@@ -2389,6 +2392,8 @@ async function editPauseWindowViaDialogs(paths: any, ui: any, notify: Notify): P
 
 /** Delete a pause window: select which (by a scope/time label), confirm, remove. */
 async function deletePauseWindowViaDialogs(paths: any, ui: any, notify: Notify): Promise<void> {
+  const refused = pauseWindowChangeRefusal({ pauseWindowsPath: paths.pauseWindowsPath });
+  if (refused) { notify?.(refused, "error"); return; }
   const p = readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath });
   const list: any[] = Array.isArray(p?.windows) ? p.windows : [];
   if (list.length === 0) { notify?.("no pause windows to delete", "info"); return; }

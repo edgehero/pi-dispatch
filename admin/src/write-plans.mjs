@@ -40,6 +40,7 @@ import {
   overlayInvalidRefusal,
   planEnvelopeWrite,
   planProjectsWrite,
+  pauseWindowChangeRefusal,
   readPauseWindows,
   readProjects,
   readScopedLimits,
@@ -654,6 +655,8 @@ export function buildPauseWindow(f) {
 
 /** The pause windows as read, and the one at `index`, or the refusal naming how many there are. */
 function pauseWindowAt(paths, index, fs) {
+  const refusal = pauseWindowChangeRefusal({ pauseWindowsPath: paths.pauseWindowsPath, fs });
+  if (refusal) return { refusal };
   const p = readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath, fs });
   const list = Array.isArray(p?.windows) ? p.windows : [];
   const cur = list[index];

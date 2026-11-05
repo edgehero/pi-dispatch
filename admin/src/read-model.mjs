@@ -36,7 +36,7 @@ import { LOADED_BASE_SHA_RE } from "@edgehero/pi-dispatch/loaded-record";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
-import { parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
+import { heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 // What this console says and skips for state a newer pi-dispatch wrote (issue #761): one leaf, shared with the console.
 import { coreRecordOf, fromNewerRelease, NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE, newerSkippedSentence, pauseWindowsNewerRefusal, readableRecords, shownRecord } from "./newer-release.mjs";
 export { coreRecordOf, fromNewerRelease, NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE, newerSkippedSentence, pauseWindowsNewerRefusal, readableRecords, shownRecord };
@@ -955,6 +955,24 @@ export function readPauseWindows({ pauseWindowsPath, fs = nodeFs }) {
   }
 }
 
+/** What a person is told who changes one window of a file that does not load. No detail, since the parser's quotes the file. */
+export const PAUSE_FILE_DOES_NOT_LOAD = "the pause-windows file does not load, so one window of it cannot be changed; nothing was changed. Fix the file, or move it aside to start from an empty one";
+
+/**
+ * Why one window of the file cannot be changed, or null when it can: the file cannot be read, does not load, or holds what a
+ * write could not keep. Each of those read as "no windows" to whoever asked for row 1, over a file that may hold them all. A
+ * file a newer release wrote is told to upgrade first, since moving it aside would lose what that release wrote.
+ */
+export function pauseWindowChangeRefusal({ pauseWindowsPath, fs = nodeFs }) {
+  const read = fileSnapshot(fs, pauseWindowsPath);
+  if (isUnreadable(read)) return PAUSE_FILE_DOES_NOT_LOAD;
+  const held = heldPauseWindows(read, pauseWindowsPath);
+  const newer = pauseWindowsNewerRefusal(held.doc, pauseWindowsPath);
+  if (newer) return newer;
+  if (held.problem) return PAUSE_FILE_DOES_NOT_LOAD;
+  return read !== null && readPauseWindows({ pauseWindowsPath, fs }).invalid ? PAUSE_FILE_DOES_NOT_LOAD : null;
+}
+
 /**
  * Read-modify-write the pause-windows file (mirrors `writeTriggers`): `mutate(windows)` receives a copy of the
  * current raw `windows` array and returns the new array; the result is re-serialized, VALIDATED through the
@@ -973,29 +991,24 @@ export function readPauseWindows({ pauseWindowsPath, fs = nodeFs }) {
  * Every other top-level key of the file is carried in its place (issue #761, `pauseWindowsText`, the one serializer the
  * console's whole-list action shares), so a block a later release added survives a write from this one; a file holding
  * only `windows` is written byte for byte as it always was. A file written by a NEWER pi-dispatch is refused with
- * `{ invalid, newer: true }` and nothing written, judged on its raw `version` alone: a file with one bad window is still
- * fixed here, and an unparseable one is still rebuilt from empty, the recorded posture. A file that is there and cannot
- * be read is neither: it refuses with nothing written. A failed write or rename throws, after dropping this write's own
- * tmp file, and both happen beside the file, so the old file is whole after either.
+ * `{ invalid, newer: true }` and nothing written, judged on its raw `version` alone: a list with a bad window in it can still
+ * be replaced here, which the console's whole-list action does. A file that is there and cannot be read refuses with nothing written, as does one holding what this writer
+ * could not keep (`heldPauseWindows`): not JSON, not an object, a `windows` that is not a list, or a key written twice.
+ * Rebuilt from empty, as it once was, a stray comma lost every window behind a preview and a Confirm whose words said nothing
+ * of it, and the Undo only took the new row back out. A failed write or rename throws, after dropping this write's own tmp file, and both happen beside the
+ * file, so the old file is whole after either.
  */
 export function writePauseWindows({ pauseWindowsPath, mutate, expect = null, fs = nodeFs }) {
-  let current = [];
-  let doc = null;
   // The text as read, which is also the snapshot the re-check compares against when there is no `expect`.
   const read = fileSnapshot(fs, pauseWindowsPath);
-  // A failed read is not a missing file (as in `writeTriggers`, and for its reason): the marker a failed read leaves does
-  // not parse, so it fell into the repair below, and with an `expect` or a read that kept failing the re-check
-  // passed and the rename replaced every window with none.
+  // A failed read is not a missing file (as in `writeTriggers`, and for its reason): with an `expect` or a read that kept
+  // failing, the re-check passed and the rename replaced every window with none.
   if (isUnreadable(read)) return { invalid: `the pause-windows file ${pauseWindowsPath} could not be read (${unreadableCode(read)}), so its windows cannot be kept; nothing was written` };
-  try {
-    doc = JSON.parse(read);
-    if (Array.isArray(doc?.windows)) current = doc.windows;
-  } catch {
-    // An unparseable file: start from empty, the recorded repair; the validated atomic write below replaces it. (A missing
-    // file reads as `null`, which parses to no document at all.)
-  }
+  const held = heldPauseWindows(read, pauseWindowsPath);
+  const { doc, windows: current } = held;
   const newer = pauseWindowsNewerRefusal(doc, pauseWindowsPath);
   if (newer) return { invalid: newer, newer: true };
+  if (held.problem) return { invalid: `${held.problem}; nothing was written. Fix the file, or move it aside to start from an empty one`, malformed: true };
   const next = mutate(current.map((w) => ({ ...w })));
   const text = pauseWindowsText(doc, next);
   try {

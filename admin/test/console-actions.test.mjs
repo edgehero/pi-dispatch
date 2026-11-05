@@ -526,7 +526,7 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["queue-pause", { payload: { queue: "pi-jobs" } }, twice("Resume queue pi-jobs"), { action: "queue-resume", body: { queue: "pi-jobs" } }, "Pause queue pi-jobs", "Paused queue pi-jobs"],
     ["queue-resume", { payload: { queue: "pi-jobs" } }, twice("Pause queue pi-jobs again"), { action: "queue-pause", body: { queue: "pi-jobs" } }, "Resume", "Resumed queue pi-jobs"],
     ["pause-windows", { beforeText: json({ windows: [windows] }), extra: { before: [windows] } }, twice("Put the previous pause windows back"), { action: "pause-windows", body: { windows: [windows] } }, "Confirm", "Replaced the pause windows"],
-    ["pause-windows", { beforeText: "not json", extra: { before: [] } }, [U.tooBig, U.tooBigAfter], null, "Confirm", "Replaced the pause windows"],
+    ["pause-windows", { beforeText: '{ "later": true }', extra: { before: [] } }, [U.tooBig, U.tooBigAfter], null, "Confirm", "Replaced the pause windows"],
     ["trigger-add", { beforeText: json({ triggers: [{}, {}] }), plan: { entry: { on: { type: "label" } } } }, twice("Delete trigger row 3"), { action: "trigger-delete", body: { index: 2 } }, "Confirm", "Added trigger row 3 (label)"],
     ["trigger-edit", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0, ref: {}, changes: [["flow", "triage", "review"]] } }, twice("Edit trigger row 1 back to what it said"), { action: "trigger-edit", body: { index: 0, flow: "triage" } }, "Confirm", "Changed trigger row 1: flow from triage to review"],
     ["trigger-edit", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0, ref: { model: "m1" }, changes: [["flow", "triage", "triage"], ["model", "-", "m1"]] } }, twice("Edit trigger row 1 back by hand: model had no value before, and an edit cannot remove one."), null, "Confirm", "Changed trigger row 1: flow from triage to triage, model from - to m1"],
@@ -874,6 +874,60 @@ for (const [what, text, says] of [
     assert.equal(read(paths.triggersPath), text);
   });
 }
+
+for (const [what, text, says] of [
+  ["a stray comma", `{ "windows": [,\n  { "scope": "*", "from": "01:00", "to": "02:00" }\n] }\n`, "is not valid JSON"],
+  ["a bare list", `[{ "scope": "*", "from": "01:00", "to": "02:00" }]\n`, "is not a JSON object"],
+  ["an object for windows", `{ "windows": {} }\n`, 'has a "windows" that is not a list'],
+  ["a key written twice over an empty list", `{ "windows": [{ "scope": "*", "from": "01:00", "to": "02:00" }], "windows": [] }\n`, "has a key written twice"],
+]) {
+  test(`every pause window action on a pause-windows file with ${what} is refused at the preview, in words, with every byte kept`, async () => {
+    const { paths } = deployment();
+    writeFileSync(paths.pauseWindowsPath, text);
+    const c = await start({ paths });
+    const window = { scope: "*", from: "05:00", to: "06:00" };
+    const added = await c.act("pause-window-add", window);
+    assert.equal(added.status, 400, added.text);
+    assert.equal(added.json().error, `rejected: the pause-windows file ${paths.pauseWindowsPath} ${says}, so its windows cannot be kept; nothing was written. Fix the file, or move it aside to start from an empty one`);
+    const whole = await c.act("pause-windows", { windows: [window] });
+    assert.equal(whole.status, 400, whole.text);
+    assert.equal(whole.json().error, `the pause-windows file ${paths.pauseWindowsPath} ${says}, so its windows cannot be kept; nothing was changed. Fix the file, or move it aside to start from an empty one`);
+    assert.doesNotMatch(whole.text, /windows? now/);
+    for (const [action, body] of [["pause-window-edit", { index: 0, to: "07:00" }], ["pause-window-delete", { index: 0 }]]) {
+      const one = await c.act(action, body);
+      assert.equal(one.status, 400, one.text);
+      assert.match(one.json().error, /the pause-windows file does not load, so one window of it cannot be changed; nothing was changed\. Fix the file, or move it aside to start from an empty one/);
+      assert.doesNotMatch(one.text, /have 0/);
+    }
+    assert.equal(read(paths.pauseWindowsPath), text);
+  });
+}
+
+test("the whole-list pause action on a file a newer release wrote says to upgrade, whatever shape its windows have", async () => {
+  const { paths } = deployment();
+  const text = '{ "version": 99, "windows": { "future": true } }\n';
+  writeFileSync(paths.pauseWindowsPath, text);
+  const c = await start({ paths });
+  const got = await c.act("pause-windows", { windows: [{ scope: "*", from: "05:00", to: "06:00" }] });
+  assert.equal(got.status, 409, got.text);
+  assert.match(got.json().error, /written by a newer pi-dispatch/);
+  for (const [action, body] of [["pause-window-edit", { index: 0, to: "07:00" }], ["pause-window-delete", { index: 0 }]]) {
+    const one = await c.act(action, body);
+    assert.match(one.json().error, /written by a newer pi-dispatch/, action);
+    assert.doesNotMatch(one.json().error, /move it aside/, `${action}: that would lose what the newer release wrote`);
+  }
+  assert.equal(read(paths.pauseWindowsPath), text);
+});
+
+test("the whole-list pause action on a file that cannot be read refuses it, not as a file with no windows", async () => {
+  const { paths } = deployment();
+  rmSync(paths.pauseWindowsPath);
+  mkdirSync(paths.pauseWindowsPath);
+  const c = await start({ paths });
+  const got = await c.act("pause-windows", { windows: [{ scope: "*", from: "05:00", to: "06:00" }] });
+  assert.equal(got.status, 409, got.text);
+  assert.match(got.json().error, /cannot be read \(EISDIR\); nothing was changed/);
+});
 
 test("trigger-add on a missing or empty triggers file still starts one", async () => {
   for (const before of [null, "", "\n"]) {
@@ -1405,9 +1459,9 @@ test("the whole-list pause-windows refusals name a window by the index the Confi
   const done = (await c.confirm("pause-windows", p.ticket)).json();
   assert.deepEqual(done.change.inverse, { action: "pause-windows", body: { windows: [{ scope: "*", from: "01:00", to: "02:00" }] } });
   assert.equal(done.change.summary, "Replaced the pause windows", "the banner says what happened");
-  // A file whose list could not be read reads as empty, which is not what it said: that one goes back by hand. The bar
-  // points at the preview, which showed it; the banner, on a page with no preview, says the console kept no copy.
-  writeFileSync(paths.pauseWindowsPath, "not json\n");
+  // A file with no list reads as empty, and an empty list is not what it said: that one goes back by hand. The bar points
+  // at the preview, which showed it; the banner, on a page with no preview, says the console kept no copy.
+  writeFileSync(paths.pauseWindowsPath, '{ "later": true }\n');
   const unread = await c.both("pause-windows", { windows: [{ scope: "*", from: "05:00", to: "06:00" }] });
   assert.equal(unread.preview.undo, UNDO_SENTENCES.tooBig);
   assert.deepEqual([unread.confirm.json().change.inverse, unread.confirm.json().change.undo], [null, UNDO_SENTENCES.tooBigAfter]);

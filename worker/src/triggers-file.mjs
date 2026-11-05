@@ -46,6 +46,7 @@
 
 import nodeFs from "node:fs";
 import { parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionFor, triggersFileVersionProblem } from "./triggers.mjs";
+import { heldDocument } from "./held-document.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { expectRefusal } from "./file-expect.mjs";
 
@@ -213,26 +214,6 @@ function discardTmp(fs, tmp) {
 }
 
 /**
- * The document a file's text holds, as `{ value }`, or `{ problem }` saying why this writer could not keep what it holds.
- * The words are its own, never the parser's message, which quotes the file. A top-level value that is not an object, or a
- * `triggers` that is not a list, parses and still gives `current` nothing to start from, so a write would drop what it holds
- * exactly as it would for a stray comma. A file with no `triggers` key is fine: it holds no trigger, and `serialize` keeps
- * its other keys.
- */
-function heldDocument(raw) {
-	let value;
-	try {
-		value = JSON.parse(raw);
-	} catch {
-		// An editor shows nothing at the start of such a file, so the plain words would not lead to the fix.
-		return { problem: raw.charCodeAt(0) === 0xfeff ? "is not valid JSON (it starts with a byte-order mark)" : "is not valid JSON" };
-	}
-	if (value === null || typeof value !== "object" || Array.isArray(value)) return { problem: "is not a JSON object" };
-	if (Object.hasOwn(value, "triggers") && !Array.isArray(value.triggers)) return { problem: 'has a "triggers" that is not a list' };
-	return { value };
-}
-
-/**
  * Read-modify-write the triggers file under the lock. `mutate` receives the RAW entries (shallow
  * copies) and returns the next raw array; the result is validated through the loaders' own
  * `parseTriggers` -- never write a file they would reject -- and written atomically (tmp + rename) so
@@ -297,8 +278,10 @@ export function writeTriggers({ triggersPath, mutate, mutateDocument = null, exp
 			// This used to start from empty for anything that did not parse, so one stray comma and the next add replaced every
 			// trigger with one, on an `{ ok: true }`, under a preview whose sentences never said so, only its diff. What the file holds is the
 			// operator's to fix; a refusal costs them the add and nothing else.
-			const { value, problem } = heldDocument(raw);
-			if (problem) return { invalid: `the triggers file ${triggersPath} ${problem}, so its triggers cannot be kept; nothing was written. Fix the file, or move it aside to start from an empty one`, malformed: true };
+			const { value, problem } = heldDocument(raw, "triggers");
+			// A newer release may mean something by that shape, and the answer to that is upgrading, below.
+			const newerFirst = value !== undefined && triggersFileVersionProblem(value, { supported: versions.supported })?.newer;
+			if (problem && !newerFirst) return { invalid: `the triggers file ${triggersPath} ${problem}, so its triggers cannot be kept; nothing was written. Fix the file, or move it aside to start from an empty one`, malformed: true };
 			parsedText = raw;
 			doc = value;
 			if (Array.isArray(value.triggers)) current = value.triggers;

@@ -939,3 +939,14 @@ test("disarmTrigger keeps every other top-level key, byte-identical in content (
 	expected.triggers[1].on.disarmed = { at: AT, jobId: "job-abc" };
 	assert.equal(fs.files[T_PATH], docFile(expected), "the disarm adds one key inside the array and touches nothing beside it");
 });
+
+test("a file a newer release wrote is told to upgrade, whatever shape its triggers have, and keeps every byte", () => {
+	const dir = tempDir("pd-triggers-newer-");
+	const path = join(dir, "triggers.json");
+	const text = '{ "version": 99, "triggers": { "future": true } }\n';
+	realWriteFileSync(path, text);
+	const res = writeTriggers({ triggersPath: path, mutate: (list) => list });
+	assert.equal(res.newer, true);
+	assert.match(res.invalid, /written by a newer pi-dispatch/);
+	assert.equal(realReadFileSync(path, "utf8"), text);
+});
