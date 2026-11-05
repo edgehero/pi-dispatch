@@ -186,7 +186,7 @@ async function main(argv) {
 			writeFileSync(soundPath, stereoWavBytes(soundDesign({ beats: measured.beats.map((beat) => beat - origin) })));
 			// 48 kHz, said twice, because loudnorm resamples upward and AAC at 96 kHz is silent in some players, which it was.
 			const audio = opts.track
-				? ["-ss", String(origin + opts.from), "-i", opts.track, "-ss", String(opts.from), "-i", soundPath, "-filter_complex", "[1:a]volume=0.8[music];[2:a]volume=1[sound];[music][sound]amix=inputs=2:normalize=0:duration=longest,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[mix]", "-map", "0:v", "-map", "[mix]", "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-shortest"]
+				? ["-ss", String(origin + opts.from), "-i", opts.track, "-ss", String(opts.from), "-i", soundPath, "-filter_complex", "[1:a]afade=t=in:d=0.2,volume=0.8[music];[2:a]volume=1[sound];[music][sound]amix=inputs=2:normalize=0:duration=longest,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[mix]", "-map", "0:v", "-map", "[mix]", "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-shortest"]
 				: [];
 			const encoder = spawn("ffmpeg", ["-v", "error", "-y", "-f", "image2pipe", "-framerate", String(FPS), "-c:v", format === "jpeg" ? "mjpeg" : "png", "-i", "pipe:0", ...audio, "-vf", "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p", "-c:v", "libx264", "-preset", opts.draft ? "veryfast" : "slow", "-crf", opts.draft ? "24" : "16", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv", "-movflags", "+faststart", resolve(opts.out)], { stdio: ["pipe", "inherit", "inherit"] });
 			const encoded = new Promise((done, fail) => {

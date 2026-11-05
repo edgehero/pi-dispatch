@@ -314,8 +314,8 @@
 	 */
 	const SWARM_MAX = 6000;
 	const DOUBLINGS = F.doublings;
-	const COLLAPSE = 28;
-	const DROP = 32;
+	const DROP = F.shots[0].beats;
+	const COLLAPSE = DROP - 4;
 	const seeds = (() => {
 		const random = rng(11);
 		const out = new Float32Array((SWARM_MAX + 2) * 3);
@@ -348,7 +348,7 @@
 			spin = fall ** 3 * 5;
 		}
 		const camera = beat >= DROP ? 8.6 + 0.02 * (beat - DROP) : beat >= COLLAPSE ? mix(2.2 + 0.72 * grown, 3.6, inOut((beat - COLLAPSE) / (DROP - COLLAPSE))) : 2.2 + 0.72 * grown;
-		const rise = beat >= DROP ? -36 : -150 * inOut((beat - 16) / 10) * (1 - inOut((beat - COLLAPSE) / 4));
+		const rise = beat >= DROP ? -36 : -150 * inOut((beat - (DROP - 14)) / 10) * (1 - inOut((beat - COLLAPSE) / 4));
 		return { radius, spin, camera, cx: W / 2, cy: H / 2 + rise };
 	}
 	const mix = (from, to, q) => from + (to - from) * q;
@@ -403,9 +403,11 @@
 		return sprite;
 	})();
 
-	function drawSwarm(beat, { alpha = 1, streaks = false } = {}) {
-		const shape = swarmShape(beat);
-		const before = streaks ? swarmShape(beat - 0.08) : null;
+	/** `place(beat)` overrides where the swarm is and how far it spreads, for sending it somewhere: `{ cx, cy, radius }`. */
+	function drawSwarm(beat, { alpha = 1, streaks = false, place = null } = {}) {
+		const shapeAt = (at) => (place ? { ...swarmShape(at), ...place(at) } : swarmShape(at));
+		const shape = shapeAt(beat);
+		const before = streaks ? shapeAt(beat - 0.08) : null;
 		const live = Math.min(SWARM_MAX, 2 ** generationsAt(beat));
 		const focal = 1150;
 		const few = cl(1 - growth(beat) / 7);
@@ -499,10 +501,10 @@
 			ground();
 			const beat = c.b;
 			// The world appears as the camera pulls back, so the scale of the swarm has something to be measured against.
-			const world = inOut((beat - 16) / 8) * (1 - 0.6 * inOut((beat - COLLAPSE) / 3));
-			if (world > 0) slot(c, "night-sky", 0, 0, W, H, { zoom: mix(1.22, 1.02, inOut((beat - 16) / 12)), alpha: world });
+			const world = inOut((beat - (DROP - 14)) / 6) * (1 - 0.6 * inOut((beat - COLLAPSE) / 3));
+			if (world > 0) slot(c, "night-sky", 0, 0, W, H, { zoom: mix(1.22, 1.02, inOut((beat - (DROP - 14)) / 10)), alpha: world });
 			// The first agent's heartbeat, on every beat until it splits.
-			const pulse = beat < 8 ? hit(beat, Math.floor(beat), 0.7) : 0;
+			const pulse = beat < DOUBLINGS[0] ? hit(beat, Math.floor(beat), 0.7) : 0;
 			g.save();
 			g.globalCompositeOperation = "lighter";
 			g.globalAlpha = 0.32 * pulse + 0.1 * hit(beat, DOUBLINGS[Math.max(0, generationsAt(beat) - 1)], 0.5);
@@ -522,7 +524,7 @@
 			filmLook(c.frame);
 			title(c, 0, H - 170);
 			const whole = generationsAt(beat);
-			if (beat >= 8 && beat < COLLAPSE) {
+			if (beat >= DOUBLINGS[0] && beat < COLLAPSE) {
 				const n = 2 ** whole;
 				const words = n <= 128 ? String(n) : "Many";
 				const pop = hit(beat, DOUBLINGS[whole - 1], 0.4);
@@ -742,26 +744,58 @@
 
 		end(c) {
 			ground();
-			drawSwarm(c.beat, { alpha: 0.38 });
+			// The whole swarm flies into the logo, which lights as it lands, and then slowly grows out again behind the words.
+			const y = 430;
+			const logo = { x: LEFT + 66, y: y - 50 };
+			const land = 1.2;
+			const start = c.shot.startBeat;
+			const inward = (beat) => {
+				const q = inOut((beat - start) / land);
+				return { cx: mix(W / 2, logo.x, q), cy: mix(H / 2 - 36, logo.y, q), radius: 7 * (1 - q) ** 1.5 + 0.02 };
+			};
+			const outward = (beat) => {
+				const q = out3((beat - start - land - 0.4) / 6);
+				return { cx: mix(logo.x, W * 0.62, q), cy: mix(logo.y, H / 2, q), radius: 7 * q + 0.02 };
+			};
+			if (c.b < land) drawSwarm(c.beat, { alpha: 0.95, streaks: c.b > 0.25, place: inward });
+			else drawSwarm(c.beat, { alpha: 0.42, place: outward });
+			// Dark behind the words, once there are words, so the flight itself is not dimmed.
 			const pool = g.createLinearGradient(0, 0, W, 0);
-			pool.addColorStop(0, "rgba(0,0,0,.9)");
-			pool.addColorStop(0.75, "rgba(0,0,0,.25)");
+			const dim = cl((c.b - land) / 0.6);
+			pool.addColorStop(0, `rgba(0,0,0,${0.82 * dim})`);
+			pool.addColorStop(0.7, `rgba(0,0,0,${0.2 * dim})`);
+			pool.addColorStop(1, "rgba(0,0,0,0)");
 			g.fillStyle = pool;
 			g.fillRect(0, 0, W, H);
+			// The flash as it lands, on the logo and nowhere else.
+			const flash = hit(c.b, land, 1);
+			if (flash > 0) {
+				g.save();
+				g.globalCompositeOperation = "lighter";
+				g.globalAlpha = flash;
+				const size = 240 + (1 - flash) * 700;
+				g.drawImage(orb, logo.x - size / 2, logo.y - size / 2, size, size);
+				g.restore();
+			}
 			filmLook(c.frame);
-			const y = 430;
-			const q = out3(c.b / 0.5);
+			if (c.b < land) return;
+			const q = out3((c.b - land) / 0.4);
 			g.fillStyle = PRIMARY;
 			g.beginPath();
-			g.arc(LEFT + 66, y - 50, 66 * q, 0, Math.PI * 2);
+			g.arc(logo.x, logo.y, 66 * q, 0, Math.PI * 2);
 			g.fill();
-			if (q > 0.6) say("pi", LEFT + 66, y - 24, { size: T.chip + 12, weight: 700, fill: ON_PRIMARY, align: "center" });
+			if (q > 0.6) say("pi", logo.x, y - 24, { size: T.chip + 12, weight: 700, fill: ON_PRIMARY, align: "center" });
 			phrase(c, 0, LEFT + 160, y, { size: T.huge, stagger: 0 });
-			if (c.b >= 0.5) {
+			const tagIn = out3((c.b - land - 0.5) / 0.4);
+			if (tagIn > 0) {
 				const tag = `${c.release.version} ${c.release.name}`;
 				const at = LEFT + 160 + wordsWidth(c.shot.phrases[0].words, T.huge, 800, F.sans) + 30;
+				g.save();
+				g.globalAlpha = tagIn;
+				g.translate((1 - tagIn) * -24, 0);
 				round(at, y - 92, wordsWidth(tag, T.chip, 800, F.sans) + 70, 96, 48, PRIMARY);
 				say(tag, at + 35, y - 25, { size: T.chip, weight: 800, fill: ON_PRIMARY });
+				g.restore();
 			}
 			phrase(c, 1, LEFT, y + 124, { size: T.line - 10, stagger: 0.1 });
 			phrase(c, 2, LEFT, y + 216, { size: T.chip + 8, weight: 500, fill: MUTED, stagger: 0.1 });
